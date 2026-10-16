@@ -1206,7 +1206,11 @@ export const ompAgentRuntime: AgentRuntime = {
       // Per-seat stop state: a seat's OWN promise settlement — never "the whole
       // group finished". A seat that returned is never messaged again.
       const settledSeats = new Set<string>();
-      const group = Promise.all(
+      // The ALL-SETTLED barrier: one failing seat must never cut supervision (or
+      // teardown) short for a sibling that is still running, so the fan-out
+      // waits for every seat's OWN settlement and rethrows the first failure
+      // only afterwards.
+      const group = Promise.allSettled(
         seats.map(async ({ plan, index, id }) => {
           try {
             const result = await runStructuredSubagent({
@@ -1227,15 +1231,12 @@ export const ompAgentRuntime: AgentRuntime = {
           }
         }),
       );
-      // Supervision runs BESIDE the fan-out and ends with it: the supervisor
-      // stops per seat (its own settlement), the loop stops with the group, and
-      // the fan-out still awaits every seat.
+      // Supervision runs BESIDE the fan-out and ends off that same barrier: the
+      // supervisor stops per seat (its own settlement), the loop stops only once
+      // EVERY seat has settled.
       const supervision = superviseSeats({
         level: input.level,
-        done: group.then(
-          () => undefined,
-          () => undefined,
-        ),
+        done: group.then(() => undefined),
         seats: seats.map(({ id }) => ({
           id,
           isRunning: () => !settledSeats.has(id),
@@ -1244,7 +1245,13 @@ export const ompAgentRuntime: AgentRuntime = {
       });
       let outputs;
       try {
-        outputs = await group;
+        const results = await group; // never rejects: the barrier absorbs every seat
+        // A failed seat (SDK error, or an invalid/absent payload rejected by
+        // seatOutput) stays fatal — it is rethrown here, after its siblings have
+        // settled, so it can no longer abandon them.
+        const failure = results.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+        outputs = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
       } catch (error) {
         recheckController.abort();
         if (recheckWork) await recheckWork;

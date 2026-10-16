@@ -1573,6 +1573,47 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     expect(nudgeCalls).toHaveLength(3);
   });
 
+  test("a failed seat cannot cut its siblings' supervision short (all-settled barrier)", async () => {
+    jest.useFakeTimers();
+    anchorRecheckDeadline(Date.now(), "default");
+    registerSeat("changeset-1-src");
+    registerSeat("changeset-2-lib");
+    holdSeats = true;
+    const dispatched = [deferred(), deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    // Seat 0 fails (SDK execution error) while seat 1 is still running.
+    seatResults = [{ error: "provider boom" }, { data: seatPayload({ findings: [] }) }];
+
+    const run = ompAgentRuntime.runReview(BASE_INPUT);
+    // Observe the eventual rejection without blocking the mid-flight assertions.
+    const outcome = run.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await dispatched[1]!.promise;
+
+    // Seat 0 returned (rejected): its sibling keeps its ticks, and nothing has
+    // been torn down while that sibling still runs.
+    seatReleases.shift()!();
+    await flush();
+    jest.advanceTimersByTime(normalTickMs);
+    await flush();
+    expect(nudgeCalls.map(({ id }) => id)).toEqual(["changeset-2-lib"]);
+    expect(disposeCalls).toBe(0);
+    expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(true);
+
+    // Seat 1 returns: the review fails with the ORIGINAL seat error — a
+    // surviving seat never synthesizes a review on its own.
+    seatReleases.shift()!();
+    expect(String(await outcome)).toMatch(/review seat 0 .*failed: provider boom/);
+    // Teardown happened only after the last settlement, and neither seat is
+    // nudged again.
+    expect(disposeCalls).toBe(1);
+    jest.advanceTimersByTime(normalTickMs * 3);
+    await flush();
+    expect(nudgeCalls.map(({ id }) => id)).toEqual(["changeset-2-lib"]);
+  });
+
   test("deep: the running parent turn is nudged aside inside the cap, steered past it, then left alone", async () => {
     jest.useFakeTimers();
     anchorRecheckDeadline(Date.now(), "deep");
