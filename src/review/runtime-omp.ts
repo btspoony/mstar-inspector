@@ -54,9 +54,9 @@
  *   - git-numstat lines `"<add>\t<del>\t<path>"` → the seat-partition universe.
  * Facts not matching these shapes pass through to the seat prompts verbatim.
  *
- * MCP note: `runStructuredSubagent` has no `enableMCP` field in 18.2.6 — MCP
+ * MCP note: `runStructuredSubagent` has no `enableMCP` field in 18.11.1 — MCP
  * is derived as `!restrictToolNames && …` (tsc-verified against the published
- * 18.2.6 type surface), so the restricted parent session structurally disables
+ * 18.11.1 type surface), so the restricted parent session structurally disables
  * MCP for every seat.
  */
 import { existsSync } from "node:fs";
@@ -235,7 +235,7 @@ export function buildSessionOptions(opts: {
 
 /**
  * The parent AgentSession is not a ToolSession (missing cwd / hasUI /
- * getSessionFile / getSessionSpawns — tsc-verified against 18.2.6). Shim the
+ * getSessionFile / getSessionSpawns — tsc-verified against 18.11.1). Shim the
  * four members over a Proxy and delegate everything else, bound to the real
  * session so private internal state keeps working:
  *   - cwd = the PR clone (input.worktreePath) — drives .omp/agents
@@ -564,9 +564,15 @@ function stripFrontmatter(markdown: string): string {
  * as an object map), which the SDK `parseAgentFields` reads as NO tool list —
  * under the parent's restrictToolNames that spawns a yield-only seat that
  * cannot read the clone. The installed contract is the same as
- * ./seat-agent.md — name + description + `tools: [read, grep, glob]` — with
+ * ./seat-agent.md — name + description + the read-only seat tools — with
  * the harness role BODY kept verbatim (zero-copy: sourced from the plugin
  * root at runtime, never pasted into src/).
+ *
+ * `yield` is listed explicitly and `structured: true` is required: on SDK
+ * >= 18.10.2 the deep parent's `task` tool runs with `task.structured` off,
+ * so the child gets no yield tool and no output schema unless its own
+ * definition opts back in (`src/task/executor.ts` filters `yield` out when
+ * unstructured; `src/task/structured-subagent.ts` honours the agent flag).
  */
 function toOmpSeatDefinition(role: string, source: string): string {
   const body = stripFrontmatter(source);
@@ -574,7 +580,8 @@ function toOmpSeatDefinition(role: string, source: string): string {
     "---",
     `name: ${role}`,
     `description: Read-only deep-review seat for the ${role} harness role — collects and vets review findings for its assigned domain using only read, grep, and glob.`,
-    `tools: [${REVIEW_TOOL_NAMES.join(", ")}]`,
+    `tools: [${[...REVIEW_TOOL_NAMES, "yield"].join(", ")}]`,
+    "structured: true",
     "---",
     "",
     body,

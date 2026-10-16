@@ -55,6 +55,7 @@ import {
   type MstarReviewV1,
 } from "@mstar-harness/engine";
 import type { IdempotencyKey } from "../contracts/idem";
+import { OMP_SANDBOX_IMAGE_PINS } from "../contracts/sandbox-images";
 import type { D1Like, RecurrenceGroup, RecurrenceQuery, ReviewRow } from "./types";
 import { computeFindingFingerprint } from "./fingerprint";
 
@@ -63,9 +64,12 @@ export const REVIEW_SCHEMA = "mstar.review/v1" as const;
 
 /**
  * `reviews.skill_version` for every v1 row (write caliber, spec § 新行写入
- * 口径): the pinned engine version + harness image commit.
+ * 口径): the pinned engine version + harness image commit, derived from the
+ * omp image's declared pins (`OMP_SANDBOX_IMAGE_PINS`) so the attribution
+ * anchor cannot drift from the build pin.
  */
-export const REVIEW_SKILL_VERSION = "3.11.2+2cae49fa";
+export const REVIEW_SKILL_VERSION =
+  `${OMP_SANDBOX_IMAGE_PINS.harnessVersion}+${OMP_SANDBOX_IMAGE_PINS.harnessRef.slice(0, 8)}`;
 
 /** Number of `:`-separated segments in an `idemKey()` string. */
 const IDEM_KEY_PARTS = 5;

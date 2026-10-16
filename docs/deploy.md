@@ -1464,7 +1464,7 @@ controls are installed (the Dockerfile carries the documentation block only).
   - `github.com` / `api.github.com` — git clone/fetch of the PR head (token
     via scoped extraheader exec env) and gh CLI.
   - Provider API hosts by active provider config — the 18 built-in provider
-    hosts resolve in omp's runtime registry (omp SDK 18.2.6, outside this
+    hosts resolve in omp's runtime registry (omp SDK 18.11.1, outside this
     repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
     19-entry list, `ark` included); the ark capability host
     `ark.cn-beijing.volces.com` is declared in the omp registry entry
@@ -1480,26 +1480,27 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Five pins — mstar-harness bumped to **3.11.2** (2026-09-20, superseding
-the 3.10.2 pin); the `mstar` CLI (`@mstar-harness/cli`) preinstall
-is the container-level mechanism, carried
-forward at the exact `@3.11.2` pin. The CLI
-preinstall is container-level only (`container exec` resolves the `mstar`
-shim): review sessions stay restricted to the read-only `read` / `grep` /
-`glob` whitelist (Runner tool whitelist above), so the review-session model
-cannot invoke the CLI today — a sanctioned session toolcall path is a
-tracked follow-up, not a shipped mechanism. Bun / gh pins carried forward
-unchanged; the base image moved with the Sandbox SDK 1.0 migration (the SDK no
-longer ships a runtime base — controlled Debian base + the 1.0.0
-`sandbox-shim`):
+The image's versioned build inputs — base digest, sandbox-shim tag, Bun, gh,
+mstar-harness tag/ref, and the CLI pin — are declared once in
+`OMP_SANDBOX_IMAGE_PINS` (`src/contracts/sandbox-images.ts`). That declaration
+is the single live copy; `tests/review/pin.test.ts` locks the Dockerfile's
+unavoidable literals to it (the image builds with no build args and no env, so
+the Dockerfile cannot read the module) and derives `REVIEW_SKILL_VERSION` from
+the same source.
 
-| Pin | Value | Where |
-|---|---|---|
-| base image | `docker.io/library/debian:trixie-slim@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483` (linux/amd64; + `sandbox-shim` from `docker.io/cloudflare/sandbox:1.0.0`) | `sandbox-image/omp/Dockerfile` FROM / COPY --from |
-| Bun | `1.4.0` | `sandbox-image/omp/Dockerfile` |
-| gh CLI | `2.98.0` | `sandbox-image/omp/Dockerfile` |
-| mstar-harness | `2cae49faaa9a7652479f8ad859999fe6da7dbc22` (3.11.2) | `sandbox-image/omp/Dockerfile` |
-| mstar-harness CLI | `@mstar-harness/cli@3.11.2` | `sandbox-image/omp/Dockerfile` |
+Historical bumps, superseding chain, and digest provenance (records, not live
+values): mstar-harness **4.0.0** (2026-10-15, superseding the 3.11.2 pin,
+which superseded the 3.10.2 pin);
+the `mstar` CLI (`@mstar-harness/cli`) preinstall is the container-level
+mechanism, carried forward at the exact pin. The CLI preinstall is
+container-level only (`container exec` resolves the `mstar` shim): review
+sessions stay restricted to the read-only `read` / `grep` / `glob` whitelist
+(Runner tool whitelist above), so the
+review-session model cannot invoke the CLI today — a sanctioned session
+toolcall path is a tracked follow-up, not a shipped mechanism. Bun / gh pins
+carried forward unchanged; the base image moved with the Sandbox SDK 1.0
+migration (the SDK no longer ships a runtime base — controlled Debian base +
+the 1.0.0 `sandbox-shim`).
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's

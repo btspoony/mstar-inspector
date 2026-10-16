@@ -27,7 +27,7 @@
  *     NULL) → undefined
  */
 import { describe, expect, test } from "bun:test";
-import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
+import type { ArtifactKind, MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import {
   createArtifactStore,
   parseIdemKey,
@@ -441,7 +441,11 @@ describe("createArtifactStore().put", () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
-    for (const kind of ["status", "snapshot", "residuals", "json"] as const) {
+    // "status" / "snapshot" / "residuals" were retired from the engine
+    // ArtifactKind union in 4.0.0; the cast keeps this fail-closed guard
+    // tested for untyped callers that can still reach the adapter.
+    const retiredKinds = ["status", "snapshot", "residuals"] as unknown as ArtifactKind[];
+    for (const kind of [...retiredKinds, "json"] as ArtifactKind[]) {
       await expect(store.put({ kind, key: "root", payload: {}, appId: TEST_APP_ID })).rejects.toThrow(
         new RegExp(`"${kind}" is not persisted`),
       );
@@ -525,7 +529,10 @@ describe("createArtifactStore().get", () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
-    await expect(store.get({ kind: "status", key: "root" })).rejects.toThrow(/"status" is not served/);
+    // "status" is retired from the engine ArtifactKind union in 4.0.0; the
+    // cast keeps this fail-closed guard tested for untyped callers.
+    const retiredKind = "status" as unknown as ArtifactKind;
+    await expect(store.get({ kind: retiredKind, key: "root" })).rejects.toThrow(/"status" is not served/);
     await expect(store.get({ kind: "review", key: "junk" })).rejects.toThrow(/idemKey\(\) string/);
   });
 });

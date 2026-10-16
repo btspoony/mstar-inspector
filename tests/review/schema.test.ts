@@ -297,6 +297,8 @@ describe("parseReviewOutput", () => {
     const TALLY: PrTallyResult = {
       verdict: "needs fixes",
       scorePct: 45,
+      // Required since engine 4.0.0; scoreBand(45) === "fail" (< 60 floor).
+      band: "fail",
       tally: { mustFix: 0, shouldFix: 2, nit: 1, unverified: 1 },
       chatHeader: "**needs fixes** · 45%\n🔴 0 🟠 2 🔵 1 ❓ 1",
     };
@@ -305,7 +307,11 @@ describe("parseReviewOutput", () => {
       const r = parseReviewOutput(JSON.stringify({ ...VALID, tally: TALLY }));
       expect(r.ok).toBe(true);
       if (r.ok) {
-        expect(r.output.tally).toEqual(TALLY);
+        // The local zod mirror (src/review/schema.ts) does not declare the
+        // engine's optional `band`, so it is stripped on parse; compare the
+        // fields the mirror round-trips.
+        const { band: _band, ...roundTripped } = TALLY;
+        expect(r.output.tally).toEqual(roundTripped);
       }
     });
 

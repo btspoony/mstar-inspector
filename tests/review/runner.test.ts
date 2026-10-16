@@ -138,7 +138,7 @@ const OMP_BASE_YAML = capabilityHostsYaml(OMP_HOSTS);
 const HELPER_STORE_PROBE = `
 import { createInMemoryAuthStorage } from "./src/review/runner";
 const storage = await createInMemoryAuthStorage();
-await storage.set("openai", [{ type: "api_key", key: "__KEY__", source: "login" }]);
+await storage.credentials.set("openai", [{ type: "api_key", key: "__KEY__", source: "login" }]);
 console.log("KEY=" + (await storage.getApiKey("openai")));
 storage.close();
 `;
@@ -713,7 +713,7 @@ describe("runner entry — transported credential pool", () => {
    */
   function storedPool(provider: string) {
     const storage = runStores.at(-1) as AuthStorage;
-    return storage.listStoredCredentials(provider).map((row) => row.credential);
+    return storage.credentials.list(provider).map((row) => row.credential);
   }
 
   test("the payload's app-provider pool lands as login api_key rows under the capability host id", async () => {
@@ -948,7 +948,7 @@ describe("runner entry — transported credential pool", () => {
     const dbPath = join(dir, "agent.db");
     try {
       const seeded = await AuthStorage.create(dbPath);
-      await seeded.set("openai", [
+      await seeded.credentials.set("openai", [
         { type: "api_key" as const, key: `!touch ${marker}`, source: "login" as const },
       ]);
       seeded.close();
@@ -1080,7 +1080,9 @@ describe("runner entry — transported credential pool", () => {
     try {
       const storage = await createInMemoryAuthStorage();
       try {
-        await storage.set("probe", [{ type: "api_key", key: sk("probe-key"), source: "login" }]);
+        await storage.credentials.set("probe", [
+          { type: "api_key", key: sk("probe-key"), source: "login" },
+        ]);
         expect(await storage.getApiKey("probe")).toBe(sk("probe-key"));
         expect(paths).toEqual([":memory:"]);
       } finally {
@@ -1107,7 +1109,7 @@ describe("runner entry — transported credential pool", () => {
 
     // (a) usable: the rows are live on the exact store handed to the runtime.
     const storage = runStores.at(-1) as AuthStorage;
-    expect(storage.listStoredCredentials("ark-plan").map((row) => row.credential)).toEqual([
+    expect(storage.credentials.list("ark-plan").map((row) => row.credential)).toEqual([
       { type: "api_key", key: sk("mem-only-key"), source: "login" },
     ]);
     expect(await storage.getApiKey("ark-plan")).toBe(sk("mem-only-key"));
