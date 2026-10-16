@@ -21,7 +21,7 @@ tags:
 
 ## Context
 
-Copying harness `agents/*.md` unchanged into `<worktree>/.omp/agents/` looks like zero-copy skill reuse. Those files use OpenCode-style `tools: { write: true, ... }` objects. omp `parseAgentFields` accepts an array or a CSV string (installed `@oh-my-pi/pi-coding-agent`, `src/discovery/helpers.ts`), so an object map parses to an **empty** tool list (`parseArrayOrCSV` returns `undefined`, coalesced to `[]`, logged as a declaration naming no tools). The parent's `restrictToolNames: true` never widens a declaration that named no tools, so the seat gets **no tools at all**: it cannot `read` the clone, and `yield` — appended only to a list that actually parsed, which an object map never produces — is absent too, leaving a blind seat whose turn ends as plain text.
+Copying harness `agents/*.md` unchanged into `<worktree>/.omp/agents/` looks like zero-copy skill reuse. Those files use OpenCode-style `tools: { write: true, ... }` objects. omp `parseAgentFields` accepts an array or a CSV string (installed `@oh-my-pi/pi-coding-agent`, `src/discovery/helpers.ts`), so an object map parses to an **empty** tool list (`parseArrayOrCSV` returns `undefined`, coalesced to `[]`, logged as a declaration naming no tools). The parent's `restrictToolNames: true` never widens that empty declaration, so the seat gets **no tools at all**: it cannot `read` the clone, and the declaration parse adds nothing of its own, so `yield` reaches the seat only from a structured spawn — which the deep parent's `task` tool is not — leaving a blind seat whose turn ends as plain text.
 
 ## Guidance
 
