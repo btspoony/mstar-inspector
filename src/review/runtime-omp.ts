@@ -865,9 +865,11 @@ function stripFrontmatter(markdown: string): string {
  * Rewrite a harness role file into an OMP-native read-only seat definition
  * (qc2 F-001): harness agents/*.md carry OpenCode-style frontmatter (`tools`
  * as an object map), which the SDK `parseAgentFields` reads as NO tool list —
- * it parses only an array or a CSV string, and appends `yield` only to a list
- * it parsed — so under the parent's restrictToolNames the seat spawns with no
- * tools at all and cannot read the clone. The installed contract is the same as
+ * it parses an array or a CSV string, and a malformed declaration collapses
+ * to an empty allowlist (logged, not repaired) — so a copied role file
+ * declares a seat with no tools at all that cannot read the clone. The parse
+ * adds nothing of its own: every tool the seat may use must be named in the
+ * definition. The installed contract is the same as
  * ./seat-agent.md — name + description + the read-only seat tools — with
  * the harness role BODY kept verbatim (zero-copy: sourced from the plugin
  * root at runtime, never pasted into src/).
