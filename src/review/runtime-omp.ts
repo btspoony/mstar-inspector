@@ -655,7 +655,8 @@ export const SUMMARY_MD_BUDGET = 8_000;
 /**
  * Characters one capped seat's coverage line may spend, scope list included.
  * Bounding lines by CHARACTERS (not by a file count) keeps a long path from
- * crowding the line — or a second capped seat — out of the published body.
+ * crowding the line — or a second capped seat — out of the published body; a
+ * disclosure longer than this (an outsized stop reason) is cut with a marker.
  */
 export const SEAT_GAP_MAX_CHARS = 400;
 
@@ -679,6 +680,17 @@ function scopeList(paths: readonly string[], budget: number): string {
 }
 
 /**
+ * The shortest honest disclosure for one capped seat: which seat, what stopped
+ * it, and that its assigned scope is not fully covered.
+ */
+function gapHead(gap: SeatGap): string {
+  return (
+    `- notes: seat ${gap.plan.domain}-${gap.plan.seat} was stopped by ${gap.stoppedBy}; ` +
+    `its assigned scope is not fully covered`
+  );
+}
+
+/**
  * One capped seat's coverage line, never longer than `maxChars`. The line
  * always names the seat and what stopped it, and describes the scope as the
  * seat's ASSIGNED scope whose coverage is incomplete — never as untouched,
@@ -686,9 +698,7 @@ function scopeList(paths: readonly string[], budget: number): string {
  */
 function gapNote(gap: SeatGap, maxChars: number): string {
   const { plan } = gap;
-  const head =
-    `- notes: seat ${plan.domain}-${plan.seat} was stopped by ${gap.stoppedBy}; ` +
-    `its assigned scope is not fully covered`;
+  const head = gapHead(gap);
   const budget = maxChars - head.length - 2;
   const list = plan.scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(plan.scope, budget) : "";
   const line = list.length === 0 ? head : `${head}: ${list}`;
@@ -699,23 +709,47 @@ function gapNote(gap: SeatGap, maxChars: number): string {
 }
 
 /**
- * The coverage block appended to `summary_md`, or "" when no seat was capped.
- * The publisher cuts the summary from the HEAD, so a block that ran past
- * {@link SUMMARY_MD_BUDGET} would lose its LAST seat silently: every line is
- * character-capped and each cap is an equal share of what the summary still
- * has, so no capped seat can be starved by a sibling's longer note.
+ * The engine summary fitted into `budget` characters, its cut MARKED. The
+ * publisher's head-keeping truncation semantics, applied here and earlier so
+ * the coverage notes keep the space reserved for them.
  */
-function gapNotes(existing: string, gaps: readonly SeatGap[]): string {
-  if (gaps.length === 0) return "";
-  // "\n\n" before the first line plus one "\n" between each following line.
-  let pool = SUMMARY_MD_BUDGET - existing.length - (2 + gaps.length - 1);
+function fittedSummary(summary: string, budget: number): string {
+  if (summary.length <= budget) return summary;
+  const marker = "\n… (summary truncated)";
+  const room = budget - marker.length;
+  return room > 0 ? `${summary.slice(0, room)}${marker}` : `${summary.slice(0, Math.max(0, budget - 1))}…`;
+}
+
+/**
+ * Fit the capped seats' coverage notes into the published body and hand back
+ * both halves: the summary shortened to make room, and the notes block.
+ *
+ * The publisher truncates `summary_md` from the HEAD at
+ * {@link SUMMARY_MD_BUDGET}, so whatever runs last is lost first — and the
+ * disclosure must never be what is lost. The order is therefore: RESERVE every
+ * capped seat's disclosure first, then fit the summary into what the reserves
+ * leave (marking its cut), and only then widen the scope lists from the
+ * remainder. A long summary can shorten a note's list; it can never erase a
+ * note.
+ */
+function coverageBlock(summary: string, gaps: readonly SeatGap[]): { summary: string; notes: string } {
+  if (gaps.length === 0) return { summary, notes: "" };
+  const separators = 2 + gaps.length - 1; // "\n\n" before the first line + "\n" between lines
+  const heads = gaps.map(gapHead);
+  // One reserve may not exceed an equal share of the note budget: an outsized
+  // stop reason would otherwise reserve the whole body for a single seat.
+  const reserveCap = Math.floor((SUMMARY_MD_BUDGET - separators) / gaps.length);
+  const reserves = heads.map((head) => Math.min(head.length, reserveCap));
+  const reserved = reserves.reduce((total, size) => total + size, 0);
+  const fitted = fittedSummary(summary, SUMMARY_MD_BUDGET - separators - reserved);
+  let leftover = SUMMARY_MD_BUDGET - separators - fitted.length - reserved;
   const notes = gaps.map((gap, index) => {
-    const note = gapNote(gap, Math.min(SEAT_GAP_MAX_CHARS, Math.floor(pool / (gaps.length - index))));
-    pool -= note.length;
+    const share = Math.floor(leftover / (gaps.length - index));
+    const note = gapNote(gap, Math.min(SEAT_GAP_MAX_CHARS, reserves[index]! + share));
+    leftover -= Math.max(0, note.length - reserves[index]!);
     return note;
   });
-  const kept = notes.filter((note) => note.length > 0);
-  return kept.length === 0 ? "" : `\n\n${kept.join("\n")}`;
+  return { summary: fitted, notes: `\n\n${notes.join("\n")}` };
 }
 
 /**
@@ -1410,11 +1444,13 @@ export const ompAgentRuntime: AgentRuntime = {
       const envelope = synthesizeReview({ findings, unverifiedCount, target: parseTarget(input.reconFacts) });
       // A capped seat's gap is declared on the body the user reads (the GitHub
       // Review is rendered from `summary_md`) — never only in a log, and never
-      // past that body's character budget. The envelope schema and the engine's
+      // past that body's character budget: its disclosure is reserved before the
+      // engine summary is fitted around it. The envelope schema and the engine's
       // tally semantics stay untouched: an uncollected seat changes neither
       // verdict nor counts.
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
-      envelope.summary_md += gapNotes(envelope.summary_md, gaps);
+      const block = coverageBlock(envelope.summary_md, gaps);
+      envelope.summary_md = `${block.summary}${block.notes}`;
       const gate = validateMstarReviewV1(envelope);
       if (!gate.ok) {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");

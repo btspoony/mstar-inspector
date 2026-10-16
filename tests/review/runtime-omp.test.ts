@@ -898,6 +898,40 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     expect(notes[0]).toMatch(/, and \d+ more$/);
     expect(notes[0]!.length).toBeLessThanOrEqual(SEAT_GAP_MAX_CHARS);
   });
+
+  test("a summary at the body budget still cannot erase the capped seats' notes", async () => {
+    // Each capped seat kept what it collected before the cap: enough findings
+    // that the engine's own summary ALONE runs past the whole body budget.
+    const findings = (prefix: string, dir: string) =>
+      Array.from({ length: 200 }, (_, index) => ({
+        mergeClass: "must-fix",
+        title: `${prefix} ${String(index).padStart(3, "0")}`,
+        body: "The handler assumes the payload is always present.",
+        file_path: `${dir}/file-${index}.ts`,
+        line_start: index + 1,
+      }));
+    seatResults = [
+      { aborted: true, abortReason: CAP_REASON, data: { findings: findings("alpha", "src") } },
+      { aborted: true, abortReason: CAP_REASON, data: { findings: findings("beta", "lib") } },
+    ];
+
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    const notesAt = envelope.summary_md.indexOf("\n\n- notes: ");
+    const summaryPart = envelope.summary_md.slice(0, notesAt);
+    const notes = noteLines(envelope.summary_md);
+    // The engine summary was cut to hold the disclosure, and its cut is marked.
+    expect(summaryPart).toContain("summary truncated");
+    // Both capped seats keep their slug, the cause and the coverage statement.
+    expect(notes).toHaveLength(2);
+    for (const [index, slug] of ["changeset-1-src", "changeset-2-lib"].entries()) {
+      expect(notes[index]).toContain(slug);
+      expect(notes[index]).toContain(CAP_REASON);
+      expect(notes[index]).toContain("its assigned scope is not fully covered");
+    }
+    // And the body the publisher receives stays inside the budget it truncates at.
+    expect(envelope.summary_md.length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
+  });
 });
 
 describe("ompAgentRuntime.runReview — per-role model overrides", () => {
