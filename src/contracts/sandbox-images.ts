@@ -102,9 +102,9 @@ export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
   sandboxShimTag: "1.0.0",
   bunVersion: "1.4.0",
   ghVersion: "2.98.0",
-  harnessVersion: "4.0.0",
-  harnessRef: "4cc910fd06c2499c4ba6365e108448087c828802",
-  harnessCliVersion: "4.0.0",
+  harnessVersion: "4.0.1",
+  harnessRef: "dd02316e4ae69ffdf96d99fd8133c38ccb2bf8e2",
+  harnessCliVersion: "4.0.1",
 });
 
 /** One selectable sandbox runtime image. */
