@@ -1299,9 +1299,9 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       // parseAgent is the SDK's own pipeline for an installed agent file:
       // frontmatter parse + parseAgentFields — exactly what omp task
       // discovery runs. A regression to raw harness agents/*.md (OpenCode
-      // `tools:` object map) lands here as tools: undefined (an empty
-      // whitelist under the parent's restrictToolNames — the yield-only
-      // blind seat).
+      // `tools:` object map) lands here as tools: undefined — the SDK
+      // parses a list only from an array or CSV string and appends `yield`
+      // only to a list it parsed, so the seat would carry no tools at all.
       const agent = parseAgent(name, content, "project");
       expect(agent.name).toBe(name.replace(/\.md$/, ""));
       expect(agent.tools).toEqual(["read", "grep", "glob", "yield"]);
