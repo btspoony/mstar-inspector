@@ -803,17 +803,49 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
     await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/no valid structured output/);
   });
 
-  test("a confirmed cap that also carries an error is still non-fatal — read before the failure", async () => {
+  test("a cap over an SDK error stays fatal — an error is never just coverage", async () => {
     const reason = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
     seatResults = [
       { status: "absent", aborted: true, abortReason: reason, error: reason },
       { data: seatPayload() },
     ];
 
-    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+    // The cap reason does not excuse a seat that reported an error: the failure
+    // wins, and no review is published from a wave that lost a seat.
+    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/review seat 0 .*failed:/);
+  });
 
-    expect(envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
-    expect(envelope.summary_md).toContain(`- notes: seat changeset-1-src was stopped by ${reason}`);
+  test("a cap over an explicitly invalid payload stays fatal — invalid is not absent", async () => {
+    const reason = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+    seatResults = [
+      { status: "invalid", aborted: true, abortReason: reason, data: { findings: [{ mergeClass: "critical" }] } },
+      { data: seatPayload() },
+    ];
+
+    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/no valid structured output/);
+  });
+
+  test("a wave with no usable output anywhere is incomplete — never synthesized", async () => {
+    const reason = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+    // Its single seat stopped before producing anything: a zero-finding envelope
+    // would report a clean verdict over a review that never happened.
+    seatResults = [{ status: "absent", aborted: true, abortReason: reason }];
+
+    await expect(ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" })).rejects.toThrow(
+      /review incomplete.*full-diff-combined/,
+    );
+  });
+
+  test("both seats capped before any output: the wave reports itself incomplete", async () => {
+    const reason = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+    seatResults = [
+      { status: "absent", aborted: true, abortReason: reason },
+      { status: "absent", aborted: true, abortReason: reason },
+    ];
+
+    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(
+      /review incomplete.*changeset-1-src, changeset-2-lib/,
+    );
   });
 });
 
@@ -864,8 +896,8 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
       ...Array.from({ length: 5 }, (_, index) => `1\t0\tlib/file-${index}-${"x".repeat(1_600)}.ts`),
     ];
     seatResults = [
-      { status: "absent", aborted: true, abortReason: CAP_REASON },
-      { status: "absent", aborted: true, abortReason: CAP_REASON },
+      { aborted: true, abortReason: CAP_REASON, data: { findings: [] } },
+      { aborted: true, abortReason: CAP_REASON, data: { findings: [] } },
     ];
 
     const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, reconFacts: facts });
@@ -888,7 +920,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     // Forty short paths: far more of the assigned scope than a bounded list can
     // name, so the note has to say how many it left out.
     const facts = Array.from({ length: 40 }, (_, index) => `1\t0\tsrc/file-${String(index).padStart(2, "0")}.ts`);
-    seatResults = [{ status: "absent", aborted: true, abortReason: CAP_REASON }];
+    seatResults = [{ aborted: true, abortReason: CAP_REASON, data: { findings: [] } }];
 
     const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", reconFacts: facts });
 

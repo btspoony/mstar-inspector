@@ -768,19 +768,25 @@ const RUNTIME_LIMIT_ABORT_RE = /Subagent runtime limit exceeded \(task\.maxRunti
  * A seat the hard cap stopped is NOT a failure: whatever it collected is kept
  * (possibly nothing) and the assigned scope whose coverage is now incomplete is
  * declared for the reader-visible body, so the review still synthesizes —
- * non-fatal is the contract. The cap is recognized ONLY by its own reason
- * ({@link RUNTIME_LIMIT_ABORT_RE}): an SDK error, an invalid/absent payload, and
- * every abort the runtime limit did not cause keep the fatal handling below.
+ * non-fatal is the contract. That leniency covers ONE shortfall only: a cap that
+ * left the seat with no payload at all. An SDK error, and a payload the strict
+ * schema did not accept (`invalid`, or `valid` without data), stay fatal whether
+ * or not the cap also fired — a stop explains a MISSING payload, never a bad
+ * one. So does every abort the runtime limit did not cause
+ * ({@link RUNTIME_LIMIT_ABORT_RE} is the only cap evidence).
  */
 function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatPlan): SeatOutcome {
   const single = result.result;
   const structured = single.structuredOutput;
   const collected =
     structured?.status === "valid" && structured.data !== undefined ? (structured.data as SeatOutput) : null;
-  // Cap stop FIRST: a capped run reports its stop through `error` too, so this
-  // must precede the failure path — but only a confirmed cap may enter it.
+  // What a cap cannot excuse: an SDK error, or a payload the seat did send and
+  // the strict schema rejected. Both keep the fatal handling below.
+  const fatalWithoutCap =
+    single.error !== undefined ||
+    (structured !== undefined && (structured.status !== "valid" || structured.data === undefined));
   const stoppedByCap = single.abortReason?.match(RUNTIME_LIMIT_ABORT_RE)?.[0];
-  if (stoppedByCap !== undefined) {
+  if (stoppedByCap !== undefined && !fatalWithoutCap) {
     return { output: collected, gap: { plan, stoppedBy: stoppedByCap } };
   }
   if (single.error) {
@@ -1440,6 +1446,16 @@ export const ompAgentRuntime: AgentRuntime = {
       const recheck = recheckWork ? await recheckWork : null;
 
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
+      // Nothing to synthesize from: every dispatched seat stopped before producing
+      // a usable payload, and a zero-finding envelope would report a clean verdict
+      // over a wave that reviewed nothing. The run is incomplete, and saying so is
+      // the only honest outcome.
+      if (outputs.length === 0) {
+        throw new Error(
+          `review incomplete: every dispatched seat (${seats.map((seat) => seat.id).join(", ")})` +
+            ` was stopped by its wall-clock cap and produced no usable output`,
+        );
+      }
       const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
       const envelope = synthesizeReview({ findings, unverifiedCount, target: parseTarget(input.reconFacts) });
       // A capped seat's gap is declared on the body the user reads (the GitHub
