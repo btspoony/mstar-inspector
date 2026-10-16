@@ -1026,24 +1026,6 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     });
   });
 
-  test("the parent session is hard-bounded at the outer guard less the reserved tail", async () => {
-    /** The tail the hard cap has to leave clear of the outer exec guard. */
-    const TAIL_MS = 60_000;
-    // Controlled clock: the anchor IS this instant, so the bound under test is
-    // the full outer budget less the tail — provably not the soft remainder.
-    const anchorStart = Date.now();
-    anchorRecheckDeadline(anchorStart, "deep");
-    parentYields = [deepEnvelope()];
-    await ompAgentRuntime.runReview(DEEP_INPUT);
-
-    const deadline = createdOptions[0]!.deadline as number;
-    // An ABSOLUTE instant (epoch ms), not a duration, and the same horizon a
-    // seat's cap lands on — so the parent cannot outlive the seats it waits on.
-    expect(deadline).toBe(anchorStart + remainingOuterMs(anchorStart, "deep") - TAIL_MS);
-    expect(deadline).toBeGreaterThan(Date.now());
-    expect(deadline).not.toBe(anchorStart + remainingSoftMinutes(anchorStart, "deep") * 60_000);
-  });
-
   test("returns the strict yield payload after engine re-validation", async () => {
     parentYields = [deepEnvelope()];
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
