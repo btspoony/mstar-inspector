@@ -679,7 +679,14 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
 describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)", () => {
   /** The tier's soft cap in ms — the engine's figure, never a re-typed minute count. */
   const softCapMs = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
-  /** The tail the hard cap has to leave clear of the outer exec guard. */
+  /**
+   * FROZEN PIN, deliberately a literal rather than a read of the source
+   * constant: the reserved tail is a contract value — the hard cap must stay
+   * clear of the outer exec guard so the runner can still merge, synthesize and
+   * validate after the last seat stops. Reading it back from the module would
+   * move with it and pin nothing; a deliberate change to that tail must fail
+   * here and update this line.
+   */
   const TAIL_MS = 60_000;
 
   test("the seat call is capped by min(soft cap × 2, outer budget − 60s) — never the soft remainder", async () => {
