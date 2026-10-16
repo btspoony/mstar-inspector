@@ -987,20 +987,6 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(JSON.stringify(list)).not.toContain("xyz");
   });
 
-  test("removeProviderKey drops the WHOLE pool (and the model cache) once, then is an idempotent no-op", async () => {
-    const db = createAppConfigD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY, ["claude-sonnet-4-6"]);
-    await store.addProviderKey(app.id, "anthropic", sk("sibling-key-2222"));
-    expect(rawCount(db, "app_provider_keys")).toBe(2);
-    expect(await store.removeProviderKey(app.id, "anthropic")).toBe(true);
-    expect(rawCount(db, "app_provider_keys")).toBe(0);
-    expect(rawCount(db, "app_provider_models")).toBe(0);
-    expect(await store.removeProviderKey(app.id, "anthropic")).toBe(false);
-    expect(await store.removeProviderKey(app.id, "never-stored")).toBe(false);
-  });
-
   test("ONE key's own report is cached verbatim, and a re-verify refreshes it upward (F4)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });

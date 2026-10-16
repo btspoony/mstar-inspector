@@ -865,11 +865,13 @@ function stripFrontmatter(markdown: string): string {
  * Rewrite a harness role file into an OMP-native read-only seat definition
  * (qc2 F-001): harness agents/*.md carry OpenCode-style frontmatter (`tools`
  * as an object map), which the SDK `parseAgentFields` reads as NO tool list —
- * under the parent's restrictToolNames that spawns a yield-only seat that
- * cannot read the clone. The installed contract is the same as
- * ./seat-agent.md — name + description + the read-only seat tools — with
- * the harness role BODY kept verbatim (zero-copy: sourced from the plugin
- * root at runtime, never pasted into src/).
+ * it parses an array or a CSV string, and a malformed declaration collapses
+ * to an empty allowlist (logged, not repaired) — so a copied role file
+ * declares a seat with no tools at all that cannot read the clone. The
+ * declaration parse adds no tools of its own. The installed contract is the
+ * same as ./seat-agent.md — name + description + the read-only seat tools —
+ * with the harness role BODY kept verbatim (zero-copy: sourced from the
+ * plugin root at runtime, never pasted into src/).
  *
  * `yield` is listed explicitly and `structured: true` is required: on SDK
  * >= 18.10.2 the deep parent's `task` tool runs with `task.structured` off,
