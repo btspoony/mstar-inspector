@@ -63,6 +63,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
+  AgentRegistry,
   createAgentSession,
   loadSkillsFromDir,
   SessionManager,
@@ -76,6 +77,7 @@ import {
 import { runStructuredSubagent, type StructuredSubagentResult } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import {
   MERGE_CLASSES,
+  PR_REVIEW_NUDGE_CADENCE,
   PR_REVIEW_TIER_BUDGETS,
   PR_VERDICTS,
   prReviewSeatPrompt,
@@ -471,14 +473,123 @@ function seatReconFacts(reconFacts: readonly string[], plan: SeatPlan): string[]
 }
 
 /**
- * Whole-minute rendering of the shared soft remainder for a dispatch head:
- * `remainingSoftMinutes` stays exact, and the prompt reads in minutes. A
+ * Whole-minute rendering of a shared soft remainder at the prompt/delivery
+ * sites: `remainingSoftMinutes` stays exact and a message reads in minutes. A
  * negative remainder keeps its sign and rounds to at least one minute over, so
  * an overrun is never displayed as time left.
  */
+function budgetMinutes(remainingMinutes: number): number {
+  return remainingMinutes >= 0 ? Math.round(remainingMinutes) : -Math.max(1, Math.round(-remainingMinutes));
+}
+
+/** The dispatch head's figure: the shared remainder at dispatch, rendered. */
 function dispatchBudgetMinutes(level: ReviewLevel): number {
-  const minutes = remainingSoftMinutes(Date.now(), level);
-  return minutes >= 0 ? Math.round(minutes) : -Math.max(1, Math.round(-minutes));
+  return budgetMinutes(remainingSoftMinutes(Date.now(), level));
+}
+
+/**
+ * One progress nudge for a seat that is still running. The engine owns the
+ * cadence and the tier figures; the harness `/amazing-pr-review` § Seat
+ * supervision owns the model-facing procedure — this type carries only what the
+ * delivery itself needs.
+ */
+export type SeatNudge = {
+  text: string;
+  /** `aside` (next step boundary) inside the cap, `steer` (interrupting) past it. */
+  deliverAs: "aside" | "steer";
+};
+
+/** One supervised seat: its address, whether it is still running, and how a nudge reaches it. */
+export type SupervisedSeat = {
+  /** The id the seat is addressable as (its reserved registry ref id). */
+  id: string;
+  /** Per-seat stop state: this seat's OWN settlement, never "the whole group finished". */
+  isRunning: () => boolean;
+  deliver: (nudge: SeatNudge) => Promise<void>;
+};
+
+/**
+ * The nudge in force at `nowMs`, plus the tick to wait before the next one. The
+ * regime flips the moment the review is past its soft cap: the tick shortens to
+ * `overrunSeconds` and delivery stops being an aside at the next step boundary
+ * and interrupts the running turn instead. The remainder is recomputed from the
+ * one process anchor on every tick (never reused from an earlier nudge), and the
+ * wording asks for convergence only — no new scope, no re-ask of returned work.
+ */
+function seatNudge(nowMs: number, level: ReviewLevel): SeatNudge & { intervalMs: number } {
+  const remaining = remainingSoftMinutes(nowMs, level);
+  const overrun = remaining < 0;
+  const minutes = budgetMinutes(remaining);
+  return {
+    intervalMs: (overrun ? PR_REVIEW_NUDGE_CADENCE.overrunSeconds : PR_REVIEW_NUDGE_CADENCE.normalSeconds) * 1000,
+    deliverAs: overrun ? "steer" : "aside",
+    text: [
+      `Review clock: ${overrun ? `${-minutes} min over` : `${minutes} min left of`} the`,
+      `${PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes} min ${level} soft cap.`,
+      "Converge now: stop expanding scope, summarize what you already have and",
+      "return it, and declare the scope you did not get to. Do not start new",
+      "work — a partial result with its unscanned scope declared is expected.",
+    ].join(" "),
+  };
+}
+
+/**
+ * Wait one cadence tick. A real awaited timer — no busy-wait and no detached
+ * interval — resolved early AND cleared the moment the supervised work settles,
+ * so a returned seat leaves no pending timer behind.
+ */
+function waitTick(intervalMs: number, done: Promise<void>): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), intervalMs);
+    void done.then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+/**
+ * Deliver one nudge to a live seat session. A session with no turn in flight is
+ * not nudged: an `aside` would start a fresh turn and a `steer` could resume one
+ * — either would restart a seat that already returned.
+ */
+async function nudgeSession(session: AgentSession | null | undefined, nudge: SeatNudge): Promise<void> {
+  if (!session?.isStreaming) return;
+  if (nudge.deliverAs === "aside") {
+    await session.sendUserMessage(nudge.text, { deliverAs: "aside" });
+    return;
+  }
+  await session.steer(nudge.text);
+}
+
+/**
+ * Keep every seat that is still running moving on the engine cadence until the
+ * work it supervises settles. Supervision is fire-and-observe: its effects are
+ * messages, and a failed delivery is logged, never thrown (non-fatal is the
+ * contract). A seat leaves the tick set the moment ITS OWN promise settles
+ * (`isRunning`), and the loop itself ends with `done` — the fan-out or the deep
+ * parent turn, whichever it supervises — so no later tick can restart a seat
+ * that already returned.
+ */
+export async function superviseSeats(opts: {
+  seats: readonly SupervisedSeat[];
+  level: ReviewLevel;
+  done: Promise<void>;
+}): Promise<void> {
+  for (;;) {
+    if (await waitTick(seatNudge(Date.now(), opts.level).intervalMs, opts.done)) return;
+    // Recomputed after the wait: crossing the soft cap during a wait must
+    // upgrade the very next nudge (figure AND delivery strength).
+    const nudge = seatNudge(Date.now(), opts.level);
+    for (const seat of opts.seats) {
+      if (!seat.isRunning()) continue;
+      try {
+        await seat.deliver({ text: nudge.text, deliverAs: nudge.deliverAs });
+      } catch (error) {
+        console.error("review seat nudge failed", seat.id, error);
+      }
+    }
+  }
 }
 
 /** Seat assignment = engine prReviewSeatPrompt — zero copies of harness text. */
@@ -747,6 +858,12 @@ async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): 
     "  summarize what you already have and return it — a partial review that",
     "  declares its unscanned scope is the expected outcome; the caller never",
     "  fails the review for a session that ran out of clock.",
+    "- You are the parent the caller can reach: the `task` seats you dispatch",
+    "  yourself are invisible to it, so supervising them is YOURS — while each",
+    "  one runs, relay it this same clock (the minutes left, or the overrun)",
+    "  on the same cadence, short and interrupting once the cap is passed, and",
+    "  ask it to converge the same way (harness § Seat supervision). Never",
+    "  re-ask a seat whose result you already have, and never widen its scope.",
     "",
     "You are the parent session of a deep (three-stage) code review.",
     "",
@@ -939,15 +1056,40 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         return yielded as MstarReviewV1;
       };
 
+      // The parent turn is the only seat this process can address on the deep
+      // path (its own `task` children are addressed by the parent itself — see
+      // deepAssignment): nudge it while the turn runs, never after it returns.
+      let parentRunning = true;
+      const parentTurn = runParentTurn().finally(() => {
+        parentRunning = false;
+      });
+      const supervision = superviseSeats({
+        level: input.level,
+        done: parentTurn.then(
+          () => undefined,
+          () => undefined,
+        ),
+        seats: [
+          {
+            id: parentSession.getAgentId() ?? "deep-parent",
+            isRunning: () => parentRunning,
+            deliver: (nudge) => nudgeSession(parentSession, nudge),
+          },
+        ],
+      });
       let envelope: MstarReviewV1;
       try {
-        envelope = await runParentTurn();
+        envelope = await parentTurn;
       } catch (error) {
         // Normal-review failure aborts the recheck seat too (spec §7.8);
         // runRecheckSeat never rejects — awaiting only reaps the seat.
         recheckController.abort();
         if (recheckWork) await recheckWork;
         throw error;
+      } finally {
+        // Supervision never outlives the turn it supervises (no pending timer
+        // can survive the review) and never masks its outcome.
+        await supervision;
       }
       // The review settled: use an already-completed recheck or abort the
       // unfinished seat — never start or await a fresh budget after review.
@@ -1055,13 +1197,22 @@ export const ompAgentRuntime: AgentRuntime = {
               signal: recheckController.signal,
             })
           : null;
-      let outputs;
-      try {
-        outputs = await Promise.all(
-          plans.map(async (plan, index) => {
+      // Each seat's reserved registry id — the engine-mandated `<domain>-<seat>`
+      // slug its prompt also carries. Reserved up front through `identity.id`
+      // (the SDK returns a caller-supplied id verbatim) so the supervisor can
+      // address THAT seat while it runs instead of racing the SDK's own
+      // allocation for an id it never reports back.
+      const seats = plans.map((plan, index) => ({ plan, index, id: `${plan.domain}-${plan.seat}` }));
+      // Per-seat stop state: a seat's OWN promise settlement — never "the whole
+      // group finished". A seat that returned is never messaged again.
+      const settledSeats = new Set<string>();
+      const group = Promise.all(
+        seats.map(async ({ plan, index, id }) => {
+          try {
             const result = await runStructuredSubagent({
               session: toolSession,
               invocationKind: "task",
+              identity: { id },
               assignment: seatAssignment(input, pluginRoot, plan),
               agent: "mstar-review-seat",
               model: seatModels,
@@ -1071,12 +1222,37 @@ export const ompAgentRuntime: AgentRuntime = {
               enableIrc: false,
             });
             return seatOutput(result, index);
-          }),
-        );
+          } finally {
+            settledSeats.add(id);
+          }
+        }),
+      );
+      // Supervision runs BESIDE the fan-out and ends with it: the supervisor
+      // stops per seat (its own settlement), the loop stops with the group, and
+      // the fan-out still awaits every seat.
+      const supervision = superviseSeats({
+        level: input.level,
+        done: group.then(
+          () => undefined,
+          () => undefined,
+        ),
+        seats: seats.map(({ id }) => ({
+          id,
+          isRunning: () => !settledSeats.has(id),
+          deliver: (nudge) => nudgeSession(AgentRegistry.global().get(id)?.session, nudge),
+        })),
+      });
+      let outputs;
+      try {
+        outputs = await group;
       } catch (error) {
         recheckController.abort();
         if (recheckWork) await recheckWork;
         throw error;
+      } finally {
+        // Supervision never outlives the fan-out it supervises (no pending
+        // timer can survive the review) and never masks its outcome.
+        await supervision;
       }
       recheckController.abort();
       const recheck = recheckWork ? await recheckWork : null;

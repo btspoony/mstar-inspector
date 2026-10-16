@@ -36,14 +36,15 @@
  *     the map into the isolated settings as `task.agentModelOverrides` with
  *     exact agent names; absent/empty map = today's options byte-for-byte.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
-import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
+import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
-import type { AgentRuntime } from "../../src/review/runtime";
+import type { AgentRuntime, ReviewLevel } from "../../src/review/runtime";
+import type { SupervisedSeat } from "../../src/review/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA } from "../../src/review/recheck";
 import type { RecheckDoc, RecheckInput } from "../../src/contracts/recheck";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
@@ -75,6 +76,8 @@ let githubTokenAtCreation: string | undefined;
 let disposeCalls = 0;
 /** Captured runStructuredSubagent requests, in dispatch order. */
 const subagentRequests: Record<string, unknown>[] = [];
+/** Reserved identity id per seat dispatch, in dispatch order (`undefined` = none passed). */
+const reservedSeatIds: Array<string | undefined> = [];
 /** Captured parent-session prompt texts (deep path, in call order). */
 const promptTexts: string[] = [];
 /** Structured yield payloads / errors the fake parent emits to its subscriber during prompt. */
@@ -86,6 +89,61 @@ let parentRejectedYields: unknown[] = [];
 let parentPromptThrow: string | null = null;
 /** Session event listeners registered by the runtime (one per deep run). */
 const yieldListeners: Array<(event: unknown) => void> = [];
+
+/** The parent session's registry id (the deep path addresses the turn by it). */
+const PARENT_SESSION_ID = "review-parent";
+
+/**
+ * Nudges the runtime delivered, in call order: the target id, the delivery
+ * strength, and the text. Recorded by the fake seat sessions and the fake
+ * parent session — the delivery sequence IS the supervision contract.
+ */
+const nudgeCalls: Array<{ id: string; deliverAs: string; text: string }> = [];
+
+/** Fake live refs the supervision path resolves a seat's session through, by reserved id. */
+const registryRefs = new Map<string, { id: string; status: string; session: unknown }>();
+
+/** Whether the fake parent session reports a turn in flight (`isStreaming`). */
+let parentStreaming = true;
+/** Called when the parent turn is entered; lets a test drive the clock mid-turn. */
+let parentPromptStarted: (() => void) | null = null;
+/** When set, the parent turn blocks on it until the test releases the turn. */
+let parentPromptRelease: Promise<void> | null = null;
+/** When true, every fan-out seat stays running until the test releases it. */
+let holdSeats = false;
+/** Release resolvers of the held fan-out seats, in dispatch order. */
+let seatReleases: Array<() => void> = [];
+/** Called once per fan-out dispatch (test barrier: "this seat is running"). */
+let seatDispatchQueue: Array<() => void> = [];
+
+/** A promise a test resolves on its own schedule (turn gates, dispatch barriers). */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+/** A fake live seat session: it records the nudges the runtime delivers to it. */
+function fakeSeatSession(id: string): { isStreaming: boolean } & Record<string, unknown> {
+  return {
+    isStreaming: true,
+    sendUserMessage: mock(async (text: string, options?: { deliverAs?: string }) => {
+      nudgeCalls.push({ id, deliverAs: options?.deliverAs ?? "turn", text });
+    }),
+    steer: mock(async (text: string) => {
+      nudgeCalls.push({ id, deliverAs: "steer", text });
+    }),
+  };
+}
+
+/** Address `id` through the fake registry as a seat that is currently running. */
+function registerSeat(id: string): { isStreaming: boolean } & Record<string, unknown> {
+  const session = fakeSeatSession(id);
+  registryRefs.set(id, { id, status: "running", session });
+  return session;
+}
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   createAgentSession: mock(async (options: Record<string, unknown>) => {
@@ -111,8 +169,21 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     githubTokenAtCreation = process.env.GITHUB_TOKEN;
     return {
       session: {
+        getAgentId: mock(() => PARENT_SESSION_ID),
         dispose: mock(async () => {
           disposeCalls += 1;
+        }),
+        // Nudge surface the supervision path uses on the deep parent: recorded
+        // exactly as the runtime delivers it, and honest about whether a turn is
+        // actually in flight.
+        get isStreaming() {
+          return parentStreaming;
+        },
+        sendUserMessage: mock(async (text: string, options?: { deliverAs?: string }) => {
+          nudgeCalls.push({ id: PARENT_SESSION_ID, deliverAs: options?.deliverAs ?? "turn", text });
+        }),
+        steer: mock(async (text: string) => {
+          nudgeCalls.push({ id: PARENT_SESSION_ID, deliverAs: "steer", text });
         }),
         subscribe: mock((listener: (event: unknown) => void) => {
           yieldListeners.push(listener);
@@ -120,6 +191,10 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
         }),
         prompt: mock(async (text: string) => {
           promptTexts.push(text);
+          // The turn is live: a test can now drive the clock and later release
+          // it (no gate → returns as before).
+          parentPromptStarted?.();
+          if (parentPromptRelease !== null) await parentPromptRelease;
           // The parent turn emits each queued yield to the listener the
           // runtime registered before prompting — as tool_execution_end
           // events (the shape the runtime captures): rejected attempts first
@@ -171,11 +246,29 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     skills: [{ name: "mstar-audit" }, { name: "other-skill" }],
     warnings: [],
   })),
+  // The registry the quick/default supervisor resolves a running seat's live
+  // session through, by the id the dispatch reserved for that seat.
+  AgentRegistry: {
+    global: mock(() => ({
+      get: mock((id: string) => registryRefs.get(id)),
+    })),
+  },
 }));
 
 mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
   runStructuredSubagent: mock(async (request: Record<string, unknown>) => {
     subagentRequests.push(request);
+    // The dispatch's reserved identity id — what the SDK registers the seat
+    // under and what the supervisor addresses the running seat by. One named
+    // cast at this mock boundary: the record is a plain object bag, and the
+    // SDK contract here is `identity?: { id?: string }`.
+    const identity = request.identity as { id?: string } | undefined;
+    reservedSeatIds.push(identity?.id);
+    seatDispatchQueue.shift()?.();
+    if (holdSeats) {
+      // The seat stays running until the test releases it (dispatch order).
+      await new Promise<void>((resolve) => seatReleases.push(resolve));
+    }
     const plan = seatResults.shift() ?? {};
     const status = plan.status ?? "valid";
     return {
@@ -217,7 +310,14 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
 // The specifier goes through a const so tsc never resolves the query-suffixed
 // path (non-literal dynamic imports are untyped, hence the cast).
 const RUNTIME_OMP_SPEC = "../../src/review/runtime-omp.ts?test=runtime-omp";
-const { ompAgentRuntime } = (await import(RUNTIME_OMP_SPEC)) as { ompAgentRuntime: AgentRuntime };
+const { ompAgentRuntime, superviseSeats } = (await import(RUNTIME_OMP_SPEC)) as {
+  ompAgentRuntime: AgentRuntime;
+  superviseSeats: (opts: {
+    seats: readonly SupervisedSeat[];
+    level: ReviewLevel;
+    done: Promise<void>;
+  }) => Promise<void>;
+};
 
 /** A valid strict seat payload the engine vocab accepts. */
 function seatPayload(overrides: Record<string, unknown> = {}): unknown {
@@ -292,6 +392,7 @@ const DEEP_INPUT = { ...BASE_INPUT, level: "deep" as const };
 afterEach(() => {
   createdOptions.length = 0;
   subagentRequests.length = 0;
+  reservedSeatIds.length = 0;
   seatResults = [];
   installedSeatAgent = null;
   installedAgentFiles = null;
@@ -305,6 +406,16 @@ afterEach(() => {
   parentRejectedYields = [];
   parentPromptThrow = null;
   yieldListeners.length = 0;
+  nudgeCalls.length = 0;
+  registryRefs.clear();
+  parentStreaming = true;
+  parentPromptStarted = null;
+  parentPromptRelease = null;
+  holdSeats = false;
+  seatReleases = [];
+  seatDispatchQueue = [];
+  // Supervision tests install fake timers; every other test runs on the real clock.
+  jest.useRealTimers();
   delete process.env.OMP_REVIEW_MODEL;
 });
 
@@ -458,6 +569,11 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     const assignments = subagentRequests.map((request) => request.assignment as string);
     expect(assignments[0]).toContain("changeset-1-src");
     expect(assignments[1]).toContain("changeset-2-lib");
+    // Each dispatch reserves its registry id up front — the same
+    // `<domain>-<seat>` slug the prompt mandates — so the supervisor can
+    // address THAT seat by id while it runs, instead of racing the SDK for an
+    // id it never reports back.
+    expect(reservedSeatIds).toEqual(["changeset-1-src", "changeset-2-lib"]);
   });
 
   test("seat assignment is engine prReviewSeatPrompt output carrying worktree + scope", async () => {
@@ -738,6 +854,9 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     // ...plus a convergence instruction: stop and return what exists.
     expect(head).toMatch(/summari[sz]e/i);
     expect(head).toMatch(/return/i);
+    // The parent owns supervising its own `task` seats (the caller cannot
+    // address them) with this same clock.
+    expect(head).toMatch(/supervis/i);
   });
 
   test("parent session keeps the isolation set and adds the task tool + strict yield schema", async () => {
@@ -1300,5 +1419,218 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(disposeCalls).toBe(2);
     // Cleanup still removed every installed definition (both sessions settled).
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents"))).toBe(false);
+  });
+});
+
+/**
+ * Seat supervision (progress nudges): while a seat runs it is told how much of
+ * the shared review clock is left and asked to converge; a seat that returned is
+ * never messaged again. The loop's ticks are driven through bun's FAKE CLOCK
+ * (`jest.useFakeTimers`), so every tick, figure and delivery is deterministic.
+ */
+describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () => {
+  /** The engine cadence this repo reads — never a re-typed number of seconds. */
+  const normalTickMs = PR_REVIEW_NUDGE_CADENCE.normalSeconds * 1000;
+  const overrunTickMs = PR_REVIEW_NUDGE_CADENCE.overrunSeconds * 1000;
+
+  /** Let the supervision loop's pending microtasks run without moving the clock. */
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 50; i += 1) await Promise.resolve();
+  }
+
+  test("one nudge per running seat per engine tick; a returned seat leaves the tick set", async () => {
+    jest.useFakeTimers();
+    anchorRecheckDeadline(Date.now(), "default");
+    const cap = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes;
+    const deliveries: Array<{ id: string; deliverAs: string; text: string }> = [];
+    const running = new Set(["a", "b"]);
+    const done = deferred();
+    const supervision = superviseSeats({
+      level: "default",
+      done: done.promise,
+      seats: ["a", "b"].map((id) => ({
+        id,
+        isRunning: () => running.has(id),
+        deliver: async (nudge) => {
+          deliveries.push({ id, ...nudge });
+        },
+      })),
+    });
+
+    // Nothing before the tick — and the tick is the engine's.
+    jest.advanceTimersByTime(normalTickMs - 1);
+    await flush();
+    expect(deliveries).toHaveLength(0);
+
+    jest.advanceTimersByTime(1);
+    await flush();
+    expect(deliveries.map(({ id, deliverAs }) => ({ id, deliverAs }))).toEqual([
+      { id: "a", deliverAs: "aside" },
+      { id: "b", deliverAs: "aside" },
+    ]);
+    // The figure is the live shared remainder, never the tier cap: the cap minus
+    // the one tick elapsed since the anchor.
+    expect(deliveries[0]!.text).toContain(`${cap - PR_REVIEW_NUDGE_CADENCE.normalSeconds / 60} min left`);
+
+    // Seat `a` returned: it is never nudged again while the running seat keeps
+    // its tick.
+    running.delete("a");
+    jest.advanceTimersByTime(normalTickMs);
+    await flush();
+    expect(deliveries.slice(2).map(({ id }) => id)).toEqual(["b"]);
+
+    // The supervised work settled: the loop ends there — and only because the
+    // pending tick was cleared (nothing advances the clock again), never a
+    // detached timer left running.
+    done.resolve();
+    await supervision;
+    jest.advanceTimersByTime(normalTickMs * 3);
+    await flush();
+    expect(deliveries).toHaveLength(3);
+  });
+
+  test("past the soft cap the tick shortens and the nudge hardens to a steer", async () => {
+    jest.useFakeTimers();
+    const cap = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes;
+    // Anchored past the tier cap: the review is already over its shared clock.
+    anchorRecheckDeadline(Date.now() - (cap * 60_000 + 60_000), "default");
+    const deliveries: Array<{ deliverAs: string; text: string }> = [];
+    const done = deferred();
+    const supervision = superviseSeats({
+      level: "default",
+      done: done.promise,
+      seats: [
+        {
+          id: "a",
+          isRunning: () => true,
+          deliver: async (nudge) => {
+            deliveries.push({ ...nudge });
+          },
+        },
+      ],
+    });
+
+    // The OVERRUN tick governs the wait — the normal tick would not have fired.
+    jest.advanceTimersByTime(overrunTickMs - 1);
+    await flush();
+    expect(deliveries).toHaveLength(0);
+    jest.advanceTimersByTime(1);
+    await flush();
+    expect(deliveries).toHaveLength(1);
+    // Over budget: the nudge interrupts the turn instead of riding the next step
+    // boundary, and reports the overrun.
+    expect(deliveries[0]!.deliverAs).toBe("steer");
+    expect(deliveries[0]!.text).toMatch(/min over/i);
+
+    // The overrun tick governs the NEXT wait too.
+    jest.advanceTimersByTime(overrunTickMs);
+    await flush();
+    expect(deliveries).toHaveLength(2);
+
+    done.resolve();
+    await supervision;
+  });
+
+  test("quick/default: a running seat is nudged through its live registry session", async () => {
+    jest.useFakeTimers();
+    anchorRecheckDeadline(Date.now(), "default");
+    const cap = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes;
+    // The reserved ids are the `<domain>-<seat>` slugs the dispatch mandates, so
+    // the fake registry stands exactly where the SDK's would: addressable while
+    // that seat runs.
+    registerSeat("changeset-1-src");
+    registerSeat("changeset-2-lib");
+    holdSeats = true;
+    const dispatched = [deferred(), deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+
+    const run = ompAgentRuntime.runReview(BASE_INPUT);
+    await dispatched[1]!.promise;
+
+    jest.advanceTimersByTime(normalTickMs);
+    await flush();
+    expect(nudgeCalls.map(({ id, deliverAs }) => ({ id, deliverAs }))).toEqual([
+      { id: "changeset-1-src", deliverAs: "aside" },
+      { id: "changeset-2-lib", deliverAs: "aside" },
+    ]);
+    expect(nudgeCalls[0]!.text).toContain(`${cap - PR_REVIEW_NUDGE_CADENCE.normalSeconds / 60} min left`);
+
+    // The first seat returns: only the seat still running is nudged again.
+    seatReleases.shift()!();
+    await flush();
+    jest.advanceTimersByTime(normalTickMs);
+    await flush();
+    expect(nudgeCalls.slice(2).map(({ id }) => id)).toEqual(["changeset-2-lib"]);
+
+    // The second seat returns: the fan-out resolves, the review completes, and
+    // the loop is gone with it.
+    seatReleases.shift()!();
+    const { envelope } = await run;
+    expect(envelope.schema).toBe("mstar.review/v1");
+    jest.advanceTimersByTime(normalTickMs * 3);
+    await flush();
+    expect(nudgeCalls).toHaveLength(3);
+  });
+
+  test("deep: the running parent turn is nudged aside inside the cap, steered past it, then left alone", async () => {
+    jest.useFakeTimers();
+    anchorRecheckDeadline(Date.now(), "deep");
+    const cap = PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes;
+    const started = deferred();
+    const release = deferred();
+    parentPromptStarted = started.resolve;
+    parentPromptRelease = release.promise;
+    parentYields = [deepEnvelope()];
+
+    const run = ompAgentRuntime.runReview(DEEP_INPUT);
+    await started.promise;
+
+    // Inside the cap: a non-interrupting aside carrying the live remainder.
+    jest.advanceTimersByTime(normalTickMs);
+    await flush();
+    expect(nudgeCalls.map(({ id, deliverAs }) => ({ id, deliverAs }))).toEqual([
+      { id: PARENT_SESSION_ID, deliverAs: "aside" },
+    ]);
+    expect(nudgeCalls[0]!.text).toContain(`${cap - PR_REVIEW_NUDGE_CADENCE.normalSeconds / 60} min left`);
+
+    // Past the soft cap: the next nudge interrupts and reports the overrun.
+    jest.advanceTimersByTime(cap * 60_000);
+    await flush();
+    expect(nudgeCalls).toHaveLength(2);
+    expect(nudgeCalls[1]!.deliverAs).toBe("steer");
+    expect(nudgeCalls[1]!.text).toMatch(/min over/i);
+
+    // The turn returns: the review resolves without waiting out a pending tick
+    // (the timer was cleared), and the parent session is never touched again.
+    release.resolve();
+    const { envelope } = await run;
+    expect(envelope.schema).toBe("mstar.review/v1");
+    jest.advanceTimersByTime(cap * 60_000);
+    await flush();
+    expect(nudgeCalls).toHaveLength(2);
+  });
+
+  test("deep: a session with no turn in flight is never messaged (a returned seat is not restarted)", async () => {
+    jest.useFakeTimers();
+    anchorRecheckDeadline(Date.now(), "deep");
+    const started = deferred();
+    const release = deferred();
+    parentPromptStarted = started.resolve;
+    parentPromptRelease = release.promise;
+    // The turn is over; only the driver's settlement is still pending.
+    parentStreaming = false;
+    parentYields = [deepEnvelope()];
+
+    const run = ompAgentRuntime.runReview(DEEP_INPUT);
+    await started.promise;
+    jest.advanceTimersByTime(normalTickMs * 2);
+    await flush();
+    // An aside here would start a fresh turn and a steer could resume one — a
+    // seat that already returned must never be restarted.
+    expect(nudgeCalls).toHaveLength(0);
+
+    release.resolve();
+    await run;
   });
 });
