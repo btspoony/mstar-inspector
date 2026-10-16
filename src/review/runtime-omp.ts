@@ -63,6 +63,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
+  AgentRegistry,
   createAgentSession,
   loadSkillsFromDir,
   SessionManager,
@@ -76,6 +77,8 @@ import {
 import { runStructuredSubagent, type StructuredSubagentResult } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import {
   MERGE_CLASSES,
+  PR_REVIEW_NUDGE_CADENCE,
+  PR_REVIEW_TIER_BUDGETS,
   PR_VERDICTS,
   prReviewSeatPrompt,
   synthesizeReview,
@@ -84,7 +87,7 @@ import {
   type MstarReviewV1,
 } from "@mstar-harness/engine";
 import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "./runtime";
-import { runRecheckSeat } from "./recheck";
+import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat } from "./recheck";
 import type { RecheckDoc } from "../contracts/recheck";
 
 /**
@@ -469,6 +472,146 @@ function seatReconFacts(reconFacts: readonly string[], plan: SeatPlan): string[]
   return [...reconFacts, `File scope for this seat (review ONLY these files):`, ...plan.scope];
 }
 
+/**
+ * Whole-minute rendering of a shared soft remainder at the prompt/delivery
+ * sites: `remainingSoftMinutes` stays exact and a message reads in minutes. A
+ * negative remainder keeps its sign and rounds to at least one minute over, so
+ * an overrun is never displayed as time left.
+ */
+function budgetMinutes(remainingMinutes: number): number {
+  return remainingMinutes >= 0 ? Math.round(remainingMinutes) : -Math.max(1, Math.round(-remainingMinutes));
+}
+
+/** The dispatch head's figure: the shared remainder at dispatch, rendered. */
+function dispatchBudgetMinutes(level: ReviewLevel): number {
+  return budgetMinutes(remainingSoftMinutes(Date.now(), level));
+}
+
+/**
+ * Tail of the outer exec guard held clear of the seats: once the last seat
+ * stops, the runner still has to merge, synthesize and validate the envelope,
+ * so no seat may claim the whole remaining budget.
+ */
+const SEAT_CAP_TAIL_MS = 60_000;
+
+/**
+ * Hard wall-clock cap for one fan-out seat: twice the tier's SOFT cap, never
+ * beyond the remaining OUTER exec budget less the reserved tail. The two clocks
+ * are distinct by construction — the soft cap is a convergence target that
+ * aborts nothing (it only drives the dispatch head and the nudges), this is the
+ * only thing that stops a seat. A spent budget clamps to 1ms instead of `0`,
+ * which the SDK reads as "no cap at all".
+ */
+function seatMaxRuntimeMs(nowMs: number, level: ReviewLevel): number {
+  const softCapMs = PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes * 60_000;
+  return Math.max(1, Math.min(softCapMs * 2, remainingOuterMs(nowMs, level) - SEAT_CAP_TAIL_MS));
+}
+
+/**
+ * One progress nudge for a seat that is still running. The engine owns the
+ * cadence and the tier figures; the harness `/amazing-pr-review` § Seat
+ * supervision owns the model-facing procedure — this type carries only what the
+ * delivery itself needs.
+ */
+export type SeatNudge = {
+  text: string;
+  /** `aside` (next step boundary) inside the cap, `steer` (interrupting) past it. */
+  deliverAs: "aside" | "steer";
+};
+
+/** One supervised seat: its address, whether it is still running, and how a nudge reaches it. */
+export type SupervisedSeat = {
+  /** The id the seat is addressable as (its reserved registry ref id). */
+  id: string;
+  /** Per-seat stop state: this seat's OWN settlement, never "the whole group finished". */
+  isRunning: () => boolean;
+  deliver: (nudge: SeatNudge) => Promise<void>;
+};
+
+/**
+ * The nudge in force at `nowMs`, plus the tick to wait before the next one. The
+ * regime flips the moment the review is past its soft cap: the tick shortens to
+ * `overrunSeconds` and delivery stops being an aside at the next step boundary
+ * and interrupts the running turn instead. The remainder is recomputed from the
+ * one process anchor on every tick (never reused from an earlier nudge), and the
+ * wording asks for convergence only — no new scope, no re-ask of returned work.
+ */
+function seatNudge(nowMs: number, level: ReviewLevel): SeatNudge & { intervalMs: number } {
+  const remaining = remainingSoftMinutes(nowMs, level);
+  const overrun = remaining < 0;
+  const minutes = budgetMinutes(remaining);
+  return {
+    intervalMs: (overrun ? PR_REVIEW_NUDGE_CADENCE.overrunSeconds : PR_REVIEW_NUDGE_CADENCE.normalSeconds) * 1000,
+    deliverAs: overrun ? "steer" : "aside",
+    text: [
+      `Review clock: ${overrun ? `${-minutes} min over` : `${minutes} min left of`} the`,
+      `${PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes} min ${level} soft cap.`,
+      "Converge now: stop expanding scope, summarize what you already have and",
+      "return it, and declare the scope you did not get to. Do not start new",
+      "work — a partial result with its unscanned scope declared is expected.",
+    ].join(" "),
+  };
+}
+
+/**
+ * Wait one cadence tick. A real awaited timer — no busy-wait and no detached
+ * interval — resolved early AND cleared the moment the supervised work settles,
+ * so a returned seat leaves no pending timer behind.
+ */
+function waitTick(intervalMs: number, done: Promise<void>): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), intervalMs);
+    void done.then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+/**
+ * Deliver one nudge to a live seat session. A session with no turn in flight is
+ * not nudged: an `aside` would start a fresh turn and a `steer` could resume one
+ * — either would restart a seat that already returned.
+ */
+async function nudgeSession(session: AgentSession | null | undefined, nudge: SeatNudge): Promise<void> {
+  if (!session?.isStreaming) return;
+  if (nudge.deliverAs === "aside") {
+    await session.sendUserMessage(nudge.text, { deliverAs: "aside" });
+    return;
+  }
+  await session.steer(nudge.text);
+}
+
+/**
+ * Keep every seat that is still running moving on the engine cadence until the
+ * work it supervises settles. Supervision is fire-and-observe: its effects are
+ * messages, and a failed delivery is logged, never thrown (non-fatal is the
+ * contract). A seat leaves the tick set the moment ITS OWN promise settles
+ * (`isRunning`), and the loop itself ends with `done` — the fan-out or the deep
+ * parent turn, whichever it supervises — so no later tick can restart a seat
+ * that already returned.
+ */
+export async function superviseSeats(opts: {
+  seats: readonly SupervisedSeat[];
+  level: ReviewLevel;
+  done: Promise<void>;
+}): Promise<void> {
+  for (;;) {
+    if (await waitTick(seatNudge(Date.now(), opts.level).intervalMs, opts.done)) return;
+    // Recomputed after the wait: crossing the soft cap during a wait must
+    // upgrade the very next nudge (figure AND delivery strength).
+    const nudge = seatNudge(Date.now(), opts.level);
+    for (const seat of opts.seats) {
+      if (!seat.isRunning()) continue;
+      try {
+        await seat.deliver({ text: nudge.text, deliverAs: nudge.deliverAs });
+      } catch (error) {
+        console.error("review seat nudge failed", seat.id, error);
+      }
+    }
+  }
+}
+
 /** Seat assignment = engine prReviewSeatPrompt — zero copies of harness text. */
 function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: SeatPlan): string {
   return prReviewSeatPrompt({
@@ -479,24 +622,184 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
     worktreePath: input.worktreePath,
     reconFacts: seatReconFacts(input.reconFacts, plan),
     tier: input.level,
+    // The tier's SHARED soft remainder at dispatch, recomputed from the one
+    // process anchor so a later wave gets less and no seat ever sees a fresh
+    // allowance. The engine owns the head wording; negative = already over cap.
+    budgetRemainingMinutes: dispatchBudgetMinutes(input.level),
   });
 }
 
-/** Extract and guard the strict-validated seat payload. */
-function seatOutput(result: StructuredSubagentResult, index: number): SeatOutput {
+/**
+ * One capped seat's coverage gap: the seat, what stopped it, and the scope
+ * whose coverage the body has to declare incomplete.
+ */
+type SeatGap = { plan: SeatPlan; stoppedBy: string };
+
+/**
+ * One settled seat: the payload it collected (`null` = nothing usable) and the
+ * coverage gap the review body must declare (`null` = the seat covered its
+ * whole scope).
+ */
+type SeatOutcome = { output: SeatOutput | null; gap: SeatGap | null };
+
+/**
+ * The published review's `summary_md` budget in characters. The consumer
+ * truncates the summary to this many characters KEEPING THE HEAD
+ * (`src/pipeline/comment.ts`: SUMMARY_MD_LIMIT / `truncateSummary`), so anything
+ * the coverage notes push past it is lost from the END. Restated here with the
+ * publisher named because the in-image runner graph may not import that workerd
+ * face — the notes below have to fit inside the same budget.
+ */
+export const SUMMARY_MD_BUDGET = 8_000;
+
+/**
+ * Characters one capped seat's coverage line may spend, scope list included.
+ * Bounding lines by CHARACTERS (not by a file count) keeps a long path from
+ * crowding the line — or a second capped seat — out of the published body; a
+ * disclosure longer than this (an outsized stop reason) is cut with a marker.
+ */
+export const SEAT_GAP_MAX_CHARS = 400;
+
+/**
+ * The scope list for a coverage note: whole paths while they fit in `budget`,
+ * then how many paths the line could not name — a cut list is always marked,
+ * never silent.
+ */
+function scopeList(paths: readonly string[], budget: number): string {
+  const listed: string[] = [];
+  for (const [index, path] of paths.entries()) {
+    const unlisted = paths.length - index - 1;
+    const candidate = `${[...listed, path].join(", ")}${unlisted > 0 ? `, and ${unlisted} more` : ""}`;
+    if (candidate.length > budget) break;
+    listed.push(path);
+  }
+  if (listed.length === paths.length) return listed.join(", ");
+  return listed.length === 0
+    ? `${paths.length} file(s)`
+    : `${listed.join(", ")}, and ${paths.length - listed.length} more`;
+}
+
+/**
+ * The shortest honest disclosure for one capped seat: which seat, what stopped
+ * it, and that its assigned scope is not fully covered.
+ */
+function gapHead(gap: SeatGap): string {
+  return (
+    `- notes: seat ${gap.plan.domain}-${gap.plan.seat} was stopped by ${gap.stoppedBy}; ` +
+    `its assigned scope is not fully covered`
+  );
+}
+
+/**
+ * One capped seat's coverage line, never longer than `maxChars`. The line
+ * always names the seat and what stopped it, and describes the scope as the
+ * seat's ASSIGNED scope whose coverage is incomplete — never as untouched,
+ * which a finding the same seat returned from that very scope would contradict.
+ */
+function gapNote(gap: SeatGap, maxChars: number): string {
+  const { plan } = gap;
+  const head = gapHead(gap);
+  const budget = maxChars - head.length - 2;
+  const list = plan.scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(plan.scope, budget) : "";
+  const line = list.length === 0 ? head : `${head}: ${list}`;
+  if (line.length <= maxChars) return line;
+  // A share too small even for the head still names the seat and its cause; the
+  // cut is marked with an ellipsis rather than hidden.
+  return maxChars > 1 ? `${line.slice(0, maxChars - 1)}…` : "";
+}
+
+/**
+ * The engine summary fitted into `budget` characters, its cut MARKED. The
+ * publisher's head-keeping truncation semantics, applied here and earlier so
+ * the coverage notes keep the space reserved for them.
+ */
+function fittedSummary(summary: string, budget: number): string {
+  if (summary.length <= budget) return summary;
+  const marker = "\n… (summary truncated)";
+  const room = budget - marker.length;
+  return room > 0 ? `${summary.slice(0, room)}${marker}` : `${summary.slice(0, Math.max(0, budget - 1))}…`;
+}
+
+/**
+ * Fit the capped seats' coverage notes into the published body and hand back
+ * both halves: the summary shortened to make room, and the notes block.
+ *
+ * The publisher truncates `summary_md` from the HEAD at
+ * {@link SUMMARY_MD_BUDGET}, so whatever runs last is lost first — and the
+ * disclosure must never be what is lost. The order is therefore: RESERVE every
+ * capped seat's disclosure first, then fit the summary into what the reserves
+ * leave (marking its cut), and only then widen the scope lists from the
+ * remainder. A long summary can shorten a note's list; it can never erase a
+ * note.
+ */
+function coverageBlock(summary: string, gaps: readonly SeatGap[]): { summary: string; notes: string } {
+  if (gaps.length === 0) return { summary, notes: "" };
+  const separators = 2 + gaps.length - 1; // "\n\n" before the first line + "\n" between lines
+  const heads = gaps.map(gapHead);
+  // One reserve may not exceed an equal share of the note budget: an outsized
+  // stop reason would otherwise reserve the whole body for a single seat.
+  const reserveCap = Math.floor((SUMMARY_MD_BUDGET - separators) / gaps.length);
+  const reserves = heads.map((head) => Math.min(head.length, reserveCap));
+  const reserved = reserves.reduce((total, size) => total + size, 0);
+  const fitted = fittedSummary(summary, SUMMARY_MD_BUDGET - separators - reserved);
+  let leftover = SUMMARY_MD_BUDGET - separators - fitted.length - reserved;
+  const notes = gaps.map((gap, index) => {
+    const share = Math.floor(leftover / (gaps.length - index));
+    const note = gapNote(gap, Math.min(SEAT_GAP_MAX_CHARS, reserves[index]! + share));
+    leftover -= Math.max(0, note.length - reserves[index]!);
+    return note;
+  });
+  return { summary: fitted, notes: `\n\n${notes.join("\n")}` };
+}
+
+/**
+ * The SDK's own reason for a wall-clock stop: its abort-reason resolver returns
+ * exactly this wording — and only this wording — when the per-subagent runtime
+ * limit it was handed fires, and it carries the cap that fired. Every other
+ * abort (provider, session, shutdown) reports its own message or the caller's
+ * cancellation reason, so a match here IS positive evidence of the cap. The
+ * settled result exposes no typed abort kind to match instead.
+ */
+const RUNTIME_LIMIT_ABORT_RE = /Subagent runtime limit exceeded \(task\.maxRuntimeMs=[^)]+\)/;
+
+/**
+ * Extract and guard the strict-validated seat payload.
+ *
+ * A seat the hard cap stopped is NOT a failure: whatever it collected is kept
+ * (possibly nothing) and the assigned scope whose coverage is now incomplete is
+ * declared for the reader-visible body, so the review still synthesizes —
+ * non-fatal is the contract. That leniency covers ONE shortfall only: a cap that
+ * left the seat with no payload at all. An SDK error, and a payload the strict
+ * schema did not accept (`invalid`, or `valid` without data), stay fatal whether
+ * or not the cap also fired — a stop explains a MISSING payload, never a bad
+ * one. So does every abort the runtime limit did not cause
+ * ({@link RUNTIME_LIMIT_ABORT_RE} is the only cap evidence).
+ */
+function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatPlan): SeatOutcome {
   const single = result.result;
+  const structured = single.structuredOutput;
+  const collected =
+    structured?.status === "valid" && structured.data !== undefined ? (structured.data as SeatOutput) : null;
+  // What a cap cannot excuse: an SDK error, or a payload the seat did send and
+  // the strict schema rejected. Both keep the fatal handling below.
+  const fatalWithoutCap =
+    single.error !== undefined ||
+    (structured !== undefined && (structured.status !== "valid" || structured.data === undefined));
+  const stoppedByCap = single.abortReason?.match(RUNTIME_LIMIT_ABORT_RE)?.[0];
+  if (stoppedByCap !== undefined && !fatalWithoutCap) {
+    return { output: collected, gap: { plan, stoppedBy: stoppedByCap } };
+  }
   if (single.error) {
     throw new Error(`review seat ${index} (${single.agent}) failed: ${single.error}`);
   }
-  const structured = single.structuredOutput;
-  if (!structured || structured.status !== "valid" || structured.data === undefined) {
+  if (collected === null) {
     const detail = structured?.error ?? single.stderr.slice(-200);
     throw new Error(
       `review seat ${index} (${single.agent}) produced no valid structured output` +
         `(status ${structured?.status ?? "absent"})${detail ? `: ${detail}` : ""}`,
     );
   }
-  return structured.data as SeatOutput;
+  return { output: collected, gap: null };
 }
 
 /** Spec fingerprint: explicit hint, else the `file:line:title` composite. */
@@ -714,7 +1017,31 @@ function deepSessionOptions(opts: {
  */
 async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): Promise<string> {
   const command = await readFile(join(pluginRoot, "commands", "amazing-pr-review.md"), "utf8");
+  // The deep parent gets the SAME budget head as the Bun fan-out seats so it
+  // knows the clock it must finish inside. These lines are inspector-authored
+  // orchestration prose (the engine owns only the seat prompt); every figure is
+  // read from the engine budget table, never re-typed.
+  const capMinutes = PR_REVIEW_TIER_BUDGETS[input.level].wallClockMinutes;
+  const remainingMinutes = dispatchBudgetMinutes(input.level);
   return [
+    "Review budget — the shared soft clock this session must finish inside:",
+    `- Tier: \`${input.level}\` — review strength for this session.`,
+    `- Soft wall-clock cap: ${capMinutes} min for the WHOLE review — one shared`,
+    "  clock started when the runner began this review, not a fresh per-seat",
+    `  allowance (${remainingMinutes} min left when this session was dispatched;`,
+    "  a negative figure means the review is already over its cap).",
+    "- The cap is SOFT: reaching it aborts nothing, so the turn keeps going —",
+    "  but as you approach it, stop expanding, summarize what you already have",
+    "  and return it. Yielding is MANDATORY here: this turn has no cap-stop",
+    "  path, so ending it without a valid `yield` fails the whole review.",
+    "  Return a partial review that declares its unscanned scope — never empty.",
+    "- You are the parent the caller can reach: the `task` seats you dispatch",
+    "  yourself are invisible to it, so supervising them is YOURS — while each",
+    "  one runs, relay it this same clock (the minutes left, or the overrun)",
+    "  on the same cadence, short and interrupting once the cap is passed, and",
+    "  ask it to converge the same way (harness § Seat supervision). Never",
+    "  re-ask a seat whose result you already have, and never widen its scope.",
+    "",
     "You are the parent session of a deep (three-stage) code review.",
     "",
     "Recon facts:",
@@ -906,15 +1233,40 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         return yielded as MstarReviewV1;
       };
 
+      // The parent turn is the only seat this process can address on the deep
+      // path (its own `task` children are addressed by the parent itself — see
+      // deepAssignment): nudge it while the turn runs, never after it returns.
+      let parentRunning = true;
+      const parentTurn = runParentTurn().finally(() => {
+        parentRunning = false;
+      });
+      const supervision = superviseSeats({
+        level: input.level,
+        done: parentTurn.then(
+          () => undefined,
+          () => undefined,
+        ),
+        seats: [
+          {
+            id: parentSession.getAgentId() ?? "deep-parent",
+            isRunning: () => parentRunning,
+            deliver: (nudge) => nudgeSession(parentSession, nudge),
+          },
+        ],
+      });
       let envelope: MstarReviewV1;
       try {
-        envelope = await runParentTurn();
+        envelope = await parentTurn;
       } catch (error) {
         // Normal-review failure aborts the recheck seat too (spec §7.8);
         // runRecheckSeat never rejects — awaiting only reaps the seat.
         recheckController.abort();
         if (recheckWork) await recheckWork;
         throw error;
+      } finally {
+        // Supervision never outlives the turn it supervises (no pending timer
+        // can survive the review) and never masks its outcome.
+        await supervision;
       }
       // The review settled: use an already-completed recheck or abort the
       // unfinished seat — never start or await a fresh budget after review.
@@ -1022,13 +1374,29 @@ export const ompAgentRuntime: AgentRuntime = {
               signal: recheckController.signal,
             })
           : null;
-      let outputs;
-      try {
-        outputs = await Promise.all(
-          plans.map(async (plan, index) => {
+      // Each seat's reserved registry id — the engine-mandated `<domain>-<seat>`
+      // slug its prompt also carries. Reserved up front through `identity.id`
+      // (the SDK returns a caller-supplied id verbatim) so the supervisor can
+      // address THAT seat while it runs instead of racing the SDK's own
+      // allocation for an id it never reports back.
+      const seats = plans.map((plan, index) => ({ plan, index, id: `${plan.domain}-${plan.seat}` }));
+      // The hard cap this wave dispatches with: one figure for every seat of
+      // the review, read at the moment they actually start.
+      const seatCapMs = seatMaxRuntimeMs(Date.now(), input.level);
+      // Per-seat stop state: a seat's OWN promise settlement — never "the whole
+      // group finished". A seat that returned is never messaged again.
+      const settledSeats = new Set<string>();
+      // The ALL-SETTLED barrier: one failing seat must never cut supervision (or
+      // teardown) short for a sibling that is still running, so the fan-out
+      // waits for every seat's OWN settlement and rethrows the first failure
+      // only afterwards.
+      const group = Promise.allSettled(
+        seats.map(async ({ plan, index, id }) => {
+          try {
             const result = await runStructuredSubagent({
               session: toolSession,
               invocationKind: "task",
+              identity: { id },
               assignment: seatAssignment(input, pluginRoot, plan),
               agent: "mstar-review-seat",
               model: seatModels,
@@ -1036,20 +1404,69 @@ export const ompAgentRuntime: AgentRuntime = {
               schemaMode: "strict",
               enableLsp: false,
               enableIrc: false,
+              maxRuntimeMs: seatCapMs,
             });
-            return seatOutput(result, index);
-          }),
-        );
+            return seatOutput(result, index, plan);
+          } finally {
+            settledSeats.add(id);
+          }
+        }),
+      );
+      // Supervision runs BESIDE the fan-out and ends off that same barrier: the
+      // supervisor stops per seat (its own settlement), the loop stops only once
+      // EVERY seat has settled.
+      const supervision = superviseSeats({
+        level: input.level,
+        done: group.then(() => undefined),
+        seats: seats.map(({ id }) => ({
+          id,
+          isRunning: () => !settledSeats.has(id),
+          deliver: (nudge) => nudgeSession(AgentRegistry.global().get(id)?.session, nudge),
+        })),
+      });
+      let outcomes: SeatOutcome[];
+      try {
+        const results = await group; // never rejects: the barrier absorbs every seat
+        // A failed seat (SDK error, or a payload rejected by seatOutput) stays
+        // fatal — it is rethrown here, after its siblings have settled, so it
+        // can no longer abandon them.
+        const failure = results.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+        outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
       } catch (error) {
         recheckController.abort();
         if (recheckWork) await recheckWork;
         throw error;
+      } finally {
+        // Supervision never outlives the fan-out it supervises (no pending
+        // timer can survive the review) and never masks its outcome.
+        await supervision;
       }
       recheckController.abort();
       const recheck = recheckWork ? await recheckWork : null;
 
+      const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
+      // Nothing to synthesize from: every dispatched seat stopped before producing
+      // a usable payload, and a zero-finding envelope would report a clean verdict
+      // over a wave that reviewed nothing. The run is incomplete, and saying so is
+      // the only honest outcome.
+      if (outputs.length === 0) {
+        throw new Error(
+          `review incomplete: every dispatched seat (${seats.map((seat) => seat.id).join(", ")})` +
+            ` was stopped by its wall-clock cap and produced no usable output`,
+        );
+      }
       const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
       const envelope = synthesizeReview({ findings, unverifiedCount, target: parseTarget(input.reconFacts) });
+      // A capped seat's gap is declared on the body the user reads (the GitHub
+      // Review is rendered from `summary_md`) — never only in a log, and never
+      // past that body's character budget: its disclosure is reserved before the
+      // engine summary is fitted around it. The envelope schema and the engine's
+      // tally semantics stay untouched: an uncollected seat changes neither
+      // verdict nor counts.
+      const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
+      const block = coverageBlock(envelope.summary_md, gaps);
+      envelope.summary_md = `${block.summary}${block.notes}`;
       const gate = validateMstarReviewV1(envelope);
       if (!gate.ok) {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");

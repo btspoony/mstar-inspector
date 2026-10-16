@@ -25,9 +25,15 @@
  * structured stderr event and resolves `null` — it never throws and never
  * loses the review. Validation is `validateRecheckDoc` (fail-closed, whole
  * document); the strict outputSchema only enforces shape.
+ *
+ * Shared soft clock: the same `anchorRecheckDeadline` call also anchors the
+ * tier's SOFT clock, and `remainingSoftMinutes(now)` is its pure view — one
+ * anchor per review serves both the recheck budget (outer, hard) and the seat
+ * dispatch head (soft).
  */
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import {
   RECHECK_MAX_RUNTIME_MS,
   RECHECK_MIN_REMAINING_MS,
@@ -117,6 +123,19 @@ const OUTER_RUNNER_CAP_MS: Record<ReviewLevel, number> = {
 let anchoredDeadlineMs: number | undefined;
 
 /**
+ * The review's SHARED soft clock: the start instant the runner anchored plus
+ * the tier it runs at. Distinct from `anchoredDeadlineMs` above — that one is
+ * the OUTER exec guard (a hard budget the recheck seat derives from), while
+ * this is the tier's soft convergence target (`PR_REVIEW_TIER_BUDGETS
+ * [level].wallClockMinutes`): reaching it changes nothing structurally and
+ * aborts nothing, it only tells a seat how much of the review's clock is left.
+ * Anchored by the SAME call as the outer deadline (one clock per review, never
+ * a second origin). `undefined` = no anchor (direct runtime/test use).
+ */
+let anchoredSoftStartMs: number | undefined;
+let anchoredSoftLevel: ReviewLevel | undefined;
+
+/**
  * Anchor the ABSOLUTE outer review deadline for this process:
  * the runner calls this ONCE per process at start (`startMs` = process
  * start, `level` = review tier). The recheck seat's budget is derived from
@@ -126,6 +145,43 @@ let anchoredDeadlineMs: number | undefined;
  */
 export function anchorRecheckDeadline(startMs: number, level: ReviewLevel): void {
   anchoredDeadlineMs = startMs + OUTER_RUNNER_CAP_MS[level];
+  // Same instant, same call: the soft clock shares the outer deadline's origin
+  // — one anchor per review, never a second one.
+  anchoredSoftStartMs = startMs;
+  anchoredSoftLevel = level;
+}
+
+/**
+ * Minutes left of the tier's SHARED soft wall-clock cap at `nowMs` — the
+ * figure that rides a seat's dispatch head and the deep parent's assignment.
+ * Pure `(anchor, now)` derivation (no ambient clock); NEGATIVE = the review is
+ * already over its tier cap, reported as an overrun rather than clamped to 0
+ * (the cap is a convergence target, never a hard stop). Unanchored → the
+ * tier's full cap. `level` overrides the anchored tier for callers that
+ * dispatch a different tier than the process anchor. Tier minutes come from
+ * the engine budget table — the single numeric source.
+ */
+export function remainingSoftMinutes(nowMs: number, level?: ReviewLevel): number {
+  const tier = level ?? anchoredSoftLevel ?? "default";
+  const capMinutes = PR_REVIEW_TIER_BUDGETS[tier].wallClockMinutes;
+  const startMs = anchoredSoftStartMs ?? nowMs;
+  // Exact remaining time, never quantized: whole minutes are a DISPLAY concern
+  // (a seat prompt reads in minutes), so rounding lives at the render site and
+  // this value stays a correct elapsed source. Exact at the anchor, strictly
+  // decreasing as `now` advances, and negative the moment the review is past
+  // its cap — never clamped to 0 the way the outer budget is.
+  return capMinutes - (nowMs - startMs) / 60_000;
+}
+
+/**
+ * Milliseconds left of the OUTER exec guard at `nowMs` — the budget a seat's
+ * hard cap derives from, as opposed to the soft convergence target
+ * `remainingSoftMinutes` reports. Same anchor and same purity; unanchored
+ * (direct runtime/test use) → the tier's full cap from `nowMs`, mirroring
+ * `currentRecheckBudget`'s convention.
+ */
+export function remainingOuterMs(nowMs: number, level: ReviewLevel): number {
+  return (anchoredDeadlineMs ?? nowMs + OUTER_RUNNER_CAP_MS[level]) - nowMs;
 }
 
 /**
