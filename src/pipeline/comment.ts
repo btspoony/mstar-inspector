@@ -15,8 +15,8 @@
  *     ship it**` / `needs fixes` / `blocked` / `incomplete` — never M1
  *     vocab, never a GitHub review event); an `incomplete` verdict also
  *     states `cause:` + `unscanned:` right after the header/tally block —
- *     the renderer's single bounded pair (machine fact lines are stripped
- *     from the rendered summary).
+ *     the renderer's single bounded pair (the summary's own byte-identical
+ *     echo of those two lines is stripped from the rendered summary).
  *
  * Posting: single-comment UPSERT via the Issues comments API
  * (@octokit/rest + createAppAuth — same deps and pattern as the deleted
@@ -264,17 +264,23 @@ function renderUnscannedLine(entries: readonly string[]): string {
 }
 
 /**
- * Strip machine fact lines from the rendered summary: the renderer owns those
- * two lines and renders exactly one bounded pair from the envelope fact. The
- * label is line-anchored with optional leading whitespace and is matched
- * case-insensitively, so an indented or capitalised echo of the pair is
- * removed too; a mid-line mention is left verbatim. Every other summary line
- * is kept byte-identical; the stored summary_md is never rewritten.
+ * Strip the machine fact lines from the rendered summary: the renderer owns
+ * those two lines and renders exactly one bounded pair from the envelope fact,
+ * so the summary's own echo of that pair would duplicate it. Only a line
+ * byte-identical to the line the engine echoes from the SAME fact
+ * (`cause: <reason>`, `unscanned: <csv | none>`) is that echo — a line that
+ * merely opens with the label (an indented YAML snippet, capitalised prose, a
+ * mid-sentence mention) is the model's own content and stays verbatim. Every
+ * other summary line is kept byte-identical; the stored summary_md is never
+ * rewritten.
  */
-function stripMachineFactLines(md: string): string {
+function stripMachineFactLines(md: string, fact: { reason: string; unscanned: readonly string[] }): string {
+  const causeLine = `cause: ${fact.reason}`;
+  const unscannedLine =
+    fact.unscanned.length === 0 ? "unscanned: none" : `unscanned: ${fact.unscanned.join(", ")}`;
   return md
     .split("\n")
-    .filter((line) => !/^\s*(?:cause|unscanned):/i.test(line))
+    .filter((line) => line !== causeLine && line !== unscannedLine)
     .join("\n");
 }
 
@@ -283,8 +289,9 @@ function stripMachineFactLines(md: string): string {
  * (when present) + incomplete fact lines (`cause:` / `unscanned:`,
  * incomplete verdict with a present fact only, each line bounded per
  * INCOMPLETE_FACT_LINE_LIMIT; the renderer owns the pair — under the same
- * condition machine fact lines are stripped from the rendered summary, and
- * every other verdict keeps its summary byte-identical) + truncated summary +
+ * condition the summary's own byte-identical echo of those two lines is
+ * stripped from the rendered summary, and every other verdict keeps its
+ * summary byte-identical) + truncated summary +
  * findings-by-class section + optional
  * omitted-findings footer + optional closure section (§7.10),
  * finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API
@@ -307,16 +314,17 @@ export function buildReviewBody(
   const tally = renderTally(output.tally, output.findings, previousFingerprints);
   // Incomplete verdicts state the declared cause + unscanned scope as part of
   // the verdict block. The renderer owns the pair: on the same condition that
-  // renders it, machine fact lines are stripped from the rendered summary
-  // (never the stored summary_md); every other verdict passes its summary
-  // through byte-identical. The pair is always rendered once from the
+  // renders it, the summary's byte-identical echo of those two lines is
+  // stripped (never the stored summary_md, and never a line that merely opens
+  // with the label); every other verdict passes its summary through
+  // byte-identical. The pair is always rendered once from the
   // envelope, each line bounded; the final body clamp stays last. The strip
-  // runs BEFORE the summary budget applies: the machine lines the renderer
+  // runs BEFORE the summary budget applies: the echo the renderer
   // reproduces must not consume the budget that keeps the summary's tail.
   const incomplete = output.verdict === "incomplete" ? output.incomplete : undefined;
   const rendersFact = incomplete !== undefined;
   const summary = rendersFact
-    ? truncateSummary(stripMachineFactLines(output.summary_md))
+    ? truncateSummary(stripMachineFactLines(output.summary_md, incomplete))
     : truncateSummary(output.summary_md);
   const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;
