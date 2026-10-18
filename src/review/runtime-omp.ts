@@ -1259,8 +1259,9 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         // The turn's TERMINAL account of itself (`gathered`, see the end-event
         // branch) plus the two pieces the bounded wait below needs: whether a
         // NON-terminal end parked the session on a queued delivery that resumes
-        // it, and the promise that settles the wait the moment that
-        // continuation yields or ends for real.
+        // it, and the promise that settles the wait when that continuation
+        // ends for real — its yields only replace the captured payload, so a
+        // corrected re-yield is still observed.
         let gathered: { summary?: string; stopped?: string } | undefined;
         let resuming = false;
         let outcomeKnown = () => {};
@@ -1322,8 +1323,11 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // with a payload count.
           if (record.status === "success" && !Array.isArray(record.type) && record.data !== undefined) {
             yielded = record.data;
-            // A resumed continuation that yields settles the wait below.
-            outcomeKnown();
+            // A non-parked turn's yield IS its outcome, so it releases the
+            // wait. A resumed continuation can yield again (a corrected
+            // payload), so while a parked end is in flight only the terminal
+            // end settles the wait — the last successful yield wins.
+            if (!resuming) outcomeKnown();
           }
         });
         let turnError: unknown;

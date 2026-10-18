@@ -277,10 +277,11 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
             // Deferred past the prompt's OWN settlement — no duration, just the
             // event-loop boundary after the runtime has processed the parked
             // end — because the SDK's drain runs the continuation only once the
-            // owning prompt has unwound.
-            setImmediate(() => {
-              disposeCallsAtResume = disposeCalls;
-              resumedYields.forEach((data, index) => {
+            // owning prompt has unwound. Each event that continuation emits
+            // (every yield, then its terminal end) reaches the runtime on its
+            // own tick, as the real drain does.
+            const resumedFrames: Array<() => void> = resumedYields.map((data, index) => {
+              return () => {
                 listener?.({
                   type: "tool_execution_end",
                   toolCallId: `resume-yield-${index}`,
@@ -288,15 +289,25 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
                   isError: false,
                   result: { content: [], details: { data, status: "success", type: undefined } },
                 });
-              });
-              if (resumedEnd !== null) {
+              };
+            });
+            if (resumedEnd !== null) {
+              resumedFrames.push(() => {
                 listener?.({
                   type: "agent_end",
                   messages: resumedEnd,
                   isTerminal: true,
                 });
-              }
-            });
+              });
+            }
+            const deliverResumed = (index: number): void => {
+              setImmediate(() => {
+                if (index === 0) disposeCallsAtResume = disposeCalls;
+                resumedFrames[index]?.();
+                if (index + 1 < resumedFrames.length) deliverResumed(index + 1);
+              });
+            };
+            deliverResumed(0);
           }
           // The run's own end, as the SDK emits it: the gathered transcript
           // rides the deferred `agent_end` frame, delivered after every tool
@@ -1769,6 +1780,28 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(envelope.summary_md).toBe("## Review\n\nOne should-fix finding.");
     expect(envelope.incomplete).toBeUndefined();
     expect(disposeCallsAtResume).toBe(0);
+    expect(disposeCalls).toBe(1);
+  });
+
+  test("a parked continuation's later corrected yield replaces the first", async () => {
+    parentParkedEnd = [stoppedTurn("Parked prose.", "Deadline exceeded")];
+    const corrected = {
+      ...(deepEnvelope() as Record<string, unknown>),
+      summary_md: "## Review\n\nCorrected after the first yield.",
+    };
+    parentResumeYields = [deepEnvelope(), corrected];
+    parentResumeEnd = [stoppedTurn("Post-yield prose.")];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    // The FIRST resumed yield must not settle the wait: the continuation was
+    // still running, so the corrected payload — last successful yield wins —
+    // only becomes visible when the terminal end releases the wait. The
+    // terminal transcript never overwrites a yielded review.
+    expect(envelope.summary_md).toBe("## Review\n\nCorrected after the first yield.");
+    expect(envelope.summary_md).not.toContain("Post-yield prose.");
+    expect(envelope.verdict).toBe("needs fixes");
+    expect(envelope.incomplete).toBeUndefined();
     expect(disposeCalls).toBe(1);
   });
 
