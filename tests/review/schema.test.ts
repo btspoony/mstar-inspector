@@ -339,6 +339,96 @@ describe("parseReviewOutput", () => {
     });
   });
 
+  describe("incomplete verdict (four-token vocabulary)", () => {
+    const FACT = { reason: "budget exhausted after 3 of 9 files", unscanned: ["src/b.ts", "src/c.ts"] };
+    const INCOMPLETE: ReviewOutput = { ...VALID, verdict: "incomplete", incomplete: FACT };
+
+    test("accepts every harness verdict token, including incomplete", () => {
+      for (const verdict of ["ship it", "needs fixes", "blocked"] as const) {
+        expect(parseReviewOutput(JSON.stringify({ ...VALID, verdict })).ok).toBe(true);
+      }
+      const r = parseReviewOutput(JSON.stringify(INCOMPLETE));
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.output.verdict).toBe("incomplete");
+      }
+    });
+
+    test("round-trips the incomplete fact (an empty unscanned list is legal)", () => {
+      const r = parseReviewOutput(JSON.stringify(INCOMPLETE));
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.output).toEqual(INCOMPLETE);
+        expect(r.output.incomplete).toEqual(FACT);
+      }
+      const nothingLeft = { ...INCOMPLETE, incomplete: { reason: FACT.reason, unscanned: [] } };
+      const r2 = parseReviewOutput(JSON.stringify(nothingLeft));
+      expect(r2.ok).toBe(true);
+      if (r2.ok) {
+        expect(r2.output.incomplete).toEqual({ reason: FACT.reason, unscanned: [] });
+      }
+    });
+
+    test("rejects the incomplete verdict without the fact", () => {
+      const { incomplete: _i, ...bare } = INCOMPLETE;
+      const r = parseReviewOutput(JSON.stringify(bare));
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error).toContain("incomplete");
+      }
+    });
+
+    test("rejects the fact on a settled verdict", () => {
+      for (const verdict of ["ship it", "needs fixes", "blocked"] as const) {
+        const r = parseReviewOutput(JSON.stringify({ ...VALID, verdict, incomplete: FACT }));
+        expect(r.ok).toBe(false);
+      }
+    });
+
+    test("rejects a malformed reason or unscanned scope", () => {
+      const malformed: unknown[] = [
+        { reason: "   ", unscanned: [] },
+        { reason: "stopped\nafter one file", unscanned: [] },
+        { unscanned: [] },
+        { reason: FACT.reason, unscanned: ["ok", ""] },
+        { reason: FACT.reason, unscanned: ["a\r\nb"] },
+        { reason: FACT.reason, unscanned: "src/a.ts" },
+        { reason: FACT.reason, unscanned: [1, 2] },
+      ];
+      for (const incomplete of malformed) {
+        const r = parseReviewOutput(JSON.stringify({ ...INCOMPLETE, incomplete }));
+        expect(r.ok).toBe(false);
+      }
+    });
+
+    test("accepts an agreeing tally echo and rejects a disagreeing one", () => {
+      const TALLY = {
+        verdict: "incomplete",
+        scorePct: 45,
+        band: "fail",
+        tally: { mustFix: 0, shouldFix: 2, nit: 1, unverified: 1 },
+        chatHeader: "**incomplete** · 45%\n🔴 0 🟠 2 🔵 1 ❓ 1",
+        incomplete: FACT,
+      };
+      const agreeing = parseReviewOutput(JSON.stringify({ ...INCOMPLETE, tally: TALLY }));
+      expect(agreeing.ok).toBe(true);
+      if (agreeing.ok) {
+        expect(agreeing.output.incomplete).toEqual(FACT);
+        expect(agreeing.output.tally!.incomplete).toEqual(FACT);
+      }
+      const disagreeing = parseReviewOutput(
+        JSON.stringify({
+          ...INCOMPLETE,
+          tally: { ...TALLY, incomplete: { reason: FACT.reason, unscanned: ["src/z.ts"] } },
+        }),
+      );
+      expect(disagreeing.ok).toBe(false);
+      if (!disagreeing.ok) {
+        expect(disagreeing.error).toContain("incomplete-tally-mismatch");
+      }
+    });
+  });
+
   test("rejects non-JSON input", () => {
     const r = parseReviewOutput("this is not json at all");
     expect(r.ok).toBe(false);
