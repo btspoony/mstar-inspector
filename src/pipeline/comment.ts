@@ -205,6 +205,40 @@ function clampFactLine(line: string): string {
 }
 
 /**
+ * Render the `unscanned:` fact line without materializing the full list
+ * join: accumulate `, `-joined entries only while the line still fits the
+ * budget together with the omission marker, then end it with `… (+N more)`
+ * (N = omitted count). A list that fits renders exactly as `join(", ")`
+ * (no marker, same text); an empty scope renders `unscanned: none`. The
+ * stored envelope is untouched.
+ */
+function renderUnscannedLine(entries: readonly string[]): string {
+  const prefix = "unscanned: ";
+  if (entries.length === 0) return `${prefix}none`;
+  // Marker as it would appear if the line stopped right after this entry;
+  // accepting an entry requires the final line (marker included) to fit.
+  const marker = (omitted: number) => (omitted > 0 ? `, … (+${omitted} more)` : "");
+  let line = prefix;
+  let shown = 0;
+  for (const entry of entries) {
+    const piece = shown === 0 ? entry : `, ${entry}`;
+    if (line.length + piece.length + marker(entries.length - shown - 1).length > INCOMPLETE_FACT_LINE_LIMIT) {
+      break;
+    }
+    line += piece;
+    shown += 1;
+  }
+  const omitted = entries.length - shown;
+  if (omitted === 0) return line;
+  if (shown > 0) return line + marker(omitted);
+  // Pathological first entry longer than the budget: truncate it so the
+  // marker still fits — the line never exceeds the cap.
+  const tail = `… (+${omitted} more)`;
+  const head = entries[0]!.slice(0, INCOMPLETE_FACT_LINE_LIMIT - prefix.length - tail.length - 2);
+  return `${prefix}${head}, ${tail}`;
+}
+
+/**
  * Strip machine fact lines (`cause:` / `unscanned:` at line start) from the
  * rendered summary: the renderer owns those two lines and renders exactly
  * one bounded pair from the envelope fact. Every other summary line is kept
@@ -261,9 +295,7 @@ export function buildReviewBody(
     rendersFact
       ? [
           clampFactLine(`cause: ${incomplete.reason}`),
-          clampFactLine(
-            `unscanned: ${incomplete.unscanned.length > 0 ? incomplete.unscanned.join(", ") : "none"}`,
-          ),
+          renderUnscannedLine(incomplete.unscanned),
         ].join("\n")
       : "";
   const withFact = fact === "" ? head : `${head}\n\n${fact}`;

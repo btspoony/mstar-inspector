@@ -16,9 +16,11 @@
  *   - incomplete verdicts state `cause:` + `unscanned:` (none when the
  *     scope is empty) right after the header/tally block, before the
  *     summary — the renderer's single pair, each line bounded at
- *     INCOMPLETE_FACT_LINE_LIMIT with an ellipsis; machine fact lines are
- *     stripped from the rendered summary (stored summary_md untouched), so
- *     the fact renders exactly once however the summary phrases it
+ *     INCOMPLETE_FACT_LINE_LIMIT (the unscanned scope joins only until the
+ *     budget and ends `… (+N more)` when entries are omitted); machine
+ *     fact lines are stripped from the rendered summary (stored summary_md
+ *     untouched), so the fact renders exactly once however the summary
+ *     phrases it
  *   - omitted-findings footer when the merge-class cap dropped findings (B4)
  *   - the assembled body carries NO line-comment fields (overall review only)
  *   - T5 upsert: marker parse, create-on-miss, patch-on-hit with round
@@ -325,17 +327,39 @@ describe("buildReviewBody", () => {
     expect(incomplete.reason).toBe(reason);
   });
 
-  test("a large unscanned scope is bounded per line with an ellipsis", () => {
+  test("an overflowing unscanned scope joins only until the budget and ends with an omitted-count marker", () => {
     const unscanned = Array.from({ length: 200 }, (_, i) => `src/module-${i}/deep-file-${i}.ts`);
+    const incomplete = { reason: "runner timed out", unscanned };
     const body = buildReviewBody({
       ...output,
       verdict: "incomplete",
       findings: [],
-      incomplete: { reason: "runner timed out", unscanned },
+      incomplete,
+    });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(unscannedLine.length).toBeLessThanOrEqual(INCOMPLETE_FACT_LINE_LIMIT);
+    // The marker states the omitted count; shown entries keep list order.
+    const match = unscannedLine.match(/, … \(\+(\d+) more\)$/);
+    expect(match).not.toBeNull();
+    const omitted = Number(match![1]);
+    expect(omitted).toBeGreaterThan(0);
+    expect(omitted).toBeLessThan(unscanned.length);
+    expect(unscannedLine).toBe(`unscanned: ${unscanned.slice(0, unscanned.length - omitted).join(", ")}, … (+${omitted} more)`);
+    // The stored envelope keeps the validated value unchanged.
+    expect(incomplete.unscanned).toBe(unscanned);
+  });
+
+  test("an unscanned scope that exactly fills the budget renders fully, with no marker", () => {
+    const entry = "x".repeat(INCOMPLETE_FACT_LINE_LIMIT - "unscanned: ".length);
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: [entry] },
     });
     const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
     expect(unscannedLine).toHaveLength(INCOMPLETE_FACT_LINE_LIMIT);
-    expect(unscannedLine.endsWith("…")).toBe(true);
+    expect(unscannedLine).toBe(`unscanned: ${entry}`);
   });
 
   test("the fact renders exactly once when the summary already carries the pair (engine default shape)", () => {
