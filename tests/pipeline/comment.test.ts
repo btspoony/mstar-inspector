@@ -14,7 +14,10 @@
  *   - summary_md truncated at 8000 chars
  *   - tally line rendered when the envelope carries a PrTallyResult
  *   - incomplete verdicts state `cause:` + `unscanned:` (none when the
- *     scope is empty) right after the header/tally block, before the summary
+ *     scope is empty) right after the header/tally block, before the
+ *     summary — each line bounded at INCOMPLETE_FACT_LINE_LIMIT with an
+ *     ellipsis, and omitted when the summary already carries the pair
+ *     (engine default summary shape), so the fact renders exactly once
  *   - omitted-findings footer when the merge-class cap dropped findings (B4)
  *   - the assembled body carries NO line-comment fields (overall review only)
  *   - T5 upsert: marker parse, create-on-miss, patch-on-hit with round
@@ -40,6 +43,7 @@ import {
   findDegradedComment,
   findDegradedComments,
   findReviewComment,
+  INCOMPLETE_FACT_LINE_LIMIT,
   parseDegradedRound,
   parseReviewRound,
   planDegradedUpsert,
@@ -306,6 +310,76 @@ describe("buildReviewBody", () => {
       expect(body).not.toContain("unscanned:");
       expect(body).toBe(buildReviewBody({ ...output, verdict }));
     }
+  });
+
+  test("an over-long reason is bounded per line with an ellipsis (envelope untouched)", () => {
+    const reason = `runner timed out: ${"r".repeat(INCOMPLETE_FACT_LINE_LIMIT + 100)}`;
+    const incomplete = { reason, unscanned: ["src/pipeline/comment.ts"] };
+    const body = buildReviewBody({ ...output, verdict: "incomplete", findings: [], incomplete });
+    const causeLine = body.split("\n").find((line) => line.startsWith("cause: "))!;
+    expect(causeLine).toHaveLength(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(causeLine.endsWith("…")).toBe(true);
+    expect(body).not.toContain(reason);
+    // The stored envelope keeps the validated value unchanged.
+    expect(incomplete.reason).toBe(reason);
+  });
+
+  test("a large unscanned scope is bounded per line with an ellipsis", () => {
+    const unscanned = Array.from({ length: 200 }, (_, i) => `src/module-${i}/deep-file-${i}.ts`);
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned },
+    });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(unscannedLine).toHaveLength(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(unscannedLine.endsWith("…")).toBe(true);
+  });
+
+  test("the fact renders exactly once when the summary already carries it (engine default shape)", () => {
+    const summaryMd = [
+      "## Verdict: incomplete · 0% (F, partial)",
+      "",
+      "must-fix=0 should-fix=0 nit=0 unverified=0",
+      "cause: runner timed out",
+      "unscanned: src/pipeline/comment.ts",
+    ].join("\n");
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: summaryMd,
+      incomplete: { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] },
+    });
+    expect(body.match(/^cause:/gm)?.length).toBe(1);
+    expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+    // No second pair before the summary; the summary text itself is verbatim.
+    expect(body).toBe(`**Verdict: incomplete**\n\n${summaryMd}`);
+  });
+
+  test("the fact renders exactly once when the summary does not carry it (model-written summary)", () => {
+    const summaryMd = "## Deep review\n\nThe parent session wrote its own summary.";
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: summaryMd,
+      incomplete: { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] },
+    });
+    expect(body.match(/^cause:/gm)?.length).toBe(1);
+    expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+    expect(body).toBe(
+      `**Verdict: incomplete**\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts\n\n${summaryMd}`,
+    );
+  });
+
+  test("the normal path is unchanged: no fact lines, summary and findings present", () => {
+    const body = buildReviewBody(output);
+    expect(body.startsWith("**Verdict: needs fixes**\n\nTwo issues found in the diff.\n\n## Findings")).toBe(true);
+    expect(body).toContain("### 🟠 should-fix");
+    expect(body).not.toContain("cause:");
+    expect(body).not.toContain("unscanned:");
   });
 });
 

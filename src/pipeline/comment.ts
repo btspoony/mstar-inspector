@@ -14,7 +14,8 @@
  *   - verdict rendered VERBATIM as text in the body header (`**Verdict:
  *     ship it**` / `needs fixes` / `blocked` / `incomplete` — never M1
  *     vocab, never a GitHub review event); an `incomplete` verdict also
- *     states `cause:` + `unscanned:` right after the header/tally block.
+ *     states `cause:` + `unscanned:` right after the header/tally block
+ *     (each line bounded; omitted when the summary already states them).
  *
  * Posting: single-comment UPSERT via the Issues comments API
  * (@octokit/rest + createAppAuth — same deps and pattern as the deleted
@@ -111,6 +112,14 @@ export const SUMMARY_MD_LIMIT = 8000;
  */
 export const REVIEW_BODY_LIMIT = 65000;
 
+/**
+ * Per-line budget for the rendered `cause:` / `unscanned:` fact lines of an
+ * incomplete verdict: long enough for a real cause or scope list, short
+ * enough to protect the body budget. The stored envelope keeps the validated
+ * values unchanged — the cap bounds the rendered line only.
+ */
+export const INCOMPLETE_FACT_LINE_LIMIT = 500;
+
 /** Truncate summary_md to the body budget (char-based; GitHub counts chars). */
 export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): string {
   return md.length <= limit ? md : `${md.slice(0, limit - 1)}…`;
@@ -189,10 +198,17 @@ function renderTally(
   );
 }
 
+/** Bound one rendered incomplete-fact line (label included); ellipsis on overflow. */
+function clampFactLine(line: string): string {
+  return line.length <= INCOMPLETE_FACT_LINE_LIMIT ? line : `${line.slice(0, INCOMPLETE_FACT_LINE_LIMIT - 1)}…`;
+}
+
 /**
  * Assemble the overall review body: verdict header (verbatim) + tally line
  * (when present) + incomplete fact lines (`cause:` / `unscanned:`,
- * incomplete verdict with a present fact only) + truncated summary +
+ * incomplete verdict with a present fact only, each line bounded per
+ * INCOMPLETE_FACT_LINE_LIMIT and omitted when the summary already carries
+ * the pair) + truncated summary +
  * findings-by-class section + optional
  * omitted-findings footer + optional closure section (§7.10),
  * finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API
@@ -217,10 +233,20 @@ export function buildReviewBody(
   const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;
   // Incomplete verdicts state the declared cause + unscanned scope as part of
-  // the verdict block; every other verdict keeps the body byte-identical.
+  // the verdict block — once. The engine's default incomplete summary already
+  // carries the pair; a summary without it (e.g. a model-written deep
+  // summary) gets the pair from the renderer instead. Every other verdict
+  // keeps the body byte-identical; the envelope values stay untouched (the
+  // cap bounds the rendered lines only, and the final body clamp stays last).
+  const summaryCarriesFact = /^cause:/m.test(summary) && /^unscanned:/m.test(summary);
   const fact =
-    output.verdict === "incomplete" && output.incomplete !== undefined
-      ? `cause: ${output.incomplete.reason}\nunscanned: ${output.incomplete.unscanned.length > 0 ? output.incomplete.unscanned.join(", ") : "none"}`
+    output.verdict === "incomplete" && output.incomplete !== undefined && !summaryCarriesFact
+      ? [
+          clampFactLine(`cause: ${output.incomplete.reason}`),
+          clampFactLine(
+            `unscanned: ${output.incomplete.unscanned.length > 0 ? output.incomplete.unscanned.join(", ") : "none"}`,
+          ),
+        ].join("\n")
       : "";
   const withFact = fact === "" ? head : `${head}\n\n${fact}`;
   const body = findings ? `${withFact}\n\n${summary}\n\n${findings}` : `${withFact}\n\n${summary}`;
