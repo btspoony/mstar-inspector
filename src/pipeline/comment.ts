@@ -14,8 +14,9 @@
  *   - verdict rendered VERBATIM as text in the body header (`**Verdict:
  *     ship it**` / `needs fixes` / `blocked` / `incomplete` — never M1
  *     vocab, never a GitHub review event); an `incomplete` verdict also
- *     states `cause:` + `unscanned:` right after the header/tally block
- *     (each line bounded; omitted when the summary already states them).
+ *     states `cause:` + `unscanned:` right after the header/tally block —
+ *     the renderer's single bounded pair (machine fact lines are stripped
+ *     from the rendered summary).
  *
  * Posting: single-comment UPSERT via the Issues comments API
  * (@octokit/rest + createAppAuth — same deps and pattern as the deleted
@@ -204,11 +205,24 @@ function clampFactLine(line: string): string {
 }
 
 /**
+ * Strip machine fact lines (`cause:` / `unscanned:` at line start) from the
+ * rendered summary: the renderer owns those two lines and renders exactly
+ * one bounded pair from the envelope fact. Every other summary line is kept
+ * byte-identical; the stored summary_md is never rewritten.
+ */
+function stripMachineFactLines(md: string): string {
+  return md
+    .split("\n")
+    .filter((line) => !/^(?:cause|unscanned):/.test(line))
+    .join("\n");
+}
+
+/**
  * Assemble the overall review body: verdict header (verbatim) + tally line
  * (when present) + incomplete fact lines (`cause:` / `unscanned:`,
  * incomplete verdict with a present fact only, each line bounded per
- * INCOMPLETE_FACT_LINE_LIMIT and omitted when the summary already carries
- * the pair) + truncated summary +
+ * INCOMPLETE_FACT_LINE_LIMIT; the renderer owns the pair, so machine fact
+ * lines are stripped from the rendered summary) + truncated summary +
  * findings-by-class section + optional
  * omitted-findings footer + optional closure section (§7.10),
  * finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API
@@ -229,18 +243,17 @@ export function buildReviewBody(
 ): string {
   const verdict = `**Verdict: ${output.verdict}**`;
   const tally = renderTally(output.tally, output.findings, previousFingerprints);
-  const summary = truncateSummary(output.summary_md);
+  const summary = stripMachineFactLines(truncateSummary(output.summary_md));
   const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;
   // Incomplete verdicts state the declared cause + unscanned scope as part of
-  // the verdict block — once. The engine's default incomplete summary already
-  // carries the pair; a summary without it (e.g. a model-written deep
-  // summary) gets the pair from the renderer instead. Every other verdict
-  // keeps the body byte-identical; the envelope values stay untouched (the
-  // cap bounds the rendered lines only, and the final body clamp stays last).
-  const summaryCarriesFact = /^cause:/m.test(summary) && /^unscanned:/m.test(summary);
+  // the verdict block. The renderer owns the pair: any machine fact lines in
+  // the summary were stripped above (never the stored summary_md), and the
+  // pair is always rendered once from the envelope, each line bounded. Every
+  // other verdict keeps the body byte-identical; the final body clamp stays
+  // last.
   const fact =
-    output.verdict === "incomplete" && output.incomplete !== undefined && !summaryCarriesFact
+    output.verdict === "incomplete" && output.incomplete !== undefined
       ? [
           clampFactLine(`cause: ${output.incomplete.reason}`),
           clampFactLine(
