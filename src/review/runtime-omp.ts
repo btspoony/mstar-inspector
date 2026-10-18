@@ -727,38 +727,19 @@ function gapHead(gap: SeatGap): string {
 }
 
 /**
- * One capped seat's coverage line, never longer than `maxChars`. The line
- * always names the seat and what stopped it, and describes the scope as the
- * seat's ASSIGNED scope whose coverage is incomplete — never as untouched,
- * which a finding the same seat returned from that very scope would contradict.
+ * One scope line: `head` plus the scope list, never longer than `maxChars`.
+ * The list gets the budget the head and `separator` leave, is `the whole diff`
+ * for a seat with no file scope, and is omitted behind the head when that
+ * budget cannot hold a list. A line still over `maxChars` is cut with an
+ * ellipsis — the seat and its cause stay named — and a share too small even
+ * for that returns empty rather than a bare marker.
  */
-function gapNote(gap: SeatGap, maxChars: number): string {
-  const { plan } = gap;
-  const head = gapHead(gap);
-  const budget = maxChars - head.length - 2;
-  const list = plan.scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(plan.scope, budget) : "";
-  const line = list.length === 0 ? head : `${head}: ${list}`;
+function scopeLine(head: string, separator: string, maxChars: number, scope: readonly string[]): string {
+  const budget = maxChars - head.length - separator.length;
+  const list = scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(scope, budget) : "";
+  const line = list.length === 0 ? head : `${head}${separator}${list}`;
   if (line.length <= maxChars) return line;
-  // A share too small even for the head still names the seat and its cause; the
-  // cut is marked with an ellipsis rather than hidden.
   return maxChars > 1 ? `${line.slice(0, maxChars - 1)}…` : "";
-}
-
-/**
- * One `incomplete.unscanned` entry: the stopped seat's address and the assigned
- * scope whose coverage fell short, bounded by the same per-seat budget as the
- * coverage note so a long scope list cannot crowd the findings out of the
- * published body. The reader-visible DETAIL — which cap fired, and that
- * coverage rather than the scope itself is what fell short — stays in the note
- * ({@link gapNote}); the entry is the terse seat/scope list the fact is read
- * for, and the two never restate each other.
- */
-function unscannedEntry(plan: SeatPlan): string {
-  const head = `${plan.domain}-${plan.seat}:`;
-  const budget = SEAT_GAP_MAX_CHARS - head.length - 1;
-  const list = plan.scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(plan.scope, budget) : "";
-  const line = list.length === 0 ? head : `${head} ${list}`;
-  return line.length <= SEAT_GAP_MAX_CHARS ? line : `${line.slice(0, SEAT_GAP_MAX_CHARS - 1)}…`;
 }
 
 /**
@@ -798,7 +779,11 @@ function coverageBlock(summary: string, gaps: readonly SeatGap[]): { summary: st
   let leftover = SUMMARY_MD_BUDGET - separators - fitted.length - reserved;
   const notes = gaps.map((gap, index) => {
     const share = Math.floor(leftover / (gaps.length - index));
-    const note = gapNote(gap, Math.min(SEAT_GAP_MAX_CHARS, reserves[index]! + share));
+    const maxChars = Math.min(SEAT_GAP_MAX_CHARS, reserves[index]! + share);
+    // The scope is named as the seat's ASSIGNED scope whose coverage is
+    // incomplete — never as untouched, which a finding the same seat returned
+    // from that very scope would contradict.
+    const note = scopeLine(gapHead(gap), ": ", maxChars, gap.plan.scope);
     leftover -= Math.max(0, note.length - reserves[index]!);
     return note;
   });
@@ -1294,23 +1279,28 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
               resuming = true;
               return;
             }
-            // The last assistant entry is what the turn had gathered: its text
-            // parts are the content a stopped run has to offer, and
-            // `errorMessage` is the stop the SDK recorded when it reported one
-            // (a deadline or a cancelled turn — a boundary exit records
-            // nothing, so absence is not evidence of a clean stop).
-            const terminal = [...event.messages].reverse().find((entry) => entry.role === "assistant");
-            if (terminal?.role !== "assistant") {
-              gathered = {};
-              outcomeKnown();
-              return;
+            // The terminal assistant entry is the turn's own last word, and
+            // `errorMessage` rides IT — the stop the SDK recorded when it
+            // reported one (a deadline or a cancelled turn; a boundary exit
+            // records nothing, so absence is not evidence of a clean stop).
+            // Its CONTENT is not the whole story: a terminal entry can be a
+            // tool call alone, and the text the turn gathered then sits on an
+            // earlier entry, so the summary is the last assistant entry that
+            // actually said something — scanning back past tool-only ones.
+            const reversed = [...event.messages].reverse();
+            const terminal = reversed.find((entry) => entry.role === "assistant");
+            let summary: string | undefined;
+            for (const entry of reversed) {
+              if (entry.role !== "assistant") continue;
+              let text = "";
+              for (const part of entry.content) {
+                if (part.type === "text") text += part.text;
+              }
+              if (text.trim() === "") continue;
+              summary = fittedSummary(text.trim(), SUMMARY_MD_BUDGET);
+              break;
             }
-            let text = "";
-            for (const part of terminal.content) {
-              if (part.type === "text") text += part.text;
-            }
-            const summary = text.trim() === "" ? undefined : fittedSummary(text.trim(), SUMMARY_MD_BUDGET);
-            const stop = terminal.errorMessage?.trim();
+            const stop = terminal?.role === "assistant" ? terminal.errorMessage?.trim() : undefined;
             gathered = {
               ...(summary === undefined ? {} : { summary }),
               ...(stop === undefined || stop === "" ? {} : { stopped: stop }),
@@ -1686,8 +1676,11 @@ export const ompAgentRuntime: AgentRuntime = {
                 // Every dispatched seat is lost in the unusable-wave branch, so
                 // the dispatch list IS the unscanned set there — rejected seats
                 // included, and no seat silently dropped from the disclosure.
+                // Each entry is the terse seat/scope list the fact is read for,
+                // bounded by the same per-seat budget as the coverage note; the
+                // note, never the entry, carries which cap fired.
                 unscanned: (everyStopWasCap ? gaps.map((gap) => gap.plan) : seats.map((seat) => seat.plan)).map(
-                  unscannedEntry,
+                  (plan) => scopeLine(`${plan.domain}-${plan.seat}:`, " ", SEAT_GAP_MAX_CHARS, plan.scope),
                 ),
               },
             }),

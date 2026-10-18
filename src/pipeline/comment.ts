@@ -252,15 +252,17 @@ function renderUnscannedLine(entries: readonly string[]): string {
 }
 
 /**
- * Strip machine fact lines (`cause:` / `unscanned:` at line start) from the
- * rendered summary: the renderer owns those two lines and renders exactly
- * one bounded pair from the envelope fact. Every other summary line is kept
- * byte-identical; the stored summary_md is never rewritten.
+ * Strip machine fact lines from the rendered summary: the renderer owns those
+ * two lines and renders exactly one bounded pair from the envelope fact. The
+ * label is line-anchored with optional leading whitespace and is matched
+ * case-insensitively, so an indented or capitalised echo of the pair is
+ * removed too; a mid-line mention is left verbatim. Every other summary line
+ * is kept byte-identical; the stored summary_md is never rewritten.
  */
 function stripMachineFactLines(md: string): string {
   return md
     .split("\n")
-    .filter((line) => !/^(?:cause|unscanned):/.test(line))
+    .filter((line) => !/^\s*(?:cause|unscanned):/i.test(line))
     .join("\n");
 }
 
@@ -296,11 +298,13 @@ export function buildReviewBody(
   // renders it, machine fact lines are stripped from the rendered summary
   // (never the stored summary_md); every other verdict passes its summary
   // through byte-identical. The pair is always rendered once from the
-  // envelope, each line bounded; the final body clamp stays last.
+  // envelope, each line bounded; the final body clamp stays last. The strip
+  // runs BEFORE the summary budget applies: the machine lines the renderer
+  // reproduces must not consume the budget that keeps the summary's tail.
   const incomplete = output.verdict === "incomplete" ? output.incomplete : undefined;
   const rendersFact = incomplete !== undefined;
   const summary = rendersFact
-    ? stripMachineFactLines(truncateSummary(output.summary_md))
+    ? truncateSummary(stripMachineFactLines(output.summary_md))
     : truncateSummary(output.summary_md);
   const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;

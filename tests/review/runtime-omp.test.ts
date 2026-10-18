@@ -28,7 +28,8 @@
  *     frontmatter) for the run and removed after, the LAST successful yield
  *     is re-validated against the engine vocab, a turn whose TERMINAL end
  *     arrives without one (its `agent_end` gathers the transcript) is
- *     synthesized into an `incomplete` envelope with the gathered summary and
+ *     synthesized into an `incomplete` envelope with the gathered summary
+ *     (the last assistant entry that carries text, past tool-only ones) and
  *     the deep scope, a NON-terminal end parks the turn and its resumed
  *     continuation's yield or terminal end is awaited first, and
  *     partitionSeats/runStructuredSubagent are never called — quick/default
@@ -452,6 +453,19 @@ function stoppedTurn(text: string, errorMessage?: string): unknown {
   return {
     role: "assistant",
     content: [{ type: "text", text }],
+    stopReason: errorMessage === undefined ? "stop" : "aborted",
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+  };
+}
+
+/**
+ * The assistant entry a turn ends on when its last step was a tool call: no
+ * text part at all, and the stop — when there is one — on this entry.
+ */
+function toolOnlyTurn(errorMessage?: string): unknown {
+  return {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-1", name: "task", arguments: {} }],
     stopReason: errorMessage === undefined ? "stop" : "aborted",
     ...(errorMessage === undefined ? {} : { errorMessage }),
   };
@@ -1188,6 +1202,27 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     expect(notes[0]).toContain("its assigned scope is not fully covered");
     expect(notes[0]).toMatch(/, and \d+ more$/);
     expect(notes[0]!.length).toBeLessThanOrEqual(SEAT_GAP_MAX_CHARS);
+    // The fact's entry comes from the same helper: the same per-seat budget,
+    // the same whole-paths-then-count list.
+    const entry = envelope.incomplete!.unscanned[0]!;
+    expect(entry.startsWith("full-diff-combined: ")).toBe(true);
+    expect(entry).toMatch(/, and \d+ more$/);
+    expect(entry.length).toBeLessThanOrEqual(SEAT_GAP_MAX_CHARS);
+  });
+
+  test("a capped seat's coverage note and fact entry keep their pinned scope lines", async () => {
+    // A scope that fits both budgets, so the two outputs of the shared
+    // head/budget/scope-list sequence are visible verbatim (the cut forms are
+    // pinned by the sibling's assertions above).
+    seatResults = [{ status: "absent", aborted: true, abortReason: CAP_REASON }];
+
+    const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+
+    expect(noteLines(envelope.summary_md)).toEqual([
+      `- notes: seat full-diff-combined was stopped by ${CAP_REASON}; ` +
+        `its assigned scope is not fully covered: lib/c.ts, src/a.ts, src/b.ts`,
+    ]);
+    expect(envelope.incomplete?.unscanned).toEqual(["full-diff-combined: lib/c.ts, src/a.ts, src/b.ts"]);
   });
 
   test("a summary at the body budget still cannot erase the capped seats' notes", async () => {
@@ -1628,6 +1663,36 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
     );
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
+  });
+
+  test("a tool-only terminal assistant entry does not erase the text an earlier entry gathered", async () => {
+    // The turn's last step dispatched a seat and stopped there: the terminal
+    // entry is a tool call, and the prose the turn gathered sits one entry
+    // earlier — the stop is still the terminal entry's own account.
+    parentAgentEnd = [
+      stoppedTurn("## Findings so far\n\nlib/c.ts needs a null check."),
+      toolOnlyTurn("Deadline exceeded while the seat ran"),
+    ];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.incomplete?.reason).toBe("Deadline exceeded while the seat ran");
+    // The summary is the last assistant entry that actually said something.
+    expect(envelope.summary_md).toContain("lib/c.ts needs a null check");
+  });
+
+  test("a transcript whose assistant entries all lack text keeps the engine summary template", async () => {
+    parentAgentEnd = [toolOnlyTurn()];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.incomplete?.reason).toBe(
+      "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
+    );
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    expect(envelope.summary_md).toContain("## Verdict: incomplete");
   });
 
   test("a turn that yielded is unchanged by the end event", async () => {

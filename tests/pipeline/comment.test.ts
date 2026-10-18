@@ -18,9 +18,10 @@
  *     summary — the renderer's single pair, each line bounded at
  *     INCOMPLETE_FACT_LINE_LIMIT (the unscanned scope joins only until the
  *     budget and ends `… (+N more)` when entries are omitted); machine
- *     fact lines are stripped from the rendered summary (stored summary_md
- *     untouched), so the fact renders exactly once however the summary
- *     phrases it
+ *     fact lines are stripped from the rendered summary BEFORE the
+ *     summary budget applies (a line-anchored, whitespace-tolerant,
+ *     case-insensitive label match; stored summary_md untouched), so the
+ *     fact renders exactly once however the summary phrases it
  *   - omitted-findings footer when the merge-class cap dropped findings (B4)
  *   - the assembled body carries NO line-comment fields (overall review only)
  *   - T5 upsert: marker parse, create-on-miss, patch-on-hit with round
@@ -493,6 +494,56 @@ describe("buildReviewBody", () => {
     expect(body).toContain(summaryMd);
     expect(body.match(/^cause:/gm)?.length).toBe(1);
     expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+  });
+
+  test("the machine pair is stripped before the summary budget applies — a long summary keeps its tail", () => {
+    const summaryMd = [
+      `cause: ${"c".repeat(300)}`,
+      `unscanned: ${"u".repeat(300)}`,
+      `${"b".repeat(7900)}TAIL-MARKER`,
+    ].join("\n");
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: summaryMd,
+      incomplete: { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] },
+    });
+    // The summary is over budget only because of the pair the renderer
+    // reproduces itself: stripped FIRST, the whole remainder fits the budget
+    // and the content past the original 8000th char survives unchanged.
+    expect(summaryMd.length).toBeGreaterThan(SUMMARY_MD_LIMIT);
+    expect(body.match(/^cause:/gm)?.length).toBe(1);
+    expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+    expect(body).toBe(
+      "**Verdict: incomplete**\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts\n\n" +
+        `${"b".repeat(7900)}TAIL-MARKER`,
+    );
+  });
+
+  test("an indented or capitalised fact echo in the summary is stripped too", () => {
+    const summaryMd = [
+      "## Partial report",
+      "",
+      "  Cause: runner timed out",
+      "\tUNSCANNED: src/pipeline/comment.ts",
+      "Otherwise complete.",
+    ].join("\n");
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: summaryMd,
+      incomplete: { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] },
+    });
+    // Neither indentation nor letter case hides an echo, and the renderer's
+    // bounded pair stays the only one in the body.
+    expect(body).not.toContain("Cause: runner timed out");
+    expect(body).not.toContain("UNSCANNED:");
+    expect(body).toBe(
+      "**Verdict: incomplete**\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts" +
+        "\n\n## Partial report\n\nOtherwise complete.",
+    );
   });
 
   test("settled verdicts keep a summary with line-anchored fact text verbatim (no strip, no pair)", () => {
