@@ -79,6 +79,7 @@ import {
   MERGE_CLASSES,
   PR_REVIEW_NUDGE_CADENCE,
   PR_REVIEW_TIER_BUDGETS,
+  PR_SCORE_BANDS,
   PR_VERDICTS,
   prReviewSeatPrompt,
   synthesizeReview,
@@ -279,6 +280,22 @@ const REVIEW_FINDING_SCHEMA = {
   },
 } as const;
 
+/**
+ * The `incomplete` fact shared by the envelope and its tally (engine
+ * `PrIncomplete`): the declared cause plus the scope the run never reached.
+ * Structural only — the single-line/blank rules and the verdict-conditional
+ * presence stay with the engine validator, never re-encoded here.
+ */
+const INCOMPLETE_FACT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["reason", "unscanned"],
+  properties: {
+    reason: { type: "string" },
+    unscanned: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
 /** Inspector-owned seat wire contract (spec § 席位输出契约), strict-validated by the SDK. */
 const SEAT_OUTPUT_SCHEMA = {
   type: "object",
@@ -294,7 +311,10 @@ const SEAT_OUTPUT_SCHEMA = {
  * Parent-session output contract for the deep path — the
  * mstar.review/v1 envelope shape as a strict JSON Schema (spec Architect
  * lock L2). The SDK's strict mode only enforces shape; the engine
- * vocabulary SSOT re-validates the extracted payload.
+ * vocabulary SSOT re-validates the extracted payload (including the
+ * verdict-conditional `incomplete` fact, which no `required` list can state).
+ * `additionalProperties: false` is why every engine-emitted member — the
+ * optional `incomplete` fact and the tally's `band` — has to be declared here.
  */
 const PARENT_OUTPUT_SCHEMA = {
   type: "object",
@@ -312,6 +332,7 @@ const PARENT_OUTPUT_SCHEMA = {
       properties: {
         verdict: { enum: [...PR_VERDICTS] },
         scorePct: { type: "integer" },
+        band: { enum: [...PR_SCORE_BANDS] },
         tally: {
           type: "object",
           additionalProperties: false,
@@ -324,6 +345,7 @@ const PARENT_OUTPUT_SCHEMA = {
           },
         },
         chatHeader: { type: "string" },
+        incomplete: INCOMPLETE_FACT_SCHEMA,
       },
     },
     target: {
@@ -336,6 +358,7 @@ const PARENT_OUTPUT_SCHEMA = {
         head_sha: { type: "string" },
       },
     },
+    incomplete: INCOMPLETE_FACT_SCHEMA,
   },
 } as const;
 
