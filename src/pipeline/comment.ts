@@ -266,21 +266,22 @@ function renderUnscannedLine(entries: readonly string[]): string {
 /**
  * Strip the machine fact lines from the rendered summary: the renderer owns
  * those two lines and renders exactly one bounded pair from the envelope fact,
- * so the summary's own echo of that pair would duplicate it. Only a line
- * byte-identical to the line the engine echoes from the SAME fact
- * (`cause: <reason>`, `unscanned: <csv | none>`) is that echo — a line that
- * merely opens with the label (an indented YAML snippet, capitalised prose, a
- * mid-sentence mention) is the model's own content and stays verbatim. Every
- * other summary line is kept byte-identical; the stored summary_md is never
- * rewritten.
+ * so the summary's own echo of that pair would duplicate it. The echo is
+ * matched by exact line equality in BOTH forms — as the engine injected the
+ * fact (`cause: <reason>`, `unscanned: <csv | none>`) and as the renderer
+ * clamps an over-long fact for the body. A line that merely opens with the
+ * label (an indented YAML snippet, capitalised prose, a mid-sentence mention)
+ * or carries any other value is the model's own content and stays verbatim.
+ * Every other summary line is kept byte-identical; the stored summary_md is
+ * never rewritten.
  */
 function stripMachineFactLines(md: string, fact: { reason: string; unscanned: readonly string[] }): string {
-  const causeLine = `cause: ${fact.reason}`;
-  const unscannedLine =
-    fact.unscanned.length === 0 ? "unscanned: none" : `unscanned: ${fact.unscanned.join(", ")}`;
+  const cause = `cause: ${fact.reason}`;
+  const unscanned = fact.unscanned.length === 0 ? "unscanned: none" : `unscanned: ${fact.unscanned.join(", ")}`;
+  const machineLines = [cause, clampFactLine(cause), unscanned, renderUnscannedLine(fact.unscanned)];
   return md
     .split("\n")
-    .filter((line) => line !== causeLine && line !== unscannedLine)
+    .filter((line) => !machineLines.includes(line))
     .join("\n");
 }
 

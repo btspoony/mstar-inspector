@@ -20,10 +20,11 @@
  *     budget and ends `… (+N more)` when entries are omitted); the
  *     summary's own byte-identical echo of those two lines is stripped
  *     BEFORE the summary budget applies (exact column-0 line equality with
- *     the fact's two machine lines; stored summary_md untouched, and a line
- *     that only opens with the label — indented, capitalised, mid-sentence —
- *     stays verbatim), so the fact renders exactly once however the summary
- *     phrases it
+ *     either form of the pair — the raw fact or the clamped line the
+ *     renderer emits; stored summary_md untouched, and a line that only
+ *     opens with the label — indented, capitalised, mid-sentence — or
+ *     carries another value stays verbatim), so the fact renders exactly
+ *     once however the summary phrases it
  *   - omitted-findings footer when the merge-class cap dropped findings (B4)
  *   - the assembled body carries NO line-comment fields (overall review only)
  *   - T5 upsert: marker parse, create-on-miss, patch-on-hit with round
@@ -554,6 +555,43 @@ describe("buildReviewBody", () => {
     expect(body).not.toContain(reason);
     expect(body).not.toContain(entry);
     expect(body).toContain("## Verdict: incomplete · 0% (F, partial)");
+  });
+
+  test("a summary echoing the renderer's clamped pair is stripped to that single pair", () => {
+    // The summary can carry the CLAMPED form the renderer itself emits, not the
+    // raw fact: matching only the raw strings left a duplicate pair behind.
+    const reason = "r".repeat(600);
+    const entry = "u".repeat(600);
+    const incomplete = { reason, unscanned: [entry] };
+    const rendered = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: "## Verdict: incomplete · 0% (F, partial)",
+      incomplete,
+    });
+    // The renderer's own pair, taken from its output — the echo to reproduce.
+    const clampedPair = rendered
+      .split("\n")
+      .filter((line) => line.startsWith("cause: ") || line.startsWith("unscanned: "))
+      .join("\n");
+    expect(clampedPair.split("\n")).toHaveLength(2);
+    expect(clampedPair).not.toBe(`cause: ${reason}\nunscanned: ${entry}`);
+
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: `## Partial report\n\n${clampedPair}\n\nOtherwise complete.`,
+      incomplete,
+    });
+
+    // Exactly one pair in the body — the renderer's — with the summary's own
+    // surrounding lines intact.
+    expect(body.match(/^cause:/gm)?.length).toBe(1);
+    expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+    expect(body.split(clampedPair).length - 1).toBe(1);
+    expect(body).toContain("Otherwise complete.");
   });
 
   test("a mid-line mention of the fact labels in the summary is left verbatim", () => {
