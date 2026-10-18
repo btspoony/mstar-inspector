@@ -732,6 +732,24 @@ function gapNote(gap: SeatGap, maxChars: number): string {
 }
 
 /**
+ * One `incomplete.unscanned` entry: the stopped seat's address and the assigned
+ * scope whose coverage fell short, bounded by the same per-seat budget as the
+ * coverage note so a long scope list cannot crowd the findings out of the
+ * published body. The reader-visible DETAIL — which cap fired, and that
+ * coverage rather than the scope itself is what fell short — stays in the note
+ * ({@link gapNote}); the entry is the terse seat/scope list the fact is read
+ * for, and the two never restate each other.
+ */
+function unscannedEntry(gap: SeatGap): string {
+  const { plan } = gap;
+  const head = `${plan.domain}-${plan.seat}:`;
+  const budget = SEAT_GAP_MAX_CHARS - head.length - 1;
+  const list = plan.scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(plan.scope, budget) : "";
+  const line = list.length === 0 ? head : `${head} ${list}`;
+  return line.length <= SEAT_GAP_MAX_CHARS ? line : `${line.slice(0, SEAT_GAP_MAX_CHARS - 1)}…`;
+}
+
+/**
  * The engine summary fitted into `budget` characters, its cut MARKED. The
  * publisher's head-keeping truncation semantics, applied here and earlier so
  * the coverage notes keep the space reserved for them.
@@ -1471,25 +1489,43 @@ export const ompAgentRuntime: AgentRuntime = {
       const recheck = recheckWork ? await recheckWork : null;
 
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
-      // Nothing to synthesize from: every dispatched seat stopped before producing
-      // a usable payload, and a zero-finding envelope would report a clean verdict
-      // over a wave that reviewed nothing. The run is incomplete, and saying so is
-      // the only honest outcome.
-      if (outputs.length === 0) {
-        throw new Error(
-          `review incomplete: every dispatched seat (${seats.map((seat) => seat.id).join(", ")})` +
-            ` was stopped by its wall-clock cap and produced no usable output`,
-        );
-      }
-      const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
-      const envelope = synthesizeReview({ findings, unverifiedCount, target: parseTarget(input.reconFacts) });
-      // A capped seat's gap is declared on the body the user reads (the GitHub
-      // Review is rendered from `summary_md`) — never only in a log, and never
-      // past that body's character budget: its disclosure is reserved before the
-      // engine summary is fitted around it. The envelope schema and the engine's
-      // tally semantics stay untouched: an uncollected seat changes neither
-      // verdict nor counts.
+      // The seats this wave did not settle. A seat that stopped short carries
+      // its gap — the wall-clock cap fired, whether it returned part of its
+      // payload or none — and a seat that returned usable output carries none,
+      // so this list IS the stopped set (`output === null` never arrives without
+      // a gap: a payload-less seat with no cap is fatal inside `seatOutput`).
+      // ONE stopped seat is enough to stop the run: a wave that lost a seat is
+      // not settled under the 4.0.2 contract, even when a sibling seat returned
+      // usable output, because an uncollected scope can hide any finding.
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
+      const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
+      // The stopped seats are declared as the engine's `incomplete` fact,
+      // synthesized — never post-edited onto the envelope. A wave that stopped
+      // everywhere still synthesizes with `findings: []`: throwing would lose
+      // the review entirely, and a zero-finding envelope reporting a clean
+      // verdict over a wave that reviewed nothing is the dishonest outcome.
+      const envelope = synthesizeReview({
+        findings,
+        unverifiedCount,
+        target: parseTarget(input.reconFacts),
+        ...(gaps.length === 0
+          ? {}
+          : {
+              incomplete: {
+                reason:
+                  `wall-clock cap stopped ${gaps.length} of ${outcomes.length} dispatched seats` +
+                  ` before their assigned scope was covered`,
+                unscanned: gaps.map(unscannedEntry),
+              },
+            }),
+      });
+      // A capped seat's gap is also declared on the body the user reads (the
+      // GitHub Review is rendered from `summary_md`) — never only in a log, and
+      // never past that body's character budget: its disclosure is reserved
+      // before the engine summary is fitted around it. The envelope schema and
+      // the engine's tally semantics stay untouched: an uncollected seat keeps
+      // the count-derived grade of the findings that DID land, and a wave with
+      // no stopped seat is synthesized and fitted exactly as before.
       const block = coverageBlock(envelope.summary_md, gaps);
       envelope.summary_md = `${block.summary}${block.notes}`;
       const gate = validateMstarReviewV1(envelope);

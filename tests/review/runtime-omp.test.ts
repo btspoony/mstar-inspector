@@ -45,7 +45,7 @@ import {
   buildOutputValidator,
   type OutputValidator,
 } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
-import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
+import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
 import type { AgentRuntime, ReviewLevel } from "../../src/review/runtime";
 import type { SupervisedSeat } from "../../src/review/runtime-omp";
@@ -828,27 +828,90 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
 
     await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/no valid structured output/);
   });
+});
 
-  test("a wave with no usable output anywhere is incomplete — never synthesized", async () => {
-    const reason = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+/**
+ * A wave that lost a seat is not settled: it is delivered carrying the engine's
+ * `incomplete` fact (single-line cause + the unscanned seat scopes) instead of
+ * throwing, while a wave that lost no seat is untouched. The engine is the
+ * oracle on both ends — `validateMstarReviewV1` for the synthesized envelope's
+ * contract, `synthesizeReview` for the envelope a clean wave must produce.
+ */
+describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete envelope", () => {
+  /** The SDK's own reason for a wall-clock stop, verbatim as its resolver emits it. */
+  const CAP_REASON = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+
+  test("a wave with no usable output anywhere lands incomplete, every dispatched seat listed", async () => {
     // Its single seat stopped before producing anything: a zero-finding envelope
-    // would report a clean verdict over a review that never happened.
-    seatResults = [{ status: "absent", aborted: true, abortReason: reason }];
+    // would report a clean verdict over a review that never happened, and
+    // throwing would lose the review entirely.
+    seatResults = [{ status: "absent", aborted: true, abortReason: CAP_REASON }];
 
-    await expect(ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" })).rejects.toThrow(
-      /review incomplete.*full-diff-combined/,
-    );
+    const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.findings).toEqual([]);
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    expect(envelope.incomplete?.reason).toContain("1 of 1 dispatched seats");
+    expect(envelope.incomplete?.unscanned).toEqual([expect.stringContaining("full-diff-combined")]);
   });
 
-  test("both seats capped before any output: the wave reports itself incomplete", async () => {
-    const reason = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+  test("both seats capped before any output: the wave lands incomplete and lists both seats", async () => {
     seatResults = [
-      { status: "absent", aborted: true, abortReason: reason },
-      { status: "absent", aborted: true, abortReason: reason },
+      { status: "absent", aborted: true, abortReason: CAP_REASON },
+      { status: "absent", aborted: true, abortReason: CAP_REASON },
     ];
 
-    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(
-      /review incomplete.*changeset-1-src, changeset-2-lib/,
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    expect(envelope.incomplete?.reason).toContain("2 of 2 dispatched seats");
+    expect(envelope.incomplete?.unscanned).toEqual([
+      expect.stringContaining("changeset-1-src"),
+      expect.stringContaining("changeset-2-lib"),
+    ]);
+  });
+
+  test("one stopped seat of two: the sibling's findings still land, and the fact marks the run incomplete", async () => {
+    seatResults = [{ status: "absent", aborted: true, abortReason: CAP_REASON }, { data: seatPayload() }];
+
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    // Only the token changes: the collected findings keep their count-derived
+    // grade, and the stopped seat's scope is declared next to them.
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(envelope.incomplete?.reason).toContain("1 of 2 dispatched seats");
+    expect(envelope.incomplete?.unscanned).toEqual([expect.stringContaining("changeset-1-src")]);
+    // The per-seat detail (which cap fired) stays on the body the user reads.
+    expect(envelope.summary_md).toContain("- notes:");
+    expect(envelope.summary_md).toContain("changeset-1-src");
+  });
+
+  test("no stopped seat: the envelope is the engine's own synthesis, fact and notes absent", async () => {
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    // Byte-identical to what the collected findings synthesize to: neither the
+    // fact nor a coverage note is added speculatively to a completed wave.
+    expect(envelope.incomplete).toBeUndefined();
+    expect(envelope).toEqual(
+      synthesizeReview({
+        findings: [
+          {
+            mergeClass: "must-fix",
+            title: "Unbounded loop",
+            body: "The loop never terminates on empty input.",
+            file_path: "src/a.ts",
+            line_start: 10,
+            line_end: 20,
+          },
+        ],
+        unverifiedCount: 1,
+        target: { owner: "acme", repo: "widgets", pr: 7, head_sha: "abc1234567890abcdef1234567890abcdef12" },
+      }),
     );
   });
 });
@@ -889,7 +952,9 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     expect(envelope.findings.map((finding) => finding.file_path)).toEqual(["src/a.ts"]);
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("its assigned scope is not fully covered");
-    expect(envelope.summary_md).not.toContain("unscanned");
+    // The claim is the NOTE's: "unscanned" survives in this body only as the
+    // harness fact's key (`unscanned:`), which this stopped run now carries.
+    expect(notes[0]).not.toContain("unscanned");
   });
 
   test("a scope whose paths are long still fits the body, capped seats and all", async () => {
