@@ -41,6 +41,10 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import {
+  buildOutputValidator,
+  type OutputValidator,
+} from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
 import type { AgentRuntime, ReviewLevel } from "../../src/review/runtime";
@@ -1372,6 +1376,94 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       delete process.env.GH_TOKEN;
       delete process.env.GITHUB_TOKEN;
     }
+  });
+});
+
+/**
+ * The strict parent yield shape exercised through the SDK'S OWN validator: the
+ * fake parent emits its payloads straight to the runtime's listener, so the
+ * `buildOutputValidator` the yield tool binds from `session.outputSchema` is
+ * what decides acceptance here (the engine gate still runs inside runReview).
+ */
+function parentYieldValidator(): OutputValidator {
+  const { validator, error } = buildOutputValidator(createdOptions[0]?.outputSchema);
+  if (validator === undefined) {
+    throw new Error(`parent output schema produced no validator: ${error ?? "unconstrained"}`);
+  }
+  return validator;
+}
+
+/** One mstar.review/v1 `incomplete` fact: the declared cause plus the scope the run never reached. */
+const INCOMPLETE_FACT = { reason: "seat budget exhausted", unscanned: ["lib/c.ts"] };
+
+describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.2)", () => {
+  test("an incomplete deep yield passes the strict schema and the engine gate", async () => {
+    const payload = {
+      ...(deepEnvelope() as Record<string, unknown>),
+      verdict: "incomplete",
+      incomplete: INCOMPLETE_FACT,
+    };
+    parentYields = [payload];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    // The envelope-level fact the 4.0.2 prompt asks for: the strict shape
+    // accepts it, so the turn can yield it at all…
+    expect(parentYieldValidator().validate(payload).success).toBe(true);
+    // …and the engine re-validation carries it onto the returned envelope.
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.incomplete).toEqual(INCOMPLETE_FACT);
+  });
+
+  test("a tally carrying band and the incomplete echo passes the strict schema", async () => {
+    const payload = {
+      ...(deepEnvelope() as Record<string, unknown>),
+      verdict: "incomplete",
+      incomplete: INCOMPLETE_FACT,
+      tally: {
+        verdict: "incomplete",
+        scorePct: 82,
+        band: "good",
+        tally: { mustFix: 0, shouldFix: 1, nit: 0, unverified: 0 },
+        chatHeader: "should-fix: 1 | 82%",
+        incomplete: INCOMPLETE_FACT,
+      },
+    };
+    parentYields = [payload];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    // `band` (engine-emitted since 4.0.0) and the tally's echo are declared
+    // members — additionalProperties:false no longer refuses a valid tally.
+    expect(parentYieldValidator().validate(payload).success).toBe(true);
+    expect(envelope.tally?.band).toBe("good");
+    expect(envelope.tally?.incomplete).toEqual(INCOMPLETE_FACT);
+  });
+
+  test("a three-token envelope is unchanged and the schema stays closed", async () => {
+    const payload = deepEnvelope();
+    parentYields = [payload];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+    const validator = parentYieldValidator();
+
+    expect(validator.validate(payload).success).toBe(true);
+    expect(envelope.verdict).toBe("needs fixes");
+    expect(envelope.incomplete).toBeUndefined();
+    // Still strict: an undeclared member and an off-vocabulary band are refused.
+    expect(validator.validate({ ...(payload as Record<string, unknown>), stray: true }).success).toBe(false);
+    expect(
+      validator.validate({
+        ...(payload as Record<string, unknown>),
+        tally: {
+          verdict: "needs fixes",
+          scorePct: 82,
+          band: "great",
+          tally: { mustFix: 0, shouldFix: 1, nit: 0, unverified: 0 },
+          chatHeader: "h",
+        },
+      }).success,
+    ).toBe(false);
   });
 });
 

@@ -78,6 +78,23 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
   return out;
 }
 
+/** The model-controlled `incomplete` fact (declared cause + unscanned scope). */
+type IncompleteFact = NonNullable<ReviewOutput["incomplete"]>;
+
+/**
+ * Redact one `incomplete` fact (qc2 F-001): `reason` and every `unscanned`
+ * entry are model-controlled and reach the public review comment and the D1
+ * envelope, so both redaction passes rewrite them. Structure is preserved —
+ * entries keep their order and count, and an empty list stays empty.
+ */
+const redactIncompleteFact = (
+  fact: IncompleteFact,
+  redact: (text: string) => string,
+): IncompleteFact => ({
+  reason: redact(fact.reason),
+  unscanned: fact.unscanned.map(redact),
+});
+
 /**
  * Redact EVERY model-controlled string of a ReviewOutput (qc2 F-001): not
  * only summary_md and the finding bodies, but also each finding's title,
@@ -90,9 +107,20 @@ export function redactReviewOutput(output: ReviewOutput): ReviewOutput {
   return {
     ...output,
     summary_md: redactSecrets(output.summary_md),
+    ...(output.incomplete === undefined
+      ? {}
+      : { incomplete: redactIncompleteFact(output.incomplete, redactSecrets) }),
     ...(output.tally === undefined
       ? {}
-      : { tally: { ...output.tally, chatHeader: redactSecrets(output.tally.chatHeader) } }),
+      : {
+          tally: {
+            ...output.tally,
+            chatHeader: redactSecrets(output.tally.chatHeader),
+            ...(output.tally.incomplete === undefined
+              ? {}
+              : { incomplete: redactIncompleteFact(output.tally.incomplete, redactSecrets) }),
+          },
+        }),
     findings: output.findings.map((finding) => ({
       ...finding,
       title: redactSecrets(finding.title),
@@ -120,9 +148,24 @@ export function redactReviewOutputExact(output: ReviewOutput, values: readonly s
   return {
     ...output,
     summary_md: redactExactSecrets(output.summary_md, values),
+    ...(output.incomplete === undefined
+      ? {}
+      : { incomplete: redactIncompleteFact(output.incomplete, (text) => redactExactSecrets(text, values)) }),
     ...(output.tally === undefined
       ? {}
-      : { tally: { ...output.tally, chatHeader: redactExactSecrets(output.tally.chatHeader, values) } }),
+      : {
+          tally: {
+            ...output.tally,
+            chatHeader: redactExactSecrets(output.tally.chatHeader, values),
+            ...(output.tally.incomplete === undefined
+              ? {}
+              : {
+                  incomplete: redactIncompleteFact(output.tally.incomplete, (text) =>
+                    redactExactSecrets(text, values),
+                  ),
+                }),
+          },
+        }),
     findings: output.findings.map((finding) => ({
       ...finding,
       title: redactExactSecrets(finding.title, values),

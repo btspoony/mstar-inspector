@@ -8,7 +8,10 @@
  * authority again.
  *
  * Vocab is imported from the engine — never re-declared:
- *   - verdict:              PR_VERDICTS   = "ship it" | "needs fixes" | "blocked"
+ *   - verdict:              PR_VERDICTS   = "ship it" | "needs fixes" | "blocked" | "incomplete"
+ *   - incomplete fact:      reason + unscanned (single-line, non-blank; an empty
+ *     unscanned list is legal) — required exactly by the `incomplete` verdict,
+ *     rejected for every other verdict, and echoed by a provided tally
  *   - findings[].mergeClass: MERGE_CLASSES = "must-fix" | "should-fix" | "nit"
  * The M1 inspector vocab (verdict comment|request_changes|approve, severity
  * critical|warning|suggestion|info) is rejected on the write path: an M1
@@ -33,6 +36,7 @@ import {
   type MergeClass,
   type MstarReviewFinding,
   type MstarReviewV1,
+  type PrIncomplete,
 } from "@mstar-harness/engine";
 import { z } from "zod";
 
@@ -40,6 +44,23 @@ export type ReviewFinding = MstarReviewFinding;
 export type ReviewOutput = MstarReviewV1;
 
 const verdictSchema = z.enum(PR_VERDICTS);
+
+/** Engine `isSingleLineFact` mirror: non-blank and free of CR/LF. */
+const isSingleLineFact = (value: string): boolean => value.trim() !== "" && !/[\r\n]/.test(value);
+
+/**
+ * Mirror of the engine `PrIncomplete` shape — the fact that makes the
+ * `incomplete` verdict meaningful: `reason` is the declared cause, `unscanned`
+ * the scope the run never reached (empty = nothing left unscanned). The
+ * `PrIncomplete` annotation keeps this runtime schema bound to the engine
+ * contract instead of inferring a private shape.
+ */
+const incompleteSchema: z.ZodType<PrIncomplete> = z.object({
+  reason: z.string().refine(isSingleLineFact, "reason must be a single-line non-blank string"),
+  unscanned: z.array(
+    z.string().refine(isSingleLineFact, "each unscanned entry must be a single-line non-blank string"),
+  ),
+});
 
 const findingSchema = z.object({
   mergeClass: z.enum(MERGE_CLASSES),
@@ -63,6 +84,8 @@ const tallySchema = z.object({
     unverified: z.number().int().min(0),
   }),
   chatHeader: z.string(),
+  /** Echo of the envelope's incomplete fact (engine `PrTallyResult.incomplete`). */
+  incomplete: incompleteSchema.optional(),
 });
 
 const targetSchema = z.object({
@@ -80,12 +103,63 @@ const outputSchema: z.ZodType<ReviewOutput> = z
     tally: tallySchema.optional(),
     findings: z.array(findingSchema),
     target: targetSchema.optional(),
+    incomplete: incompleteSchema.optional(),
   })
   .superRefine((output, ctx) => {
     // Consistency rule (engine-locked): a provided tally must agree with the
     // top-level verdict (validateMstarReviewV1 review.verdict-tally-mismatch).
     if (output.tally !== undefined && output.tally.verdict !== output.verdict) {
       ctx.addIssue({ code: "custom", message: "tally.verdict must equal the top-level verdict" });
+    }
+    const top = output.incomplete;
+    const echo = output.tally?.incomplete;
+    // Tally-level presence rule (engine-locked, checkProvidedTallyShape): a
+    // provided tally's echo is required exactly by the `incomplete` tally
+    // verdict (review.missing-incomplete / review.incomplete-unexpected).
+    if (output.tally !== undefined) {
+      if (output.tally.verdict === "incomplete") {
+        if (echo === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            message: 'tally.verdict "incomplete" requires the matching tally.incomplete fact (reason + unscanned)',
+          });
+        }
+      } else if (echo !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          message: `tally.incomplete is carried only by the "incomplete" tally verdict - tally.verdict is "${output.tally.verdict}"`,
+        });
+      }
+    }
+    // Envelope-level presence rule (engine-locked): the incomplete fact is
+    // required exactly by the `incomplete` verdict and rejected for every other
+    // verdict (review.missing-incomplete / review.incomplete-unexpected).
+    if (output.verdict === "incomplete") {
+      if (top === undefined) {
+        ctx.addIssue({
+          code: "custom",
+          message: 'verdict "incomplete" requires an incomplete fact (reason + unscanned)',
+        });
+      }
+    } else if (top !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: `incomplete is carried only by the "incomplete" verdict - verdict is "${output.verdict}"`,
+      });
+    }
+    // The tally echoes the envelope fact when both carry it; the two must agree
+    // (review.incomplete-tally-mismatch).
+    if (
+      top !== undefined &&
+      echo !== undefined &&
+      (top.reason !== echo.reason ||
+        top.unscanned.length !== echo.unscanned.length ||
+        top.unscanned.some((entry, index) => entry !== echo.unscanned[index]))
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "tally.incomplete must match the top-level incomplete fact",
+      });
     }
   });
 
@@ -215,7 +289,8 @@ function extractBraces(text: string): string | null {
  * goes through the engine `validateMstarReviewV1` gate BEFORE zod strips
  * unknown keys, so a residual M1 `severity` key (top-level or per-finding)
  * is rejected with `review.inspector-vocab` instead of being silently
- * dropped; zod then narrows types (int line numbers, tally consistency).
+ * dropped; zod then narrows types (int line numbers, tally consistency,
+ * incomplete presence/agreement).
  * Any failure returns `{ ok: false, error }` and never throws. An
  * M1-shaped document (no `schema` literal, M1 verdict/severity vocab) fails
  * here — it is never posted or persisted.

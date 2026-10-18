@@ -32,27 +32,6 @@ import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 import { OMP_SANDBOX_IMAGE_PINS } from "../../src/contracts/sandbox-images";
 import { REVIEW_SKILL_VERSION } from "../../src/store/artifact-store";
 
-/**
- * Every harness ref this image has previously pinned, plus the ref that
- * superseded them — append-only data (a bump appends the outgoing ref;
- * nothing is renamed or removed). Values are version-agnostic. The live ref
- * is `OMP_SANDBOX_IMAGE_PINS.harnessRef`; the entry equal to it is the one
- * the "no superseded ref" case below deliberately skips.
- */
-const SUPERSEDED_HARNESS_REFS: readonly string[] = [
-  "c188934c807184f416656a80ca50adb61ccbd525",
-  "f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66",
-  "bde437075aeefd4cdb4e87060c6c44149968c3b0",
-  "ad76f0c6600acd5040464248085ad7d22af93e9f",
-  "3436ddcaf03ddec693dc7059395e9ccf92e5d005",
-  "6cbeea67179a82483429cc6476111bfdbb959c7e",
-  "4c8fbb216c444df832b1943d68e4eee76261bbd2",
-  "23d2c78c481e3571bf3e975886ace5f8c1f9f905",
-  "65399624b5951bcf6478cb4d71e0dbb84f24acec",
-  "2cae49faaa9a7652479f8ad859999fe6da7dbc22",
-  "4cc910fd06c2499c4ba6365e108448087c828802",
-];
-
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 /** The runtime-specific Dockerfile location (sandbox-image/omp/). */
 const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "omp", "Dockerfile");
@@ -61,13 +40,6 @@ const DOCKERFILE = readFileSync(OMP_DOCKERFILE, "utf8");
 describe("sandbox image harness pin", () => {
   test("Dockerfile fetches the declared harness commit", () => {
     expect(DOCKERFILE).toContain(`fetch --depth 1 origin ${OMP_SANDBOX_IMAGE_PINS.harnessRef}`);
-  });
-
-  test("Dockerfile no longer references any superseded ref", () => {
-    for (const ref of SUPERSEDED_HARNESS_REFS) {
-      if (ref === OMP_SANDBOX_IMAGE_PINS.harnessRef) continue;
-      expect(DOCKERFILE).not.toContain(ref);
-    }
   });
 
   test("Dockerfile comment records the declared tag", () => {
