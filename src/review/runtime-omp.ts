@@ -659,11 +659,17 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
 type SeatGap = { plan: SeatPlan; stoppedBy: string };
 
 /**
- * One settled seat: the payload it collected (`null` = nothing usable) and the
- * coverage gap the review body must declare (`null` = the seat covered its
- * whole scope).
+ * One settled seat: the payload it collected (`null` = nothing usable), the
+ * coverage gap a CAP stop declares (`null` = the cap did not fire), and the
+ * failure a result the seat did not deliver cleanly carries (`null` = it
+ * delivered). {@link seatOutput} decides which of the three a result is;
+ * `runReview` decides whether the failure stays fatal.
  */
-type SeatOutcome = { output: SeatOutput | null; gap: SeatGap | null };
+type SeatOutcome = {
+  output: SeatOutput | null;
+  gap: SeatGap | null;
+  failure: Error | null;
+};
 
 /**
  * The published review's `summary_md` budget in characters. The consumer
@@ -732,6 +738,23 @@ function gapNote(gap: SeatGap, maxChars: number): string {
 }
 
 /**
+ * One `incomplete.unscanned` entry: the stopped seat's address and the assigned
+ * scope whose coverage fell short, bounded by the same per-seat budget as the
+ * coverage note so a long scope list cannot crowd the findings out of the
+ * published body. The reader-visible DETAIL — which cap fired, and that
+ * coverage rather than the scope itself is what fell short — stays in the note
+ * ({@link gapNote}); the entry is the terse seat/scope list the fact is read
+ * for, and the two never restate each other.
+ */
+function unscannedEntry(plan: SeatPlan): string {
+  const head = `${plan.domain}-${plan.seat}:`;
+  const budget = SEAT_GAP_MAX_CHARS - head.length - 1;
+  const list = plan.scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(plan.scope, budget) : "";
+  const line = list.length === 0 ? head : `${head} ${list}`;
+  return line.length <= SEAT_GAP_MAX_CHARS ? line : `${line.slice(0, SEAT_GAP_MAX_CHARS - 1)}…`;
+}
+
+/**
  * The engine summary fitted into `budget` characters, its cut MARKED. The
  * publisher's head-keeping truncation semantics, applied here and earlier so
  * the coverage notes keep the space reserved for them.
@@ -788,41 +811,53 @@ const RUNTIME_LIMIT_ABORT_RE = /Subagent runtime limit exceeded \(task\.maxRunti
 /**
  * Extract and guard the strict-validated seat payload.
  *
- * A seat the hard cap stopped is NOT a failure: whatever it collected is kept
- * (possibly nothing) and the assigned scope whose coverage is now incomplete is
- * declared for the reader-visible body, so the review still synthesizes —
- * non-fatal is the contract. That leniency covers ONE shortfall only: a cap that
- * left the seat with no payload at all. An SDK error, and a payload the strict
- * schema did not accept (`invalid`, or `valid` without data), stay fatal whether
- * or not the cap also fired — a stop explains a MISSING payload, never a bad
- * one. So does every abort the runtime limit did not cause
- * ({@link RUNTIME_LIMIT_ABORT_RE} is the only cap evidence).
+ * The CAP decides the classification, and it is checked FIRST: a seat the
+ * wall-clock cap stopped is a STOPPED seat, never a failure — the cap explains
+ * the shortfall, and the run declares its scope as uncovered coverage, whatever
+ * else the settled result carries. What the cap does NOT excuse is composing a
+ * payload the seat did not deliver cleanly: an SDK error, or a payload the
+ * strict schema rejected, is dropped rather than merged, because a stop
+ * explains a MISSING payload, never a bad one.
+ *
+ * WITHOUT the cap ({@link RUNTIME_LIMIT_ABORT_RE} is the only cap evidence), a
+ * result that carries no admissible payload is returned as a FAILURE. It stays
+ * fatal while the wave still has usable output to lose, and becomes the wave's
+ * own uncovered scope when nothing usable arrived at all — the fan-out decides
+ * which, because only the whole wave knows whether a review is still publishable.
  */
 function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatPlan): SeatOutcome {
   const single = result.result;
   const structured = single.structuredOutput;
   const collected =
     structured?.status === "valid" && structured.data !== undefined ? (structured.data as SeatOutput) : null;
-  // What a cap cannot excuse: an SDK error, or a payload the seat did send and
-  // the strict schema rejected. Both keep the fatal handling below.
-  const fatalWithoutCap =
+  // A payload the seat did not deliver cleanly: its own error, or a payload the
+  // strict schema refused. Never admitted, whatever stopped the seat.
+  const rejectedPayload =
     single.error !== undefined ||
     (structured !== undefined && (structured.status !== "valid" || structured.data === undefined));
   const stoppedByCap = single.abortReason?.match(RUNTIME_LIMIT_ABORT_RE)?.[0];
-  if (stoppedByCap !== undefined && !fatalWithoutCap) {
-    return { output: collected, gap: { plan, stoppedBy: stoppedByCap } };
+  if (stoppedByCap !== undefined) {
+    return { output: rejectedPayload ? null : collected, gap: { plan, stoppedBy: stoppedByCap }, failure: null };
   }
   if (single.error) {
-    throw new Error(`review seat ${index} (${single.agent}) failed: ${single.error}`);
+    return {
+      output: null,
+      gap: null,
+      failure: new Error(`review seat ${index} (${single.agent}) failed: ${single.error}`),
+    };
   }
   if (collected === null) {
     const detail = structured?.error ?? single.stderr.slice(-200);
-    throw new Error(
-      `review seat ${index} (${single.agent}) produced no valid structured output` +
-        `(status ${structured?.status ?? "absent"})${detail ? `: ${detail}` : ""}`,
-    );
+    return {
+      output: null,
+      gap: null,
+      failure: new Error(
+        `review seat ${index} (${single.agent}) produced no valid structured output` +
+          `(status ${structured?.status ?? "absent"})${detail ? `: ${detail}` : ""}`,
+      ),
+    };
   }
-  return { output: collected, gap: null };
+  return { output: collected, gap: null, failure: null };
 }
 
 /** Spec fingerprint: explicit hint, else the `file:line:title` composite. */
@@ -1450,14 +1485,29 @@ export const ompAgentRuntime: AgentRuntime = {
         })),
       });
       let outcomes: SeatOutcome[];
+      // Seats whose promise rejected outright: no outcome object at all, and
+      // still a lost seat — the results array is index-aligned with the dispatch
+      // list, so every rejection maps back to the seat it was dispatched for.
+      let rejectedSeats = 0;
       try {
         const results = await group; // never rejects: the barrier absorbs every seat
-        // A failed seat (SDK error, or a payload rejected by seatOutput) stays
-        // fatal — it is rethrown here, after its siblings have settled, so it
-        // can no longer abandon them.
-        const failure = results.find((result) => result.status === "rejected");
-        if (failure?.status === "rejected") throw failure.reason;
         outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+        rejectedSeats = results.filter((result) => result.status === "rejected").length;
+        // The wave's verdict on a lost seat. A settled seat that failed without
+        // a cap carries its own error; a seat promise that rejected outright
+        // produced no outcome at all (the SDK threw, or a bug of ours). Both are
+        // fatal while the wave still has a usable payload to lose: a wave with a
+        // review to publish must not lose a seat to a coverage note. With NO
+        // usable output the wave has nothing to publish a review FROM, so it is
+        // STOPPED — the fact synthesized below declares it, and only an engine
+        // validation failure may throw. Decided here, beside the fan-out, so a
+        // lost seat still aborts the recheck child.
+        const rejected = results.find((result) => result.status === "rejected");
+        const lostSeat = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
+        if (outcomes.some((outcome) => outcome.output !== null)) {
+          if (rejected?.status === "rejected") throw rejected.reason;
+          if (lostSeat !== null) throw lostSeat;
+        }
       } catch (error) {
         recheckController.abort();
         if (recheckWork) await recheckWork;
@@ -1471,25 +1521,55 @@ export const ompAgentRuntime: AgentRuntime = {
       const recheck = recheckWork ? await recheckWork : null;
 
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
-      // Nothing to synthesize from: every dispatched seat stopped before producing
-      // a usable payload, and a zero-finding envelope would report a clean verdict
-      // over a wave that reviewed nothing. The run is incomplete, and saying so is
-      // the only honest outcome.
-      if (outputs.length === 0) {
-        throw new Error(
-          `review incomplete: every dispatched seat (${seats.map((seat) => seat.id).join(", ")})` +
-            ` was stopped by its wall-clock cap and produced no usable output`,
-        );
-      }
-      const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
-      const envelope = synthesizeReview({ findings, unverifiedCount, target: parseTarget(input.reconFacts) });
-      // A capped seat's gap is declared on the body the user reads (the GitHub
-      // Review is rendered from `summary_md`) — never only in a log, and never
-      // past that body's character budget: its disclosure is reserved before the
-      // engine summary is fitted around it. The envelope schema and the engine's
-      // tally semantics stay untouched: an uncollected seat changes neither
-      // verdict nor counts.
+      // The seats this wave did not settle: every dispatched seat that stopped
+      // short (the wall-clock cap fired, or it delivered nothing usable without
+      // one) plus every seat whose promise REJECTED outright — a rejection is a
+      // lost seat too, it just carries no outcome object. ONE stopped seat is
+      // enough to stop the run: a wave that lost a seat is not settled under the
+      // 4.0.2 contract, even when a sibling seat returned usable output, because
+      // an uncollected scope can hide any finding.
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
+      const stoppedSeats =
+        outcomes.filter((outcome) => outcome.gap !== null || outcome.output === null).length + rejectedSeats;
+      // The cause the fact can state: the cap, when a cap caused every stop; the
+      // empty result, when a seat was lost without one (which reaches synthesis
+      // only alongside an unusable wave — see the failure rule above, where it
+      // is exactly then that every dispatched seat was lost).
+      const everyStopWasCap = gaps.length === stoppedSeats;
+      const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
+      // The stopped seats are declared as the engine's `incomplete` fact,
+      // synthesized — never post-edited onto the envelope. A wave that stopped
+      // everywhere still synthesizes with `findings: []`: throwing would lose
+      // the review entirely, and a zero-finding envelope reporting a clean
+      // verdict over a wave that reviewed nothing is the dishonest outcome.
+      const envelope = synthesizeReview({
+        findings,
+        unverifiedCount,
+        target: parseTarget(input.reconFacts),
+        ...(stoppedSeats === 0
+          ? {}
+          : {
+              incomplete: {
+                reason: everyStopWasCap
+                  ? `wall-clock cap stopped ${stoppedSeats} of ${seats.length} dispatched seats` +
+                    ` before their assigned scope was covered`
+                  : `no dispatched seat produced a usable payload`,
+                // Every dispatched seat is lost in the unusable-wave branch, so
+                // the dispatch list IS the unscanned set there — rejected seats
+                // included, and no seat silently dropped from the disclosure.
+                unscanned: (everyStopWasCap ? gaps.map((gap) => gap.plan) : seats.map((seat) => seat.plan)).map(
+                  unscannedEntry,
+                ),
+              },
+            }),
+      });
+      // A capped seat's gap is also declared on the body the user reads (the
+      // GitHub Review is rendered from `summary_md`) — never only in a log, and
+      // never past that body's character budget: its disclosure is reserved
+      // before the engine summary is fitted around it. The envelope schema and
+      // the engine's tally semantics stay untouched: an uncollected seat keeps
+      // the count-derived grade of the findings that DID land, and a wave with
+      // no stopped seat is synthesized and fitted exactly as before.
       const block = coverageBlock(envelope.summary_md, gaps);
       envelope.summary_md = `${block.summary}${block.notes}`;
       const gate = validateMstarReviewV1(envelope);
