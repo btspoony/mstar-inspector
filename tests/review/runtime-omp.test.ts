@@ -74,6 +74,8 @@ let seatResults: Array<{
   stderr?: string;
   aborted?: boolean;
   abortReason?: string;
+  /** When set, the seat's PROMISE rejects with this message — no settled result at all. */
+  reject?: string;
 }> = [];
 /** Definition content snapshotted from the PR-clone cwd at session creation. */
 let installedSeatAgent: string | null = null;
@@ -282,6 +284,9 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
       await new Promise<void>((resolve) => seatReleases.push(resolve));
     }
     const plan = seatResults.shift() ?? {};
+    // A seat whose promise REJECTS rather than settles: the SDK threw, or our
+    // own code did. It produces no seat outcome at all.
+    if (plan.reject !== undefined) throw new Error(plan.reject);
     const status = plan.status ?? "valid";
     return {
       result: {
@@ -911,6 +916,24 @@ describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete enve
     expect(envelope.findings).toEqual([]);
     expect(envelope.incomplete?.reason).toBe("no dispatched seat produced a usable payload");
     expect(envelope.incomplete?.unscanned).toEqual([expect.stringContaining("full-diff-combined")]);
+  });
+
+  test("every seat promise rejected: the wave is incomplete and lists every dispatched seat", async () => {
+    // Neither seat settled at all. The wave has nothing to publish, so it must
+    // still declare the incompleteness — and its disclosure must not shrink to
+    // "nothing left unscanned" just because no outcome object exists to read.
+    seatResults = [{ reject: "provider boom" }, { reject: "provider boom" }];
+
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.findings).toEqual([]);
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    expect(envelope.incomplete?.reason).toBe("no dispatched seat produced a usable payload");
+    expect(envelope.incomplete?.unscanned).toEqual([
+      expect.stringContaining("changeset-1-src"),
+      expect.stringContaining("changeset-2-lib"),
+    ]);
   });
 
   test("a cap that fired over an SDK error is a stopped seat, not a failure", async () => {

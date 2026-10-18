@@ -1485,9 +1485,14 @@ export const ompAgentRuntime: AgentRuntime = {
         })),
       });
       let outcomes: SeatOutcome[];
+      // Seats whose promise rejected outright: no outcome object at all, and
+      // still a lost seat — the results array is index-aligned with the dispatch
+      // list, so every rejection maps back to the seat it was dispatched for.
+      let rejectedSeats = 0;
       try {
         const results = await group; // never rejects: the barrier absorbs every seat
         outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+        rejectedSeats = results.filter((result) => result.status === "rejected").length;
         // The wave's verdict on a lost seat. A settled seat that failed without
         // a cap carries its own error; a seat promise that rejected outright
         // produced no outcome at all (the SDK threw, or a bug of ours). Both are
@@ -1516,19 +1521,21 @@ export const ompAgentRuntime: AgentRuntime = {
       const recheck = recheckWork ? await recheckWork : null;
 
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
-      // The seats this wave did not settle: every seat that stopped short,
-      // whether the wall-clock cap fired (a gap) or it delivered nothing usable
-      // without one (a failure, which survives this far only in an empty wave).
-      // ONE stopped seat is enough to stop the run: a wave that lost a seat is
-      // not settled under the 4.0.2 contract, even when a sibling seat returned
-      // usable output, because an uncollected scope can hide any finding.
+      // The seats this wave did not settle: every dispatched seat that stopped
+      // short (the wall-clock cap fired, or it delivered nothing usable without
+      // one) plus every seat whose promise REJECTED outright — a rejection is a
+      // lost seat too, it just carries no outcome object. ONE stopped seat is
+      // enough to stop the run: a wave that lost a seat is not settled under the
+      // 4.0.2 contract, even when a sibling seat returned usable output, because
+      // an uncollected scope can hide any finding.
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
-      const stopped = outcomes.filter((outcome) => outcome.gap !== null || outcome.output === null);
+      const stoppedSeats =
+        outcomes.filter((outcome) => outcome.gap !== null || outcome.output === null).length + rejectedSeats;
       // The cause the fact can state: the cap, when a cap caused every stop; the
-      // empty result, when a seat stopped without one (which reaches synthesis
-      // only alongside an empty wave — see the failure rule above, where it is
-      // exactly then that every dispatched seat stopped).
-      const everyStopWasCap = gaps.length === stopped.length;
+      // empty result, when a seat was lost without one (which reaches synthesis
+      // only alongside an unusable wave — see the failure rule above, where it
+      // is exactly then that every dispatched seat was lost).
+      const everyStopWasCap = gaps.length === stoppedSeats;
       const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
       // The stopped seats are declared as the engine's `incomplete` fact,
       // synthesized — never post-edited onto the envelope. A wave that stopped
@@ -1539,14 +1546,17 @@ export const ompAgentRuntime: AgentRuntime = {
         findings,
         unverifiedCount,
         target: parseTarget(input.reconFacts),
-        ...(stopped.length === 0
+        ...(stoppedSeats === 0
           ? {}
           : {
               incomplete: {
                 reason: everyStopWasCap
-                  ? `wall-clock cap stopped ${stopped.length} of ${outcomes.length} dispatched seats` +
+                  ? `wall-clock cap stopped ${stoppedSeats} of ${seats.length} dispatched seats` +
                     ` before their assigned scope was covered`
                   : `no dispatched seat produced a usable payload`,
+                // Every dispatched seat is lost in the unusable-wave branch, so
+                // the dispatch list IS the unscanned set there — rejected seats
+                // included, and no seat silently dropped from the disclosure.
                 unscanned: (everyStopWasCap ? gaps.map((gap) => gap.plan) : seats.map((seat) => seat.plan)).map(
                   unscannedEntry,
                 ),
