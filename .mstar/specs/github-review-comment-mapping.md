@@ -1,6 +1,6 @@
 # GitHub 审查评论映射（github-review-comment-mapping）
 
-> **状态：** 已锁定仓库级产品契约（v0.3 Phase 1，2026-08-28；2026-09-12 经 review-lifecycle 专项 Review & Edit 显式评审修订：§3 收尾小节、§4 降级时序与发表后副作用、§5 Check Run 授权；2026-09-13（M8）落地对齐：线程 resolve 已实现 → §4；2026-09-14（M7）落地对齐：Check 收口已实现 → §4/§5）。变更需显式评审。  
+> **状态：** 已锁定仓库级产品契约（v0.3 Phase 1，2026-08-28；2026-09-12 经 review-lifecycle 专项 Review & Edit 显式评审修订：§3 收尾小节、§4 降级时序与发表后副作用、§5 Check Run 授权；2026-09-13（M8）落地对齐：线程 resolve 已实现 → §4；2026-09-14（M7）落地对齐：Check 收口已实现 → §4/§5；2026-10-18 经 review 驱动显式评审修订：§1 词表、§2 event 表与 §3 正文规则纳入第四结论 `incomplete`）。变更需显式评审。  
 > **跨迭代：** 是 — 云端审查发表到 GitHub 的词表与 event 纪律，后续迭代继续消费。  
 > **SSOT：** 本文件（GitHub 发表面）；审查 JSON 权威形状 = harness `mstar.review/v1`（engine `validateMstarReviewV1` / `synthesizeReview`）。  
 > **历史写入契约：** `.mstar/specs/findings-schema.md`（M1 `ReviewOutput`）— **只读旧行**；v0.3 起 **禁止**作为 persist/发表权威。
@@ -9,7 +9,7 @@
 
 | 面 | 合法值 | 非法（inspector M1，persist 必须拒） |
 |----|--------|--------------------------------------|
-| verdict | `ship it` \| `needs fixes` \| `blocked` | `comment` \| `request_changes` \| `approve` |
+| verdict | `ship it` \| `needs fixes` \| `blocked` \| `incomplete` | `comment` \| `request_changes` \| `approve` |
 | finding class | `must-fix` \| `should-fix` \| `nit` | `critical` \| `warning` \| `suggestion` \| `info` |
 
 `score_pct` 只作展示，**不得**覆盖 verdict。公式与 tally 键以 engine `computePrTally` 为准，inspector 不另发明。
@@ -25,6 +25,7 @@
 | `ship it` | `COMMENT` | **不**发 `APPROVE`（advisory；分数再高也不 APPROVE） |
 | `needs fixes` | `COMMENT` | |
 | `blocked` | `COMMENT` | **不**发 `REQUEST_CHANGES`（grill-me + harness 同一纪律） |
+| `incomplete` | `COMMENT` | 中性「运行已停止」标记：**不是**通过、**不可**作为合并许可；仍**不**发 `APPROVE` / `REQUEST_CHANGES` |
 
 Issues Comments API（无 `event` 字段）同样满足本表：不得改走会发出 `APPROVE` / `REQUEST_CHANGES` 的路径。
 
@@ -38,7 +39,8 @@ v0.3 发表面允许二者之一（architect 锁实现，产品只锁结果）�
 ## 3. 评论体（用户可见）
 
 - 正文结构对齐 `/amazing-pr-review` Stage 3 报告：verdict 行、tally（must-fix / should-fix / nit / unverified）、findings 按 merge class 列出。
-- Verdict **原文**写入正文（`ship it` / `needs fixes` / `blocked`），不得再写成 M1 `approve` / `comment`。
+- Verdict **原文**写入正文（`ship it` / `needs fixes` / `blocked` / `incomplete`），不得再写成 M1 `approve` / `comment`。
+- `incomplete` 的必需事实紧随 verdict（及存在时的 tally）**只渲染一次**，`cause:` = `reason`、`unscanned:` = 未覆盖范围（空列表渲染为 `none`）；该渲染**有界**（展示预算），持久化 envelope 保留校验后的原值。该事实**仅**在 `incomplete` verdict 下渲染，其他 verdict 的正文与既有版本逐字节一致。
 - Findings 的 class 原文写入（`must-fix` 等），不得改写成 M1 severity。
 - 整体评论仍是每轮发表 SSOT；line-level comments 已由 v0.7 交付——锚定契约见 knowledge `github-pr-review-line-comments.md`（本文件不重复其细节）。
 - 总评可含**「上一轮收尾」小节**（自 review-lifecycle 契约起；产品契约 → `review-lifecycle.md` RL-8）：逐 finding 带类型化状态与证据；repeat 不计入新 tally；finding 处置（addressed）与线程实际 resolve 分开陈述；verdict/score 权威仍在 engine。
