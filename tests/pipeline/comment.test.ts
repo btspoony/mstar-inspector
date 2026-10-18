@@ -80,6 +80,24 @@ function finding(mergeClass: ReviewFinding["mergeClass"], title: string): Review
   };
 }
 
+/**
+ * True when `text` carries an unpaired surrogate code unit — the shape a
+ * character-budget slice emits when it cuts between a pair's two halves.
+ */
+function hasLoneSurrogate(text: string): boolean {
+  for (let index = 0; index < text.length; index++) {
+    const unit = text.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
 describe("truncateSummary", () => {
   test("keeps summaries at or under the 8000-char budget verbatim", () => {
     expect(truncateSummary("short")).toBe("short");
@@ -403,6 +421,38 @@ describe("buildReviewBody", () => {
     expect(unscannedLine).toHaveLength(INCOMPLETE_FACT_LINE_LIMIT);
     expect(unscannedLine.endsWith("…")).toBe(true);
     expect(unscannedLine).not.toContain("more)");
+  });
+
+  test("a surrogate pair straddling the cause-line cut is never split", () => {
+    // The cap lands exactly between the emoji's two code units: the cut backs
+    // off, so the line keeps whole characters only — never a lone surrogate.
+    const reason = `${"r".repeat(491)}😀${"s".repeat(20)}`;
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason, unscanned: [] },
+    });
+    const causeLine = body.split("\n").find((line) => line.startsWith("cause: "))!;
+    expect(hasLoneSurrogate(causeLine)).toBe(false);
+    expect(causeLine.length).toBeLessThanOrEqual(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(causeLine).toBe(`cause: ${"r".repeat(491)}…`);
+  });
+
+  test("a surrogate pair straddling the truncated first-entry cut keeps the marker", () => {
+    // The pathological branch's head cut falls between the emoji's units; the
+    // pair backs off by one unit while the omitted-sibling marker stays exact.
+    const first = `${"x".repeat(475)}😀${"y".repeat(20)}`;
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: [first, "src/a.ts", "src/b.ts"] },
+    });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(hasLoneSurrogate(unscannedLine)).toBe(false);
+    expect(unscannedLine.length).toBeLessThanOrEqual(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(unscannedLine).toBe(`unscanned: ${"x".repeat(475)}, … (+2 more)`);
   });
 
   test("the fact renders exactly once when the summary already carries the pair (engine default shape)", () => {

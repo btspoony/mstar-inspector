@@ -199,9 +199,21 @@ function renderTally(
   );
 }
 
+/**
+ * Slice that never splits a surrogate pair: when the last unit kept by the cut
+ * is a high surrogate (its low half would be dropped), the cut backs off by one
+ * so the rendered text never carries a lone surrogate.
+ */
+function sliceWithoutSplittingPair(text: string, end: number): string {
+  const lastKept = text.charCodeAt(end - 1);
+  return text.slice(0, lastKept >= 0xd800 && lastKept <= 0xdbff ? end - 1 : end);
+}
+
 /** Bound one rendered incomplete-fact line (label included); ellipsis on overflow. */
 function clampFactLine(line: string): string {
-  return line.length <= INCOMPLETE_FACT_LINE_LIMIT ? line : `${line.slice(0, INCOMPLETE_FACT_LINE_LIMIT - 1)}…`;
+  return line.length <= INCOMPLETE_FACT_LINE_LIMIT
+    ? line
+    : `${sliceWithoutSplittingPair(line, INCOMPLETE_FACT_LINE_LIMIT - 1)}…`;
 }
 
 /**
@@ -247,7 +259,7 @@ function renderUnscannedLine(entries: readonly string[]): string {
   // represented, so the count covers only the fully omitted siblings) and
   // budget the marker so the line never exceeds the cap.
   const tail = `… (+${omitted - 1} more)`;
-  const head = entries[0]!.slice(0, INCOMPLETE_FACT_LINE_LIMIT - prefix.length - tail.length - 2);
+  const head = sliceWithoutSplittingPair(entries[0]!, INCOMPLETE_FACT_LINE_LIMIT - prefix.length - tail.length - 2);
   return `${prefix}${head}, ${tail}`;
 }
 

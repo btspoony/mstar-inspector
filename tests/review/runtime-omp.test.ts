@@ -116,6 +116,8 @@ let parentResumeYields: unknown[] = [];
 let parentResumeEnd: unknown[] | null = null;
 /** Session disposals seen when the resumed continuation fired (0 = the parking pause did not tear the session down). */
 let disposeCallsAtResume: number | null = null;
+/** Test barrier: called as soon as the fake emits the NON-terminal (parked) `agent_end`. */
+let parentParkedEndObserved: (() => void) | null = null;
 /** Session event listeners registered by the runtime (one per deep run). */
 const yieldListeners: Array<(event: unknown) => void> = [];
 
@@ -267,6 +269,9 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
               messages: parentParkedEnd,
               isTerminal: false,
             });
+            // The parked end is delivered; the continuation below rides a later
+            // tick, so a test can gate on the pause having arrived.
+            parentParkedEndObserved?.();
             const resumedYields = parentResumeYields;
             const resumedEnd = parentResumeEnd;
             // Deferred past the prompt's OWN settlement — no duration, just the
@@ -525,6 +530,7 @@ afterEach(() => {
   parentResumeYields = [];
   parentResumeEnd = null;
   disposeCallsAtResume = null;
+  parentParkedEndObserved = null;
   yieldListeners.length = 0;
   nudgeCalls.length = 0;
   registryRefs.clear();
@@ -1736,6 +1742,8 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     parentResumeYields = [deepEnvelope()];
     parentResumeEnd = [stoppedTurn("Post-yield prose.")];
 
+    const parkedDelivered = deferred();
+    parentParkedEndObserved = parkedDelivered.resolve;
     const run = ompAgentRuntime.runReview(DEEP_INPUT);
     let settled = false;
     void run.then(
@@ -1746,9 +1754,10 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
         settled = true;
       },
     );
-    // The parked turn is still in flight: the review cannot settle before the
-    // continuation has been delivered, and that arrives on a later tick only.
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    // The parked end has ARRIVED and the continuation the SDK queued is still
+    // pending — it rides a later tick (setImmediate in the fake), so the review
+    // cannot settle on the pause.
+    await parkedDelivered.promise;
     expect(settled).toBe(false);
 
     const { envelope } = await run;
