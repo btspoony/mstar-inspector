@@ -429,6 +429,16 @@ describe("buildReviewBody", () => {
     expect(body.match(/^unscanned:/gm)?.length).toBe(1);
   });
 
+  test("settled verdicts keep a summary with line-anchored fact text verbatim (no strip, no pair)", () => {
+    const summaryMd = "## Review\n\ncause: heuristic only, no incident\nunscanned: docs/ only\n\nFindings below.";
+    for (const verdict of ["ship it", "needs fixes", "blocked"] as const) {
+      const body = buildReviewBody({ ...output, verdict, summary_md: summaryMd });
+      expect(body).toContain(summaryMd);
+      expect(body.match(/^cause:/gm)?.length).toBe(1);
+      expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+    }
+  });
+
   test("the fact renders exactly once when the summary does not carry it (model-written summary)", () => {
     const summaryMd = "## Deep review\n\nThe parent session wrote its own summary.";
     const body = buildReviewBody({

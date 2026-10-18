@@ -221,8 +221,9 @@ function stripMachineFactLines(md: string): string {
  * Assemble the overall review body: verdict header (verbatim) + tally line
  * (when present) + incomplete fact lines (`cause:` / `unscanned:`,
  * incomplete verdict with a present fact only, each line bounded per
- * INCOMPLETE_FACT_LINE_LIMIT; the renderer owns the pair, so machine fact
- * lines are stripped from the rendered summary) + truncated summary +
+ * INCOMPLETE_FACT_LINE_LIMIT; the renderer owns the pair — under the same
+ * condition machine fact lines are stripped from the rendered summary, and
+ * every other verdict keeps its summary byte-identical) + truncated summary +
  * findings-by-class section + optional
  * omitted-findings footer + optional closure section (§7.10),
  * finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API
@@ -243,21 +244,25 @@ export function buildReviewBody(
 ): string {
   const verdict = `**Verdict: ${output.verdict}**`;
   const tally = renderTally(output.tally, output.findings, previousFingerprints);
-  const summary = stripMachineFactLines(truncateSummary(output.summary_md));
+  // Incomplete verdicts state the declared cause + unscanned scope as part of
+  // the verdict block. The renderer owns the pair: on the same condition that
+  // renders it, machine fact lines are stripped from the rendered summary
+  // (never the stored summary_md); every other verdict passes its summary
+  // through byte-identical. The pair is always rendered once from the
+  // envelope, each line bounded; the final body clamp stays last.
+  const incomplete = output.verdict === "incomplete" ? output.incomplete : undefined;
+  const rendersFact = incomplete !== undefined;
+  const summary = rendersFact
+    ? stripMachineFactLines(truncateSummary(output.summary_md))
+    : truncateSummary(output.summary_md);
   const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;
-  // Incomplete verdicts state the declared cause + unscanned scope as part of
-  // the verdict block. The renderer owns the pair: any machine fact lines in
-  // the summary were stripped above (never the stored summary_md), and the
-  // pair is always rendered once from the envelope, each line bounded. Every
-  // other verdict keeps the body byte-identical; the final body clamp stays
-  // last.
   const fact =
-    output.verdict === "incomplete" && output.incomplete !== undefined
+    rendersFact
       ? [
-          clampFactLine(`cause: ${output.incomplete.reason}`),
+          clampFactLine(`cause: ${incomplete.reason}`),
           clampFactLine(
-            `unscanned: ${output.incomplete.unscanned.length > 0 ? output.incomplete.unscanned.join(", ") : "none"}`,
+            `unscanned: ${incomplete.unscanned.length > 0 ? incomplete.unscanned.join(", ") : "none"}`,
           ),
         ].join("\n")
       : "";
