@@ -34,7 +34,7 @@ M1 stored inspector-local `ReviewOutput` (`comment`/`request_changes`/`approve`)
 - **Engine-first, then narrow.** `parseReviewOutput` runs `validateMstarReviewV1` before zod. Presence and shape rules belong to the engine; the mirror exists to preserve types, not to re-derive scoring or vocabulary. Import the enum and the fact type (`PR_VERDICTS`, `PrIncomplete`) instead of re-declaring them.
 - **Every model-controlled string that can reach the public body or D1 passes both redaction passes.** `redactReviewOutput` (shape) and `redactReviewOutputExact` (resolved values) are the single choke point in the consumer; a new envelope field that renders publicly must be added there, with conditional spreads so an absent field stays absent.
 - **Persistence needs no migration for a new optional field.** `reviews.verdict` is unconstrained `TEXT` and `reviews.envelope` stores the validated payload as whole JSON; `artifact-store.put` writes the caller's object unchanged.
-- **Sandbox pins move together.** `OMP_SANDBOX_IMAGE_PINS` (harness version/ref and CLI pin), the Dockerfile fetch/install literals, and the append-only superseded-ref list are one declaration; the pin tests derive from it.
+- **Sandbox pins move together.** `OMP_SANDBOX_IMAGE_PINS` (harness version/ref and CLI pin) and the Dockerfile fetch/install literals are one declaration; the pin tests derive from it.
 
 ## Why This Matters
 
