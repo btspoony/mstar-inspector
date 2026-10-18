@@ -12,8 +12,9 @@
  *     comments are a SEPARATE chain (pulls.createReview COMMENT, see
  *     "Line comments" below);
  *   - verdict rendered VERBATIM as text in the body header (`**Verdict:
- *     ship it**` / `needs fixes` / `blocked` — never M1 vocab, never a
- *     GitHub review event).
+ *     ship it**` / `needs fixes` / `blocked` / `incomplete` — never M1
+ *     vocab, never a GitHub review event); an `incomplete` verdict also
+ *     states `cause:` + `unscanned:` right after the header/tally block.
  *
  * Posting: single-comment UPSERT via the Issues comments API
  * (@octokit/rest + createAppAuth — same deps and pattern as the deleted
@@ -190,7 +191,9 @@ function renderTally(
 
 /**
  * Assemble the overall review body: verdict header (verbatim) + tally line
- * (when present) + truncated summary + findings-by-class section + optional
+ * (when present) + incomplete fact lines (`cause:` / `unscanned:`,
+ * incomplete verdict with a present fact only) + truncated summary +
+ * findings-by-class section + optional
  * omitted-findings footer + optional closure section (§7.10),
  * finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API
  * never sees an over-limit body). `omittedFindings` is the count of findings
@@ -213,7 +216,14 @@ export function buildReviewBody(
   const summary = truncateSummary(output.summary_md);
   const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;
-  const body = findings ? `${head}\n\n${summary}\n\n${findings}` : `${head}\n\n${summary}`;
+  // Incomplete verdicts state the declared cause + unscanned scope as part of
+  // the verdict block; every other verdict keeps the body byte-identical.
+  const fact =
+    output.verdict === "incomplete" && output.incomplete !== undefined
+      ? `cause: ${output.incomplete.reason}\nunscanned: ${output.incomplete.unscanned.length > 0 ? output.incomplete.unscanned.join(", ") : "none"}`
+      : "";
+  const withFact = fact === "" ? head : `${head}\n\n${fact}`;
+  const body = findings ? `${withFact}\n\n${summary}\n\n${findings}` : `${withFact}\n\n${summary}`;
   const withOmitted = omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
   const withClosure = closure ? `${withOmitted}\n\n${closure}` : withOmitted;
   return withClosure.length <= REVIEW_BODY_LIMIT ? withClosure : `${withClosure.slice(0, REVIEW_BODY_LIMIT - 1)}…`;

@@ -13,6 +13,8 @@
  *     / nit verbatim; mapping spec §3), category rendered verbatim
  *   - summary_md truncated at 8000 chars
  *   - tally line rendered when the envelope carries a PrTallyResult
+ *   - incomplete verdicts state `cause:` + `unscanned:` (none when the
+ *     scope is empty) right after the header/tally block, before the summary
  *   - omitted-findings footer when the merge-class cap dropped findings (B4)
  *   - the assembled body carries NO line-comment fields (overall review only)
  *   - T5 upsert: marker parse, create-on-miss, patch-on-hit with round
@@ -252,6 +254,58 @@ describe("buildReviewBody", () => {
     });
     expect(body).toContain("**Tally:** 🔴 must-fix 0 · 🟠 should-fix 2 · 🔵 nit 1 · ❓ unverified 1");
     expect(body).not.toContain("*(repeat)*");
+  });
+
+  test("incomplete verdict renders cause + unscanned scope after the header, before the summary", () => {
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: ["tests/pipeline/comment.test.ts", "src/pipeline/comment.ts"] },
+    });
+    expect(body).toBe(
+      "**Verdict: incomplete**\n\ncause: runner timed out\nunscanned: tests/pipeline/comment.test.ts, src/pipeline/comment.ts\n\nTwo issues found in the diff.",
+    );
+  });
+
+  test("incomplete verdict with an empty unscanned scope renders `unscanned: none`", () => {
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "model returned no findings", unscanned: [] },
+    });
+    expect(body).toContain("cause: model returned no findings\nunscanned: none");
+  });
+
+  test("incomplete fact lines sit after the tally block when a tally is present", () => {
+    const incomplete = { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] };
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete,
+      tally: {
+        verdict: "incomplete",
+        scorePct: 0,
+        tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 0 },
+        chatHeader: "unused here",
+        incomplete,
+      },
+    });
+    expect(body).toContain(
+      "**Verdict: incomplete**\n\n**Tally:** 🔴 must-fix 0 · 🟠 should-fix 0 · 🔵 nit 0 · ❓ unverified 0\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts\n\nTwo issues found in the diff.",
+    );
+  });
+
+  test("other verdicts never gain the fact lines, even when a fact is present", () => {
+    const incomplete = { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] };
+    for (const verdict of ["ship it", "needs fixes", "blocked"] as const) {
+      const body = buildReviewBody({ ...output, verdict, incomplete });
+      expect(body).not.toContain("cause:");
+      expect(body).not.toContain("unscanned:");
+      expect(body).toBe(buildReviewBody({ ...output, verdict }));
+    }
   });
 });
 
