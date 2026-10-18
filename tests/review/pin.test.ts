@@ -51,6 +51,7 @@ const SUPERSEDED_HARNESS_REFS: readonly string[] = [
   "65399624b5951bcf6478cb4d71e0dbb84f24acec",
   "2cae49faaa9a7652479f8ad859999fe6da7dbc22",
   "4cc910fd06c2499c4ba6365e108448087c828802",
+  "dd02316e4ae69ffdf96d99fd8133c38ccb2bf8e2",
 ];
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
