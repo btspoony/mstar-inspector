@@ -238,9 +238,15 @@ function renderUnscannedLine(entries: readonly string[]): string {
   }
   const omitted = entries.length - shown;
   if (shown > 0) return line + marker(omitted);
-  // Pathological first entry longer than the budget: truncate it so the
-  // marker still fits — the line never exceeds the cap.
-  const tail = `… (+${omitted} more)`;
+  if (omitted === 1) {
+    // Single entry longer than the budget: nothing is fully omitted —
+    // truncate it like the cause line, with no omitted-count marker.
+    return clampFactLine(prefix + entries[0]!);
+  }
+  // Pathological first entry longer than the budget: truncate it (it stays
+  // represented, so the count covers only the fully omitted siblings) and
+  // budget the marker so the line never exceeds the cap.
+  const tail = `… (+${omitted - 1} more)`;
   const head = entries[0]!.slice(0, INCOMPLETE_FACT_LINE_LIMIT - prefix.length - tail.length - 2);
   return `${prefix}${head}, ${tail}`;
 }

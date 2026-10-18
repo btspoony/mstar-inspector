@@ -377,6 +377,33 @@ describe("buildReviewBody", () => {
     expect(unscannedLine).not.toContain("more)");
   });
 
+  test("a truncated first entry counts only the fully omitted siblings in the marker", () => {
+    const entries = ["x".repeat(490), "src/a.ts", "src/b.ts"];
+    const incomplete = { reason: "runner timed out", unscanned: entries };
+    const body = buildReviewBody({ ...output, verdict: "incomplete", findings: [], incomplete });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(unscannedLine.length).toBeLessThanOrEqual(INCOMPLETE_FACT_LINE_LIMIT);
+    // The first entry stays represented at the head (truncated); the marker
+    // counts only the two siblings not represented at all.
+    expect(unscannedLine.startsWith(`unscanned: ${"x".repeat(40)}`)).toBe(true);
+    expect(unscannedLine.endsWith(", … (+2 more)")).toBe(true);
+    expect(incomplete.unscanned).toBe(entries);
+  });
+
+  test("a single over-long unscanned entry truncates like the cause line, with no marker", () => {
+    const entry = "x".repeat(INCOMPLETE_FACT_LINE_LIMIT + 50);
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: [entry] },
+    });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(unscannedLine).toHaveLength(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(unscannedLine.endsWith("…")).toBe(true);
+    expect(unscannedLine).not.toContain("more)");
+  });
+
   test("the fact renders exactly once when the summary already carries the pair (engine default shape)", () => {
     const summaryMd = [
       "## Verdict: incomplete · 0% (F, partial)",
