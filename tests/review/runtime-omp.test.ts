@@ -26,9 +26,11 @@
  *     installed into <worktree>/.omp/agents/ as OMP-native read-only seat
  *     definitions (bodies from the fixture, `tools: [read, grep, glob]`
  *     frontmatter) for the run and removed after, the LAST successful yield
- *     is re-validated against the engine vocab, a turn that ENDS without one
- *     (its `agent_end` gathers the transcript) is synthesized into an
- *     `incomplete` envelope with the gathered summary and the deep scope, and
+ *     is re-validated against the engine vocab, a turn whose TERMINAL end
+ *     arrives without one (its `agent_end` gathers the transcript) is
+ *     synthesized into an `incomplete` envelope with the gathered summary and
+ *     the deep scope, a NON-terminal end parks the turn and its resumed
+ *     continuation's yield or terminal end is awaited first, and
  *     partitionSeats/runStructuredSubagent are never called — quick/default
  *     keep the Bun fan-out untouched;
  *   - a non-delivered level is rejected at the port;
@@ -105,6 +107,14 @@ let parentRejectedYields: unknown[] = [];
 let parentPromptThrow: string | null = null;
 /** When set, the fake parent turn ends with this `agent_end` payload (the SDK's gathered transcript). */
 let parentAgentEnd: unknown[] | null = null;
+/** When set, the fake turn parks on this NON-terminal `agent_end` and resumes on a later tick. */
+let parentParkedEnd: unknown[] | null = null;
+/** Yields the resumed continuation emits, in order, once the parked prompt has settled. */
+let parentResumeYields: unknown[] = [];
+/** The terminal end the resumed continuation emits; `null` = nothing more arrives (it never terminates). */
+let parentResumeEnd: unknown[] | null = null;
+/** Session disposals seen when the resumed continuation fired (0 = the parking pause did not tear the session down). */
+let disposeCallsAtResume: number | null = null;
 /** Session event listeners registered by the runtime (one per deep run). */
 const yieldListeners: Array<(event: unknown) => void> = [];
 
@@ -246,6 +256,42 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
               result: { content: [], details: { data: undefined, status: "aborted", error } },
             });
           });
+          // The SDK's scheduling pause: the session is parked on a delivery it
+          // already queued (a steer, a follow-up, a background wake), so it
+          // emits a NON-terminal end now and runs the continuation after this
+          // prompt unwinds — a later tick, never inline.
+          if (parentParkedEnd !== null) {
+            listener?.({
+              type: "agent_end",
+              messages: parentParkedEnd,
+              isTerminal: false,
+            });
+            const resumedYields = parentResumeYields;
+            const resumedEnd = parentResumeEnd;
+            // Deferred past the prompt's OWN settlement — no duration, just the
+            // event-loop boundary after the runtime has processed the parked
+            // end — because the SDK's drain runs the continuation only once the
+            // owning prompt has unwound.
+            setImmediate(() => {
+              disposeCallsAtResume = disposeCalls;
+              resumedYields.forEach((data, index) => {
+                listener?.({
+                  type: "tool_execution_end",
+                  toolCallId: `resume-yield-${index}`,
+                  toolName: "yield",
+                  isError: false,
+                  result: { content: [], details: { data, status: "success", type: undefined } },
+                });
+              });
+              if (resumedEnd !== null) {
+                listener?.({
+                  type: "agent_end",
+                  messages: resumedEnd,
+                  isTerminal: true,
+                });
+              }
+            });
+          }
           // The run's own end, as the SDK emits it: the gathered transcript
           // rides the deferred `agent_end` frame, delivered after every tool
           // execution and before the prompt settles (the session flushes it
@@ -461,6 +507,10 @@ afterEach(() => {
   parentRejectedYields = [];
   parentPromptThrow = null;
   parentAgentEnd = null;
+  parentParkedEnd = null;
+  parentResumeYields = [];
+  parentResumeEnd = null;
+  disposeCallsAtResume = null;
   yieldListeners.length = 0;
   nudgeCalls.length = 0;
   registryRefs.clear();
@@ -1593,6 +1643,73 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(envelope.findings[0]!.title).toBe("Missing null check");
     expect(envelope.summary_md).toBe("## Review\n\nOne should-fix finding.");
     expect(envelope.incomplete).toBeUndefined();
+  });
+
+  // A NON-terminal end is a scheduling pause, not a stop: the SDK has already
+  // queued the delivery that resumes the session, so the continuation's yield
+  // or its own terminal end is awaited (bounded) before anything is decided.
+  test("a parked end waits for the resumed terminal end and reports THAT stop", async () => {
+    parentParkedEnd = [stoppedTurn("Interrupted mid-review.", "Deadline exceeded")];
+    parentResumeEnd = [stoppedTurn("Resumed and wrapped up.", "Cancelled after the pause")];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    // The TERMINAL end's account — the parked end never becomes the stop.
+    expect(envelope.incomplete?.reason).toBe("Cancelled after the pause");
+    expect(envelope.summary_md).toContain("Resumed and wrapped up.");
+    expect(envelope.summary_md).not.toContain("Interrupted mid-review.");
+    // The pause did not tear the session down before the continuation ran, and
+    // the teardown still happened exactly once afterwards.
+    expect(disposeCallsAtResume).toBe(0);
+    expect(disposeCalls).toBe(1);
+  });
+
+  test("a parked end that a resumed yield resolves returns the yielded envelope", async () => {
+    parentParkedEnd = [stoppedTurn("Parked prose.", "Deadline exceeded")];
+    parentResumeYields = [deepEnvelope()];
+    parentResumeEnd = [stoppedTurn("Post-yield prose.")];
+
+    const run = ompAgentRuntime.runReview(DEEP_INPUT);
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // The parked turn is still in flight: the review cannot settle before the
+    // continuation has been delivered, and that arrives on a later tick only.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+
+    const { envelope } = await run;
+
+    // The continuation's yield wins outright: no stopped envelope is synthesized
+    // over a review the resumed turn completed.
+    expect(envelope.verdict).toBe("needs fixes");
+    expect(envelope.findings).toHaveLength(1);
+    expect(envelope.summary_md).toBe("## Review\n\nOne should-fix finding.");
+    expect(envelope.incomplete).toBeUndefined();
+    expect(disposeCallsAtResume).toBe(0);
+    expect(disposeCalls).toBe(1);
+  });
+
+  test("a parked turn that never comes back expires its bounded wait and stays fatal", async () => {
+    // The continuation never delivers anything. The wait is bounded by the
+    // run's own remaining allowance, so an already-exhausted clock expires it
+    // at once and the pre-existing fatal path decides: a parked end is never
+    // promoted into a fabricated stop.
+    anchorRecheckDeadline(Date.now() - 10_000 * 60_000, "deep");
+    parentParkedEnd = [stoppedTurn("Parked prose.", "Deadline exceeded")];
+
+    await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
+      "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
+    );
+    expect(subagentRequests).toHaveLength(0);
   });
 
   test("installs the deep seat roles as OMP-native defs and removes them after", async () => {

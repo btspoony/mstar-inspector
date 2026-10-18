@@ -35,10 +35,12 @@
  *      as OMP-native read-only seat definitions (seat-agent.md frontmatter
  *      contract, bodies loaded from the plugin root), and one session.prompt()
  *      drives the three stages; a turn that ends in a schema-validated yield
- *      is re-validated with validateMstarReviewV1, and a turn that ENDS
- *      without one (the SDK's agent_end carries the gathered messages) is
- *      synthesized into an `incomplete` envelope instead of failing the whole
- *      review (spec Architect locks L1/L2).
+ *      is re-validated with validateMstarReviewV1, and a turn whose TERMINAL
+ *      end arrives without one (the SDK's agent_end carries the gathered
+ *      messages) is synthesized into an `incomplete` envelope instead of
+ *      failing the whole review — a non-terminal end is a scheduling pause
+ *      whose resumed continuation is awaited first (spec Architect locks
+ *      L1/L2).
  *   6. recheck (spec §7.8): when the input carries a typed
  *      recheck document, runRecheckSeat runs CONCURRENTLY with the review
  *      work — quick/default as one more structured child on the same
@@ -49,8 +51,9 @@
  *
  * Failure contract: ANY seat/parse/validation failure throws — the caller
  * never receives an M1-shaped fake success and nothing is posted or stored.
- * A deep turn that ENDED without a yield is the one stated exception, and it
- * declares itself `incomplete` with its gathered content rather than passing.
+ * A deep turn whose terminal end arrives without a yield is the one stated
+ * exception, and it declares itself `incomplete` with its gathered content
+ * rather than passing.
  *
  * reconFacts conventions this adapter defines for the consumer:
  *   - `<owner>/<repo>#<pr>`     → folded into the envelope `target`;
@@ -1173,12 +1176,15 @@ const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (msta
  * Architect locks L1/L2): one parent LLM turn runs the harness three-stage
  * flow and dispatches its own seats via the built-in `task` tool; the turn
  * must end in a schema-validated `yield` of the mstar.review/v1 envelope,
- * which is re-validated against the engine vocabulary. A turn that ENDED
- * without one (the SDK's `agent_end` carries the gathered messages) is a
- * STOPPED run, not an exception: its gathered text and its declared
- * cause/scope are synthesized into an `incomplete` envelope. A turn that never
- * ended, and a yield the engine vocabulary rejects, still throw — nothing is
- * posted or stored short of an engine-validated envelope.
+ * which is re-validated against the engine vocabulary. A turn whose TERMINAL
+ * end arrives without one (the SDK's `agent_end` carries the gathered
+ * messages) is a STOPPED run, not an exception: its gathered text and its
+ * declared cause/scope are synthesized into an `incomplete` envelope. A
+ * non-terminal end is a scheduling pause, not a stop — the queued delivery
+ * resumes the session, and the continuation is awaited (bounded) for its yield
+ * or its own terminal end. A turn that never ended, and a yield the engine
+ * vocabulary rejects, still throw — nothing is posted or stored short of an
+ * engine-validated envelope.
  *
  * spec §7.8: when `input.recheck` is present, a DEDICATED
  * read-only recheck AgentSession/ToolSession runs `runRecheckSeat`
@@ -1265,13 +1271,29 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       const runParentTurn = async (): Promise<MstarReviewV1> => {
         let yielded: unknown;
         let yieldError: string | undefined;
-        // The ended turn's own account of itself, recorded only when the SDK
-        // ended the agent run. Its presence is what separates a STOPPED deep
-        // run (the turn ended and produced no yield) from a turn that failed
-        // before it ever ended.
+        // The turn's TERMINAL account of itself (`gathered`, see the end-event
+        // branch) plus the two pieces the bounded wait below needs: whether a
+        // NON-terminal end parked the session on a queued delivery that resumes
+        // it, and the promise that settles the wait the moment that
+        // continuation yields or ends for real.
         let gathered: { summary?: string; stopped?: string } | undefined;
+        let resuming = false;
+        let outcomeKnown = () => {};
+        const outcome = new Promise<void>((resolve) => {
+          outcomeKnown = resolve;
+        });
         const unsubscribe = parentSession.subscribe((event) => {
           if (event.type === "agent_end") {
+            // A non-terminal end is a scheduling pause, NOT the turn's stop:
+            // the SDK has already queued the delivery that resumes this session
+            // (a steer, a follow-up or a background wake), so its terminal end
+            // — or a yield — is still to come. Recording it as the stop would
+            // publish a stopped review and dispose a session that was still
+            // going to deliver.
+            if (event.isTerminal === false) {
+              resuming = true;
+              return;
+            }
             // The last assistant entry is what the turn had gathered: its text
             // parts are the content a stopped run has to offer, and
             // `errorMessage` is the stop the SDK recorded when it reported one
@@ -1280,6 +1302,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             const terminal = [...event.messages].reverse().find((entry) => entry.role === "assistant");
             if (terminal?.role !== "assistant") {
               gathered = {};
+              outcomeKnown();
               return;
             }
             let text = "";
@@ -1292,6 +1315,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
               ...(summary === undefined ? {} : { summary }),
               ...(stop === undefined || stop === "" ? {} : { stopped: stop }),
             };
+            outcomeKnown();
             return;
           }
           if (event.type !== "tool_execution_end" || event.toolName !== "yield") return;
@@ -1308,6 +1332,8 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // with a payload count.
           if (record.status === "success" && !Array.isArray(record.type) && record.data !== undefined) {
             yielded = record.data;
+            // A resumed continuation that yields settles the wait below.
+            outcomeKnown();
           }
         });
         let turnError: unknown;
@@ -1316,15 +1342,28 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         } catch (error) {
           turnError = error;
         } finally {
+          // The prompt settling is NOT the turn's end when the SDK reported a
+          // non-terminal end: the queued delivery resumes this session on a
+          // later tick, and this listener is what observes the continuation's
+          // yield or terminal end. Wait for it here, bounded by the run's own
+          // remaining allowance (never the tail held clear for merge/synthesis/
+          // validation) — released the moment the continuation settles, and
+          // expired into the fatal path below rather than into a fabricated
+          // stop. An unbounded wait would hang the review on a session that
+          // never comes back.
+          if (resuming && yielded === undefined && gathered === undefined) {
+            await waitTick(Math.max(1, remainingOuterMs(Date.now(), input.level) - SEAT_CAP_TAIL_MS), outcome);
+          }
           unsubscribe();
         }
         if (yielded === undefined) {
           // A turn that ENDED without a yield is a stopped deep run, not an
           // exception: its gathered content and its declared cause/scope
           // become a synthesized `incomplete` envelope — the fact has ONE
-          // source, never a hand-built or post-edited one. A turn that never
-          // ended stays fatal, so an operational failure is never laundered
-          // into a partial review.
+          // source, never a hand-built or post-edited one. `gathered` is
+          // unset when no TERMINAL end was observed (including a parked end
+          // whose continuation never delivered): that stays fatal, so an
+          // operational failure is never laundered into a partial review.
           if (gathered === undefined) {
             if (turnError !== undefined) {
               throw turnError;
