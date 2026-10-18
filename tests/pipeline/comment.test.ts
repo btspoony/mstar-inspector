@@ -362,6 +362,21 @@ describe("buildReviewBody", () => {
     expect(unscannedLine).toBe(`unscanned: ${entry}`);
   });
 
+  test("an unscanned scope that fits with a trailing short entry renders verbatim, no marker", () => {
+    // Regression: the omission marker must not be reserved up front — the
+    // full join fits the budget, so it renders byte-identically to join(", ").
+    const entries = ["x".repeat(480), "a"];
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: entries },
+    });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(unscannedLine).toBe(`unscanned: ${entries.join(", ")}`);
+    expect(unscannedLine).not.toContain("more)");
+  });
+
   test("the fact renders exactly once when the summary already carries the pair (engine default shape)", () => {
     const summaryMd = [
       "## Verdict: incomplete · 0% (F, partial)",

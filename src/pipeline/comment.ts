@@ -206,18 +206,26 @@ function clampFactLine(line: string): string {
 
 /**
  * Render the `unscanned:` fact line without materializing the full list
- * join: accumulate `, `-joined entries only while the line still fits the
- * budget together with the omission marker, then end it with `… (+N more)`
- * (N = omitted count). A list that fits renders exactly as `join(", ")`
- * (no marker, same text); an empty scope renders `unscanned: none`. The
- * stored envelope is untouched.
+ * join. First measure the full rendered length (prefix + entry lengths +
+ * `, ` separators); when it fits INCOMPLETE_FACT_LINE_LIMIT the line is
+ * `join(", ")` verbatim — no marker. Only an overflowing list accumulates
+ * entries until the budget minus the omission marker, ending the line with
+ * `… (+N more)` (N = omitted count, marker budgeted at accept time so the
+ * line never exceeds the cap). An empty scope renders `unscanned: none`;
+ * the stored envelope is untouched.
  */
 function renderUnscannedLine(entries: readonly string[]): string {
   const prefix = "unscanned: ";
   if (entries.length === 0) return `${prefix}none`;
-  // Marker as it would appear if the line stopped right after this entry;
-  // accepting an entry requires the final line (marker included) to fit.
-  const marker = (omitted: number) => (omitted > 0 ? `, … (+${omitted} more)` : "");
+  const fullLength =
+    prefix.length + entries.reduce((sum, entry) => sum + entry.length, 0) + 2 * (entries.length - 1);
+  if (fullLength <= INCOMPLETE_FACT_LINE_LIMIT) return prefix + entries.join(", ");
+  // Overflow: the list is guaranteed to omit at least one entry (the last
+  // one cannot pass the budgeted-marker check below). Marker as it would
+  // appear if the line stopped right after the entry being considered; the
+  // accepted prefix therefore always fits together with the exact final
+  // marker.
+  const marker = (omitted: number) => `, … (+${omitted} more)`;
   let line = prefix;
   let shown = 0;
   for (const entry of entries) {
@@ -229,7 +237,6 @@ function renderUnscannedLine(entries: readonly string[]): string {
     shown += 1;
   }
   const omitted = entries.length - shown;
-  if (omitted === 0) return line;
   if (shown > 0) return line + marker(omitted);
   // Pathological first entry longer than the budget: truncate it so the
   // marker still fits — the line never exceeds the cap.
