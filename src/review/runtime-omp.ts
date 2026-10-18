@@ -34,9 +34,11 @@
  *      seat roles (DEEP_SEAT_ROLES) are installed into <worktree>/.omp/agents/
  *      as OMP-native read-only seat definitions (seat-agent.md frontmatter
  *      contract, bodies loaded from the plugin root), and one session.prompt()
- *      drives the three stages; the turn must end in a schema-validated
- *      yield, which the adapter re-validates with validateMstarReviewV1
- *      (spec Architect locks L1/L2).
+ *      drives the three stages; a turn that ends in a schema-validated yield
+ *      is re-validated with validateMstarReviewV1, and a turn that ENDS
+ *      without one (the SDK's agent_end carries the gathered messages) is
+ *      synthesized into an `incomplete` envelope instead of failing the whole
+ *      review (spec Architect locks L1/L2).
  *   6. recheck (spec §7.8): when the input carries a typed
  *      recheck document, runRecheckSeat runs CONCURRENTLY with the review
  *      work — quick/default as one more structured child on the same
@@ -47,6 +49,8 @@
  *
  * Failure contract: ANY seat/parse/validation failure throws — the caller
  * never receives an M1-shaped fake success and nothing is posted or stored.
+ * A deep turn that ENDED without a yield is the one stated exception, and it
+ * declares itself `incomplete` with its gathered content rather than passing.
  *
  * reconFacts conventions this adapter defines for the consumer:
  *   - `<owner>/<repo>#<pr>`     → folded into the envelope `target`;
@@ -1150,12 +1154,31 @@ function seatModelChain(input: AgentRuntimeRunInput): string[] {
 }
 
 /**
+ * The scope a stopped deep turn did not fully cover: ONE entry naming the deep
+ * parent, because the parent IS the review's whole-diff unit — the `task` seats
+ * it dispatches are its own children, invisible to the caller, so they are not
+ * separate units to declare.
+ */
+const DEEP_STOP_UNSCANNED = "deep-parent: the whole diff";
+
+/**
+ * What a deep turn that ended (or failed) without yielding states as its cause
+ * when no more specific reason is known — the fatal error and the synthesized
+ * `incomplete` fact use the one wording.
+ */
+const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (mstar.review/v1 envelope)";
+
+/**
  * The deep parent-session path (spec § 父 session 约束 +
  * Architect locks L1/L2): one parent LLM turn runs the harness three-stage
  * flow and dispatches its own seats via the built-in `task` tool; the turn
  * must end in a schema-validated `yield` of the mstar.review/v1 envelope,
- * which is re-validated against the engine vocabulary. No yield, a yielded
- * error, or a validation failure throws — nothing is posted or stored.
+ * which is re-validated against the engine vocabulary. A turn that ENDED
+ * without one (the SDK's `agent_end` carries the gathered messages) is a
+ * STOPPED run, not an exception: its gathered text and its declared
+ * cause/scope are synthesized into an `incomplete` envelope. A turn that never
+ * ended, and a yield the engine vocabulary rejects, still throw — nothing is
+ * posted or stored short of an engine-validated envelope.
  *
  * spec §7.8: when `input.recheck` is present, a DEDICATED
  * read-only recheck AgentSession/ToolSession runs `runRecheckSeat`
@@ -1229,8 +1252,9 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         });
       }
 
-      // Capture the structured yield the turn must end with. Capture rides
-      // `tool_execution_end`, NOT start: the SDK yield tool validates the
+      // Capture the structured yield the turn must end with, and the gathered
+      // `agent_end` payload of a turn that ends without one. Yield capture
+      // rides `tool_execution_end`, NOT start: the SDK yield tool validates the
       // payload inside execute() — after the start event — and retries up to
       // MAX_SCHEMA_RETRIES before overriding, so a start-args capture can
       // keep a payload the SDK went on to reject (qc2 F-002). On end,
@@ -1241,7 +1265,35 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       const runParentTurn = async (): Promise<MstarReviewV1> => {
         let yielded: unknown;
         let yieldError: string | undefined;
+        // The ended turn's own account of itself, recorded only when the SDK
+        // ended the agent run. Its presence is what separates a STOPPED deep
+        // run (the turn ended and produced no yield) from a turn that failed
+        // before it ever ended.
+        let gathered: { summary?: string; stopped?: string } | undefined;
         const unsubscribe = parentSession.subscribe((event) => {
+          if (event.type === "agent_end") {
+            // The last assistant entry is what the turn had gathered: its text
+            // parts are the content a stopped run has to offer, and
+            // `errorMessage` is the stop the SDK recorded when it reported one
+            // (a deadline or a cancelled turn — a boundary exit records
+            // nothing, so absence is not evidence of a clean stop).
+            const terminal = [...event.messages].reverse().find((entry) => entry.role === "assistant");
+            if (terminal?.role !== "assistant") {
+              gathered = {};
+              return;
+            }
+            let text = "";
+            for (const part of terminal.content) {
+              if (part.type === "text") text += part.text;
+            }
+            const summary = text.trim() === "" ? undefined : fittedSummary(text.trim(), SUMMARY_MD_BUDGET);
+            const stop = terminal.errorMessage?.trim();
+            gathered = {
+              ...(summary === undefined ? {} : { summary }),
+              ...(stop === undefined || stop === "" ? {} : { stopped: stop }),
+            };
+            return;
+          }
           if (event.type !== "tool_execution_end" || event.toolName !== "yield") return;
           if (event.isError) return;
           const details = (event.result as { details?: unknown } | undefined)?.details;
@@ -1267,14 +1319,52 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           unsubscribe();
         }
         if (yielded === undefined) {
-          if (turnError !== undefined) {
-            throw turnError;
+          // A turn that ENDED without a yield is a stopped deep run, not an
+          // exception: its gathered content and its declared cause/scope
+          // become a synthesized `incomplete` envelope — the fact has ONE
+          // source, never a hand-built or post-edited one. A turn that never
+          // ended stays fatal, so an operational failure is never laundered
+          // into a partial review.
+          if (gathered === undefined) {
+            if (turnError !== undefined) {
+              throw turnError;
+            }
+            throw new Error(
+              yieldError !== undefined ? `deep parent yielded an error: ${yieldError}` : DEEP_NO_YIELD_CAUSE,
+            );
           }
-          throw new Error(
+          // The cause, most specific first: the yield contract's own error,
+          // the turn's failure, the stop the SDK recorded on the ended turn,
+          // else the bare fact that the turn produced no yield. Whitespace
+          // collapses to one line — the engine's incomplete fact rejects a
+          // `\r`/`\n` and a blank reason, and provider/abort text spans lines.
+          const cause = (
             yieldError !== undefined
               ? `deep parent yielded an error: ${yieldError}`
-              : "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
-          );
+              : turnError !== undefined
+                ? `deep parent turn failed: ${turnError instanceof Error ? turnError.message : String(turnError)}`
+                : (gathered.stopped ?? DEEP_NO_YIELD_CAUSE)
+          )
+            .replace(/\s+/g, " ")
+            .trim();
+          const stoppedEnvelope = synthesizeReview({
+            findings: [],
+            unverifiedCount: 0,
+            target: parseTarget(input.reconFacts),
+            incomplete: { reason: cause, unscanned: [DEEP_STOP_UNSCANNED] },
+            ...(gathered.summary === undefined ? {} : { summary_md: gathered.summary }),
+          });
+          // The engine vocabulary is the SSOT for the synthesized envelope
+          // too: an `agent_end` transcript is no more trusted than a yielded
+          // payload, so only this gate may throw past it.
+          const stopGate = validateMstarReviewV1(stoppedEnvelope);
+          if (!stopGate.ok) {
+            const detail = stopGate.violations
+              .map((violation) => `${violation.code}: ${violation.message}`)
+              .join("; ");
+            throw new Error(`synthesized deep stop failed mstar.review/v1 validation: ${detail}`);
+          }
+          return stoppedEnvelope;
         }
         // A prompt throw AFTER a successful yield must stay observable (qc3
         // S-002): the envelope below is engine-validated, so returning it
