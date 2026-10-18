@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { REDACTED, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "../../src/pipeline/redact";
+import { buildReviewBody } from "../../src/pipeline/comment";
 import type { ReviewOutput } from "../../src/review/schema";
 import { sk, gh, AWS_CANARY_KEY, pemBanner } from "../helpers/fake-secrets";
 
@@ -149,6 +150,53 @@ describe("redactReviewOutput", () => {
     expect(redacted.tally!.tally.mustFix).toBe(1);
     expect(redacted.verdict).toBe("blocked");
   });
+
+  // F-001: the `incomplete` fact is model-controlled text — buildReviewBody
+  // interpolates `reason` and `unscanned` into the public comment and the
+  // consumer stores the same object in D1, so both fields pass this choke
+  // point (envelope fact AND its tally echo).
+  test("redacts the incomplete fact's reason, every unscanned entry and its tally echo", () => {
+    const token = gh("p", "abcdef1234567890");
+    const fact = { reason: `provider key ${token} expired`, unscanned: ["src/auth.ts", `tools/${token}/x.ts`] };
+    const stopped: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "incomplete",
+      summary_md: "Run stopped early.",
+      tally: {
+        verdict: "incomplete",
+        scorePct: 0,
+        tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 1 },
+        chatHeader: "chat",
+        incomplete: fact,
+      },
+      incomplete: { reason: fact.reason, unscanned: [...fact.unscanned] },
+      findings: [],
+    };
+
+    const redacted = redactReviewOutput(stopped);
+    expect(redacted.incomplete!.reason).toBe(`provider key ${REDACTED} expired`);
+    // No entry is trimmed, dropped or reordered: only the secret span goes.
+    expect(redacted.incomplete!.unscanned).toEqual([`src/auth.ts`, `tools/${REDACTED}/x.ts`]);
+    expect(redacted.tally!.incomplete!.reason).toBe(`provider key ${REDACTED} expired`);
+    expect(redacted.tally!.incomplete!.unscanned).toEqual([`src/auth.ts`, `tools/${REDACTED}/x.ts`]);
+    // The rendered public comment carries the redacted strings only.
+    expect(buildReviewBody(redacted)).not.toContain(token);
+  });
+
+  test("keeps an absent fact absent and an empty unscanned list empty", () => {
+    const accepted = redactReviewOutput(output);
+    expect(Object.hasOwn(accepted, "incomplete")).toBe(false);
+    expect(Object.hasOwn(accepted.tally!, "incomplete")).toBe(false);
+
+    const emptyScope = redactReviewOutput({
+      schema: "mstar.review/v1",
+      verdict: "incomplete",
+      summary_md: "Timed out.",
+      incomplete: { reason: "provider request timed out", unscanned: [] },
+      findings: [],
+    });
+    expect(emptyScope.incomplete).toEqual({ reason: "provider request timed out", unscanned: [] });
+  });
 });
 
 describe("redactReviewOutputExact", () => {
@@ -190,5 +238,33 @@ describe("redactReviewOutputExact", () => {
     const redacted = redactReviewOutputExact(clean, []);
     expect(redacted.summary_md).toBe(clean.summary_md);
     expect(redacted.findings[0]!.title).toBe(clean.findings[0]!.title);
+  });
+
+  // F-001: a credential that evades every shape pattern in reason/unscanned
+  // is still removed verbatim, at the envelope fact and its tally echo.
+  test("removes the session's actual secret values from the incomplete fact and its tally echo", () => {
+    const uuid = "3f2a1b4c-9d8e-4f6a-b7c2-1e0d9a8b7c6d";
+    const fact = { reason: `cache key ${uuid} rejected`, unscanned: [`a/${uuid}.ts`, "src/clean.ts"] };
+    const stopped: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "incomplete",
+      summary_md: "Run stopped early.",
+      tally: {
+        verdict: "incomplete",
+        scorePct: 0,
+        tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 1 },
+        chatHeader: "chat",
+        incomplete: fact,
+      },
+      incomplete: { reason: fact.reason, unscanned: [...fact.unscanned] },
+      findings: [],
+    };
+
+    const redacted = redactReviewOutputExact(stopped, [uuid]);
+    expect(redacted.incomplete!.reason).toBe(`cache key ${REDACTED} rejected`);
+    expect(redacted.incomplete!.unscanned).toEqual([`a/${REDACTED}.ts`, "src/clean.ts"]);
+    expect(redacted.tally!.incomplete!.reason).toBe(`cache key ${REDACTED} rejected`);
+    expect(redacted.tally!.incomplete!.unscanned).toEqual([`a/${REDACTED}.ts`, "src/clean.ts"]);
+    expect(buildReviewBody(redacted)).not.toContain(uuid);
   });
 });
