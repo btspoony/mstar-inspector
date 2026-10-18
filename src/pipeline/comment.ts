@@ -15,8 +15,8 @@
  *     ship it**` / `needs fixes` / `blocked` / `incomplete` — never M1
  *     vocab, never a GitHub review event); an `incomplete` verdict also
  *     states `cause:` + `unscanned:` right after the header/tally block —
- *     the renderer's single bounded pair (machine fact lines are stripped
- *     from the rendered summary).
+ *     the renderer's single bounded pair (the summary's own byte-identical
+ *     echo of those two lines is stripped from the rendered summary).
  *
  * Posting: single-comment UPSERT via the Issues comments API
  * (@octokit/rest + createAppAuth — same deps and pattern as the deleted
@@ -199,21 +199,89 @@ function renderTally(
   );
 }
 
+/**
+ * Slice that never splits a surrogate pair: when the last unit kept by the cut
+ * is a high surrogate (its low half would be dropped), the cut backs off by one
+ * so the rendered text never carries a lone surrogate.
+ */
+function sliceWithoutSplittingPair(text: string, end: number): string {
+  const lastKept = text.charCodeAt(end - 1);
+  return text.slice(0, lastKept >= 0xd800 && lastKept <= 0xdbff ? end - 1 : end);
+}
+
 /** Bound one rendered incomplete-fact line (label included); ellipsis on overflow. */
 function clampFactLine(line: string): string {
-  return line.length <= INCOMPLETE_FACT_LINE_LIMIT ? line : `${line.slice(0, INCOMPLETE_FACT_LINE_LIMIT - 1)}…`;
+  return line.length <= INCOMPLETE_FACT_LINE_LIMIT
+    ? line
+    : `${sliceWithoutSplittingPair(line, INCOMPLETE_FACT_LINE_LIMIT - 1)}…`;
 }
 
 /**
- * Strip machine fact lines (`cause:` / `unscanned:` at line start) from the
- * rendered summary: the renderer owns those two lines and renders exactly
- * one bounded pair from the envelope fact. Every other summary line is kept
- * byte-identical; the stored summary_md is never rewritten.
+ * Render the `unscanned:` fact line without materializing the full list
+ * join. First measure the full rendered length (prefix + entry lengths +
+ * `, ` separators); when it fits INCOMPLETE_FACT_LINE_LIMIT the line is
+ * `join(", ")` verbatim — no marker. Only an overflowing list accumulates
+ * entries until the budget minus the omission marker, ending the line with
+ * `… (+N more)` (N = omitted count, marker budgeted at accept time so the
+ * line never exceeds the cap). An empty scope renders `unscanned: none`;
+ * the stored envelope is untouched.
  */
-function stripMachineFactLines(md: string): string {
+function renderUnscannedLine(entries: readonly string[]): string {
+  const prefix = "unscanned: ";
+  if (entries.length === 0) return `${prefix}none`;
+  const fullLength =
+    prefix.length + entries.reduce((sum, entry) => sum + entry.length, 0) + 2 * (entries.length - 1);
+  if (fullLength <= INCOMPLETE_FACT_LINE_LIMIT) return prefix + entries.join(", ");
+  // Overflow: the list is guaranteed to omit at least one entry (the last
+  // one cannot pass the budgeted-marker check below). Marker as it would
+  // appear if the line stopped right after the entry being considered; the
+  // accepted prefix therefore always fits together with the exact final
+  // marker.
+  const marker = (omitted: number) => `, … (+${omitted} more)`;
+  let line = prefix;
+  let shown = 0;
+  for (const entry of entries) {
+    const piece = shown === 0 ? entry : `, ${entry}`;
+    if (line.length + piece.length + marker(entries.length - shown - 1).length > INCOMPLETE_FACT_LINE_LIMIT) {
+      break;
+    }
+    line += piece;
+    shown += 1;
+  }
+  const omitted = entries.length - shown;
+  if (shown > 0) return line + marker(omitted);
+  if (omitted === 1) {
+    // Single entry longer than the budget: nothing is fully omitted —
+    // truncate it like the cause line, with no omitted-count marker.
+    return clampFactLine(prefix + entries[0]!);
+  }
+  // Pathological first entry longer than the budget: truncate it (it stays
+  // represented, so the count covers only the fully omitted siblings) and
+  // budget the marker so the line never exceeds the cap.
+  const tail = `… (+${omitted - 1} more)`;
+  const head = sliceWithoutSplittingPair(entries[0]!, INCOMPLETE_FACT_LINE_LIMIT - prefix.length - tail.length - 2);
+  return `${prefix}${head}, ${tail}`;
+}
+
+/**
+ * Strip the machine fact lines from the rendered summary: the renderer owns
+ * those two lines and renders exactly one bounded pair from the envelope fact,
+ * so the summary's own echo of that pair would duplicate it. The echo is
+ * matched by exact line equality in BOTH forms — as the engine injected the
+ * fact (`cause: <reason>`, `unscanned: <csv | none>`) and as the renderer
+ * clamps an over-long fact for the body. A line that merely opens with the
+ * label (an indented YAML snippet, capitalised prose, a mid-sentence mention)
+ * or carries any other value is the model's own content and stays verbatim.
+ * Every other summary line is kept byte-identical; the stored summary_md is
+ * never rewritten.
+ */
+function stripMachineFactLines(md: string, fact: { reason: string; unscanned: readonly string[] }): string {
+  const cause = `cause: ${fact.reason}`;
+  const unscanned = fact.unscanned.length === 0 ? "unscanned: none" : `unscanned: ${fact.unscanned.join(", ")}`;
+  const machineLines = [cause, clampFactLine(cause), unscanned, renderUnscannedLine(fact.unscanned)];
   return md
     .split("\n")
-    .filter((line) => !/^(?:cause|unscanned):/.test(line))
+    .filter((line) => !machineLines.includes(line))
     .join("\n");
 }
 
@@ -222,8 +290,9 @@ function stripMachineFactLines(md: string): string {
  * (when present) + incomplete fact lines (`cause:` / `unscanned:`,
  * incomplete verdict with a present fact only, each line bounded per
  * INCOMPLETE_FACT_LINE_LIMIT; the renderer owns the pair — under the same
- * condition machine fact lines are stripped from the rendered summary, and
- * every other verdict keeps its summary byte-identical) + truncated summary +
+ * condition the summary's own byte-identical echo of those two lines is
+ * stripped from the rendered summary, and every other verdict keeps its
+ * summary byte-identical) + truncated summary +
  * findings-by-class section + optional
  * omitted-findings footer + optional closure section (§7.10),
  * finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API
@@ -246,14 +315,17 @@ export function buildReviewBody(
   const tally = renderTally(output.tally, output.findings, previousFingerprints);
   // Incomplete verdicts state the declared cause + unscanned scope as part of
   // the verdict block. The renderer owns the pair: on the same condition that
-  // renders it, machine fact lines are stripped from the rendered summary
-  // (never the stored summary_md); every other verdict passes its summary
-  // through byte-identical. The pair is always rendered once from the
-  // envelope, each line bounded; the final body clamp stays last.
+  // renders it, the summary's byte-identical echo of those two lines is
+  // stripped (never the stored summary_md, and never a line that merely opens
+  // with the label); every other verdict passes its summary through
+  // byte-identical. The pair is always rendered once from the
+  // envelope, each line bounded; the final body clamp stays last. The strip
+  // runs BEFORE the summary budget applies: the echo the renderer
+  // reproduces must not consume the budget that keeps the summary's tail.
   const incomplete = output.verdict === "incomplete" ? output.incomplete : undefined;
   const rendersFact = incomplete !== undefined;
   const summary = rendersFact
-    ? stripMachineFactLines(truncateSummary(output.summary_md))
+    ? truncateSummary(stripMachineFactLines(output.summary_md, incomplete))
     : truncateSummary(output.summary_md);
   const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;
@@ -261,9 +333,7 @@ export function buildReviewBody(
     rendersFact
       ? [
           clampFactLine(`cause: ${incomplete.reason}`),
-          clampFactLine(
-            `unscanned: ${incomplete.unscanned.length > 0 ? incomplete.unscanned.join(", ") : "none"}`,
-          ),
+          renderUnscannedLine(incomplete.unscanned),
         ].join("\n")
       : "";
   const withFact = fact === "" ? head : `${head}\n\n${fact}`;

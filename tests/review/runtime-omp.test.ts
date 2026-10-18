@@ -26,7 +26,12 @@
  *     installed into <worktree>/.omp/agents/ as OMP-native read-only seat
  *     definitions (bodies from the fixture, `tools: [read, grep, glob]`
  *     frontmatter) for the run and removed after, the LAST successful yield
- *     is re-validated against the engine vocab, and
+ *     is re-validated against the engine vocab, a turn whose TERMINAL end
+ *     arrives without one (its `agent_end` gathers the transcript) is
+ *     synthesized into an `incomplete` envelope with the gathered summary
+ *     (the last assistant entry that carries text, past tool-only ones) and
+ *     the deep scope, a NON-terminal end parks the turn and its resumed
+ *     continuation's yield or terminal end is awaited first, and
  *     partitionSeats/runStructuredSubagent are never called — quick/default
  *     keep the Bun fan-out untouched;
  *   - a non-delivered level is rejected at the port;
@@ -101,6 +106,18 @@ let parentYieldErrors: string[] = [];
 let parentRejectedYields: unknown[] = [];
 /** When set, the fake prompt throws this message AFTER emitting the queued yields. */
 let parentPromptThrow: string | null = null;
+/** When set, the fake parent turn ends with this `agent_end` payload (the SDK's gathered transcript). */
+let parentAgentEnd: unknown[] | null = null;
+/** When set, the fake turn parks on this NON-terminal `agent_end` and resumes on a later tick. */
+let parentParkedEnd: unknown[] | null = null;
+/** Yields the resumed continuation emits, in order, once the parked prompt has settled. */
+let parentResumeYields: unknown[] = [];
+/** The terminal end the resumed continuation emits; `null` = nothing more arrives (it never terminates). */
+let parentResumeEnd: unknown[] | null = null;
+/** Session disposals seen when the resumed continuation fired (0 = the parking pause did not tear the session down). */
+let disposeCallsAtResume: number | null = null;
+/** Test barrier: called as soon as the fake emits the NON-terminal (parked) `agent_end`. */
+let parentParkedEndObserved: (() => void) | null = null;
 /** Session event listeners registered by the runtime (one per deep run). */
 const yieldListeners: Array<(event: unknown) => void> = [];
 
@@ -242,6 +259,67 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
               result: { content: [], details: { data: undefined, status: "aborted", error } },
             });
           });
+          // The SDK's scheduling pause: the session is parked on a delivery it
+          // already queued (a steer, a follow-up, a background wake), so it
+          // emits a NON-terminal end now and runs the continuation after this
+          // prompt unwinds — a later tick, never inline.
+          if (parentParkedEnd !== null) {
+            listener?.({
+              type: "agent_end",
+              messages: parentParkedEnd,
+              isTerminal: false,
+            });
+            // The parked end is delivered; the continuation below rides a later
+            // tick, so a test can gate on the pause having arrived.
+            parentParkedEndObserved?.();
+            const resumedYields = parentResumeYields;
+            const resumedEnd = parentResumeEnd;
+            // Deferred past the prompt's OWN settlement — no duration, just the
+            // event-loop boundary after the runtime has processed the parked
+            // end — because the SDK's drain runs the continuation only once the
+            // owning prompt has unwound. Each event that continuation emits
+            // (every yield, then its terminal end) reaches the runtime on its
+            // own tick, as the real drain does.
+            const resumedFrames: Array<() => void> = resumedYields.map((data, index) => {
+              return () => {
+                listener?.({
+                  type: "tool_execution_end",
+                  toolCallId: `resume-yield-${index}`,
+                  toolName: "yield",
+                  isError: false,
+                  result: { content: [], details: { data, status: "success", type: undefined } },
+                });
+              };
+            });
+            if (resumedEnd !== null) {
+              resumedFrames.push(() => {
+                listener?.({
+                  type: "agent_end",
+                  messages: resumedEnd,
+                  isTerminal: true,
+                });
+              });
+            }
+            const deliverResumed = (index: number): void => {
+              setImmediate(() => {
+                if (index === 0) disposeCallsAtResume = disposeCalls;
+                resumedFrames[index]?.();
+                if (index + 1 < resumedFrames.length) deliverResumed(index + 1);
+              });
+            };
+            deliverResumed(0);
+          }
+          // The run's own end, as the SDK emits it: the gathered transcript
+          // rides the deferred `agent_end` frame, delivered after every tool
+          // execution and before the prompt settles (the session flushes it
+          // while the owning prompt unwinds).
+          if (parentAgentEnd !== null) {
+            listener?.({
+              type: "agent_end",
+              messages: parentAgentEnd,
+              isTerminal: true,
+            });
+          }
           if (parentPromptThrow !== null) {
             throw new Error(parentPromptThrow);
           }
@@ -381,6 +459,34 @@ function deepEnvelope(): unknown {
   };
 }
 
+/**
+ * One assistant message of a gathered `agent_end` payload — the SDK transcript
+ * shape the stopped-run synthesis reads: its text parts are the content the
+ * turn had gathered, and `errorMessage` is the stop the SDK recorded when it
+ * reported one (a deadline or an aborted call).
+ */
+function stoppedTurn(text: string, errorMessage?: string): unknown {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    stopReason: errorMessage === undefined ? "stop" : "aborted",
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+  };
+}
+
+/**
+ * The assistant entry a turn ends on when its last step was a tool call: no
+ * text part at all, and the stop — when there is one — on this entry.
+ */
+function toolOnlyTurn(errorMessage?: string): unknown {
+  return {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-1", name: "task", arguments: {} }],
+    stopReason: errorMessage === undefined ? "stop" : "aborted",
+    ...(errorMessage === undefined ? {} : { errorMessage }),
+  };
+}
+
 /** reconFacts with numstat lines spanning two top-level dirs. */
 const TWO_CLUSTER_FACTS = [
   "acme/widgets#7",
@@ -430,6 +536,12 @@ afterEach(() => {
   parentYieldErrors = [];
   parentRejectedYields = [];
   parentPromptThrow = null;
+  parentAgentEnd = null;
+  parentParkedEnd = null;
+  parentResumeYields = [];
+  parentResumeEnd = null;
+  disposeCallsAtResume = null;
+  parentParkedEndObserved = null;
   yieldListeners.length = 0;
   nudgeCalls.length = 0;
   registryRefs.clear();
@@ -1107,6 +1219,27 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     expect(notes[0]).toContain("its assigned scope is not fully covered");
     expect(notes[0]).toMatch(/, and \d+ more$/);
     expect(notes[0]!.length).toBeLessThanOrEqual(SEAT_GAP_MAX_CHARS);
+    // The fact's entry comes from the same helper: the same per-seat budget,
+    // the same whole-paths-then-count list.
+    const entry = envelope.incomplete!.unscanned[0]!;
+    expect(entry.startsWith("full-diff-combined: ")).toBe(true);
+    expect(entry).toMatch(/, and \d+ more$/);
+    expect(entry.length).toBeLessThanOrEqual(SEAT_GAP_MAX_CHARS);
+  });
+
+  test("a capped seat's coverage note and fact entry keep their pinned scope lines", async () => {
+    // A scope that fits both budgets, so the two outputs of the shared
+    // head/budget/scope-list sequence are visible verbatim (the cut forms are
+    // pinned by the sibling's assertions above).
+    seatResults = [{ status: "absent", aborted: true, abortReason: CAP_REASON }];
+
+    const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+
+    expect(noteLines(envelope.summary_md)).toEqual([
+      `- notes: seat full-diff-combined was stopped by ${CAP_REASON}; ` +
+        `its assigned scope is not fully covered: lib/c.ts, src/a.ts, src/b.ts`,
+    ]);
+    expect(envelope.incomplete?.unscanned).toEqual(["full-diff-combined: lib/c.ts, src/a.ts, src/b.ts"]);
   });
 
   test("a summary at the body budget still cannot erase the capped seats' notes", async () => {
@@ -1417,6 +1550,9 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
   });
 
   test("a prompt throw WITHOUT a yield rethrows the turn error", async () => {
+    // No `agent_end` either: the turn never ended where the runtime could
+    // observe it, so the operational failure stays fatal (the stopped-run
+    // synthesis is gated on the end event, never on the throw).
     parentPromptThrow = "model provider exploded before any yield";
     await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
       "model provider exploded before any yield",
@@ -1450,6 +1586,237 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
       /deep parent yielded an error: model refused/,
     );
+  });
+
+  // A deep turn that ENDED without a yield is a stopped run, not an exception:
+  // the SDK's `agent_end` carries the gathered messages, and the adapter
+  // synthesizes the engine's `incomplete` fact from them — the engine stays
+  // the oracle, and a turn that never ended keeps throwing.
+  test("a stopped deep turn lands incomplete with its gathered summary and scope", async () => {
+    parentAgentEnd = [stoppedTurn("## Findings so far\n\nlib/c.ts needs a null check.")];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.schema).toBe("mstar.review/v1");
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.findings).toEqual([]);
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    expect(envelope.incomplete).toEqual({
+      reason: "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
+      unscanned: ["deep-parent: the whole diff"],
+    });
+    // The fact is synthesized, never hand-built: the engine's own tally echoes
+    // the fact it derived the verdict from.
+    expect(envelope.tally?.incomplete).toEqual(envelope.incomplete);
+    // The gathered content is published as the summary — never dropped.
+    expect(envelope.summary_md).toContain("lib/c.ts needs a null check");
+    // The reviewed PR still rides the envelope (reconFacts are the one source).
+    expect(envelope.target).toEqual({
+      owner: "acme",
+      repo: "widgets",
+      pr: 7,
+      head_sha: "abc1234567890abcdef1234567890abcdef12",
+    });
+  });
+
+  test("the gathered summary is bounded by the published body budget, its cut marked", async () => {
+    parentAgentEnd = [stoppedTurn("x".repeat(SUMMARY_MD_BUDGET + 1))];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.summary_md.length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
+    expect(envelope.summary_md).toContain("summary truncated");
+  });
+
+  test("a stop the SDK reported is the declared cause, one line, and keeps the engine summary template", async () => {
+    // A deadline that fired at the turn boundary: the stop is recorded on the
+    // message and there is no assistant prose to publish. Provider/abort text
+    // spans lines — the engine's fact rejects that, so it is collapsed.
+    parentAgentEnd = [stoppedTurn("", "Deadline exceeded\nwhile streaming\n(the tier cap)")];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.incomplete?.reason).toBe("Deadline exceeded while streaming (the tier cap)");
+    // No text gathered → the engine's own template, never a blank summary and
+    // never a throw over the missing text.
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    expect(envelope.summary_md).toContain("## Verdict: incomplete");
+    expect(envelope.summary_md).toContain("cause: Deadline exceeded while streaming (the tier cap)");
+  });
+
+  test("a reported yield error is the cause of a stopped turn", async () => {
+    parentAgentEnd = [stoppedTurn("I could not finish the review.")];
+    parentYieldErrors = ["model refused"];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.incomplete?.reason).toBe("deep parent yielded an error: model refused");
+  });
+
+  test("a stopped turn whose prompt also threw states that failure as the cause", async () => {
+    // The turn ended (agent_end) and the awaited prompt failed: the stop is
+    // still deliverable, and the cause is the failure — never a silent success.
+    parentAgentEnd = [stoppedTurn("partial notes")];
+    parentPromptThrow = "provider connection dropped";
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.incomplete?.reason).toBe("deep parent turn failed: provider connection dropped");
+  });
+
+  test("an end whose transcript carries no assistant message is still a stopped turn", async () => {
+    // A deadline can fire at the turn boundary, right after tool results: the
+    // gathered transcript has no assistant prose left, and the run is still
+    // delivered rather than failed.
+    parentAgentEnd = [{ role: "toolResult", toolCallId: "call-1", toolName: "read", content: [] }];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.incomplete?.reason).toBe(
+      "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
+    );
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+  });
+
+  test("a tool-only terminal assistant entry does not erase the text an earlier entry gathered", async () => {
+    // The turn's last step dispatched a seat and stopped there: the terminal
+    // entry is a tool call, and the prose the turn gathered sits one entry
+    // earlier — the stop is still the terminal entry's own account.
+    parentAgentEnd = [
+      stoppedTurn("## Findings so far\n\nlib/c.ts needs a null check."),
+      toolOnlyTurn("Deadline exceeded while the seat ran"),
+    ];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.incomplete?.reason).toBe("Deadline exceeded while the seat ran");
+    // The summary is the last assistant entry that actually said something.
+    expect(envelope.summary_md).toContain("lib/c.ts needs a null check");
+  });
+
+  test("a transcript whose assistant entries all lack text keeps the engine summary template", async () => {
+    parentAgentEnd = [toolOnlyTurn()];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(envelope.incomplete?.reason).toBe(
+      "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
+    );
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    expect(envelope.summary_md).toContain("## Verdict: incomplete");
+  });
+
+  test("a turn that yielded is unchanged by the end event", async () => {
+    parentAgentEnd = [stoppedTurn("wrapping up")];
+    parentYields = [deepEnvelope()];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    // The yielded payload passes through verbatim: the end event never
+    // contributes to an envelope the model actually produced.
+    expect(envelope.verdict).toBe("needs fixes");
+    expect(envelope.findings).toHaveLength(1);
+    expect(envelope.findings[0]!.title).toBe("Missing null check");
+    expect(envelope.summary_md).toBe("## Review\n\nOne should-fix finding.");
+    expect(envelope.incomplete).toBeUndefined();
+  });
+
+  // A NON-terminal end is a scheduling pause, not a stop: the SDK has already
+  // queued the delivery that resumes the session, so the continuation's yield
+  // or its own terminal end is awaited (bounded) before anything is decided.
+  test("a parked end waits for the resumed terminal end and reports THAT stop", async () => {
+    parentParkedEnd = [stoppedTurn("Interrupted mid-review.", "Deadline exceeded")];
+    parentResumeEnd = [stoppedTurn("Resumed and wrapped up.", "Cancelled after the pause")];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("incomplete");
+    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    // The TERMINAL end's account — the parked end never becomes the stop.
+    expect(envelope.incomplete?.reason).toBe("Cancelled after the pause");
+    expect(envelope.summary_md).toContain("Resumed and wrapped up.");
+    expect(envelope.summary_md).not.toContain("Interrupted mid-review.");
+    // The pause did not tear the session down before the continuation ran, and
+    // the teardown still happened exactly once afterwards.
+    expect(disposeCallsAtResume).toBe(0);
+    expect(disposeCalls).toBe(1);
+  });
+
+  test("a parked end that a resumed yield resolves returns the yielded envelope", async () => {
+    parentParkedEnd = [stoppedTurn("Parked prose.", "Deadline exceeded")];
+    parentResumeYields = [deepEnvelope()];
+    parentResumeEnd = [stoppedTurn("Post-yield prose.")];
+
+    const parkedDelivered = deferred();
+    parentParkedEndObserved = parkedDelivered.resolve;
+    const run = ompAgentRuntime.runReview(DEEP_INPUT);
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // The parked end has ARRIVED and the continuation the SDK queued is still
+    // pending — it rides a later tick (setImmediate in the fake), so the review
+    // cannot settle on the pause.
+    await parkedDelivered.promise;
+    expect(settled).toBe(false);
+
+    const { envelope } = await run;
+
+    // The continuation's yield wins outright: no stopped envelope is synthesized
+    // over a review the resumed turn completed.
+    expect(envelope.verdict).toBe("needs fixes");
+    expect(envelope.findings).toHaveLength(1);
+    expect(envelope.summary_md).toBe("## Review\n\nOne should-fix finding.");
+    expect(envelope.incomplete).toBeUndefined();
+    expect(disposeCallsAtResume).toBe(0);
+    expect(disposeCalls).toBe(1);
+  });
+
+  test("a parked continuation's later corrected yield replaces the first", async () => {
+    parentParkedEnd = [stoppedTurn("Parked prose.", "Deadline exceeded")];
+    const corrected = {
+      ...(deepEnvelope() as Record<string, unknown>),
+      summary_md: "## Review\n\nCorrected after the first yield.",
+    };
+    parentResumeYields = [deepEnvelope(), corrected];
+    parentResumeEnd = [stoppedTurn("Post-yield prose.")];
+
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    // The FIRST resumed yield must not settle the wait: the continuation was
+    // still running, so the corrected payload — last successful yield wins —
+    // only becomes visible when the terminal end releases the wait. The
+    // terminal transcript never overwrites a yielded review.
+    expect(envelope.summary_md).toBe("## Review\n\nCorrected after the first yield.");
+    expect(envelope.summary_md).not.toContain("Post-yield prose.");
+    expect(envelope.verdict).toBe("needs fixes");
+    expect(envelope.incomplete).toBeUndefined();
+    expect(disposeCalls).toBe(1);
+  });
+
+  test("a parked turn that never comes back expires its bounded wait and stays fatal", async () => {
+    // The continuation never delivers anything. The wait is bounded by the
+    // run's own remaining allowance, so an already-exhausted clock expires it
+    // at once and the pre-existing fatal path decides: a parked end is never
+    // promoted into a fabricated stop.
+    anchorRecheckDeadline(Date.now() - 10_000 * 60_000, "deep");
+    parentParkedEnd = [stoppedTurn("Parked prose.", "Deadline exceeded")];
+
+    await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
+      "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
+    );
+    expect(subagentRequests).toHaveLength(0);
   });
 
   test("installs the deep seat roles as OMP-native defs and removes them after", async () => {

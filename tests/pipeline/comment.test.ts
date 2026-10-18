@@ -16,9 +16,15 @@
  *   - incomplete verdicts state `cause:` + `unscanned:` (none when the
  *     scope is empty) right after the header/tally block, before the
  *     summary — the renderer's single pair, each line bounded at
- *     INCOMPLETE_FACT_LINE_LIMIT with an ellipsis; machine fact lines are
- *     stripped from the rendered summary (stored summary_md untouched), so
- *     the fact renders exactly once however the summary phrases it
+ *     INCOMPLETE_FACT_LINE_LIMIT (the unscanned scope joins only until the
+ *     budget and ends `… (+N more)` when entries are omitted); the
+ *     summary's own byte-identical echo of those two lines is stripped
+ *     BEFORE the summary budget applies (exact column-0 line equality with
+ *     either form of the pair — the raw fact or the clamped line the
+ *     renderer emits; stored summary_md untouched, and a line that only
+ *     opens with the label — indented, capitalised, mid-sentence — or
+ *     carries another value stays verbatim), so the fact renders exactly
+ *     once however the summary phrases it
  *   - omitted-findings footer when the merge-class cap dropped findings (B4)
  *   - the assembled body carries NO line-comment fields (overall review only)
  *   - T5 upsert: marker parse, create-on-miss, patch-on-hit with round
@@ -75,6 +81,24 @@ function finding(mergeClass: ReviewFinding["mergeClass"], title: string): Review
     title,
     body: `\`${title}\` body.`,
   };
+}
+
+/**
+ * True when `text` carries an unpaired surrogate code unit — the shape a
+ * character-budget slice emits when it cuts between a pair's two halves.
+ */
+function hasLoneSurrogate(text: string): boolean {
+  for (let index = 0; index < text.length; index++) {
+    const unit = text.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
 }
 
 describe("truncateSummary", () => {
@@ -274,13 +298,24 @@ describe("buildReviewBody", () => {
   });
 
   test("incomplete verdict with an empty unscanned scope renders `unscanned: none`", () => {
-    const body = buildReviewBody({
+    const incomplete = { reason: "model returned no findings", unscanned: [] };
+    const body = buildReviewBody({ ...output, verdict: "incomplete", findings: [], incomplete });
+    expect(body).toContain("cause: model returned no findings\nunscanned: none");
+    // `none` is the machine line for an empty scope too: the summary's exact
+    // echo of the pair is stripped, every other summary line survives.
+    const echoed = buildReviewBody({
       ...output,
       verdict: "incomplete",
       findings: [],
-      incomplete: { reason: "model returned no findings", unscanned: [] },
+      summary_md: "## Partial\n\ncause: model returned no findings\nunscanned: none",
+      incomplete,
     });
-    expect(body).toContain("cause: model returned no findings\nunscanned: none");
+    expect(echoed.match(/^unscanned:/gm)?.length).toBe(1);
+    // The blank separator line the stripped pair left behind stays, like every
+    // other summary line.
+    expect(echoed).toBe(
+      "**Verdict: incomplete**\n\ncause: model returned no findings\nunscanned: none\n\n## Partial\n",
+    );
   });
 
   test("incomplete fact lines sit after the tally block when a tally is present", () => {
@@ -325,17 +360,113 @@ describe("buildReviewBody", () => {
     expect(incomplete.reason).toBe(reason);
   });
 
-  test("a large unscanned scope is bounded per line with an ellipsis", () => {
+  test("an overflowing unscanned scope joins only until the budget and ends with an omitted-count marker", () => {
     const unscanned = Array.from({ length: 200 }, (_, i) => `src/module-${i}/deep-file-${i}.ts`);
+    const incomplete = { reason: "runner timed out", unscanned };
     const body = buildReviewBody({
       ...output,
       verdict: "incomplete",
       findings: [],
-      incomplete: { reason: "runner timed out", unscanned },
+      incomplete,
+    });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(unscannedLine.length).toBeLessThanOrEqual(INCOMPLETE_FACT_LINE_LIMIT);
+    // The marker states the omitted count; shown entries keep list order.
+    const match = unscannedLine.match(/, … \(\+(\d+) more\)$/);
+    expect(match).not.toBeNull();
+    const omitted = Number(match![1]);
+    expect(omitted).toBeGreaterThan(0);
+    expect(omitted).toBeLessThan(unscanned.length);
+    expect(unscannedLine).toBe(`unscanned: ${unscanned.slice(0, unscanned.length - omitted).join(", ")}, … (+${omitted} more)`);
+    // The stored envelope keeps the validated value unchanged.
+    expect(incomplete.unscanned).toBe(unscanned);
+  });
+
+  test("an unscanned scope that exactly fills the budget renders fully, with no marker", () => {
+    const entry = "x".repeat(INCOMPLETE_FACT_LINE_LIMIT - "unscanned: ".length);
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: [entry] },
+    });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(unscannedLine).toHaveLength(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(unscannedLine).toBe(`unscanned: ${entry}`);
+  });
+
+  test("an unscanned scope that fits with a trailing short entry renders verbatim, no marker", () => {
+    // Regression: the omission marker must not be reserved up front — the
+    // full join fits the budget, so it renders byte-identically to join(", ").
+    const entries = ["x".repeat(480), "a"];
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: entries },
+    });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(unscannedLine).toBe(`unscanned: ${entries.join(", ")}`);
+    expect(unscannedLine).not.toContain("more)");
+  });
+
+  test("a truncated first entry counts only the fully omitted siblings in the marker", () => {
+    const entries = ["x".repeat(490), "src/a.ts", "src/b.ts"];
+    const incomplete = { reason: "runner timed out", unscanned: entries };
+    const body = buildReviewBody({ ...output, verdict: "incomplete", findings: [], incomplete });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(unscannedLine.length).toBeLessThanOrEqual(INCOMPLETE_FACT_LINE_LIMIT);
+    // The first entry stays represented at the head (truncated); the marker
+    // counts only the two siblings not represented at all.
+    expect(unscannedLine.startsWith(`unscanned: ${"x".repeat(40)}`)).toBe(true);
+    expect(unscannedLine.endsWith(", … (+2 more)")).toBe(true);
+    expect(incomplete.unscanned).toBe(entries);
+  });
+
+  test("a single over-long unscanned entry truncates like the cause line, with no marker", () => {
+    const entry = "x".repeat(INCOMPLETE_FACT_LINE_LIMIT + 50);
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: [entry] },
     });
     const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
     expect(unscannedLine).toHaveLength(INCOMPLETE_FACT_LINE_LIMIT);
     expect(unscannedLine.endsWith("…")).toBe(true);
+    expect(unscannedLine).not.toContain("more)");
+  });
+
+  test("a surrogate pair straddling the cause-line cut is never split", () => {
+    // The cap lands exactly between the emoji's two code units: the cut backs
+    // off, so the line keeps whole characters only — never a lone surrogate.
+    const reason = `${"r".repeat(491)}😀${"s".repeat(20)}`;
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason, unscanned: [] },
+    });
+    const causeLine = body.split("\n").find((line) => line.startsWith("cause: "))!;
+    expect(hasLoneSurrogate(causeLine)).toBe(false);
+    expect(causeLine.length).toBeLessThanOrEqual(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(causeLine).toBe(`cause: ${"r".repeat(491)}…`);
+  });
+
+  test("a surrogate pair straddling the truncated first-entry cut keeps the marker", () => {
+    // The pathological branch's head cut falls between the emoji's units; the
+    // pair backs off by one unit while the omitted-sibling marker stays exact.
+    const first = `${"x".repeat(475)}😀${"y".repeat(20)}`;
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: [first, "src/a.ts", "src/b.ts"] },
+    });
+    const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
+    expect(hasLoneSurrogate(unscannedLine)).toBe(false);
+    expect(unscannedLine.length).toBeLessThanOrEqual(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(unscannedLine).toBe(`unscanned: ${"x".repeat(475)}, … (+2 more)`);
   });
 
   test("the fact renders exactly once when the summary already carries the pair (engine default shape)", () => {
@@ -398,21 +529,69 @@ describe("buildReviewBody", () => {
     );
   });
 
-  test("an over-long fact pair inside the summary is replaced by the bounded renderer pair", () => {
-    const summaryMd = `## Verdict: incomplete · 0% (F, partial)\ncause: ${"s".repeat(600)}\nunscanned: ${"u".repeat(600)}`;
+  test("an over-long fact the summary echoes is replaced by the bounded renderer pair", () => {
+    // The envelope's own fact is the long one, so the summary's echo of it is
+    // an exact machine line: stripped, and the renderer's bounded pair becomes
+    // the body's only pair.
+    const reason = "s".repeat(600);
+    const entry = "u".repeat(600);
+    const summaryMd = `## Verdict: incomplete · 0% (F, partial)\ncause: ${reason}\nunscanned: ${entry}`;
     const body = buildReviewBody({
       ...output,
       verdict: "incomplete",
       findings: [],
       summary_md: summaryMd,
-      incomplete: { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] },
+      incomplete: { reason, unscanned: [entry] },
     });
     expect(body.match(/^cause:/gm)?.length).toBe(1);
     expect(body.match(/^unscanned:/gm)?.length).toBe(1);
     const causeLine = body.split("\n").find((line) => line.startsWith("cause: "))!;
     const unscannedLine = body.split("\n").find((line) => line.startsWith("unscanned: "))!;
-    expect(causeLine).toBe("cause: runner timed out");
-    expect(unscannedLine).toBe("unscanned: src/pipeline/comment.ts");
+    expect(causeLine).toHaveLength(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(causeLine.endsWith("…")).toBe(true);
+    expect(unscannedLine).toHaveLength(INCOMPLETE_FACT_LINE_LIMIT);
+    expect(unscannedLine.endsWith("…")).toBe(true);
+    // The raw echoes are gone; every other summary line survives.
+    expect(body).not.toContain(reason);
+    expect(body).not.toContain(entry);
+    expect(body).toContain("## Verdict: incomplete · 0% (F, partial)");
+  });
+
+  test("a summary echoing the renderer's clamped pair is stripped to that single pair", () => {
+    // The summary can carry the CLAMPED form the renderer itself emits, not the
+    // raw fact: matching only the raw strings left a duplicate pair behind.
+    const reason = "r".repeat(600);
+    const entry = "u".repeat(600);
+    const incomplete = { reason, unscanned: [entry] };
+    const rendered = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: "## Verdict: incomplete · 0% (F, partial)",
+      incomplete,
+    });
+    // The renderer's own pair, taken from its output — the echo to reproduce.
+    const clampedPair = rendered
+      .split("\n")
+      .filter((line) => line.startsWith("cause: ") || line.startsWith("unscanned: "))
+      .join("\n");
+    expect(clampedPair.split("\n")).toHaveLength(2);
+    expect(clampedPair).not.toBe(`cause: ${reason}\nunscanned: ${entry}`);
+
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: `## Partial report\n\n${clampedPair}\n\nOtherwise complete.`,
+      incomplete,
+    });
+
+    // Exactly one pair in the body — the renderer's — with the summary's own
+    // surrounding lines intact.
+    expect(body.match(/^cause:/gm)?.length).toBe(1);
+    expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+    expect(body.split(clampedPair).length - 1).toBe(1);
+    expect(body).toContain("Otherwise complete.");
   });
 
   test("a mid-line mention of the fact labels in the summary is left verbatim", () => {
@@ -424,6 +603,76 @@ describe("buildReviewBody", () => {
       summary_md: summaryMd,
       incomplete: { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] },
     });
+    expect(body).toContain(summaryMd);
+    expect(body.match(/^cause:/gm)?.length).toBe(1);
+    expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+  });
+
+  test("the machine pair is stripped before the summary budget applies — a long summary keeps its tail", () => {
+    const reason = "c".repeat(300);
+    const entry = "u".repeat(300);
+    const summaryMd = [`cause: ${reason}`, `unscanned: ${entry}`, `${"b".repeat(7900)}TAIL-MARKER`].join("\n");
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: summaryMd,
+      incomplete: { reason, unscanned: [entry] },
+    });
+    // The summary is over budget only because of the echo the renderer
+    // reproduces itself: stripped FIRST, the whole remainder fits the budget
+    // and the content past the original 8000th char survives unchanged.
+    expect(summaryMd.length).toBeGreaterThan(SUMMARY_MD_LIMIT);
+    expect(body.match(/^cause:/gm)?.length).toBe(1);
+    expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+    expect(body).toBe(
+      `**Verdict: incomplete**\n\ncause: ${reason}\nunscanned: ${entry}\n\n${"b".repeat(7900)}TAIL-MARKER`,
+    );
+  });
+
+  test("an indented fact echo in the summary stays verbatim (only an exact machine line is stripped)", () => {
+    const summaryMd = [
+      "## Partial report",
+      "",
+      "```yaml",
+      "  cause: the sandbox was unreachable",
+      "```",
+      "Otherwise complete.",
+    ].join("\n");
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: summaryMd,
+      incomplete: { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] },
+    });
+    // The indented line is the summary's own evidence, not the machine echo:
+    // only a column-0 exact match is a fact line.
+    expect(body).toContain("  cause: the sandbox was unreachable");
+    expect(body).toContain(summaryMd);
+    expect(body.match(/^cause:/gm)?.length).toBe(1);
+    expect(body.match(/^unscanned:/gm)?.length).toBe(1);
+  });
+
+  test("a capitalised fact echo in the summary stays verbatim (case is not the machine line)", () => {
+    const summaryMd = [
+      "## Partial report",
+      "",
+      "Cause: runner timed out",
+      "UNSCANNED: src/pipeline/comment.ts",
+      "Otherwise complete.",
+    ].join("\n");
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      summary_md: summaryMd,
+      incomplete: { reason: "runner timed out", unscanned: ["src/pipeline/comment.ts"] },
+    });
+    // Different case is the model's own prose, not the engine's machine echo:
+    // both lines survive, and the renderer's pair stays the only one.
+    expect(body).toContain("Cause: runner timed out");
+    expect(body).toContain("UNSCANNED: src/pipeline/comment.ts");
     expect(body).toContain(summaryMd);
     expect(body.match(/^cause:/gm)?.length).toBe(1);
     expect(body.match(/^unscanned:/gm)?.length).toBe(1);
