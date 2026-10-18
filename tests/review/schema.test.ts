@@ -342,6 +342,15 @@ describe("parseReviewOutput", () => {
   describe("incomplete verdict (four-token vocabulary)", () => {
     const FACT = { reason: "budget exhausted after 3 of 9 files", unscanned: ["src/b.ts", "src/c.ts"] };
     const INCOMPLETE: ReviewOutput = { ...VALID, verdict: "incomplete", incomplete: FACT };
+    /** Tally mirror of the incomplete envelope: the fact echoed verbatim. */
+    const TALLY = {
+      verdict: "incomplete",
+      scorePct: 45,
+      band: "fail",
+      tally: { mustFix: 0, shouldFix: 2, nit: 1, unverified: 1 },
+      chatHeader: "**incomplete** · 45%\n🔴 0 🟠 2 🔵 1 ❓ 1",
+      incomplete: FACT,
+    };
 
     test("accepts every harness verdict token, including incomplete", () => {
       for (const verdict of ["ship it", "needs fixes", "blocked"] as const) {
@@ -402,14 +411,6 @@ describe("parseReviewOutput", () => {
     });
 
     test("accepts an agreeing tally echo and rejects a disagreeing one", () => {
-      const TALLY = {
-        verdict: "incomplete",
-        scorePct: 45,
-        band: "fail",
-        tally: { mustFix: 0, shouldFix: 2, nit: 1, unverified: 1 },
-        chatHeader: "**incomplete** · 45%\n🔴 0 🟠 2 🔵 1 ❓ 1",
-        incomplete: FACT,
-      };
       const agreeing = parseReviewOutput(JSON.stringify({ ...INCOMPLETE, tally: TALLY }));
       expect(agreeing.ok).toBe(true);
       if (agreeing.ok) {
@@ -425,6 +426,25 @@ describe("parseReviewOutput", () => {
       expect(disagreeing.ok).toBe(false);
       if (!disagreeing.ok) {
         expect(disagreeing.error).toContain("incomplete-tally-mismatch");
+      }
+    });
+
+    test("rejects an incomplete tally that omits its fact", () => {
+      const { incomplete: _f, ...noFact } = TALLY;
+      const r = parseReviewOutput(JSON.stringify({ ...INCOMPLETE, tally: noFact }));
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error).toContain("missing-incomplete");
+      }
+    });
+
+    test("rejects a settled tally that carries a fact", () => {
+      const r = parseReviewOutput(
+        JSON.stringify({ ...VALID, tally: { ...TALLY, verdict: "needs fixes" } }),
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error).toContain("incomplete-unexpected");
       }
     });
   });

@@ -36,6 +36,7 @@ import {
   type MergeClass,
   type MstarReviewFinding,
   type MstarReviewV1,
+  type PrIncomplete,
 } from "@mstar-harness/engine";
 import { z } from "zod";
 
@@ -50,9 +51,11 @@ const isSingleLineFact = (value: string): boolean => value.trim() !== "" && !/[\
 /**
  * Mirror of the engine `PrIncomplete` shape — the fact that makes the
  * `incomplete` verdict meaningful: `reason` is the declared cause, `unscanned`
- * the scope the run never reached (empty = nothing left unscanned).
+ * the scope the run never reached (empty = nothing left unscanned). The
+ * `PrIncomplete` annotation keeps this runtime schema bound to the engine
+ * contract instead of inferring a private shape.
  */
-const incompleteSchema = z.object({
+const incompleteSchema: z.ZodType<PrIncomplete> = z.object({
   reason: z.string().refine(isSingleLineFact, "reason must be a single-line non-blank string"),
   unscanned: z.array(
     z.string().refine(isSingleLineFact, "each unscanned entry must be a single-line non-blank string"),
@@ -108,17 +111,37 @@ const outputSchema: z.ZodType<ReviewOutput> = z
     if (output.tally !== undefined && output.tally.verdict !== output.verdict) {
       ctx.addIssue({ code: "custom", message: "tally.verdict must equal the top-level verdict" });
     }
-    // Presence rule (engine-locked): the incomplete fact is required exactly by
-    // the `incomplete` verdict and rejected for every other verdict
-    // (review.missing-incomplete / review.incomplete-unexpected).
+    const top = output.incomplete;
+    const echo = output.tally?.incomplete;
+    // Tally-level presence rule (engine-locked, checkProvidedTallyShape): a
+    // provided tally's echo is required exactly by the `incomplete` tally
+    // verdict (review.missing-incomplete / review.incomplete-unexpected).
+    if (output.tally !== undefined) {
+      if (output.tally.verdict === "incomplete") {
+        if (echo === undefined) {
+          ctx.addIssue({
+            code: "custom",
+            message: 'tally.verdict "incomplete" requires the matching tally.incomplete fact (reason + unscanned)',
+          });
+        }
+      } else if (echo !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          message: `tally.incomplete is carried only by the "incomplete" tally verdict - tally.verdict is "${output.tally.verdict}"`,
+        });
+      }
+    }
+    // Envelope-level presence rule (engine-locked): the incomplete fact is
+    // required exactly by the `incomplete` verdict and rejected for every other
+    // verdict (review.missing-incomplete / review.incomplete-unexpected).
     if (output.verdict === "incomplete") {
-      if (output.incomplete === undefined) {
+      if (top === undefined) {
         ctx.addIssue({
           code: "custom",
           message: 'verdict "incomplete" requires an incomplete fact (reason + unscanned)',
         });
       }
-    } else if (output.incomplete !== undefined) {
+    } else if (top !== undefined) {
       ctx.addIssue({
         code: "custom",
         message: `incomplete is carried only by the "incomplete" verdict - verdict is "${output.verdict}"`,
@@ -126,8 +149,6 @@ const outputSchema: z.ZodType<ReviewOutput> = z
     }
     // The tally echoes the envelope fact when both carry it; the two must agree
     // (review.incomplete-tally-mismatch).
-    const top = output.incomplete;
-    const echo = output.tally?.incomplete;
     if (
       top !== undefined &&
       echo !== undefined &&
