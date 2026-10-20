@@ -1464,7 +1464,7 @@ controls are installed (the Dockerfile carries the documentation block only).
   - `github.com` / `api.github.com` — git clone/fetch of the PR head (token
     via scoped extraheader exec env) and gh CLI.
   - Provider API hosts by active provider config — the 18 built-in provider
-    hosts resolve in omp's runtime registry (omp SDK 18.11.1, outside this
+    hosts resolve in omp's runtime registry (omp SDK 18.12.3, outside this
     repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
     19-entry list, `ark` included); the ark capability host
     `ark.cn-beijing.volces.com` is declared in the omp registry entry
@@ -1489,7 +1489,9 @@ the Dockerfile cannot read the module) and derives `REVIEW_SKILL_VERSION` from
 the same source.
 
 Historical bumps, superseding chain, and digest provenance (records, not live
-values): mstar-harness **4.0.0** (2026-10-15, superseding the 3.11.2 pin,
+values): mstar-harness **4.0.4** (2026-10-20, superseding the 4.0.2 pin, which
+superseded the 4.0.0 pin; omp SDK 18.12.3, engine `^4.0.4` resolved to 4.0.4);
+mstar-harness **4.0.0** (2026-10-15, superseding the 3.11.2 pin,
 which superseded the 3.10.2 pin);
 the `mstar` CLI (`@mstar-harness/cli`) preinstall is the container-level
 mechanism, carried forward at the exact pin. The CLI preinstall is
@@ -1501,6 +1503,15 @@ toolcall path is a tracked follow-up, not a shipped mechanism. Bun / gh pins
 carried forward unchanged; the base image moved with the Sandbox SDK 1.0
 migration (the SDK no longer ships a runtime base — controlled Debian base +
 the 1.0.0 `sandbox-shim`).
+
+Finding carry at the 4.0.4 pin (the omp 18.12.3 / harness 4.0.4 cohort
+above): the harness can hold exactly one review artifact unchanged — the
+validated `mstar.review/v1` envelope, written through `persist` by
+`scripts/mstar-export-review.ts` (default `FsStore` under the resolved harness
+root; `--store <module>` for a custom store). The issue store is not a finding
+sink: its severity enum and mandatory synthesized fields do not map onto
+review findings, and the publication journal, leases, recurrence queries, and
+dashboard reads stay in D1. No finding-store migration is planned.
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's

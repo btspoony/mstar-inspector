@@ -1937,7 +1937,7 @@ function parentYieldValidator(): OutputValidator {
 /** One mstar.review/v1 `incomplete` fact: the declared cause plus the scope the run never reached. */
 const INCOMPLETE_FACT = { reason: "seat budget exhausted", unscanned: ["lib/c.ts"] };
 
-describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.2)", () => {
+describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.4)", () => {
   test("an incomplete deep yield passes the strict schema and the engine gate", async () => {
     const payload = {
       ...(deepEnvelope() as Record<string, unknown>),
@@ -1948,7 +1948,7 @@ describe("ompAgentRuntime.runReview — strict parent yield schema (engine 4.0.2
 
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
-    // The envelope-level fact the 4.0.2 prompt asks for: the strict shape
+    // The envelope-level fact the 4.0.4 prompt asks for: the strict shape
     // accepts it, so the turn can yield it at all…
     expect(parentYieldValidator().validate(payload).success).toBe(true);
     // …and the engine re-validation carries it onto the returned envelope.

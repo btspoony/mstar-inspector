@@ -86,7 +86,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref 3ed42ba7563f9daed890b61408a425ef4547f751 (tag v4.0.2, bumped 2026-10-18).
+# mstar-harness plugin, pinned ref d58005dff66d2edca420624fc6ba5ee4d4d38e32 (tag v4.0.4, bumped 2026-10-20).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -97,7 +97,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin 3ed42ba7563f9daed890b61408a425ef4547f751 \
+    && git -C /opt/mstar-harness fetch --depth 1 origin d58005dff66d2edca420624fc6ba5ee4d4d38e32 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && rm -rf /opt/mstar-harness/.git
 
@@ -108,12 +108,12 @@ RUN git init /opt/mstar-harness \
 # canNOT invoke the `mstar` CLI today; absent a wired invocation path, review
 # behavior is unchanged (legacy, non-CLI). Wiring a sanctioned session
 # toolcall path is a tracked follow-up — no such mechanism
-# exists in this image. Exact pin `@mstar-harness/cli@4.0.2`: image pinning
-# discipline — the repo manifest `^4.0.2` exception does NOT extend to the
+# exists in this image. Exact pin `@mstar-harness/cli@4.0.4`: image pinning
+# discipline — the repo manifest `^4.0.4` exception does NOT extend to the
 # image. The CLI dist ships `#!/usr/bin/env bun` (verified) and the Bun 1.4.0
 # installed above executes it directly, so no node is added. The global bin
 # dir is put on PATH so sandbox exec resolves the `mstar` shim.
-RUN bun add --global @mstar-harness/cli@4.0.2
+RUN bun add --global @mstar-harness/cli@4.0.4
 ENV PATH="/root/.bun/bin:${PATH}"
 
 # omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (no baked
@@ -132,7 +132,7 @@ ENV PATH="/root/.bun/bin:${PATH}"
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
-# lockfile (omp SDK 18.11.1 = package.json). `--omit=optional` is NOT used:
+# lockfile (omp SDK 18.12.3 = package.json). `--omit=optional` is NOT used:
 # pi-natives ships its platform binary as an optional dep, so omitting optionals
 # breaks the runner at load (T4 live smoke). Size control instead prunes the
 # transformers tree (local-embedding models only — the runner uses the remote

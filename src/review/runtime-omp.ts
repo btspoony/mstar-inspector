@@ -61,9 +61,9 @@
  *   - git-numstat lines `"<add>\t<del>\t<path>"` → the seat-partition universe.
  * Facts not matching these shapes pass through to the seat prompts verbatim.
  *
- * MCP note: `runStructuredSubagent` has no `enableMCP` field in 18.11.1 — MCP
+ * MCP note: `runStructuredSubagent` has no `enableMCP` field in 18.12.3 — MCP
  * is derived as `!restrictToolNames && …` (tsc-verified against the published
- * 18.11.1 type surface), so the restricted parent session structurally disables
+ * 18.12.3 type surface), so the restricted parent session structurally disables
  * MCP for every seat.
  */
 import { existsSync } from "node:fs";
@@ -246,7 +246,7 @@ export function buildSessionOptions(opts: {
 
 /**
  * The parent AgentSession is not a ToolSession (missing cwd / hasUI /
- * getSessionFile / getSessionSpawns — tsc-verified against 18.11.1). Shim the
+ * getSessionFile / getSessionSpawns — tsc-verified against 18.12.3). Shim the
  * four members over a Proxy and delegate everything else, bound to the real
  * session so private internal state keeps working:
  *   - cwd = the PR clone (input.worktreePath) — drives .omp/agents
@@ -322,6 +322,7 @@ const SEAT_OUTPUT_SCHEMA = {
  * verdict-conditional `incomplete` fact, which no `required` list can state).
  * `additionalProperties: false` is why every engine-emitted member — the
  * optional `incomplete` fact and the tally's `band` — has to be declared here.
+ * omp 18.12.3 rejects unsupported root fields, so the strictness is load-bearing.
  */
 const PARENT_OUTPUT_SCHEMA = {
   type: "object",
@@ -1649,7 +1650,7 @@ export const ompAgentRuntime: AgentRuntime = {
       // one) plus every seat whose promise REJECTED outright — a rejection is a
       // lost seat too, it just carries no outcome object. ONE stopped seat is
       // enough to stop the run: a wave that lost a seat is not settled under the
-      // 4.0.2 contract, even when a sibling seat returned usable output, because
+      // 4.0.4 contract, even when a sibling seat returned usable output, because
       // an uncollected scope can hide any finding.
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
       const stoppedSeats =
