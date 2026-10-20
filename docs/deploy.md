@@ -1504,6 +1504,15 @@ carried forward unchanged; the base image moved with the Sandbox SDK 1.0
 migration (the SDK no longer ships a runtime base — controlled Debian base +
 the 1.0.0 `sandbox-shim`).
 
+Finding carry at the 4.0.4 pin (the omp 18.12.3 / harness 4.0.4 cohort
+above): the harness can hold exactly one review artifact unchanged — the
+validated `mstar.review/v1` envelope, written through `persist` by
+`scripts/mstar-export-review.ts` (default `FsStore` under the resolved harness
+root; `--store <module>` for a custom store). The issue store is not a finding
+sink: its severity enum and mandatory synthesized fields do not map onto
+review findings, and the publication journal, leases, recurrence queries, and
+dashboard reads stay in D1. No finding-store migration is planned.
+
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's
 `ark-plan` capability host in `src/contracts/sandbox-images.ts`, synthesized
