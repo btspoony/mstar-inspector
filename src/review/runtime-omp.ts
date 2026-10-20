@@ -322,6 +322,7 @@ const SEAT_OUTPUT_SCHEMA = {
  * verdict-conditional `incomplete` fact, which no `required` list can state).
  * `additionalProperties: false` is why every engine-emitted member — the
  * optional `incomplete` fact and the tally's `band` — has to be declared here.
+ * omp 18.12.3 rejects unsupported root fields, so the strictness is load-bearing.
  */
 const PARENT_OUTPUT_SCHEMA = {
   type: "object",

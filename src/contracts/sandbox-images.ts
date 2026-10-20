@@ -150,6 +150,7 @@ const SANDBOX_IMAGES: readonly SandboxImageDefinition[] = Object.freeze([
             name: "Deepseek v4 flash 0731",
             reasoning: true,
             input: Object.freeze(["text"]),
+            // omp 18.12.0 makes models.yml model limits win over catalog rules — these values are effective.
             contextWindow: 1024000,
             maxTokens: 65536,
           }),

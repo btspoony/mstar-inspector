@@ -6,7 +6,10 @@
  * - Carries: the validated `mstar.review/v1` envelope, unchanged, as a `review` artifact.
  * - Does not carry: the D1 finding store (reviews/findings) — the harness has no analogue.
  * - Does not carry: publication journal, leases, threads, checks, recurrence, or dashboard rows.
- * - Key: `<installation>-<owner>-<repo>-<pr>-<sha>` from `--idem`; destination `sdd/_reviews/<key>.json`.
+ * - Key: `r-<hex installation>-<hex owner>-<hex repo>-<hex pr>-<hex sha>` from `--idem`
+ *   (hex-encoded segments make the derivation injective; parts carrying lone
+ *   surrogates are rejected because utf8 encoding would collapse them into
+ *   one key); destination `sdd/_reviews/<key>.json`.
  * - Store: FsStore under `--harness` (default: harness root resolved from cwd); `--store` overrides.
  *
  * Usage:
@@ -26,18 +29,23 @@ import {
 
 /** Persist keys are a single safe path component (engine `assertSafePathComponent`). */
 const KEY_RE = /^[A-Za-z0-9._-]+$/;
+/** Plan-shaped keys route to `sdd/<key>/review/report.json`; a review key must never match. */
+const PLAN_KEY_RE = /^[0-9]{8}-[a-z0-9-]+$/;
+/** Lone surrogates encode to U+FFFD, so `\uD800` and `\uFFFD` would alias one key. */
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** `<installation>/<owner>/<repo>/<pr>/<sha>` — either `/` or `:` separators. */
 export function deriveReviewKey(idem: string): string {
   const parts = idem.split(/[/:]/);
-  if (parts.length !== 5 || parts.some((part) => part === "")) {
+  if (parts.length !== 5 || parts.some((part) => part === "" || LONE_SURROGATE_RE.test(part))) {
     throw new Error(
-      `--idem must be <installation>/<owner>/<repo>/<pr>/<sha> (5 non-empty parts, "/" or ":" separators) — got ${JSON.stringify(idem)}`,
+      `--idem must be <installation>/<owner>/<repo>/<pr>/<sha> (5 non-empty, well-formed Unicode parts, "/" or ":" separators) — got ${JSON.stringify(idem)}`,
     );
   }
-  const key = parts.join("-");
-  if (!KEY_RE.test(key)) {
-    throw new Error(`derived persist key ${JSON.stringify(key)} must match ${KEY_RE}`);
+  // Hex segments are injective: no part can forge a separator or another tuple's key.
+  const key = `r-${parts.map((part) => Buffer.from(part, "utf8").toString("hex")).join("-")}`;
+  if (!KEY_RE.test(key) || PLAN_KEY_RE.test(key)) {
+    throw new Error(`derived persist key ${JSON.stringify(key)} must match ${KEY_RE} and not ${PLAN_KEY_RE}`);
   }
   return key;
 }
@@ -87,8 +95,8 @@ as a "review" artifact. Nothing is written when validation fails.
 
 Options:
   --file <path>     Envelope JSON file (default: stdin)
-  --idem <tuple>    installation/owner/repo/pr/sha, "/" or ":" separated; key is
-                    <installation>-<owner>-<repo>-<pr>-<sha>
+  --idem <tuple>    installation/owner/repo/pr/sha, "/" or ":" separated; the key
+                    is r-<hex segment>x5 — injective, and never plan-shaped
   --harness <dir>   Harness root (default: resolved from cwd); not needed with --store
   --store <module>  Custom store module (createArtifactStore / default factory or
                     {put,get} object), same contract the harness CLI accepts;
@@ -98,8 +106,8 @@ Options:
 Carry limits:
   Carries the envelope only — no D1 finding store, publication journal, leases,
   threads, checks, recurrence, or dashboard data.
-  Default destination: <harness>/sdd/_reviews/<key>.json
-  (a plan-shaped key <yyyymmdd>-<slug> lands at <harness>/sdd/<key>/review/report.json).`);
+  Default destination: <harness>/sdd/_reviews/<key>.json — the r- prefix keeps
+  every key out of the plan-shaped <yyyymmdd>-<slug> route.`);
 }
 
 function argValue(args: string[], flag: string): string | undefined {
@@ -117,8 +125,12 @@ async function main(args: string[]): Promise<number> {
     console.error("missing --idem; see --help");
     return 2;
   }
+  const fileIndex = args.indexOf("--file");
+  if (fileIndex !== -1 && args[fileIndex + 1] === undefined) {
+    console.error("--file needs a path; see --help");
+    return 2;
+  }
   const file = argValue(args, "--file");
-  const raw = file === undefined ? readFileSync(0, "utf8") : readFileSync(file, "utf8");
   const storeModule = argValue(args, "--store") ?? process.env["MSTAR_STORE_MODULE"];
   const harnessRoot = argValue(args, "--harness") ?? resolveHarnessDir(process.cwd()) ?? "";
   if (harnessRoot === "" && storeModule === undefined) {
@@ -126,6 +138,7 @@ async function main(args: string[]): Promise<number> {
     return 2;
   }
   try {
+    const raw = readFileSync(file ?? 0, "utf8");
     const result = await exportReview({ raw, idem, harnessRoot, storeModule });
     console.log(result.path ?? `review ${result.key} written through custom store`);
     return 0;
