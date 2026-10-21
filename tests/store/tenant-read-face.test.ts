@@ -248,4 +248,25 @@ describe("tenant read face allowlist", () => {
       }
     }
   });
+
+  /**
+   * The annotation claims "no tenant-facing field". The review-threads read
+   * used to select `ga.slug` (a tenant-facing column) while reading
+   * `identity.slug` instead — a comment that was not true of its statement.
+   * Every maintenance SELECT must stay off the identity/ownership columns
+   * (`private_key_enc` is frozen plan-scope maintenance credential routing, not
+   * a response field).
+   */
+  test("a maintenance read selects no identity or ownership column", () => {
+    const TENANT_FACING = /\b(?:slug|name|workspace_id)\b/i;
+    for (const rel of Object.keys(MAINTENANCE_SITES)) {
+      for (const site of prepareStatements(readFileSync(join(SRC_DIR, rel), "utf8"))) {
+        expect({ file: rel, line: site.line + 1, tenantFacing: TENANT_FACING.test(site.sql) }).toEqual({
+          file: rel,
+          line: site.line + 1,
+          tenantFacing: false,
+        });
+      }
+    }
+  });
 });
