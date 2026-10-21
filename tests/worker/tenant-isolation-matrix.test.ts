@@ -213,22 +213,40 @@ function appSnapshot(db: TestD1, appId = "app-acme") {
 
 /**
  * Every management write the App routes expose, with the payload a MANAGER
- * would accept (valid vocabulary, in-range values, existing default image), so
- * a 403 can only come from the role gate. Two settings `op`s share one path;
- * they are separate entries because each is its own write branch.
+ * would accept (valid vocabulary, in-range values, existing default image, an
+ * EXISTING key row to delete), so a 403 can only come from the role gate. Two
+ * settings `op`s share one path; they are separate entries because each is its
+ * own write branch.
+ *
+ * `ownerStatus` is the status the route answers on a real success — the owner
+ * wave asserts exactly that, so a 400/404/500 can never pass as "authorized".
+ * An entry WITHOUT `ownerStatus` cannot reach a real success offline (see the
+ * keys/verify note) and is therefore excluded from the positive control.
  */
-const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string }> = [
-  { route: "/apps/acme-app/disable" },
-  { route: "/apps/acme-app/enable" },
-  { route: "/apps/acme-app/pause" },
-  { route: "/apps/acme-app/resume" },
-  { route: "/apps/acme-app/review-trigger-mode", body: "mode=open" },
-  { route: "/apps/acme-app/settings", body: "op=save-chain&model_chain=" },
-  { route: "/apps/acme-app/settings", body: "op=save-sandbox-image&sandbox_image_id=omp" },
-  { route: "/apps/acme-app/settings/key/delete", body: "provider=anthropic&key_id=key-absent" },
+const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string; ownerStatus?: number }> = [
+  { route: "/apps/acme-app/disable", ownerStatus: 200 },
+  { route: "/apps/acme-app/enable", ownerStatus: 200 },
+  { route: "/apps/acme-app/pause", ownerStatus: 200 },
+  { route: "/apps/acme-app/resume", ownerStatus: 200 },
+  { route: "/apps/acme-app/review-trigger-mode", body: "mode=open", ownerStatus: 200 },
+  { route: "/apps/acme-app/settings", body: "op=save-chain&model_chain=", ownerStatus: 200 },
+  {
+    route: "/apps/acme-app/settings",
+    body: "op=save-sandbox-image&sandbox_image_id=omp",
+    ownerStatus: 200,
+  },
+  {
+    route: "/apps/acme-app/settings/key/delete",
+    body: "provider=anthropic&key_id=seeded-key",
+    ownerStatus: 200,
+  },
+  // No positive control: a real 200 here needs a live provider endpoint (the
+  // route verifies with globalThis.fetch). The member-403 cell below still
+  // proves the authorization decision; the success path is owned by
+  // tests/worker/settings-provider-first.test.ts.
   { route: "/api/apps/acme-app/keys/verify", body: "provider=anthropic&key=sk-not-a-real-key" },
   // Last: a manager's success soft-deletes the row.
-  { route: "/apps/acme-app/delete" },
+  { route: "/apps/acme-app/delete", ownerStatus: 200 },
 ];
 
 describe("tenant isolation matrix (scenario × mode)", () => {
@@ -298,6 +316,14 @@ describe("tenant isolation matrix (scenario × mode)", () => {
       "app-acme",
       "ark-plan/deepseek-v4-flash",
     );
+    // A REAL key row for the delete target: deleting a nonexistent key is a
+    // tolerant 2xx no-op, which would prove nothing about authorization.
+    seed(
+      db,
+      `INSERT INTO app_provider_keys (app_id, provider, key_id, key_enc, created_at)
+       VALUES (?, 'anthropic', 'seeded-key', 'v1.primary.aXZpdi.c2VlZA==', datetime('now'))`,
+      "app-acme",
+    );
 
     const list = await worker.fetch(await request("/dashboard/acme/api/apps", "mallory"), env);
     expect(list.status).toBe(200);
@@ -325,15 +351,19 @@ describe("tenant isolation matrix (scenario × mode)", () => {
     }
     expect((pristine.config as { model_chain: string }).model_chain).toBe("ark-plan/deepseek-v4-flash");
 
-    // Reachability wave: the workspace OWNER sends the same payloads and is
-    // never refused by authorization — so each 403 above came from the role.
-    for (const { route, body: form } of MANAGEMENT_WRITES) {
+    // Reachability wave: the workspace OWNER sends the same payloads and each
+    // route answers its REAL success status — so every 403 above came from the
+    // role, not from a payload the route would have rejected anyway.
+    for (const { route, body: form, ownerStatus } of MANAGEMENT_WRITES) {
+      if (ownerStatus === undefined) continue; // no offline success path
       const res = await worker.fetch(await post("dana", route, form), env);
-      expect(res.status, route).not.toBe(403);
+      expect(res.status, route).toBe(ownerStatus);
     }
-    // And the writes that wave made really did land (the gate is the only
-    // difference between the two waves): the manager's delete took effect.
-    expect((appSnapshot(db).app as { deleted_at: string | null }).deleted_at).not.toBeNull();
+    // And the writes really landed (the role gate is the only difference
+    // between the two waves): the seeded key is gone and the delete took effect.
+    const after = appSnapshot(db);
+    expect((after.keys as { n: number }).n).toBe(0);
+    expect((after.app as { deleted_at: string | null }).deleted_at).not.toBeNull();
   });
 
   // row 4 — layers: strict INNER JOIN read face → workspace list route / off
