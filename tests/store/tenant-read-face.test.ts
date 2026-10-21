@@ -70,7 +70,7 @@ describe("apps-store tenant read face (mode: strict)", () => {
 });
 
 describe("apps-store off SQL is frozen", () => {
-  test("the three read methods prepare APP_READ_SQL.*.off byte-for-byte", async () => {
+  test("the three read methods prepare the frozen off SQL byte-for-byte", async () => {
     const queries: string[] = [];
     const statement = {
       bind: () => statement,
@@ -89,10 +89,11 @@ describe("apps-store off SQL is frozen", () => {
     await store.getAppBySlug("slug");
     await store.getAppById("id");
     await store.listApps();
+    // Literals, NOT APP_READ_SQL: a mutated production constant must fail here.
     expect(queries).toEqual([
-      APP_READ_SQL.getAppBySlug.off,
-      APP_READ_SQL.getAppById.off,
-      APP_READ_SQL.listApps.off,
+      `SELECT * FROM github_apps WHERE slug = ?`,
+      `SELECT * FROM github_apps WHERE id = ?`,
+      `SELECT * FROM github_apps WHERE deleted_at IS NULL ORDER BY created_at DESC, id`,
     ]);
     for (const sql of queries) expect(sql).not.toContain("app_workspaces");
   });
@@ -116,6 +117,27 @@ function srcFiles(dir = SRC_DIR, out: string[] = []): string[] {
 }
 
 const DIRECT_READ = /\b(?:from|join)\s+github_apps\b/i;
+const TENANT_BYPASS = "shortcut: tenant-bypass";
+
+/** Line offsets of every direct `github_apps` read in one source text. */
+function readSites(src: string): number[] {
+  return src.split("\n").flatMap((line, i) => (DIRECT_READ.test(line) ? [i] : []));
+}
+
+/**
+ * True when the statement carrying the read at `lineIndex` is annotated: walk
+ * up to the `.prepare(` that opened it, then through the contiguous
+ * non-blank block above, looking for the marker in that statement's comment.
+ */
+function isAnnotated(lines: string[], lineIndex: number): boolean {
+  let p = lineIndex;
+  while (p >= 0 && !/\.prepare\s*\(/.test(lines[p]!)) p--;
+  if (p < 0) return false;
+  for (let k = p - 1; k >= 0 && lines[k]!.trim() !== ""; k--) {
+    if (lines[k]!.includes(TENANT_BYPASS)) return true;
+  }
+  return false;
+}
 
 function directReadFiles(): string[] {
   return srcFiles()
@@ -124,6 +146,14 @@ function directReadFiles(): string[] {
     .sort();
 }
 
+/** The maintenance face: every direct `github_apps` read outside apps-store. */
+const MAINTENANCE_SITES: Record<string, number> = {
+  "worker/lifecycle-reconcile.ts": 1,
+  "worker/check-reconcile.ts": 2,
+  "pipeline/review-threads.ts": 1,
+  "store/review-checks.ts": 1,
+};
+
 describe("tenant read face allowlist", () => {
   test("tenant-facing modules hold no direct github_apps read", () => {
     for (const rel of ["dashboard/index.ts", "dashboard/views.ts", "pipeline/consumer.ts"]) {
@@ -131,24 +161,32 @@ describe("tenant read face allowlist", () => {
     }
   });
 
-  test("only apps-store plus the five annotated maintenance sites read github_apps", () => {
+  test("only apps-store plus the four maintenance files read github_apps", () => {
     expect(directReadFiles()).toEqual([
       "dashboard/apps-store.ts",
-      "pipeline/review-threads.ts",
-      "store/review-checks.ts",
-      "worker/check-reconcile.ts",
-      "worker/lifecycle-reconcile.ts",
+      ...Object.keys(MAINTENANCE_SITES).sort(),
     ]);
   });
 
-  test("every maintenance direct read is annotated tenant-bypass", () => {
-    for (const rel of [
-      "pipeline/review-threads.ts",
-      "store/review-checks.ts",
-      "worker/check-reconcile.ts",
-      "worker/lifecycle-reconcile.ts",
-    ]) {
-      expect(readFileSync(join(SRC_DIR, rel), "utf8")).toContain("shortcut: tenant-bypass");
+  test("maintenance files hold exactly their pinned number of direct reads", () => {
+    const counts = Object.fromEntries(
+      Object.keys(MAINTENANCE_SITES)
+        .sort()
+        .map((rel) => [rel, readSites(readFileSync(join(SRC_DIR, rel), "utf8")).length]),
+    );
+    expect(counts).toEqual(MAINTENANCE_SITES);
+  });
+
+  test("every maintenance direct read carries its tenant-bypass annotation", () => {
+    for (const rel of Object.keys(MAINTENANCE_SITES)) {
+      const lines = readFileSync(join(SRC_DIR, rel), "utf8").split("\n");
+      for (const site of readSites(lines.join("\n"))) {
+        expect({ file: rel, line: site + 1, annotated: isAnnotated(lines, site) }).toEqual({
+          file: rel,
+          line: site + 1,
+          annotated: true,
+        });
+      }
     }
   });
 });
