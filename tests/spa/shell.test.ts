@@ -60,6 +60,16 @@ describe("shell models", () => {
     expect(buildSidebarModel(admin, "/dashboard/members").brand).toBe(t("zh_CN", "nav.brand"));
   });
 
+  test("the wordmark follows the workspace, like the Apps entry", () => {
+    // Legacy pages keep the root; a workspace page names its own Apps list,
+    // so the brand link never lands on the strict-mode dead end.
+    expect(buildSidebarModel(member, "/dashboard/apps").brandHref).toBe("/dashboard");
+    expect(buildSidebarModel(admin, "/dashboard/acme/apps").brandHref).toBe("/dashboard/acme/apps");
+    expect(
+      buildSidebarModel(admin, "/dashboard/acme/apps/acme-app/settings").brandHref,
+    ).toBe("/dashboard/acme/apps");
+  });
+
   test("language toggle targets the other locale", () => {
     expect(otherLocale("en")).toBe("zh_CN");
     expect(otherLocale("zh_CN")).toBe("en");

@@ -3318,6 +3318,20 @@ describe("/dashboard/oauth/callback bootstrap + deny", () => {
     expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
   });
 
+  test("strict: the callback lands on the sole workspace's Apps page, not the dead-end root", async () => {
+    // 0026 seeds exactly one workspace (`default`) — the landing the root
+    // redirect and the login bounce also name.
+    const db = createDashboardTestD1();
+    stubGitHubIdentity("octocat");
+    const res = await oauthCallback(
+      "octocat",
+      makeDbEnv(db, { ADMIN_LOGINS: "octocat", WORKSPACE_TENANT_MODE: "strict" }),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(true);
+  });
+
   test("empty-table fallback (ADMIN_LOGINS unset) → first login becomes admin", async () => {
     const db = createDashboardTestD1();
     stubGitHubIdentity("deployer");

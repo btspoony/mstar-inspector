@@ -621,6 +621,104 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
   });
 });
 
+describe("strict: the post-authentication landing is the workspace Apps page", () => {
+  /** ONE live workspace — the M1 shape `getSoleWorkspace` resolves. */
+  function soleWorkspaceFixture() {
+    const db = createMigratedTestD1();
+    const userId = seedUser(db, "octocat", "admin");
+    seedMembership(db, "default", userId, "owner");
+    return { db };
+  }
+
+  test("a signed-in HTML GET /dashboard 302s to the workspace Apps list, not the legacy root", async () => {
+    const { db } = soleWorkspaceFixture();
+    const env = withSpaAssets(envFor(db, "strict"));
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    // The dead-end shell is never served on this path.
+    expect(await res.text()).not.toContain("window.__BOOT__");
+  });
+
+  test("an unsigned /dashboard still 302s into the login page", async () => {
+    const { db } = soleWorkspaceFixture();
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard", { headers: { Accept: "text/html" } }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  test("an already-signed-in login bounce lands on the same workspace Apps page", async () => {
+    const { db } = soleWorkspaceFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/login", "octocat"),
+      envFor(db, "strict"),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+  });
+
+  test("no sole workspace → the legacy root shell is kept (no guessed slug)", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db, "strict"));
+    const warns: string[] = [];
+    const original = console.warn;
+    console.warn = (msg: unknown) => {
+      warns.push(String(msg));
+    };
+    try {
+      const res = await worker.fetch(
+        await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("window.__BOOT__");
+    } finally {
+      console.warn = original;
+    }
+    expect(warns.some((line) => line.includes('"reason":"no_sole_workspace"'))).toBe(true);
+  });
+
+  test("off: the legacy root shell is unchanged", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "off")),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("window.__BOOT__");
+  });
+});
+
+describe("strict: the onboarding CTA stays inside the workspace", () => {
+  test("the Open Settings CTA targets the workspace settings page", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/acme-app/onboarding", "dana"),
+      envFor(db, "strict"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('href="/dashboard/acme/apps/acme-app/settings"');
+    expect(body).not.toContain('href="/dashboard/apps/acme-app/settings"');
+  });
+
+  test("off: the CTA keeps the legacy href", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/apps/acme-app/onboarding", "octocat"),
+      envFor(db, "off"),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('href="/dashboard/apps/acme-app/settings"');
+  });
+});
+
 describe("WORKSPACE_TENANT_MODE with an illegal value — fails loud", () => {
   test("every /dashboard request answers 500 with the bad value and serves no route", async () => {
     const { db } = tenancyFixture();

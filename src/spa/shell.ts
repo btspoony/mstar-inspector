@@ -10,6 +10,8 @@ export type ShellNavItem = { href: string; label: string; current: boolean };
 
 export type SidebarModel = {
   brand: string;
+  /** Same target as the Apps entry: the root is a dead end under `strict`. */
+  brandHref: string;
   navLabel: string;
   items: ShellNavItem[];
 };
@@ -62,6 +64,9 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
   const workspaceSlug = workspaceSlugOf(pathname);
   return {
     brand: t(boot.locale, "nav.brand"),
+    // The root workbench 404s its data reads under `strict`, so the wordmark
+    // follows the same workspace Apps target as the nav entry there.
+    brandHref: workspaceSlug === null ? "/dashboard" : `/dashboard/${workspaceSlug}/apps`,
     navLabel: t(boot.locale, "nav.primary"),
     items: visibleNavItems(boot.role).map((item) => {
       const href =

@@ -179,6 +179,38 @@ function scopedAppPath(c: DashboardContext, path: string): string {
 }
 
 /**
+ * `/dashboard/<sole-workspace-slug>/apps` under `strict`, otherwise null. M1 is
+ * single-workspace; a deployment that does not carry exactly one live
+ * workspace has no unambiguous apps list to name, so callers keep their own
+ * legacy target and this warns instead of guessing a slug.
+ */
+export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> {
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return null;
+  const db = dashboardD1(env);
+  const workspace = db ? await getSoleWorkspace(db) : null;
+  if (workspace !== null) return `/dashboard/${workspace.slug}/apps`;
+  console.warn(
+    JSON.stringify({
+      event: "dashboard_landing",
+      reason: db === null ? "db_unbound" : "no_sole_workspace",
+    }),
+  );
+  return null;
+}
+
+/**
+ * The post-authentication landing page. `/dashboard` (the root workbench) is
+ * mode-independent, but its first data read derives the base from the
+ * pathname — the retired legacy App family — so under `strict` it is a dead
+ * end with no click path into the workspace UI. Every signed-in producer
+ * (OAuth callback, the login bounce) names the workspace Apps page instead.
+ * Unresolvable → today's target (already warned by the resolver).
+ */
+export async function signedInLanding(env: Env): Promise<string> {
+  return (await strictWorkspaceAppsBase(env)) ?? DASHBOARD_MOUNT;
+}
+
+/**
  * The post-commit landing page. The manifest flow's own request carries no
  * tenant scope (its routes are mode-independent), so `scopedAppPath` cannot
  * rewrite this target: under `strict` the legacy App family answers 404, and
@@ -189,10 +221,8 @@ function scopedAppPath(c: DashboardContext, path: string): string {
  */
 async function manifestSuccessTarget(c: DashboardContext, appSlug: string): Promise<string> {
   const legacy = `/dashboard/apps/${appSlug}/onboarding`;
-  if (tenantModeOf(c.env.WORKSPACE_TENANT_MODE) !== "strict") return legacy;
-  const db = dashboardD1(c.env);
-  const workspace = db ? await getSoleWorkspace(db) : null;
-  return workspace === null ? legacy : `/dashboard/${workspace.slug}/apps/${appSlug}/onboarding`;
+  const base = await strictWorkspaceAppsBase(c.env);
+  return base === null ? legacy : `${base}/${appSlug}/onboarding`;
 }
 
 function isSpaFetchPost(c: DashboardContext): boolean {
@@ -452,7 +482,7 @@ async function startOAuthLogin(c: DashboardContext): Promise<Response> {
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   // Already signed in → bounce back to the shell (IA routing table).
   if (await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret)) {
-    return c.redirect("/dashboard", 302);
+    return c.redirect(await signedInLanding(c.env), 302);
   }
   const state = await createStateValue(secrets.sessionSecret);
   c.header("Set-Cookie", serializeCookie(OAUTH_STATE_COOKIE, state, OAUTH_STATE_MAX_AGE_SEC));
@@ -521,7 +551,7 @@ dashboardApp.get("/oauth/callback", async (c) => {
   c.header("Set-Cookie", serializeCookie(SESSION_COOKIE, session, SESSION_MAX_AGE_SEC), {
     append: true,
   });
-  return c.redirect("/dashboard", 302);
+  return c.redirect(await signedInLanding(c.env), 302);
 });
 
 dashboardApp.get("/logout", (c) => {
@@ -934,6 +964,8 @@ const appOnboardingRoute = async (c: DashboardContext) => {
         webhookUrl: `${origin}/webhook/${app.slug}`,
       },
       requestLocale(c),
+      // Set only on a workspace-scoped request; the view never reads env.
+      c.get("tenant")?.slug ?? null,
     ),
   );
 };
