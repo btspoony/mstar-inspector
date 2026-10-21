@@ -2414,6 +2414,9 @@ function createDashboardTestD1(
     }
     applyMigrationFile(db, name);
   }
+  // Tail of the batch queue: each `batch()` call chains onto it, so two
+  // concurrent batches run one after the other (D1 single-writer model).
+  let batchQueue: Promise<void> = Promise.resolve();
   return {
     raw: db,
     prepare(query: string): DashboardD1Statement {
@@ -2448,18 +2451,31 @@ function createDashboardTestD1(
      * bun:sqlite's async `db.transaction()` does not roll back (probed), so
      * the transaction is bracketed manually — the same double as
      * tests/store/helpers.ts.
+     *
+     * Batches are QUEUED, not interleaved: D1 has a single-writer model, so a
+     * second concurrent batch waits for the first transaction to commit. Two
+     * overlapping BEGIN/COMMIT brackets would instead throw "cannot start a
+     * transaction within a transaction" — a double artifact, not a
+     * production behavior (the concurrent-demotions test depends on this).
      */
     async batch(statements: DashboardD1Statement[]): Promise<DashboardD1BatchResult[]> {
-      db.exec("BEGIN");
-      try {
-        const results: DashboardD1BatchResult[] = [];
-        for (const stmt of statements) results.push(await stmt.run());
-        db.exec("COMMIT");
-        return results;
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
+      const run = batchQueue.then(async () => {
+        db.exec("BEGIN");
+        try {
+          const results: DashboardD1BatchResult[] = [];
+          for (const stmt of statements) results.push(await stmt.run());
+          db.exec("COMMIT");
+          return results;
+        } catch (error) {
+          db.exec("ROLLBACK");
+          throw error;
+        }
+      });
+      batchQueue = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
     },
   };
 }
@@ -2785,6 +2801,111 @@ describe("migrations/0023_removed_logins.sql", () => {
 });
 
 describe("dashboard users store (users.ts)", () => {
+  /** `workspace_members` roles keyed by login, for order-independent asserts. */
+  function membershipRoles(db: DashboardD1 & { raw: Database }): Record<string, string> {
+    const rows = db.raw
+      .query(
+        `SELECT u.github_login AS login, wm.role AS role
+         FROM workspace_members wm JOIN users u ON u.id = wm.user_id
+         ORDER BY u.github_login`,
+      )
+      .all() as Array<{ login: string; role: string }>;
+    return Object.fromEntries(rows.map((row) => [row.login, row.role]));
+  }
+
+  /** Raw seed in the pre-0027 shape: a users row the backfill gave a membership. */
+  function seedBackfilledUser(
+    db: DashboardD1 & { raw: Database },
+    login: string,
+    role: "admin" | "member",
+  ): string {
+    const id = crypto.randomUUID();
+    db.raw
+      .prepare("INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, ?, ?, NULL)")
+      .run(id, login, role, new Date().toISOString());
+    db.raw
+      .prepare("INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, ?, ?)")
+      .run(id, role === "admin" ? "owner" : "member", new Date().toISOString());
+    return id;
+  }
+
+  test("createUser admits the new user into the sole workspace with the 0027 role mapping", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "hubot", role: "member" });
+    expect(membershipRoles(db)).toEqual({ hubot: "member", octocat: "owner" });
+  });
+
+  test("createUser with no workspace row still succeeds (zero membership rows, no error)", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM workspaces"); // no tenant root: the insert affects 0 rows
+    const user = await createUser(db, { login: "hubot", role: "member" });
+    expect((await getUserByLogin(db, "hubot"))?.id).toBe(user.id);
+    expect(membershipRoles(db)).toEqual({});
+  });
+
+  test("removing a backfilled user drops the membership row too (0026 FK no longer blocks the delete)", async () => {
+    const db = createDashboardTestD1();
+    // Two admins so the last-admin guard is not what decides this removal.
+    await createUser(db, { login: "octocat", role: "admin" });
+    expect(await deleteUserUnlessLastAdmin(db, seedBackfilledUser(db, "hubot", "member"), "octocat")).toBe(true);
+    expect(await getUserByLogin(db, "hubot")).toBeNull();
+    expect(membershipRoles(db)).toEqual({ octocat: "owner" });
+    expect(await isLoginRemoved(db, "hubot")).toBe(true);
+  });
+
+  test("the last-admin refusal leaves the membership row and writes no tombstone", async () => {
+    const db = createDashboardTestD1();
+    seedBackfilledUser(db, "octocat", "admin");
+    const soleAdmin = (await getUserByLogin(db, "octocat"))!;
+    expect(await deleteUserUnlessLastAdmin(db, soleAdmin.id, "octocat")).toBe(false);
+    expect(await getUserByLogin(db, "octocat")).not.toBeNull();
+    expect(membershipRoles(db)).toEqual({ octocat: "owner" });
+    expect(removedRows(db)).toEqual([]);
+  });
+
+  test("a role change mirrors the workspace role (admin → owner, member → member)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const member = await createUser(db, { login: "hubot", role: "member" });
+    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "admin")).toBe(true);
+    expect(membershipRoles(db)).toEqual({ hubot: "owner", octocat: "owner" });
+    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "member")).toBe(true);
+    expect(membershipRoles(db)).toEqual({ hubot: "member", octocat: "owner" });
+  });
+
+  test("a refused demotion of the sole admin mirrors nothing into the membership", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    expect(await updateUserRoleUnlessLastAdmin(db, admin.id, "member")).toBe(false);
+    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
+    expect(membershipRoles(db)).toEqual({ octocat: "owner" });
+  });
+
+  test("an invited user reads the workspace App list under strict (membership written by createUser)", async () => {
+    const env = makeEnv({ WORKSPACE_TENANT_MODE: "strict" });
+    const db = dbOf(env);
+    applyMigrationFile(db.raw, "0011_webhook_deliveries.sql"); // the list's health face
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-octocat",
+      githubAppId: CONVERSION.id,
+      name: CONVERSION.name,
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "octocat",
+    });
+    // The invite path: createUser writes the users row AND the membership.
+    await createUser(db, { login: "invitee", role: "member" });
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("invitee", null, SESSION_SECRET)}`;
+
+    const res = await worker.fetch(dashboardRequest("/dashboard/default/api/apps", cookie), env);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { apps: Array<{ slug: string }> };
+    expect(body.apps.map((app) => app.slug)).toEqual(["mstar-inspector-octocat"]);
+  });
+
   test("createUser + getUserByLogin round trip (bootstrapped admin shape)", async () => {
     const db = createDashboardTestD1();
     const created = await createUser(db, { login: "octocat", role: "admin" });
@@ -2967,6 +3088,12 @@ describe("bootstrapDashboardAccess precedence matrix (spec § AuthZ)", () => {
       expect(decision.user.invited_by).toBeNull();
     }
     expect(userCount(db)).toBe(1);
+    // The bootstrapped admin owns the sole workspace in the SAME batch —
+    // otherwise every strict-mode workspace route would 404 the operator.
+    const membership = db.raw
+      .query("SELECT workspace_id, role FROM workspace_members")
+      .all() as Array<{ workspace_id: string; role: string }>;
+    expect(membership).toEqual([{ workspace_id: "default", role: "owner" }]);
   });
 
   test("2b. ADMIN_LOGINS comparison is case-insensitive (GitHub logins are)", async () => {

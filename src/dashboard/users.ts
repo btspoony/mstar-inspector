@@ -6,8 +6,13 @@
  * dashboard/index.ts header contract): NO pipeline/store/review imports.
  * The narrow D1 face below mirrors src/store/types.ts `D1Like`
  * structurally, so a real `D1Database` and the bun:sqlite test double both
- * satisfy it; the store's only multi-write paths are removal (tombstone +
- * delete) and (re-)invite (insert + tombstone clear), each one `batch`.
+ * satisfy it; the store's multi-write paths — removal (tombstone + membership
+ * delete + row delete), (re-)invite (insert + tombstone clear + workspace
+ * membership), role change (users update + membership mirror) and bootstrap
+ * (insert + membership) — are each ONE `batch`. A user and their
+ * `workspace_members` row (migration 0026) therefore always move together:
+ * `users.role` maps to the workspace role exactly like 0027's backfill
+ * (admin → owner, member → member).
  *
  * Bootstrap precedence is EXACT (spec § AuthZ), evaluated in order:
  *   1. user row exists          → allow, zero writes
@@ -68,10 +73,12 @@ export type DashboardD1BatchResult = {
 
 /**
  * Narrow D1 face the users store depends on (mirror of src/store/types.ts
- * `D1Like`): single-statement reads and writes, plus `batch` — the only
- * multi-write paths are a removal (tombstone + row delete) and a (re-)invite
- * (row insert + tombstone clear), each ONE `batch` transaction. A real
- * `D1Database` statement face satisfies this structurally.
+ * `D1Like`): single-statement reads and writes, plus `batch` — the multi-write
+ * paths are a removal (tombstone + membership delete + row delete), a
+ * (re-)invite (row insert + tombstone clear + membership), a role change
+ * (users update + membership mirror) and a bootstrap creation (same as the
+ * invite), each ONE `batch` transaction. A real `D1Database` statement face
+ * satisfies this structurally.
  */
 export type DashboardD1 = {
   prepare(query: string): DashboardD1Statement;
@@ -148,6 +155,11 @@ function isUniqueConstraintError(err: unknown): boolean {
  * automatic OAuth bootstrap does NOT call this function; it uses
  * bootstrapCreateAdmin, which never clears removal state.
  *
+ * The same batch admits the new row into the sole workspace
+ * (`workspace_members`, role mapped like migration 0027), so an invited user is
+ * a workspace member before their first request — under `strict` an
+ * unmapped user is invisible on every workspace route.
+ *
  * Idempotent on an exact-case UNIQUE race: a concurrent callback that won
  * the insert has written THIS user's row — re-read and return it
  * (same first-written-row-wins convention as the D1 ArtifactStore put).
@@ -190,6 +202,21 @@ export async function createUser(
       db
         .prepare("DELETE FROM removed_logins WHERE github_login = ? COLLATE NOCASE")
         .bind(user.login),
+      // The workspace side of the SAME admission (migration 0026/0027): a new
+      // user must be a member of the sole workspace or every strict-mode
+      // workspace route 404s them forever. `users.role` maps like 0027
+      // (admin → owner, member → member). The SELECT joins the row THIS batch
+      // just inserted, so a lost insert race adds no membership; no workspace
+      // row at all affects zero rows (legal), never an error.
+      db
+        .prepare(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+           SELECT w.id, u.id, ?, ?
+           FROM workspaces w JOIN users u ON u.id = ?
+           LIMIT 1
+           ON CONFLICT DO NOTHING`,
+        )
+        .bind(user.role === "admin" ? "owner" : "member", row.created_at, row.id),
     ]);
     inserted = results[0]!;
   } catch (err) {
@@ -247,14 +274,15 @@ export async function isLoginRemoved(db: DashboardD1, login: string): Promise<bo
 }
 
 /**
- * Removal = record the login as removed (migration 0023) AND delete its row,
- * as ONE D1 `batch` — a transaction (d1-batch-atomicity), so a removal can
- * never be recorded without the row actually being gone, or a row deleted
- * without being recorded. The tombstone statement reads the row's login under
- * the SAME `condition` as the DELETE (and both evaluate it inside the one
- * transaction), so a refused removal writes nothing on either side.
- * `removedBy` is the acting admin's login, NULL when the caller has no actor
- * in scope. Returns true when the row was deleted.
+ * Removal = record the login as removed (migration 0023), drop the user's
+ * workspace membership and delete its row, as ONE D1 `batch` — a transaction
+ * (d1-batch-atomicity), so a removal can never be recorded without the row
+ * actually being gone, or a row deleted without being recorded. The tombstone
+ * statement and the membership delete read the row under the SAME `condition`
+ * as the DELETE (and all three evaluate it inside the one transaction), so a
+ * refused removal writes nothing on any side. `removedBy` is the acting
+ * admin's login, NULL when the caller has no actor in scope. Returns true when
+ * the row was deleted.
  */
 async function removeUser(
   db: DashboardD1,
@@ -272,9 +300,20 @@ async function removeUser(
            SET removed_at = excluded.removed_at, removed_by = excluded.removed_by`,
       )
       .bind(new Date().toISOString(), removedBy, id),
+    // The workspace side first: 0026 declares `workspace_members.user_id
+    // REFERENCES users(id)` with no cascade, so the row delete below is
+    // impossible while a membership points at it. Same `condition` (the
+    // EXISTS reads the users row the DELETE still sees), same transaction —
+    // a refused removal leaves the membership intact too.
+    db
+      .prepare(
+        `DELETE FROM workspace_members WHERE user_id = ?
+           AND EXISTS (SELECT 1 FROM users WHERE id = ?${guard})`,
+      )
+      .bind(id, id),
     db.prepare(`DELETE FROM users WHERE id = ?${guard}`).bind(id),
   ]);
-  return results[1]!.meta.changes > 0;
+  return results[2]!.meta.changes > 0;
 }
 
 /**
@@ -322,23 +361,37 @@ export async function deleteUserUnlessLastAdmin(
  * bun:sqlite harness validates the SQL under serialization; the production
  * guarantee is D1's write serialization — a platform behavior, not
  * code-proven mutual exclusion (Needs L4/QA verification).
+ *
+ * The workspace role is the same fact (migration 0026/0027): the second
+ * statement of the SAME batch mirrors it into `workspace_members`, guarded by
+ * `users.role = <new role>` so a REFUSED demotion (the sole admin keeps
+ * 'admin') mirrors nothing. Mapping matches 0027: admin → owner, member →
+ * member.
  */
 export async function updateUserRoleUnlessLastAdmin(
   db: DashboardD1,
   id: string,
   role: "admin" | "member",
 ): Promise<boolean> {
-  const result = await db
-    .prepare(
-      `UPDATE users
-       SET role = ?
-       WHERE id = ?
-         AND role <> ?
-         AND NOT (role = 'admin' AND ? = 'member' AND (SELECT COUNT(*) FROM users WHERE role = 'admin') <= 1)`,
-    )
-    .bind(role, id, role, role)
-    .run();
-  return result.meta.changes > 0;
+  const results = await db.batch([
+    db
+      .prepare(
+        `UPDATE users
+         SET role = ?
+         WHERE id = ?
+           AND role <> ?
+           AND NOT (role = 'admin' AND ? = 'member' AND (SELECT COUNT(*) FROM users WHERE role = 'admin') <= 1)`,
+      )
+      .bind(role, id, role, role),
+    db
+      .prepare(
+        `UPDATE workspace_members SET role = ?
+         WHERE user_id = ? AND role <> ?
+           AND EXISTS (SELECT 1 FROM users WHERE id = ? AND role = ?)`,
+      )
+      .bind(role === "admin" ? "owner" : "member", id, role === "admin" ? "owner" : "member", id, role),
+  ]);
+  return results[0]!.meta.changes > 0;
 }
 
 /** Total membership — bootstrap rule 3 keys on the EMPTY table (any role). */
@@ -375,6 +428,12 @@ export type BootstrapDecision =
  * existing row (exact-case or case-variant race) is a member and is allowed,
  * no row at all means the insert was refused. The removal record is compared
  * NOCASE, like every other login lookup (migration 0023).
+ *
+ * The workspace membership rides the SAME batch (createUser's shape): its
+ * SELECT joins the users row the first statement just inserted, so a refused
+ * insert leaves the deny branch with zero rows written on either side. Without
+ * it a bootstrapped admin has no membership and every strict-mode workspace
+ * route 404s them.
  */
 async function bootstrapCreateAdmin(db: DashboardD1, login: string): Promise<BootstrapDecision> {
   const row: DashboardUserRow = {
@@ -386,16 +445,26 @@ async function bootstrapCreateAdmin(db: DashboardD1, login: string): Promise<Boo
   };
   let changes: number;
   try {
-    const result = await db
-      .prepare(
-        `INSERT INTO users (id, github_login, role, created_at, invited_by)
-         SELECT ?, ?, 'admin', ?, NULL
-         WHERE NOT EXISTS (SELECT 1 FROM removed_logins WHERE github_login = ? COLLATE NOCASE)
-         ON CONFLICT (github_login) DO NOTHING`,
-      )
-      .bind(row.id, row.github_login, row.created_at, row.github_login)
-      .run();
-    changes = result.meta.changes;
+    const results = await db.batch([
+      db
+        .prepare(
+          `INSERT INTO users (id, github_login, role, created_at, invited_by)
+           SELECT ?, ?, 'admin', ?, NULL
+           WHERE NOT EXISTS (SELECT 1 FROM removed_logins WHERE github_login = ? COLLATE NOCASE)
+           ON CONFLICT (github_login) DO NOTHING`,
+        )
+        .bind(row.id, row.github_login, row.created_at, row.github_login),
+      db
+        .prepare(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+           SELECT w.id, u.id, 'owner', ?
+           FROM workspaces w JOIN users u ON u.id = ?
+           LIMIT 1
+           ON CONFLICT DO NOTHING`,
+        )
+        .bind(row.created_at, row.id),
+    ]);
+    changes = results[0]!.meta.changes;
   } catch (err) {
     // D1 raises where bun:sqlite absorbs into ON CONFLICT: the row exists (a
     // case-variant race) — classify it below instead of 500ing the callback.
