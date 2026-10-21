@@ -238,24 +238,20 @@ jobs:
 
       # The tenant rollout replays the SAME tag twice — Deploy A `off`, Deploy
       # B `strict` — so the mode is a dispatch input, never a code edit. A
-      # `release` event carries no input → off. An illegal value fails HERE,
-      # before any mutating step.
+      # ROUTINE arm (`release: published`) carries no input: it takes the
+      # steady-state variable `vars.WORKSPACE_TENANT_MODE`, because reading the
+      # mode from the event would demote a `strict` installation to `off` on
+      # the next ordinary release without saying so. Resolving to `off` on a
+      # routine arm warns and records `tenant_mode_change` (the live mode was
+      # never observed, so no honest strict→off claim is possible). An illegal
+      # value fails HERE, before any mutating step.
       - name: Resolve tenant mode
         id: tenant
         env:
           TENANT_MODE: ${{ inputs.tenant_mode }}
-        run: |
-          set -euo pipefail
-          MODE="${TENANT_MODE:-off}"
-          case "$MODE" in
-            off|strict) ;;
-            *)
-              echo "::error::invalid tenant_mode '$MODE' — expected off or strict"
-              exit 1
-              ;;
-          esac
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
-          echo "tenant_mode=$MODE"
+          STEADY_TENANT_MODE: ${{ vars.WORKSPACE_TENANT_MODE }}
+          ROUTINE_ARM: ${{ github.event_name != 'workflow_dispatch' }}
+        run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE" "$ROUTINE_ARM"
 
       # Replay identity (before anything is deployed). A `strict` run IS Deploy
       # B, so it must name the SHA Deploy A shipped — the tag assertion alone
@@ -513,6 +509,7 @@ jobs:
           # deploy that bound it, never from the dispatch input.
           SERVING_MODE: ${{ steps.serving.outputs.mode }}
           DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          SERVING_OUTCOME: ${{ steps.serving.outcome }}
           EXPECTED_DIGEST: ${{ inputs.expected_container_digest }}
           RUN_SHA: ${{ github.sha }}
         run: |
@@ -530,8 +527,12 @@ jobs:
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
           # Status keys: scripts/deploy-status.sh owns the decision (and is
-          # behaviour-tested) — this step only wires the outcome in.
-          bash scripts/deploy-status.sh "$DEPLOY_OUTCOME" "$RUN_SHA" "$RUN_SHA" >> "$GITHUB_STEP_SUMMARY"
+          # behaviour-tested) — this step only wires the outcomes in. BOTH
+          # version-creating deploys must have succeeded: `steps.deploy` builds
+          # the bindings, `steps.serving` creates the version that actually
+          # serves, so certifying `deployed` from the first one alone would
+          # offer a replay source for a rollout that never landed.
+          bash scripts/deploy-status.sh "$DEPLOY_OUTCOME" "$RUN_SHA" "$RUN_SHA" "$SERVING_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
           # Replay audit, never a silent pass: the sandbox image rebuilds from a
           # rolling apt base, so byte-identical output is not provable. A
           # different digest is reported (and warned) with that reason.
