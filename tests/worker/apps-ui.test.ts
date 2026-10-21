@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
 import { matchSpaRoute } from "../../src/spa/routes";
+import { apiBase } from "../../src/spa/workspace-base";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
@@ -574,7 +575,11 @@ describe("Apps list → App settings wayfinding", () => {
   test("each App row carries the /dashboard/apps/:slug detail link, and that route resolves as App detail", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
     // The link target is the detail route (App detail IA).
-    expect(source).toContain("const href = `/dashboard/apps/${app.slug}`;");
+    expect(source).toContain("const href = `${apiBase()}/apps/${app.slug}`;");
+    // Legacy navigation keeps the historical detail path: the base is empty
+    // of a workspace segment when the current page is not workspace-scoped.
+    expect(apiBase("/dashboard/apps")).toBe("/dashboard");
+    expect(apiBase("/dashboard/acme/apps")).toBe("/dashboard/acme");
     expect(source).not.toContain("/dashboard/apps/${app.slug}/settings");
     // The visible per-row destination label comes from the dictionary —
     // detail semantics, and the settings key is retired.
