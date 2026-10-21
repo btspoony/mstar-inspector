@@ -20,7 +20,7 @@
  * DASHBOARD_ENCRYPTION_KEY → the encryption-dependent commit and settings
  * routes 5xx with the hold kept / nothing stored (spec § Crypto envelope).
  */
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type Handler } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Env } from "../worker/env";
 import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
@@ -123,6 +123,7 @@ import {
   manifestErrorPage,
   manifestOnboardingPage,
   manifestStartPage,
+  notFoundPage,
   removedPage,
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
@@ -171,7 +172,15 @@ function pinnedPostMutationResponse(
   message: string,
   status: 200 | 400 | 404 | 409 | 500 = 200,
 ): Response {
-  if (wantsHtmlFormNavigation(c)) {
+  const htmlNavigation = wantsHtmlFormNavigation(c);
+  // Tenant invisibility is final on a workspace-scoped request: an unknown or
+  // cross-workspace App answers a real 404 (rendered page on navigation),
+  // never the legacy redirect — a redirect would confirm nothing but still
+  // move the operator into a surface the request cannot see.
+  if (status === 404 && c.get("tenant")) {
+    return htmlNavigation ? c.html(notFoundPage(requestLocale(c)), 404) : c.text(message, status);
+  }
+  if (htmlNavigation) {
     return c.redirect(redirectTo, 302);
   }
   return c.text(message, status);
@@ -302,7 +311,18 @@ function classifyDashboardPath(pathname: string): DashboardPathClass {
   return { kind: "other" };
 }
 
-dashboardApp.use("*", async (c, next) => {
+/**
+ * The tenant route-family gate. Mounted twice: by `src/worker/index.ts` on
+ * `/dashboard/*` BEFORE SPA dispatch (so a strict legacy-App HTML request
+ * cannot be served by the SPA shell before the 404 decision) and by
+ * `dashboardApp` ahead of its routes. The first run wins — the second must not
+ * re-resolve the workspace.
+ */
+export const dashboardTenantGate: Handler<{
+  Bindings: Env;
+  Variables: DashboardVariables;
+}> = async (c, next) => {
+  if (c.get("tenant")) return next();
   const mode = tenantModeOf(c.env);
   const target = classifyDashboardPath(c.req.path);
   if (target.kind === "legacy-app") {
@@ -321,7 +341,9 @@ dashboardApp.use("*", async (c, next) => {
   // the routing gate only proves the workspace exists.
   c.set("tenant", { workspaceId: workspace.id, slug: workspace.slug, role: null });
   return next();
-});
+};
+
+dashboardApp.use("*", dashboardTenantGate);
 
 // --- Per-request allowlist guard (spec § AuthZ, lock L5) ---
 //
@@ -2821,8 +2843,18 @@ const APP_ROUTES: ReadonlyArray<{
   { method: "get", path: "/api/apps/:slug/insights/summary", handler: appInsightsRoute },
 ];
 
-function workspaceOnly(handler: AppRouteHandler): AppRouteHandler {
-  return (c) => (c.get("tenant") ? handler(c) : c.notFound());
+/**
+ * Registration wrapper for the workspace copy of a route. Hono matches
+ * `:workspaceSlug` without knowing the reserved set, so a request that reached
+ * this registration without a tenant scope (`/login/apps/...`, or any path the
+ * gate classified `other`) falls through to the ORIGINAL handling — the legacy
+ * route or the placeholder catch-all — exactly as before the workspace block
+ * existed. A real workspace route always carries a scope.
+ */
+function workspaceOnly(
+  handler: AppRouteHandler,
+): Handler<{ Bindings: Env; Variables: DashboardVariables }> {
+  return (c, next) => (c.get("tenant") ? handler(c) : next());
 }
 
 for (const route of APP_ROUTES) {

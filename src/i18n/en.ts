@@ -55,6 +55,9 @@ export const en = {
       forbiddenTitle: "Forbidden",
       forbiddenBody:
         "This page is restricted to dashboard admins. You are signed in as {login} — back to /dashboard.",
+      notFoundTitle: "Not found",
+      notFoundBody:
+        "This page does not exist, or it is not available in this workspace. Back to /dashboard.",
       signInErrorTitle: "Sign-in error",
       signInErrorBody:
         "Sign-in failed. {message} No session was created. Return to /dashboard/login to try again.",

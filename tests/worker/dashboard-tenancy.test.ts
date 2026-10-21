@@ -18,6 +18,7 @@ import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -52,10 +53,11 @@ function envFor(db: TestD1, mode?: "off" | "strict"): Env {
 async function authedRequest(
   path: string,
   login: string,
-  init: { method?: string; body?: string } = {},
+  init: { method?: string; body?: string; accept?: string } = {},
 ): Promise<Request> {
   const session = await createSessionValue(login, null, SESSION_SECRET);
   const headers: Record<string, string> = { Cookie: `${SESSION_COOKIE}=${session}` };
+  if (init.accept !== undefined) headers["Accept"] = init.accept;
   if (init.body !== undefined) headers["Content-Type"] = "application/x-www-form-urlencoded";
   return new Request(`https://worker.local${path}`, {
     method: init.method ?? "GET",
@@ -344,5 +346,126 @@ describe("WORKSPACE_TENANT_MODE=strict — reserved slugs are never captured", (
       envFor(db, "strict"),
     );
     expect(res.status).toBe(200);
+  });
+});
+
+describe("invisible App stays a 404 on both faces (never a redirect)", () => {
+  test("strict: HTML GET and POST on a cross-workspace App answer 404 with no Location", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+
+    const get = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/other-app/onboarding", "dana", {
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(get.status).toBe(404);
+    expect(get.headers.get("Location")).toBeNull();
+    expect(get.headers.get("Content-Type")).toContain("text/html");
+
+    const post = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/other-app/disable", "dana", {
+        method: "POST",
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(post.status).toBe(404);
+    expect(post.headers.get("Location")).toBeNull();
+  });
+
+  test("strict: a fetch POST on an invisible App answers the legacy 404 body", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/other-app/disable", "dana", { method: "POST" }),
+      envFor(db, "strict"),
+    );
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe("unknown app");
+  });
+
+  test("off: the legacy HTML GET and POST still redirect exactly as today", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "off");
+    const cases: Array<{ path: string; init: { method?: string; accept: string } }> = [
+      { path: "/dashboard/apps/ghost-app/onboarding", init: { accept: "text/html" } },
+      { path: "/dashboard/apps/ghost-app/disable", init: { method: "POST", accept: "text/html" } },
+    ];
+    for (const { path, init } of cases) {
+      const res = await worker.fetch(await authedRequest(path, "octocat", init), env);
+      expect(res.status, path).toBe(302);
+      expect(res.headers.get("Location"), path).toBe("/dashboard");
+    }
+  });
+});
+
+describe("off: unmatched reserved-shaped paths keep their original answer", () => {
+  test("a POST under a reserved first segment still reaches the placeholder catch-all", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/login/apps/anything/disable", "octocat", { method: "POST" }),
+      envFor(db, "off"),
+    );
+    expect(res.status).toBe(405);
+    expect(await res.text()).toBe("placeholder actions are not implemented");
+  });
+
+  test("a GET under a reserved first segment is still the plain 404", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/login/apps/anything/onboarding", "octocat"),
+      envFor(db, "off"),
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
+  test("strict: legacy App HTML GET and HEAD answer 404, not the SPA shell", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db, "strict"));
+    for (const path of ["/dashboard/apps", "/dashboard/apps/acme-app/settings"]) {
+      const get = await worker.fetch(
+        await authedRequest(path, "octocat", { accept: "text/html" }),
+        env,
+      );
+      expect(get.status, path).toBe(404);
+      expect(await get.text()).not.toContain("window.__BOOT__");
+
+      const head = await worker.fetch(
+        await authedRequest(path, "octocat", { method: "HEAD", accept: "text/html" }),
+        env,
+      );
+      expect(head.status, path).toBe(404);
+    }
+  });
+
+  test("strict: a workspace App page still serves with ASSETS bound", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db, "strict"));
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/acme-app/onboarding", "dana", {
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("acme-app");
+    expect(body).not.toContain("window.__BOOT__");
+  });
+
+  test("off: the legacy SPA pages still serve with ASSETS bound", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db, "off"));
+    for (const path of ["/dashboard/apps", "/dashboard/apps/acme-app/settings"]) {
+      const res = await worker.fetch(
+        await authedRequest(path, "octocat", { accept: "text/html" }),
+        env,
+      );
+      expect(res.status, path).toBe(200);
+      expect(await res.text()).toContain("window.__BOOT__");
+    }
   });
 });
