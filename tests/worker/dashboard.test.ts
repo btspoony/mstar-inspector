@@ -1978,6 +1978,19 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
+  test("strict: a successful commit lands on the workspace onboarding URL (the legacy App path is retired there)", async () => {
+    // 0026 seeds exactly one workspace (`default`), and the commit's createApp
+    // maps the new App into it — the same workspace the landing page names.
+    const env = commitEnv({ WORKSPACE_TENANT_MODE: "strict" });
+    const res = await doCommit({ env, holdValue: await freshHold() });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe(
+      "/dashboard/default/apps/mstar-inspector-octocat/onboarding",
+    );
+    expectHoldExpired(res);
+    expect(appRowCount(env)).toBe(1);
+  });
+
   test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row", async () => {
     // 1. Callback with a key-less env: the auto-commit fails at encryption and
     // parks the hold cookie (500, zero rows). The signed state carries the

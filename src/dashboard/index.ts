@@ -66,6 +66,7 @@ import {
 } from "./apps-store";
 import {
   getMembership,
+  getSoleWorkspace,
   getWorkspaceBySlug,
   type WorkspaceRole,
 } from "./workspace-store";
@@ -128,7 +129,7 @@ import {
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
 import { isLocale, resolveLocale, serializeLocaleCookie, t, type DictionaryKey, type Locale } from "../i18n";
-import { wantsHtml } from "../spa/routes";
+import { RESERVED_WORKSPACE_SLUGS, wantsHtml } from "../spa/routes";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
 
 /**
@@ -175,6 +176,23 @@ function scopedAppPath(c: DashboardContext, path: string): string {
     return `/dashboard/${tenant.slug}${path.slice(DASHBOARD_MOUNT.length)}`;
   }
   return path;
+}
+
+/**
+ * The post-commit landing page. The manifest flow's own request carries no
+ * tenant scope (its routes are mode-independent), so `scopedAppPath` cannot
+ * rewrite this target: under `strict` the legacy App family answers 404, and
+ * the App's onboarding page is named by the sole workspace the commit just
+ * mapped it into. `off` keeps today's target. A commit that succeeded always
+ * minted an `app_workspaces` row, which `createApp` only does when exactly one
+ * workspace exists, so the strict read always resolves.
+ */
+async function manifestSuccessTarget(c: DashboardContext, appSlug: string): Promise<string> {
+  const legacy = `/dashboard/apps/${appSlug}/onboarding`;
+  if (tenantModeOf(c.env.WORKSPACE_TENANT_MODE) !== "strict") return legacy;
+  const db = dashboardD1(c.env);
+  const workspace = db ? await getSoleWorkspace(db) : null;
+  return workspace === null ? legacy : `/dashboard/${workspace.slug}/apps/${appSlug}/onboarding`;
 }
 
 function isSpaFetchPost(c: DashboardContext): boolean {
@@ -283,19 +301,6 @@ async function resolveAvailableSlug(db: DashboardD1, base: string): Promise<stri
 // Both App route blocks register from ONE handler table (APP_ROUTES below), so
 // no handler body exists twice.
 const DASHBOARD_MOUNT = "/dashboard";
-
-/** First path segments that can never name a workspace (today's routes). */
-const RESERVED_WORKSPACE_SLUGS = new Set([
-  "apps",
-  "api",
-  "oauth",
-  "members",
-  "login",
-  "logout",
-  "manifest",
-  "locale",
-  "healthz",
-]);
 
 type DashboardPathClass =
   | { kind: "workspace"; slug: string }
@@ -685,7 +690,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   switch (outcome.kind) {
     case "success": {
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
-      return c.redirect(`/dashboard/apps/${outcome.row.slug}/onboarding`, 302);
+      return c.redirect(await manifestSuccessTarget(c, outcome.row.slug), 302);
     }
     case "login_mismatch": {
       // Unreachable here (the hold is minted for this session) — same burn
@@ -748,7 +753,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       // Success: the hold is single-success — burned now that the row exists;
       // the operator lands on the App's onboarding page.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      return c.redirect(`/dashboard/apps/${outcome.row.slug}/onboarding`, 302);
+      return c.redirect(await manifestSuccessTarget(c, outcome.row.slug), 302);
     }
     case "login_mismatch": {
       // The hold is bound to the login that ran the callback: a different
