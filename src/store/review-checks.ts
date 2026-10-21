@@ -1216,6 +1216,9 @@ export async function listReenableableCheckPairs(
   const resumable: { appId: string; installationId: number }[] = [];
   for (const candidate of candidates) {
     const row = await db
+      // shortcut: tenant-bypass — per-pair Check resume probe selecting status
+      // flags only; no tenant-facing field. Upgrade: tenant-filter it once the
+      // check store becomes workspace-scoped.
       .prepare(
         `SELECT rc.holder, rc.last_error, ga.status AS app_status, ga.deleted_at AS app_deleted,
                 ga.review_enabled AS review_enabled
