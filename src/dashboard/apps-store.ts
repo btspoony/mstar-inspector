@@ -139,6 +139,8 @@ export type GithubAppRow = {
   sandbox_image_id: string;
   created_at: string;
   updated_at: string;
+  /** Owning workspace (migration 0026); present only under `mode: "strict"`. */
+  workspace_id?: string;
 };
 
 export type GithubAppStatus = "active" | "disabled";
@@ -304,8 +306,34 @@ type AppsStoreD1 = {
   batch(statements: AppsStoreStatement[]): Promise<AppsStoreBatchResult[]>;
 };
 
+/**
+ * Tenant read face (migration 0026). `off` = today's single-table reads,
+ * byte-identical; `strict` = every execution-facing App read INNER JOINs
+ * `app_workspaces`, so an App with no workspace mapping is invisible.
+ */
+export type TenantMode = "off" | "strict";
+
+/**
+ * The three execution-facing App reads, per mode. `off` is FROZEN — do not
+ * reword it; call sites and tests assert these exact strings.
+ */
+export const APP_READ_SQL = {
+  getAppById: {
+    off: `SELECT * FROM github_apps WHERE id = ?`,
+    strict: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.id = ?`,
+  },
+  getAppBySlug: {
+    off: `SELECT * FROM github_apps WHERE slug = ?`,
+    strict: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.slug = ?`,
+  },
+  listApps: {
+    off: `SELECT * FROM github_apps WHERE deleted_at IS NULL ORDER BY created_at DESC, id`,
+    strict: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
+  },
+} as const;
+
 /** Create the github_apps / app_installations store over one D1 handle. */
-export function createAppsStore(db: AppsStoreD1) {
+export function createAppsStore(db: AppsStoreD1, mode: TenantMode = "off") {
   /**
    * BATCHED health-read face (QC wave 1, W-1): the Apps list
    * renders every row's health on each POST re-render, so the per-App
@@ -415,20 +443,33 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /** By slug; resolves soft-deleted and disabled rows too (callers filter). */
     async getAppBySlug(slug: string): Promise<GithubAppRow | null> {
-      return db.prepare(`SELECT * FROM github_apps WHERE slug = ?`).bind(slug).first<GithubAppRow>();
+      return db
+        .prepare(APP_READ_SQL.getAppBySlug[mode])
+        .bind(slug)
+        .first<GithubAppRow>();
     },
 
     /** By id; resolves soft-deleted and disabled rows too (callers filter). */
     async getAppById(id: string): Promise<GithubAppRow | null> {
-      return db.prepare(`SELECT * FROM github_apps WHERE id = ?`).bind(id).first<GithubAppRow>();
+      return db.prepare(APP_READ_SQL.getAppById[mode]).bind(id).first<GithubAppRow>();
     },
 
     /** Dashboard list: non-deleted rows, newest first (stable id tiebreak). */
     async listApps(): Promise<GithubAppRow[]> {
-      const res = await db
-        .prepare(`SELECT * FROM github_apps WHERE deleted_at IS NULL ORDER BY created_at DESC, id`)
-        .all<GithubAppRow>();
+      const res = await db.prepare(APP_READ_SQL.listApps[mode]).all<GithubAppRow>();
       return res.results;
+    },
+
+    /**
+     * The App's stored sandbox image id (migration 0018). No tenant join: it
+     * returns a configuration value, never a tenant-facing field.
+     */
+    async getSandboxImageId(appId: string): Promise<string | null> {
+      const row = await db
+        .prepare(`SELECT sandbox_image_id FROM github_apps WHERE id = ?`)
+        .bind(appId)
+        .first<{ sandbox_image_id: string }>();
+      return row?.sandbox_image_id ?? null;
     },
 
     /**

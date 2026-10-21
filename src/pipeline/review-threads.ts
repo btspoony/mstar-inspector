@@ -811,6 +811,9 @@ type AppContext = { octokit: GraphqlOctokit; botLogin: string; githubAppId: numb
  */
 async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise<AppContext | null> {
   try {
+    // shortcut: tenant-bypass — consumer App resolution by exact (app_id,
+    // installation_id); no tenant-facing field. Upgrade: tenant-filter it once
+    // the consumer becomes workspace-scoped.
     const row = await deps.db
       .prepare(
         `SELECT ga.github_app_id AS github_app_id, ga.slug AS slug, ga.status AS status, ga.deleted_at AS deleted_at
