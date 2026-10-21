@@ -6,7 +6,10 @@
  * `off` the workspace-shaped paths do not exist (404) and the legacy App face
  * behaves exactly as before; under `strict` the legacy App face is 404 and the
  * workspace paths serve, with authorization decided by the actor's workspace
- * role instead of `canManageApp`'s creator-or-deployment-admin rule.
+ * role instead of `canManageApp`'s creator-or-deployment-admin rule. The
+ * routing gate only CLASSIFIES the slug — the workspace row and the membership
+ * are resolved after the session/user read, so an anonymous request learns
+ * nothing about slug existence (pinned below).
  *
  * The fixture runs against the full migration set (the store helper walks
  * `migrations/`), so 0026/0027 are real: `default` is seeded by 0026 and the
@@ -19,6 +22,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
+import { apiBase } from "../../src/spa/workspace-base";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -229,6 +233,48 @@ describe("WORKSPACE_TENANT_MODE=strict — legacy App paths are retired", () => 
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
+
+  test("an anonymous request cannot tell an existing workspace from a missing one (no pre-auth oracle)", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    // `acme` exists, `ghost` does not. Both must answer the same 302 to login:
+    // the gate classifies the slug without a D1 read, and the workspace row is
+    // only resolved after the session + user read.
+    const answers: Array<{ status: number; location: string | null; body: string }> = [];
+    for (const slug of ["acme", "ghost"]) {
+      const res = await worker.fetch(
+        new Request(`https://worker.local/dashboard/${slug}/api/apps`),
+        env,
+      );
+      answers.push({
+        status: res.status,
+        location: res.headers.get("Location"),
+        body: await res.text(),
+      });
+    }
+    expect(answers[0]).toEqual(answers[1]);
+    expect(answers[0]).toMatchObject({ status: 302, location: "/dashboard/login" });
+  });
+
+  test("the tenant gate issues no workspace read for an anonymous request", async () => {
+    const { db } = tenancyFixture();
+    const statements: string[] = [];
+    // Record every statement the request prepares; a classified-only gate must
+    // not touch `workspaces` before the session read.
+    const observed = {
+      ...db,
+      prepare(query: string) {
+        statements.push(query);
+        return db.prepare(query);
+      },
+    } as TestD1;
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/acme/api/apps"),
+      envFor(observed, "strict"),
+    );
+    expect(res.status).toBe(302);
+    expect(statements.filter((sql) => sql.includes("FROM workspaces"))).toEqual([]);
+  });
 });
 
 describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
@@ -323,6 +369,84 @@ describe("WORKSPACE_TENANT_MODE=strict — manage is the workspace role", () => 
       env,
     );
     expect(res.status).toBe(403); // legacy rule: not the creator, not a deployment admin
+  });
+});
+
+describe("WORKSPACE_TENANT_MODE=strict — success redirects stay in the workspace route family", () => {
+  const SETTINGS_BODY = "op=save-sandbox-image&sandbox_image_id=omp";
+
+  test("a native settings form post answers 302 to the workspace-prefixed settings URL", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/acme-app/settings", "carol", {
+        method: "POST",
+        body: SETTINGS_BODY,
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps/acme-app/settings");
+  });
+
+  test("a native validation 400 keeps the same workspace-prefixed target", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/acme-app/settings", "carol", {
+        method: "POST",
+        body: "op=save-sandbox-image&sandbox_image_id=no-such-image",
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps/acme-app/settings");
+  });
+
+  test("a native pause form post redirects to the workspace apps list (Referer-derived)", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/acme-app/pause", "carol", {
+        method: "POST",
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+  });
+
+  test("the SPA fetch form post keeps its plain 2xx body (no redirect)", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    const request = await authedRequest("/dashboard/acme/apps/acme-app/settings", "carol", {
+      method: "POST",
+      body: SETTINGS_BODY,
+      accept: "text/html",
+    });
+    request.headers.set("X-Mstar-Spa-Post", "1");
+    const res = await worker.fetch(request, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Location")).toBeNull();
+    expect(await res.text()).toContain("Saved the omp runtime image for acme-app.");
+  });
+
+  test("off: the same native post still redirects to the legacy settings URL", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "off");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/apps/acme-app/settings", "octocat", {
+        method: "POST",
+        body: SETTINGS_BODY,
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/apps/acme-app/settings");
   });
 });
 
@@ -456,6 +580,33 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(body).not.toContain("window.__BOOT__");
   });
 
+  test("strict: the workspace Apps pages serve the shell over the workspace API base", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db, "strict"));
+    for (const path of ["/dashboard/acme/apps", "/dashboard/acme/apps/acme-app"]) {
+      const res = await worker.fetch(
+        await authedRequest(path, "dana", { accept: "text/html" }),
+        env,
+      );
+      expect(res.status, path).toBe(200);
+      expect(await res.text(), path).toContain("window.__BOOT__");
+      // The shell derives its API base from THIS pathname: every read and link
+      // on the page hangs off /dashboard/acme (the legacy App family 404s here).
+      expect(apiBase(path), path).toBe("/dashboard/acme");
+    }
+  });
+
+  test("off: a workspace Apps page answers 404 even with ASSETS bound (gate before dispatch)", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db, "off"));
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps", "octocat", { accept: "text/html" }),
+      env,
+    );
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("window.__BOOT__");
+  });
+
   test("off: the legacy SPA pages still serve with ASSETS bound", async () => {
     const { db } = tenancyFixture();
     const env = withSpaAssets(envFor(db, "off"));
@@ -467,6 +618,104 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
       expect(res.status, path).toBe(200);
       expect(await res.text()).toContain("window.__BOOT__");
     }
+  });
+});
+
+describe("strict: the post-authentication landing is the workspace Apps page", () => {
+  /** ONE live workspace — the M1 shape `getSoleWorkspace` resolves. */
+  function soleWorkspaceFixture() {
+    const db = createMigratedTestD1();
+    const userId = seedUser(db, "octocat", "admin");
+    seedMembership(db, "default", userId, "owner");
+    return { db };
+  }
+
+  test("a signed-in HTML GET /dashboard 302s to the workspace Apps list, not the legacy root", async () => {
+    const { db } = soleWorkspaceFixture();
+    const env = withSpaAssets(envFor(db, "strict"));
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    // The dead-end shell is never served on this path.
+    expect(await res.text()).not.toContain("window.__BOOT__");
+  });
+
+  test("an unsigned /dashboard still 302s into the login page", async () => {
+    const { db } = soleWorkspaceFixture();
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard", { headers: { Accept: "text/html" } }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  test("an already-signed-in login bounce lands on the same workspace Apps page", async () => {
+    const { db } = soleWorkspaceFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/login", "octocat"),
+      envFor(db, "strict"),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+  });
+
+  test("no sole workspace → the legacy root shell is kept (no guessed slug)", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db, "strict"));
+    const warns: string[] = [];
+    const original = console.warn;
+    console.warn = (msg: unknown) => {
+      warns.push(String(msg));
+    };
+    try {
+      const res = await worker.fetch(
+        await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
+        env,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("window.__BOOT__");
+    } finally {
+      console.warn = original;
+    }
+    expect(warns.some((line) => line.includes('"reason":"no_sole_workspace"'))).toBe(true);
+  });
+
+  test("off: the legacy root shell is unchanged", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "off")),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("window.__BOOT__");
+  });
+});
+
+describe("strict: the onboarding CTA stays inside the workspace", () => {
+  test("the Open Settings CTA targets the workspace settings page", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/acme-app/onboarding", "dana"),
+      envFor(db, "strict"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('href="/dashboard/acme/apps/acme-app/settings"');
+    expect(body).not.toContain('href="/dashboard/apps/acme-app/settings"');
+  });
+
+  test("off: the CTA keeps the legacy href", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/apps/acme-app/onboarding", "octocat"),
+      envFor(db, "off"),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('href="/dashboard/apps/acme-app/settings"');
   });
 });
 

@@ -31,6 +31,7 @@ import type { PipelineEnv } from "../pipeline/consumer";
 import { classifyWebhook, WEBHOOK_BODY_LIMIT, type WebhookOutcome } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
 import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
+import { tenantModeOf, type TenantMode } from "./tenant-mode";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
 import { trailingSlashRedirect } from "./redirects";
@@ -242,7 +243,22 @@ app.post("/webhook/:appSlug", async (c) => {
     );
     return c.text("db binding missing", 500);
   }
-  const appsStore = createAppsStore(db);
+  // The webhook's slug lookup is a tenant-facing `github_apps` read (AC2):
+  // resolve the deploy var through the SAME resolver as the dashboard and the
+  // consumer, so a strict deployment classifies an unmapped App as unknown and
+  // answers 404 with zero decrypt, zero delivery row and zero enqueue.
+  let tenantMode: TenantMode;
+  try {
+    tenantMode = tenantModeOf(c.env.WORKSPACE_TENANT_MODE);
+  } catch (error) {
+    webhookWarn(
+      "invalid_workspace_tenant_mode",
+      (error as Error).message,
+      "per-App webhook rejected with 500 — invalid WORKSPACE_TENANT_MODE (fail-closed)",
+    );
+    return c.text((error as Error).message, 500);
+  }
+  const appsStore = createAppsStore(db, tenantMode);
 
   // Slug lookup: exactly one active, non-deleted App may serve this route.
   // Unknown / disabled / soft-deleted are all 404 with zero side effects

@@ -21,12 +21,13 @@ export type WorkspaceRow = {
   name: string;
 };
 
-/** Narrow D1 face: a single-row read is all this module ever issues. */
+/** Narrow D1 face: single-row reads plus the one bounded two-row probe below. */
 type WorkspaceStoreD1 = {
   prepare(query: string): {
     bind(...values: unknown[]): {
       first<T = Record<string, unknown>>(): Promise<T | null>;
     };
+    all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
   };
 };
 
@@ -58,4 +59,17 @@ export async function getMembership(
     .bind(workspaceId, userId)
     .first<{ role: WorkspaceRole }>();
   return row?.role ?? null;
+}
+
+/**
+ * The deployment's single live workspace, or null when it does not carry
+ * exactly one. M1 is single-workspace (the same assumption `createApp` makes);
+ * the mode-independent manifest flow has no tenant scope on its request, so its
+ * strict-mode landing page names the workspace through this read.
+ */
+export async function getSoleWorkspace(db: WorkspaceStoreD1): Promise<WorkspaceRow | null> {
+  const rows = await db
+    .prepare(`SELECT id, slug, name FROM workspaces WHERE deleted_at IS NULL LIMIT 2`)
+    .all<WorkspaceRow>();
+  return rows.results.length === 1 ? rows.results[0]! : null;
 }

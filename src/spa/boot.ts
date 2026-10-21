@@ -6,8 +6,10 @@
  * the document. The session cookie is HttpOnly, so the client cannot read
  * login/role itself — this injection is the only bootstrap path.
  *
- * Shape is intentionally small (locale + identity). Page data still comes
- * from legacy `/dashboard/api/*`.
+ * Shape is intentionally small (locale + identity). Page data comes from the
+ * dashboard API under the page's own workspace prefix (`workspace-base.ts`),
+ * so no workspace identity is duplicated here — a boot-injected base would go
+ * stale on the first client-side navigation.
  */
 import type { Locale } from "../i18n";
 

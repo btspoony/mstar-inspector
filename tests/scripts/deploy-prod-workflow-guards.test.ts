@@ -393,6 +393,7 @@ describe("deploy-prod.yml guards", () => {
       "Re-run workspace backfill (0027, idempotent)",
       "Assert zero orphan Apps (pre-deploy gate)",
       "Deploy Worker (prod)",
+      "Deploy serving version (prod, mode var)",
       "Re-capture live Worker version",
       "Assert zero orphan Apps (post-deploy)",
     ]) {
@@ -406,7 +407,7 @@ describe("deploy-prod.yml guards", () => {
     expect(actionSteps.length).toBe(3);
     for (const s of actionSteps) expect([s.uses, secretsOf(s)]).toEqual([s.uses, []]);
 
-    // and no OTHER step smuggles one in: the ten above are the full carrier set
+    // and no OTHER step smuggles one in: the eleven above are the full carrier set
     expect(
       steps
         .filter((s) => secretsOf(s).length > 0)
@@ -418,6 +419,7 @@ describe("deploy-prod.yml guards", () => {
         "Assert required secrets are set",
         "Assert zero orphan Apps (post-deploy)",
         "Assert zero orphan Apps (pre-deploy gate)",
+        "Deploy serving version (prod, mode var)",
         "Deploy Worker (prod)",
         "Re-capture live Worker version",
         "Re-run workspace backfill (0027, idempotent)",
@@ -536,8 +538,29 @@ describe("deploy-prod.yml guards", () => {
     // draft Worker holding production secrets.
     expect(idx("Write required secrets")).toBeGreaterThan(idx("Deploy Worker"));
     expect(idx("Write ALERT_WEBHOOK_URL secret")).toBeGreaterThan(idx("Write required secrets"));
+    // the serving version is created AFTER the last bulk: the bulk version is
+    // built from the config default, so only this deploy binds the mode.
+    expect(idx("Deploy serving version")).toBeGreaterThan(idx("Write ALERT_WEBHOOK_URL secret"));
+    expect(idx("Re-capture live Worker version")).toBeGreaterThan(idx("Deploy serving version"));
     expect(idx("healthz")).toBeGreaterThan(idx("Write ALERT_WEBHOOK_URL secret"));
     expect(idx("Upload deploy evidence")).toBeGreaterThan(idx("healthz"));
+  });
+
+  test("the serving deploy binds the resolved mode and the summary reports THAT mode, not the dispatch input", () => {
+    const serving = steps.find((s) => s.name === "Deploy serving version (prod, mode var)")!;
+    expect(serving).toBeDefined();
+    expect(serving.env?.TENANT_MODE).toBe("${{ steps.tenant.outputs.mode }}");
+    expect(serving.run).toContain(
+      'bunx wrangler deploy --env production --var "WORKSPACE_TENANT_MODE:$TENANT_MODE"',
+    );
+    expect(serving.run).toContain('echo "mode=$TENANT_MODE" >> "$GITHUB_OUTPUT"');
+    expect(serving.if).toBeUndefined();   // a skip leaves a bulk version serving
+
+    const summary = steps.find((s) => s.name === "Record prod deploy evidence")!;
+    expect(summary.env?.SERVING_MODE).toBe("${{ steps.serving.outputs.mode }}");
+    // the dispatch input must not be printed as the live mode
+    expect(Object.values(summary.env ?? {})).not.toContain("${{ steps.tenant.outputs.mode }}");
+    expect(summary.run).toContain("Tenant mode (serving version)");
   });
 
   test("the tag↔version validation runs after tag resolution and before the FIRST mutating command", () => {
@@ -559,7 +582,7 @@ describe("deploy-prod.yml guards", () => {
     const mutatingIdx = steps
       .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
       .filter((i) => i >= 0);
-    expect(mutatingIdx.length).toBe(4);
+    expect(mutatingIdx.length).toBe(5);
     for (const i of mutatingIdx) expect(validateIdx).toBeLessThan(i);
   });
 
@@ -694,7 +717,7 @@ describe("deploy-prod.yml guards", () => {
     const mutatingIdx = steps
       .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
       .filter((i) => i >= 0);
-    expect(mutatingIdx.length).toBe(4);
+    expect(mutatingIdx.length).toBe(5);
     for (const i of mutatingIdx) expect(preflightIdx).toBeLessThan(i);
     // and the writer no longer carries the assertion itself.
     const writer = steps.find((s) => s.name === "Write required secrets")!;
@@ -960,7 +983,7 @@ describe("deploy-prod.yml guards", () => {
     // webhook — both carry `--env production` on the SAME line as the write.
     // every mutating Wrangler invocation in this workflow carries the flag.
     const mutating = stepRuns.filter((r) => /bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(r));
-    expect(mutating.length).toBe(4);
+    expect(mutating.length).toBe(5);
     for (const r of mutating) expect(r).toMatch(/--env production/);
   });
 
@@ -988,7 +1011,7 @@ describe("deploy-prod.yml guards", () => {
     const mutatingIdx = steps
       .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
       .filter((i) => i >= 0);
-    expect(mutatingIdx.length).toBe(4);
+    expect(mutatingIdx.length).toBe(5);
     for (const i of mutatingIdx) expect(verIdx).toBeLessThan(i);
   });
 

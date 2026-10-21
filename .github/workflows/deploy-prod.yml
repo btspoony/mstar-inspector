@@ -391,6 +391,25 @@ jobs:
             jq -n '{ALERT_WEBHOOK_URL: null}' | bunx wrangler secret bulk --env production
           fi
 
+      # LOAD-BEARING: the LAST version-creating step, so the version that serves
+      # carries the resolved mode. Every `secret bulk` above creates AND deploys
+      # a version of its own from the config, and `env.production` declares
+      # `WORKSPACE_TENANT_MODE: off` (a named environment rejects `keep_vars`, so
+      # the mode cannot ride the bulk write). Without this deploy a `strict`
+      # dispatch would go green while production serves `off` — the bulk version
+      # is the serving one. Appended bulks must stay ABOVE this step;
+      # tests/scripts/deploy-workflow-ordering.test.ts fails otherwise.
+      - name: Deploy serving version (prod, mode var)
+        id: serving
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TENANT_MODE: ${{ steps.tenant.outputs.mode }}
+        run: |
+          bunx wrangler deploy --env production --var "WORKSPACE_TENANT_MODE:$TENANT_MODE"
+          # The summary names THIS value, not the dispatch input: it is the mode
+          # the last version-creating command actually bound.
+          echo "mode=$TENANT_MODE" >> "$GITHUB_OUTPUT"
+
       # Every `secret bulk` above creates AND immediately deploys a new Worker
       # version, so the id captured from the `wrangler deploy` log names a
       # PREDECESSOR of the version actually serving traffic. This is the LAST
@@ -490,19 +509,24 @@ jobs:
       - name: Record prod deploy evidence
         if: always()
         env:
-          TENANT_MODE: ${{ steps.tenant.outputs.mode }}
+          # The mode of the version that actually serves — read from the final
+          # deploy that bound it, never from the dispatch input.
+          SERVING_MODE: ${{ steps.serving.outputs.mode }}
           DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
           EXPECTED_DIGEST: ${{ inputs.expected_container_digest }}
           RUN_SHA: ${{ github.sha }}
         run: |
           VERSION=$(cat version_id.txt 2>/dev/null || echo "unavailable")
           DIGEST=$(cat image_digest.txt 2>/dev/null || echo "unavailable")
+          # Empty only when the final deploy did not run (an earlier step
+          # failed); a run that never bound the mode must not print one.
+          [ -n "${SERVING_MODE:-}" ] || SERVING_MODE="unavailable (the serving deploy did not complete)"
           {
             echo "## Production deploy evidence"
             echo "- Worker: \`mstar-inspector-production\` — https://inspector.mstar.page"
             echo "- Worker version: \`$VERSION\`"
             echo "- Image digest: \`$DIGEST\`"
-            echo "- Tenant mode: \`$TENANT_MODE\`"
+            echo "- Tenant mode (serving version): \`$SERVING_MODE\`"
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
           # Status keys: scripts/deploy-status.sh owns the decision (and is

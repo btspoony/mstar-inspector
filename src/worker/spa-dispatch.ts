@@ -20,6 +20,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
+import { strictWorkspaceAppsBase } from "../dashboard/index";
 import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
@@ -114,6 +115,15 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   const auth = await readShellAuth(c);
   if (auth.kind === "deny") return auth.response;
   if (auth.kind === "redirect") return c.redirect(auth.location, 302);
+  // Signed in on the root workbench: under `strict` every data read on this
+  // page derives `/dashboard` — the retired legacy App family — so it is a
+  // dead end. Send it to the sole workspace's Apps page (the same target the
+  // OAuth callback and the login bounce use); unresolvable keeps today's
+  // shell. `/index.html` and the login page never take this branch.
+  if (c.req.path === "/dashboard") {
+    const workspaceBase = await strictWorkspaceAppsBase(c.env);
+    if (workspaceBase !== null) return c.redirect(workspaceBase, 302);
+  }
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   if (c.req.method === "HEAD") {
     return new Response(null, { status: assetResponse.status });

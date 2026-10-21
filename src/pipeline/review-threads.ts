@@ -816,13 +816,13 @@ async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise
       // installation_id); no tenant-facing field. Upgrade: tenant-filter it once
       // the consumer becomes workspace-scoped.
       .prepare(
-        `SELECT ga.github_app_id AS github_app_id, ga.slug AS slug, ga.status AS status, ga.deleted_at AS deleted_at
+        `SELECT ga.github_app_id AS github_app_id, ga.status AS status, ga.deleted_at AS deleted_at
          FROM app_installations ai
          JOIN github_apps ga ON ga.id = ai.app_id
          WHERE ai.app_id = ? AND ai.installation_id = ?`,
       )
       .bind(scope.appId, scope.installationId)
-      .first<{ github_app_id: number; slug: string; status: string; deleted_at: string | null }>();
+      .first<{ github_app_id: number; status: string; deleted_at: string | null }>();
     if (row === null) return null;
     if (row.deleted_at !== null || row.status !== "active") return null;
     const identity = await deps.getAppIdentity({ appId: scope.appId, installationId: scope.installationId });

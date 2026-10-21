@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
+import { apiBase } from "../workspace-base";
 import { PageNotice, type NoticeKind } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -89,7 +90,9 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   async function load({ background = false }: { background?: boolean } = {}): Promise<boolean> {
     if (!background) setState("loading");
     try {
-      const settingsRaw = await fetchJson(`/dashboard/api/apps/${encodeURIComponent(slug)}/settings`);
+      const settingsRaw = await fetchJson(
+        `${apiBase()}/api/apps/${encodeURIComponent(slug)}/settings`,
+      );
       if (cancelledRef.current) return false;
       const parsed = parseSettings(settingsRaw);
       if (!parsed) {
@@ -100,7 +103,9 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
       let nextGroups: ModelOptionGroup[] = [];
       if (parsed.can_manage) {
         try {
-          const modelsRaw = await fetchJson(`/dashboard/api/apps/${encodeURIComponent(slug)}/models`);
+          const modelsRaw = await fetchJson(
+            `${apiBase()}/api/apps/${encodeURIComponent(slug)}/models`,
+          );
           nextGroups = parseModels(modelsRaw)?.groups ?? [];
         } catch {
           nextGroups = [];
@@ -199,11 +204,12 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   // faces (error + ok — it serves both roles), moved here from the
   // settings tab body. The decorative ArrowLeft rides the link
   // aria-hidden, so the accessible name stays the backToApps text alone.
+  const appsHref = `${apiBase()}/apps`;
   const wayfinding = (
     <a
       className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-      href="/dashboard/apps"
-      onClick={(event) => spaClick("/dashboard/apps", event)}
+      href={appsHref}
+      onClick={(event) => spaClick(appsHref, event)}
     >
       <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
       {t(locale, "appDetail.backToApps")}

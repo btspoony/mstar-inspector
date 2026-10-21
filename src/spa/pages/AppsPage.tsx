@@ -12,6 +12,7 @@ import { formatRelativeTime } from "../relative-time";
 import { spaClick } from "../spa-click";
 import { isPaused, parseApps, type AppsPayload } from "./data";
 import { GitHubMark } from "./LoginPage";
+import { apiBase } from "../workspace-base";
 
 /** DESIGN.md Table: header band on background-200, headers at label-12
     (12px; the primitive's font-medium supplies the 500 weight). */
@@ -27,7 +28,7 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
   async function load(): Promise<void> {
     setState("loading");
     try {
-      const parsed = parseApps(await fetchJson("/dashboard/api/apps"));
+      const parsed = parseApps(await fetchJson(`${apiBase()}/api/apps`));
       if (cancelledRef.current) return;
       if (!parsed) {
         setState("error");
@@ -108,7 +109,7 @@ function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: App
         </TableHeader>
         <TableBody>
           {payload.apps.map((app) => {
-            const href = `/dashboard/apps/${app.slug}`;
+            const href = `${apiBase()}/apps/${app.slug}`;
             const latest = app.health.latest;
             return (
               <TableRow
