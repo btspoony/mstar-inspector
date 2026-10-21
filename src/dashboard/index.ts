@@ -134,13 +134,17 @@ import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-head
 /**
  * Per-request values the workspace tenancy middleware and the member gate
  * attach: `tenant` exists only on a strict-mode workspace path (the workspace
- * was resolved from the first path segment), so its absence IS the legacy
- * `off` request shape.
+ * slug was classified from the first path segment), so its absence IS the
+ * legacy `off` request shape. The routing gate classifies WITHOUT a database
+ * read (an anonymous request must not learn whether a workspace exists or pay
+ * a D1 round trip): `workspaceId`/`role` stay null until `requireMember`
+ * resolves them after the session and user row are known.
  */
 type DashboardVariables = {
   tenant?: {
-    workspaceId: string;
     slug: string;
+    /** null until the member gate resolves the live workspace row. */
+    workspaceId: string | null;
     /** null until the member gate resolves the signed-in user's membership. */
     role: WorkspaceRole | null;
   };
@@ -156,6 +160,22 @@ export const dashboardApp = new Hono<{ Bindings: Env; Variables: DashboardVariab
 /** SPA shell entry for members/apps list mutations (QC W-2, apps route). */
 const DASHBOARD_SHELL_REDIRECT = "/dashboard";
 const APPS_LIST_REDIRECT = "/dashboard/apps";
+
+/**
+ * A legacy App path on a workspace-scoped request (`/dashboard/apps…`) belongs
+ * to that workspace's route family: under `strict` the legacy family answers
+ * 404, so a response that redirected there would land on a dead URL. Legacy
+ * requests and non-App paths are returned unchanged.
+ */
+function scopedAppPath(c: DashboardContext, path: string): string {
+  const tenant = c.get("tenant");
+  if (!tenant) return path;
+  if (path === APPS_LIST_REDIRECT) return `/dashboard/${tenant.slug}/apps`;
+  if (path.startsWith(`${APPS_LIST_REDIRECT}/`)) {
+    return `/dashboard/${tenant.slug}${path.slice(DASHBOARD_MOUNT.length)}`;
+  }
+  return path;
+}
 
 function isSpaFetchPost(c: DashboardContext): boolean {
   return c.req.header(SPA_POST_FORM_HEADER) === SPA_POST_FORM_VALUE;
@@ -181,7 +201,7 @@ function pinnedPostMutationResponse(
     return htmlNavigation ? c.html(notFoundPage(requestLocale(c)), 404) : c.text(message, status);
   }
   if (htmlNavigation) {
-    return c.redirect(redirectTo, 302);
+    return c.redirect(scopedAppPath(c, redirectTo), 302);
   }
   return c.text(message, status);
 }
@@ -310,8 +330,10 @@ function classifyDashboardPath(pathname: string): DashboardPathClass {
  * The tenant route-family gate. Mounted twice: by `src/worker/index.ts` on
  * `/dashboard/*` BEFORE SPA dispatch (so a strict legacy-App HTML request
  * cannot be served by the SPA shell before the 404 decision) and by
- * `dashboardApp` ahead of its routes. The first run wins — the second must not
- * re-resolve the workspace.
+ * `dashboardApp` ahead of its routes. It only CLASSIFIES: it issues no D1 read,
+ * and the workspace row plus the caller's membership are resolved by
+ * `requireMember` after the session and user read. The first run wins — the
+ * second returns on the `tenant` it already set.
  */
 export const dashboardTenantGate: Handler<{
   Bindings: Env;
@@ -335,13 +357,11 @@ export const dashboardTenantGate: Handler<{
   if (target.kind !== "workspace") return next();
   // Deploy A: the workspace face does not exist yet.
   if (mode !== "strict") return c.notFound();
-  const db = dashboardD1(c.env);
-  if (!db) return c.text("dashboard storage is not configured", 500);
-  const workspace = await getWorkspaceBySlug(db, target.slug);
-  if (!workspace) return c.notFound();
-  // Membership is resolved by the member gate (it owns the users-row read);
-  // the routing gate only proves the workspace exists.
-  c.set("tenant", { workspaceId: workspace.id, slug: workspace.slug, role: null });
+  // CLASSIFY ONLY — no D1 read. The workspace row and the caller's membership
+  // are resolved by the member gate AFTER the session and user row are known,
+  // so an anonymous request neither pays a pre-auth round trip nor learns from
+  // the response whether the slug exists (both cases 302 to login).
+  c.set("tenant", { slug: target.slug, workspaceId: null, role: null });
   return next();
 };
 
@@ -1119,15 +1139,20 @@ async function requireMember(c: DashboardContext): Promise<
   // Fail closed: no row (removed between guard and here) → 403, the 403 view
   // carries zero membership data.
   if (!user) return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
-  // Workspace path: the routing middleware proved the workspace exists; the
-  // membership row is what proves the user may see it. Not a member → the
-  // same 404 an unknown workspace answers (no tenant-existence oracle).
+  // Workspace path: the routing gate only classified the slug. Resolve the
+  // live workspace and the membership row HERE, after the session and user
+  // read, so an anonymous request cannot distinguish an existing workspace
+  // from a missing one (both never reach this line: the guard 302s to login)
+  // and pays no workspace D1 read. Not a member → the same 404 an unknown
+  // workspace answers (no tenant-existence oracle).
   const tenant = c.get("tenant");
   if (tenant) {
-    const role = await getMembership(db, tenant.workspaceId, user.id);
+    const workspace = await getWorkspaceBySlug(db, tenant.slug);
+    if (!workspace) return { ok: false, response: await c.notFound() };
+    const role = await getMembership(db, workspace.id, user.id);
     if (!role) return { ok: false, response: await c.notFound() };
-    c.set("tenant", { ...tenant, role });
-    return { ok: true, session, db, user, scope: { workspaceId: tenant.workspaceId, role } };
+    c.set("tenant", { slug: workspace.slug, workspaceId: workspace.id, role });
+    return { ok: true, session, db, user, scope: { workspaceId: workspace.id, role } };
   }
   return { ok: true, session, db, user, scope: null };
 }
@@ -1271,14 +1296,17 @@ async function appStatusAction(
  * caller (`<form method="post">` on the Review card); Apps-list uses fetch
  * `postForm`. Origin is a sanitized Referer pathname — never echoed as
  * Location. Settings-origin → `/dashboard/apps/:slug/settings` (DB slug);
- * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`.
+ * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`. On a
+ * workspace-scoped request both App targets carry that workspace's prefix
+ * (`scopedAppPath`), because the legacy App family 404s under `strict`.
  */
 function reviewActionRedirect(c: DashboardContext, slug: string): string {
-  const settingsPath = `/dashboard/apps/${slug}/settings`;
+  const settingsPath = scopedAppPath(c, `/dashboard/apps/${slug}/settings`);
+  const listPath = scopedAppPath(c, APPS_LIST_REDIRECT);
   const origin = new URL(c.req.raw.url).origin;
   const refererPath = new URL(safeLocaleRedirect(c.req.header("Referer"), origin), origin).pathname;
   if (refererPath === settingsPath) return settingsPath;
-  if (refererPath === APPS_LIST_REDIRECT) return APPS_LIST_REDIRECT;
+  if (refererPath === listPath) return listPath;
   return DASHBOARD_SHELL_REDIRECT;
 }
 
@@ -1494,7 +1522,7 @@ function settingsRemoveResponse(
   message: string,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
   }
   return c.json({ changed, message }, 200);
 }
@@ -1573,7 +1601,7 @@ function settings400Response(
   params?: Record<string, string | number>,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
   }
   return c.json({ key, message: t("en", key, params), ...(params ? { params } : {}) }, 400);
 }
@@ -1619,7 +1647,7 @@ function settingsVerifyFailResponse(
   const mapped = mapVerifyReason(reason);
   const message = verifyFailCopy(mapped);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
   }
   return c.json({ ok: false, reason: mapped, message }, 400);
 }
@@ -1638,7 +1666,7 @@ function settingsMembershipFailResponse(
 ): Response {
   const message = membershipFailCopy(selector);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
   }
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }

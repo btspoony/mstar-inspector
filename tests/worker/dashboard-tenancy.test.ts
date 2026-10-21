@@ -6,7 +6,10 @@
  * `off` the workspace-shaped paths do not exist (404) and the legacy App face
  * behaves exactly as before; under `strict` the legacy App face is 404 and the
  * workspace paths serve, with authorization decided by the actor's workspace
- * role instead of `canManageApp`'s creator-or-deployment-admin rule.
+ * role instead of `canManageApp`'s creator-or-deployment-admin rule. The
+ * routing gate only CLASSIFIES the slug — the workspace row and the membership
+ * are resolved after the session/user read, so an anonymous request learns
+ * nothing about slug existence (pinned below).
  *
  * The fixture runs against the full migration set (the store helper walks
  * `migrations/`), so 0026/0027 are real: `default` is seeded by 0026 and the
@@ -229,6 +232,48 @@ describe("WORKSPACE_TENANT_MODE=strict — legacy App paths are retired", () => 
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
+
+  test("an anonymous request cannot tell an existing workspace from a missing one (no pre-auth oracle)", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    // `acme` exists, `ghost` does not. Both must answer the same 302 to login:
+    // the gate classifies the slug without a D1 read, and the workspace row is
+    // only resolved after the session + user read.
+    const answers: Array<{ status: number; location: string | null; body: string }> = [];
+    for (const slug of ["acme", "ghost"]) {
+      const res = await worker.fetch(
+        new Request(`https://worker.local/dashboard/${slug}/api/apps`),
+        env,
+      );
+      answers.push({
+        status: res.status,
+        location: res.headers.get("Location"),
+        body: await res.text(),
+      });
+    }
+    expect(answers[0]).toEqual(answers[1]);
+    expect(answers[0]).toMatchObject({ status: 302, location: "/dashboard/login" });
+  });
+
+  test("the tenant gate issues no workspace read for an anonymous request", async () => {
+    const { db } = tenancyFixture();
+    const statements: string[] = [];
+    // Record every statement the request prepares; a classified-only gate must
+    // not touch `workspaces` before the session read.
+    const observed = {
+      ...db,
+      prepare(query: string) {
+        statements.push(query);
+        return db.prepare(query);
+      },
+    } as TestD1;
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/acme/api/apps"),
+      envFor(observed, "strict"),
+    );
+    expect(res.status).toBe(302);
+    expect(statements.filter((sql) => sql.includes("FROM workspaces"))).toEqual([]);
+  });
 });
 
 describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
@@ -323,6 +368,84 @@ describe("WORKSPACE_TENANT_MODE=strict — manage is the workspace role", () => 
       env,
     );
     expect(res.status).toBe(403); // legacy rule: not the creator, not a deployment admin
+  });
+});
+
+describe("WORKSPACE_TENANT_MODE=strict — success redirects stay in the workspace route family", () => {
+  const SETTINGS_BODY = "op=save-sandbox-image&sandbox_image_id=omp";
+
+  test("a native settings form post answers 302 to the workspace-prefixed settings URL", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/acme-app/settings", "carol", {
+        method: "POST",
+        body: SETTINGS_BODY,
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps/acme-app/settings");
+  });
+
+  test("a native validation 400 keeps the same workspace-prefixed target", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/acme-app/settings", "carol", {
+        method: "POST",
+        body: "op=save-sandbox-image&sandbox_image_id=no-such-image",
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps/acme-app/settings");
+  });
+
+  test("a native pause form post redirects to the workspace apps list (Referer-derived)", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/acme-app/pause", "carol", {
+        method: "POST",
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+  });
+
+  test("the SPA fetch form post keeps its plain 2xx body (no redirect)", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    const request = await authedRequest("/dashboard/acme/apps/acme-app/settings", "carol", {
+      method: "POST",
+      body: SETTINGS_BODY,
+      accept: "text/html",
+    });
+    request.headers.set("X-Mstar-Spa-Post", "1");
+    const res = await worker.fetch(request, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Location")).toBeNull();
+    expect(await res.text()).toContain("Saved the omp runtime image for acme-app.");
+  });
+
+  test("off: the same native post still redirects to the legacy settings URL", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "off");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/apps/acme-app/settings", "octocat", {
+        method: "POST",
+        body: SETTINGS_BODY,
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/apps/acme-app/settings");
   });
 });
 

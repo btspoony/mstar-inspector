@@ -406,10 +406,10 @@ describe("tenant isolation matrix (scenario × mode)", () => {
     expect(offDetail.status).toBe(200);
   });
 
-  // row 5 — NEW cell (no task-level owner): layers: route gate →
-  //         getWorkspaceBySlug `deleted_at IS NULL` → scoped read. The tenant
-  //         has a live membership row and a mapped App, so only the soft-delete
-  //         filter can produce the 404.
+  // row 5 — NEW cell (no task-level owner): layers: route classification →
+  //         getWorkspaceBySlug `deleted_at IS NULL` (after the session/user
+  //         read) → scoped read. The tenant has a live membership row and a
+  //         mapped App, so only the soft-delete filter can produce the 404.
   test("row 5 · a soft-deleted workspace slug answers 404 under strict despite membership and a mapped App", async () => {
     const { db } = matrixFixture();
     const env = envFor(db, "strict");
