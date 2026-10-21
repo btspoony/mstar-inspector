@@ -1215,10 +1215,10 @@ export async function listReenableableCheckPairs(
   if (candidates.length === 0) return [];
   const resumable: { appId: string; installationId: number }[] = [];
   for (const candidate of candidates) {
-    // shortcut: tenant-bypass — per-pair Check resume probe selecting status
-    // flags only; no tenant-facing field. Upgrade: tenant-filter it once the
-    // check store becomes workspace-scoped.
     const row = await db
+      // shortcut: tenant-bypass — per-pair Check resume probe selecting status
+      // flags only; no tenant-facing field. Upgrade: tenant-filter it once the
+      // check store becomes workspace-scoped.
       .prepare(
         `SELECT rc.holder, rc.last_error, ga.status AS app_status, ga.deleted_at AS app_deleted,
                 ga.review_enabled AS review_enabled

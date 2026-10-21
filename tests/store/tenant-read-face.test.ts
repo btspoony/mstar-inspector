@@ -116,24 +116,67 @@ function srcFiles(dir = SRC_DIR, out: string[] = []): string[] {
   return out;
 }
 
-const DIRECT_READ = /\b(?:from|join)\s+github_apps\b/i;
+const DIRECT_READ = /(?:from|join)\s+github_apps\b/;
 const TENANT_BYPASS = "shortcut: tenant-bypass";
 
-/** Line offsets of every direct `github_apps` read in one source text. */
-function readSites(src: string): number[] {
-  return src.split("\n").flatMap((line, i) => (DIRECT_READ.test(line) ? [i] : []));
+/**
+ * Every `.prepare(…)` call in one source, as {line, sql}: the argument text is
+ * captured with a paren/brace matcher that skips string literals, so a
+ * multi-line SQL statement is ONE site regardless of how it is wrapped.
+ */
+function prepareStatements(lines: string[]): { line: number; sql: string }[] {
+  const out: { line: number; sql: string }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const call = lines[i]!.indexOf(".prepare");
+    if (call < 0) continue;
+    const open = lines[i]!.indexOf("(", call);
+    if (open < 0) continue;
+    let depth = 0;
+    let quote: string | null = null;
+    let sql = "";
+    outer: for (let l = i; l < lines.length; l++) {
+      const text = lines[l]!;
+      for (let c = l === i ? open : 0; c < text.length; c++) {
+        const ch = text[c]!;
+        if (quote !== null) {
+          sql += ch;
+          if (ch === "\\") sql += text[++c] ?? "";
+          else if (ch === quote) quote = null;
+          continue;
+        }
+        if (ch === '"' || ch === "'" || ch === "`") {
+          quote = ch;
+          sql += ch;
+        } else if (ch === "(") {
+          if (depth++ > 0) sql += ch;
+        } else if (ch === ")") {
+          if (--depth === 0) break outer;
+          sql += ch;
+        } else {
+          sql += ch;
+        }
+      }
+      sql += "\n";
+    }
+    out.push({ line: i, sql: sql.replace(/\s+/g, " ").trim().toLowerCase() });
+  }
+  return out;
+}
+
+/** Offsets of the `.prepare(` lines whose statement reads `github_apps`. */
+function readSites(lines: string[]): number[] {
+  return prepareStatements(lines)
+    .filter((s) => DIRECT_READ.test(s.sql))
+    .map((s) => s.line);
 }
 
 /**
- * True when the statement carrying the read at `lineIndex` is annotated: walk
- * up to the `.prepare(` that opened it, then through the contiguous
- * non-blank block above, looking for the marker in that statement's comment.
+ * True when the `.prepare(` line is IMMEDIATELY preceded by a contiguous
+ * `//` comment block carrying the marker. A blank line or any code line
+ * between the comment and the call means unannotated.
  */
-function isAnnotated(lines: string[], lineIndex: number): boolean {
-  let p = lineIndex;
-  while (p >= 0 && !/\.prepare\s*\(/.test(lines[p]!)) p--;
-  if (p < 0) return false;
-  for (let k = p - 1; k >= 0 && lines[k]!.trim() !== ""; k--) {
+function isAnnotated(lines: string[], prepareLine: number): boolean {
+  for (let k = prepareLine - 1; k >= 0 && lines[k]!.trim().startsWith("//"); k--) {
     if (lines[k]!.includes(TENANT_BYPASS)) return true;
   }
   return false;
@@ -141,7 +184,7 @@ function isAnnotated(lines: string[], lineIndex: number): boolean {
 
 function directReadFiles(): string[] {
   return srcFiles()
-    .filter((path) => DIRECT_READ.test(readFileSync(path, "utf8")))
+    .filter((path) => readSites(readFileSync(path, "utf8").split("\n")).length > 0)
     .map((path) => path.slice(SRC_DIR.length + 1))
     .sort();
 }
@@ -157,7 +200,8 @@ const MAINTENANCE_SITES: Record<string, number> = {
 describe("tenant read face allowlist", () => {
   test("tenant-facing modules hold no direct github_apps read", () => {
     for (const rel of ["dashboard/index.ts", "dashboard/views.ts", "pipeline/consumer.ts"]) {
-      expect(readFileSync(join(SRC_DIR, rel), "utf8")).not.toMatch(DIRECT_READ);
+      const lines = readFileSync(join(SRC_DIR, rel), "utf8").split("\n");
+      expect({ file: rel, sites: readSites(lines) }).toEqual({ file: rel, sites: [] });
     }
   });
 
@@ -172,7 +216,7 @@ describe("tenant read face allowlist", () => {
     const counts = Object.fromEntries(
       Object.keys(MAINTENANCE_SITES)
         .sort()
-        .map((rel) => [rel, readSites(readFileSync(join(SRC_DIR, rel), "utf8")).length]),
+        .map((rel) => [rel, readSites(readFileSync(join(SRC_DIR, rel), "utf8").split("\n")).length]),
     );
     expect(counts).toEqual(MAINTENANCE_SITES);
   });
@@ -180,7 +224,7 @@ describe("tenant read face allowlist", () => {
   test("every maintenance direct read carries its tenant-bypass annotation", () => {
     for (const rel of Object.keys(MAINTENANCE_SITES)) {
       const lines = readFileSync(join(SRC_DIR, rel), "utf8").split("\n");
-      for (const site of readSites(lines.join("\n"))) {
+      for (const site of readSites(lines)) {
         expect({ file: rel, line: site + 1, annotated: isAnnotated(lines, site) }).toEqual({
           file: rel,
           line: site + 1,

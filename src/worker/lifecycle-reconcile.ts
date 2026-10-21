@@ -228,10 +228,10 @@ type RoutingRow = {
 
 /** The exact-pair routing query (also the re-enable probe — D1 only). */
 async function routingRow(db: D1Like, appId: string, installationId: number): Promise<RoutingRow | null> {
-  // shortcut: tenant-bypass — reconciler credential routing by exact (app_id,
-  // installation_id); returns no tenant-facing field. Upgrade: tenant-filter it
-  // once reconciliation itself becomes workspace-scoped.
   return db
+    // shortcut: tenant-bypass — reconciler credential routing by exact (app_id,
+    // installation_id); returns no tenant-facing field. Upgrade: tenant-filter it
+    // once reconciliation itself becomes workspace-scoped.
     .prepare(
       `SELECT ga.id AS id, ga.github_app_id AS github_app_id, ga.status AS status,
               ga.deleted_at AS deleted_at, ga.review_enabled AS review_enabled,

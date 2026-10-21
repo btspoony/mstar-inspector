@@ -216,10 +216,10 @@ type CheckRoutingRow = {
 };
 
 async function checkRoutingRow(db: D1Like, appId: string, installationId: number): Promise<CheckRoutingRow | null> {
-  // shortcut: tenant-bypass — check credential routing by exact (app_id,
-  // installation_id); returns no tenant-facing field. Upgrade: tenant-filter it
-  // once check reconciliation becomes workspace-scoped.
   return db
+    // shortcut: tenant-bypass — check credential routing by exact (app_id,
+    // installation_id); returns no tenant-facing field. Upgrade: tenant-filter it
+    // once check reconciliation becomes workspace-scoped.
     .prepare(
       `SELECT ga.id AS id, ga.github_app_id AS github_app_id, ga.status AS status,
               ga.deleted_at AS deleted_at, ga.review_enabled AS review_enabled,
@@ -534,10 +534,10 @@ async function reenableHealthyAppChecks(
   transport: CheckTransport,
   log: CheckReconcileLog,
 ): Promise<void> {
-  // shortcut: tenant-bypass — bounded reconciliation scan selecting ids only;
-  // no tenant-facing field. Upgrade: tenant-filter it once check
-  // reconciliation becomes workspace-scoped.
   const { results: suspended } = await db
+    // shortcut: tenant-bypass — bounded reconciliation scan selecting ids only;
+    // no tenant-facing field. Upgrade: tenant-filter it once check
+    // reconciliation becomes workspace-scoped.
     .prepare(
       `SELECT DISTINCT rc.app_id AS app_id, rc.installation_id AS installation_id
          FROM review_checks rc
