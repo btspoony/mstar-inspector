@@ -33,23 +33,32 @@ describe("attributionVerdict", () => {
   });
 
   test("unreadable output fails — never a silent pass", () => {
-    const malformed = [
-      "",
-      "not json",
-      "null",
-      "{}",
-      "[]",
-      '[{"results":[],"success":true}]',
-      '[{"results":[{"n":"0"}],"success":true}]',
-      '[{"results":[{"n":-1}],"success":true}]',
-      '[{"results":[{"n":1.5}],"success":true}]',
-      wranglerJson(0, false),
+    const malformed: Array<[string, string]> = [
+      ["empty stdout", ""],
+      ["non-JSON", "not json"],
+      ["null", "null"],
+      ["object, not an array", "{}"],
+      ["empty array (no statement)", "[]"],
+      ["two statements", '[{"results":[{"n":0}],"success":true},{"results":[{"n":0}],"success":true}]'],
+      ["null statement", "[null]"],
+      ["string statement", '["ok"]'],
+      ["missing success", '[{"results":[{"n":0}]}]'],
+      ["success: false", wranglerJson(0, false)],
+      ["success: \"false\" (string)", '[{"results":[{"n":0}],"success":"false"}]'],
+      ["zero rows", '[{"results":[],"success":true}]'],
+      ["two result rows", '[{"results":[{"n":0},{"n":0}],"success":true}]'],
+      ["results not an array", '[{"results":{"n":0},"success":true}]'],
+      ["null row", '[{"results":[null],"success":true}]'],
+      ["string count", '[{"results":[{"n":"0"}],"success":true}]'],
+      ["negative count", '[{"results":[{"n":-1}],"success":true}]'],
+      ["fractional count", '[{"results":[{"n":1.5}],"success":true}]'],
+      ["missing n", '[{"results":[{"count":0}],"success":true}]'],
     ];
-    for (const stdout of malformed) {
+    for (const [shape, stdout] of malformed) {
       const verdict = attributionVerdict(stdout);
-      expect(verdict.ok, stdout).toBe(false);
-      expect(verdict.count, stdout).toBeNull();
-      expect(verdict.message, stdout).toContain("tenant attribution:");
+      expect(verdict.ok, shape).toBe(false);
+      expect(verdict.count, shape).toBeNull();
+      expect(verdict.message, shape).toContain("tenant attribution:");
     }
   });
 

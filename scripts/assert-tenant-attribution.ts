@@ -42,21 +42,43 @@ export type AttributionVerdict = {
  * not pass.
  */
 export function attributionVerdict(stdout: string): AttributionVerdict {
+  const fail = (reason: string): AttributionVerdict => ({
+    ok: false,
+    count: null,
+    message: `tenant attribution: ${reason}`,
+  });
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
   } catch {
-    return { ok: false, count: null, message: "tenant attribution: wrangler d1 execute did not print JSON" };
+    return fail("wrangler d1 execute did not print JSON");
   }
-  const statement = Array.isArray(parsed) ? (parsed[0] as Record<string, unknown> | undefined) : undefined;
-  if (statement === undefined || statement.success === false) {
-    return { ok: false, count: null, message: "tenant attribution: wrangler d1 execute reported no successful result" };
+  if (!Array.isArray(parsed) || parsed.length !== 1) {
+    return fail("wrangler d1 execute did not return exactly one statement result");
   }
-  const rows = statement.results;
-  const row = Array.isArray(rows) ? (rows[0] as Record<string, unknown> | undefined) : undefined;
-  const count = row?.n;
+  const statement: unknown = parsed[0];
+  if (typeof statement !== "object" || statement === null || Array.isArray(statement)) {
+    return fail("wrangler d1 execute returned a malformed statement result");
+  }
+  const { success, results } = statement as Record<string, unknown>;
+  // Strict `true`: a missing flag or the string `"false"` is neither a success
+  // nor a readable answer, and this gate never passes on an unknown.
+  if (success !== true) {
+    return fail("wrangler d1 execute did not report success: true");
+  }
+  // Exactly one row: the query returns one COUNT(*), so extra rows mean the
+  // wrong statement (or a batched reply) and the first row is not the answer.
+  if (!Array.isArray(results) || results.length !== 1) {
+    return fail("wrangler d1 execute did not return exactly one result row (expected one COUNT(*) AS n row)");
+  }
+  const row: unknown = results[0];
+  if (typeof row !== "object" || row === null || Array.isArray(row)) {
+    return fail("wrangler d1 execute returned a malformed result row");
+  }
+  const count = (row as Record<string, unknown>).n;
   if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
-    return { ok: false, count: null, message: "tenant attribution: wrangler d1 execute returned no integer COUNT(*) AS n row" };
+    return fail("wrangler d1 execute returned no non-negative integer COUNT(*) AS n");
   }
   if (count === 0) {
     return { ok: true, count, message: "tenant attribution: 0 orphan Apps (every github_apps row has an app_workspaces row)" };

@@ -527,7 +527,7 @@ The reserved first segments (`apps`, `api`, `oauth`, `members`, `login`,
 mode-independent routes (login, logout, OAuth callback, members, manifest,
 locale, healthz) answer in both modes.
 
-### Rollout: two deploys of the SAME artifact
+### Rollout: two deploys of the same tag/SHA
 
 Both workflows take a `tenant_mode` dispatch input (`off` default, `strict`
 allowed) and pass it as `wrangler deploy --var
@@ -538,14 +538,29 @@ rollout, and `env.production` declares `off` as the manual-deploy default.
    on their legacy paths, workspace paths 404.
 2. **Deploy B — `strict` on the same tag/SHA.** Replay the SAME ref:
    `gh workflow run deploy-prod.yml --ref <tag> -f tenant_mode=strict`
-   (staging: dispatch `deploy.yml` on `main` for the same commit). The
-   workspace pages and the INNER-JOIN reads go live; no code differs between A
-   and B.
+   (staging: dispatch `deploy.yml` on `main` for the same commit, with
+   `-f replay_sha=<deploy A sha>`). The workspace pages and the INNER-JOIN
+   reads go live; **the Worker code is the same SHA in both runs**.
 3. **Rollback** is Deploy A again — the same tag with `tenant_mode=off`; the
    read face and the routes revert together.
 
-Every run prints and summarizes `deployed_sha=<sha>`, so "same artifact" is
-auditable from the run itself.
+**Replay identity is asserted, not assumed.** Before any deploy-capable step,
+staging compares the optional `replay_sha` input with `github.sha`, and
+production asserts the release tag still names the run's SHA (`git rev-parse
+refs/tags/<tag>^{commit}`) — a tag moved after Deploy A aborts the run instead
+of shipping different code under the same name.
+
+**The container image is rebuilt, not byte-identical.** Both images are built
+from a rolling apt base, so a byte-identical rebuild is not provable. Pass
+Deploy A's digest as `-f expected_container_digest=sha256:…` and the run
+records `container_digest_match=true|false` in its summary; a mismatch is a
+**warning** naming the rolling-base reason, never a silent pass. With the
+input omitted, the summary says `unreported`.
+
+Every run records `deployed_sha=<sha>` **only when its deploy step
+succeeded**; a failed or skipped deploy records `deploy_status=not-deployed`
+plus the `requested_sha` instead, so the summary never claims a deploy that
+did not happen.
 
 ### Gate ordering (zero-orphan abort gate)
 
@@ -559,9 +574,11 @@ Each deploy run performs, in order:
 3. `bun scripts/assert-tenant-attribution.ts` —
    `SELECT COUNT(*) … WHERE w.app_id IS NULL` through
    `wrangler d1 execute --remote --json`. **A non-zero count exits the run
-   before `wrangler deploy`** (both modes: the gap is latent under `off` and
-   invisible under `strict`).
-4. `wrangler deploy --var WORKSPACE_TENANT_MODE:<mode>`.
+   before every deploy-capable step** (both modes: the gap is latent under
+   `off` and invisible under `strict`).
+4. Every step that publishes a Worker version — `wrangler secret bulk` (it
+   creates and deploys a version on its own) and `wrangler deploy`. On staging
+   the D1 work therefore sits **before** the secret writes, not after them.
 5. Healthz / cron / digest smokes, then the same attribution gate again, against
    the artifact now serving.
 

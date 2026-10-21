@@ -62,6 +62,10 @@ on:
         options:
           - 'off'
           - 'strict'
+      expected_container_digest:
+        description: "Deploy B only: Deploy A's sandbox image digest (sha256:…) — compared and reported, never assumed identical"
+        required: false
+        default: ''
 
 concurrency:
   group: deploy-prod-mstar-inspector
@@ -249,6 +253,23 @@ jobs:
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           echo "tenant_mode=$MODE"
 
+      # Replay identity (before anything is deployed): the run's ref is the
+      # release tag, and Deploy B must execute the SHA Deploy A shipped. A tag
+      # that moved after A would put different code under the same name, so the
+      # run aborts instead of replaying a stranger.
+      - name: Assert the deploy tag names the run SHA
+        env:
+          TAG: ${{ github.ref_name }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG_SHA=$(git rev-parse "refs/tags/$TAG^{commit}")
+          if [ "$TAG_SHA" != "$RUN_SHA" ]; then
+            echo "::error::tag $TAG names $TAG_SHA but this run executes $RUN_SHA — Deploy B must replay Deploy A's SHA; cut a new release instead of moving the tag"
+            exit 1
+          fi
+          echo "replay_sha=$RUN_SHA (tag $TAG names this run's SHA)"
+
       # LOAD-BEARING: the tag must match the tree it names BEFORE production is
       # touched. A human-published Release or a hand-cut/re-pointed `v*` tag can
       # point at a commit whose version surfaces differ from the tag; without
@@ -285,6 +306,7 @@ jobs:
         run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-prod-db --env production
 
       - name: Deploy Worker (prod)
+        id: deploy
         shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -296,6 +318,9 @@ jobs:
           # come from the code. `wrangler.jsonc` env.production also declares
           # the safe default (off) for a manual deploy without this flag.
           bunx wrangler deploy --env production --var "WORKSPACE_TENANT_MODE:$TENANT_MODE" 2>&1 | tee deploy.log
+          # The deploy command succeeded: record the SHA it shipped before the
+          # (non-fatal) version-id extraction below.
+          echo "deployed_sha=$GITHUB_SHA"
           VERSION_ID="$(grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 || true)"
           # Recording only — NEVER a gate. The Worker is already LIVE here and
           # the secret writes below have not run yet: a log-shape problem that
@@ -457,6 +482,8 @@ jobs:
         if: always()
         env:
           TENANT_MODE: ${{ steps.tenant.outputs.mode }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          EXPECTED_DIGEST: ${{ inputs.expected_container_digest }}
         run: |
           VERSION=$(cat version_id.txt 2>/dev/null || echo "unavailable")
           DIGEST=$(cat image_digest.txt 2>/dev/null || echo "unavailable")
@@ -466,7 +493,27 @@ jobs:
             echo "- Worker version: \`$VERSION\`"
             echo "- Image digest: \`$DIGEST\`"
             echo "- Tenant mode: \`$TENANT_MODE\`"
-            echo "deployed_sha=$GITHUB_SHA"
+            # `deployed_sha` ONLY when the deploy step succeeded: an always-run
+            # summary must never claim a deploy that did not happen.
+            if [ "$DEPLOY_OUTCOME" = "success" ]; then
+              echo "deployed_sha=$GITHUB_SHA"
+            else
+              echo "deploy_status=not-deployed"
+              echo "requested_sha=$GITHUB_SHA"
+            fi
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
+          # Replay audit, never a silent pass: the sandbox image rebuilds from a
+          # rolling apt base, so byte-identical output is not provable. A
+          # different digest is reported (and warned) with that reason.
+          if [ -z "$EXPECTED_DIGEST" ]; then
+            MATCH="unreported (no expected_container_digest input)"
+          elif [ "$DIGEST" = "$EXPECTED_DIGEST" ]; then
+            MATCH=true
+          else
+            MATCH=false
+            echo "::warning::container digest $DIGEST differs from Deploy A's $EXPECTED_DIGEST — the sandbox image rebuilds from a rolling base, so a byte-identical rebuild is not provable; the Worker code is the same SHA"
+          fi
+          echo "container_digest_match=$MATCH" >> "$GITHUB_STEP_SUMMARY"
+          echo "container_digest_match=$MATCH"
           echo "::notice::prod deploy: version=$VERSION digest=$DIGEST (run summary + deploy-evidence artifact)"

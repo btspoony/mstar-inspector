@@ -228,20 +228,22 @@ describe("deploy-prod.yml guards", () => {
     }
   });
 
-  test("triggers: release published + workflow_dispatch whose only input is tenant_mode", () => {
+  test("triggers: release published + workflow_dispatch whose only inputs are the replay knobs", () => {
     expect(triggers(wf).release).toEqual({ types: ["published"] });
     const dispatch = triggers(wf).workflow_dispatch;
     // T3-3: still no `ref` input — a run can never deploy a tag other than the
-    // one it runs on. The ONE input is the tenant read mode, so the same
-    // tag/SHA is deployed `off` (Deploy A) and replayed `strict` (Deploy B).
+    // one it runs on. The inputs only carry the tenant read mode and the
+    // replay audit value, so the same tag/SHA is deployed `off` (Deploy A) and
+    // replayed `strict` (Deploy B).
     expect(Object.keys(dispatch)).toEqual(["inputs"]);
-    expect(Object.keys(dispatch.inputs)).toEqual(["tenant_mode"]);
+    expect(Object.keys(dispatch.inputs).sort()).toEqual(["expected_container_digest", "tenant_mode"]);
     expect(dispatch.inputs.tenant_mode).toMatchObject({
       required: false,
       default: "off",
       type: "choice",
       options: ["off", "strict"],
     });
+    expect(dispatch.inputs.expected_container_digest).toMatchObject({ required: false, default: "" });
     // a `push:` trigger would deploy production on every main push — this
     // workflow is release/dispatch only.
     expect(triggers(wf).push).toBeUndefined();
@@ -1056,7 +1058,13 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
       Bun.spawnSync(["chmod", "+x", join(dir, "bunx")]);
       const proc = Bun.spawnSync(["bash", "-eo", "pipefail", "-c", body], {
         cwd: dir,
-        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, WRANGLER_VERSION_ID: payload, TENANT_MODE: "off" },
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          WRANGLER_VERSION_ID: payload,
+          TENANT_MODE: "off",
+          GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
+        },
       });
       const file = join(dir, "version_id.txt");
       return {
