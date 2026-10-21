@@ -634,6 +634,20 @@ export function forbiddenPage(login: string, locale: Locale = "en"): string {
   return authFace(t(locale, "common.error.forbiddenTitle"), body, locale);
 }
 
+/**
+ * Tenant-invisible App: the workspace-scoped 404 surface. A cross-workspace or
+ * unknown App answers a REAL 404 on HTML navigation too — the legacy
+ * pinned-POST redirect would bounce the operator into a shell the request has
+ * no access to.
+ */
+export function notFoundPage(locale: Locale = "en"): string {
+  const body = t(locale, "common.error.notFoundBody").replace(
+    "/dashboard",
+    '<a href="/dashboard">/dashboard</a>',
+  );
+  return authFace(t(locale, "common.error.notFoundTitle"), body, locale);
+}
+
 /** OAuth failure surface: red-700 banner + what-to-do-next (DESIGN.md § State legibility). */
 export function errorPage(message: string, locale: Locale = "en"): string {
   const body = t(locale, "common.error.signInErrorBody", { message: escapeHtml(message) }).replace(

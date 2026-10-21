@@ -32,17 +32,22 @@ import { classifyWebhook, WEBHOOK_BODY_LIMIT, type WebhookOutcome } from "./webh
 import { defaultLog, handleReviewJob } from "./handlers";
 import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
-import { dashboardApp } from "../dashboard/index";
+import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
 import { trailingSlashRedirect } from "./redirects";
 import { spaDispatch } from "./spa-dispatch";
 import { APP_VERSION } from "../version";
 
 const app = new Hono<{ Bindings: Env }>();
 // `/dashboard*` GET/HEAD redirects (trailing
-// slash + the `/dashboard/apps` exact alias) then SPA dispatch. Both run
-// BEFORE the dashboard membership guard (mounted inside dashboardApp) so
-// POST family, OAuth, and APIs still fall through unchanged.
+// slash + the `/dashboard/apps` exact alias), then the tenant route-family
+// gate, then SPA dispatch. The gate runs HERE, ahead of SPA dispatch: under
+// `strict` a legacy App path (`/dashboard/apps…`, `/dashboard/api/apps…`) must
+// answer 404 even when the SPA shell could serve it, and under `off` a
+// workspace path must 404 before the shell is reached. Requests the gate
+// passes are unchanged; the dashboard app re-mounts the same (idempotent) gate
+// ahead of its own routes so direct mounts keep working.
 app.use("*", trailingSlashRedirect());
+app.use("/dashboard/*", dashboardTenantGate);
 app.use("*", spaDispatch());
 /**
  * Classifier outcome → delivery-record outcome (QC wave 1, S-2):
