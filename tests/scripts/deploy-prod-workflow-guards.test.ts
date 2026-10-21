@@ -236,7 +236,11 @@ describe("deploy-prod.yml guards", () => {
     // replay audit value, so the same tag/SHA is deployed `off` (Deploy A) and
     // replayed `strict` (Deploy B).
     expect(Object.keys(dispatch)).toEqual(["inputs"]);
-    expect(Object.keys(dispatch.inputs).sort()).toEqual(["expected_container_digest", "tenant_mode"]);
+    expect(Object.keys(dispatch.inputs).sort()).toEqual([
+      "expected_container_digest",
+      "expected_deploy_sha",
+      "tenant_mode",
+    ]);
     expect(dispatch.inputs.tenant_mode).toMatchObject({
       required: false,
       default: "off",

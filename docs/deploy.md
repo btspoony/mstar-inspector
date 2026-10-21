@@ -537,18 +537,24 @@ rollout, and `env.production` declares `off` as the manual-deploy default.
 1. **Deploy A — `off`.** The normal deploy of the new build: Apps keep serving
    on their legacy paths, workspace paths 404.
 2. **Deploy B — `strict` on the same tag/SHA.** Replay the SAME ref:
-   `gh workflow run deploy-prod.yml --ref <tag> -f tenant_mode=strict`
-   (staging: dispatch `deploy.yml` on `main` for the same commit, with
-   `-f replay_sha=<deploy A sha>`). The workspace pages and the INNER-JOIN
-   reads go live; **the Worker code is the same SHA in both runs**.
+   `gh workflow run deploy-prod.yml --ref <tag> -f tenant_mode=strict
+   -f expected_deploy_sha=<deploy A sha>`
+   (staging: dispatch `deploy.yml` on `main` for the same commit, same flags).
+   The workspace pages and the INNER-JOIN reads go live; **the Worker code is
+   the same SHA in both runs**.
 3. **Rollback** is Deploy A again — the same tag with `tenant_mode=off`; the
    read face and the routes revert together.
 
-**Replay identity is asserted, not assumed.** Before any deploy-capable step,
-staging compares the optional `replay_sha` input with `github.sha`, and
-production asserts the release tag still names the run's SHA (`git rev-parse
-refs/tags/<tag>^{commit}`) — a tag moved after Deploy A aborts the run instead
-of shipping different code under the same name.
+**Replay identity is asserted, not assumed.** Both workflows take
+`expected_deploy_sha`, which is **required when `tenant_mode=strict`** (a
+strict run IS Deploy B; leaving it empty aborts with `strict replay requires
+the SHA deployed by Deploy A`). Deploy A's run summary is the source of that
+value — it prints `deployed_sha=<sha>`. The run aborts unless `github.sha`
+equals the input **and** the run's ref resolves to the same SHA (staging
+asserts the checked-out `HEAD`; production asserts the release tag through
+`git rev-parse refs/tags/<tag>^{commit}`), so a tag or branch that moved
+between A and B cannot pass by agreeing with itself. An `off` deploy may leave
+the input empty.
 
 **The container image is rebuilt, not byte-identical.** Both images are built
 from a rolling apt base, so a byte-identical rebuild is not provable. Pass
@@ -560,7 +566,9 @@ input omitted, the summary says `unreported`.
 Every run records `deployed_sha=<sha>` **only when its deploy step
 succeeded**; a failed or skipped deploy records `deploy_status=not-deployed`
 plus the `requested_sha` instead, so the summary never claims a deploy that
-did not happen.
+did not happen. The Worker version id is captured in a separate, non-fatal
+step (`version_id=unreported` on a log-shape problem), so a capture failure
+can never contradict a successful deploy.
 
 ### Gate ordering (zero-orphan abort gate)
 
