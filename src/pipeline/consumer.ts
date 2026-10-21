@@ -138,7 +138,8 @@ import {
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // github_apps row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
-import { createAppsStore, type TenantMode } from "../dashboard/apps-store";
+import { createAppsStore } from "../dashboard/apps-store";
+import { tenantModeOf, type TenantMode } from "../worker/tenant-mode";
 import { createSecretbox } from "../dashboard/secretbox";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads app_provider_keys / app_model_config and
@@ -176,8 +177,9 @@ export type PipelineEnv = {
   REVIEW_LEVEL?: string;
   /**
    * Tenant read mode (migration 0026). Only the exact `"strict"` turns on the
-   * workspace-mapped App read face; unset / any other value = `"off"`. The
-   * value domain is validated outside the consumer (deploy wiring).
+   * workspace-mapped App read face; unset/empty = `"off"`. Resolved once at
+   * consumer creation through `tenantModeOf` (src/worker/tenant-mode.ts),
+   * which throws on any other value before a message is read.
    */
   WORKSPACE_TENANT_MODE?: "off" | "strict";
   /**
@@ -1200,6 +1202,13 @@ async function publishDegradedPublication(input: {
 
 type ProcessDeps = {
   env: PipelineEnv;
+  /**
+   * App read mode for this deployment, resolved ONCE at consumer creation
+   * through src/worker/tenant-mode.ts. An illegal `WORKSPACE_TENANT_MODE`
+   * throws there — before any message is read — so no review ever runs
+   * against a guessed face.
+   */
+  tenantMode: TenantMode;
   store: D1ArtifactStore;
   /**
    * review_failures leaf (AL-1 + AL-6): the parse-fail
@@ -1278,16 +1287,6 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
 }
 
 /**
- * The App read mode for this deployment. Only the exact `"strict"` opts in;
- * unset / `"off"` / any other value keeps the frozen `off` read face (an
- * illegal value is deploy-wiring validation's concern — the consumer never
- * infers strict from it).
- */
-function tenantModeOf(env: PipelineEnv): TenantMode {
-  return env.WORKSPACE_TENANT_MODE === "strict" ? "strict" : "off";
-}
-
-/**
  * Outcome of the per-message commenter resolution (architect lock
  * L4): `ok` carries the commenter the review runs with PLUS the row's
  * numeric `github_app_id` (the §7.10 Check seam's App identity — the row is
@@ -1326,7 +1325,7 @@ type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter; githubAppId
  */
 async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<CommenterResolution> {
   const appRef = payload.appRef;
-  const tenantMode = tenantModeOf(deps.env);
+  const tenantMode = deps.tenantMode;
   const row = await createAppsStore(deps.env.DB, tenantMode).getAppById(appRef.appId);
   if (row === null) {
     deps.appCommenters.delete(appRef.appId);
@@ -1553,7 +1552,7 @@ async function resolveCustomProviders(
 async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<SandboxImageDefinition> {
   const appRef = payload.appRef;
   try {
-    const row = await createAppsStore(deps.env.DB, tenantModeOf(deps.env)).getAppById(appRef.appId);
+    const row = await createAppsStore(deps.env.DB, deps.tenantMode).getAppById(appRef.appId);
     if (row === null) {
       throw new Error("app not found");
     }
@@ -1908,6 +1907,7 @@ export function createReviewConsumer(
   const appCommenters = new Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>();
   const deps: ProcessDeps = {
     env,
+    tenantMode: tenantModeOf(env.WORKSPACE_TENANT_MODE),
     store: overrides.store ?? createArtifactStore(env.DB),
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
     appCommenters,

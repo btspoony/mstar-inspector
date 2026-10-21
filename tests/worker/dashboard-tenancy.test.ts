@@ -469,3 +469,19 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     }
   });
 });
+
+describe("WORKSPACE_TENANT_MODE with an illegal value — fails loud", () => {
+  test("every /dashboard request answers 500 with the bad value and serves no route", async () => {
+    const { db } = tenancyFixture();
+    const env = { ...envFor(db), WORKSPACE_TENANT_MODE: "on" } as unknown as Env;
+    // Legacy, workspace-shaped and mode-independent paths alike: refusing to
+    // pick a face is safer than serving either one from a typo'd deploy var.
+    for (const path of ["/dashboard/apps", "/dashboard/acme/apps", "/dashboard/login"]) {
+      const res = await worker.fetch(await authedRequest(path, "octocat"), env);
+      expect(res.status, path).toBe(500);
+      expect(await res.text(), path).toContain(
+        'invalid WORKSPACE_TENANT_MODE on — expected "off" or "strict"',
+      );
+    }
+  });
+});

@@ -90,9 +90,10 @@ export type Env = {
   /**
    * Tenant read mode (migration 0026). `"strict"` makes every
    * execution-facing App read INNER JOIN `app_workspaces`, so an App with no
-   * workspace mapping is invisible to the pipeline; unset / any other value
-   * = `"off"` (today's single-table reads). Value validation and deploy
-   * wiring live outside this type.
+   * workspace mapping is invisible to the pipeline; unset/empty = `"off"`
+   * (today's single-table reads). Resolve it through `tenantModeOf`
+   * (src/worker/tenant-mode.ts) — an illegal value throws instead of
+   * silently reading as `off`.
    */
   WORKSPACE_TENANT_MODE?: "off" | "strict";
 };
