@@ -8,11 +8,15 @@
  *
  * Also pinned here: replay identity is bound to the SHA Deploy A shipped (not
  * to whatever the ref points at now), the container-digest comparison is
- * reported, and the always-run summary derives its status keys from
- * `steps.deploy.outcome` — never from the non-fatal version-id capture.
+ * reported, the routine (`push` / `release`) arm takes its tenant mode from the
+ * steady-state variable instead of hardcoding `off`, and the always-run summary
+ * derives its status keys from the deploy steps' outcomes — never from the
+ * non-fatal version-id capture. The summary pins assert the CONTENT the step
+ * actually writes into `$GITHUB_STEP_SUMMARY` (the step body is executed), not
+ * the markdown source shape.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -54,6 +58,50 @@ function parseText(rel: string, text: string): Step[] {
   }
 }
 
+/**
+ * Execute one step body exactly as Actions would (bash -eo pipefail, the step's
+ * `env:` resolved from `vars`), in a scratch directory whose `scripts/` points
+ * at the repository's. Returns what landed in `$GITHUB_OUTPUT` /
+ * `$GITHUB_STEP_SUMMARY` — the emitted content, not the YAML shape.
+ */
+function runStep(
+  step: Step,
+  env: Record<string, string>,
+  files: Record<string, string> = {},
+): { code: number; out: string; output: string; summary: string } {
+  const dir = mkdtempSync(join(tmpdir(), "step-"));
+  try {
+    symlinkSync(join(REPO_ROOT, "scripts"), join(dir, "scripts"));
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+    const output = join(dir, "output.txt");
+    const summary = join(dir, "summary.md");
+    writeFileSync(output, "");
+    writeFileSync(summary, "");
+    const proc = Bun.spawnSync(["bash", "-eo", "pipefail", "-c", step.run ?? ""], {
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: output,
+        GITHUB_STEP_SUMMARY: summary,
+        GITHUB_SERVER_URL: "https://github.com",
+        GITHUB_REPOSITORY: "o/r",
+        GITHUB_RUN_ID: "42",
+        ...env,
+      },
+    });
+    return {
+      code: proc.exitCode,
+      out: proc.stdout.toString() + proc.stderr.toString(),
+      output: readFileSync(output, "utf8"),
+      summary: readFileSync(summary, "utf8"),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /** Steps that publish a Worker version (a `secret bulk` write does too). */
 const DEPLOY_CAPABLE = /bunx wrangler (deploy|secret bulk)\b/;
 /**
@@ -89,20 +137,36 @@ function assertServingStepBindsMode(file: string, steps: Step[]): void {
   );
 }
 
+/** The always-run step that writes the status keys and the evidence summary. */
+function findSummaryStep(steps: Step[]): Step | undefined {
+  return steps.find(
+    (s) =>
+      s.if === "always()" &&
+      (s.run ?? "").includes("GITHUB_STEP_SUMMARY") &&
+      (s.run ?? "").includes("scripts/deploy-status.sh"),
+  );
+}
+
 const WORKFLOWS = [
   {
     file: "deploy.yml",
     migrations: "Apply D1 migrations (remote)",
     replayNeedles: ["HEAD_SHA", "EXPECTED_DEPLOY_SHA"],
+    // Staging's `wrangler deploy` IS the last version-creating step, so the
+    // summary takes no separate serving outcome.
+    serving: undefined,
   },
   {
     file: "deploy-prod.yml",
     migrations: "Apply prod D1 migrations (remote)",
     replayNeedles: ["refs/tags/", "EXPECTED_DEPLOY_SHA"],
+    // Production re-deploys the mode-bearing version in a LATER step: the
+    // summary must consume that outcome too (I-000071).
+    serving: { id: "serving", name: "Deploy serving version (prod, mode var)" },
   },
 ] as const;
 
-for (const { file, migrations, replayNeedles } of WORKFLOWS) {
+for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
   describe(`${file} gate ordering`, () => {
     const steps = parseWorkflow(file).jobs.deploy.steps as Step[];
     const deployCapable = steps
@@ -149,28 +213,128 @@ for (const { file, migrations, replayNeedles } of WORKFLOWS) {
       // one writer: the deploy step itself must not append status to the summary
       expect(deploy.run, `${file}: deploy step must not write the summary`).not.toContain("GITHUB_STEP_SUMMARY");
 
-      const summary = steps.find(
-        (s) =>
-          s.if === "always()" &&
-          (s.run ?? "").includes("GITHUB_STEP_SUMMARY") &&
-          (s.run ?? "").includes("scripts/deploy-status.sh"),
-      );
+      const summary = findSummaryStep(steps);
       expect(summary, `${file}: no always-run status summary calling the script`).toBeDefined();
       expect(summary!.env?.DEPLOY_OUTCOME, `${file}: summary must read the deploy outcome`).toBe(
         "${{ steps.deploy.outcome }}",
       );
-      // the status shape itself (and the never-both invariant) is behaviour-tested
-      // in tests/scripts/deploy-guards.test.ts, which executes the script.
-
-      const body = readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8");
-      expect(body, `${file}: container digest comparison missing`).toContain("container_digest_match=");
-      expect(body, `${file}: a digest mismatch must warn with the rolling-base reason`).toContain(
-        "::warning::container digest",
+      // Run it: the emitted keys are the contract, not the step's markdown shape.
+      const sha = "c".repeat(40);
+      const failed = runStep(summary!, { DEPLOY_OUTCOME: "failure", RUN_SHA: sha });
+      expect(failed.code, `${file}: the summary step must never fail the run`).toBe(0);
+      expect(failed.summary, `${file}: a failed deploy certifies nothing`).toContain(
+        `deploy_status=not-deployed\nrequested_sha=${sha}`,
       );
+      expect(failed.summary, `${file}: a failed deploy must not print a replay SHA`).not.toContain("deployed_sha=");
+    });
+
+    test("the routine (non-dispatch) arm takes the steady-state tenant mode, never a hardcoded off", () => {
+      const step = steps.find((s) => s.name === "Resolve tenant mode")!;
+      expect(step, `${file}: mode resolution step is missing`).toBeDefined();
+      expect(step.id).toBe("tenant");
+      // the steady-state variable is read from `vars`, so a strict installation
+      // survives an ordinary release/push deploy
+      expect(step.env?.STEADY_TENANT_MODE, `${file}: routine arm must read vars.WORKSPACE_TENANT_MODE`).toBe(
+        "${{ vars.WORKSPACE_TENANT_MODE }}",
+      );
+      expect(step.env?.TENANT_MODE).toBe("${{ inputs.tenant_mode }}");
+      // the arm, not the step, decides: release/push is routine, dispatch is not
+      expect(step.env?.ROUTINE_ARM).toBe("${{ github.event_name != 'workflow_dispatch' }}");
+      expect(step.run, `${file}: the resolver script owns the decision`).toContain(
+        "bash scripts/resolve-tenant-mode.sh",
+      );
+
+      // strict installation, routine arm, no dispatch input → strict, silent
+      const strict = runStep(step, { TENANT_MODE: "", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "true" });
+      expect(strict.code).toBe(0);
+      expect(strict.output).toBe("mode=strict\n");
+      expect(strict.out).not.toContain("::warning::");
+
+      // no steady-state variable → off, and the demotion is reported
+      const unset = runStep(step, { TENANT_MODE: "", STEADY_TENANT_MODE: "", ROUTINE_ARM: "true" });
+      expect(unset.code).toBe(0);
+      expect(unset.output).toBe("mode=off\n");
+      expect(unset.out).toContain("::warning::");
+      expect(unset.summary).toContain("tenant_mode_change=unproven->off");
+
+      // the dispatch input still overrides the steady-state variable
+      const dispatched = runStep(step, { TENANT_MODE: "off", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "false" });
+      expect(dispatched.code).toBe(0);
+      expect(dispatched.output).toBe("mode=off\n");
+      expect(dispatched.summary).toContain("tenant_mode_change=none");
+    });
+
+    test("the mode step runs before every deploy-capable step", () => {
+      const tenant = steps.findIndex((s) => s.name === "Resolve tenant mode");
+      expect(tenant).toBeGreaterThan(-1);
+      for (const i of deployCapable) {
+        expect(tenant, `${file}: mode resolution must precede "${steps[i]!.name}"`).toBeLessThan(i);
+      }
     });
 
     test("the LAST version-creating step is a deploy that binds the resolved tenant mode", () => {
       assertServingStepBindsMode(file, steps);
+    });
+
+    test("the summary certifies a deployed SHA only when every version-creating deploy succeeded", () => {
+      const summary = findSummaryStep(steps)!;
+      const sha = "d".repeat(40);
+      if (serving === undefined) {
+        // Staging: one version-creating deploy, so its outcome alone decides and
+        // a fourth argument would invent a step that does not exist.
+        expect(summary.env?.SERVING_OUTCOME).toBeUndefined();
+        const ok = runStep(summary, { DEPLOY_OUTCOME: "success", RUN_SHA: sha });
+        expect(ok.summary).toContain(`deploy_status=deployed\ndeployed_sha=${sha}`);
+        return;
+      }
+
+      const servingStep = steps.find((s) => s.name === serving.name)!;
+      expect(servingStep, `${file}: serving step "${serving.name}" is missing`).toBeDefined();
+      expect(servingStep.id).toBe(serving.id);
+      expect(summary.env?.SERVING_OUTCOME, `${file}: the summary must read the serving outcome`).toBe(
+        `\${{ steps.${serving.id}.outcome }}`,
+      );
+
+      // First deploy green, serving deploy failed → the SHA is NOT replayable.
+      const partial = runStep(summary, {
+        DEPLOY_OUTCOME: "success",
+        SERVING_OUTCOME: "failure",
+        RUN_SHA: sha,
+      });
+      expect(partial.code).toBe(0);
+      expect(partial.summary, `${file}: a failed serving deploy must not certify the SHA`).toContain(
+        `deploy_status=not-deployed\nrequested_sha=${sha}`,
+      );
+      expect(partial.summary).not.toContain("deployed_sha=");
+
+      // Both green → the SHA is the replay source Deploy B needs.
+      const both = runStep(summary, {
+        DEPLOY_OUTCOME: "success",
+        SERVING_OUTCOME: "success",
+        RUN_SHA: sha,
+      });
+      expect(both.summary).toContain(`deploy_status=deployed\ndeployed_sha=${sha}`);
+    });
+
+    test("the evidence summary renders the Worker version as a markdown bullet", () => {
+      // N3: pin the CONTENT the step emits, not the echo shape. Both summaries
+      // carry the same evidence line; a bare `version_id=<uuid>` key renders as
+      // plain text in the run summary, so the bullet is the contract.
+      const evidence = steps.find(
+        (s) => (s.run ?? "").includes("Worker version") && (s.run ?? "").includes("GITHUB_STEP_SUMMARY"),
+      )!;
+      expect(evidence, `${file}: no step emits the Worker version`).toBeDefined();
+      const version = "11111111-2222-3333-4444-555555555555";
+      const emitted = runStep(
+        evidence,
+        { TENANT_MODE: "off", EXPECTED_DIGEST: "", RUN_SHA: "e".repeat(40), DEPLOY_OUTCOME: "failure", SERVING_OUTCOME: "failure" },
+        { "version_id.txt": `${version}\n`, "image_digest.txt": `sha256:${"f".repeat(64)}\n` },
+      );
+      expect(emitted.code, `${file}: the evidence step must never fail the run`).toBe(0);
+      expect(emitted.summary).toContain(`Worker version: \`${version}\``);
+      expect(emitted.summary, `${file}: the version must not be re-rendered as a bare key`).not.toMatch(
+        /^version_id=[0-9a-f-]{36}$/m,
+      );
     });
 
     test("mutation: an appended bulk after the serving deploy, or a serving deploy without the var, fails the pin", () => {
@@ -205,14 +369,6 @@ for (const { file, migrations, replayNeedles } of WORKFLOWS) {
         expect(capture.if).toBeUndefined();
         expect(capture.run).toContain("unreported");
         expect(deploy.name).not.toBe(capture.name);
-      });
-
-      test("the summary renders the Worker version as a markdown bullet", () => {
-        // Both run summaries carry the same evidence key; a bare `key=value`
-        // line renders differently from the prod bullet for the same value.
-        const body = readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8");
-        expect(body).toContain('echo "- Worker version: \\`$VERSION\\`"');
-        expect(body).not.toContain('echo "version_id=$VERSION"');
       });
     }
   });
