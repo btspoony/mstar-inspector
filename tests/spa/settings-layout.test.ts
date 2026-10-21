@@ -1309,7 +1309,7 @@ describe("App workflow boundaries", () => {
     // the settings tab body — the source pin re-pointed with the move.
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     // The back link targets the enumerated Apps route (the /dashboard surface).
-    expect(source).toContain('href="/dashboard/apps"');
+    expect(source).toContain('href={appsHref}');
     expect(source).toContain('t(locale, "appDetail.backToApps")');
     expect(t("en", "appDetail.backToApps")).toBe("Back to Apps");
     expect(t("zh_CN", "appDetail.backToApps")).toBe("返回应用");
@@ -1317,7 +1317,7 @@ describe("App workflow boundaries", () => {
     // the accessible name at the backToApps text alone; inline-flex aligns
     // icon + label. Copy and target unchanged (AC3).
     const wayfinding = source.slice(
-      source.lastIndexOf("<a", source.indexOf('href="/dashboard/apps"')),
+      source.lastIndexOf("<a", source.indexOf('href={appsHref}')),
       source.indexOf('t(locale, "appDetail.backToApps")'),
     );
     expect(wayfinding).toContain("<ArrowLeft");

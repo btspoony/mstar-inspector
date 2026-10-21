@@ -22,6 +22,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
+import { apiBase } from "../../src/spa/workspace-base";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -577,6 +578,33 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     const body = await res.text();
     expect(body).toContain("acme-app");
     expect(body).not.toContain("window.__BOOT__");
+  });
+
+  test("strict: the workspace Apps pages serve the shell over the workspace API base", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db, "strict"));
+    for (const path of ["/dashboard/acme/apps", "/dashboard/acme/apps/acme-app"]) {
+      const res = await worker.fetch(
+        await authedRequest(path, "dana", { accept: "text/html" }),
+        env,
+      );
+      expect(res.status, path).toBe(200);
+      expect(await res.text(), path).toContain("window.__BOOT__");
+      // The shell derives its API base from THIS pathname: every read and link
+      // on the page hangs off /dashboard/acme (the legacy App family 404s here).
+      expect(apiBase(path), path).toBe("/dashboard/acme");
+    }
+  });
+
+  test("off: a workspace Apps page answers 404 even with ASSETS bound (gate before dispatch)", async () => {
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db, "off"));
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps", "octocat", { accept: "text/html" }),
+      env,
+    );
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("window.__BOOT__");
   });
 
   test("off: the legacy SPA pages still serve with ASSETS bound", async () => {

@@ -12,10 +12,8 @@ import {
 import type { SidebarModel } from "../shell";
 import { spaClick } from "../spa-click";
 
-const NAV_ICONS = {
-  "/dashboard/apps": LayoutGrid,
-  "/dashboard/members": Users,
-} as const;
+/** Keyed by the nav page segment — a workspace-scoped href carries a slug prefix. */
+const NAV_ICONS = { apps: LayoutGrid, members: Users } as const;
 
 /**
  * Brand mark: the sidebar wordmark mark is the single source —
@@ -53,7 +51,7 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
           <SidebarGroupContent>
             <SidebarMenu>
               {model.items.map((item) => {
-                const Icon = NAV_ICONS[item.href as keyof typeof NAV_ICONS];
+                const Icon = NAV_ICONS[item.href.split("/").pop() as keyof typeof NAV_ICONS];
                 return (
                   <SidebarMenuItem key={item.href}>
                     {/* Active face (AD-641): low-alpha brand tint +

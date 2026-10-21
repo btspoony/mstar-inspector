@@ -29,6 +29,7 @@ import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
 import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
+import { apiBase } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import {
@@ -172,7 +173,11 @@ export function SettingsView({
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const { app } = payload;
-  const base = `/dashboard/apps/${app.slug}/settings`;
+  // Every pinned path of this page hangs off the page's workspace prefix
+  // (`/dashboard` legacy, `/dashboard/<slug>` under strict) — the legacy App
+  // route family answers 404 on a workspace-scoped deployment.
+  const appPath = `${apiBase()}/apps/${app.slug}`;
+  const base = `${appPath}/settings`;
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
   // Dialog-confirmed ops report into the card that owns the
@@ -248,7 +253,7 @@ export function SettingsView({
     // rejects: load() catches its own failures into the page notice.
     try {
       ({ status, body } = await postForm(
-        `/dashboard/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
+        `${apiBase()}/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
         fields,
       ));
     } catch {
@@ -298,7 +303,7 @@ export function SettingsView({
    * via the awaited background reload.
    */
   async function runTriggerMode(mode: ReviewTriggerMode): Promise<OpNotice> {
-    return runPinnedWithBody(`/dashboard/apps/${app.slug}/review-trigger-mode`, { mode });
+    return runPinnedWithBody(`${appPath}/review-trigger-mode`, { mode });
   }
 
   /**
@@ -360,7 +365,7 @@ export function SettingsView({
         // identity's, so a pool with a sibling key keeps it.
         const slot = configuredKeySlot(configured, action.provider, action.keyId);
         setProvidersRemoveOutcome({
-          notice: await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
+          notice: await runPinnedWithBody(`${base}/key/delete`, {
             provider: action.provider,
             key_id: action.keyId,
           }),
@@ -372,13 +377,13 @@ export function SettingsView({
         // reload: false — the deleted App's settings GET is a guaranteed 404.
         setOpsNotice(
           await runPinnedWithBody(
-            `/dashboard/apps/${app.slug}/delete`,
+            `${appPath}/delete`,
             {},
             { successMessage: t(locale, "settings.deleteSuccess"), reload: false },
           ),
         );
       } else {
-        setOpsNotice(await runPinned(`/dashboard/apps/${app.slug}/${action.kind}`));
+        setOpsNotice(await runPinned(`${appPath}/${action.kind}`));
       }
     } finally {
       setBusy(false);

@@ -91,6 +91,19 @@ describe("shell models", () => {
     const root = buildSidebarModel(member, "/dashboard");
     expect(root.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(true);
   });
+
+  test("a workspace page keeps the Apps entry in its workspace; Members stays legacy", () => {
+    const sidebar = buildSidebarModel(admin, "/dashboard/acme/apps");
+    expect(sidebar.items.map((item) => item.href)).toEqual([
+      "/dashboard/acme/apps",
+      "/dashboard/members",
+    ]);
+    expect(sidebar.items.find((item) => item.href === "/dashboard/acme/apps")?.current).toBe(true);
+    // The App detail page under the same workspace keeps the entry current.
+    const detail = buildSidebarModel(admin, "/dashboard/acme/apps/acme-app/settings");
+    expect(detail.items.find((item) => item.href === "/dashboard/acme/apps")?.current).toBe(true);
+    expect(detail.items.find((item) => item.href === "/dashboard/members")?.current).toBe(false);
+  });
 });
 
 describe("navbar theme toggle", () => {

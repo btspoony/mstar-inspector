@@ -5,6 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
+import { apiBase } from "../workspace-base";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
@@ -75,7 +76,7 @@ export function AppInsightsTab({
     setState("loading");
     // include=repos: the records Select needs the window-scoped distinct
     // repo set (QC F-001); default summary reads stay cheap.
-    fetchJson(appInsightsSummaryUrl(slug, search.window, search.repo))
+    fetchJson(appInsightsSummaryUrl(apiBase(), slug, search.window, search.repo))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parseInsights(raw);

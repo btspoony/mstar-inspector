@@ -590,16 +590,22 @@ export function insightsTrendPoints(data: InsightsSummary): InsightsTrendPoint[]
 }
 
 /**
- * Per-App insights summary URL — the mount-prefixed dashboard API face
- * of the Worker's `GET /api/apps/:slug/insights/summary`. `repo` is omitted
- * when empty (the no-filter default). `include=repos` rides every read:
- * the repo Select needs the window-scoped distinct repo set on every face
- * it can render (the insights tab has no repo-less summary consumer).
+ * Per-App insights summary URL — `base` is the page's workspace prefix
+ * (`/dashboard`, or `/dashboard/<slug>` under strict) plus the Worker's
+ * `GET /api/apps/:slug/insights/summary` face. `repo` is omitted when empty
+ * (the no-filter default). `include=repos` rides every read: the repo Select
+ * needs the window-scoped distinct repo set on every face it can render (the
+ * insights tab has no repo-less summary consumer).
  */
-export function appInsightsSummaryUrl(slug: string, window: string, repo: string): string {
+export function appInsightsSummaryUrl(
+  base: string,
+  slug: string,
+  window: string,
+  repo: string,
+): string {
   const params = new URLSearchParams({ window, include: "repos" });
   if (repo !== "") params.set("repo", repo);
-  return `/dashboard/api/apps/${encodeURIComponent(slug)}/insights/summary?${params.toString()}`;
+  return `${base}/api/apps/${encodeURIComponent(slug)}/insights/summary?${params.toString()}`;
 }
 
 /** The App detail page's two tabs (应用设置 / 洞察). Insights is manager-only. */

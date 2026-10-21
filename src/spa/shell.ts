@@ -4,6 +4,7 @@
  */
 import { NAV_ITEMS, t, type Locale } from "../i18n";
 import type { SpaBoot } from "./boot";
+import { workspaceSlugOf } from "./routes";
 
 export type ShellNavItem = { href: string; label: string; current: boolean };
 
@@ -40,6 +41,11 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
  * `/dashboard/apps/:slug`) — the root lands on Apps, so the brand href and
  * `/dashboard/apps` highlight the same entry. Remaining entries follow the
  * generic rule below.
+ *
+ * On a workspace-scoped page the Apps entry follows that workspace
+ * (`/dashboard/<slug>/apps`); Members is not workspace-routed, so its legacy
+ * href stays. The generic prefix rule then also marks the scoped Apps entry
+ * current on its own detail pages.
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
   if (href === "/dashboard/apps") {
@@ -53,14 +59,21 @@ export function isNavCurrent(href: string, pathname: string): boolean {
 }
 
 export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel {
+  const workspaceSlug = workspaceSlugOf(pathname);
   return {
     brand: t(boot.locale, "nav.brand"),
     navLabel: t(boot.locale, "nav.primary"),
-    items: visibleNavItems(boot.role).map((item) => ({
-      href: item.href,
-      label: t(boot.locale, item.labelKey),
-      current: isNavCurrent(item.href, pathname),
-    })),
+    items: visibleNavItems(boot.role).map((item) => {
+      const href =
+        workspaceSlug !== null && item.href === "/dashboard/apps"
+          ? `/dashboard/${workspaceSlug}/apps`
+          : item.href;
+      return {
+        href,
+        label: t(boot.locale, item.labelKey),
+        current: isNavCurrent(href, pathname),
+      };
+    }),
   };
 }
 

@@ -118,12 +118,13 @@ describe("app detail URL state (shared pure helpers)", () => {
     );
   });
 
-  test("the per-App summary URL is mount-prefixed and encodes slug + filters; include=repos always rides", () => {
-    expect(appInsightsSummaryUrl("demo", "30", "")).toBe(
+  test("the per-App summary URL is base-prefixed and encodes slug + filters; include=repos always rides", () => {
+    expect(appInsightsSummaryUrl("/dashboard", "demo", "30", "")).toBe(
       "/dashboard/api/apps/demo/insights/summary?window=30&include=repos",
     );
-    expect(appInsightsSummaryUrl("acme inc", "7", "acme/web")).toBe(
-      "/dashboard/api/apps/acme%20inc/insights/summary?window=7&include=repos&repo=acme%2Fweb",
+    // A workspace-scoped page rides its own prefix (no legacy App family there).
+    expect(appInsightsSummaryUrl("/dashboard/acme", "acme inc", "7", "acme/web")).toBe(
+      "/dashboard/acme/api/apps/acme%20inc/insights/summary?window=7&include=repos&repo=acme%2Fweb",
     );
   });
 });
@@ -155,7 +156,7 @@ describe("tab shell source contracts", () => {
     // non-managers alike) as the page's first element. The loading
     // skeleton early returns stay excluded (transient faces). The link
     // face is the SettingsPage idiom: ArrowLeft aria-hidden + label.
-    const wayfindingAt = detailPage.indexOf('href="/dashboard/apps"');
+    const wayfindingAt = detailPage.indexOf('href={appsHref}');
     expect(wayfindingAt).toBeGreaterThan(-1);
     expect(detailPage).toContain('t(locale, "appDetail.backToApps")');
     expect(detailPage).toContain("spaClick");
@@ -174,10 +175,10 @@ describe("tab shell source contracts", () => {
     // error face (ErrorState) and ok face (AppDetailView).
     const returnAt = detailPage.indexOf('state === "error" ? <ErrorState');
     expect(returnAt).toBeGreaterThan(-1);
-    expect(detailPage.lastIndexOf('href="/dashboard/apps"', returnAt)).toBeGreaterThan(-1);
+    expect(detailPage.lastIndexOf('href={appsHref}', returnAt)).toBeGreaterThan(-1);
     // The pure view gained nothing: no back link inside AppDetailView.
     const viewAt = detailPage.indexOf("export function AppDetailView");
-    expect(detailPage.indexOf('href="/dashboard/apps"', viewAt)).toBe(-1);
+    expect(detailPage.indexOf('href={appsHref}', viewAt)).toBe(-1);
   });
 
   test("page tab face: the shell tab bar rides the line variant with hairline + sized-up left-aligned triggers", () => {
@@ -306,7 +307,7 @@ describe("tab shell source contracts", () => {
   });
 
   test("R1 closure: the insights tab consumes the kept data.ts helpers over the mount-prefixed per-App face", () => {
-    expect(insightsTab).toContain("appInsightsSummaryUrl(slug");
+    expect(insightsTab).toContain("appInsightsSummaryUrl(apiBase(), slug");
     expect(insightsTab).toContain("parseInsights(");
     expect(insightsTab).toContain("INSIGHTS_WINDOWS.map");
     expect(insightsTab).toContain("insightsRepoOptions(");

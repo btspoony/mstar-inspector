@@ -34,7 +34,7 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     // Row-level and identity-link spaClick handlers (behavior).
     expect(appsPage.split("onClick={(event) => spaClick(href, event)}").length - 1).toBe(3);
     // Every row navigation targets the detail route (no /settings deep link).
-    expect(appsPage).toContain("const href = `/dashboard/apps/${app.slug}`;");
+    expect(appsPage).toContain("const href = `${apiBase()}/apps/${app.slug}`;");
     expect(appsPage).not.toContain("/settings`");
     expect(appsPage).toContain('className="text-primary underline-offset-4 hover:underline"');
     // Row action copy is detail semantics in both locales.

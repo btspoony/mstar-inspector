@@ -137,7 +137,7 @@ describe("save flow + 400 fallback contract (source pins)", () => {
     // never-blank fallback; count pinned at 2 by settings-error-keys.test.ts
     // and unchanged here).
     expect(settingsPage).toContain(
-      "runPinnedWithBody(`/dashboard/apps/${app.slug}/review-trigger-mode`, { mode })",
+      "runPinnedWithBody(`${appPath}/review-trigger-mode`, { mode })",
     );
     // OpsCard receives the saver and renders the control (beside the review
     // toggle, inside the ops card — before the pause/resume actions row).

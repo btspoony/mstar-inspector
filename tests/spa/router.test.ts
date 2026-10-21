@@ -6,7 +6,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
-import { SPA_PAGES, isSpaAssetPath, matchSpaRoute, wantsHtml } from "../../src/spa/routes";
+import { SPA_PAGES, RESERVED_WORKSPACE_SLUGS, isSpaAssetPath, matchSpaRoute, wantsHtml } from "../../src/spa/routes";
+
+/** True when the matched route is workspace-scoped (legacy variants carry no field). */
+function isWorkspaceRoute(pathname: string): boolean {
+  const route = matchSpaRoute(pathname);
+  return route !== null && "workspaceSlug" in route;
+}
 
 describe("SPA_PAGES enum", () => {
   test("includes apps, members, login, app-detail (insights and home retired; settings folded into app-detail)", () => {
@@ -58,6 +64,60 @@ describe("matchSpaRoute", () => {
     // The global insights page is retired: its path is no longer a SPA page.
     expect(matchSpaRoute("/dashboard/insights")).toBeNull();
     expect(matchSpaRoute("/apps")).toBeNull();
+  });
+});
+
+describe("matchSpaRoute — workspace-scoped App pages", () => {
+  test("the workspace Apps page and its App detail routes carry the slug", () => {
+    expect(matchSpaRoute("/dashboard/acme/apps")).toEqual({
+      page: "apps",
+      pathname: "/dashboard/acme/apps",
+      workspaceSlug: "acme",
+    });
+    expect(matchSpaRoute("/dashboard/acme/apps/acme-app")).toEqual({
+      page: "app-detail",
+      pathname: "/dashboard/acme/apps/acme-app",
+      slug: "acme-app",
+      workspaceSlug: "acme",
+    });
+    // The permanent settings-tab deep link exists on the workspace family too
+    // (the settings POST family's HTML-nav 302 targets it under strict).
+    expect(matchSpaRoute("/dashboard/acme/apps/acme-app/settings")).toEqual({
+      page: "app-detail",
+      pathname: "/dashboard/acme/apps/acme-app/settings",
+      slug: "acme-app",
+      workspaceSlug: "acme",
+    });
+  });
+
+  test("a reserved first segment is never a workspace", () => {
+    for (const word of RESERVED_WORKSPACE_SLUGS) {
+      for (const path of [`/dashboard/${word}/apps`, `/dashboard/${word}/apps/some-app`]) {
+        // Whatever else such a path resolves to (e.g. the legacy app-detail
+        // for an App literally named "apps"), it never carries a workspace.
+        expect(isWorkspaceRoute(path), path).toBe(false);
+      }
+    }
+  });
+
+  test("workspace pages stop at the enumerated shapes (onboarding and deeper paths are Worker routes)", () => {
+    expect(matchSpaRoute("/dashboard/acme/apps/acme-app/onboarding")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/apps/acme-app/settings/key/delete")).toBeNull();
+    expect(isWorkspaceRoute("/dashboard/acme/api/apps")).toBe(false);
+    expect(isWorkspaceRoute("/dashboard/acme/members")).toBe(false);
+  });
+
+  test("legacy routes keep no workspace field (the prefix is the only signal)", () => {
+    for (const path of [
+      "/dashboard",
+      "/dashboard/apps",
+      "/dashboard/apps/acme",
+      "/dashboard/apps/acme/settings",
+      "/dashboard/members",
+      "/dashboard/login",
+    ]) {
+      expect(isWorkspaceRoute(path), path).toBe(false);
+    }
   });
 });
 
