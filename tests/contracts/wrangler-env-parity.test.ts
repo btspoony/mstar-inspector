@@ -346,4 +346,22 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
       `wrangler.jsonc: prod route must be a Custom Domain`,
     ).toEqual([true]);
   });
+
+  /**
+   * `WORKSPACE_TENANT_MODE` (migration 0026) is the tenant route/read switch.
+   * It rides `--var` on BOTH deploy commands, so the artifact and the mode stay
+   * independent: the same SHA is deployed `off` (Deploy A) and replayed
+   * `strict` (Deploy B). A workflow that lost the `--var` would fall back to the
+   * config default and ship a different mode than its run says.
+   */
+  test("WORKSPACE_TENANT_MODE: both deploy workflows pass --var, and prod config carries the default", () => {
+    for (const name of ["deploy.yml", "deploy-prod.yml"]) {
+      const text = readFileSync(join(REPO_ROOT, ".github", "workflows", name), "utf8");
+      expect(text, `${name}: tenant_mode dispatch input is missing`).toMatch(/\n\s+tenant_mode:\n/);
+      expect(text, `${name}: deploy command does not pass the tenant mode`).toContain(
+        '--var "WORKSPACE_TENANT_MODE:$TENANT_MODE"',
+      );
+    }
+    expect(asObject(production.vars).WORKSPACE_TENANT_MODE).toBe("off");
+  });
 });

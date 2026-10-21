@@ -496,6 +496,75 @@ restores by hand.
   (previous bullet). Rotate explicitly when the rollback is
   security-motivated.
 
+## Workspace tenant mode (`WORKSPACE_TENANT_MODE`)
+
+One Worker var switches both the dashboard route family and the App read face
+(migrations `0026` + `0027`):
+
+| Value | Dashboard routes | App reads |
+|---|---|---|
+| `off` (default) | legacy App paths (`/dashboard/apps…`, `/dashboard/api/apps…`) serve; workspace paths (`/dashboard/<slug>/apps…`) answer 404 | `github_apps` only — the pre-workspace behavior, byte-identical |
+| `strict` | legacy App paths answer 404; `/dashboard/<slug>/apps…` serves that workspace | every execution-facing App read INNER JOINs `app_workspaces`, so an unmapped App is invisible to the pipeline |
+
+Unset / empty reads as `off`. **Any other value fails loud**: the dashboard
+answers `500` without serving a route, and the queue consumer throws before it
+reads a message — a typo can never silently pick a face. The runtime reader is
+`tenantModeOf` in [`src/worker/tenant-mode.ts`](../src/worker/tenant-mode.ts),
+and both workflows reject an illegal `tenant_mode` input before any
+deploy-capable step.
+
+### Route move
+
+| Before (`off`) | After (`strict`) |
+|---|---|
+| `/dashboard/apps` | `/dashboard/<slug>/apps` |
+| `/dashboard/apps/<app>/settings` | `/dashboard/<slug>/apps/<app>/settings` |
+| `/dashboard/api/apps` | `/dashboard/<slug>/api/apps` |
+| `/dashboard/api/apps/<app>/…` | `/dashboard/<slug>/api/apps/<app>/…` |
+
+The reserved first segments (`apps`, `api`, `oauth`, `members`, `login`,
+`logout`, `manifest`, `locale`, `healthz`) never name a workspace, and the
+mode-independent routes (login, logout, OAuth callback, members, manifest,
+locale, healthz) answer in both modes.
+
+### Rollout: two deploys of the SAME artifact
+
+Both workflows take a `tenant_mode` dispatch input (`off` default, `strict`
+allowed) and pass it as `wrangler deploy --var
+WORKSPACE_TENANT_MODE:<mode>` — production gained that `--var` for this
+rollout, and `env.production` declares `off` as the manual-deploy default.
+
+1. **Deploy A — `off`.** The normal deploy of the new build: Apps keep serving
+   on their legacy paths, workspace paths 404.
+2. **Deploy B — `strict` on the same tag/SHA.** Replay the SAME ref:
+   `gh workflow run deploy-prod.yml --ref <tag> -f tenant_mode=strict`
+   (staging: dispatch `deploy.yml` on `main` for the same commit). The
+   workspace pages and the INNER-JOIN reads go live; no code differs between A
+   and B.
+3. **Rollback** is Deploy A again — the same tag with `tenant_mode=off`; the
+   read face and the routes revert together.
+
+Every run prints and summarizes `deployed_sha=<sha>`, so "same artifact" is
+auditable from the run itself.
+
+### Gate ordering (zero-orphan abort gate)
+
+Each deploy run performs, in order:
+
+1. `wrangler d1 migrations apply` — forward-only; applies `0026`/`0027` on a
+   fresh database.
+2. **Re-run** [`migrations/0027_workspace_backfill.sql`](../migrations/0027_workspace_backfill.sql)
+   — both statements are `INSERT … SELECT … WHERE NOT EXISTS`, so a re-run
+   repairs a partially applied deploy and inserts nothing that exists.
+3. `bun scripts/assert-tenant-attribution.ts` —
+   `SELECT COUNT(*) … WHERE w.app_id IS NULL` through
+   `wrangler d1 execute --remote --json`. **A non-zero count exits the run
+   before `wrangler deploy`** (both modes: the gap is latent under `off` and
+   invisible under `strict`).
+4. `wrangler deploy --var WORKSPACE_TENANT_MODE:<mode>`.
+5. Healthz / cron / digest smokes, then the same attribution gate again, against
+   the artifact now serving.
+
 ## Prerequisites
 
 ### Cloudflare resources (one-time)

@@ -276,9 +276,14 @@
         }
       ],
       // Prod D1 starts empty, so without this the first OAuth login would
-      // self-promote to admin.
+      // self-promote to admin. WORKSPACE_TENANT_MODE is the migration 0026
+      // tenant read mode: `off` is the safe default for a manual deploy —
+      // both deploy workflows override it with `--var
+      // WORKSPACE_TENANT_MODE:$TENANT_MODE`, which is how the same artifact
+      // is replayed as `strict` (Deploy B).
       "vars": {
-        "ADMIN_LOGINS": "btspoony"
+        "ADMIN_LOGINS": "btspoony",
+        "WORKSPACE_TENANT_MODE": "off"
       }
     }
   }

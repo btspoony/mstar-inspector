@@ -228,12 +228,20 @@ describe("deploy-prod.yml guards", () => {
     }
   });
 
-  test("triggers: release published + workflow_dispatch with NO inputs (run ref is the deploy ref)", () => {
+  test("triggers: release published + workflow_dispatch whose only input is tenant_mode", () => {
     expect(triggers(wf).release).toEqual({ types: ["published"] });
     const dispatch = triggers(wf).workflow_dispatch;
-    // no `inputs:` block at all — T3-3: a `ref` input would let a run deploy a
-    // tag other than the one it runs on. `null` is YAML's empty-mapping form.
-    expect(dispatch).toBeNull();
+    // T3-3: still no `ref` input — a run can never deploy a tag other than the
+    // one it runs on. The ONE input is the tenant read mode, so the same
+    // tag/SHA is deployed `off` (Deploy A) and replayed `strict` (Deploy B).
+    expect(Object.keys(dispatch)).toEqual(["inputs"]);
+    expect(Object.keys(dispatch.inputs)).toEqual(["tenant_mode"]);
+    expect(dispatch.inputs.tenant_mode).toMatchObject({
+      required: false,
+      default: "off",
+      type: "choice",
+      options: ["off", "strict"],
+    });
     // a `push:` trigger would deploy production on every main push — this
     // workflow is release/dispatch only.
     expect(triggers(wf).push).toBeUndefined();
@@ -376,8 +384,11 @@ describe("deploy-prod.yml guards", () => {
     for (const n of [
       "Verify Cloudflare account",
       "Apply prod D1 migrations (remote)",
+      "Re-run workspace backfill (0027, idempotent)",
+      "Assert zero orphan Apps (pre-deploy gate)",
       "Deploy Worker (prod)",
       "Re-capture live Worker version",
+      "Assert zero orphan Apps (post-deploy)",
     ]) {
       expectSecrets(n, [TOKEN]);
     }
@@ -389,7 +400,7 @@ describe("deploy-prod.yml guards", () => {
     expect(actionSteps.length).toBe(3);
     for (const s of actionSteps) expect([s.uses, secretsOf(s)]).toEqual([s.uses, []]);
 
-    // and no OTHER step smuggles one in: the seven above are the full carrier set
+    // and no OTHER step smuggles one in: the ten above are the full carrier set
     expect(
       steps
         .filter((s) => secretsOf(s).length > 0)
@@ -399,8 +410,11 @@ describe("deploy-prod.yml guards", () => {
       [
         "Apply prod D1 migrations (remote)",
         "Assert required secrets are set",
+        "Assert zero orphan Apps (post-deploy)",
+        "Assert zero orphan Apps (pre-deploy gate)",
         "Deploy Worker (prod)",
         "Re-capture live Worker version",
+        "Re-run workspace backfill (0027, idempotent)",
         "Verify Cloudflare account",
         "Write ALERT_WEBHOOK_URL secret (bind, or null-delete when unset)",
         "Write required secrets",
@@ -1014,7 +1028,9 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("deploy runs `wrangler deploy --env production`, tees deploy.log, records the Version ID", () => {
-    expect(runsText).toContain("bunx wrangler deploy --env production 2>&1 | tee deploy.log");
+    expect(runsText).toContain(
+      'bunx wrangler deploy --env production --var "WORKSPACE_TENANT_MODE:$TENANT_MODE" 2>&1 | tee deploy.log',
+    );
     expect(runsText).toContain("Current Version ID:");
     expect(runsText).toContain("version_id.txt");
   });
@@ -1040,7 +1056,7 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
       Bun.spawnSync(["chmod", "+x", join(dir, "bunx")]);
       const proc = Bun.spawnSync(["bash", "-eo", "pipefail", "-c", body], {
         cwd: dir,
-        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, WRANGLER_VERSION_ID: payload },
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, WRANGLER_VERSION_ID: payload, TENANT_MODE: "off" },
       });
       const file = join(dir, "version_id.txt");
       return {
