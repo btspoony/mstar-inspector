@@ -69,13 +69,14 @@ function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void
   return db;
 }
 /**
- * Seed DB + apply the migrations in locked order 0004 → 0005 → 0026.
- * 0026 carries the workspace data plane `createApp` now writes into; it is
- * append-only over 0004 (its `workspace_members` FK targets `users`, which
- * this fixture never populates — SQLite resolves the reference lazily).
+ * Seed DB + the migrations in wrangler order 0003 → 0004 → 0005 → 0026.
+ * 0026 carries the workspace data plane `createApp` now writes into; its
+ * `workspace_members.user_id` references `users(id)`, the table 0003 creates,
+ * so the fixture applies the production shape up to 0003 first.
  */
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createSeededD1();
+  applyMigration(db, "0003_dashboard_users.sql");
   applyMigration(db, "0004_github_apps.sql");
   applyMigration(db, "0005_reviews_app_id.sql");
   applyMigration(db, "0026_workspaces.sql");
@@ -467,6 +468,20 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     const app = await seedApp(db);
     expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "default" }]);
     expect(appCount(db)).toBe(1);
+  });
+
+  test("one transaction: a failing app_workspaces insert rolls the App row back", async () => {
+    const db = createMigratedD1();
+    // A split-write implementation (INSERT then a separate mapping run) leaves
+    // the github_apps row behind when this ABORT fires — the test then fails.
+    rawRun(
+      db,
+      `CREATE TRIGGER fail_mapping BEFORE INSERT ON app_workspaces
+       BEGIN SELECT RAISE(ABORT, 'mapping fail'); END;`,
+    );
+    await expect(seedApp(db)).rejects.toThrow(/mapping fail/);
+    expect(appCount(db)).toBe(0);
+    expect(mappingRows(db)).toEqual([]);
   });
 
   test("the mapping write is in the same batch: a slug conflict rolls back both rows", async () => {

@@ -82,6 +82,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   //     consumer's §7.10 lifecycle seam owns; its publication_id FK
   //     resolves against 0020's review_publications.
   for (const name of [
+    "0003_dashboard_users.sql",
     "0004_github_apps.sql",
     "0005_reviews_app_id.sql",
     "0006_app_provider_config.sql",
