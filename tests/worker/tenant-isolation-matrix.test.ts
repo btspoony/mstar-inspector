@@ -192,6 +192,45 @@ function matrixFixture() {
 
 type ListBody = { viewer: { login: string }; apps: Array<{ slug: string }> };
 
+/**
+ * Every persisted field a management write could touch on `app-acme`, plus the
+ * key/provider row counts — one equality check per route proves refusal, not a
+ * partial write.
+ */
+function appSnapshot(db: TestD1, appId = "app-acme") {
+  return {
+    app: db.raw
+      .query(
+        `SELECT status, review_enabled, review_trigger_mode, sandbox_image_id, deleted_at, updated_at
+           FROM github_apps WHERE id = ?`,
+      )
+      .get(appId),
+    config: db.raw.query("SELECT model_chain FROM app_model_config WHERE app_id = ?").get(appId) ?? null,
+    keys: db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE app_id = ?").get(appId),
+    custom: db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers WHERE app_id = ?").get(appId),
+  };
+}
+
+/**
+ * Every management write the App routes expose, with the payload a MANAGER
+ * would accept (valid vocabulary, in-range values, existing default image), so
+ * a 403 can only come from the role gate. Two settings `op`s share one path;
+ * they are separate entries because each is its own write branch.
+ */
+const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string }> = [
+  { route: "/apps/acme-app/disable" },
+  { route: "/apps/acme-app/enable" },
+  { route: "/apps/acme-app/pause" },
+  { route: "/apps/acme-app/resume" },
+  { route: "/apps/acme-app/review-trigger-mode", body: "mode=open" },
+  { route: "/apps/acme-app/settings", body: "op=save-chain&model_chain=" },
+  { route: "/apps/acme-app/settings", body: "op=save-sandbox-image&sandbox_image_id=omp" },
+  { route: "/apps/acme-app/settings/key/delete", body: "provider=anthropic&key_id=key-absent" },
+  { route: "/api/apps/acme-app/keys/verify", body: "provider=anthropic&key=sk-not-a-real-key" },
+  // Last: a manager's success soft-deletes the row.
+  { route: "/apps/acme-app/delete" },
+];
+
 describe("tenant isolation matrix (scenario × mode)", () => {
   // row 1 — layers: route family gate → membership gate → scoped App resolve
   //         → strict store read. covered by tests/worker/dashboard-tenancy.test.ts
@@ -241,19 +280,31 @@ describe("tenant isolation matrix (scenario × mode)", () => {
     }
   });
 
-  // row 3 — layers: membership gate → read store → canManageApp(scope.role).
-  //         covered by tests/worker/dashboard-tenancy.test.ts (member 403 /
-  //         list 200); composed as ONE actor reading and being denied writing
-  //         in the same workspace, with the write provably not applied.
+  // row 3 — layers: membership gate → canManageApp(scope.role) on EVERY
+  //         management entry point. covered by
+  //         tests/worker/dashboard-tenancy.test.ts (list 200 / settings POST
+  //         403); composed as one actor reading, then every write route with a
+  //         manager-accepted payload, with the persisted row read back after
+  //         each attempt and a manager pass proving the same payload is
+  //         accepted — so no 403 can be a payload rejection in disguise.
   test("row 3 · a workspace member reads the App list but every management write is 403 and lands nothing", async () => {
     const { db } = matrixFixture();
     const env = envFor(db, "strict");
+    // A stored chain makes the save-chain write observable: a permitted actor
+    // would CLEAR it with the same empty value.
+    seed(
+      db,
+      "INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES (?, ?, datetime('now'))",
+      "app-acme",
+      "ark-plan/deepseek-v4-flash",
+    );
 
     const list = await worker.fetch(await request("/dashboard/acme/api/apps", "mallory"), env);
     expect(list.status).toBe(200);
     const body = (await list.json()) as ListBody;
     expect(body.viewer.login).toBe("mallory");
-    expect(body.apps.map((app) => app.slug).sort()).toEqual(["acme-app"]);
+    // Read access, not the full list contract (orphan exclusion is row 4's cell).
+    expect(body.apps.map((app) => app.slug)).toContain("acme-app");
 
     const onboarding = await worker.fetch(
       await request("/dashboard/acme/apps/acme-app/onboarding", "mallory"),
@@ -261,21 +312,28 @@ describe("tenant isolation matrix (scenario × mode)", () => {
     );
     expect(onboarding.status).toBe(403);
 
-    const write = await worker.fetch(
-      await request("/dashboard/acme/apps/acme-app/settings", "mallory", {
-        method: "POST",
-        body: "op=save-sandbox-image&sandbox_image_id=not-a-real-image",
-      }),
-      env,
-    );
-    expect(write.status).toBe(403);
+    const post = (login: string, route: string, form?: string) =>
+      request(`/dashboard/acme${route}`, login, { method: "POST", body: form ?? "" });
 
-    // The denial is a refusal, not a silent no-op after a partial write.
-    const row = db.raw
-      .query("SELECT sandbox_image_id, status FROM github_apps WHERE id = 'app-acme'")
-      .get() as { sandbox_image_id: string; status: string };
-    expect(row.status).toBe("active");
-    expect(row.sandbox_image_id).toBe("omp"); // 0018 DDL default, untouched by the refused write
+    // Denial wave: every route refuses this plain member, and the row is
+    // byte-identical afterwards.
+    const pristine = appSnapshot(db);
+    for (const { route, body: form } of MANAGEMENT_WRITES) {
+      const res = await worker.fetch(await post("mallory", route, form), env);
+      expect(res.status, route).toBe(403);
+      expect(appSnapshot(db), route).toEqual(pristine);
+    }
+    expect((pristine.config as { model_chain: string }).model_chain).toBe("ark-plan/deepseek-v4-flash");
+
+    // Reachability wave: the workspace OWNER sends the same payloads and is
+    // never refused by authorization — so each 403 above came from the role.
+    for (const { route, body: form } of MANAGEMENT_WRITES) {
+      const res = await worker.fetch(await post("dana", route, form), env);
+      expect(res.status, route).not.toBe(403);
+    }
+    // And the writes that wave made really did land (the gate is the only
+    // difference between the two waves): the manager's delete took effect.
+    expect((appSnapshot(db).app as { deleted_at: string | null }).deleted_at).not.toBeNull();
   });
 
   // row 4 — layers: strict INNER JOIN read face → workspace list route / off
@@ -345,31 +403,37 @@ describe("tenant isolation matrix (scenario × mode)", () => {
     expect(live).toEqual({ members: 1, apps: 1 });
   });
 
-  // row 6 — layers: route family gate only. covered by
-  //         tests/worker/dashboard-tenancy.test.ts (off legacy intact); composed
-  //         against the SAME fixture as the strict rows above, so the pair
-  //         proves the mode — not the data — decides the face.
-  test("row 6 · off keeps the legacy App face for the same App that strict serves on the workspace path", async () => {
+  // row 6 — layers: mode switch × workspace lifecycle × route family. The
+  //         `off` rows in tests/worker/dashboard-tenancy.test.ts pin the legacy
+  //         face only for LIVE workspaces; this composes the soft-deleted
+  //         workspace from row 5 with the switch, proving the mode decides
+  //         whether workspace lifecycle gates an App at all — the same App is
+  //         reachable on the legacy face under `off` and on neither face under
+  //         `strict`.
+  test("row 6 · off still serves an App whose workspace was soft-deleted; strict serves it on neither face", async () => {
     const { db } = matrixFixture();
+
     const off = envFor(db, "off");
-
-    const legacyServes = await worker.fetch(
-      await request("/dashboard/apps/acme-app/onboarding", "octocat"),
+    const offList = await worker.fetch(await request("/dashboard/api/apps", "octocat"), off);
+    expect(offList.status).toBe(200);
+    expect(((await offList.json()) as ListBody).apps.map((app) => app.slug)).toContain("gone-app");
+    const offDetail = await worker.fetch(
+      await request("/dashboard/apps/gone-app/onboarding", "octocat"),
       off,
     );
-    expect(legacyServes.status).toBe(200);
+    expect(offDetail.status).toBe(200);
 
-    const workspaceHidden = await worker.fetch(
-      await request("/dashboard/acme/apps/acme-app/onboarding", "dana"),
-      off,
+    const strict = envFor(db, "strict");
+    const strictLegacy = await worker.fetch(
+      await request("/dashboard/apps/gone-app/onboarding", "octocat"),
+      strict,
     );
-    expect(workspaceHidden.status).toBe(404);
-
-    const strictLegacyRetired = await worker.fetch(
-      await request("/dashboard/apps/acme-app/onboarding", "octocat"),
-      envFor(db, "strict"),
+    expect(strictLegacy.status).toBe(404);
+    const strictWorkspace = await worker.fetch(
+      await request("/dashboard/gone/apps/gone-app/onboarding", "dana"),
+      strict,
     );
-    expect(strictLegacyRetired.status).toBe(404);
+    expect(strictWorkspace.status).toBe(404);
   });
 
   // row 7 — layers: tenantModeOf (single resolver) → dashboard gate AND
