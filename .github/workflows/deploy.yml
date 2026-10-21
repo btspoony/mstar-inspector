@@ -90,10 +90,10 @@ jobs:
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           echo "tenant_mode=$MODE"
 
-      # Replay identity (before anything is deployed). A `strict` run IS Deploy
-      # B, so it must name the SHA Deploy A shipped: the checkout is asserted to
-      # be that SHA too, so a ref that moved between A and B cannot pass by
-      # agreeing with itself. An `off` run may leave the input empty.
+      # Replay identity (before anything is deployed). The strict binding lives
+      # in scripts/deploy-replay-guard.sh (executed by the behaviour tests); the
+      # checkout assertion below stays here because it is about the tree on
+      # disk, not about which SHA was requested.
       - name: Assert replay identity
         env:
           MODE: ${{ steps.tenant.outputs.mode }}
@@ -106,15 +106,7 @@ jobs:
             echo "::error::checked-out HEAD $HEAD_SHA != run SHA $RUN_SHA — the replay must execute the SHA it names"
             exit 1
           fi
-          if [ "$MODE" = "strict" ] && [ -z "$EXPECTED_DEPLOY_SHA" ]; then
-            echo "::error::strict replay requires the SHA deployed by Deploy A (expected_deploy_sha); Deploy A's run summary carries deployed_sha=<sha>"
-            exit 1
-          fi
-          if [ -n "$EXPECTED_DEPLOY_SHA" ] && [ "$EXPECTED_DEPLOY_SHA" != "$RUN_SHA" ]; then
-            echo "::error::expected_deploy_sha $EXPECTED_DEPLOY_SHA != this run's SHA $RUN_SHA — dispatch Deploy B on the exact SHA Deploy A shipped"
-            exit 1
-          fi
-          echo "replay identity: mode=$MODE sha=$RUN_SHA"
+          bash scripts/deploy-replay-guard.sh "$MODE" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA" "$HEAD_SHA"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -366,22 +358,16 @@ jobs:
           echo "container_digest_match=$MATCH"
           echo "::notice::DOCS-01 baseline: digest=$DIGEST version=$VERSION (run summary + deploy-evidence artifact)"
 
-      # The ONE place the summary decides status: `deployed_sha` only when the
-      # deploy step itself succeeded, otherwise the requested SHA plus
-      # `not-deployed`. The version-id capture is deliberately not consulted for
-      # that decision.
+      # The ONE place the summary decides status, and the decision is made by
+      # scripts/deploy-status.sh (behaviour-tested): success emits
+      # deploy_status=deployed + deployed_sha, anything else emits
+      # deploy_status=not-deployed + requested_sha, never both. The version-id
+      # capture is deliberately not consulted for that decision.
       - name: Record deploy status
         if: always()
         env:
           DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          RUN_SHA: ${{ github.sha }}
         run: |
-          {
-            if [ "$DEPLOY_OUTCOME" = "success" ]; then
-              echo "deploy_status=deployed"
-              echo "deployed_sha=$GITHUB_SHA"
-            else
-              echo "deploy_status=not-deployed"
-              echo "requested_sha=$GITHUB_SHA"
-            fi
-            echo "version_id=$(cat version_id.txt 2>/dev/null || echo unreported)"
-          } >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/deploy-status.sh "$DEPLOY_OUTCOME" "$RUN_SHA" "$RUN_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "version_id=$(cat version_id.txt 2>/dev/null || echo unreported)" >> "$GITHUB_STEP_SUMMARY"

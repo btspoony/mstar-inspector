@@ -78,20 +78,25 @@ for (const { file, migrations, replayNeedles } of WORKFLOWS) {
       }
     });
 
-    test("replay identity binds Deploy A's SHA, before every deploy-capable step", () => {
+    test("replay identity is delegated to the guard script, before every deploy-capable step", () => {
       const index = steps.findIndex((s) => s.name === REPLAY);
       expect(index, `${file}: replay-identity step is missing`).toBeGreaterThan(-1);
+      const step = steps[index]!;
       for (const needle of replayNeedles) {
-        expect(steps[index]!.run, `${file}: replay step must use ${needle}`).toContain(needle);
+        expect(step.run, `${file}: replay step must resolve ${needle}`).toContain(needle);
       }
-      // strict without a SHA is a replay that cannot prove anything
-      expect(steps[index]!.run).toContain("strict replay requires the SHA deployed by Deploy A");
+      // The strict binding decision belongs to the executed script.
+      expect(step.run, `${file}: replay step must call the guard`).toContain(
+        'bash scripts/deploy-replay-guard.sh "$MODE" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA"',
+      );
+      expect(step.env?.MODE, `${file}: replay step needs the resolved mode`).toBe("${{ steps.tenant.outputs.mode }}");
+      expect(step.env?.EXPECTED_DEPLOY_SHA).toBe("${{ inputs.expected_deploy_sha }}");
       for (const i of deployCapable) {
         expect(i, `${file}: "${steps[i]!.name}" runs before the replay-identity assertion`).toBeGreaterThan(index);
       }
     });
 
-    test("the summary decides status from steps.deploy.outcome, never from the version capture", () => {
+    test("the summary delegates status to the script, fed by steps.deploy.outcome", () => {
       const deploy = steps.find((s) => (s.name ?? "").startsWith("Deploy Worker"))!;
       expect(deploy).toBeDefined();
       expect(deploy.id, `${file}: deploy step needs id: deploy`).toBe("deploy");
@@ -102,16 +107,14 @@ for (const { file, migrations, replayNeedles } of WORKFLOWS) {
         (s) =>
           s.if === "always()" &&
           (s.run ?? "").includes("GITHUB_STEP_SUMMARY") &&
-          (s.run ?? "").includes("deploy_status="),
+          (s.run ?? "").includes("scripts/deploy-status.sh"),
       );
-      expect(summary, `${file}: no always-run status summary`).toBeDefined();
+      expect(summary, `${file}: no always-run status summary calling the script`).toBeDefined();
       expect(summary!.env?.DEPLOY_OUTCOME, `${file}: summary must read the deploy outcome`).toBe(
         "${{ steps.deploy.outcome }}",
       );
-      expect(summary!.run, `${file}: positive status`).toContain("deploy_status=deployed");
-      expect(summary!.run, `${file}: negative status`).toContain("deploy_status=not-deployed");
-      expect(summary!.run, `${file}: deployed sha`).toContain("deployed_sha=$GITHUB_SHA");
-      expect(summary!.run, `${file}: requested sha`).toContain("requested_sha=$GITHUB_SHA");
+      // the status shape itself (and the never-both invariant) is behaviour-tested
+      // in tests/scripts/deploy-guards.test.ts, which executes the script.
 
       const body = readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8");
       expect(body, `${file}: container digest comparison missing`).toContain("container_digest_match=");

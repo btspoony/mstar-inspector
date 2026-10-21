@@ -270,19 +270,14 @@ jobs:
         run: |
           set -euo pipefail
           TAG_SHA=$(git rev-parse "refs/tags/$TAG^{commit}")
+          # The tag must name the run's tree for ANY mode (an `off` run under a
+          # moved tag would deploy code that is not the one the tag names).
           if [ "$TAG_SHA" != "$RUN_SHA" ]; then
             echo "::error::tag $TAG names $TAG_SHA but this run executes $RUN_SHA — cut a new release instead of moving the tag"
             exit 1
           fi
-          if [ "$MODE" = "strict" ] && [ -z "$EXPECTED_DEPLOY_SHA" ]; then
-            echo "::error::strict replay requires the SHA deployed by Deploy A (expected_deploy_sha); Deploy A's run summary carries deployed_sha=<sha>"
-            exit 1
-          fi
-          if [ -n "$EXPECTED_DEPLOY_SHA" ] && [ "$EXPECTED_DEPLOY_SHA" != "$RUN_SHA" ]; then
-            echo "::error::expected_deploy_sha $EXPECTED_DEPLOY_SHA != this run's SHA $RUN_SHA — dispatch Deploy B on the exact SHA Deploy A shipped"
-            exit 1
-          fi
-          echo "replay identity: mode=$MODE sha=$RUN_SHA tag=$TAG"
+          # The strict replay binding itself is the script's contract.
+          bash scripts/deploy-replay-guard.sh "$MODE" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA" "$TAG_SHA"
 
       # LOAD-BEARING: the tag must match the tree it names BEFORE production is
       # touched. A human-published Release or a hand-cut/re-pointed `v*` tag can
@@ -498,6 +493,7 @@ jobs:
           TENANT_MODE: ${{ steps.tenant.outputs.mode }}
           DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
           EXPECTED_DIGEST: ${{ inputs.expected_container_digest }}
+          RUN_SHA: ${{ github.sha }}
         run: |
           VERSION=$(cat version_id.txt 2>/dev/null || echo "unavailable")
           DIGEST=$(cat image_digest.txt 2>/dev/null || echo "unavailable")
@@ -507,17 +503,11 @@ jobs:
             echo "- Worker version: \`$VERSION\`"
             echo "- Image digest: \`$DIGEST\`"
             echo "- Tenant mode: \`$TENANT_MODE\`"
-            # `deployed_sha` ONLY when the deploy step succeeded: an always-run
-            # summary must never claim a deploy that did not happen.
-            if [ "$DEPLOY_OUTCOME" = "success" ]; then
-              echo "deploy_status=deployed"
-              echo "deployed_sha=$GITHUB_SHA"
-            else
-              echo "deploy_status=not-deployed"
-              echo "requested_sha=$GITHUB_SHA"
-            fi
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
+          # Status keys: scripts/deploy-status.sh owns the decision (and is
+          # behaviour-tested) — this step only wires the outcome in.
+          bash scripts/deploy-status.sh "$DEPLOY_OUTCOME" "$RUN_SHA" "$RUN_SHA" >> "$GITHUB_STEP_SUMMARY"
           # Replay audit, never a silent pass: the sandbox image rebuilds from a
           # rolling apt base, so byte-identical output is not provable. A
           # different digest is reported (and warned) with that reason.
