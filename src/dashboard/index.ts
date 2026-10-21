@@ -23,6 +23,7 @@
 import { Hono, type Context, type Handler } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Env } from "../worker/env";
+import { tenantModeOf, type TenantMode } from "../worker/tenant-mode";
 import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
 import {
   OAUTH_STATE_COOKIE,
@@ -62,7 +63,6 @@ import {
   type DeliverySummary,
   type GithubAppRow,
   type ReviewTriggerMode,
-  type TenantMode,
 } from "./apps-store";
 import {
   getMembership,
@@ -277,11 +277,6 @@ const RESERVED_WORKSPACE_SLUGS = new Set([
   "healthz",
 ]);
 
-/** `"strict"` only for the exact value; unset / anything else keeps today's `off` face. */
-function tenantModeOf(env: Env): TenantMode {
-  return env.WORKSPACE_TENANT_MODE === "strict" ? "strict" : "off";
-}
-
 type DashboardPathClass =
   | { kind: "workspace"; slug: string }
   | { kind: "legacy-app" }
@@ -323,7 +318,14 @@ export const dashboardTenantGate: Handler<{
   Variables: DashboardVariables;
 }> = async (c, next) => {
   if (c.get("tenant")) return next();
-  const mode = tenantModeOf(c.env);
+  let mode: TenantMode;
+  try {
+    mode = tenantModeOf(c.env.WORKSPACE_TENANT_MODE);
+  } catch (error) {
+    // A typo'd deploy var fails the whole face: no route is served from a
+    // guessed `off`/`strict`. The message names the value, never a secret.
+    return c.text((error as Error).message, 500);
+  }
   const target = classifyDashboardPath(c.req.path);
   if (target.kind === "legacy-app") {
     // Deploy B retires the pre-workspace App face: the same 404 an unmatched

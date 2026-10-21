@@ -87,6 +87,7 @@
  *     references are caller-visible errors, never swallowed.
  */
 import { getSandboxImage } from "../contracts/sandbox-images";
+import type { TenantMode } from "../worker/tenant-mode";
 
 /** A row of `github_apps` (D1 column names, snake_case; migration 0004). */
 export type GithubAppRow = {
@@ -309,9 +310,11 @@ type AppsStoreD1 = {
 /**
  * Tenant read face (migration 0026). `off` = today's single-table reads,
  * byte-identical; `strict` = every execution-facing App read INNER JOINs
- * `app_workspaces`, so an App with no workspace mapping is invisible.
+ * `app_workspaces`, so an App with no workspace mapping is invisible. The
+ * mode TYPE and the runtime resolver live together in
+ * src/worker/tenant-mode.ts — evaluate a deploy var through `tenantModeOf`,
+ * never by hand.
  */
-export type TenantMode = "off" | "strict";
 
 /**
  * The three execution-facing App reads, per mode. `off` is FROZEN — do not

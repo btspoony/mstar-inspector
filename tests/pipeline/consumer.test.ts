@@ -81,6 +81,7 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../src/review/credential-payload";
+import { tenantModeOf } from "../../src/worker/tenant-mode";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../src/contracts/recheck";
 import { sk, gh, AWS_CANARY_KEY, fakePem } from "../helpers/fake-secrets";
 
@@ -4779,6 +4780,21 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 });
 
+describe("tenantModeOf (WORKSPACE_TENANT_MODE)", () => {
+  test("unset/empty → off, the two legal values pass through, anything else throws", () => {
+    expect(tenantModeOf(undefined)).toBe("off");
+    expect(tenantModeOf("")).toBe("off");
+    expect(tenantModeOf("off")).toBe("off");
+    expect(tenantModeOf("strict")).toBe("strict");
+    expect(() => tenantModeOf("STRICT")).toThrow(
+      'invalid WORKSPACE_TENANT_MODE STRICT — expected "off" or "strict"',
+    );
+    expect(() => tenantModeOf(" on ")).toThrow(
+      'invalid WORKSPACE_TENANT_MODE  on  — expected "off" or "strict"',
+    );
+  });
+});
+
 describe("workspace tenant mode (WORKSPACE_TENANT_MODE)", () => {
   /**
    * The seeded App minus its `app_workspaces` row: what a pre-0026 row looks
@@ -4844,5 +4860,21 @@ describe("workspace tenant mode (WORKSPACE_TENANT_MODE)", () => {
 
     expect(commenterCalls).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0);
+  });
+
+  test("an illegal mode throws at consumer creation — no message is read, no side effect", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const env = await makeEnv({ DB: db as never, WORKSPACE_TENANT_MODE: "on" as never });
+
+    // The deploy var is validated eagerly: a typo must never pick a read face.
+    expect(() => createReviewConsumer(env, testLog, testOverrides)).toThrow(
+      'invalid WORKSPACE_TENANT_MODE on — expected "off" or "strict"',
+    );
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(commenterCalls).toHaveLength(0);
+    expect(kvGuardPuts).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
   });
 });
