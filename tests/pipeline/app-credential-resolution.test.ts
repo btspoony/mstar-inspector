@@ -82,6 +82,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   //     consumer's §7.10 lifecycle seam owns; its publication_id FK
   //     resolves against 0020's review_publications.
   for (const name of [
+    "0003_dashboard_users.sql",
     "0004_github_apps.sql",
     "0005_reviews_app_id.sql",
     "0006_app_provider_config.sql",
@@ -96,6 +97,8 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0021_review_checks.sql",
     "0022_app_trigger_mode.sql",
     "0024_provider_multi_key.sql",
+    // 0026: createApp also writes the App's workspace mapping.
+    "0026_workspaces.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

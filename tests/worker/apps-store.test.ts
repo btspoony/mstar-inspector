@@ -19,7 +19,7 @@
  *   - 0005 is the metadata-only `ALTER TABLE reviews ADD COLUMN app_id TEXT
  *     REFERENCES github_apps(id)`; existing rows keep app_id NULL (legacy).
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1 } from "../store/helpers";
@@ -68,11 +68,18 @@ function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void
     .run();
   return db;
 }
-/** Seed DB + apply both migrations in locked order 0004 → 0005. */
+/**
+ * Seed DB + the migrations in wrangler order 0003 → 0004 → 0005 → 0026.
+ * 0026 carries the workspace data plane `createApp` now writes into; its
+ * `workspace_members.user_id` references `users(id)`, the table 0003 creates,
+ * so the fixture applies the production shape up to 0003 first.
+ */
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createSeededD1();
+  applyMigration(db, "0003_dashboard_users.sql");
   applyMigration(db, "0004_github_apps.sql");
   applyMigration(db, "0005_reviews_app_id.sql");
+  applyMigration(db, "0026_workspaces.sql");
   return db;
 }
 
@@ -250,10 +257,14 @@ describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)",
     expect(() => rawRun(db, "DELETE FROM github_apps WHERE id = ?", app.id)).toThrow(
       /FOREIGN KEY constraint failed/,
     );
-    // An app WITHOUT review history can still be hard-deleted (schema allows
-    // it; the store/API surface never does — soft-delete is the product path).
+    // Since 0026 every App has an `app_workspaces` ownership row (NO ACTION),
+    // so even an App without review history cannot be hard-deleted: the
+    // ownership map outlives the review history, and soft delete is the only
+    // removal path at the schema level.
     const orphan = await seedApp(db, { slug: "orphan", githubAppId: 42 });
-    rawRun(db, "DELETE FROM github_apps WHERE id = ?", orphan.id);
+    expect(() => rawRun(db, "DELETE FROM github_apps WHERE id = ?", orphan.id)).toThrow(
+      /FOREIGN KEY constraint failed/,
+    );
   });
 });
 
@@ -428,6 +439,137 @@ describe("apps-store (createAppsStore)", () => {
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });
 });
+
+describe("apps-store workspace dual write (migration 0026)", () => {
+  type CountRow = { n: number };
+  type MappingRow = { app_id: string; workspace_id: string };
+  /** Minimal statement face for the SQL-recording double below. */
+  type RecordingStatement = {
+    bind(...values: unknown[]): RecordingStatement;
+    first<T = Record<string, unknown>>(): Promise<T | null>;
+    all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+    run<T = Record<string, unknown>>(): Promise<{
+      results: T[];
+      meta: { changes: number; last_row_id: number };
+    }>;
+  };
+
+  function appCount(db: ReturnType<typeof createTestD1>): number {
+    const row = db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as CountRow;
+    return row.n;
+  }
+
+  function mappingRows(db: ReturnType<typeof createTestD1>): MappingRow[] {
+    return db.raw.query("SELECT app_id, workspace_id FROM app_workspaces").all() as MappingRow[];
+  }
+
+  test("createApp writes the App row AND its default-workspace mapping", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "default" }]);
+    expect(appCount(db)).toBe(1);
+  });
+
+  test("one transaction: a failing app_workspaces insert rolls the App row back", async () => {
+    const db = createMigratedD1();
+    // A split-write implementation (INSERT then a separate mapping run) leaves
+    // the github_apps row behind when this ABORT fires — the test then fails.
+    rawRun(
+      db,
+      `CREATE TRIGGER fail_mapping BEFORE INSERT ON app_workspaces
+       BEGIN SELECT RAISE(ABORT, 'mapping fail'); END;`,
+    );
+    await expect(seedApp(db)).rejects.toThrow(/mapping fail/);
+    expect(appCount(db)).toBe(0);
+    expect(mappingRows(db)).toEqual([]);
+  });
+
+  test("the mapping write is in the same batch: a slug conflict rolls back both rows", async () => {
+    const db = createMigratedD1();
+    const first = await seedApp(db);
+    // Same slug, fresh id (the pre-resolved-slug race the store must refuse).
+    await expect(seedApp(db, { slug: APP_INPUT.slug, githubAppId: 999 })).rejects.toThrow(
+      /UNIQUE constraint failed: github_apps.slug/,
+    );
+    // The failed batch left no mapping behind for the rejected id...
+    expect(mappingRows(db)).toEqual([{ app_id: first.id, workspace_id: "default" }]);
+    expect(appCount(db)).toBe(1);
+  });
+
+  test("no workspace → createApp throws the found-count error and writes nothing", async () => {
+    const db = createMigratedD1();
+    rawRun(db, "DELETE FROM workspaces");
+    await expect(seedApp(db)).rejects.toThrow(/exactly one workspace, found 0/);
+    expect(appCount(db)).toBe(0);
+    expect(mappingRows(db)).toEqual([]);
+  });
+
+  test("two workspaces → createApp throws the found-count error and writes nothing", async () => {
+    const db = createMigratedD1();
+    rawRun(
+      db,
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+       VALUES ('second', 'second', 'Second', NULL, '2026-10-21T00:00:00.000Z')`,
+    );
+    await expect(seedApp(db)).rejects.toThrow(/exactly one workspace, found 2/);
+    expect(appCount(db)).toBe(0);
+    expect(mappingRows(db)).toEqual([]);
+  });
+
+  test("repeated createApp never creates a workspace: the seeded row is the only one", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "one", githubAppId: 1 });
+    await seedApp(db, { slug: "two", githubAppId: 2 });
+    const row = db.raw.query("SELECT COUNT(*) AS n FROM workspaces").get() as CountRow;
+    expect(row.n).toBe(1);
+    expect(mappingRows(db)).toHaveLength(2);
+  });
+
+  test("read faces stay single-statement github_apps selects (no tenant join, no extra query)", async () => {
+    const queries: string[] = [];
+    const statement: RecordingStatement = {
+      bind: () => statement,
+      first: async () => null,
+      all: async () => ({ results: [] }),
+      run: async () => ({ results: [], meta: { changes: 0, last_row_id: 0 } }),
+    };
+    const db = {
+      prepare(query: string): RecordingStatement {
+        queries.push(query);
+        return statement;
+      },
+      batch: async () => [],
+    };
+    const s = createAppsStore(db);
+    await s.getAppBySlug("slug");
+    await s.getAppById("id");
+    await s.listApps();
+    expect(queries).toHaveLength(3);
+    for (const query of queries) {
+      expect(query).toMatch(/^SELECT \* FROM github_apps/);
+      expect(query).not.toContain("app_workspaces");
+      expect(query).not.toContain("workspaces");
+    }
+  });
+
+  test("src/ has exactly one INSERT INTO github_apps site (createApp is the only creation path)", () => {
+    const sites: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (entry.name.endsWith(".ts")) {
+          const hits = readFileSync(path, "utf8").match(/INSERT INTO github_apps\b/g)?.length ?? 0;
+          if (hits > 0) sites.push(`${path}:${hits}`);
+        }
+      }
+    };
+    walk(join(import.meta.dir, "../../src"));
+    expect(sites).toHaveLength(1);
+    expect(sites[0]).toEndWith(`apps-store.ts:1`);
+  });
+});
+
 describe("apps-store sandbox image selection (migration 0018)", () => {
   /** createMigratedD1 (0004/0005) + the sandbox_image_id column. */
   function createSandboxImageD1(): ReturnType<typeof createTestD1> {
