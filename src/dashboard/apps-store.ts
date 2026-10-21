@@ -280,7 +280,8 @@ export type DeliverySummary = {
 
 /**
  * Narrow D1 face, declared locally so this leaf module imports nothing
- * (prepare/bind/first/all/run; no batch — this store never batches).
+ * (prepare/bind/first/all/run plus batch — App creation writes the App row
+ * and its workspace mapping in ONE transaction).
  */
 type AppsStoreStatement = {
   bind(...values: unknown[]): AppsStoreStatement;
@@ -292,8 +293,15 @@ type AppsStoreStatement = {
   }>;
 };
 
+/** One statement's result inside a `batch()` (order matches the input). */
+type AppsStoreBatchResult = {
+  results: unknown[];
+  meta: { changes: number; last_row_id: number };
+};
+
 type AppsStoreD1 = {
   prepare(query: string): AppsStoreStatement;
+  batch(statements: AppsStoreStatement[]): Promise<AppsStoreBatchResult[]>;
 };
 
 /** Create the github_apps / app_installations store over one D1 handle. */
@@ -353,7 +361,9 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (review pin — the caller's
-     * secretbox AAD rowKey is this id). sandbox_image_id is omitted: the
+     * secretbox AAD rowKey is this id), plus its `app_workspaces` mapping to
+     * the single workspace. The two inserts are ONE batch transaction, so an
+     * App never exists without an owner. sandbox_image_id is omitted: the
      * migration 0018 DDL default materializes every new row onto the
      * registry's default image ('omp') — the store face for changing it is
      * setSandboxImage. UNIQUE violations on slug
@@ -363,23 +373,39 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
-      await db
-        .prepare(
-          `INSERT INTO github_apps
-             (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-              created_by, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
-        )
-        .bind(
-          id,
-          input.slug,
-          input.githubAppId,
-          input.name,
-          input.privateKeyEnc,
-          input.webhookSecretEnc,
-          input.createdBy,
-        )
-        .run();
+      // Sole-workspace guard (separate read, BEFORE the batch): Deploy A ships
+      // one workspace, and a mapping write cannot guess which of several to
+      // pick. A clean throw here leaves no half-written App.
+      const workspaces = await db
+        .prepare(`SELECT id FROM workspaces LIMIT 2`)
+        .all<{ id: string }>();
+      if (workspaces.results.length !== 1) {
+        throw new Error(
+          `apps-store: createApp requires exactly one workspace, found ${workspaces.results.length}`,
+        );
+      }
+      const workspaceId = workspaces.results[0]!.id;
+      await db.batch([
+        db
+          .prepare(
+            `INSERT INTO github_apps
+               (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+                created_by, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+          )
+          .bind(
+            id,
+            input.slug,
+            input.githubAppId,
+            input.name,
+            input.privateKeyEnc,
+            input.webhookSecretEnc,
+            input.createdBy,
+          ),
+        db
+          .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)`)
+          .bind(id, workspaceId),
+      ]);
       const row = await db.prepare(`SELECT * FROM github_apps WHERE id = ?`).bind(id).first<GithubAppRow>();
       if (!row) {
         throw new Error("apps-store: createApp row vanished on read-back");

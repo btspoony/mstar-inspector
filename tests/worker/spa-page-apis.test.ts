@@ -47,6 +47,8 @@ function createDb(): ReturnType<typeof createTestD1> {
     // rows cover both pools), so this world needs the per-key shape too.
     "0023_removed_logins.sql",
     "0024_provider_multi_key.sql",
+    // 0026: createApp also writes the App's workspace mapping.
+    "0026_workspaces.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

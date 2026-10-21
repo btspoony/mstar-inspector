@@ -126,6 +126,10 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
      VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'ok')`,
   );
   for (const name of PLAN_13_MIGRATIONS) applyMigration(db, name);
+  // 0026: createApp writes its app_workspaces mapping in the same batch, so
+  // every fixture that seeds an App needs the workspace data plane. Applied
+  // after 0004 (its FK parent); the file only creates new tables.
+  applyMigration(db, "0026_workspaces.sql");
   return db;
 }
 

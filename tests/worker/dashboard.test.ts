@@ -2394,6 +2394,8 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0005_reviews_app_id.sql",
   "0016_users_login_nocase_unique.sql",
   "0023_removed_logins.sql",
+  // 0026: createApp also writes the App's workspace mapping.
+  "0026_workspaces.sql",
 ] as const;
 
 function createDashboardTestD1(
