@@ -87,6 +87,14 @@ export type Env = {
    * wrangler secret / .dev.vars only — never in git.
    */
   ALERT_WEBHOOK_URL?: string;
+  /**
+   * Tenant read mode (migration 0026). `"strict"` makes every
+   * execution-facing App read INNER JOIN `app_workspaces`, so an App with no
+   * workspace mapping is invisible to the pipeline; unset / any other value
+   * = `"off"` (today's single-table reads). Value validation and deploy
+   * wiring live outside this type.
+   */
+  WORKSPACE_TENANT_MODE?: "off" | "strict";
 };
 
 /**

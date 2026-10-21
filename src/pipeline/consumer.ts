@@ -138,7 +138,7 @@ import {
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // github_apps row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
-import { createAppsStore } from "../dashboard/apps-store";
+import { createAppsStore, type TenantMode } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads app_provider_keys / app_model_config and
@@ -174,6 +174,12 @@ export type PipelineEnv = {
    * quotes), so this doc cannot drift when the universe widens again.
    */
   REVIEW_LEVEL?: string;
+  /**
+   * Tenant read mode (migration 0026). Only the exact `"strict"` turns on the
+   * workspace-mapped App read face; unset / any other value = `"off"`. The
+   * value domain is validated outside the consumer (deploy wiring).
+   */
+  WORKSPACE_TENANT_MODE?: "off" | "strict";
   /**
    * AL-24-5 (zero global fallback): provider keys and the model chain NEVER
    * come from the Worker env — OMP_MODEL_KEY / OMP_REVIEW_MODEL / the 18
@@ -1272,6 +1278,16 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
 }
 
 /**
+ * The App read mode for this deployment. Only the exact `"strict"` opts in;
+ * unset / `"off"` / any other value keeps the frozen `off` read face (an
+ * illegal value is deploy-wiring validation's concern — the consumer never
+ * infers strict from it).
+ */
+function tenantModeOf(env: PipelineEnv): TenantMode {
+  return env.WORKSPACE_TENANT_MODE === "strict" ? "strict" : "off";
+}
+
+/**
  * Outcome of the per-message commenter resolution (architect lock
  * L4): `ok` carries the commenter the review runs with PLUS the row's
  * numeric `github_app_id` (the §7.10 Check seam's App identity — the row is
@@ -1310,9 +1326,17 @@ type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter; githubAppId
  */
 async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<CommenterResolution> {
   const appRef = payload.appRef;
-  const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
+  const tenantMode = tenantModeOf(deps.env);
+  const row = await createAppsStore(deps.env.DB, tenantMode).getAppById(appRef.appId);
   if (row === null) {
     deps.appCommenters.delete(appRef.appId);
+    // Under `strict` an unmapped App is indistinguishable from a missing one
+    // (the INNER JOIN yields null for both) — the message names both causes.
+    if (tenantMode === "strict") {
+      throw new Error(
+        `per-App credential resolution failed: app ${appRef.appId} not found or has no workspace mapping`,
+      );
+    }
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} not found`);
   }
   if (row.deleted_at !== null) {
@@ -1529,7 +1553,7 @@ async function resolveCustomProviders(
 async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<SandboxImageDefinition> {
   const appRef = payload.appRef;
   try {
-    const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
+    const row = await createAppsStore(deps.env.DB, tenantModeOf(deps.env)).getAppById(appRef.appId);
     if (row === null) {
       throw new Error("app not found");
     }
