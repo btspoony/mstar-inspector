@@ -2653,6 +2653,40 @@ describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
   });
 });
 
+describe("workspace (tenant) paths under off — T5 routing gate", () => {
+  test("workspace-shaped App paths 404 without reaching a handler", async () => {
+    const env = makeEnv();
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+    for (const path of [
+      "/dashboard/default/apps/mstar-inspector-octocat/onboarding",
+      "/dashboard/default/api/apps",
+    ]) {
+      const res = await worker.fetch(dashboardRequest(path, cookie), env);
+      expect(res.status, path).toBe(404);
+    }
+  });
+
+  test("the legacy App face keeps today's payload under off", async () => {
+    const env = makeEnv();
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-octocat",
+      githubAppId: CONVERSION.id,
+      name: CONVERSION.name,
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "octocat",
+    });
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+    const onboarding = await worker.fetch(
+      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding", cookie),
+      env,
+    );
+    expect(onboarding.status).toBe(200);
+    expect(await onboarding.text()).toContain("mstar-inspector-octocat");
+  });
+});
+
 describe("migrations/0003_dashboard_users.sql", () => {
   test("creates the users table per spec § Data model — no status column (removal = delete row)", () => {
     const db = createDashboardTestD1();
