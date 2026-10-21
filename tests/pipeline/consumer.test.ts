@@ -142,6 +142,13 @@ async function createSeededTestD1(): Promise<TestD1> {
        VALUES (?, 'consumer-test-app', 424242, 'consumer-test-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC);
+  // Production shape (migration 0026): createApp writes the App row and its
+  // `app_workspaces` mapping in ONE batch, so no App exists unmapped — the
+  // consumer's strict read face resolves a real App. A test that needs an
+  // orphan deletes this row explicitly.
+  db.raw
+    .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
+    .run(TEST_APP_ID);
   // The default App's per-App AI config (AL-24-5 health baseline). AWAITED
   // so the seed completes before any caller re-seeds the same app_id with a
   // different chain (Rev24T6 Important-2: the fire-and-forget seed raced
@@ -4769,5 +4776,73 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRows(db)).toHaveLength(0);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(publicationRow(db).phase).toBe("applied");
+  });
+});
+
+describe("workspace tenant mode (WORKSPACE_TENANT_MODE)", () => {
+  /**
+   * The seeded App minus its `app_workspaces` row: what a pre-0026 row looks
+   * like when the backfill never ran. Under `off` it is a normal App; under
+   * `strict` the INNER JOIN read face cannot see it at all.
+   */
+  function dropWorkspaceMapping(db: TestD1): void {
+    db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = ?").run(TEST_APP_ID);
+  }
+
+  test("strict: an unmapped App fails at the credential gate — zero sandbox/token/GitHub, same retry→DLQ path", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    dropWorkspaceMapping(db);
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: db as never, WORKSPACE_TENANT_MODE: "strict" }),
+      testLog,
+      testOverrides,
+    );
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /per-App credential resolution failed: app 11111111-2222-3333-4444-555555555555 not found or has no workspace mapping/,
+    );
+
+    // Structural: nothing ran — no sandbox step, no commenter instance (so no
+    // token mint), no guard, no GitHub call, no review row.
+    expect(sandboxCalls).toHaveLength(0);
+    expect(commenterCalls).toHaveLength(0);
+    expect(kvGuardPuts).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    // The existing failure path is untouched: the throw IS the queue's
+    // retry→DLQ signal (no ack, no message-level retry), with the AL-6 row.
+    expect(messageAckCalls).toHaveLength(0);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
+    expect(String(failureRows(db)[0]!.error)).toContain("not found or has no workspace mapping");
+  });
+
+  test("off: the same unmapped App resolves through the single-table read face and the review completes", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    dropWorkspaceMapping(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(commenterCalls.filter((c) => c.op === "token")).toHaveLength(1);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+  });
+
+  test("off: a genuinely missing App keeps the current message byte-for-byte", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(
+      consumer(makeBatch(makePayload({ appRef: { appId: "no-such-app" } }))),
+    ).rejects.toThrow(/per-App credential resolution failed: app no-such-app not found$/);
+
+    expect(commenterCalls).toHaveLength(0);
+    expect(sandboxCalls).toHaveLength(0);
   });
 });
