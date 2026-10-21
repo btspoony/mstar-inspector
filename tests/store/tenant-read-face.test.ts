@@ -120,60 +120,74 @@ const DIRECT_READ = /(?:from|join)\s+github_apps\b/;
 const TENANT_BYPASS = "shortcut: tenant-bypass";
 
 /**
- * Every `.prepare(…)` call in one source, as {line, sql}: the argument text is
- * captured with a paren/brace matcher that skips string literals, so a
- * multi-line SQL statement is ONE site regardless of how it is wrapped.
+ * Every `.prepare(…)` call in one source, as {line, sql}: a single left-to-right
+ * scan over the file, so several calls on ONE line are all enumerated and a
+ * multi-line SQL statement is ONE site. String literals are skipped while
+ * balancing parens, so a paren inside SQL does not end the call.
  */
-function prepareStatements(lines: string[]): { line: number; sql: string }[] {
+function prepareStatements(src: string): { line: number; sql: string }[] {
   const out: { line: number; sql: string }[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const call = lines[i]!.indexOf(".prepare");
-    if (call < 0) continue;
-    const open = lines[i]!.indexOf("(", call);
-    if (open < 0) continue;
+  const marker = ".prepare";
+  let pos = 0;
+  let counted = 0;
+  let line = 0;
+  // Lazy line counter: `counted` only moves forward because `pos` does.
+  const lineAt = (idx: number): number => {
+    while (counted < idx) {
+      if (src[counted] === "\n") line++;
+      counted++;
+    }
+    return line;
+  };
+  for (;;) {
+    const start = src.indexOf(marker, pos);
+    if (start < 0) return out;
+    const open = src.indexOf("(", start + marker.length);
+    if (open < 0) return out;
+    const callLine = lineAt(start);
     let depth = 0;
     let quote: string | null = null;
     let sql = "";
-    outer: for (let l = i; l < lines.length; l++) {
-      const text = lines[l]!;
-      for (let c = l === i ? open : 0; c < text.length; c++) {
-        const ch = text[c]!;
-        if (quote !== null) {
-          sql += ch;
-          if (ch === "\\") sql += text[++c] ?? "";
-          else if (ch === quote) quote = null;
-          continue;
-        }
-        if (ch === '"' || ch === "'" || ch === "`") {
-          quote = ch;
-          sql += ch;
-        } else if (ch === "(") {
-          if (depth++ > 0) sql += ch;
-        } else if (ch === ")") {
-          if (--depth === 0) break outer;
-          sql += ch;
-        } else {
-          sql += ch;
-        }
+    let i = open;
+    for (; i < src.length; i++) {
+      const ch = src[i]!;
+      if (quote !== null) {
+        sql += ch;
+        if (ch === "\\") sql += src[++i] ?? "";
+        else if (ch === quote) quote = null;
+        continue;
       }
-      sql += "\n";
+      if (ch === '"' || ch === "'" || ch === "`") {
+        quote = ch;
+        sql += ch;
+      } else if (ch === "(") {
+        if (depth++ > 0) sql += ch;
+      } else if (ch === ")") {
+        if (--depth === 0) {
+          i++;
+          break;
+        }
+        sql += ch;
+      } else {
+        sql += ch;
+      }
     }
-    out.push({ line: i, sql: sql.replace(/\s+/g, " ").trim().toLowerCase() });
+    out.push({ line: callLine, sql: sql.replace(/\s+/g, " ").trim().toLowerCase() });
+    pos = i;
   }
-  return out;
 }
 
-/** Offsets of the `.prepare(` lines whose statement reads `github_apps`. */
-function readSites(lines: string[]): number[] {
-  return prepareStatements(lines)
-    .filter((s) => DIRECT_READ.test(s.sql))
-    .map((s) => s.line);
+/** Every `.prepare(…)` statement that reads `github_apps`, with its start line. */
+function readSites(src: string): { line: number }[] {
+  return prepareStatements(src).filter((s) => DIRECT_READ.test(s.sql));
 }
 
 /**
  * True when the `.prepare(` line is IMMEDIATELY preceded by a contiguous
  * `//` comment block carrying the marker. A blank line or any code line
- * between the comment and the call means unannotated.
+ * between the comment and the call means unannotated. Two calls on one line
+ * share that line's annotation block, which is the point: the comment covers
+ * every call on the line it precedes.
  */
 function isAnnotated(lines: string[], prepareLine: number): boolean {
   for (let k = prepareLine - 1; k >= 0 && lines[k]!.trim().startsWith("//"); k--) {
@@ -184,7 +198,7 @@ function isAnnotated(lines: string[], prepareLine: number): boolean {
 
 function directReadFiles(): string[] {
   return srcFiles()
-    .filter((path) => readSites(readFileSync(path, "utf8").split("\n")).length > 0)
+    .filter((path) => readSites(readFileSync(path, "utf8")).length > 0)
     .map((path) => path.slice(SRC_DIR.length + 1))
     .sort();
 }
@@ -200,8 +214,8 @@ const MAINTENANCE_SITES: Record<string, number> = {
 describe("tenant read face allowlist", () => {
   test("tenant-facing modules hold no direct github_apps read", () => {
     for (const rel of ["dashboard/index.ts", "dashboard/views.ts", "pipeline/consumer.ts"]) {
-      const lines = readFileSync(join(SRC_DIR, rel), "utf8").split("\n");
-      expect({ file: rel, sites: readSites(lines) }).toEqual({ file: rel, sites: [] });
+      const src = readFileSync(join(SRC_DIR, rel), "utf8");
+      expect({ file: rel, sites: readSites(src) }).toEqual({ file: rel, sites: [] });
     }
   });
 
@@ -216,18 +230,19 @@ describe("tenant read face allowlist", () => {
     const counts = Object.fromEntries(
       Object.keys(MAINTENANCE_SITES)
         .sort()
-        .map((rel) => [rel, readSites(readFileSync(join(SRC_DIR, rel), "utf8").split("\n")).length]),
+        .map((rel) => [rel, readSites(readFileSync(join(SRC_DIR, rel), "utf8")).length]),
     );
     expect(counts).toEqual(MAINTENANCE_SITES);
   });
 
   test("every maintenance direct read carries its tenant-bypass annotation", () => {
     for (const rel of Object.keys(MAINTENANCE_SITES)) {
-      const lines = readFileSync(join(SRC_DIR, rel), "utf8").split("\n");
-      for (const site of readSites(lines)) {
-        expect({ file: rel, line: site + 1, annotated: isAnnotated(lines, site) }).toEqual({
+      const src = readFileSync(join(SRC_DIR, rel), "utf8");
+      const lines = src.split("\n");
+      for (const site of readSites(src)) {
+        expect({ file: rel, line: site.line + 1, annotated: isAnnotated(lines, site.line) }).toEqual({
           file: rel,
-          line: site + 1,
+          line: site.line + 1,
           annotated: true,
         });
       }
