@@ -338,7 +338,7 @@ jobs:
           {
             echo "## Deploy evidence (DOCS-01 baseline)"
             echo "- Image digest: \`$DIGEST\`"
-            echo "version_id=$VERSION"
+            echo "- Worker version: \`$VERSION\`"
             echo "- Tenant mode: \`$TENANT_MODE\`"
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "- Source: \`registry.cloudflare.com\` container reference printed by this run's \`wrangler deploy\` — \`wrangler containers list --json\` reports an empty \`image\` for the 1.0 durable_object application"

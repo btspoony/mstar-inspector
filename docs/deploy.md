@@ -372,7 +372,12 @@ plan, and both rejected for now in favour of the applied approval gate.
    and validate it against the checked-out version surfaces (pre-mutation,
    § Production environment) → apply the prod D1
    migrations → `wrangler deploy --env production` → write the `production`
-   secrets → re-read the live Worker version → smoke.** Deploying *before* the
+   secrets → **`wrangler deploy --env production --var
+   WORKSPACE_TENANT_MODE:<mode>`** (the version that actually serves: a
+   `secret bulk` republishes the config default, so the LAST version-creating
+   command must be this one) → re-read the live Worker version → smoke.** The
+   run summary reports the mode that final deploy bound, not the dispatch
+   input. Deploying *before* the
    secrets is deliberate: the
    earlier order wrote them first, and on a first bring-up that made wrangler
    materialise a **bound-less draft Worker** (`mstar-inspector-production`
@@ -533,6 +538,10 @@ Both workflows take a `tenant_mode` dispatch input (`off` default, `strict`
 allowed) and pass it as `wrangler deploy --var
 WORKSPACE_TENANT_MODE:<mode>` — production gained that `--var` for this
 rollout, and `env.production` declares `off` as the manual-deploy default.
+In both workflows that deploy is the LAST version-creating command: a
+`wrangler secret bulk` republishes the config default and cannot carry `--var`
+(a named environment rejects `keep_vars`), so the mode that serves is the one
+that last deploy bound, and the run summary reports that value.
 
 1. **Deploy A — `off`.** The normal deploy of the new build: Apps keep serving
    on their legacy paths, workspace paths 404.
@@ -776,7 +785,8 @@ version, so the `Current Version ID` line `wrangler deploy` prints names a
 **predecessor** of the version actually serving traffic, and a `version_id.txt`
 taken from that log alone would misreport the live version in the
 `deploy-evidence` artifact and the Release notes. After the **last** mutating
-step (the optional `ALERT_WEBHOOK_URL` write / delete) the workflow therefore
+step (the mode-binding `wrangler deploy` that follows the optional
+`ALERT_WEBHOOK_URL` write / delete) the workflow therefore
 re-reads the live deployment with
 `bunx wrangler deployments list --env production --json`, selects the **newest**
 deployment by `created_on` — the CLI lists deployments **ascending**, so index 0

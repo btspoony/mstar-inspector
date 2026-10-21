@@ -12,7 +12,8 @@
  * `steps.deploy.outcome` — never from the non-fatal version-id capture.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -37,11 +38,56 @@ function parseWorkflow(rel: string): Record<string, any> {
   return JSON.parse(proc.stdout.toString());
 }
 
+/** Parse mutated workflow TEXT (mutation tests write a variant to a temp file). */
+function parseText(rel: string, text: string): Step[] {
+  const dir = mkdtempSync(join(tmpdir(), "ordering-"));
+  try {
+    const path = join(dir, rel);
+    writeFileSync(path, text);
+    const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+    if (proc.exitCode !== 0) {
+      throw new Error(`python3 yaml parse failed for the mutated ${rel}: ${proc.stderr.toString().trim()}`);
+    }
+    return JSON.parse(proc.stdout.toString()).jobs.deploy.steps as Step[];
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /** Steps that publish a Worker version (a `secret bulk` write does too). */
 const DEPLOY_CAPABLE = /bunx wrangler (deploy|secret bulk)\b/;
+/**
+ * Every wrangler command that CREATES a Worker version — the one serving
+ * traffic is the version made by the LAST of these, whatever its kind.
+ */
+const VERSION_CREATING = /bunx wrangler (deploy|secret bulk|versions)\b/;
+/** The var that decides which tenant face the created version serves. */
+const MODE_VAR = '--var "WORKSPACE_TENANT_MODE:$TENANT_MODE"';
 const GATE = "Assert zero orphan Apps (pre-deploy gate)";
 const BACKFILL = "Re-run workspace backfill (0027, idempotent)";
 const REPLAY = "Assert replay identity";
+
+/**
+ * The version that serves a deploy is created by the LAST version-creating
+ * command, and it must bind the resolved tenant mode. `wrangler secret bulk`
+ * cannot carry `--var` (a named environment rejects `keep_vars`, so the bulk
+ * version always falls back to the config default `off`), so the last such
+ * command has to be a `wrangler deploy` that passes the var.
+ */
+function assertServingStepBindsMode(file: string, steps: Step[]): void {
+  const versionCreating = steps.filter((s) => VERSION_CREATING.test(s.run ?? ""));
+  expect(versionCreating.length, `${file}: no version-creating step found`).toBeGreaterThan(0);
+  const last = versionCreating[versionCreating.length - 1]!;
+  expect(last.run, `${file}: last version-creating step "${last.name}" is not a mode-binding deploy`).toContain(
+    "bunx wrangler deploy",
+  );
+  expect(last.run, `${file}: last version-creating step "${last.name}" drops the tenant mode var`).toContain(
+    MODE_VAR,
+  );
+  expect(last.env?.TENANT_MODE, `${file}: the serving deploy needs the resolved mode`).toBe(
+    "${{ steps.tenant.outputs.mode }}",
+  );
+}
 
 const WORKFLOWS = [
   {
@@ -123,6 +169,31 @@ for (const { file, migrations, replayNeedles } of WORKFLOWS) {
       );
     });
 
+    test("the LAST version-creating step is a deploy that binds the resolved tenant mode", () => {
+      assertServingStepBindsMode(file, steps);
+    });
+
+    test("mutation: an appended bulk after the serving deploy, or a serving deploy without the var, fails the pin", () => {
+      // The hazard this pin exists for: every bulk write deploys a version from
+      // the config default (`off`), so anything version-creating appended after
+      // the mode-binding deploy silently becomes the serving version.
+      const src = readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8");
+      const appended =
+        src +
+        '\n      - name: Late secret write\n        run: |\n          jq -n \'{}\' | bunx wrangler secret bulk\n';
+      expect(appended).not.toBe(src);
+      const appendedSteps = parseText(file, appended);
+      expect(() => assertServingStepBindsMode(file, appendedSteps)).toThrow();
+
+      // and dropping the var from that last deploy leaves a serving version on
+      // the config default while the run summary claims a mode.
+      const lastIdx = src.lastIndexOf(MODE_VAR);
+      expect(lastIdx).toBeGreaterThan(-1);
+      const stripped = src.slice(0, lastIdx) + src.slice(lastIdx + MODE_VAR.length);
+      expect(stripped).not.toBe(src);
+      expect(() => assertServingStepBindsMode(file, parseText(file, stripped))).toThrow();
+    });
+
     if (file === "deploy.yml") {
       test("the version-id capture is a separate, non-fatal step", () => {
         const deploy = steps.find((s) => s.id === "deploy")!;
@@ -134,6 +205,14 @@ for (const { file, migrations, replayNeedles } of WORKFLOWS) {
         expect(capture.if).toBeUndefined();
         expect(capture.run).toContain("unreported");
         expect(deploy.name).not.toBe(capture.name);
+      });
+
+      test("the summary renders the Worker version as a markdown bullet", () => {
+        // Both run summaries carry the same evidence key; a bare `key=value`
+        // line renders differently from the prod bullet for the same value.
+        const body = readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8");
+        expect(body).toContain('echo "- Worker version: \\`$VERSION\\`"');
+        expect(body).not.toContain('echo "version_id=$VERSION"');
       });
     }
   });
