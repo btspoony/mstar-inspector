@@ -5,14 +5,16 @@
  * four workspace principals — `member`, `operator-granted`, `operator-denied`,
  * `outsider` — and the surfaces are the workspace faces an operator could try
  * to reach: the support metadata read, the member list, the App list, the
- * credentials write, the settings write, the role change, and the audit list.
+ * credentials write, the settings read, the model chains, the settings write,
+ * the role change, and the audit list.
  *
- * Every cell asserts BOTH the status and the audit rows the workspace gate
+ * Every cell asserts BOTH the status and the audit row the workspace gate
  * wrote for it: the gate writes in the middleware before dispatch, so a
  * granted or denied operator request is exactly one row and every other actor
- * is none. The table therefore pins the whole failure-semantics matrix of the
- * plan, including that a denied operator is byte-indistinguishable from an
- * outsider (same 404) while still being recorded.
+ * is none — each surface names that row, so a cell reads on its own. The table
+ * therefore pins the whole failure-semantics matrix of the plan, including that
+ * a denied operator is byte-indistinguishable from an outsider (same 404)
+ * while still being recorded.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -24,8 +26,14 @@ import { insertSupportGrant } from "../../src/dashboard/operator-store";
 const SESSION_SECRET = ["test", "operator", "matrix", "secret", "32-bytes!"].join("-");
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
-/** The mixed-case login the allowlist names — the gate compare is NOCASE. */
+/**
+ * The mixed-case login of the operator's users row and session. The allowlist
+ * names it lowercase and the grant row stores it lowercase too, so the NOCASE
+ * compare is load-bearing on both sides: a case-sensitive gate would classify
+ * this caller as an outsider.
+ */
 const OPERATOR = "Support-Bot";
+const OPERATOR_KEY = OPERATOR.toLowerCase();
 const DAY = 24 * 60 * 60 * 1000;
 const WORKSPACE = "ws-acme";
 /** The workspace's slug — the ref every surface below is addressed by. */
@@ -41,7 +49,7 @@ function envFor(db: TestD1): Env {
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
     WORKSPACE_TENANT_MODE: "strict",
-    PLATFORM_OPERATORS: OPERATOR,
+    PLATFORM_OPERATORS: OPERATOR_KEY,
   } as unknown as Env;
 }
 
@@ -118,12 +126,16 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   seed(db, "INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", id, workspaceId);
 }
 
-/** Grant the operator on `ws-acme` for one day from now. */
-function grant(db: TestD1): Promise<unknown> {
+/**
+ * Grant `operatorLogin` on `ws-acme` for one day from now. The caller's own
+ * grant is written in the LOWERCASE form the allowlist uses, so the NOCASE
+ * compare in `hasValidGrant` and in the support-view projection is exercised.
+ */
+function grant(db: TestD1, operatorLogin = OPERATOR_KEY): Promise<unknown> {
   const now = Date.now();
   return insertSupportGrant(db, {
     workspaceId: WORKSPACE,
-    operatorLogin: OPERATOR,
+    operatorLogin,
     reason: "tenant-reported incident",
     grantedBy: "deployer",
     now: new Date(now).toISOString(),
@@ -163,7 +175,7 @@ const auditActions = (db: TestD1): string[] =>
 type Actor = "member" | "granted" | "denied" | "outsider";
 const ACTORS: readonly Actor[] = ["member", "granted", "denied", "outsider"];
 
-/** One workspace face, with the status and audit-row count each actor gets. */
+/** One workspace face, with the status and audit row each actor gets. */
 type Surface = {
   name: string;
   method?: "GET" | "POST";
@@ -172,28 +184,37 @@ type Surface = {
   body?: (memberId: string) => string;
   /** Status the gate + handler answer for each actor. */
   status: Record<Actor, number>;
+  /** The one audit row each operator actor's request must add; members/outsiders add none. */
+  action: Partial<Record<Actor, string>>;
 };
 
 /**
  * The matrix. `metadata` is the operator's support view, which refuses a
  * member (they read the same facts through the members face) — that 403 is a
  * route rule, not the operator ceiling.
+ *
+ * `settings read` and `model chains` are the two AC3 surfaces most likely to be
+ * relaxed by a future edit (both are ordinary member-facing reads), so the
+ * matrix pins them as `write`-class for the operator.
  */
 const SURFACES: readonly Surface[] = [
   {
     name: "metadata",
     path: `/dashboard/${REF}/api/support/workspace`,
     status: { member: 403, granted: 200, denied: 404, outsider: 404 },
+    action: { granted: "support.read", denied: "support.denied" },
   },
   {
     name: "members",
     path: `/dashboard/${REF}/api/members`,
     status: { member: 200, granted: 200, denied: 404, outsider: 404 },
+    action: { granted: "support.read", denied: "support.denied" },
   },
   {
     name: "app list",
     path: `/dashboard/${REF}/api/apps`,
     status: { member: 200, granted: 403, denied: 404, outsider: 404 },
+    action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "credentials",
@@ -201,6 +222,19 @@ const SURFACES: readonly Surface[] = [
     path: `/dashboard/${REF}/api/apps/acme-app/keys/verify`,
     body: () => "provider=anthropic&key=sk-not-a-real-key",
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
+    action: { granted: "support.forbidden", denied: "support.denied" },
+  },
+  {
+    name: "settings read",
+    path: `/dashboard/${REF}/api/apps/acme-app/settings`,
+    status: { member: 200, granted: 403, denied: 404, outsider: 404 },
+    action: { granted: "support.forbidden", denied: "support.denied" },
+  },
+  {
+    name: "model chains",
+    path: `/dashboard/${REF}/api/apps/acme-app/models`,
+    status: { member: 403, granted: 403, denied: 404, outsider: 404 },
+    action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "settings write",
@@ -208,6 +242,7 @@ const SURFACES: readonly Surface[] = [
     path: `/dashboard/${REF}/apps/acme-app/settings`,
     body: () => "op=save-chain&model_chain=",
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
+    action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "role change",
@@ -215,16 +250,15 @@ const SURFACES: readonly Surface[] = [
     path: `/dashboard/${REF}/members/role`,
     body: (memberId) => `userId=${memberId}&role=admin`,
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
+    action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "audit list",
     path: `/dashboard/${REF}/api/audit`,
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
+    action: { granted: "support.forbidden", denied: "support.denied" },
   },
 ];
-
-/** The audit row each actor's request must add (0 = no routine business read). */
-const AUDIT_ROWS: Record<Actor, number> = { member: 0, granted: 1, denied: 1, outsider: 0 };
 
 describe("operator matrix (actor × surface)", () => {
   for (const actor of ACTORS) {
@@ -244,33 +278,15 @@ describe("operator matrix (actor × surface)", () => {
           env,
         );
         expect(res.status, `${actor} × ${surface.name}`).toBe(surface.status[actor]);
+        const expected = surface.action[actor];
         expect(auditCount(db) - before, `${actor} × ${surface.name} audit rows`).toBe(
-          AUDIT_ROWS[actor],
+          expected === undefined ? 0 : 1,
         );
-      }
-
-      // The whole-run audit vocabulary: only the operator's own requests are
-      // ever recorded, and a granted one records the access it was allowed or
-      // refused — never a member/outsider read.
-      const actions = auditActions(db).sort();
-      if (actor === "granted") {
-        // Two reads reachable through the grant (metadata + member list); the
-        // other five surfaces are write-classified and refused by the ceiling.
-        expect(actions).toEqual(
-          [
-            "support.read",
-            "support.read",
-            "support.forbidden",
-            "support.forbidden",
-            "support.forbidden",
-            "support.forbidden",
-            "support.forbidden",
-          ].sort(),
+        // Every cell names its own audit action: the gate writes before
+        // dispatch, so the row is the attempt, not the handler's outcome.
+        expect(auditActions(db).slice(before), `${actor} × ${surface.name} audit action`).toEqual(
+          expected === undefined ? [] : [expected],
         );
-      } else if (actor === "denied") {
-        expect(actions).toEqual(Array<string>(SURFACES.length).fill("support.denied"));
-      } else {
-        expect(actions).toEqual([]);
       }
     });
   }
@@ -297,8 +313,7 @@ describe("operator matrix (actor × surface)", () => {
         env,
       );
       expect(res.status, surface.name).toBe(404);
-      expect(auditCount(db) - before, surface.name).toBe(1);
+      expect(auditActions(db).slice(before), surface.name).toEqual(["support.denied"]);
     }
-    expect(auditActions(db)).toEqual(Array<string>(SURFACES.length).fill("support.denied"));
   });
 });

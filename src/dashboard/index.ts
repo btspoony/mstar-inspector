@@ -1769,10 +1769,23 @@ const memberRoleRoute = async (c: DashboardContext) => {
 //     Operators ONLY: a member reads the same facts through the ordinary
 //     members face, so this one refuses them (AC2 fixes its exact field set).
 //   - `/api/support/grants` — the members' undismissable notice data (operator
-//     login, `reason`, `expires_at`). Every member sees it; it carries no
-//     control that ends or edits a grant.
+//     login, `reason`, `expires_at`). Every member sees the whole set; a
+//     granted operator reading this same path sees only their own grant.
 // A granted operator never reaches a member-only handler: the gate refuses
 // every write-classified route before any body runs (AC3).
+//
+// A grant on this workspace can belong to another operator, so the grant list
+// is projected to the CALLER's own row on both operator-reachable faces: AC2
+// describes the single grant that opened this window, not the workspace's
+// other operators' logins and reasons.
+
+/**
+ * An operator sees only their own grant (AC2); the member notice keeps the
+ * whole set (AC4). The grant row's compare is NOCASE, so match it the same way.
+ */
+const onlyOwnGrant = <T extends { operator_login: string }>(rows: T[], login: string): T[] =>
+  rows.filter((row) => row.operator_login.toLowerCase() === login.toLowerCase());
+
 const supportWorkspaceRoute = async (c: DashboardContext) => {
   const tenant = c.get("tenant");
   const db = dashboardD1(c.env);
@@ -1786,12 +1799,14 @@ const supportWorkspaceRoute = async (c: DashboardContext) => {
       : await tenantNotFound(c);
   }
   const workspace = await getWorkspaceByRef(db, tenant.ref);
-  if (!workspace) return await tenantNotFound(c);
+  const login = c.get("authUser")?.github_login;
+  if (!workspace || login === undefined) return await tenantNotFound(c);
   const now = new Date().toISOString();
-  const [members, grants] = await Promise.all([
+  const [members, all] = await Promise.all([
     listWorkspaceMembers(db, workspace.id),
     listActiveSupportGrants(db, workspace.id, now),
   ]);
+  const grants = onlyOwnGrant(all, login);
   return c.json({
     workspace: {
       id: workspace.id,
@@ -1819,15 +1834,19 @@ const supportGrantsRoute = async (c: DashboardContext) => {
   const db = dashboardD1(c.env);
   if (!tenant || !db) return await tenantNotFound(c);
   let workspaceId: string | null;
+  /** Set for the operator face: only their own grant is theirs to see. */
+  let ownLogin: string | null = null;
   if (tenant.principal === "operator-granted") {
     workspaceId = tenant.workspaceId;
+    ownLogin = c.get("authUser")?.github_login ?? null;
   } else {
     const member = await requireMember(c);
     if (!member.ok) return member.response;
     workspaceId = member.scope?.workspaceId ?? null;
   }
   if (workspaceId === null) return c.json({ error: "not_found" }, 404);
-  const grants = await listActiveSupportGrants(db, workspaceId, new Date().toISOString());
+  const live = await listActiveSupportGrants(db, workspaceId, new Date().toISOString());
+  const grants = ownLogin === null ? live : onlyOwnGrant(live, ownLogin);
   return c.json({
     grants: grants.map((row) => ({
       operator_login: row.operator_login,

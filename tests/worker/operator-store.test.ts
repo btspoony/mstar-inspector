@@ -196,9 +196,14 @@ describe("append-only store shape", () => {
   // contract here IS "no writer exists" — so the source shape is the evidence.
   test("no UPDATE or DELETE statement exists anywhere in the module", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/dashboard/operator-store.ts"), "utf8");
-    // Statements only: a comment may name the rule it guarantees.
+    // Statements only: a comment or string may name the rule it guarantees.
     const statements = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-    expect(statements).not.toMatch(/\b(UPDATE|DELETE)\b/i);
+    // A statement starts a line with the verb and a table name follows, so a
+    // comment or message that merely contains the word cannot fail this.
+    expect(statements).not.toMatch(/^\s*(UPDATE|DELETE)\s+[A-Za-z_]/im);
+    // …and the verbs cannot hide mid-statement inside a multi-line template.
+    expect(statements).not.toMatch(/\b(UPDATE|DELETE)\s+FROM\s+[A-Za-z_]/i);
+    expect(statements).not.toMatch(/\bUPDATE\s+[A-Za-z_]+\s+SET\b/i);
   });
 });
 

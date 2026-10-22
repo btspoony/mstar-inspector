@@ -41,6 +41,8 @@ const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
 /** The operator the allowlist names, in mixed case — the compare is NOCASE. */
 const OPERATOR = "Support-Bot";
+/** A second listed operator, holding its own grant on the same workspace. */
+const OTHER_OPERATOR = "Other-Bot";
 const DAY = 24 * 60 * 60 * 1000;
 
 function envFor(db: TestD1, operators = OPERATOR): Env {
@@ -272,6 +274,36 @@ describe("operator with a valid grant", () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { grants: unknown[] }).grants).toHaveLength(1);
     expect(auditRows(db).map((row) => row.action)).toEqual(["support.read"]);
+  });
+
+  test("an operator sees ONLY their own grant on both faces; the member notice keeps all", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    grant(db, "ws-acme", OTHER_OPERATOR, DAY);
+    const env = envFor(db, `${OPERATOR},${OTHER_OPERATOR}`);
+
+    // The two operator-reachable faces carry the same grant projection.
+    for (const path of ["/dashboard/acme/api/support/workspace", "/dashboard/acme/api/support/grants"]) {
+      const res = await worker.fetch(await authedRequest(path, OPERATOR), env);
+      expect(res.status, path).toBe(200);
+      const body = (await res.json()) as {
+        grants: Array<{ operator_login: string; reason: string }>;
+      };
+      // AC2: the operator's window is the grant that opened it — one row, theirs.
+      expect(body.grants, path).toHaveLength(1);
+      expect(body.grants[0]?.operator_login, path).toBe(OPERATOR);
+      expect(body.grants[0]?.reason, path).toBe("tenant-reported incident");
+    }
+
+    // AC4: the member notice is the whole live set — both operators' rows.
+    const notice = await worker.fetch(await authedRequest("/dashboard/acme/api/support/grants", "dana"), env);
+    expect(notice.status).toBe(200);
+    const noticeBody = (await notice.json()) as { grants: Array<{ operator_login: string }> };
+    expect(noticeBody.grants.map((row) => row.operator_login).sort()).toEqual(
+      [OPERATOR, OTHER_OPERATOR].sort(),
+    );
+    // The member read is not audited; the two operator reads are.
+    expect(auditRows(db).map((row) => row.action)).toEqual(["support.read", "support.read"]);
   });
 
   test("App settings, credentials and the App list are 403 with one support.forbidden row each", async () => {
