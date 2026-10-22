@@ -23,6 +23,24 @@ import {
 } from "./data";
 
 /**
+ * Page wayfinding link back to the Apps list. Exported so the target and the
+ * decorative ArrowLeft's aria-hidden contract are asserted on rendered markup,
+ * not on the page's source text.
+ */
+export function BackToApps({ locale, href }: { locale: SpaBoot["locale"]; href: string }) {
+  return (
+    <a
+      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+      href={href}
+      onClick={(event) => spaClick(href, event)}
+    >
+      <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
+      {t(locale, "appDetail.backToApps")}
+    </a>
+  );
+}
+
+/**
  * The App detail page (App detail IA): `/dashboard/apps/:slug` —
  * and the legacy `/dashboard/apps/:slug/settings` deep link (a permanent
  * settings-tab target: the settings POST family's HTML-nav 302s pin it) —
@@ -202,19 +220,8 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
 
   // Page wayfinding: the back link is the shell's first element on both
   // faces (error + ok — it serves both roles), moved here from the
-  // settings tab body. The decorative ArrowLeft rides the link
-  // aria-hidden, so the accessible name stays the backToApps text alone.
-  const appsHref = `${apiBase()}/apps`;
-  const wayfinding = (
-    <a
-      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-      href={appsHref}
-      onClick={(event) => spaClick(appsHref, event)}
-    >
-      <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
-      {t(locale, "appDetail.backToApps")}
-    </a>
-  );
+  // settings tab body.
+  const wayfinding = <BackToApps locale={locale} href={`${apiBase()}/apps`} />;
 
   return (
     <div className="flex flex-col gap-6">

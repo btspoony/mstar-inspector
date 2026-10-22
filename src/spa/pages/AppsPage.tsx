@@ -94,7 +94,8 @@ function CreateAppButton({ locale }: { locale: SpaBoot["locale"] }) {
   );
 }
 
-function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: AppsPayload }) {
+/** One App row — exported so its links are asserted on rendered markup. */
+export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: AppsPayload }) {
   return (
     <div className="overflow-hidden rounded-md border">
       <Table>

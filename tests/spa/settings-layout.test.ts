@@ -23,6 +23,8 @@ import {
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
 import { AppInfoCard, DraftChainPanel, ProviderConfigForm, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
+import { BackToApps } from "../../src/spa/pages/AppDetailPage";
+import { apiBase } from "../../src/spa/workspace-base";
 
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
@@ -1305,24 +1307,25 @@ describe("operational action hierarchy", () => {
 
 describe("App workflow boundaries", () => {
   test("App settings reads as one workflow with the Apps list: a visible path back", () => {
-    // The wayfinding lives on the AppDetailPage shell (both faces), not
-    // the settings tab body — the source pin re-pointed with the move.
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
-    // The back link targets the enumerated Apps route (the /dashboard surface).
-    expect(source).toContain('href={appsHref}');
-    expect(source).toContain('t(locale, "appDetail.backToApps")');
+    // Rendered, not source-pinned: the link target is whatever the page
+    // actually emits, so a wrong base/slug fails here.
+    const html = renderToStaticMarkup(
+      createElement(BackToApps, { locale: "en", href: `${apiBase("/dashboard/acme/apps")}/apps` }),
+    );
+    expect(html).toContain('href="/dashboard/acme/apps"');
+    expect(html).toContain("Back to Apps");
     expect(t("en", "appDetail.backToApps")).toBe("Back to Apps");
     expect(t("zh_CN", "appDetail.backToApps")).toBe("返回应用");
-    // A decorative ArrowLeft rides the link — aria-hidden keeps
-    // the accessible name at the backToApps text alone; inline-flex aligns
-    // icon + label. Copy and target unchanged (AC3).
-    const wayfinding = source.slice(
-      source.lastIndexOf("<a", source.indexOf('href={appsHref}')),
-      source.indexOf('t(locale, "appDetail.backToApps")'),
+    // The decorative ArrowLeft rides the link — aria-hidden keeps the
+    // accessible name at the backToApps text alone; inline-flex aligns
+    // icon + label.
+    expect(html).toContain("<svg");
+    expect(html).toContain('aria-hidden="true"');
+    expect(html).toContain("inline-flex items-center gap-1.5");
+    // Legacy pages keep the historical target.
+    expect(renderToStaticMarkup(createElement(BackToApps, { locale: "en", href: `${apiBase("/dashboard/apps")}/apps` }))).toContain(
+      'href="/dashboard/apps"',
     );
-    expect(wayfinding).toContain("<ArrowLeft");
-    expect(wayfinding).toContain('aria-hidden="true"');
-    expect(wayfinding).toContain("inline-flex items-center gap-1.5");
   });
 
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {

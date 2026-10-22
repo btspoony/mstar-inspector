@@ -303,7 +303,7 @@ export function SettingsView({
    * via the awaited background reload.
    */
   async function runTriggerMode(mode: ReviewTriggerMode): Promise<OpNotice> {
-    return runPinnedWithBody(`${appPath}/review-trigger-mode`, { mode });
+    return runPinnedWithBody(reviewTriggerModePath(appPath), { mode });
   }
 
   /**
@@ -895,6 +895,15 @@ function OpsCard({
       </CardContent>
     </SectionCard>
   );
+}
+
+/**
+ * The pinned POST target of the review-trigger-mode save, under one App path.
+ * Exported so a test can execute the derivation instead of pinning the call
+ * site's source text.
+ */
+export function reviewTriggerModePath(appPath: string): string {
+  return `${appPath}/review-trigger-mode`;
 }
 
 /**

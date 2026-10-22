@@ -15,7 +15,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { REVIEW_TRIGGER_MODES as STORE_REVIEW_TRIGGER_MODES } from "../../src/dashboard/apps-store";
 import { REVIEW_TRIGGER_MODES, isReviewTriggerMode, type ReviewTriggerMode } from "../../src/spa/pages/data";
-import { ReviewTriggerControl, botMention } from "../../src/spa/pages/SettingsPage";
+import { ReviewTriggerControl, botMention, reviewTriggerModePath } from "../../src/spa/pages/SettingsPage";
+import { apiBase } from "../../src/spa/workspace-base";
 
 const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
 
@@ -135,10 +136,17 @@ describe("save flow + 400 fallback contract (source pins)", () => {
     // SettingsView wires the save through runPinnedWithBody — the family
     // whose 400 face resolves through settingsErrorMessage (key-first,
     // never-blank fallback; count pinned at 2 by settings-error-keys.test.ts
-    // and unchanged here).
-    expect(settingsPage).toContain(
-      "runPinnedWithBody(`${appPath}/review-trigger-mode`, { mode })",
+    // and unchanged here). The target is EXECUTED, not source-pinned: the
+    // page's own base derivation plus the shared path helper name the route.
+    expect(reviewTriggerModePath("/dashboard/apps/acme")).toBe(
+      "/dashboard/apps/acme/review-trigger-mode",
     );
+    // Workspace-scoped pages post to the workspace copy — the legacy App
+    // family answers 404 under strict.
+    expect(reviewTriggerModePath(`${apiBase("/dashboard/acme/apps/acme")}/apps/acme`)).toBe(
+      "/dashboard/acme/apps/acme/review-trigger-mode",
+    );
+    expect(settingsPage).toContain("runPinnedWithBody(reviewTriggerModePath(appPath), { mode })");
     // OpsCard receives the saver and renders the control (beside the review
     // toggle, inside the ops card — before the pause/resume actions row).
     const opsBody = settingsPage.slice(
