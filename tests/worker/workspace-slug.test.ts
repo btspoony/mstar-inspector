@@ -1,5 +1,5 @@
 /**
- * Plan 98 T2 — the owner-editable workspace slug.
+ * The workspace-identifier work (2026-10) — the owner-editable workspace slug.
  *
  * `PUT /:workspaceRef/api/settings/slug` is owner-only and answers the failure
  * table's machine-readable codes; the write itself is one guarded UPDATE, so a
@@ -25,10 +25,10 @@ function envFor(db: TestD1): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
-    WORKSPACE_TENANT_MODE: "strict",
   } as unknown as Env;
 }
 

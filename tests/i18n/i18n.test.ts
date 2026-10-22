@@ -194,10 +194,6 @@ describe("shared navbar contract", () => {
     expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual(["nav.apps", "nav.members"]);
   });
 
-  test("Members is the only admin-only item", () => {
-    expect(NAV_ITEMS.map((item) => item.adminOnly ?? false)).toEqual([false, true]);
-  });
-
   test("every labelKey resolves to a real dictionary string in both locales", () => {
     for (const item of NAV_ITEMS) {
       for (const locale of LOCALES) {

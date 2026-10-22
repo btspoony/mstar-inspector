@@ -27,10 +27,6 @@ export function otherLocale(locale: Locale): Locale {
   return locale === "en" ? "zh_CN" : "en";
 }
 
-export function visibleNavItems(role: SpaBoot["role"]): typeof NAV_ITEMS {
-  return NAV_ITEMS.filter((item) => !item.adminOnly || role === "admin");
-}
-
 /** Locked chrome copy: `{name (login)}` when both differ, else login. */
 export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | null {
   if (!boot.login) return null;
@@ -46,10 +42,11 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
  *
  * On a workspace-scoped page BOTH entries follow that workspace: Apps becomes
  * `/dashboard/<ref>/apps` and Members `/dashboard/<ref>/members`, because both
- * route families are workspace-scoped. The workspace comes from
- * the pathname, else from the boot (`SpaBoot.workspaceRef`, the server-resolved
- * sole workspace under `strict`). The generic prefix rule then also marks the
- * scoped Apps entry current on its own detail pages.
+ * route families are workspace-scoped. The workspace comes from the pathname,
+ * else from the boot (`SpaBoot.workspaceRef`), else from the login's first
+ * membership — so no entry ever points at the retired `/dashboard/apps`
+ * family. The generic prefix rule then also marks the scoped Apps entry
+ * current on its own detail pages.
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
   if (href === "/dashboard/apps") {
@@ -70,14 +67,18 @@ function navHref(baseHref: string, workspaceRef: string | null): string {
 export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel {
   // The page's own prefix wins (it is the route the request was matched
   // against); the boot ref covers the mode-independent pages, whose pathname
-  // names no workspace. Both absent → the legacy targets.
-  const workspaceRef = workspaceRefOf(pathname) ?? boot.workspaceRef ?? null;
+  // names no workspace. Both absent (a multi-workspace deployment has no sole
+  // workspace to name) → the login's own first membership, the same target the
+  // landing uses, so no entry points at the retired `/dashboard/apps` family.
+  const workspaceRef =
+    workspaceRefOf(pathname) ?? boot.workspaceRef ?? boot.memberships?.[0]?.slug ?? null;
   // No workspace yet → every nav target would 404; the shell keeps its
   // wordmark and drops the entries (creation surface). An operator under a
   // support grant gets the same treatment: its one page is the support view,
-  // and every other entry would only 403 that page's reads.
-  const items =
-    boot.needsWorkspace === true || boot.supportOnly === true ? [] : visibleNavItems(boot.role);
+  // and every other entry would only 403 that page's reads. Otherwise every
+  // entry renders for every workspace member — Members is readable by all, and
+  // the page's own actions stay role-gated.
+  const items = boot.needsWorkspace === true || boot.supportOnly === true ? [] : NAV_ITEMS;
   return {
     brand: t(boot.locale, "nav.brand"),
     // The root workbench 404s its data reads under `strict`, so the wordmark
@@ -149,8 +150,8 @@ export function buildWorkspaceSwitcherModel(
  * this login does not list, and for the absent list.
  *
  * The boot is a per-document snapshot, so without this patch the switcher keeps
- * offering the retired slug (a 404 under D8) and the current row goes empty
- * after the rename navigates to the new one.
+ * offering the retired slug (a 404, since a rename is not a redirect) and the
+ * current row goes empty after the rename navigates to the new one.
  */
 export function renameWorkspaceMembership(
   memberships: SpaBoot["memberships"],

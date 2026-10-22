@@ -1,5 +1,5 @@
 /**
- * Plan 99 T3 — the platform-operator matrix.
+ * The platform-operator support work (2026-10) — the operator matrix.
  *
  * One executable table of (actor × surface) cells. The actors are the gate's
  * four workspace principals — `member`, `operator-granted`, `operator-denied`,
@@ -45,10 +45,10 @@ function envFor(db: TestD1): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
-    WORKSPACE_TENANT_MODE: "strict",
     PLATFORM_OPERATORS: OPERATOR_KEY,
   } as unknown as Env;
 }
@@ -166,8 +166,14 @@ function fixture() {
 const auditCount = (db: TestD1): number =>
   (db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n;
 
+/**
+ * Every audit action in WRITE order. `created_at` is a same-millisecond ISO
+ * string for requests inside one test, so it ties constantly; `rowid` is the
+ * insertion order and the only deterministic tiebreak (ordering by the random
+ * UUID `id` was sampling luck, not order).
+ */
 const auditActions = (db: TestD1): string[] =>
-  (db.raw.query("SELECT action FROM audit_events ORDER BY created_at ASC, id ASC").all() as Array<{
+  (db.raw.query("SELECT action FROM audit_events ORDER BY created_at ASC, rowid ASC").all() as Array<{
     action: string;
   }>).map((row) => row.action);
 

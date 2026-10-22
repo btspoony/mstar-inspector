@@ -1,10 +1,11 @@
 /**
- * The login's workspace memberships as LIVE client state (plan 98 fix 2).
+ * The login's workspace memberships as LIVE client state (the
+ * workspace-identifier work, 2026-10).
  *
  * The boot is a per-document snapshot and the rename navigates with
  * `replaceState`, so nothing ever refreshes it. Patched in place, the switcher
- * would keep offering the retired slug (a 404 under D8) while its current row
- * went empty on the new path.
+ * would keep offering the retired slug (a 404 — a rename is not a redirect)
+ * while its current row went empty on the new path.
  *
  * A context rather than a callback prop: `main.tsx` renders the page as
  * `Layout`'s already-built `children` — `<Layout><Router>{DashboardPage}</Router></Layout>`

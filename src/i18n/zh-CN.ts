@@ -128,6 +128,11 @@ export const zhCN: Dictionary = {
   apps: {
     heading: "应用",
     create: "创建 GitHub App",
+    /** Create 控件不可用的原因（见 en.ts 同名字段）。 */
+    createUnavailable: {
+      role: "只有工作区所有者或管理员可以在此创建 App。",
+      workspace: "请先进入某个工作区 — 此部署有多个工作区，App 需要归属其中一个。",
+    },
     /** 组合式空态（EmptyState 标题 + 描述）。 */
     emptyTitle: "还没有 App",
     emptyDescription: "使用「创建 GitHub App」连接第一个。",
@@ -207,6 +212,8 @@ export const zhCN: Dictionary = {
   workspace: {
     setupHeading: "创建工作区",
     setupDescription: "你还不属于任何工作区。创建后你将成为它的所有者，之后可以邀请队友。",
+    /** `self-hosted` 空实例提示：本次登录创建了部署的第一个账号。 */
+    emptyInstance: "本实例还没有任何账号。你的登录现在已是本实例的第一个账号——创建一个工作区即可开始。",
     nameLabel: "工作区名称",
     namePlaceholder: "例如 Acme",
     create: "创建工作区",
@@ -228,7 +235,7 @@ export const zhCN: Dictionary = {
     slugFailed: "修改工作区 URL 失败，请重试。",
   },
   /**
-   * 平台运维支持（plan 99）：运维人员的只读界面与租户不可关闭的授权通知。
+   * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
    * 通知说明谁在查看、原因与到期时间——不提供任何操作，因为租户既不能结束
    * 也不能修改一份授权。
    */
@@ -489,6 +496,8 @@ export const zhCN: Dictionary = {
       alreadyConnected: "此 GitHub App 已在此部署上连接 — 未做任何更改。",
       dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",
+      workspaceRequired:
+        "此部署有多个工作区，App 需要归属其中一个 — 请先进入某个工作区，再从那里创建 App。",
     },
   },
 };

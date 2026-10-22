@@ -67,7 +67,7 @@ import {
   SANDBOX_READ_PERMISSIONS,
   type AuthSeam,
 } from "../../src/pipeline/comment";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../store/helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const GITHUB_APP_ID = 1001;
@@ -75,7 +75,7 @@ const SCOPE: Scope = { appId: APP_ID, installationId: 123, owner: "acme", repo: 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const T0 = 1_700_000_000_000;
 
-function seededDb(): TestD1 {
+async function seededDb(): Promise<TestD1> {
   const db = createMigratedTestD1();
   db.raw
     .prepare(
@@ -85,6 +85,7 @@ function seededDb(): TestD1 {
        VALUES (?, 'checks-test', ?, 'checks-test', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(APP_ID, GITHUB_APP_ID);
+  await mapAppToDefaultWorkspace(db, APP_ID);
   return db;
 }
 
@@ -189,7 +190,7 @@ const SUCCESS: CheckConclusion = {
 
 describe("beginCheck — the create contract", () => {
   test("sends external_id, the exact name and the authoritative SHA, and NO details_url", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const identity = attempt.identity;
     const fake = fakeChecks({ create: () => runPayload(identity) });
@@ -213,7 +214,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("`sending` is persisted BEFORE the create request leaves", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     let stateAtSend: string | undefined;
     const fake = fakeChecks({
@@ -229,7 +230,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a create that never reached the wire leaves the row unsent", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     // No client at all: nothing was attempted, so `not-sent` must survive —
     // marking it `sending` would strand the attempt as possibly-sent.
@@ -239,7 +240,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a client whose create method is MISSING keeps the row unsent (no request, no sending mark)", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     // A surface exists but the exact callable does not: calling it would throw
     // and look like a possibly-lost send, so it must be refused pre-emptively.
@@ -251,7 +252,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a lease that expires during client resolution blocks the create request", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
     // The clock advances past the lease while the client is being resolved —
@@ -274,7 +275,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a matching response yields the remote evidence, not an opinion", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity, { id: 987654 }) });
     const result = await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease });
@@ -293,7 +294,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a missing Checks surface (no client) is unavailable, never a throw", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const result = await adapterFor(db, null).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
@@ -303,7 +304,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a surface without the checks methods (an older/foreign client) is unavailable", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const bare = { rest: {} } as unknown as ChecksOctokit;
     const result = await adapterFor(db, bare).beginCheck({ identity: attempt.identity, lease });
@@ -314,7 +315,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a throwing client factory is unavailable, never an exception", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const adapter = createChecksAdapter({
       db,
@@ -333,7 +334,7 @@ describe("beginCheck — the create contract", () => {
 
   test("403 and 404 permission rejections are unavailable with a named reason", async () => {
     for (const status of [403, 404]) {
-      const db = seededDb();
+      const db = await seededDb();
       const { attempt, lease } = await claimedAttempt(db);
       const fake = fakeChecks({
         create: () => {
@@ -357,7 +358,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a 5xx/API failure is unavailable", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({
       create: () => {
@@ -376,7 +377,7 @@ describe("beginCheck — the create contract", () => {
       { name: "other-check" },
       { head_sha: `beef${SHA.slice(4)}` },
     ]) {
-      const db = seededDb();
+      const db = await seededDb();
       const { attempt, lease } = await claimedAttempt(db);
       const fake = fakeChecks({ create: () => runPayload(attempt.identity, foreign) });
       const result = await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease });
@@ -386,7 +387,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a response missing identity evidence (null app / non-positive id) is unavailable", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({ create: () => ({ ...runPayload(attempt.identity), app: null }) });
     expect((await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease })).kind).toBe("unavailable");
@@ -395,14 +396,14 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a malformed response body is unavailable", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({ create: () => null as unknown as CheckRunPayload });
     expect((await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease })).kind).toBe("unavailable");
   });
 
   test("an attempt that already owns a run is never created again", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
@@ -418,7 +419,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("an ownership-read failure is unavailable with zero requests", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
     // The ownership read is the FIRST D1 statement the lane issues; failing it
@@ -451,7 +452,7 @@ describe("beginCheck — the create contract", () => {
     // The additive `requests` contract is only useful if NO refusal path can
     // leave it undefined: an undefined count would be read as a false
     // zero-request classification by the recovery lane.
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const noClient = await adapterFor(db, null).beginCheck({ identity: attempt.identity, lease });
     const bareSurface = await adapterFor(db, { rest: {} } as unknown as ChecksOctokit).beginCheck({
@@ -479,7 +480,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a stale lease sends nothing (the fence is checked immediately before the send)", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const stale: Lease = { holder: "run-a", epoch: 1, untilMs: T0 + CHECK_LEASE_MS + 1 };
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
@@ -489,7 +490,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("a caller whose identity disagrees with the persisted row sends nothing", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
     const wrong = { ...attempt.identity, externalId: "mstar-check:v1:forged:9" };
@@ -523,7 +524,7 @@ describe("persisted scope identity (spec §7.6 / §7.9)", () => {
 
   for (const [label, change] of scopeChanges) {
     test(`beginCheck refuses a changed scope (${label}) and issues no request`, async () => {
-      const db = seededDb();
+      const db = await seededDb();
       const { attempt, lease } = await claimedAttempt(db);
       const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
       const result = await adapterFor(db, fake.octokit).beginCheck({
@@ -535,7 +536,7 @@ describe("persisted scope identity (spec §7.6 / §7.9)", () => {
     });
 
     test(`adoptCheckRun refuses a changed scope (${label}) and issues no request`, async () => {
-      const db = seededDb();
+      const db = await seededDb();
       const { attempt } = await claimedAttempt(db);
       const fake = fakeChecks({});
       const result = await adapterFor(db, fake.octokit).adoptCheckRun({
@@ -546,7 +547,7 @@ describe("persisted scope identity (spec §7.6 / §7.9)", () => {
     });
 
     test(`fetchCheckRun refuses a changed scope (${label}) and issues no request`, async () => {
-      const db = seededDb();
+      const db = await seededDb();
       const { attempt } = await claimedAttempt(db);
       const fake = fakeChecks({ get: () => runPayload(attempt.identity, { id: 4242 }) });
       const result = await adapterFor(db, fake.octokit).fetchCheckRun({
@@ -558,7 +559,7 @@ describe("persisted scope identity (spec §7.6 / §7.9)", () => {
   }
 
   test("a changed generation or external id is refused too", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
     const adapter = adapterFor(db, fake.octokit);
@@ -574,7 +575,7 @@ describe("persisted scope identity (spec §7.6 / §7.9)", () => {
   });
 
   test("routing uses the PERSISTED scope, not a caller-supplied one", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const asked: { installationId: number; repo: string }[] = [];
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
@@ -593,7 +594,7 @@ describe("persisted scope identity (spec §7.6 / §7.9)", () => {
 
 describe("the live-lease send fence (spec §7.9)", () => {
   test("an EXPIRED lease with otherwise-exact fields sends nothing and mutates nothing", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const id = attempt.identity.attemptId;
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
@@ -614,7 +615,7 @@ describe("the live-lease send fence (spec §7.9)", () => {
   });
 
   test("an expired lease cannot complete a run it previously owned", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
@@ -634,7 +635,7 @@ describe("the live-lease send fence (spec §7.9)", () => {
 
 describe("adoptCheckRun — the adoption fences", () => {
   test("adopts ONLY the run whose external id, App id, SHA and name all match", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const identity = attempt.identity;
     const ours = runPayload(identity, { status: "completed", conclusion: "action_required" });
@@ -664,7 +665,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("never adopts the run of ANOTHER GENERATION (different external id)", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const sibling = { ...attempt.identity, externalId: "mstar-check:v1:11111111-1111-4111-8111-111111111111:1" };
     const fake = fakeChecks({ pages: (_p, page) => (page === 1 ? { total_count: 1, check_runs: [runPayload(sibling)] } : null) });
@@ -673,7 +674,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("never adopts another PR's or another App's run even at the same SHA", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const foreign = [
       runPayload(attempt.identity, { external_id: attempt.identity.externalId.replace(":1", ":1"), head_sha: SHA, app: { id: GITHUB_APP_ID } }),
@@ -693,7 +694,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("at most two pages are read, and a match is found on the second", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const filler = Array.from({ length: 100 }, (_, i) => runPayload(attempt.identity, { id: i + 1, external_id: `x${i}` }));
     const fake = fakeChecks({
@@ -710,7 +711,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("a saturated page-1 match must finish the walk: a duplicate on page 2 is ambiguous", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const identity = attempt.identity;
     const filler = Array.from({ length: 99 }, (_, i) => runPayload(identity, { id: i + 1, external_id: `x${i}` }));
@@ -731,7 +732,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("a saturated page-1 match is confirmed by a complete page 2 (uniqueness proven)", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const identity = attempt.identity;
     const filler = Array.from({ length: 99 }, (_, i) => runPayload(identity, { id: i + 1, external_id: `x${i}` }));
@@ -750,7 +751,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("a still-saturated two-page walk with one match stays incomplete, never found", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const identity = attempt.identity;
     const pageWith = (page: number, match: boolean) => {
@@ -776,7 +777,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("a saturated 2-page walk without a match is INCOMPLETE, never absent", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const filler = (page: number) =>
       Array.from({ length: 100 }, (_, i) => runPayload(attempt.identity, { id: page * 1000 + i, external_id: `x${page}-${i}` }));
@@ -787,7 +788,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("a complete walk with no match is absent (and adoption writes nothing)", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const fake = fakeChecks({ pages: (_p, page) => (page === 1 ? { total_count: 0, check_runs: [] } : null) });
     expect((await adapterFor(db, fake.octokit).adoptCheckRun({ identity: attempt.identity })).kind).toBe("absent");
@@ -796,7 +797,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("two distinct matching runs are ambiguous; one malformed candidate is ambiguous", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const two = fakeChecks({
       pages: () => ({
@@ -812,7 +813,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("an errored or missing walk is incomplete (absence needs a complete read)", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const failing = fakeChecks({}); // no `pages` responder → listForRef rejects 500
     expect((await adapterFor(db, failing.octokit).adoptCheckRun({ identity: attempt.identity })).kind).toBe("incomplete");
@@ -820,7 +821,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   });
 
   test("adoption is read-only: no create and no update is issued", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
     const fake = fakeChecks({
       pages: () => ({ total_count: 1, check_runs: [runPayload(attempt.identity)] }),
@@ -839,7 +840,7 @@ describe("adoptCheckRun — the adoption fences", () => {
 
 describe("completeCheck — the terminal send", () => {
   test("sends the frozen intent and returns the validated terminal evidence", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
@@ -862,7 +863,7 @@ describe("completeCheck — the terminal send", () => {
   });
 
   test("a lease that expires during client resolution blocks the update request", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
@@ -886,7 +887,7 @@ describe("completeCheck — the terminal send", () => {
   });
 
   test("a client with no callable update method is refused before any request", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
@@ -902,7 +903,7 @@ describe("completeCheck — the terminal send", () => {
   });
 
   test("a run id the attempt never persisted is refused before any request", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
@@ -918,7 +919,7 @@ describe("completeCheck — the terminal send", () => {
   });
 
   test("an unattached attempt cannot terminalize any caller-supplied run", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
@@ -929,7 +930,7 @@ describe("completeCheck — the terminal send", () => {
   });
 
   test("an unpersisted intent cannot be sent (desired is frozen before the update)", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
@@ -945,7 +946,7 @@ describe("completeCheck — the terminal send", () => {
   });
 
   test("a conclusion that disagrees with the persisted intent is refused", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, { ...SUCCESS, desired: "neutral" }, null, T0);
@@ -957,7 +958,7 @@ describe("completeCheck — the terminal send", () => {
   });
 
   test("in_progress can never reach the wire", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
@@ -971,7 +972,7 @@ describe("completeCheck — the terminal send", () => {
   });
 
   test("a lost lease sends nothing, and a run whose identity moved is refused", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
@@ -984,7 +985,7 @@ describe("completeCheck — the terminal send", () => {
   });
 
   test("a response that is not the intended terminal state is unavailable", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
@@ -1002,7 +1003,7 @@ describe("completeCheck — the terminal send", () => {
 
   test("a 403/5xx update is unavailable with a named reason (never an exception)", async () => {
     for (const status of [403, 502]) {
-      const db = seededDb();
+      const db = await seededDb();
       const { attempt, lease } = await claimedAttempt(db);
       await attachedRun(db, attempt, lease, 4242);
       await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
@@ -1027,7 +1028,7 @@ describe("completeCheck — the terminal send", () => {
 
 describe("frozen terminal intent (spec §7.9)", () => {
   test("the update ships the PERSISTED text, not the caller's copies", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const id = attempt.identity.attemptId;
     await attachedRun(db, attempt, lease, 4242);
@@ -1052,7 +1053,7 @@ describe("frozen terminal intent (spec §7.9)", () => {
   });
 
   test("an oversized or multi-line intent is bounded at persistence", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const id = attempt.identity.attemptId;
     await setCheckDesired(
@@ -1070,7 +1071,7 @@ describe("frozen terminal intent (spec §7.9)", () => {
   });
 
   test("a divergent conclusion enum is still refused before any request", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
@@ -1088,7 +1089,7 @@ describe("frozen terminal intent (spec §7.9)", () => {
 
 describe("fetchCheckRun — the recovery lane's read", () => {
   test("returns the run only when its identity matches this attempt", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ get: () => runPayload(attempt.identity, { id: 4242 }) });
@@ -1103,7 +1104,7 @@ describe("fetchCheckRun — the recovery lane's read", () => {
   });
 
   test("a run id that does not echo the request is unavailable (a proxy lied)", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ get: () => runPayload(attempt.identity, { id: 111 }) });
@@ -1259,7 +1260,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     // detect. The private key is generated per run purely so auth-app can sign
     // its JWT; the single HTTP request it makes (and the Checks request) are
     // answered locally, so nothing here is a live GitHub call.
-    const db = seededDb();
+    const db = await seededDb();
     const { privateKey } = generateKeyPairSync("rsa", {
       modulusLength: 2_048,
       privateKeyEncoding: { type: "pkcs8", format: "pem" },
@@ -1344,7 +1345,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
   });
 
   test("a typed pre-dispatch refusal reports zero requests, an unknown failure stays conservative", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     // The transport refused BEFORE dispatch (a budget/allocation gate): the
     // marker is what tells the lane nothing left the process.
@@ -1385,7 +1386,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
   });
 
   test("a client whose checks surface is absent fails soft, without throwing", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const partial = { rest: { checks: { create: undefined } } } as unknown as ChecksOctokit;
     expect((await adapterFor(db, partial).beginCheck({ identity: attempt.identity, lease })).kind).toBe("unavailable");
@@ -1396,7 +1397,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
   });
 
   test("an unowned attempt produces no request even when a client is present", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     // Terminalize the attempt through the store, then the adapter must refuse.
     await attachedRun(db, attempt, lease, 4242);
@@ -1435,7 +1436,7 @@ describe("the review-write permission set (spec §7.12)", () => {
 
 describe("the remote non-idempotency boundary (RL-12)", () => {
   test("a create whose response was lost is never blindly re-created", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const id = attempt.identity.attemptId;
     // The send was ATTEMPTED and the response was lost: `sending` with no id.
@@ -1508,7 +1509,7 @@ async function runState(db: TestD1, attempt: CheckAttempt): Promise<string | nul
  */
 describe("zero-dispatch create refusal rolls the sending mark back", () => {
   test("a lease that expires after the sending mark restores not-sent with no request", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const identity = attempt.identity;
     const fake = fakeChecks({ create: () => runPayload(identity) });
@@ -1552,7 +1553,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
   });
 
   test("a pre-existing error survives the mark and the rollback untouched", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const identity = attempt.identity;
     // A real diagnostic already on the row (e.g. from an earlier deferral).
@@ -1583,7 +1584,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
   });
 
   test("a stale epoch defeats the rollback: a newer holder's state is untouched", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     // A newer recovery claim takes the row over (epoch bumps) after this
     // caller's `sending` write.
@@ -1603,7 +1604,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
   });
 
   test("a known remote id is never disguised as unsent", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
 
@@ -1614,7 +1615,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
   });
 
   test("the rollback moves only create_state: no attempt, backoff, error or identity change", async () => {
-    const db = seededDb();
+    const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await setCheckCreateState(db, attempt.identity.attemptId, lease, "sending", undefined, T0);
     const before = await rowOf(db, attempt);

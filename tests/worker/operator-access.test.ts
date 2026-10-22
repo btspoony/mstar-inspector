@@ -1,6 +1,6 @@
 /**
  * Platform operators and support grants — the workspace gate's operator classes
- * (plan 99 T2).
+ * (platform-operator support, 2026-10).
  *
  * The fixture puts ONE listed operator in the env allowlist, with no membership
  * anywhere, plus a real workspace, its members, and an App. Every case asserts
@@ -51,10 +51,10 @@ function envFor(db: TestD1, operators = OPERATOR): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
-    WORKSPACE_TENANT_MODE: "strict",
     PLATFORM_OPERATORS: operators,
   } as unknown as Env;
 }
@@ -183,9 +183,14 @@ function grant(db: TestD1, workspaceId: string, login: string, ttlMs: number): v
 
 type AuditRow = { action: string; actor_login: string; workspace_id: string };
 
+/**
+ * Every audit row in WRITE order. `created_at` ties for requests inside one
+ * test (same-millisecond ISO), and the row `id` is a random UUID — so `rowid`
+ * (insertion order) is the only deterministic tiebreak.
+ */
 function auditRows(db: TestD1): AuditRow[] {
   return db.raw
-    .prepare("SELECT action, actor_login, workspace_id FROM audit_events ORDER BY created_at ASC, id ASC")
+    .prepare("SELECT action, actor_login, workspace_id FROM audit_events ORDER BY created_at ASC, rowid ASC")
     .all() as AuditRow[];
 }
 
@@ -518,17 +523,5 @@ describe("the shell boot asks the gate's own classifier", () => {
     // shell must not replace the acceptance surface with the support face.
     expect(boot.supportOnly).toBeUndefined();
     expect(boot.pendingInvites?.map((invite) => invite.workspaceRef)).toEqual(["acme"]);
-  });
-
-  test("off: a granted operator gets no supportOnly boot (the workspace face does not exist)", async () => {
-    const { db } = soleWorkspaceFixture();
-    grant(db, "default", OPERATOR, DAY);
-    const env = withSpaAssets({ ...envFor(db), WORKSPACE_TENANT_MODE: "off" } as Env);
-    const res = await worker.fetch(
-      await authedRequest("/dashboard", OPERATOR, { accept: "text/html" }),
-      env,
-    );
-    expect(res.status).toBe(200);
-    expect(bootOf(await res.text()).supportOnly).toBeUndefined();
   });
 });

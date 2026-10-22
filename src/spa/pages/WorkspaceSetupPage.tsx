@@ -77,6 +77,12 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
         </h1>
       </div>
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
+      {/* The `self-hosted` first-account line: the boot carries `emptyInstance`
+          only for the sign-in that created this instance's first account, so
+          neither `saas` nor a later sign-in may claim the instance story. */}
+      {boot.emptyInstance === true ? (
+        <p className="text-sm text-muted-foreground">{t(locale, "workspace.emptyInstance")}</p>
+      ) : null}
       <Card className="max-w-lg">
         <CardHeader>
           <CardTitle className="text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">

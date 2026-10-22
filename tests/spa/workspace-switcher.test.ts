@@ -1,5 +1,5 @@
 /**
- * Workspace switcher (plan 98 T3) — the URL-only navigation contract.
+ * Workspace switcher (the workspace-identifier work, 2026-10) — the URL-only navigation contract.
  *
  * Picking another workspace must rewrite ONLY the workspace segment of the
  * current path and hand the new URL to the router. Executed proof, not source
@@ -20,7 +20,6 @@ const boot: SpaBoot = {
   locale: "en",
   login: "octocat",
   name: "The Octocat",
-  role: "admin",
   workspaceRef: "acme",
   memberships: [
     // `acme` was renamed away from its id; `ws_7d41` still answers to both.

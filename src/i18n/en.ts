@@ -146,6 +146,15 @@ export const en = {
   apps: {
     heading: "Apps",
     create: "Create GitHub App",
+    /**
+     * Why the Create control is disabled. `role`: the caller is not
+     * owner/admin of the workspace the page addresses. `workspace`: this
+     * deployment carries several workspaces and the page names none.
+     */
+    createUnavailable: {
+      role: "Only a workspace owner or admin can create an App here.",
+      workspace: "Open a workspace first — this deployment has more than one, so an App needs to know which it belongs to.",
+    },
     /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No Apps yet",
     emptyDescription: "Create GitHub App connects your first one.",
@@ -227,6 +236,13 @@ export const en = {
     setupHeading: "Create a workspace",
     setupDescription:
       "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",
+    /**
+     * The `self-hosted` empty-instance line: this sign-in created the
+     * deployment's first account. Absent on `saas` and once `users` is
+     * non-empty.
+     */
+    emptyInstance:
+      "This instance has no accounts yet. Your login is now this instance's first account — create a workspace to start.",
     nameLabel: "Workspace name",
     namePlaceholder: "e.g. Acme",
     create: "Create workspace",
@@ -248,7 +264,7 @@ export const en = {
     slugFailed: "Could not change the workspace URL — try again.",
   },
   /**
-   * Platform-operator support (plan 99): the operator's read-only face and the
+   * Platform-operator support (2026-10): the operator's read-only face and the
    * tenant's undismissable grant notice. The notice states who is looking, why,
    * and until when — and offers no action, because the tenant can neither end
    * nor edit a grant.
@@ -552,6 +568,8 @@ export const en = {
       alreadyConnected: "This GitHub App is already connected on this deployment — no changes were made.",
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
+      workspaceRequired:
+        "This deployment has more than one workspace, so an App needs to know which it belongs to — open a workspace and create the App from there.",
     },
   },
 };

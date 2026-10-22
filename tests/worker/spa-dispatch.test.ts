@@ -81,6 +81,7 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
       put: async () => {},
     } as unknown as Env["IDEMPOTENCY_KV"],
     ASSETS: stubAssets({ "/index.html": SPA_INDEX_HTML, "/assets/app.js": "js" }, calls),
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
   };
@@ -115,7 +116,8 @@ function concurrentBootDbStub(): Env["DB"] {
   };
   const respond = (query: string) => {
     if (query.includes("workspace_invites i JOIN workspaces w")) return { all: async () => { await arrive("invites"); return { results: [] }; } };
-    if (query.includes("w.id AS id, w.slug AS slug")) return { all: async () => { await arrive("memberships"); return { results: [] }; } };
+    // The switcher's list carries `w.name`; the boot's workspace-access read does not.
+    if (query.includes("w.name AS name")) return { all: async () => { await arrive("memberships"); return { results: [] }; } };
     if (query.includes("SELECT * FROM users WHERE github_login")) {
       return { first: async () => ({ id: "u-test", github_login: "octocat", role: "admin", created_at: new Date().toISOString(), invited_by: null }) };
     }
@@ -133,7 +135,7 @@ function concurrentBootDbStub(): Env["DB"] {
 describe("SPA dispatch", () => {
   test("SPA page GET with Accept: text/html fetches /index.html", async () => {
     // Members is workspace-scoped, so the tenant gate must admit the ref.
-    const { env, calls } = makeEnv({ DB: memberDbStub(), WORKSPACE_TENANT_MODE: "strict" });
+    const { env, calls } = makeEnv({ DB: memberDbStub() });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       htmlGetRequest("/dashboard/acme/members", { Cookie: `${SESSION_COOKIE}=${session}` }),
@@ -147,22 +149,18 @@ describe("SPA dispatch", () => {
   });
 
   test("each enumerated page GET hits ASSETS (with a session)", async () => {
-    // The tenant gate decides which family a path may address, so each page
-    // carries the mode that admits it: the legacy App pages live under `off`,
-    // the workspace pages under `strict`.
-    const pages: Array<{ path: string; mode?: "off" | "strict" }> = [
-      { path: "/dashboard" },
-      { path: "/dashboard/apps", mode: "off" },
-      { path: "/dashboard/apps/acme/settings", mode: "off" },
+    // App pages are workspace-scoped; the root App path and the login page are
+    // the deployment-level shell entries.
+    const pages: string[] = [
+      "/dashboard",
+      "/dashboard/acme/apps",
+      "/dashboard/acme/apps/acme/settings",
       // Members is workspace-scoped: the root path is retired.
-      { path: "/dashboard/acme/members", mode: "strict" },
-      { path: "/dashboard/login" },
+      "/dashboard/acme/members",
+      "/dashboard/login",
     ];
-    for (const { path, mode } of pages) {
-      const { env, calls } = makeEnv({
-        DB: memberDbStub(),
-        ...(mode === undefined ? {} : { WORKSPACE_TENANT_MODE: mode }),
-      });
+    for (const path of pages) {
+      const { env, calls } = makeEnv({ DB: memberDbStub() });
       const session = await createSessionValue("octocat", null, SESSION_SECRET);
       const res = await worker.fetch(
         htmlGetRequest(path, { Cookie: `${SESSION_COOKIE}=${session}` }),
@@ -326,7 +324,9 @@ describe("SPA dispatch", () => {
     const body = await res.text();
     expect(body).toContain('"login":"octocat"');
     expect(body).toContain('"name":"The Octocat"');
-    expect(body).toContain('"role":"admin"');
+    // `users.role` left the boot contract (the workspace-role change,
+    // 2026-10): nav visibility reads the workspace role in `memberships[]`.
+    expect(body).not.toContain('"role":"admin"');
   });
 
   test("session on the shell path fails closed when D1 is unbound (500, W-001)", async () => {
@@ -345,10 +345,12 @@ describe("SPA dispatch", () => {
   // --- auth redirect 全覆盖 (spec §1.3) ---
 
   test("unauthenticated deep link HTML GET → 302 login, no ASSETS call", async () => {
+    // Workspace-scoped deep links only: the retired deployment-level App
+    // family answers 404 before any session read.
     const deepLinks = [
-      "/dashboard/apps",
-      "/dashboard/members",
-      "/dashboard/apps/acme/settings",
+      "/dashboard/acme/apps",
+      "/dashboard/acme/members",
+      "/dashboard/acme/apps/acme/settings",
     ];
     for (const path of deepLinks) {
       const { env, calls } = makeEnv();
@@ -436,7 +438,7 @@ describe("SPA dispatch", () => {
   test("the two boot list reads share one round trip (neither waits for the other)", async () => {
     // L2: the pending-invite and membership lists both key on the login alone,
     // so they overlap. The stub only answers once BOTH are in flight.
-    const { env, calls } = makeEnv({ DB: concurrentBootDbStub(), WORKSPACE_TENANT_MODE: "strict" });
+    const { env, calls } = makeEnv({ DB: concurrentBootDbStub() });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       htmlGetRequest("/dashboard/acme/apps", { Cookie: `${SESSION_COOKIE}=${session}` }),

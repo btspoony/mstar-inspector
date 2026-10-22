@@ -26,7 +26,7 @@ import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
 import type { Env } from "../../src/worker/env";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
@@ -100,6 +100,7 @@ async function seededWorld(privateKeyPem: string): Promise<{ db: TestD1; appId: 
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
+  seedDefaultMemberships(db, { octocat: "owner", mallory: "owner", hubot: "member" });
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
   await createAppsStore(db).createApp({
@@ -120,6 +121,7 @@ function makeEnv(db: unknown, encryptionKey: string | null = TEST_KEY): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     REVIEW_ENABLED: "true",
     DB: db,
@@ -132,7 +134,7 @@ const cookie = (login: string) => createSessionValue(login, null, SESSION_SECRET
 
 async function getSettings(login: string, env: Env): Promise<Response> {
   return worker.fetch(
-    new Request(`https://worker.local/dashboard/api/apps/${SLUG}/settings`, {
+    new Request(`https://worker.local/dashboard/default/api/apps/${SLUG}/settings`, {
       headers: { Cookie: `${SESSION_COOKIE}=${await cookie(login)}`, Accept: "application/json" },
     }),
     env,

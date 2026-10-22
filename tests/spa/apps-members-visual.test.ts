@@ -213,13 +213,14 @@ describe("Create action is a boot capability (I-000082)", () => {
   ];
 
   /** The loaded Apps face, rendered from the real component. */
-  function renderFace(canCreate: boolean, apps: number): string {
+  function renderFace(canCreate: boolean, apps: number, unavailableReason = "role"): string {
     return renderToStaticMarkup(
       createElement(AppsView, {
         locale: "en",
         state: "ok",
         payload: { viewer: { login: "mallory", role: "member" }, apps: APPS.slice(0, apps) },
         canCreate,
+        unavailableReason,
         onRetry: () => {},
       }),
     );
@@ -234,12 +235,13 @@ describe("Create action is a boot capability (I-000082)", () => {
     expect(empty.match(/action="\/dashboard\/manifest\/start"/g)?.length).toBe(1);
   });
 
-  test("a member gets no Create action on either face — the flow would 403 (I-000082)", () => {
+  test("a caller who cannot create sees the control DISABLED with the reason, never a silent gap", () => {
     for (const apps of [0, 1]) {
-      const html = renderFace(false, apps);
-      expect(html, `apps=${apps}`).not.toContain("/dashboard/manifest/start");
-      expect(html, `apps=${apps}`).not.toContain(t("en", "apps.create"));
-      // The guidance itself stays: the page is not blank, just actionless.
+      const html = renderFace(false, apps, t("en", "apps.createUnavailable.role"));
+      expect(html, `apps=${apps}`).toContain(t("en", "apps.create"));
+      expect(html, `apps=${apps}`).toMatch(/<button[^>]*disabled/);
+      // The reason rides beside the control, so the page explains itself.
+      expect(html, `apps=${apps}`).toContain(t("en", "apps.createUnavailable.role"));
       expect(html, `apps=${apps}`).toContain(t("en", "apps.heading"));
     }
     // The empty face still explains the state without offering a dead end.

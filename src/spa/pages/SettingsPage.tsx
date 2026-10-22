@@ -884,7 +884,7 @@ function OpsCard({
  * retired slug would render a dead option and an empty current row.
  *
  * The page keeps its own path, and REPLACES rather than pushes, because the old
- * ref answers 404 under D8 — Back must not return to it.
+ * ref answers 404 (a rename is not a redirect) — Back must not return to it.
  */
 export function commitWorkspaceRename(slug: string, rename: (ref: string | null, slug: string) => void): void {
   const pathname = window.location.pathname;
@@ -920,13 +920,14 @@ export async function submitWorkspaceSlug(
 }
 
 /**
- * Renames the workspace's readable URL (plan 98 T2) — owner-only, enforced by
- * the server. Its value is the workspace's STORED slug, resolved through the
- * live membership list: the address bar's segment may be the stable id, and a
- * rename happens in place, so a value captured at mount would save the old slug
- * again. A rename is not a redirect (plan 98 D8 — the old ref answers 404
- * afterwards), so the page REPLACES its history entry instead of pushing one:
- * Back must not return to a dead ref.
+ * Renames the workspace's readable URL (the workspace-identifier work, 2026-10)
+ * — owner-only, enforced by the server. Its value is the workspace's STORED
+ * slug, resolved through the live membership list: the address bar's segment
+ * may be the stable id, and a rename happens in place, so a value captured at
+ * mount would save the old slug again. A rename is not a redirect (the
+ * workspace-rename decision, 2026-10 — the old ref answers 404 afterwards), so
+ * the page REPLACES its history entry instead of pushing one: Back must not
+ * return to a dead ref.
  */
 export function WorkspaceSlugCard({ locale, storedSlug }: { locale: SpaBoot["locale"]; storedSlug: string }) {
   // Only what the operator has typed is local; the display falls back to the
@@ -950,8 +951,8 @@ export function WorkspaceSlugCard({ locale, storedSlug }: { locale: SpaBoot["loc
     setBusy(true);
     try {
       // The pipeline patches the live list BEFORE navigating: the switcher
-      // would otherwise keep offering the retired slug (a 404 under D8) and
-      // show no current row on the new path.
+      // would otherwise keep offering the retired slug (a 404, since a rename
+      // is not a redirect) and show no current row on the new path.
       const outcome = await submitWorkspaceSlug(next, locale, renameMembership);
       if (outcome.kind === "success") setDraft(null);
       setSlugNotice(outcome);

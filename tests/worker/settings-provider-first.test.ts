@@ -3,7 +3,7 @@
  * dropdown source, and save-chain/save-roles membership (spec §6.3).
  */
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { createMigratedTestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
@@ -23,10 +23,10 @@ import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-mallory-verify-9988");
-const SETTINGS = "/dashboard/apps/mallorys-app/settings";
-const VERIFY = "/dashboard/api/apps/mallorys-app/keys/verify";
-const MODELS = "/dashboard/api/apps/mallorys-app/models";
-const SETTINGS_JSON = "/dashboard/api/apps/mallorys-app/settings";
+const SETTINGS = "/dashboard/default/apps/mallorys-app/settings";
+const VERIFY = "/dashboard/default/api/apps/mallorys-app/keys/verify";
+const MODELS = "/dashboard/default/api/apps/mallorys-app/models";
+const SETTINGS_JSON = "/dashboard/default/api/apps/mallorys-app/settings";
 
 /**
  * One `configured_providers` wire row: a stored key (provider + pool identity +
@@ -51,6 +51,7 @@ async function seededWorld() {
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
+  seedDefaultMemberships(db, { octocat: "owner", mallory: "owner", hubot: "member" });
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
   const app = await createAppsStore(db).createApp({
@@ -71,6 +72,7 @@ function makeEnv(db: unknown): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
     REVIEW_ENABLED: "true",
@@ -457,7 +459,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
       sandbox_image_id: "omp",
     });
     // The JSON face (not the SPA page path) reflects the saved selection.
-    const payload = await getJson("/dashboard/api/apps/mallorys-app/settings", "mallory", env);
+    const payload = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "mallory", env);
     const body = (await payload.json()) as {
       app: { sandbox_image_id: string };
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
@@ -885,7 +887,7 @@ describe("POST /dashboard/apps/:slug/settings — add-template-provider material
 describe("GET settings includes delivery_summary for the sidebar", () => {
   test("delivery_summary is present and never includes encrypted columns", async () => {
     const { db } = await seededWorld();
-    const res = await getJson("/dashboard/api/apps/mallorys-app/settings", "mallory", makeEnv(db));
+    const res = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "mallory", makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       delivery_summary: { latest: null; rejected24h: number };
@@ -924,7 +926,7 @@ describe("GET settings includes delivery_summary for the sidebar", () => {
 
   test("other member GET is 200 with can_manage false and base+health only", async () => {
     const { db } = await seededWorld();
-    const res = await getJson("/dashboard/api/apps/mallorys-app/settings", "hubot", makeEnv(db));
+    const res = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "hubot", makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       can_manage: boolean;
@@ -962,7 +964,7 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     configured_providers: ConfiguredRow[];
     provider_catalog: Array<{ id: string; tier: string; eligibility: string }>;
   }> {
-    const res = await getJson("/dashboard/api/apps/mallorys-app/settings", "mallory", env);
+    const res = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "mallory", env);
     expect(res.status).toBe(200);
     return (await res.json()) as {
       configured_providers: ConfiguredRow[];
@@ -1459,7 +1461,7 @@ describe("GET settings provider_catalog display_group (AD-547)", () => {
   };
 
   async function getCatalog(env: Env): Promise<CatalogRow[]> {
-    const res = await getJson("/dashboard/api/apps/mallorys-app/settings", "mallory", env);
+    const res = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "mallory", env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { provider_catalog: CatalogRow[] };
     return body.provider_catalog;

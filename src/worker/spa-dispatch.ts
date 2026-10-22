@@ -22,16 +22,22 @@ import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
 import {
   operatorSupportWorkspace,
-  strictWorkspaceAppsBase,
-  strictWorkspaceBoot,
+  signedInLanding,
+  workspaceBoot,
   pendingInvitesForLogin,
   workspaceMembershipsForLogin,
 } from "../dashboard/index";
-import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
+import {
+  FIRST_INSTANCE_COOKIE,
+  SESSION_COOKIE,
+  expireCookie,
+  readFirstInstanceValue,
+  readSessionValue,
+} from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
 import { isSpaAssetPath, matchSpaRoute, wantsHtml } from "../spa/routes";
-import type { Env } from "./env";
+import { deploymentModeOf, type DeploymentMode, type Env } from "./env";
 
 type SpaContext = Context<{ Bindings: Env }>;
 
@@ -41,8 +47,8 @@ type SpaContext = Context<{ Bindings: Env }>;
  * boot-injected shell cannot rely on the guard's 403 — a removed member with
  * a still-valid session cookie would get the workbench with their own
  * identity echoed in `window.__BOOT__`. Re-read membership the way the guard
- * does: ONE D1 lookup on the users store, shared with the boot's role (a
- * session-bearing shell request costs a single read). No valid session →
+ * does: ONE D1 lookup on the users store per session-bearing shell request. No
+ * valid session →
  * 302 `/dashboard/login` (spec §1.3 — the old null-boot shell was the
  * render-then-kick flash source); session with no users row → session cookie
  * expired, HTML navigation 302s to login while API/fetch keeps the
@@ -63,7 +69,7 @@ type ShellAuth =
  */
 function noSessionShell(c: SpaContext, locale: Locale): ShellAuth {
   if (c.req.path === "/index.html" || c.req.path === "/dashboard/login") {
-    return { kind: "shell", boot: { locale, login: null, name: null, role: null } };
+    return { kind: "shell", boot: { locale, login: null, name: null } };
   }
   return { kind: "redirect", location: "/dashboard/login" };
 }
@@ -100,7 +106,7 @@ async function readShellAuth(c: SpaContext): Promise<ShellAuth> {
       // on the result rather than the context.
       return {
         kind: "shell",
-        boot: { locale, login: null, name: null, role: null },
+        boot: { locale, login: null, name: null },
         setCookie: expireCookie(SESSION_COOKIE),
       };
     }
@@ -111,16 +117,53 @@ async function readShellAuth(c: SpaContext): Promise<ShellAuth> {
   }
   return {
     kind: "shell",
-    boot: { locale, login: session.login, name: session.name ?? session.login, role: user.role },
+    boot: { locale, login: session.login, name: session.name ?? session.login },
   };
 }
 
 export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   const assets = c.env.ASSETS;
   if (!assets) return new Response("SPA assets unbound", { status: 500 });
+  // The boot payload carries the deployment shape, so an unusable value fails
+  // HERE — before any page (login included) is served. No guidance page, no
+  // fallback: a deployment that cannot name its shape has no first-login story
+  // to tell.
+  let deploymentMode: DeploymentMode;
+  try {
+    deploymentMode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+  } catch (error) {
+    return c.text((error as Error).message, 500);
+  }
+  // The OAuth callback mints a signed, one-shot marker for the ONE sign-in
+  // that created a self-hosted instance's first account: it is the last moment
+  // the table is empty, so the fact cannot be re-read here. The marker is bound
+  // to that login and dropped on read (one-shot), and a SaaS deployment never
+  // honours it.
   const auth = await readShellAuth(c);
   if (auth.kind === "deny") return auth.response;
-  if (auth.kind === "redirect") return c.redirect(auth.location, 302);
+  if (auth.kind === "redirect") {
+    // No session, so nothing honours the marker here — but it must not outlive
+    // the request either: a surviving marker would tell the post-sign-in shell
+    // a story about a sign-in this browser never witnessed.
+    if (getCookie(c, FIRST_INSTANCE_COOKIE) !== undefined) {
+      c.header("Set-Cookie", expireCookie(FIRST_INSTANCE_COOKIE), { append: true });
+    }
+    return c.redirect(auth.location, 302);
+  }
+  const firstInstance =
+    deploymentMode === "self-hosted" &&
+    auth.boot.login !== null &&
+    c.env.DASHBOARD_SESSION_SECRET !== undefined &&
+    (await readFirstInstanceValue(
+      getCookie(c, FIRST_INSTANCE_COOKIE),
+      auth.boot.login,
+      c.env.DASHBOARD_SESSION_SECRET,
+    ));
+  // The marker is NOT spent here. It carries a statement only the shell
+  // document can deliver (`emptyInstance` in the boot), and a self-hosted
+  // deployer usually lands on a 302 first (`/dashboard` → the workspace Apps
+  // page, or an operator's support redirect), so spending it before the
+  // branches would burn the guidance on a response that never renders it.
   // `/dashboard` (the root workbench) is mode-independent, but its first data
   // read derives the base from the pathname — the retired legacy App family —
   // so under `strict` it is a dead end. Send it to the workspace Apps page (the
@@ -134,37 +177,13 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // The signed-in login of a sidebar-bearing shell; null on the login page and
   // for an anonymous boot (those take no workspace read at all).
   const login = auth.boot.login !== null && route?.page !== "login" ? auth.boot.login : null;
-  const extras = login === null ? {} : await strictWorkspaceBoot(c.env, login);
+  const extras = login === null ? {} : await workspaceBoot(c.env, login, routeRef);
   // The operator's landing must name the workspace too: the support face reads
   // `/api/support/workspace` off the pathname's workspace segment, and the bare
   // `/dashboard` carries none (root route unregistered → 404). The SAME
   // classifier the workspace gate uses answers it, so the shell cannot call an
   // invitee (or a member) a support visitor.
   const supportRef = login === null ? null : await operatorSupportWorkspace(c.env, login, routeRef);
-  if (c.req.path === "/dashboard") {
-    if (supportRef !== null) return c.redirect(`/dashboard/${supportRef}/apps`, 302);
-    // A login with no workspace of its own still needs a path into the
-    // workspace UI; a newcomer (needsWorkspace) keeps the creation surface
-    // instead of being sent to a page that answers the outsider 404.
-    if (extras.needsWorkspace !== true) {
-      const workspaceBase = await strictWorkspaceAppsBase(c.env);
-      if (workspaceBase !== null) return c.redirect(workspaceBase, 302);
-    }
-  }
-  // The shell's Apps/brand links need the active workspace, and the shell
-  // outlives the URL: a client-side navigation (spaClick → pushState) to the
-  // mode-independent Members page changes the pathname but not the boot, so a
-  // boot without the ref would strand that page on the legacy
-  // `/dashboard/apps` dead end under `strict`. Name the workspace in every
-  // sidebar-bearing boot — a workspace-scoped pathname already carries the ref
-  // in the URL and the boot copies that, but the boot ALSO carries the caller's
-  // workspace role as `canCreateApp` (I-000082: a plain member cannot manage the
-  // App the manifest flow creates, so the SPA offers no Create action), and one
-  // sole-workspace read answers both — so the read runs on every strict
-  // sidebar-bearing boot either way. `/index.html` is the same shell document
-  // addressed directly (the SPA router then reads the real pathname), so it
-  // takes the same boot. The login page renders no sidebar, and `/dashboard`
-  // either redirected above or has no sole workspace to name.
   // Two independent lists behind the same login gate, so they share ONE round
   // trip — neither reads the other and both key on the login alone.
   // The invitee's discovery surface: every live pending invitation for this
@@ -177,14 +196,42 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
       : await Promise.all([pendingInvitesForLogin(c.env, login), workspaceMembershipsForLogin(c.env, login)]);
   const pendingInvites = lists?.[0] ?? [];
   const memberships = lists?.[1] ?? [];
+  if (c.req.path === "/dashboard" && login !== null) {
+    if (supportRef !== null) return c.redirect(`/dashboard/${supportRef}/apps`, 302);
+    // A login with no workspace of its own still needs a path into the
+    // workspace UI; a newcomer (needsWorkspace) keeps the creation surface
+    // instead of being sent to a page that answers the outsider 404. A
+    // multi-workspace login lands on its FIRST membership's Apps page — a real
+    // route — because the root workbench has no workspace segment (its data
+    // reads all hang off one) and `/dashboard/apps` is retired (404).
+    // ONE landing policy (`signedInLanding`), shared with the OAuth callback
+    // and the login bounce, so the root path cannot disagree with sign-in.
+    const landing = await signedInLanding(c.env, login);
+    if (landing !== "/dashboard") return c.redirect(landing, 302);
+  }
+  // The shell's Apps/brand links need the active workspace, and the shell
+  // outlives the URL: a client-side navigation (spaClick → pushState) to a page
+  // whose pathname names no workspace changes the pathname but not the boot, so
+  // a boot without the ref would strand that page on the retired
+  // `/dashboard/apps` paths. Name the workspace in every sidebar-bearing boot —
+  // a workspace-scoped pathname already carries the ref in the URL and the boot
+  // copies that, but the boot ALSO carries the caller's create capability
+  // (I-000082: a plain member cannot manage the App the manifest flow creates,
+  // so the SPA shows a disabled control with the reason), and one
+  // workspace-access read answers both — so the read runs on every
+  // sidebar-bearing boot either way.
+  // `/index.html` is the same shell document addressed directly (the SPA router
+  // then reads the real pathname), so it takes the same boot. The login page
+  // renders no sidebar, and `/dashboard` either redirected above or names no
+  // workspace of its own.
   // A platform operator under a live grant sees the support face, not the
   // creation surface: `needsWorkspace` below would otherwise offer to create a
   // workspace to someone who is here to read one. The grant also names the
   // workspace (the operator has no membership row to derive it from).
-  // Absent fields add nothing, so `off` and a ref-less deployment keep the
-  // pre-existing boot (and its JSON key order) byte-identical.
+  // Absent fields add nothing, so a ref-less boot keeps its JSON key order.
   const boot: SpaBoot = {
     ...auth.boot,
+    ...(firstInstance ? { emptyInstance: true } : {}),
     ...(routeRef ?? supportRef ?? extras.workspaceRef) === undefined
       ? {}
       : { workspaceRef: routeRef ?? supportRef ?? extras.workspaceRef },
@@ -192,24 +239,35 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     ...(supportRef === null
       ? extras.needsWorkspace === true
         ? { needsWorkspace: true }
-        : {}
+        : extras.workspaceRequired === true
+          ? { workspaceRequired: true }
+          : {}
       : { supportOnly: true }),
     ...(pendingInvites.length === 0 ? {} : { pendingInvites }),
     ...(memberships.length === 0 ? {} : { memberships }),
   };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
+  // Only the document below delivers the boot, so only it spends the marker.
+  // HEAD and an asset failure carry no boot: expiring there would drop the
+  // guidance before it ever reached a screen.
   if (c.req.method === "HEAD") {
     return new Response(null, { status: assetResponse.status });
   }
   if (!assetResponse.ok) return assetResponse as unknown as Response;
   const html = await assetResponse.text();
-  const headers: Record<string, string> = {
+  const headers = new Headers({
     "content-type": "text/html; charset=utf-8",
     // QC S-001: the injected boot personalizes the document
-    // (login/name/role) — never cache it.
+    // (login/name) — never cache it.
     "cache-control": "private, no-store",
-  };
-  if (auth.setCookie) headers["set-cookie"] = auth.setCookie;
+  });
+  if (auth.setCookie) headers.append("set-cookie", auth.setCookie);
+  // One-shot: the guidance is a statement about the sign-in that just
+  // happened, never a property of the session, so the marker dies on the one
+  // response that carries it (RFC 6265 forbids comma-joining Set-Cookie —
+  // append instead). HEAD and an asset failure above return before this line,
+  // so neither can spend it for a shell that never showed the boot.
+  if (firstInstance) headers.append("set-cookie", expireCookie(FIRST_INSTANCE_COOKIE));
   return new Response(injectSpaBoot(html, boot), {
     status: assetResponse.status,
     headers,

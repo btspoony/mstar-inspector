@@ -329,7 +329,14 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // last_webhook_at) the pause gate + touch read and write on every
     // delivery; 0011 is the delivery table under test — omitted
     // for the best-effort failure fixture.
-    const names = ["0004_github_apps.sql", "0005_reviews_app_id.sql", "0008_github_apps_ops.sql"];
+    const names = [
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0008_github_apps_ops.sql",
+      // 0026 + 0027: the webhook's slug lookup is the joined tenant read, so
+      // the fixture carries the workspace plane and the App's mapping.
+      "0026_workspaces.sql",
+    ];
     if (withDeliveries) {
       names.push("0011_webhook_deliveries.sql");
     }
@@ -365,6 +372,10 @@ describe("per-App webhook face — best-effort delivery recording", () => {
          VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
       .run(id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
+    // Production shape: the read face joins app_workspaces.
+    db.raw
+      .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
+      .run(id);
     return { id, slug: opts.slug };
   }
 

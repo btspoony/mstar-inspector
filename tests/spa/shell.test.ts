@@ -10,13 +10,12 @@ import {
   buildSidebarModel,
   isNavCurrent,
   otherLocale,
-  visibleNavItems,
 } from "../../src/spa/shell";
 import { NAV_ITEMS, t } from "../../src/i18n";
 import { injectSpaBoot, SPA_BOOT_MARKER, type SpaBoot } from "../../src/spa/boot";
 
-const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory", role: "member" };
-const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat", role: "admin" };
+const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory" };
+const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat" };
 
 describe("shell models", () => {
   test("nav order is Apps → Members (insights retired)", () => {
@@ -26,16 +25,21 @@ describe("shell models", () => {
     ]);
   });
 
-  test("member does not see Members in the sidebar", () => {
-    expect(visibleNavItems("member").map((item) => item.href)).toEqual(["/dashboard/apps"]);
+  test("a plain member sees Members too (nav is not role-gated)", () => {
+    // The Members page is readable by every workspace member; its in-page
+    // actions carry the role gate. Nav visibility must not hide the entry.
     const sidebar = buildSidebarModel(member, "/dashboard/apps");
-    expect(sidebar.items.map((item) => item.label)).toEqual(["Apps"]);
-    expect(sidebar.items.some((item) => item.href === "/dashboard/members")).toBe(false);
+    expect(sidebar.items.map((item) => item.label)).toEqual(["Apps", "Members"]);
+    const scoped = buildSidebarModel(member, "/dashboard/acme/apps");
+    expect(scoped.items.map((item) => item.href)).toEqual([
+      "/dashboard/acme/apps",
+      "/dashboard/acme/members",
+    ]);
     // The global insights page is retired: no sidebar entry renders for it.
     expect(sidebar.items.some((item) => item.href === "/dashboard/insights")).toBe(false);
   });
 
-  test("admin sees Members in the sidebar", () => {
+  test("the admin sees the same entries", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/acme/members");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
@@ -85,7 +89,7 @@ describe("shell models", () => {
   });
 
   test("logged-out navbar has no account label", () => {
-    const navbar = buildNavbarModel({ locale: "en", login: null, name: null, role: null });
+    const navbar = buildNavbarModel({ locale: "en", login: null, name: null });
     expect(navbar.accountLabel).toBeNull();
   });
 

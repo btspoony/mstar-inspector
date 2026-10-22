@@ -1,9 +1,10 @@
 /**
- * Workspace switcher (plan 98 T3). URL-only: picking a workspace rewrites the
- * workspace segment of the CURRENT path and lets the router re-render from the
- * pathname — no fetch, no reload, no cookie. A workspace the current path has
- * no resource for stays a 404 on that URL (the unknown-path stub), which is the
- * honest answer; nothing redirects back.
+ * Workspace switcher (the workspace-identifier work, 2026-10). URL-only:
+ * picking a workspace rewrites the workspace segment of the CURRENT path and
+ * lets the router re-render from the pathname — no fetch, no reload, no
+ * cookie. A workspace the current path has no resource for stays a 404 on that
+ * URL (the unknown-path stub), which is the honest answer; nothing redirects
+ * back.
  */
 import {
   Select,
