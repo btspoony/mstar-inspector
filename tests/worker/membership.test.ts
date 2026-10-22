@@ -1,5 +1,5 @@
 /**
- * Workspace membership + invitation API (plan 97 Task 2) — the request-level
+ * Workspace membership + invitation API — the request-level
  * matrix over `/:workspaceRef/api/members{,/invites,/invites/:id/{revoke,accept}}`
  * and the workspace member action POSTs.
  *
@@ -149,7 +149,7 @@ function memberRows(db: TestD1, workspaceId = WORKSPACE): number {
 const MEMBERS = "/dashboard/acme/api/members";
 const INVITES = "/dashboard/acme/api/members/invites";
 
-describe("member list visibility (plan AC4)", () => {
+describe("member list visibility (AC4)", () => {
   test("every member sees the list with workspace roles; an outsider gets 404", async () => {
     const { db } = fixture();
     use(db);
@@ -204,7 +204,7 @@ describe("member list visibility (plan AC4)", () => {
   });
 });
 
-describe("pending invite visibility (plan AC4)", () => {
+describe("pending invite visibility (AC4)", () => {
   test("owner and admin read the list; a plain member is 403; an outsider is 404", async () => {
     const { db, users } = fixture();
     use(db);
@@ -236,7 +236,7 @@ describe("pending invite visibility (plan AC4)", () => {
   });
 });
 
-describe("invite creation (plan AC2)", () => {
+describe("invite creation (AC2)", () => {
   test("owner and admin create one pending invite; the row carries the invited role", async () => {
     const { db } = fixture();
     use(db);
@@ -308,7 +308,7 @@ describe("invite creation (plan AC2)", () => {
   });
 });
 
-describe("invite revoke (plan AC6)", () => {
+describe("invite revoke (AC6)", () => {
   test("revoking removes the row from the pending list and a later accept is 410", async () => {
     const { db, users } = fixture();
     use(db);
@@ -365,7 +365,7 @@ describe("invite revoke (plan AC6)", () => {
   });
 });
 
-describe("invite accept (plan AC3)", () => {
+describe("invite accept (AC3)", () => {
   test("the invited login accepts and becomes a member at the invited role", async () => {
     const { db, users } = fixture();
     use(db);
@@ -476,7 +476,7 @@ describe("invite accept (plan AC3)", () => {
   });
 });
 
-describe("member role change and removal (plan AC5)", () => {
+describe("member role change and removal (AC5)", () => {
   test("owner changes a member's workspace role; users.role is not written", async () => {
     const { db, users } = fixture();
     use(db);
@@ -486,7 +486,7 @@ describe("member role change and removal (plan AC5)", () => {
     });
     expect(res.status).toBe(200);
     expect(memberRole(db, "mallory")).toBe("admin");
-    // The legacy column is not a role surface after plan 97.
+    // The legacy column is not a role surface.
     const legacy = db.raw.prepare("SELECT role FROM users WHERE id = ?").get(users.member) as {
       role: string;
     } | null;

@@ -24,7 +24,7 @@ describe("matchSpaRoute", () => {
   test("matches exact enumerated paths", () => {
     expect(matchSpaRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
     expect(matchSpaRoute("/dashboard/apps")).toEqual({ page: "apps", pathname: "/dashboard/apps" });
-    // Members is workspace-scoped after plan 97: the root path is retired.
+    // Members is workspace-scoped: the root path is retired.
     expect(matchSpaRoute("/dashboard/members")).toBeNull();
     expect(matchSpaRoute("/dashboard/acme/members")).toEqual({
       page: "members",

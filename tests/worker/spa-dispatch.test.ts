@@ -112,7 +112,7 @@ describe("SPA dispatch", () => {
       { path: "/dashboard" },
       { path: "/dashboard/apps", mode: "off" },
       { path: "/dashboard/apps/acme/settings", mode: "off" },
-      // Members is workspace-scoped after plan 97: the root path is retired.
+      // Members is workspace-scoped: the root path is retired.
       { path: "/dashboard/acme/members", mode: "strict" },
       { path: "/dashboard/login" },
     ];

@@ -35,12 +35,12 @@ export type SpaBoot = {
   canCreateApp?: boolean;
   /**
    * The signed-in login's live pending workspace invitations — the invitee's
-   * discovery surface (plan 97 T2). Empty/absent for a login nobody invited.
+   * discovery surface. Empty/absent for a login nobody invited.
    * Each row names the workspace ref plus the invite id the accept POST takes.
    */
   /**
    * `true` = this login belongs to no live workspace yet, so the shell is the
-   * creation surface (plan 97 AC1): the SPA renders the workspace-creation page
+   * creation surface: the SPA renders the workspace-creation page
    * instead of the workspace pages, which would 404.
    */
   needsWorkspace?: boolean;

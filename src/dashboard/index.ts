@@ -145,7 +145,7 @@ import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-head
 
 /**
  * Principal classes of a workspace request (the request-path ordering
- * contract, step 3). `invitee` may reach ONLY the invite-accept route; plan 99
+ * contract, step 3). `invitee` may reach ONLY the invite-accept route; the operator-support plan
  * inserts its operator classes after `invitee` in the same middleware.
  */
 type WorkspacePrincipal = "member" | "invitee" | "outsider";
@@ -246,37 +246,49 @@ export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> 
 }
 
 /**
- * The `strict` boot extras for one signed-in login: the deployment's sole
- * workspace slug (the shell's nav targets) and whether this login may run the
- * App-creation flow there. ONE workspace read answers both.
+ * The boot extras for one signed-in login: whether the login belongs to no
+ * live workspace yet, the deployment's sole workspace slug (the shell's nav
+ * targets under `strict`), and whether this login may run the App-creation
+ * flow there. ONE membership count answers the first, and one workspace read
+ * the other two.
  *
- * Under `strict` an unbound store answers NO creation decision (the key is
- * absent, like `off`): storage is a configuration failure, not a permission
- * answer, and every caller already has its own honest `db_unbound` outcome —
- * `/manifest/start` 500s before minting a slug or cookie, the callback parks
- * the hold and serves the resumable confirm link (QC F-005), and confirm keeps
- * the hold. Reporting `false` here would 403 a storage outage and burn the
- * only copy of the App credentials. An unbound store cannot be attributed, so
- * nothing is gated and nothing is granted: the write path still fails closed.
+ * `needsWorkspace` is MODE-INDEPENDENT: workspace creation is the only way a
+ * newcomer gets a first workspace, and the creation route itself is outside
+ * the workspace gate, so a deployment that has not switched its route family
+ * yet (`off`) still has to offer the form — otherwise that login can never
+ * leave the legacy face. The workspace slug and the create decision stay
+ * `strict`-only: under `off` the workspace plane is invisible, so there is no
+ * slug to name and the legacy creator rule keeps the flow open.
  *
- * A deployment that does not carry exactly one live workspace cannot attribute
- * the App the flow would create, so creation is refused (`canCreateApp:
- * false`) rather than falling through to `createApp`'s guard after the slug is
- * minted. `off` returns `{}` — nothing is read and nothing is gated.
+ * An unbound store answers nothing at all: storage is a configuration
+ * failure, not a permission answer, and every caller already has its own
+ * honest `db_unbound` outcome — `/manifest/start` 500s before minting a slug
+ * or cookie, the callback parks the hold and serves the resumable confirm
+ * link (QC F-005), and confirm keeps the hold. Reporting `canCreateApp:
+ * false` here would 403 a storage outage and burn the only copy of the App
+ * credentials.
+ *
+ * A `strict` deployment that does not carry exactly one live workspace cannot
+ * attribute the App the flow would create, so creation is refused
+ * (`canCreateApp: false`) rather than falling through to `createApp`'s guard
+ * after the slug is minted.
  */
 export async function strictWorkspaceBoot(
   env: Env,
   login: string,
 ): Promise<{ workspaceSlug?: string; canCreateApp?: boolean; needsWorkspace?: boolean }> {
-  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return {};
   const db = dashboardD1(env);
   if (db === null) return {};
+  const strict = tenantModeOf(env.WORKSPACE_TENANT_MODE) === "strict";
+  if (!strict) {
+    return (await countMembershipsForLogin(db, login)) === 0 ? { needsWorkspace: true } : {};
+  }
   const [access, memberships] = await Promise.all([
     getSoleWorkspaceAccess(db, login),
     countMembershipsForLogin(db, login),
   ]);
   // No live membership → no workspace to name: every workspace path 404s this
-  // login, so the shell must offer creation instead (plan 97 AC1).
+  // login, so the shell must offer creation instead.
   if (memberships === 0) return { canCreateApp: false, needsWorkspace: true };
   if (access === null) return { canCreateApp: false };
   return {
@@ -289,7 +301,7 @@ export async function strictWorkspaceBoot(
 
 /**
  * The signed-in login's live pending invitations — the invitee's discovery
- * surface in the SPA boot (plan 97 T2). Mode-independent: an invitation exists
+ * surface in the SPA boot. Mode-independent: an invitation exists
  * in the workspace plane whether or not the deployment routes by workspace
  * yet, and presenting it is what makes acceptance reachable at all.
  *
@@ -310,10 +322,11 @@ export async function pendingInvitesForLogin(
  * consults, because each one can write the row. `strict` resolves a decision
  * from the workspace role, except on an unbound store where no decision is
  * possible (see `strictWorkspaceBoot` — the routes' own `db_unbound` outcomes
- * answer there); `off` never resolves extras, so its creator rule keeps the
- * flow open (the caller can manage what it creates there).
+ * answer there); `off` never gates, so its creator rule keeps the flow open
+ * (the caller can manage what it creates there) and reads nothing.
  */
 export async function canCreateApp(env: Env, login: string): Promise<boolean> {
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return true;
   return (await strictWorkspaceBoot(env, login)).canCreateApp ?? true;
 }
 
@@ -326,7 +339,7 @@ export async function canCreateApp(env: Env, login: string): Promise<boolean> {
  *
  * A login with NO live membership never lands there: the workspace Apps page
  * would answer the outsider 404, so sign-in ends on `/dashboard`, whose shell
- * offers workspace creation (plan 97 AC1 — sign-in joins nobody to a
+ * offers workspace creation (sign-in joins nobody to a
  * workspace, so a newcomer's first stop is making one). Unresolvable → today's
  * target.
  *
@@ -650,7 +663,8 @@ dashboardApp.use("*", async (c, next) => {
  * reach ONLY the accept route; everything else is `outsider`, which the routes
  * answer with the byte-identical tenant 404.
  *
- * Plan 99 inserts its operator classes after `invitee` in this same list.
+ * The planned operator-support work inserts its operator classes after
+ * `invitee` in this same list.
  */
 dashboardApp.use("*", async (c, next) => {
   if (c.get("workspaceScope") !== undefined) return next();
@@ -742,9 +756,9 @@ dashboardApp.get("/oauth/callback", async (c) => {
   // Sign-in decision BEFORE any session is minted. A recorded removal denies
   // (migration 0023 — an operator's removal is authoritative) and is cleared
   // only by a deliberate re-admission; every other GitHub-verified login gets
-  // a `users` row (plan 97 T3 — there is no deployment allowlist). The invite
-  // path is NOT consulted here: sign-in never joins a workspace (plan 97 AC3 —
-  // acceptance is the explicit POST). Deny = 403 page with ZERO Set-Cookie
+  // a `users` row (there is no deployment allowlist). The invite
+  // path is NOT consulted here: sign-in never joins a workspace (acceptance is
+  // the explicit POST). Deny = 403 page with ZERO Set-Cookie
   // (spec: 零 cookie、零写入) — the single-use state-expiry header set above is
   // withdrawn here — and zero D1 writes (the deny branch never inserts).
   const db = dashboardD1(c.env);
@@ -752,7 +766,7 @@ dashboardApp.get("/oauth/callback", async (c) => {
   const decision = await signInDashboardUser(db, user.login);
   if (decision.outcome === "deny") {
     // The only deny is a recorded removal, so the deny face is the removal
-    // face: sign-in no longer denies for any other reason (plan 97 AC1).
+    // face: sign-in no longer denies for any other reason.
     logOAuthFailure("sign_in", "removed", { login: user.login });
     c.header("Set-Cookie", undefined);
     return c.html(removedPage(user.login, requestLocale(c)), 403);
@@ -772,7 +786,7 @@ dashboardApp.get("/logout", (c) => {
   return c.redirect("/dashboard/login", 302);
 });
 
-// --- Workspace creation (plan 97 T3) ---
+// --- Workspace creation ---
 //
 // The ONLY membership write outside the invite path (Global Constraints): a
 // signed-in login with no workspace creates one and becomes its `owner`.
@@ -783,7 +797,7 @@ dashboardApp.get("/logout", (c) => {
 // The id is `ws_` + 22 chars of lowercase base32 (`a-z2-7`, all inside the
 // `[a-z0-9]` alphabet) drawn from `crypto.getRandomValues`. Lowercase-only is
 // load-bearing: `slug = id` then keeps the BINARY `workspaces.slug` UNIQUE
-// equivalent to case-insensitive uniqueness (plan 98's routing depends on it).
+// equivalent to case-insensitive uniqueness (the workspace-ref routing depends on it).
 const WORKSPACE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 /** Bounded retries for the (astronomically unlikely) slug collision. */
 const WORKSPACE_ID_ATTEMPTS = 6;
@@ -814,7 +828,17 @@ dashboardApp.post("/api/workspaces", async (c) => {
   for (let attempt = 0; attempt < WORKSPACE_ID_ATTEMPTS; attempt++) {
     const id = createWorkspaceId();
     if (await createWorkspace(db, { id, name, userId: user.id, createdAt })) {
-      return c.json({ id, slug: id, name, role: "owner" as const }, 201);
+      // The client cannot derive the post-creation landing: it does not know
+      // the deployment's tenant read mode, and a second live workspace defeats
+      // the sole-workspace resolver, so `/dashboard` would strand the creator
+      // on a slug-less shell. `strict` serves the new workspace's own App
+      // list; `off` has no workspace routes at all, so the legacy list is the
+      // only surface that exists there.
+      const appsPath =
+        tenantModeOf(c.env.WORKSPACE_TENANT_MODE) === "strict"
+          ? `/dashboard/${id}/apps`
+          : APPS_LIST_REDIRECT;
+      return c.json({ id, slug: id, name, role: "owner" as const, appsPath }, 201);
     }
   }
   return c.text("Could not allocate a workspace id — try again.", 500);
@@ -1256,7 +1280,7 @@ const appOnboardingRoute = async (c: DashboardContext) => {
   );
 };
 
-// --- Workspace members + invitations (plan 97) ---
+// --- Workspace members + invitations ---
 //
 // Authority is workspace-scoped: the routing gate classified the ref, the
 // route-local member gate below resolves the workspace + the caller's row, and
@@ -1316,7 +1340,7 @@ function inviteMutationResponse(
 }
 
 /**
- * The workspace's member list — every member sees it (plan AC4), so this route
+ * The workspace's member list — every member sees it (AC4), so this route
  * is gated by `requireMember` alone. `role` is the WORKSPACE role; the legacy
  * `users.role` column is never read for authorization after this plan.
  */
@@ -1336,7 +1360,7 @@ const memberListRoute = async (c: DashboardContext) => {
   });
 };
 
-/** The workspace's live pending invites — `owner`/`admin` only (plan AC4). */
+/** The workspace's live pending invites — `owner`/`admin` only (AC4). */
 const inviteListRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
@@ -1354,7 +1378,7 @@ const inviteListRoute = async (c: DashboardContext) => {
 };
 
 /**
- * Create one pending invite (plan AC2). `owner` or `admin` only; inviting an
+ * Create one pending invite (AC2). `owner` or `admin` only; inviting an
  * existing member or a login that already has a live pending invite is 409 and
  * writes nothing. A lapsed pending row is flipped terminal by the store before
  * the insert, so re-inviting after expiry is legal.
@@ -1378,7 +1402,7 @@ const inviteCreateRoute = async (c: DashboardContext) => {
       400,
     );
   }
-  // Already a member → 409, zero writes (plan AC2). Resolution is on the
+  // Already a member → 409, zero writes (AC2). Resolution is on the
   // WORKSPACE row, not the users row: a signed-in outsider is not a member.
   const now = new Date();
   const members = await listWorkspaceMembers(gate.db, gate.scope.workspaceId);
@@ -1406,7 +1430,7 @@ const inviteCreateRoute = async (c: DashboardContext) => {
 };
 
 /**
- * Revoke a live pending invite (plan AC6). Workspace-scoped in the store's
+ * Revoke a live pending invite (AC6). Workspace-scoped in the store's
  * WHERE clause, so a foreign invite id is indistinguishable from an unknown
  * one; both are 404, and a later accept of the revoked row is 410.
  */
@@ -1419,7 +1443,7 @@ const inviteRevokeRoute = async (c: DashboardContext) => {
 };
 
 /**
- * Accept an invite as the signed-in login (plan AC3). This is the ONLY write
+ * Accept an invite as the signed-in login (AC3). This is the ONLY write
  * that creates a membership from outside. It is reachable by an `invitee`
  * principal (a signed-in login holding a live pending invite in this
  * workspace) as well as by a member, so it gates on the workspace + session
@@ -1461,7 +1485,7 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
 };
 
 /**
- * Remove a member from this workspace (`owner`/`admin`; plan AC5 table).
+ * Remove a member from this workspace (`owner`/`admin`; AC5 table).
  * The role boundary is checked on the TARGET's workspace role: an `admin` may
  * only remove a plain `member` — an `owner` or another `admin` is 403, even
  * when that owner is the last one (the 403 answers before any 409 could).
@@ -1512,7 +1536,7 @@ const memberRemoveRoute = async (c: DashboardContext) => {
 };
 
 /**
- * Change a member's workspace role (`owner`-only; plan AC5 table), including
+ * Change a member's workspace role (`owner`-only; AC5 table), including
  * promotion to `owner` — that promotion IS the ownership-transfer path, so
  * there is no separate transfer route.
  *
@@ -3326,7 +3350,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:slug/settings", handler: appSettingsSaveRoute },
   { method: "post", path: "/apps/:slug/settings/key/delete", handler: appKeyDeleteRoute },
   { method: "get", path: "/api/apps/:slug/insights/summary", handler: appInsightsRoute },
-  // Members + invitations: workspace-only (plan 97).
+  // Members + invitations: workspace-only.
   { method: "get", path: "/api/members", handler: memberListRoute, root: false },
   { method: "get", path: "/api/members/invites", handler: inviteListRoute, root: false },
   { method: "post", path: "/api/members/invites", handler: inviteCreateRoute, root: false },

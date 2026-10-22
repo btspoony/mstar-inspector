@@ -97,7 +97,7 @@ async function get(path: string, login?: string, env?: Env): Promise<Response> {
 
 describe("the retired deployment-level members face", () => {
   test("GET /dashboard/api/members is gone; the workspace face serves", async () => {
-    // Plan 97: authority is workspace-scoped, so a deployment-level member list
+    // Authority is workspace-scoped, so a deployment-level member list
     // has no meaning. `off` (no tenant plane) therefore 404s the root path.
     const env = makeEnv(await seededWorld());
     const root = await get("/dashboard/api/members", "octocat", env);

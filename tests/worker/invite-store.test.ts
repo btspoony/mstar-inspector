@@ -1,6 +1,5 @@
 /**
- * Unit tests: migration 0028 + the `workspace_invites` store
- * (plan 97 Task 1, `### Store and schema contract (T1)`).
+ * Unit tests: migration 0028 + the `workspace_invites` store.
  *
  * The bun:sqlite double applies the REAL migration list (tests/store/helpers),
  * so the partial unique indexes and the CHECK domains under test are the same

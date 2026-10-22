@@ -366,7 +366,7 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
   });
 
   /**
-   * `env.production.vars` is the plain-var roster for prod. Plan 97 T3 removed
+   * `env.production.vars` is the plain-var roster for prod. The open-sign-in change removed
    * the deployment allowlist, so the ONLY prod var left is the tenant read mode
    * — a config var that a deploy re-supplies must not quietly come back as a
    * half-configured bootstrap list.
@@ -377,13 +377,13 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
 });
 
 /**
- * The deployment allowlist is GONE end to end (plan 97 T3, issue I-000064):
+ * The deployment allowlist is GONE end to end (issue I-000064):
  * sign-in no longer consults a list of blessed logins, so a surviving reference
  * anywhere in the shipped code, the tests, the workflows or the docs would be a
  * second, undocumented authority. `.changes/unreleased/*` is release history
  * and is deliberately NOT scanned.
  */
-describe("no deployment allowlist survives (plan 97 T3)", () => {
+describe("no deployment allowlist survives", () => {
   /**
    * The retired allowlist var name, assembled from fragments so THIS file does
    * not match its own scan — a grep-assertion that trips on itself proves
@@ -415,7 +415,7 @@ describe("no deployment allowlist survives (plan 97 T3)", () => {
     );
     expect(
       offenders,
-      `${RETIRED_VAR} is retired (plan 97 T3): sign-in is unconditional, so nothing may still read or document an allowlist`,
+      `${RETIRED_VAR} is retired: sign-in is unconditional, so nothing may still read or document an allowlist`,
     ).toEqual([]);
   });
 });

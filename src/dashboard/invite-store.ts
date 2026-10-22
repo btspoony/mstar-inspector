@@ -257,7 +257,7 @@ export async function getInviteInWorkspace(
 
 /**
  * The login's live pending invites across every workspace, each paired with its
- * workspace's path ref — the SPA boot payload's discovery rows (plan 97 T2).
+ * workspace's path ref — the SPA boot payload's discovery rows.
  * A soft-deleted workspace is excluded: presenting an accept link into a
  * retired tenant would only 404.
  */

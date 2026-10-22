@@ -1,5 +1,5 @@
 /**
- * The three-role boundary and the two structural refusals (plan 97 Task 4).
+ * The three-role boundary and the two structural refusals.
  *
  * Everything here goes through the real worker mount — routing gate, session
  * guard, workspace resolution, route-local role check, then the store's

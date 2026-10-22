@@ -63,7 +63,7 @@ export const zhCN: Dictionary = {
     heading: "登录",
     description: "使用你的 GitHub 账号访问控制台。",
     signIn: "使用 GitHub 登录",
-    /** plan 97：登录开放 —— 没有访问名单挡在工作区之前。 */
+    /** 登录开放 —— 没有访问名单挡在工作区之前。 */
     openAccess: "任意 GitHub 账号均可登录 —— 创建工作区，或接受邀请。",
   },
   notice: {
@@ -200,7 +200,7 @@ export const zhCN: Dictionary = {
     emptyDescriptionMember: "本工作区目前没有其他成员。",
   },
   /**
-   * 工作区创建 —— 尚未加入任何工作区的登录用户的落地页（plan 97 T3）：
+   * 工作区创建 —— 尚未加入任何工作区的登录用户的落地页：
    * 登录不会自动加入工作区，除了接受邀请，这里是进入首个工作区的唯一路径。
    */
   workspace: {

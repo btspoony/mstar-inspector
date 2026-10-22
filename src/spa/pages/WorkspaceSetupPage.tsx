@@ -5,14 +5,27 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
+import { parseCreatedWorkspace } from "./data";
 import { PageNotice, type NoticeKind } from "./PageNotice";
 
 /** Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
 const NAME_MAX_LENGTH = 80;
 
 /**
+ * Where a creation POST sends the browser: the landing the 201 named, or null
+ * when the response carries none (the caller surfaces the failure notice). The
+ * page never derives the target itself — only the Worker knows whether the
+ * deployment serves workspace routes, and `strict`'s sole-workspace resolver
+ * cannot name a workspace once a second one exists.
+ */
+export function creationLanding(status: number, body: string): string | null {
+  if (status !== 201) return null;
+  return parseCreatedWorkspace(body)?.appsPath ?? null;
+}
+
+/**
  * Workspace creation — the signed-in landing for a login that belongs to no
- * workspace yet (plan 97 T3). Sign-in never joins a workspace, so this page is
+ * workspace yet. Sign-in never joins a workspace, so this page is
  * the only way into a first one; the creator becomes its `owner` and the POST
  * answers the workspace ref the shell then navigates to.
  *
@@ -42,11 +55,10 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
     }
     setBusy(true);
     try {
-      const { status } = await postForm("/dashboard/api/workspaces", { name: trimmed });
-      if (status === 201) {
-        // The new workspace's ref IS its id — reload so the shell (and the
-        // boot-injected workspace slug) pick the new membership up.
-        window.location.replace("/dashboard");
+      const { status, body } = await postForm("/dashboard/api/workspaces", { name: trimmed });
+      const landing = creationLanding(status, body);
+      if (landing !== null) {
+        window.location.replace(landing);
         return;
       }
       setNotice({ kind: "error", message: t(locale, "workspace.createFailed") });

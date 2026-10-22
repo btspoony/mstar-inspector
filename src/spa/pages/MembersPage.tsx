@@ -51,14 +51,61 @@ type PendingAction =
   | { kind: "revoke"; invite: InviteRow };
 
 /**
- * Workspace members + pending invitations (plan 97). Every read/write hangs off
+ * Workspace members + pending invitations. Every read/write hangs off
  * the page's workspace base (`apiBase`), so the same component serves
  * `/dashboard/<ref>/members` and its data never escapes the workspace.
  *
  * Inviting and the pending list are `owner`/`admin` only; the member list is
- * visible to every member (plan AC4). The client gate mirrors the server one —
+ * visible to every member. The client gate mirrors the server one —
  * the routes remain the SSOT for every decision.
  */
+
+/** The page's loaded state; null when the member list itself did not parse. */
+export type MembersPageData = {
+  members: MemberRow[];
+  role: WorkspaceRole;
+  invites: InviteRow[];
+};
+
+/**
+ * The one read path: the member list, then — for a manager only — the pending
+ * invites. Both requests hang off `base`, so a plain member costs ONE request
+ * and never asks for a list the server would 403.
+ */
+export async function loadMembersPage(base: string): Promise<MembersPageData | null> {
+  const payload = parseMembers(await fetchJson(`${base}/api/members`));
+  if (!payload) return null;
+  const invites = canInviteMembers(payload.viewer.role)
+    ? (parseInvites(await fetchJson(`${base}/api/members/invites`)) ?? [])
+    : [];
+  return { members: payload.members, role: payload.viewer.role, invites };
+}
+
+/**
+ * How an invite POST refusal reads to the actor. `409 invite.pending_exists`
+ * is the one refusal that is not an error: the invite is already pending, so
+ * the notice warns instead of asking for a retry. A target the list already
+ * showed as a member is the same class.
+ */
+export function inviteFailureNotice(
+  status: number,
+  body: string,
+  existed: boolean,
+): { kind: NoticeKind; key: "notice.warn.invitePending" | "notice.warn.alreadyMember" | "notice.error.inviteFailed" } {
+  const duplicate = status === 409 && body.includes("invite.pending_exists");
+  if (duplicate) return { kind: "warn", key: "notice.warn.invitePending" };
+  if (existed) return { kind: "warn", key: "notice.warn.alreadyMember" };
+  return { kind: "error", key: "notice.error.inviteFailed" };
+}
+
+/**
+ * Whether the pending-invitation section renders: manager-only AND non-empty,
+ * so a plain member — who never loads the list — shows no empty heading either.
+ */
+export function showsPendingInvites(role: WorkspaceRole | null, invites: readonly InviteRow[]): boolean {
+  return canInviteMembers(role) && invites.length > 0;
+}
+
 export function MembersPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const base = apiBase();
@@ -85,22 +132,15 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
     async ({ background = false }: { background?: boolean } = {}): Promise<void> => {
       if (!background) setState("loading");
       try {
-        const payload = parseMembers(await fetchJson(`${base}/api/members`));
+        const payload = await loadMembersPage(base);
         if (!payload) {
           if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
           else setState("error");
           return;
         }
         setMembers(payload.members);
-        setMemberRole(payload.viewer.role);
-        // Pending invites are manager-only; a plain member gets 403 and simply
-        // sees no invitation zone (the member list already answered above).
-        if (canInviteMembers(payload.viewer.role)) {
-          const parsed = parseInvites(await fetchJson(`${base}/api/members/invites`));
-          setInvites(parsed ?? []);
-        } else {
-          setInvites([]);
-        }
+        setMemberRole(payload.role);
+        setInvites(payload.invites);
         setState("ok");
       } catch {
         if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
@@ -136,19 +176,8 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
         // 409 `invite.pending_exists` is the one refusal with its own copy —
         // the invite is already pending, which is not an error the actor must
         // retry.
-        const duplicate = status === 409 && body.includes("invite.pending_exists");
-        setNotice({
-          kind: duplicate || existed ? "warn" : "error",
-          message: t(
-            locale,
-            duplicate
-              ? "notice.warn.invitePending"
-              : existed
-                ? "notice.warn.alreadyMember"
-                : "notice.error.inviteFailed",
-            { login: trimmed },
-          ),
-        });
+        const failure = inviteFailureNotice(status, body, existed);
+        setNotice({ kind: failure.kind, message: t(locale, failure.key, { login: trimmed }) });
         return;
       }
       // Background reload: the page (and this op's notice) stays mounted —
@@ -305,7 +334,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
                       boot.login !== null && member.github_login.toLowerCase() === boot.login.toLowerCase();
                     // Client-side mirror of the server guards: the sole owner
                     // cannot be demoted or removed; an `admin` may only remove
-                    // plain members and may not change any role (plan 97 AC5).
+                    // plain members and may not change any role.
                     // The routes remain the SSOT (conditional UPDATE/DELETE
                     // close the race); this only greys out the actions the
                     // server would refuse anyway.
@@ -371,7 +400,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
               </Table>
             </div>
           )}
-          {canInvite && invites.length > 0 ? (
+          {showsPendingInvites(memberRole, invites) ? (
             <section className="flex flex-col gap-2">
               <h2 className="font-medium text-base">{t(locale, "members.pendingHeading")}</h2>
               <div className="overflow-hidden rounded-md border">
