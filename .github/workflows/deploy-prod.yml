@@ -55,11 +55,12 @@ on:
   workflow_dispatch:   # the dispatch ref is the deploy tag — no `ref` input
     inputs:
       tenant_mode:
-        description: 'Workspace tenant read mode — Deploy A: off, Deploy B: strict (same tag/SHA)'
+        description: "Workspace tenant read mode — steady: use vars.WORKSPACE_TENANT_MODE (routine); off: Deploy A; strict: Deploy B replay (same tag/SHA)"
         required: false
-        default: 'off'
+        default: 'steady'
         type: choice
         options:
+          - 'steady'
           - 'off'
           - 'strict'
       expected_container_digest:
@@ -237,28 +238,28 @@ jobs:
           echo "Deploying $REF_NAME to production; expected healthz version: v${REF_NAME#v}"
 
       # The tenant rollout replays the SAME tag twice — Deploy A `off`, Deploy
-      # B `strict` — so the mode is a dispatch input, never a code edit. A
-      # ROUTINE arm (`release: published`) carries no input: it takes the
-      # steady-state variable `vars.WORKSPACE_TENANT_MODE`, because reading the
-      # mode from the event would demote a `strict` installation to `off` on
-      # the next ordinary release without saying so. Resolving to `off` on a
-      # routine arm warns and records `tenant_mode_change` (the live mode was
-      # never observed, so no honest strict→off claim is possible). An illegal
-      # value fails HERE, before any mutating step.
+      # B `strict` — so the mode is a dispatch input, never a code edit. The
+      # input's default is `steady`, NOT `off`: a routine run carries the
+      # default (the Release workflow dispatches with no fields at all), and a
+      # declared `off` there would win over `vars.WORKSPACE_TENANT_MODE` and
+      # demote a `strict` installation on every ordinary release without saying
+      # so. `steady` means "take the variable"; a `steady` run that still
+      # resolves to `off` warns and records `tenant_mode_change` (the live mode
+      # was never observed, so no honest strict→off claim is possible). An
+      # illegal value fails HERE, before any mutating step.
       - name: Resolve tenant mode
         id: tenant
         env:
           TENANT_MODE: ${{ inputs.tenant_mode }}
           STEADY_TENANT_MODE: ${{ vars.WORKSPACE_TENANT_MODE }}
-          ROUTINE_ARM: ${{ github.event_name != 'workflow_dispatch' }}
-        run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE" "$ROUTINE_ARM"
+        run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE"
 
       # Replay identity (before anything is deployed). A DISPATCH that asked for
       # `strict` IS Deploy B, so it must name the SHA Deploy A shipped — the tag
       # assertion alone cannot catch a MOVED tag (both runs would read the new
       # tag and agree with themselves). The input comes from Deploy A's run
-      # summary. A ROUTINE arm serving `strict` from the steady-state variable
-      # has no Deploy A to bind (the resolver reports `replay=none`), so it keeps
+      # summary. A `steady` run serving `strict` from the variable has no
+      # Deploy A to bind (the resolver reports `replay=none`), so it keeps
       # every tag identity assertion below without demanding — or inventing — a
       # Deploy-A SHA.
       - name: Assert replay identity

@@ -7,11 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       tenant_mode:
-        description: 'Workspace tenant read mode (off | strict)'
+        description: 'Workspace tenant read mode — steady: use vars.WORKSPACE_TENANT_MODE (routine); off: Deploy A; strict: Deploy B replay'
         required: false
-        default: 'off'
+        default: 'steady'
         type: choice
         options:
+          - 'steady'
           - 'off'
           - 'strict'
       expected_deploy_sha:
@@ -71,27 +72,27 @@ jobs:
           fetch-depth: 0   # Bugbot #14: digest write-back merges origin/main — shallow clone has no merge base
 
       # The mode is a dispatch input, never a code edit: the SAME build is
-      # deployed twice on the tenant rollout (off, then strict). A ROUTINE arm
-      # (`push` to main) carries no input: it takes the steady-state variable
-      # `vars.WORKSPACE_TENANT_MODE`, because reading the mode from the event
-      # would demote a `strict` installation to `off` on the next ordinary push
-      # without saying so — resolving to `off` there warns and records
-      # `tenant_mode_change` instead. An illegal value fails HERE, before any
-      # step that can create or deploy a Worker version.
+      # deployed twice on the tenant rollout (off, then strict). The input's
+      # default is `steady`, NOT `off`: a `push` to main carries no input, and a
+      # declared `off` would win over `vars.WORKSPACE_TENANT_MODE` and demote a
+      # `strict` installation on the next ordinary push without saying so.
+      # `steady` means "take the variable"; a `steady` run that still resolves
+      # to `off` warns and records `tenant_mode_change` instead. An illegal
+      # value fails HERE, before any step that can create or deploy a Worker
+      # version.
       - name: Resolve tenant mode
         id: tenant
         env:
           TENANT_MODE: ${{ inputs.tenant_mode }}
           STEADY_TENANT_MODE: ${{ vars.WORKSPACE_TENANT_MODE }}
-          ROUTINE_ARM: ${{ github.event_name != 'workflow_dispatch' }}
-        run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE" "$ROUTINE_ARM"
+        run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE"
 
       # Replay identity (before anything is deployed). The strict replay binding
       # lives in scripts/deploy-replay-guard.sh (executed by the behaviour
       # tests); the checkout assertion below stays here because it is about the
       # tree on disk, not about which SHA was requested. `replay=required` only
-      # for a dispatch that asked for `strict` — a ROUTINE push serving `strict`
-      # from the steady-state variable has no Deploy A to bind.
+      # for a dispatch that asked for `strict` — a `steady` push serving
+      # `strict` from the variable has no Deploy A to bind.
       - name: Assert replay identity
         env:
           REPLAY: ${{ steps.tenant.outputs.replay }}
