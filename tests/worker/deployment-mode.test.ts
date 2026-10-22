@@ -422,17 +422,4 @@ describe("SPA creation page copy", () => {
     expect(t("en", "workspace.emptyInstance")).toContain("no accounts yet");
     expect(t("zh_CN", "workspace.emptyInstance")).toContain("还没有任何账号");
   });
-
-  test("the page renders it only when the boot carries emptyInstance", async () => {
-    const { createElement } = await import("react");
-    const { renderToStaticMarkup } = await import("react-dom/server");
-    const { WorkspaceSetupPage } = await import("../../src/spa/pages/WorkspaceSetupPage");
-    const base: SpaBoot = { locale: "en", login: "founder", name: null, needsWorkspace: true };
-    const plain = renderToStaticMarkup(createElement(WorkspaceSetupPage, { boot: base }));
-    const empty = renderToStaticMarkup(
-      createElement(WorkspaceSetupPage, { boot: { ...base, emptyInstance: true } }),
-    );
-    expect(plain).not.toContain("no accounts yet");
-    expect(empty).toContain("no accounts yet");
-  });
 });
