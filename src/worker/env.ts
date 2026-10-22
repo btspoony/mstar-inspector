@@ -72,11 +72,12 @@ export type Env = {
    */
   ALERT_WEBHOOK_URL?: string;
   /**
-   * Platform-operator allowlist (plan 99): comma-separated GitHub logins,
-   * compared case-insensitively through `parseLoginList`. An operator holds NO
-   * business rights: without a live `support_grants` row for a workspace they
-   * get the outsider 404, and with one they may read that workspace's metadata
-   * and member list only. Not a secret — logins are public identity.
+   * Platform-operator allowlist (platform-operator support, 2026-10):
+   * comma-separated GitHub logins, compared case-insensitively through
+   * `parseLoginList`. An operator holds NO business rights: without a live
+   * `support_grants` row for a workspace they get the outsider 404, and with
+   * one they may read that workspace's metadata and member list only. Not a
+   * secret — logins are public identity.
    */
   PLATFORM_OPERATORS?: string;
   /**

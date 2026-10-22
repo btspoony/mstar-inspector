@@ -350,8 +350,9 @@ describe("workspace paths serve", () => {
   });
 
   test("the workspace id resolves exactly like its slug", async () => {
-    // Plan 98 T1: the segment is a ref — `ws-acme` is the row id, `acme` its
-    // slug; both name the same workspace, for the same member.
+    // The workspace-identifier work (2026-10): the segment is a ref —
+    // `ws-acme` is the row id, `acme` its slug; both name the same workspace,
+    // for the same member.
     const { db } = tenancyFixture();
     const env = envFor(db);
     const list = async (ref: string) => {

@@ -1,5 +1,5 @@
 /**
- * `DEPLOYMENT_MODE` — the deployment-shape switch (plan 100 Task 1).
+ * `DEPLOYMENT_MODE` — the deployment-shape switch (2026-10).
  *
  * It decides ONE product question: does a deployment with no accounts yet
  * tell its first signer-in that this sign-in created the first account? The

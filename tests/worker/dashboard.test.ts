@@ -491,8 +491,9 @@ describe("/dashboard routes", () => {
   });
 
   test("the boot carries the WORKSPACE role, never users.role (F-001)", async () => {
-    // `users.role` left the public boot contract with plan 100: nav visibility
-    // and page capabilities read the workspace role in `memberships[]`.
+    // `users.role` left the public boot contract with the workspace-role
+    // change (2026-10): nav visibility and page capabilities read the
+    // workspace role in `memberships[]`.
     const admin = await worker.fetch(
       htmlDashboardRequest("/dashboard/default/apps", `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`),
       withSpaAssets(makeEnv()),
@@ -2733,8 +2734,9 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
 
   test("owner → 200 with name / id / slug / webhook URL + Settings CTA, no secrets", async () => {
     // Manage is the workspace role: `octocat-with-a-long-login` is an owner,
-    // and the App's `created_by` grants nothing (plan 100 removed the
-    // creator-or-deployment-admin rule from the null-scope face).
+    // and the App's `created_by` grants nothing (the workspace-role change,
+    // 2026-10, removed the creator-or-deployment-admin rule from the
+    // null-scope face).
     const env = makeEnv();
     const row = await seedApp(env, { createdBy: "octocat-with-a-long-login" });
     const res = await worker.fetch(await onboardingRequest(row.slug, "octocat-with-a-long-login"), env);

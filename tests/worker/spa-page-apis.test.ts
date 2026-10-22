@@ -319,7 +319,7 @@ function seedMembership(db: ReturnType<typeof createTestD1>, workspaceId: string
     .run(workspaceId, role, login);
 }
 
-describe("SPA boot payload — workspace memberships (plan 98 T3)", () => {
+describe("SPA boot payload — workspace memberships (2026-10)", () => {
   test("lists every live membership as {id, slug, name, role} — both identifiers, not one ref", async () => {
     const db = await seededWorld();
     // A login outside the seeded `default` workspace, so the list is exactly

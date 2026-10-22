@@ -255,7 +255,7 @@ export const en = {
     slugFailed: "Could not change the workspace URL — try again.",
   },
   /**
-   * Platform-operator support (plan 99): the operator's read-only face and the
+   * Platform-operator support (2026-10): the operator's read-only face and the
    * tenant's undismissable grant notice. The notice states who is looking, why,
    * and until when — and offers no action, because the tenant can neither end
    * nor edit a grant.

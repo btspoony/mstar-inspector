@@ -1712,7 +1712,7 @@ const memberRoleRoute = async (c: DashboardContext) => {
   return inviteMutationResponse(c, "ok", 200);
 };
 
-// --- Support reads (plan 99) ---
+// --- Support reads (platform-operator support, 2026-10) ---
 //
 // Two faces, both `read` in the route table so a granted platform operator
 // reaches them and nothing else:
@@ -1841,8 +1841,9 @@ const auditListRoute = async (c: DashboardContext) => {
 //
 // The path segment IS the workspace's public identity, so only the OWNER may
 // rewrite it (owner-only, unlike the App settings family's owner-or-admin): a
-// slug change kills every shared link that used the old value — there is no
-// redirect (plan 98 D8), so this is a workspace-wide decision.
+// slug change kills every shared link that used the old value — a rename is
+// not a redirect (the workspace-rename decision, 2026-10), so this is a
+// workspace-wide decision.
 const WORKSPACE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{1,38}$/;
 
 /** English faces for the store's two 409 guards; the SPA keys its copy on `code`. */
@@ -3656,8 +3657,9 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/api/members/invites/:id/accept", handler: inviteAcceptRoute, access: "write" },
   { method: "post", path: "/members/role", handler: memberRoleRoute, access: "write" },
   { method: "post", path: "/members/remove", handler: memberRemoveRoute, access: "write" },
-  // Support + audit (plan 99): the granted operator's read-only face, the
-  // members' undismissable notice, and the owner/admin audit read.
+  // Support + audit (platform-operator support, 2026-10): the granted operator's
+  // read-only face, the members' undismissable notice, and the owner/admin audit
+  // read.
   { method: "get", path: "/api/support/workspace", handler: supportWorkspaceRoute, access: "read" },
   { method: "get", path: "/api/support/grants", handler: supportGrantsRoute, access: "read" },
   { method: "get", path: "/api/audit", handler: auditListRoute, access: "write" },

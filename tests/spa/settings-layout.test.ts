@@ -1972,9 +1972,10 @@ describe("runtime image row tightness", () => {
 });
 
 /**
- * Plan 98 T2's settings control: the workspace segment is renamed in place, so
- * the page keeps its own path under the new ref, and every refusal the route
- * emits resolves through its machine-readable value rather than the copy.
+ * The workspace-identifier work's settings control (2026-10): the workspace
+ * segment is renamed in place, so the page keeps its own path under the new
+ * ref, and every refusal the route emits resolves through its machine-readable
+ * value rather than the copy.
  */
 describe("workspace slug control", () => {
   test("the rename rewrites only the workspace segment and keeps the rest", () => {
@@ -2065,7 +2066,7 @@ describe("workspace slug control", () => {
     // The boot (`acme`) is a per-document snapshot the rename never refreshes.
     // The REAL save pipeline runs: the list the switcher reads must carry the
     // new slug by the time the path names it — otherwise the switcher offers
-    // `acme` (a 404 under D8) and marks no row current.
+    // `acme` (a 404 — a rename is not a redirect) and marks no row current.
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response('{"slug":"acme-labs"}', { status: 200 })) as unknown as typeof fetch;

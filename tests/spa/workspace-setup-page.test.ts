@@ -68,7 +68,7 @@ describe("workspace creation page", () => {
   });
 
   /**
-   * `emptyInstance` is the ONLY gate on the empty-instance guidance (plan 100):
+   * `emptyInstance` is the ONLY gate on the empty-instance guidance (2026-10):
    * the Worker decides it from `DEPLOYMENT_MODE` + an empty `users` table, and
    * the page renders the sentence from that flag alone. The flag's own matrix
    * lives in `tests/worker/deployment-mode.test.ts`; this pins that the flag —

@@ -323,8 +323,8 @@ describe("SPA dispatch", () => {
     const body = await res.text();
     expect(body).toContain('"login":"octocat"');
     expect(body).toContain('"name":"The Octocat"');
-    // `users.role` left the boot contract (plan 100): nav visibility reads the
-    // workspace role in `memberships[]`.
+    // `users.role` left the boot contract (the workspace-role change,
+    // 2026-10): nav visibility reads the workspace role in `memberships[]`.
     expect(body).not.toContain('"role":"admin"');
   });
 

@@ -146,8 +146,8 @@ export function buildWorkspaceSwitcherModel(
  * this login does not list, and for the absent list.
  *
  * The boot is a per-document snapshot, so without this patch the switcher keeps
- * offering the retired slug (a 404 under D8) and the current row goes empty
- * after the rename navigates to the new one.
+ * offering the retired slug (a 404, since a rename is not a redirect) and the
+ * current row goes empty after the rename navigates to the new one.
  */
 export function renameWorkspaceMembership(
   memberships: SpaBoot["memberships"],

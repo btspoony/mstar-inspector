@@ -356,7 +356,7 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
   });
 
   /**
-   * `DEPLOYMENT_MODE` is the deployment-shape switch (plan 100): `self-hosted`
+   * `DEPLOYMENT_MODE` is the deployment-shape switch (2026-10): `self-hosted`
    * or `saas`, validated at startup, read by the login/landing faces only. Both
    * deploy workflows pass it with `--var` so a config default cannot silently
    * disagree with the instance the run is deploying.
@@ -391,8 +391,9 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
 
   /**
    * `env.production.vars` is the plain-var roster for prod. The open-sign-in
-   * change removed the deployment allowlist and plan 100 removed the tenant
-   * read mode, so the ONLY prod var left is the deployment shape — a config var
+   * change removed the deployment allowlist and the tenant-mode removal
+   * (2026-10) dropped the tenant read mode, so the ONLY prod var left is the
+   * deployment shape — a config var
    * that a deploy re-supplies must not quietly come back as a half-configured
    * bootstrap list.
    */
@@ -439,7 +440,8 @@ describe("no deployment allowlist survives", () => {
 });
 
 /**
- * The v1.2 tenant read mode is GONE end to end (plan 100): one SQL face, one
+ * The v1.2 tenant read mode is GONE end to end (the tenant-mode removal,
+ * 2026-10): one SQL face, one
  * App route family, no mode var — so a surviving reference in the shipped
  * code, the deploy scripts, the workflows, the tests, the docs or the deploy
  * config would either resurrect a second read path or document a variable
@@ -465,6 +467,64 @@ describe("no tenant read mode survives", () => {
     expect(
       offenders,
       `${RETIRED_VAR} is retired: tenant reads are unconditional, so no workflow may pass it and no script, test or doc may read it`,
+    ).toEqual([]);
+  });
+});
+
+/**
+ * `.mstar/` is gitignored local process data (plans, iterations, SDD runs,
+ * workflows), so its identifiers must never appear in a tracked file: a reader
+ * of the code cannot resolve them, because the record they name is not in the
+ * repository. A tracked comment states its own provenance instead — what it is
+ * plus a date, e.g. "the deployment-shape switch (2026-10)".
+ *
+ * `AD-*` / `AL-*` / `F-*` / `I-0000xx` ids are NOT process ids (several are
+ * recorded in tracked docs on purpose), so the scan is narrow: only the local
+ * plan/iteration shapes AGENTS.md bans. The patterns and their samples are
+ * ASSEMBLED from fragments for the same reason the retired-var scans above are:
+ * a grep assertion that trips on its own source proves nothing.
+ */
+describe("no local process ids in tracked content", () => {
+  const SCANNED_ROOTS = ["src", "tests", "scripts", "docs", "migrations", ".github", ".changes"] as const;
+  const SCANNED_FILES = ["wrangler.jsonc", "wrangler.smoke.jsonc", ".env.example", "README.md", "README_CN.md"] as const;
+
+  const PLAN = ["pl", "an"].join("");
+  const ITER = ["it", "er"].join("");
+  const DOT_MSTAR = [".mstar", "/"].join("");
+  const PLAN_SUBDIR = ["pl", "ans"].join("");
+
+  /** Local plan/iteration identifiers the AGENTS.md rule bans, with a sample each. */
+  const BANNED: Array<[label: string, source: string, sample: string]> = [
+    ["plan id", `\\b${PLAN}[ _-]?\\d{2,}\\b`, `see ${PLAN} 100 for why`],
+    ["iteration id", `\\b${ITER}(?:ation)?[ _-]?\\d{2,}\\b`, `closed in ${ITER} 042`],
+    ["iteration slug", `${ITER}ation-v\\d`, `closed at ${ITER}ation-v1.3`],
+    [
+      "process path",
+      `\\${DOT_MSTAR}(?:${PLAN_SUBDIR}|sdd|iterations|workflows)\\b`,
+      `see ${DOT_MSTAR}${PLAN_SUBDIR}/x.md`,
+    ],
+  ];
+
+  test("no tracked file names a local plan, iteration or process path", () => {
+    const rules = BANNED.map(([label, source, sample]) => ({ label, pattern: new RegExp(source, "i"), sample }));
+    // Every rule must fire on its sample, or a typo'd pattern would pass
+    // vacuously across the whole repo.
+    for (const { label, pattern, sample } of rules) {
+      expect(pattern.test(sample), `${label} pattern matches nothing — it cannot guard anything`).toBe(true);
+    }
+    const files = [...SCANNED_ROOTS.flatMap(walk), ...SCANNED_FILES];
+    const offenders = files.flatMap((path) => {
+      const lines = readFileSync(join(REPO_ROOT, path), "utf8").split("\n");
+      return lines.flatMap((line, index) =>
+        rules
+          .filter(({ pattern }) => pattern.test(line))
+          .map(({ label }) => `${path}:${index + 1} [${label}] ${line.trim().slice(0, 120)}`),
+      );
+    });
+    expect(
+      offenders,
+      "a local plan/iteration id cannot be resolved from the repository (that state is gitignored " +
+        "under .mstar/): write what it is plus a date instead",
     ).toEqual([]);
   });
 });

@@ -7,7 +7,7 @@ import { parseSupportGrants, type SupportGrantRow } from "../pages/data";
 import { PageNotice } from "../pages/PageNotice";
 
 /**
- * The tenant's always-on support notice (plan 99 AC4).
+ * The tenant's always-on support notice (platform-operator support, 2026-10).
  *
  * Every member of the workspace sees who holds a live support grant, why, and
  * when it ends. It is deliberately UNDISMISSABLE and carries no control — the

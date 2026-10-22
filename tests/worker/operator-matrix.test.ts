@@ -1,5 +1,5 @@
 /**
- * Plan 99 T3 — the platform-operator matrix.
+ * The platform-operator support work (2026-10) — the operator matrix.
  *
  * One executable table of (actor × surface) cells. The actors are the gate's
  * four workspace principals — `member`, `operator-granted`, `operator-denied`,

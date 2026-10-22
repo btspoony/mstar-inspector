@@ -4,8 +4,9 @@
  * Order is LOCKED (spec § IA, dashboard nav): Apps → Members (the global
  * insights entry is retired). `labelKey` is a dictionary key (type-checked
  * against en.ts). Every entry is visible to every workspace member; what a
- * page OFFERS is gated inside the page (plan 97 AC2/AC4). Apps href is
- * `/dashboard/apps`. The language toggle is NOT a nav item — it renders from
+ * page OFFERS is gated inside the page (the workspace-membership decision,
+ * 2026-10). Apps href is `/dashboard/apps`. The language toggle is NOT a nav
+ * item — it renders from
  * `t(locale, "nav.language")` (the label of the OTHER locale: en shows 中文,
  * zh_CN shows EN) and POSTs to /dashboard/locale.
  */

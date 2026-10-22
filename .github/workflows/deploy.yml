@@ -134,7 +134,7 @@ jobs:
           # plaintext var (REVIEW_ENABLED).
           # DEPLOYMENT_MODE is the deployment shape, not a rollout switch: the
           # staging instance is a SaaS deployment (`saas`), so the empty-instance
-          # first-login story never shows here. See plan 100.
+          # first-login story never shows here. See docs/deploy.md § Deployment mode.
           bunx wrangler deploy --var "DEPLOYMENT_MODE:saas" 2>&1 | tee deploy.log
           # The deploy command succeeded: this run's SHA is what it shipped.
           # The summary key is derived from this step's outcome in the

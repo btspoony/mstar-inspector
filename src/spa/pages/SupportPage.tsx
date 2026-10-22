@@ -11,7 +11,8 @@ import { apiBase } from "../workspace-base";
 import { parseSupportView, type SupportGrantRow, type SupportWorkspaceView } from "./data";
 
 /**
- * The platform operator's read-only support face (plan 99 AC2/AC3).
+ * The platform operator's read-only support face (platform-operator support,
+ * 2026-10).
  *
  * One request, one screen: the workspace's four identity fields, each member's
  * GitHub login and role, and the active grants with their reason and expiry.

@@ -1,5 +1,5 @@
 /**
- * Plan 98 T2 — the owner-editable workspace slug.
+ * The workspace-identifier work (2026-10) — the owner-editable workspace slug.
  *
  * `PUT /:workspaceRef/api/settings/slug` is owner-only and answers the failure
  * table's machine-readable codes; the write itself is one guarded UPDATE, so a

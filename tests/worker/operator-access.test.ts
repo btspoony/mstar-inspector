@@ -1,6 +1,6 @@
 /**
  * Platform operators and support grants — the workspace gate's operator classes
- * (plan 99 T2).
+ * (platform-operator support, 2026-10).
  *
  * The fixture puts ONE listed operator in the env allowlist, with no membership
  * anywhere, plus a real workspace, its members, and an App. Every case asserts
