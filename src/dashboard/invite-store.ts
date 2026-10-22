@@ -32,14 +32,15 @@ export type InviteRole = "admin" | "member";
  */
 export type InviteStatus = "pending" | "accepted" | "revoked" | "expired";
 
-/** A `workspace_invites` row (migration 0028). */
+/** A `workspace_invites` row (migration 0028). `invited_by` is null once the
+ * author's `users` row is hard-deleted (operator removal, ON DELETE SET NULL). */
 export type WorkspaceInviteRow = {
   id: string;
   workspace_id: string;
   github_login: string;
   role: InviteRole;
   status: InviteStatus;
-  invited_by: string;
+  invited_by: string | null;
   created_at: string;
   expires_at: string;
   accepted_at: string | null;

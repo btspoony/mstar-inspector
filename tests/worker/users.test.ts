@@ -15,6 +15,7 @@ import {
   signInDashboardUser,
 } from "../../src/dashboard/users";
 import { createWorkspace } from "../../src/dashboard/workspace-store";
+import { createInvite } from "../../src/dashboard/invite-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 /** bun:sqlite's `.get()` is untyped — name the row shape once per query. */
@@ -76,6 +77,29 @@ describe("signInDashboardUser", () => {
     expect(await getUserByLogin(db, "mallory")).toBeNull();
     expect(userRows(db)).toBe(0);
     expect(await isLoginRemoved(db, "mallory")).toBe(true);
+  });
+
+  test("operator removal deletes an invite author: the invite survives with invited_by NULL", async () => {
+    const db = createMigratedTestD1();
+    const inviter = await createUser(db, { login: "mallory", role: "admin" });
+    const invite = await createInvite(db, {
+      workspaceId: "default",
+      login: "hubot",
+      role: "member",
+      invitedBy: inviter.id,
+      now: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    // The operator path is a hard DELETE of the users row; a NOT NULL
+    // invited_by would fail the FK here and 500 the operator action.
+    expect(await deleteUser(db, inviter.id, "octocat")).toBe(true);
+    expect(await getUserByLogin(db, "mallory")).toBeNull();
+    expect(await isLoginRemoved(db, "mallory")).toBe(true);
+    // The invite outlives its author as anonymous history.
+    expect(
+      db.raw.query("SELECT invited_by, status FROM workspace_invites WHERE id = ?").get(invite.id),
+    ).toEqual({ invited_by: null, status: "pending" });
   });
 
   test("a deliberate re-admission clears the record and the login signs in again", async () => {

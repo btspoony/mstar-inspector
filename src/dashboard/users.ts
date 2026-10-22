@@ -251,6 +251,9 @@ async function removeUser(db: DashboardD1, id: string, removedBy: string | null)
     // REFERENCES users(id)` with no cascade, so the row delete below is
     // impossible while a membership points at it.
     db.prepare("DELETE FROM workspace_members WHERE user_id = ?").bind(id),
+    // `workspace_invites.invited_by` is ON DELETE SET NULL (0028), so invites
+    // this account authored survive as anonymous history instead of blocking
+    // the delete.
     db.prepare("DELETE FROM users WHERE id = ?").bind(id),
   ]);
   return results[2]!.meta.changes > 0;
@@ -303,11 +306,11 @@ function notSoleOwner(workspaceId: string, userId: string): { sql: string; param
  * written ONLY by the operator removal path (`removeUser`, migration 0023),
  * never as a side effect of a workspace membership change.
  *
- * This also keeps the delete legal: `workspace_invites.invited_by` references
- * `users(id)` with NO ACTION (0028), so a `users` delete would roll the batch
- * back for anyone who ever created an invite. The membership itself is the only
- * workspace-scoped artifact keyed by the member; accepted invites stay as
- * history.
+ * Removal is therefore independent of the operator path: that path hard-deletes
+ * the `users` row, and `workspace_invites.invited_by` is `ON DELETE SET NULL`
+ * (0028), so authored invites survive as anonymous history instead of rolling
+ * the delete back. The membership itself is the only workspace-scoped artifact
+ * keyed by the member; accepted invites stay as history.
  *
  * A sole owner, or a target that is not in this workspace, is refused with
  * zero writes. Returns true when this workspace's membership was removed.

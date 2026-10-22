@@ -30,9 +30,14 @@
 --     predicate.
 --   * workspace_invites_login serves the invitee's cross-workspace discovery
 --     read (boot payload / empty state).
---   * NO ON DELETE clause anywhere (0026 precedent): default NO ACTION makes
---     a hard DELETE of a referenced workspace or user impossible at the
---     schema level. Removal stays soft delete.
+--   * workspace_id keeps the default NO ACTION (0026 precedent): a hard
+--     DELETE of a referenced workspace stays impossible at the schema level,
+--     so workspace removal stays soft delete.
+--   * invited_by is nullable with ON DELETE SET NULL: the operator removal
+--     path (users.ts `removeUser`, 0023 tombstone) hard-deletes the `users`
+--     row, and a NOT NULL author would make that DELETE fail for anyone who
+--     ever created an invite. The invite outlives its author as an anonymous
+--     row (`invited_by IS NULL`) — it is workspace history, not a permission.
 --   * Timestamps are caller-supplied ISO-8601 UTC strings (0003 created_at
 --     convention), never a database clock. This file seeds no rows.
 --
@@ -45,7 +50,7 @@ CREATE TABLE workspace_invites (
   github_login  TEXT NOT NULL COLLATE NOCASE,
   role          TEXT NOT NULL CHECK (role IN ('admin','member')),
   status        TEXT NOT NULL CHECK (status IN ('pending','accepted','revoked','expired')),
-  invited_by    TEXT NOT NULL REFERENCES users(id),
+  invited_by    TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at    TEXT NOT NULL,
   expires_at    TEXT NOT NULL,
   accepted_at   TEXT
