@@ -518,9 +518,17 @@ never a secret — logins are public identity) and holds **no business rights**:
 
 Expiry is read from `support_grants.expires_at` on every request — there is no
 scheduled job and no status column, so an expired grant answers exactly like no
-grant. Every operator decision appends one `audit_events` row **in the workspace
-gate, before dispatch** (`support.read` / `support.forbidden` /
-`support.denied`), so a route added later cannot skip the record.
+grant. Every operator decision the workspace gate makes appends one
+`audit_events` row **before dispatch** (`support.read` / `support.forbidden` /
+`support.denied`), so a route added later cannot skip the record. HTML shell
+loads (`/dashboard`, `/dashboard/<ref>/apps`) are served by `spa-dispatch`
+rather than the workspace gate, so they are classified by the same function but
+append no row.
+
+A membership-less operator's landing is `/dashboard/<ref>/apps`: the shell
+redirects the bare `/dashboard` there whenever the gate would classify that
+login `operator-granted`, because the support view derives its API base from
+the pathname's workspace segment.
 
 `PLATFORM_OPERATORS` is not declared in `wrangler.jsonc`; set it with
 `wrangler deploy --var "PLATFORM_OPERATORS:<login>[,<login>]"` or as a plain

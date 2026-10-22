@@ -318,21 +318,23 @@ export async function strictWorkspaceBoot(
 
 /**
  * The workspace slug a platform operator is visiting under a live support
- * grant, or null when this login is not such a visitor. True only when the
- * login is listed in `PLATFORM_OPERATORS`, holds NO membership in that
- * workspace, and has an unexpired `support_grants` row there. A member operator
- * is null: membership carries ordinary rights (AC1) and the read-only ceiling
- * never applies to it.
+ * grant, or null when this login is not such a visitor: the shell asks the ONE
+ * classifier the gate uses ({@link classifyWorkspacePrincipal}), so the boot
+ * and the request can never disagree about who the caller is.
  *
  * `workspaceRef` is the path's workspace segment when there is one, else the
- * deployment's sole workspace. An unbound store, an unknown ref, no grant and a
- * lapsed grant all answer null — and the shell then behaves exactly as before.
+ * deployment's sole workspace. An unbound store, an unknown ref, a membership,
+ * a live invite, no grant and a lapsed grant all answer null — and the shell
+ * then behaves exactly as before.
  */
 export async function operatorSupportWorkspace(
   env: Env,
   login: string,
   workspaceRef?: string,
 ): Promise<string | null> {
+  // The support face lives in the workspace route family, which `off` does not
+  // serve — a supportOnly boot there would be a page whose every read 404s.
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return null;
   if (!isPlatformOperator(env, login)) return null;
   const db = dashboardD1(env);
   if (db === null) return null;
@@ -343,10 +345,8 @@ export async function operatorSupportWorkspace(
   if (workspace === null) return null;
   const user = await getUserByLogin(db, login);
   if (user === null) return null;
-  if ((await getMembership(db, workspace.id, user.id)) !== null) return null;
-  const now = new Date().toISOString();
-  if (!(await hasValidGrant(db, workspace.id, login, now))) return null;
-  return workspace.slug;
+  const { principal } = await classifyWorkspacePrincipal(env, db, workspace, user, new Date().toISOString());
+  return principal === "operator-granted" ? workspace.slug : null;
 }
 
 /**
@@ -726,6 +726,31 @@ dashboardApp.use("*", async (c, next) => {
 });
 
 /**
+ * The ONE principal classifier of a workspace request, shared by the gate
+ * (which acts on the verdict) and the SPA shell boot (which only asks whether
+ * the caller is a granted operator). Ordering is the contract, not an
+ * implementation detail: member wins, then a live pending invite, and only
+ * then the operator allowlist — so an operator who is a member (or holds an
+ * invite here) keeps that ordinary standing (AC1), and the shell can never
+ * hand a listed operator an invitee's landing page.
+ */
+async function classifyWorkspacePrincipal(
+  env: Env,
+  db: DashboardDb,
+  workspace: { id: string },
+  user: DashboardUserRow,
+  now: string,
+): Promise<{ principal: WorkspacePrincipal; role: WorkspaceRole | null }> {
+  const role = await getMembership(db, workspace.id, user.id);
+  if (role !== null) return { principal: "member", role };
+  const invited = await getPendingInviteByLogin(db, workspace.id, user.github_login, now);
+  if (invited !== null) return { principal: "invitee", role: null };
+  if (!isPlatformOperator(env, user.github_login)) return { principal: "outsider", role: null };
+  const granted = await hasValidGrant(db, workspace.id, user.github_login, now);
+  return { principal: granted ? "operator-granted" : "operator-denied", role: null };
+}
+
+/**
  * Workspace-scope resolution — ordering-contract step 3, ONE middleware for
  * every workspace route. It runs after the session guard (so `authUser` is the
  * verified caller) and classifies the principal in order:
@@ -751,7 +776,8 @@ dashboardApp.use("*", async (c, next) => {
  * `support.denied` for an operator without a grant. A route handler therefore
  * cannot skip the audit — classification and the write happen before `next()`,
  * and mounting a workspace route at all requires the route table that declares
- * its access.
+ * its access. HTML shell loads are dispatch, not workspace routes: they are
+ * classified by the same function but write no row (see `docs/deploy.md`).
  */
 dashboardApp.use("*", async (c, next) => {
   if (c.get("workspaceScope") !== undefined) return next();
@@ -767,43 +793,39 @@ dashboardApp.use("*", async (c, next) => {
     return next();
   }
   const user = c.get("authUser");
-  const role = user ? await getMembership(db, workspace.id, user.id) : null;
+  const now = new Date().toISOString();
+  const { principal, role } = user
+    ? await classifyWorkspacePrincipal(c.env, db, workspace, user, now)
+    : { principal: "outsider" as const, role: null };
   if (role !== null && user) {
-    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role, principal: "member" });
+    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role, principal });
     c.set("workspaceScope", { workspaceId: workspace.id, role });
     return next();
   }
-  const invited =
-    user === undefined
-      ? null
-      : await getPendingInviteByLogin(db, workspace.id, user.github_login, new Date().toISOString());
-  // Operator classes come after member and invitee: a listed operator who is a
-  // member (or holds a live invite here) keeps that ordinary standing (AC1).
-  if (user !== undefined && invited === null && isPlatformOperator(c.env, user.github_login)) {
-    const now = new Date().toISOString();
-    if (!(await hasValidGrant(db, workspace.id, user.github_login, now))) {
-      // Expired and absent grants are the same answer — the outsider 404 — so
-      // the response never reveals the grant state.
-      await insertAuditEvent(db, {
-        workspaceId: workspace.id,
-        actorLogin: user.github_login,
-        action: "support.denied",
-        now,
-      });
-      c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role: null, principal: "operator-denied" });
-      c.set("workspaceScope", null);
-      return await tenantNotFound(c);
-    }
+  if (principal === "operator-denied" && user) {
+    // Expired and absent grants are the same answer — the outsider 404 — so
+    // the response never reveals the grant state.
+    await insertAuditEvent(db, {
+      workspaceId: workspace.id,
+      actorLogin: user.github_login,
+      action: "support.denied",
+      now,
+    });
+    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role: null, principal });
+    c.set("workspaceScope", null);
+    return await tenantNotFound(c);
+  }
+  if (principal === "operator-granted" && user) {
     // The audit row records the ATTEMPT, before dispatch: it is written here,
     // so no route handler can skip it and none can change what was decided.
-    const read = isOperatorReadPath(c.req.path);
+    const read = isOperatorReadPath(c.req.path, c.req.method);
     await insertAuditEvent(db, {
       workspaceId: workspace.id,
       actorLogin: user.github_login,
       action: read ? "support.read" : "support.forbidden",
       now,
     });
-    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role: null, principal: "operator-granted" });
+    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role: null, principal });
     c.set("workspaceScope", null);
     if (!read) return c.json({ error: "forbidden" }, 403);
     return next();
@@ -812,7 +834,7 @@ dashboardApp.use("*", async (c, next) => {
     ref: tenant.ref,
     workspaceId: workspace.id,
     role: null,
-    principal: invited === null ? "outsider" : "invitee",
+    principal,
   });
   c.set("workspaceScope", null);
   return next();
@@ -827,14 +849,22 @@ function isPlatformOperator(env: Env, login: string): boolean {
 
 /**
  * The operator read ceiling: the routes declared `access: "read"` in the
- * workspace route table. Everything else — every App read, credentials,
+ * workspace route table, for the method the request actually uses — a future
+ * non-GET handler mounted at a read path is `write` by default rather than
+ * admitted by its path alone. Everything else — every App read, credentials,
  * settings, role change, invites, the audit list — is write-classified and
  * answers 403, and an UNDECLARED route is `write` too, so a route added later
  * cannot widen the surface by omission. Declared paths are literals (no
  * `:param`), which is what makes the suffix match exact.
+ *
+ * Hono dispatches a HEAD request through the GET route table, so HEAD is
+ * compared as `get` — the ceiling follows the handler that actually runs.
  */
-function isOperatorReadPath(path: string): boolean {
-  return APP_ROUTES.some((route) => route.access === "read" && path.endsWith(route.path));
+function isOperatorReadPath(path: string, method: string): boolean {
+  const routeMethod = method === "HEAD" ? "get" : method.toLowerCase();
+  return APP_ROUTES.some(
+    (route) => route.access === "read" && route.method === routeMethod && path.endsWith(route.path),
+  );
 }
 
 async function startOAuthLogin(c: DashboardContext): Promise<Response> {

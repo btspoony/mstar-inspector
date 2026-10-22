@@ -12,16 +12,19 @@ category: Changed
   identity fields and the member list (login + role). App list, App settings,
   credentials, model chains, settings writes, role changes, member removal,
   invites and the audit list all answer 403 to a granted operator.
-- **Every operator request is audited, from the gate.** The workspace middleware
-  appends exactly one `audit_events` row before dispatch — `support.read`,
-  `support.forbidden` or `support.denied` — so a route handler cannot skip the
-  record. Grants are time-boxed and evaluated per request from `expires_at`; an
-  expired grant behaves exactly like no grant.
+- **Every operator workspace request is audited by the gate.** The workspace
+  middleware appends exactly one `audit_events` row before dispatch —
+  `support.read`, `support.forbidden` or `support.denied` — so a route handler
+  cannot skip the record. HTML shell loads (`/dashboard`, `/dashboard/<ref>/apps`)
+  are dispatched by `spa-dispatch`, not by the workspace gate, and write no row.
+  Grants are time-boxed and evaluated per request from `expires_at`; an expired
+  grant behaves exactly like no grant.
 - **Tenants can see the window.** Every member of the workspace gets an
   undismissable notice naming the operator, the grant reason and its expiry —
   with no control that ends or edits the grant. `owner`/`admin` can read the
   audit rows through `GET /dashboard/<ref>/api/audit`; a plain `member` gets
-  403. The notice is gone the request after the grant lapses.
+  403. The notice re-reads on every in-app navigation, so a grant that lapses
+  (or appears) is gone (or shown) as soon as the tenant moves between pages.
 
 <!-- CN -->
 - **部署运维者不再自动获得租户权限。** 部署级管理员 `ADMIN_LOGINS` 已从授权路径中移除；
@@ -31,10 +34,12 @@ category: Changed
   404；**拥有**有效授权的运维者只能读取工作区身份字段与成员名单（登录名 + 角色）。App
   列表、App 设置、凭据、模型链、设置写入、角色变更、移除成员、邀请与审计列表对已授权
   运维者一律返回 403。
-- **每一次运维访问都在网关内留痕。** 工作区中间件在派发之前恰好追加一条 `audit_events`
-  记录——`support.read`、`support.forbidden` 或 `support.denied`——因此路由处理器无法跳过
-  该记录。授权是限时的，每次请求按 `expires_at` 判定；过期授权与无授权表现完全一致。
+- **每一次运维的工作区请求都在网关内留痕。** 工作区中间件在派发之前恰好追加一条
+  `audit_events` 记录——`support.read`、`support.forbidden` 或 `support.denied`——因此路由
+  处理器无法跳过该记录。HTML 外壳加载（`/dashboard`、`/dashboard/<ref>/apps`）由
+  `spa-dispatch` 派发、不经过工作区网关，故不写审计行。授权是限时的，每次请求按
+  `expires_at` 判定；过期授权与无授权表现完全一致。
 - **租户看得见这段窗口。** 工作区的所有成员都会看到一条不可关闭的通知，写明运维者、
   授权原因与到期时间——且不提供任何结束或编辑授权的控件。`owner`/`admin` 可以通过
-  `GET /dashboard/<ref>/api/audit` 读取审计记录，普通 `member` 返回 403。授权过期后，
-  通知在下一次请求即消失。
+  `GET /dashboard/<ref>/api/audit` 读取审计记录，普通 `member` 返回 403。通知在每次站内
+  导航时重新读取，因此授权过期（或新增）会在租户切换页面的那一刻消失（或出现）。

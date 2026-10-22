@@ -96,7 +96,7 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
           {/* The undismissable support notice sits above every workspace page:
               the tenant must see an active operator grant on any screen, and it
               carries no control (AC4). */}
-          <SupportNotice boot={boot} />
+          <SupportNotice boot={boot} pathname={pathname} />
           {children}
         </div>
       </SidebarInset>

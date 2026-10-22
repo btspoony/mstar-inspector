@@ -15,16 +15,20 @@ import { PageNotice } from "../pages/PageNotice";
  * can. The read is the same `/api/support/grants` face the operator's support
  * view uses, so a grant that lapses simply stops being listed.
  *
+ * Keyed on the pathname, not just the base: the shell survives client-side
+ * navigation, so re-reading on every route change is what lets a grant created
+ * (or lapsed) mid-session reach a tab that is already open.
+ *
  * Renders nothing for the operator's own support face (they already see their
  * grants there) and for a login with no workspace yet.
  */
-export function SupportNotice({ boot }: { boot: SpaBoot }) {
+export function SupportNotice({ boot, pathname }: { boot: SpaBoot; pathname: string }) {
   const [grants, setGrants] = useState<SupportGrantRow[]>([]);
-  const base = apiBase();
   const skip = boot.login === null || boot.supportOnly === true || boot.needsWorkspace === true;
 
   useEffect(() => {
     if (skip) return;
+    const base = apiBase(pathname);
     let live = true;
     void (async () => {
       try {
@@ -38,7 +42,7 @@ export function SupportNotice({ boot }: { boot: SpaBoot }) {
     return () => {
       live = false;
     };
-  }, [base, skip]);
+  }, [pathname, skip]);
 
   if (skip || grants.length === 0) return null;
   return (

@@ -131,16 +131,25 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // never take the redirect branch.
   const route = matchSpaRoute(c.req.path);
   const routeRef = route !== null && "workspaceRef" in route ? route.workspaceRef : undefined;
-  const extras =
-    auth.boot.login === null || route?.page === "login"
-      ? {}
-      : await strictWorkspaceBoot(c.env, auth.boot.login);
-  // The redirect target keeps the resolver that warns when a strict deployment
-  // cannot name its workspace (that warning is the operator signal for the
-  // landing). A login with no workspace stays on the shell either way.
-  if (c.req.path === "/dashboard" && extras.needsWorkspace !== true) {
-    const workspaceBase = await strictWorkspaceAppsBase(c.env);
-    if (workspaceBase !== null) return c.redirect(workspaceBase, 302);
+  // The signed-in login of a sidebar-bearing shell; null on the login page and
+  // for an anonymous boot (those take no workspace read at all).
+  const login = auth.boot.login !== null && route?.page !== "login" ? auth.boot.login : null;
+  const extras = login === null ? {} : await strictWorkspaceBoot(c.env, login);
+  // The operator's landing must name the workspace too: the support face reads
+  // `/api/support/workspace` off the pathname's workspace segment, and the bare
+  // `/dashboard` carries none (root route unregistered → 404). The SAME
+  // classifier the workspace gate uses answers it, so the shell cannot call an
+  // invitee (or a member) a support visitor.
+  const supportRef = login === null ? null : await operatorSupportWorkspace(c.env, login, routeRef);
+  if (c.req.path === "/dashboard") {
+    if (supportRef !== null) return c.redirect(`/dashboard/${supportRef}/apps`, 302);
+    // A login with no workspace of its own still needs a path into the
+    // workspace UI; a newcomer (needsWorkspace) keeps the creation surface
+    // instead of being sent to a page that answers the outsider 404.
+    if (extras.needsWorkspace !== true) {
+      const workspaceBase = await strictWorkspaceAppsBase(c.env);
+      if (workspaceBase !== null) return c.redirect(workspaceBase, 302);
+    }
   }
   // The shell's Apps/brand links need the active workspace, and the shell
   // outlives the URL: a client-side navigation (spaClick → pushState) to the
@@ -162,9 +171,8 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // login, so an invited outsider sees a path to accept without knowing the
   // workspace's ref (they are not a member yet, so no member list names it).
   // The switcher's list: the same login's live memberships.
-  const login = auth.boot.login;
   const lists =
-    login === null || route?.page === "login"
+    login === null
       ? null
       : await Promise.all([pendingInvitesForLogin(c.env, login), workspaceMembershipsForLogin(c.env, login)]);
   const pendingInvites = lists?.[0] ?? [];
@@ -173,10 +181,6 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // creation surface: `needsWorkspace` below would otherwise offer to create a
   // workspace to someone who is here to read one. The grant also names the
   // workspace (the operator has no membership row to derive it from).
-  const supportRef =
-    login === null || route?.page === "login"
-      ? null
-      : await operatorSupportWorkspace(c.env, login, routeRef);
   // Absent fields add nothing, so `off` and a ref-less deployment keep the
   // pre-existing boot (and its JSON key order) byte-identical.
   const boot: SpaBoot = {

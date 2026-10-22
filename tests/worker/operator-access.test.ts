@@ -18,7 +18,13 @@
  *     `support.forbidden` row;
  *   - a grant on W1 grants nothing on W2;
  *   - an operator who IS a member keeps ordinary membership rights (AC1) and is
- *     not audited as a support read.
+ *     not audited as a support read;
+ *   - the ceiling matches the METHOD too: HEAD rides the GET handler, a POST at
+ *     a read path is refused;
+ *   - the shell boot asks the gate's own classifier, so a membership-less
+ *     operator lands on the workspace path (never the bare `/dashboard` whose
+ *     support read has no tenant) and a listed operator holding a live invite
+ *     is an invitee, not a support visitor.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -26,6 +32,9 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { insertSupportGrant } from "../../src/dashboard/operator-store";
+import { createInvite } from "../../src/dashboard/invite-store";
+import { withSpaAssets } from "../helpers/spa";
+import type { SpaBoot } from "../../src/spa/boot";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -380,5 +389,114 @@ describe("tenant-visible grant notice and member audit reads", () => {
 
     const asMember = await worker.fetch(await authedRequest("/dashboard/acme/api/audit", "mallory"), env);
     expect(asMember.status).toBe(403);
+  });
+});
+
+describe("the read ceiling is method-aware", () => {
+  test("HEAD rides the GET handler and reads; a POST at a read path is forbidden", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const env = envFor(db);
+    // Hono dispatches HEAD through the GET route, so the ceiling must admit it
+    // for the handler that actually runs.
+    const head = await worker.fetch(
+      await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR, { method: "HEAD" }),
+      env,
+    );
+    expect(head.status).toBe(200);
+    // The same path with a write method: no POST handler is mounted there, and
+    // the ceiling refuses before the router can answer 404/405.
+    const post = await worker.fetch(
+      await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR, {
+        method: "POST",
+        body: "x=1",
+      }),
+      env,
+    );
+    expect(post.status).toBe(403);
+    expect(auditRows(db).map((row) => row.action).sort()).toEqual(["support.forbidden", "support.read"]);
+  });
+});
+
+describe("the shell boot asks the gate's own classifier", () => {
+  /** The boot the served shell injected. */
+  function bootOf(html: string): SpaBoot {
+    const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
+    if (json === undefined) throw new Error("no injected SPA boot");
+    return JSON.parse(json) as SpaBoot;
+  }
+
+  /**
+   * A strict deployment with ONE live workspace (`default`, seeded by 0026) —
+   * the shape the landing redirect resolves. Migration 0026 seeds it, so this
+   * fixture only adds the operator login.
+   */
+  function soleWorkspaceFixture() {
+    const db = createMigratedTestD1();
+    seedUser(db, OPERATOR);
+    return { db };
+  }
+
+  test("a membership-less granted operator's bare /dashboard redirects to the workspace path", async () => {
+    const { db } = soleWorkspaceFixture();
+    grant(db, "default", OPERATOR, DAY);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", OPERATOR, { accept: "text/html" }),
+      withSpaAssets(envFor(db)),
+    );
+    // The support view derives its API base from the pathname's workspace
+    // segment; on the bare mount that read has no tenant and 404s.
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    // A shell navigation is not a workspace route: no audit row.
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("the redirected page boots supportOnly with the workspace ref named", async () => {
+    const { db } = soleWorkspaceFixture();
+    grant(db, "default", OPERATOR, DAY);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/default/apps", OPERATOR, { accept: "text/html" }),
+      withSpaAssets(envFor(db)),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.supportOnly).toBe(true);
+    expect(boot.needsWorkspace).toBeUndefined();
+    expect(boot.workspaceRef).toBe("default");
+  });
+
+  test("a listed operator holding a live invite here is an invitee, not a support visitor", async () => {
+    const { db, owner } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    await createInvite(db, {
+      workspaceId: "ws-acme",
+      login: OPERATOR,
+      role: "member",
+      invitedBy: owner,
+      now: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + DAY).toISOString(),
+    });
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps", OPERATOR, { accept: "text/html" }),
+      withSpaAssets(envFor(db)),
+    );
+    const boot = bootOf(await res.text());
+    // The gate classifies `invitee` (the grant is intentionally inert), so the
+    // shell must not replace the acceptance surface with the support face.
+    expect(boot.supportOnly).toBeUndefined();
+    expect(boot.pendingInvites?.map((invite) => invite.workspaceRef)).toEqual(["acme"]);
+  });
+
+  test("off: a granted operator gets no supportOnly boot (the workspace face does not exist)", async () => {
+    const { db } = soleWorkspaceFixture();
+    grant(db, "default", OPERATOR, DAY);
+    const env = withSpaAssets({ ...envFor(db), WORKSPACE_TENANT_MODE: "off" } as Env);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", OPERATOR, { accept: "text/html" }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).supportOnly).toBeUndefined();
   });
 });
