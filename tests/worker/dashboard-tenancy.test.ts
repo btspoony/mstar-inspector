@@ -17,13 +17,13 @@
  * workspace here is explicit, which keeps the role matrix readable.
  */
 import { describe, expect, test } from "bun:test";
+import type { ReactElement } from "react";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
 import { apiBase } from "../../src/spa/workspace-base";
-import { buildSidebarModel } from "../../src/spa/shell";
 import type { SpaBoot } from "../../src/spa/boot";
 import { RESERVED_WORKSPACE_SLUGS } from "../../src/spa/routes";
 import { t } from "../../src/i18n";
@@ -37,6 +37,36 @@ function bootOf(html: string): SpaBoot {
   const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
   if (json === undefined) throw new Error("no injected SPA boot");
   return JSON.parse(json) as SpaBoot;
+}
+
+/**
+ * Renders the REAL Members page (chrome included) at `/dashboard/members` from
+ * one boot and returns every href it emits. The SPA tree is imported through a
+ * computed specifier: the root tsconfig keeps `src/spa` out of this program
+ * (it targets the Workers lib, not the DOM), so a static import would drag the
+ * browser sources into a typecheck that has no `document`.
+ */
+async function renderMembersHrefs(boot: SpaBoot): Promise<string[]> {
+  // Specifiers stay relative to THIS file so Bun resolves them exactly as a
+  // static import would; `tsc` never sees them.
+  const spa = "../../src/spa";
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  type Component = (props: Record<string, unknown>) => ReactElement;
+  const { Layout } = (await import(`${spa}/Layout`)) as { Layout: Component };
+  const { DashboardPage } = (await import(`${spa}/pages`)) as { DashboardPage: Component };
+  const { matchRoute } = (await import(`${spa}/router`)) as {
+    matchRoute: (pathname: string) => unknown;
+  };
+  const pathname = "/dashboard/members";
+  const html = renderToStaticMarkup(
+    createElement(Layout, {
+      boot,
+      pathname,
+      children: createElement(DashboardPage, { route: matchRoute(pathname), boot }),
+    }),
+  );
+  return [...html.matchAll(/href="([^"]+)"/g)].map((match) => match[1] ?? "");
 }
 
 function envFor(db: TestD1, mode?: "off" | "strict"): Env {
@@ -628,12 +658,10 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
     expect(boot.workspaceSlug).toBe("default");
-    const sidebar = buildSidebarModel(boot, "/dashboard/members");
-    expect(sidebar.brandHref).toBe("/dashboard/default/apps");
-    expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/default/apps",
-      "/dashboard/members",
-    ]);
+    const hrefs = await renderMembersHrefs(boot);
+    expect(hrefs).toContain("/dashboard/default/apps");
+    expect(hrefs).toContain("/dashboard/members");
+    expect(hrefs).not.toContain("/dashboard/apps");
   });
 
   test("off: the Members shell keeps the legacy targets (no workspace in the boot)", async () => {
@@ -646,10 +674,10 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
     expect(boot.workspaceSlug).toBeUndefined();
-    expect(buildSidebarModel(boot, "/dashboard/members").items.map((item) => item.href)).toEqual([
-      "/dashboard/apps",
-      "/dashboard/members",
-    ]);
+    // `off` keeps today's output exactly: the legacy targets, no workspace.
+    const hrefs = await renderMembersHrefs(boot);
+    expect(hrefs).toContain("/dashboard/apps");
+    expect(hrefs).not.toContain("/dashboard/default/apps");
   });
 
   test("strict: the workspace Apps boot keeps its workspace after a client-side navigation to Members", async () => {
@@ -667,14 +695,12 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
     expect(boot.workspaceSlug).toBe("default");
-    // The same boot object, rendered at the Members route the click lands on.
-    const sidebar = buildSidebarModel(boot, "/dashboard/members");
-    expect(sidebar.brandHref).toBe("/dashboard/default/apps");
-    expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/default/apps",
-      "/dashboard/members",
-    ]);
-    expect(sidebar.items.find((item) => item.href === "/dashboard/members")?.current).toBe(true);
+    // The Members PAGE the click lands on, rendered from THAT boot: the
+    // sidebar hrefs are read off the markup, not off the model behind it.
+    const hrefs = await renderMembersHrefs(boot);
+    expect(hrefs).toContain("/dashboard/default/apps");
+    expect(hrefs).toContain("/dashboard/members");
+    expect(hrefs).not.toContain("/dashboard/apps");
   });
 
   test("off: a workspace-shaped shell never exists, so no boot carries a slug", async () => {

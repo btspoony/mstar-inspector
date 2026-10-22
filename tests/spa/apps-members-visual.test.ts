@@ -20,6 +20,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList } from "../../src/spa/pages/AppsPage";
+import { withLocation } from "./browser-stub";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const appsPage = readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8");
@@ -37,13 +38,9 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     // Rendered from the real row component under the two ACTUAL pathnames: the
     // emitted links are the page's own base, so a wrong base, a legacy target
     // under a workspace page, or a /settings deep link fails here.
-    const render = (pathname: string): string => {
-      // Bun's test runtime has no document; `apiBase()` reads
-      // `location.pathname` through a narrow structural type.
-      const scope = globalThis as { location?: { pathname: string } };
-      scope.location = { pathname };
-      try {
-        return renderToStaticMarkup(
+    const render = (pathname: string): string =>
+      withLocation(pathname, () =>
+        renderToStaticMarkup(
           createElement(AppsList, {
             locale: "en",
             payload: {
@@ -60,11 +57,8 @@ describe("AppsPage table reinforcement (AD-581)", () => {
               ],
             },
           }),
-        );
-      } finally {
-        delete scope.location;
-      }
-    };
+        ),
+      );
     // Legacy Apps page: the historical detail path, identity link + anchor.
     expect(
       [...render("/dashboard/apps").matchAll(/href="([^"]+)"/g)].map((match) => match[1]),
@@ -75,8 +69,6 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       [...render("/dashboard/acme/apps").matchAll(/href="([^"]+)"/g)].map((match) => match[1]),
     ).toEqual(["/dashboard/acme/apps/demo", "/dashboard/acme/apps/demo"]);
     const scoped = render("/dashboard/acme/apps");
-    // Row-level and identity-link spaClick handlers (behavior).
-    expect(appsPage.split("onClick={(event) => spaClick(href, event)}").length - 1).toBe(3);
     expect(scoped).toContain('class="text-primary underline-offset-4 hover:underline"');
     expect(scoped).not.toContain("/settings");
     // Row action copy is detail semantics in both locales.

@@ -23,10 +23,14 @@ import {
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
 import { AppInfoCard, DraftChainPanel, ProviderConfigForm, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
-import { AppDetailShell } from "../../src/spa/pages/AppDetailPage";
+import { AppDetailPage } from "../../src/spa/pages/AppDetailPage";
+import { withLocation } from "./browser-stub";
 
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
+
+/** The detail page reads only locale/role from the boot for this face. */
+const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat", role: "admin" as const };
 
 describe("settings layout", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -1306,28 +1310,17 @@ describe("operational action hierarchy", () => {
 
 describe("App workflow boundaries", () => {
   test("App settings reads as one workflow with the Apps list: a visible path back", () => {
-    // The real shell fragment renders the link from ITS OWN page base, so both
-    // pathnames (legacy and workspace-scoped) are exercised end to end: a
-    // wrong base or a link that stops being the shell's first element fails.
-    const render = (pathname: string): string => {
-      // Bun's test runtime has no document; the shell reads `location.pathname`
-      // through a narrow structural type — the same stub `workspace-base` does.
-      const scope = globalThis as { location?: { pathname: string } };
-      scope.location = { pathname };
-      try {
-        return renderToStaticMarkup(
-          createElement(AppDetailShell, { locale: "en", children: "face" }),
-        );
-      } finally {
-        delete scope.location;
-      }
-    };
+    // The REAL page is rendered under each pathname; the loader has not
+    // resolved, so this is the loading face — which must still carry the
+    // wayfinding link, derived from the page's own base.
+    const render = (pathname: string): string =>
+      withLocation(pathname, () =>
+        renderToStaticMarkup(createElement(AppDetailPage, { boot: adminBoot, slug: "acme-app" })),
+      );
 
     const legacy = render("/dashboard/apps/acme-app");
     expect(legacy).toContain('href="/dashboard/apps"');
     expect(legacy).toContain("Back to Apps");
-    // The link is the shell's first element — it precedes the page face.
-    expect(legacy.indexOf('href="/dashboard/apps"')).toBeLessThan(legacy.indexOf(">face<"));
 
     // A workspace App page keeps the wayfinding inside its workspace: the
     // legacy App family answers 404 under strict.

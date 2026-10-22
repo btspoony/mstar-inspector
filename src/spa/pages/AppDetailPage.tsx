@@ -220,12 +220,14 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
     setSearch(next);
   }
 
-  // Loading rides the shared skeleton as the page's full loading face —
-  // the skeleton's heading placeholder stands in for the real h1 (AD-582),
-  // matching the Apps/Members idiom. Foreground only, so op-triggered
-  // background reloads never flash it (the background-reload contract).
+  // Every face keeps the wayfinding link — loading included, so a slow read
+  // never strands the operator on a page with no exit.
   if (state === "loading") {
-    return <PageSkeleton locale={locale} kind="forms" />;
+    return (
+      <AppDetailShell locale={locale}>
+        <PageSkeleton locale={locale} kind="forms" />
+      </AppDetailShell>
+    );
   }
 
   // Deep-link withhold (bugbot fix): once the payload lands, `state` is
@@ -236,12 +238,13 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   // shell withholds it behind the loading skeleton for exactly that one
   // paint. Background reloads are unaffected: searchReady stays true.
   if (state === "ok" && payload && !searchReady) {
-    return <PageSkeleton locale={locale} kind="forms" />;
+    return (
+      <AppDetailShell locale={locale}>
+        <PageSkeleton locale={locale} kind="forms" />
+      </AppDetailShell>
+    );
   }
 
-  // Page wayfinding: the back link is the shell's first element on both
-  // faces (error + ok — it serves both roles), moved here from the
-  // settings tab body.
   return (
     <AppDetailShell locale={locale}>
       {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
