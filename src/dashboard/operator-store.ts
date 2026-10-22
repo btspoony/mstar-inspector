@@ -2,8 +2,11 @@
  * Platform-operator store — the one read/write authority for `support_grants`
  * and `audit_events` (migration 0029 is the DDL single source).
  *
- * Two appends and two reads, nothing else: this module exports NO update and
- * NO delete for either table, because both are append-only history.
+ * The five exports are the whole surface — two appends (`insertSupportGrant`,
+ * `insertAuditEvent`), two listing reads (`listActiveSupportGrants`,
+ * `listAuditEvents`) and the validity probe (`hasValidGrant`). Nothing else:
+ * this module exports NO update and NO delete for either table, because both
+ * are append-only history.
  *   * `support_grants` is the time-boxed, workspace-scoped window that lets a
  *     non-member platform operator read a workspace's identity fields and
  *     member list. Expiry is evaluated per request from the stored
@@ -183,13 +186,17 @@ export async function insertAuditEvent(
 /**
  * The workspace's audit rows, newest first, at most `limit` of them — the
  * owner/admin read. `id` breaks the tie so a same-millisecond batch keeps a
- * stable order.
+ * stable order. A negative or non-finite `limit` would bind as SQLite's
+ * "no upper bound", so the store refuses it rather than fail open.
  */
 export async function listAuditEvents(
   db: OperatorStoreD1,
   workspaceId: string,
   limit: number,
 ): Promise<AuditEventRow[]> {
+  if (!Number.isInteger(limit) || limit < 0) {
+    throw new RangeError(`listAuditEvents: limit must be a non-negative integer, got ${limit}`);
+  }
   const { results } = await db
     .prepare(
       `SELECT ${AUDIT_COLUMNS} FROM audit_events

@@ -47,6 +47,7 @@ import { describe, expect, test } from "bun:test";
 import "../helpers/cloudflare-workers-mock";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
+import { insertSupportGrant } from "../../src/dashboard/operator-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 // Dynamic AFTER the shim: the static import order would resolve the workerd
@@ -58,7 +59,7 @@ const SESSION_SECRET = ["test", "matrix", "session", "secret", "32-bytes!"].join
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
-function envFor(db: TestD1, mode?: "off" | "strict"): Env {
+function envFor(db: TestD1, mode?: "off" | "strict", operators?: string): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} },
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
@@ -68,6 +69,7 @@ function envFor(db: TestD1, mode?: "off" | "strict"): Env {
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
     ...(mode === undefined ? {} : { WORKSPACE_TENANT_MODE: mode }),
+    ...(operators === undefined ? {} : { PLATFORM_OPERATORS: operators }),
   } as unknown as Env;
 }
 
@@ -540,5 +542,55 @@ describe("tenant isolation matrix (scenario × mode)", () => {
       )
       .get() as { reviews: number; failures: number };
     expect(counts).toEqual({ reviews: 0, failures: 0 });
+  });
+  // row 9 — layers: workspace gate operator classification → support_grants
+  //         workspace-keyed lookup → route access declaration. covered at the
+  //         unit level by tests/worker/operator-store.test.ts (`hasValidGrant`
+  //         W1 vs W2) and per-route by tests/worker/operator-matrix.test.ts;
+  //         composed here because a grant's SCOPE is the isolation question —
+  //         the same operator, the same grant, two tenants of one fixture.
+  test("row 9 · a support grant on one workspace opens that tenant only, on both ref forms", async () => {
+    const { db } = matrixFixture();
+    seedUser(db, "support-bot", "member");
+    await insertSupportGrant(db, {
+      workspaceId: "ws-acme",
+      operatorLogin: "support-bot",
+      reason: "tenant-reported incident",
+      grantedBy: "deployer",
+      now: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const env = envFor(db, "strict", "support-bot");
+
+    for (const ref of ["acme", "ws-acme"]) {
+      const res = await worker.fetch(
+        await request(`/dashboard/${ref}/api/support/workspace`, "support-bot"),
+        env,
+      );
+      expect(res.status, ref).toBe(200);
+    }
+
+    for (const ref of ["other", "ws-other"]) {
+      const res = await worker.fetch(
+        await request(`/dashboard/${ref}/api/support/workspace`, "support-bot"),
+        env,
+      );
+      expect(res.status, ref).toBe(404);
+    }
+
+    // The audit rows land on the workspace each request addressed: reads on
+    // `acme`, denials on `other`. A scoped grant would show up here as a read
+    // row on the sibling workspace.
+    const rows = db.raw
+      .query("SELECT workspace_id, action FROM audit_events")
+      .all() as Array<{ workspace_id: string; action: string }>;
+    expect(rows.filter((row) => row.workspace_id === "ws-acme").map((row) => row.action)).toEqual([
+      "support.read",
+      "support.read",
+    ]);
+    expect(rows.filter((row) => row.workspace_id === "ws-other").map((row) => row.action)).toEqual([
+      "support.denied",
+      "support.denied",
+    ]);
   });
 });

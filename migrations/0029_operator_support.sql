@@ -12,7 +12,7 @@
 --     matching, exactly like no row at all.
 --   * operator_login carries COLLATE NOCASE (0028 precedent): a GitHub
 --     display-case change must not orphan or widen a grant. The same collation
---     governs the lookup index's leftmost-but-one column comparisons.
+--     governs the comparisons on the index's second column (`operator_login`).
 --   * granted_by is the creating operator's login STRING (the CLI actor), not a
 --     `users` FK: operators hold no user row, and the grant is audit history
 --     rather than a permission edge to a user.

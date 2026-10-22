@@ -28,6 +28,9 @@ export function SupportNotice({ boot, pathname }: { boot: SpaBoot; pathname: str
 
   useEffect(() => {
     if (skip) return;
+    // Clear first: a workspace switch (or a refetch that fails and is
+    // swallowed below) must not leave another workspace's notice on screen.
+    setGrants([]);
     const base = apiBase(pathname);
     let live = true;
     void (async () => {

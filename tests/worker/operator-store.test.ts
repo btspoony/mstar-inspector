@@ -14,6 +14,8 @@
  *   - the module exports no update/delete path at all (append-only).
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import * as operatorStore from "../../src/dashboard/operator-store";
 import {
@@ -188,5 +190,25 @@ describe("append-only store shape", () => {
       "listAuditEvents",
     ]);
     expect(exported.filter((name) => /update|delete|remove|revoke/i.test(name))).toEqual([]);
+  });
+
+  // The export set cannot see a statement that never became an export, and the
+  // contract here IS "no writer exists" — so the source shape is the evidence.
+  test("no UPDATE or DELETE statement exists anywhere in the module", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/dashboard/operator-store.ts"), "utf8");
+    // Statements only: a comment may name the rule it guarantees.
+    const statements = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(statements).not.toMatch(/\b(UPDATE|DELETE)\b/i);
+  });
+});
+
+describe("listAuditEvents limit guard", () => {
+  test("a negative, fractional or non-finite limit is refused instead of reading unbounded", async () => {
+    const db = createFixture();
+    for (const limit of [-1, -1000, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(listAuditEvents(db, W1, limit)).rejects.toThrow(RangeError);
+    }
+    // Zero is a legitimate "nothing" read, not an error.
+    expect(await listAuditEvents(db, W1, 0)).toEqual([]);
   });
 });
