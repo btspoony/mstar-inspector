@@ -56,6 +56,18 @@ export function workspaceRefOf(pathname: string): string | null {
   return ref !== undefined && !RESERVED_WORKSPACE_SLUGS.has(ref) ? ref : null;
 }
 
+/**
+ * The same path with its workspace segment replaced — every other segment and
+ * the query are preserved, so a renamed workspace lands on the SAME page under
+ * its new ref. Null when the pathname carries no workspace segment (a
+ * deployment-level page has nothing to rewrite).
+ */
+export function replaceWorkspaceRef(pathname: string, nextRef: string): string | null {
+  const match = /^\/dashboard\/([^/]+)(\/.*)?$/.exec(pathname);
+  if (!match || match[1] === undefined || RESERVED_WORKSPACE_SLUGS.has(match[1])) return null;
+  return `/dashboard/${nextRef}${match[2] ?? ""}`;
+}
+
 const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/settings)?$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
 const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;

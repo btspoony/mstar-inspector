@@ -73,6 +73,7 @@ import {
   getWorkspaceByRef,
   getWorkspaceMember,
   listWorkspaceMembers,
+  setWorkspaceSlug,
   type WorkspaceRole,
 } from "./workspace-store";
 import {
@@ -1588,6 +1589,66 @@ const memberRoleRoute = async (c: DashboardContext) => {
     return inviteMutationResponse(c, "Cannot demote the last owner.", 409);
   }
   return inviteMutationResponse(c, "ok", 200);
+};
+
+// --- Workspace settings: the owner-editable slug ---
+//
+// The path segment IS the workspace's public identity, so only the OWNER may
+// rewrite it (owner-only, unlike the App settings family's owner-or-admin): a
+// slug change kills every shared link that used the old value — there is no
+// redirect (plan 98 D8), so this is a workspace-wide decision.
+const WORKSPACE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{1,38}$/;
+
+/** English faces for the store's two 409s; the SPA keys its copy on `code`. */
+const SLUG_CONFLICT_KEYS = {
+  slug_taken: "workspace.slugTaken",
+  slug_is_workspace_id: "workspace.slugIsWorkspaceId",
+} as const;
+
+/**
+ * `PUT /:workspaceRef/api/settings/slug` — validate, then the store's single
+ * guarded UPDATE. The shape gate and the reserved set run BEFORE the write
+ * (they need no row read); the store answers the two 409 conflicts, and a
+ * concurrent write that slips past its guards lands on the slug UNIQUE index,
+ * which the store maps to the same 409 rather than a 500.
+ */
+const workspaceSlugRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  // `workspaceOnly` guarantees a tenant, but a request whose ref did not
+  // resolve has no workspace to rename — the same 404 as an unknown ref.
+  if (!member.scope) return await tenantNotFound(c);
+  if (member.scope.role !== "owner") {
+    // Same split as the members family: a navigation gets the rendered denial,
+    // a fetch the bare status the SPA parses.
+    return wantsHtml(c.req.header("Accept") ?? null)
+      ? c.html(forbiddenPage(member.session.login, requestLocale(c)), 403)
+      : c.json({ error: "forbidden" }, 403);
+  }
+  let slug = "";
+  try {
+    const body = (await c.req.json()) as { slug?: unknown };
+    slug = typeof body.slug === "string" ? body.slug : "";
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (!WORKSPACE_SLUG_PATTERN.test(slug)) {
+    return c.json(
+      { key: "workspace.slugInvalid", message: t("en", "workspace.slugInvalid") },
+      400,
+    );
+  }
+  if (RESERVED_WORKSPACE_SLUGS.has(slug)) {
+    return c.json(
+      { code: "slug_reserved", message: t("en", "workspace.slugReserved") },
+      409,
+    );
+  }
+  const conflict = await setWorkspaceSlug(member.db, member.scope.workspaceId, slug);
+  if (conflict !== null) {
+    return c.json({ code: conflict, message: t("en", SLUG_CONFLICT_KEYS[conflict]) }, 409);
+  }
+  return c.json({ slug });
 };
 
 // --- Apps list + per-App management (spec § Multi-App 契约,
@@ -3392,6 +3453,11 @@ for (const route of APP_ROUTES) {
     dashboardApp.post(`/:workspaceRef${route.path}`, workspaceOnly(route.handler));
   }
 }
+
+// The workspace settings family is workspace-only and PUT-shaped (the table
+// above carries GET/POST only): the slug is the workspace's own identity, so
+// there is no deployment-level copy to register.
+dashboardApp.put("/:workspaceRef/api/settings/slug", workspaceOnly(workspaceSlugRoute));
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
 // not a wired route above is a placeholder submit and must never succeed —

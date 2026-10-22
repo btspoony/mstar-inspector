@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
@@ -27,8 +27,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
-import { postForm } from "../api";
+import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
+import { navigate } from "../router";
+import { replaceWorkspaceRef } from "../routes";
 import { apiBase } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
@@ -46,7 +48,9 @@ import {
   seatRoleValues,
   seatSelectValue,
   selectedCatalogProvider,
+  slugFailureKey,
   splitModelChain,
+  WORKSPACE_SLUG_PATTERN,
   type CatalogProvider,
   type ChainTab,
   type ConfiguredProvider,
@@ -431,6 +435,9 @@ export function SettingsView({
               onOutcome={setChainsNotice}
             />
             <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
+            {/* Owner-only by the server's role check; the card is part of the
+                manage face because a non-manager never loads this tab. */}
+            <WorkspaceSlugCard locale={locale} />
           </SectionGroup>
         ) : null}
       </div>
@@ -861,6 +868,82 @@ function OpsCard({
           <NoticeRegion notice={notice} />
         </div>
         <HealthBody locale={locale} payload={payload} />
+      </CardContent>
+    </SectionCard>
+  );
+}
+
+/**
+ * The workspace's readable URL (plan 98 T2). The control is owner-only and the
+ * server enforces it; the ref cannot be derived from the payload, so the
+ * current segment is read from the address bar. A rename is not a redirect
+ * (plan 98 D8 — the old ref answers 404 afterwards), so the page REPLACES its
+ * history entry instead of pushing one: Back must not return to a dead ref.
+ */
+export function WorkspaceSlugCard({ locale }: { locale: SpaBoot["locale"] }) {
+  // The segment the address bar shows — read through the same base every
+  // other path on this page uses, so a DOM-less render stays safe.
+  const base = apiBase();
+  const currentRef = base.startsWith("/dashboard/") ? base.slice("/dashboard/".length) : "";
+  const [slug, setSlug] = useState(currentRef);
+  // Card-local channel: an op outcome never rides the page-level notice.
+  const [slugNotice, setSlugNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    const next = slug.trim();
+    if (!WORKSPACE_SLUG_PATTERN.test(next)) {
+      setSlugNotice({ kind: "error", message: t(locale, "workspace.slugInvalid") });
+      return;
+    }
+    setBusy(true);
+    try {
+      const { status, body } = await putJson(`${apiBase()}/api/settings/slug`, { slug: next });
+      if (status >= 400) {
+        setSlugNotice({ kind: "error", message: t(locale, slugFailureKey(status, body)) });
+        return;
+      }
+      // The page keeps its own path under the new ref; nothing else moves.
+      const href = replaceWorkspaceRef(window.location.pathname, next);
+      if (href !== null) navigate(href, { replace: true });
+      setSlugNotice({ kind: "success", message: t(locale, "workspace.slugSaved") });
+    } catch {
+      setSlugNotice({ kind: "error", message: t(locale, "workspace.slugFailed") });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SectionCard tier="secondary">
+      <CardHeader>
+        <SectionCardTitle>{t(locale, "workspace.slugHeading")}</SectionCardTitle>
+        <CardDescription>{t(locale, "workspace.slugDescription")}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium" htmlFor="workspace-slug">
+              {t(locale, "workspace.slugLabel")}
+            </label>
+            <Input
+              id="workspace-slug"
+              className="w-64"
+              autoComplete="off"
+              spellCheck={false}
+              value={slug}
+              onChange={(event) => setSlug(event.target.value)}
+            />
+          </div>
+          <Button type="submit" disabled={busy}>
+            {t(locale, "workspace.slugSave")}
+          </Button>
+        </form>
+        <div className="mt-3">
+          <NoticeRegion notice={slugNotice} />
+        </div>
       </CardContent>
     </SectionCard>
   );

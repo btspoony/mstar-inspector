@@ -22,7 +22,17 @@ import {
   filterCatalogProviders,
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
-import { AppInfoCard, DraftChainPanel, ProviderConfigForm, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
+import {
+  AppInfoCard,
+  DraftChainPanel,
+  ProviderConfigForm,
+  WorkspaceSlugCard,
+  draftChainTabLabel,
+  githubAppSettingsUrl,
+} from "../../src/spa/pages/SettingsPage";
+import { replaceWorkspaceRef } from "../../src/spa/routes";
+import { slugFailureKey, WORKSPACE_SLUG_PATTERN } from "../../src/spa/pages/data";
+import type { DictionaryKey } from "../../src/i18n";
 import { AppDetailPage } from "../../src/spa/pages/AppDetailPage";
 import { withLocation } from "./browser-stub";
 
@@ -1955,5 +1965,74 @@ describe("runtime image row tightness", () => {
     );
     expect(row).toContain("SelectTrigger");
     expect(row).toContain("settings.saveRuntimeImage");
+  });
+});
+
+/**
+ * Plan 98 T2's settings control: the workspace segment is renamed in place, so
+ * the page keeps its own path under the new ref, and every refusal the route
+ * emits resolves through its machine-readable value rather than the copy.
+ */
+describe("workspace slug control", () => {
+  test("the rename rewrites only the workspace segment and keeps the rest", () => {
+    expect(replaceWorkspaceRef("/dashboard/acme/members", "acme-labs")).toBe(
+      "/dashboard/acme-labs/members",
+    );
+    expect(replaceWorkspaceRef("/dashboard/ws_abc24/apps/thing/insights", "acme")).toBe(
+      "/dashboard/acme/apps/thing/insights",
+    );
+    expect(replaceWorkspaceRef("/dashboard/acme-labs/members", "acme")).toBe(
+      "/dashboard/acme/members",
+    );
+    expect(replaceWorkspaceRef("/login", "acme")).toBeNull();
+  });
+
+  test("every 409 code and the 400 key resolve to their own copy", () => {
+    const cases: Array<[number, string, string]> = [
+      [409, '{"code":"slug_reserved","message":"x"}', "workspace.slugReserved"],
+      [409, '{"code":"slug_taken","message":"x"}', "workspace.slugTaken"],
+      [409, '{"code":"slug_is_workspace_id","message":"x"}', "workspace.slugIsWorkspaceId"],
+      [400, '{"key":"workspace.slugInvalid","message":"x"}', "workspace.slugInvalid"],
+      [403, "forbidden", "workspace.slugForbidden"],
+      [500, "boom", "workspace.slugFailed"],
+    ];
+    for (const [status, body, key] of cases) {
+      expect(slugFailureKey(status, body), `${status} ${body}`).toBe(key as DictionaryKey);
+    }
+    // The three conflicts are distinct: a shared copy would hide the difference
+    // between "taken" and "that is another workspace's id".
+    expect(new Set(cases.slice(0, 3).map(([, , key]) => key)).size).toBe(3);
+  });
+
+  test("the client shape gate mirrors the server's grammar", () => {
+    for (const ok of ["ab", "acme", "acme-labs", "a0", "x".repeat(39)]) {
+      expect(WORKSPACE_SLUG_PATTERN.test(ok), ok).toBe(true);
+    }
+    for (const bad of ["a", "Acme", "-acme", "acme_1", "acme labs", "x".repeat(40), ""]) {
+      expect(WORKSPACE_SLUG_PATTERN.test(bad), bad).toBe(false);
+    }
+  });
+
+  test("the owner's control renders on the settings page with its own region", () => {
+    const html = withLocation("/dashboard/acme/apps/acme-app", () =>
+      renderToStaticMarkup(createElement(WorkspaceSlugCard, { locale: "en" })),
+    );
+    expect(html).toContain(t("en", "workspace.slugHeading"));
+    expect(html).toContain(t("en", "workspace.slugSave"));
+    // Prefilled with the segment the address bar shows, so a save is a rename
+    // of the CURRENT ref rather than a guess.
+    expect(html).toContain('value="acme"');
+    expect(html).toContain(`id="workspace-slug"`);
+  });
+
+  test("no auto-suffix: a refusal never rewrites the typed slug", () => {
+    // The form posts the trimmed value verbatim and renders the refusal in
+    // place — a suffixing control would need a mutation path here.
+    const settingsSource = readFileSync(
+      join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"),
+      "utf8",
+    );
+    expect(settingsSource).toContain("putJson(`${apiBase()}/api/settings/slug`, { slug: next })");
+    expect(settingsSource).not.toMatch(/slug\s*\+\s*[\w"`'-]/);
   });
 });

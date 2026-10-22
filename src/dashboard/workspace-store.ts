@@ -198,6 +198,53 @@ type WorkspaceStoreWriteD1 = {
   >;
 };
 
+/** The guard that refused a slug write — the 409 code the route answers. */
+export type WorkspaceSlugConflict = "slug_taken" | "slug_is_workspace_id";
+
+/**
+ * The rename: both guards live in the UPDATE's own WHERE, so the statement is
+ * atomic by construction — a guard hit changes no row (`changes === 0`), which
+ * is what a two-statement pre-check batch cannot promise. The guards are the
+ * pinned pair: no OTHER workspace may carry the slug in any case, and the value
+ * may not be any workspace's id (that would make the path ref ambiguous).
+ */
+const SET_SLUG_SQL = `UPDATE workspaces SET slug = ?1
+   WHERE id = ?2
+     AND NOT EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2)
+     AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2)`;
+
+/** Which guard matched, read once after a refused write (index order = precedence). */
+const SLUG_CONFLICT_SQL = `SELECT
+     EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2) AS slug_taken,
+     EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2) AS id_taken`;
+
+/**
+ * Rename one workspace's slug. Returns the conflict that refused the write, or
+ * null when it landed. A concurrent write that slips past the guards is caught
+ * by the UNIQUE index and maps to `slug_taken`, never a 500.
+ */
+export async function setWorkspaceSlug(
+  db: WorkspaceStoreD1,
+  workspaceId: string,
+  slug: string,
+): Promise<WorkspaceSlugConflict | null> {
+  let changes: number;
+  try {
+    changes = (await db.prepare(SET_SLUG_SQL).bind(slug, workspaceId).run()).meta.changes;
+  } catch (err) {
+    if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) return "slug_taken";
+    throw err;
+  }
+  if (changes > 0) return null;
+  const guard = await db
+    .prepare(SLUG_CONFLICT_SQL)
+    .bind(slug, workspaceId)
+    .first<{ slug_taken: number; id_taken: number }>();
+  // A zero-change write with both guards clear is unreachable: the caller
+  // resolved a live row, and workspaces are soft-deleted, never removed.
+  return guard?.slug_taken ? "slug_taken" : "slug_is_workspace_id";
+}
+
 /**
  * Create one workspace and its creator's `owner` membership as ONE `batch` — a
  * workspace without an owner, or an owner without a workspace, must never be
