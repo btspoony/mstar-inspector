@@ -20,7 +20,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
-import { strictWorkspaceAppsBase } from "../dashboard/index";
+import { strictWorkspaceAppsBase, strictWorkspaceSlug } from "../dashboard/index";
 import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
@@ -115,15 +115,32 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   const auth = await readShellAuth(c);
   if (auth.kind === "deny") return auth.response;
   if (auth.kind === "redirect") return c.redirect(auth.location, 302);
-  // Signed in on the root workbench: under `strict` every data read on this
-  // page derives `/dashboard` — the retired legacy App family — so it is a
-  // dead end. Send it to the sole workspace's Apps page (the same target the
-  // OAuth callback and the login bounce use); unresolvable keeps today's
-  // shell. `/index.html` and the login page never take this branch.
+  // `/dashboard` (the root workbench) is mode-independent, but its first data
+  // read derives the base from the pathname — the retired legacy App family —
+  // so under `strict` it is a dead end. Send it to the sole workspace's Apps
+  // page (the same target the OAuth callback and the login bounce use);
+  // unresolvable keeps today's shell. `/index.html` and the login page never
+  // take this branch.
   if (c.req.path === "/dashboard") {
     const workspaceBase = await strictWorkspaceAppsBase(c.env);
     if (workspaceBase !== null) return c.redirect(workspaceBase, 302);
   }
+  // Mode-independent pages (Members) carry no workspace in their pathname, so
+  // the shell's Apps/brand links would fall back to the legacy `/dashboard/apps`
+  // dead end under `strict`. Name the deployment's sole workspace in the boot.
+  // Skipped where the slug cannot matter or is already known: a
+  // workspace-scoped pathname wins client-side, the login page renders no
+  // sidebar, and `/dashboard` either redirected above or resolved no sole
+  // workspace — this read would repeat that answer.
+  const route = matchSpaRoute(c.req.path);
+  const boot =
+    auth.boot.login !== null &&
+    route !== null &&
+    route.page !== "apps" &&
+    route.page !== "login" &&
+    !("workspaceSlug" in route)
+      ? { ...auth.boot, workspaceSlug: (await strictWorkspaceSlug(c.env)) ?? undefined }
+      : auth.boot;
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   if (c.req.method === "HEAD") {
     return new Response(null, { status: assetResponse.status });
@@ -137,7 +154,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     "cache-control": "private, no-store",
   };
   if (auth.setCookie) headers["set-cookie"] = auth.setCookie;
-  return new Response(injectSpaBoot(html, auth.boot), {
+  return new Response(injectSpaBoot(html, boot), {
     status: assetResponse.status,
     headers,
   });

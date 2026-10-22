@@ -45,9 +45,11 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
  * generic rule below.
  *
  * On a workspace-scoped page the Apps entry follows that workspace
- * (`/dashboard/<slug>/apps`); Members is not workspace-routed, so its legacy
- * href stays. The generic prefix rule then also marks the scoped Apps entry
- * current on its own detail pages.
+ * (`/dashboard/<slug>/apps`); Members is not workspace-routed, so its own href
+ * stays and the workspace comes from the boot (`SpaBoot.workspaceSlug`, the
+ * server-resolved sole workspace under `strict`) instead of the pathname. The
+ * generic prefix rule then also marks the scoped Apps entry current on its own
+ * detail pages.
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
   if (href === "/dashboard/apps") {
@@ -61,7 +63,10 @@ export function isNavCurrent(href: string, pathname: string): boolean {
 }
 
 export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel {
-  const workspaceSlug = workspaceSlugOf(pathname);
+  // The page's own prefix wins (it is the route the request was matched
+  // against); the boot slug covers the mode-independent pages (Members), whose
+  // pathname names no workspace. Both absent → the legacy targets.
+  const workspaceSlug = workspaceSlugOf(pathname) ?? boot.workspaceSlug ?? null;
   return {
     brand: t(boot.locale, "nav.brand"),
     // The root workbench 404s its data reads under `strict`, so the wordmark
