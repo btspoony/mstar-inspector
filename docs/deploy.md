@@ -542,9 +542,10 @@ precedence:
 1. an **explicit** `tenant_mode` dispatch input — `off` or `strict` (an operator
    deciding a specific run),
 2. else `vars.WORKSPACE_TENANT_MODE` — the steady-state value for routine runs,
-3. else `off`.
+   which is what a `steady` input (and no input at all) means,
+3. else `off` — the variable is unset or empty on a routine run.
 
-The input's default is **`steady`**, meaning exactly that third rule: *take the
+The input's default is **`steady`**, meaning exactly that second rule: *take the
 variable*. A dispatch nobody filled in therefore still follows the installation
 instead of deciding for it. This is the release path — the Release workflow runs
 `gh workflow run deploy-prod.yml --ref <tag>` with **no fields**, so an
@@ -565,7 +566,8 @@ resolution).
 The same resolver separates **steady state** from a **replay**: it reports
 `replay=required` only for a dispatch whose `tenant_mode` input is explicitly
 `strict`, and `replay=none` otherwise (including `steady` resolving to `strict`).
-Only a replay must bind `expected_deploy_sha`; see *Replay identity* below.
+Only a replay binds `expected_deploy_sha`, and the guard **refuses** a run that
+supplies it without that binding; see *Replay identity* below.
 
 Both workflows take a `tenant_mode` dispatch input (`steady` default — use the
 variable; `off` / `strict` explicit) and pass the resolved mode as `wrangler
@@ -610,6 +612,16 @@ deploys `strict`, and still passes every ref identity assertion above. It never
 fabricates an `expected_deploy_sha` — the binding it would claim was never
 proven. A rollback dispatch names `tenant_mode=off` explicitly; `steady` with
 the variable back at `off` is the same deploy.
+
+**A supplied `expected_deploy_sha` on a non-replay run aborts the run.** The
+input means "bind Deploy A", so a run that carries it without enforcing the
+binding would deploy looking exactly like a completed Deploy B while the
+moved-tag binding was skipped — and a `steady` dispatch can still *serve*
+`strict` from the variable, which is how the two become indistinguishable. The
+guard exits 1 with `expected_deploy_sha <sha> was supplied but this run is not a
+strict replay` and names the fix: re-dispatch with `-f tenant_mode=strict -f
+expected_deploy_sha=<sha>`. Leaving the SHA empty is the only way to ask for a
+plain steady-state deploy.
 
 **The container image is rebuilt, not byte-identical.** Both images are built
 from a rolling apt base, so a byte-identical rebuild is not provable. Pass

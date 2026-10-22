@@ -30,15 +30,24 @@ const SHA_B = "b".repeat(40);
 describe("deploy-replay-guard.sh", () => {
   const guard = (...args: string[]) => runBash(join(SCRIPTS, "deploy-replay-guard.sh"), args);
 
-  test("replay=none never binds, whatever the SHAs say (routine steady-state strict, off, empty)", () => {
+  test("replay=none never binds and never reads the SHAs — unless a Deploy-A SHA is supplied", () => {
     for (const args of [
       ["none", "", "", ""],
       ["none", "", SHA_A, SHA_A],
-      ["none", SHA_A, SHA_B, SHA_B],
       ["off", "", "", ""],
       ["", "", "", ""],
     ]) {
       expect(guard(...args).code, args.join("|")).toBe(0);
+    }
+    // A SHA on a non-replay run asks for a binding the run does not enforce
+    // (I-000089): refused, never silently discarded — `steady` may serve
+    // `strict`, so the ignored SHA would look like a completed Deploy B.
+    for (const replay of ["none", "off", ""]) {
+      const result = guard(replay, SHA_A, SHA_A, SHA_A);
+      expect(result.code, replay).toBe(1);
+      expect(result.err, replay).toContain(`expected_deploy_sha ${SHA_A} was supplied but this run is not a strict replay`);
+      expect(result.err, replay).toContain("re-dispatch with -f tenant_mode=strict");
+      expect(result.out, replay).toBe("");
     }
   });
 

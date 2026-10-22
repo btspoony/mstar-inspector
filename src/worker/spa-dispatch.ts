@@ -130,15 +130,15 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // mode-independent Members page changes the pathname but not the boot, so a
   // boot without the slug would strand that page on the legacy
   // `/dashboard/apps` dead end under `strict`. Name the workspace in every
-  // sidebar-bearing boot — a workspace-scoped pathname already carries it (no
-  // read), otherwise the deployment's sole workspace answers (one read, the
-  // sign-in landing's resolver). `/index.html` is the same shell document
+  // sidebar-bearing boot — a workspace-scoped pathname already carries the slug
+  // in the URL and the boot copies that, but the boot ALSO carries the caller's
+  // workspace role as `canCreateApp` (I-000082: a plain member cannot manage the
+  // App the manifest flow creates, so the SPA offers no Create action), and one
+  // sole-workspace read answers both — so the read runs on every strict
+  // sidebar-bearing boot either way. `/index.html` is the same shell document
   // addressed directly (the SPA router then reads the real pathname), so it
-  // takes the same boot. The same read also yields the caller's workspace role,
-  // which the boot carries as `canCreateApp` (I-000082: a plain member cannot
-  // manage the App the manifest flow creates, so the SPA offers no Create
-  // action). The login page renders no sidebar, and `/dashboard` either
-  // redirected above or has no sole workspace to name.
+  // takes the same boot. The login page renders no sidebar, and `/dashboard`
+  // either redirected above or has no sole workspace to name.
   const route = matchSpaRoute(c.req.path);
   const routeSlug = route !== null && "workspaceSlug" in route ? route.workspaceSlug : undefined;
   const extras =

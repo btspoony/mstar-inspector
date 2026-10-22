@@ -418,7 +418,10 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
       expect(await page.text(), path).toContain(t("en", "common.error.notFoundTitle"));
       const api = await worker.fetch(await authedRequest(path, "octocat"), env);
       expect(api.status, path).toBe(404);
-      expect(await api.text(), path).toBe("404 Not Found");
+      // The fetch contract is the status and its content type — never Hono's
+      // exact default body text (I-000087: that pin is not ours to keep).
+      expect(api.headers.get("Content-Type"), path).toStartWith("text/plain");
+      expect(await api.text(), path).not.toContain(t("en", "common.error.notFoundTitle"));
     }
   });
 

@@ -16,7 +16,7 @@ on:
           - 'off'
           - 'strict'
       expected_deploy_sha:
-        description: "Deploy B (strict) only: the SHA Deploy A shipped — required for a strict replay; Deploy A's run summary prints deployed_sha=<sha>"
+        description: "Deploy B (strict) only: the SHA Deploy A shipped — required for, and only accepted on, a strict dispatch (empty on a steady/off run); Deploy A's run summary prints deployed_sha=<sha>"
         required: false
         default: ''
       expected_container_digest:
@@ -92,7 +92,8 @@ jobs:
       # tests); the checkout assertion below stays here because it is about the
       # tree on disk, not about which SHA was requested. `replay=required` only
       # for a dispatch that asked for `strict` — a `steady` push serving
-      # `strict` from the variable has no Deploy A to bind.
+      # `strict` from the variable has no Deploy A to bind, and a SHA supplied
+      # on such a run is refused rather than ignored (I-000089).
       - name: Assert replay identity
         env:
           REPLAY: ${{ steps.tenant.outputs.replay }}
