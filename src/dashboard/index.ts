@@ -213,9 +213,13 @@ export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> 
 /**
  * The `strict` boot extras for one signed-in login: the deployment's sole
  * workspace slug (the shell's nav targets) and whether this login may run the
- * App-creation flow there. ONE workspace read answers both. Under `off` — and
- * whenever the deployment cannot name exactly one live workspace — both are
- * absent, so the shell keeps its legacy targets and creation stays ungated.
+ * App-creation flow there. ONE workspace read answers both.
+ *
+ * Under `strict` the answer is always a decision: an unbound store or a
+ * deployment that does not carry exactly one live workspace cannot attribute
+ * the App the flow would create, so creation is refused (`canCreateApp: false`)
+ * rather than falling through to `createApp`'s guard after the slug is minted.
+ * `off` returns `{}` — nothing is read and nothing is gated.
  */
 export async function strictWorkspaceBoot(
   env: Env,
@@ -223,22 +227,22 @@ export async function strictWorkspaceBoot(
 ): Promise<{ workspaceSlug?: string; canCreateApp?: boolean }> {
   if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return {};
   const db = dashboardD1(env);
-  if (db === null) return {};
+  if (db === null) return { canCreateApp: false };
   const access = await getSoleWorkspaceAccess(db, login);
-  if (access === null) return {};
+  if (access === null) return { canCreateApp: false };
   return {
     workspaceSlug: access.slug,
-    // I-000082: a new App lands in the sole workspace, where the scoped
-    // `canManageApp` gives a plain member no rights — so creation is
-    // owner/admin there. `off` keeps its creator rule and never asks.
+    // A new App lands in the sole workspace, where the scoped `canManageApp`
+    // gives a plain member no rights — so creation is owner/admin there.
     canCreateApp: access.role === "owner" || access.role === "admin",
   };
 }
 
 /**
- * Whether `login` may run the App-creation flow (the manifest routes' gate).
- * Absent capability means "no workspace to judge against" — the flow proceeds
- * and `createApp`'s own sole-workspace guard decides.
+ * Whether `login` may run the App-creation flow — the gate every manifest route
+ * consults, because each one can write the row. `strict` always resolves a
+ * decision; `off` never resolves extras, so its creator rule keeps the flow
+ * open (the caller can manage what it creates there).
  */
 export async function canCreateApp(env: Env, login: string): Promise<boolean> {
   return (await strictWorkspaceBoot(env, login)).canCreateApp ?? true;
@@ -732,6 +736,14 @@ dashboardApp.get("/manifest/callback", async (c) => {
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE));
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // Creation capability is re-checked HERE, not only at start: a flow that
+  // began as owner/admin must not complete after a mid-flight demotion, and the
+  // callback writes the row itself (same rule as the start/commit routes). The
+  // state cookie is already expired above, so the flow is burned either way.
+  if (!(await canCreateApp(c.env, session.login))) {
+    logManifestFailure("callback", "not_a_creator");
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   const state = await readManifestStateValue(
     getCookie(c, MANIFEST_STATE_COOKIE),
     c.req.query("state"),
@@ -985,6 +997,14 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   if (!session) return c.redirect("/dashboard/login", 302);
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
+  // This page is the resume gate for the commit that /manifest/commit performs,
+  // so it applies the same creation capability (see the callback): a member
+  // demoted mid-flight must not be handed the commit affordance.
+  if (!(await canCreateApp(c.env, session.login))) {
+    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+    logManifestFailure("confirm", "not_a_creator");
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   return c.html(
     manifestConfirmPage(
       session,
