@@ -253,15 +253,19 @@ jobs:
           ROUTINE_ARM: ${{ github.event_name != 'workflow_dispatch' }}
         run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE" "$ROUTINE_ARM"
 
-      # Replay identity (before anything is deployed). A `strict` run IS Deploy
-      # B, so it must name the SHA Deploy A shipped — the tag assertion alone
-      # cannot catch a MOVED tag (both runs would read the new tag and agree
-      # with themselves). The input comes from Deploy A's run summary.
+      # Replay identity (before anything is deployed). A DISPATCH that asked for
+      # `strict` IS Deploy B, so it must name the SHA Deploy A shipped — the tag
+      # assertion alone cannot catch a MOVED tag (both runs would read the new
+      # tag and agree with themselves). The input comes from Deploy A's run
+      # summary. A ROUTINE arm serving `strict` from the steady-state variable
+      # has no Deploy A to bind (the resolver reports `replay=none`), so it keeps
+      # every tag identity assertion below without demanding — or inventing — a
+      # Deploy-A SHA.
       - name: Assert replay identity
         env:
           TAG: ${{ github.ref_name }}
           RUN_SHA: ${{ github.sha }}
-          MODE: ${{ steps.tenant.outputs.mode }}
+          REPLAY: ${{ steps.tenant.outputs.replay }}
           EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}
         run: |
           set -euo pipefail
@@ -273,7 +277,7 @@ jobs:
             exit 1
           fi
           # The strict replay binding itself is the script's contract.
-          bash scripts/deploy-replay-guard.sh "$MODE" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA" "$TAG_SHA"
+          bash scripts/deploy-replay-guard.sh "$REPLAY" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA" "$TAG_SHA"
 
       # LOAD-BEARING: the tag must match the tree it names BEFORE production is
       # touched. A human-published Release or a hand-cut/re-pointed `v*` tag can

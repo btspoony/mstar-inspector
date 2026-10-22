@@ -554,6 +554,11 @@ it cannot claim a strict→off change: it emits a `::warning::` and records
 `tenant_mode_change=unproven->off` in the run summary. `tenant_mode_change=none`
 means no demotion is being reported (a dispatch, or a non-`off` resolution).
 
+The same resolver separates **steady state** from a **replay**: it reports
+`replay=required` only for a dispatch whose `tenant_mode` input is `strict`,
+and `replay=none` otherwise (including a routine arm serving `strict`). Only a
+replay must bind `expected_deploy_sha`; see *Replay identity* below.
+
 Both workflows take a `tenant_mode` dispatch input (`off` default, `strict`
 allowed) and pass the resolved mode as `wrangler deploy --var
 WORKSPACE_TENANT_MODE:<mode>` — production gained that `--var` for this
@@ -577,16 +582,24 @@ that last deploy bound, and the run summary reports that value.
    `vars.WORKSPACE_TENANT_MODE` back to `off` (otherwise the next routine
    release redeploys `strict`); the read face and the routes revert together.
 
-**Replay identity is asserted, not assumed.** Both workflows take
-`expected_deploy_sha`, which is **required when `tenant_mode=strict`** (a
-strict run IS Deploy B; leaving it empty aborts with `strict replay requires
-the SHA deployed by Deploy A`). Deploy A's run summary is the source of that
+**Replay identity is asserted, not assumed — for the replay, and only for it.**
+A *strict replay* is a `workflow_dispatch` whose `tenant_mode` input is
+`strict`: that run IS Deploy B and must name the SHA Deploy A shipped. The
+resolver reports `replay=required` for exactly that case, and the run aborts
+with `strict replay requires the SHA deployed by Deploy A` when
+`expected_deploy_sha` is empty. Deploy A's run summary is the source of that
 value — it prints `deployed_sha=<sha>`. The run aborts unless `github.sha`
 equals the input **and** the run's ref resolves to the same SHA (staging
 asserts the checked-out `HEAD`; production asserts the release tag through
 `git rev-parse refs/tags/<tag>^{commit}`), so a tag or branch that moved
-between A and B cannot pass by agreeing with itself. An `off` deploy may leave
-the input empty.
+between A and B cannot pass by agreeing with itself.
+
+A **routine** arm (`push` / `release: published`) resolving `strict` from
+`vars.WORKSPACE_TENANT_MODE` is *not* a replay: there is no Deploy A to bind,
+so it reports `replay=none`, deploys `strict`, and still passes every ref
+identity assertion above. It never fabricates an `expected_deploy_sha` — the
+binding it would claim was never proven. An `off` run may leave the input empty
+in either case.
 
 **The container image is rebuilt, not byte-identical.** Both images are built
 from a rolling apt base, so a byte-identical rebuild is not provable. Pass

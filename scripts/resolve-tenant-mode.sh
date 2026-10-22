@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# resolve-tenant-mode.sh — the ONE resolver of a deploy run's tenant mode.
+# resolve-tenant-mode.sh — the ONE resolver of a deploy run's tenant mode and
+# of whether that run is a strict REPLAY.
 #
 # Usage:
 #   bash scripts/resolve-tenant-mode.sh <input_mode> <steady_mode> <routine>
@@ -14,9 +15,16 @@
 # emits a `::warning::` and records `tenant_mode_change=unproven->off` rather
 # than demoting a strict installation silently (PR #87 I-000070).
 #
-# Outputs: `mode=<mode>` → `$GITHUB_OUTPUT`, `tenant_mode_change=<...>` →
-# `$GITHUB_STEP_SUMMARY`, and a human line on stdout. An illegal value exits 1,
-# so a typo reds the run before any deploy-capable step.
+# `replay=required` ONLY for a dispatch that explicitly asks for `strict`: that
+# run IS Deploy B and must name the SHA Deploy A shipped. A routine arm can
+# serve `strict` from the steady-state variable without any Deploy A to bind —
+# requiring an expected SHA there would abort every ordinary release/push, and
+# inventing one would fabricate a replay binding (PR #87 L2).
+#
+# Outputs: `mode=<mode>` and `replay=<required|none>` → `$GITHUB_OUTPUT`,
+# `tenant_mode_change=<...>` → `$GITHUB_STEP_SUMMARY`, and a human line on
+# stdout. An illegal value exits 1, so a typo reds the run before any
+# deploy-capable step.
 set -euo pipefail
 
 input="${1:-}"
@@ -32,7 +40,14 @@ case "$mode" in
     ;;
 esac
 
-echo "tenant_mode=$mode (input='${input}' steady-state='${steady}' routine='${routine}')"
+# A replay is an operator replaying a specific SHA, never a steady-state deploy:
+# only the dispatch input can ask for one.
+replay="none"
+if [ "$routine" != "true" ] && [ "$input" = "strict" ]; then
+  replay="required"
+fi
+
+echo "tenant_mode=$mode replay=$replay (input='${input}' steady-state='${steady}' routine='${routine}')"
 
 change="none"
 if [ "$routine" = "true" ] && [ "$mode" = "off" ]; then
@@ -41,7 +56,7 @@ if [ "$routine" = "true" ] && [ "$mode" = "off" ]; then
 fi
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
-  printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+  printf 'mode=%s\nreplay=%s\n' "$mode" "$replay" >> "$GITHUB_OUTPUT"
 fi
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   printf 'tenant_mode_change=%s\n' "$change" >> "$GITHUB_STEP_SUMMARY"

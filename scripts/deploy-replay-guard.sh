@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# deploy-replay-guard.sh — Deploy B (tenant_mode=strict) must replay Deploy A's
-# exact SHA.
+# deploy-replay-guard.sh — a strict REPLAY must bind the SHA Deploy A shipped.
 #
 # Usage:
-#   bash scripts/deploy-replay-guard.sh <tenant_mode> <expected_deploy_sha> <github_sha> <resolved_ref_sha>
+#   bash scripts/deploy-replay-guard.sh <replay> <expected_deploy_sha> <github_sha> <resolved_ref_sha>
 #
-# Contract: exit 0 only when the mode is not `strict`, OR when all three SHAs
+# `replay` is the resolver's `replay` output (`scripts/resolve-tenant-mode.sh`):
+#   required  a dispatch explicitly asked for `strict` — this run IS Deploy B
+#   none      anything else, including a ROUTINE arm serving `strict` from the
+#             steady-state variable. Such a run has no Deploy A to bind, so
+#             requiring an expected SHA here would abort every ordinary
+#             release/push; fabricating one would invent a binding that was
+#             never proven.
+#
+# Contract: exit 0 when `replay` is not `required`, OR when all three SHAs
 # (expected_deploy_sha, github_sha, resolved_ref_sha) are non-empty and equal.
 # Any other case prints the reason to stderr and exits 1 — a strict replay that
 # cannot prove "same tree as Deploy A" must never deploy.
@@ -16,13 +23,13 @@
 # runs would otherwise read the new ref and agree with themselves).
 set -euo pipefail
 
-mode="${1:-}"
+replay="${1:-}"
 expected="${2:-}"
 github_sha="${3:-}"
 ref_sha="${4:-}"
 
 # Not a strict replay: nothing to bind.
-if [ "$mode" != "strict" ]; then
+if [ "$replay" != "required" ]; then
   exit 0
 fi
 
