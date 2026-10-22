@@ -23,23 +23,21 @@ import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
 import { apiBase } from "../../src/spa/workspace-base";
+import { buildSidebarModel } from "../../src/spa/shell";
+import type { SpaBoot } from "../../src/spa/boot";
+import { RESERVED_WORKSPACE_SLUGS } from "../../src/spa/routes";
+import { t } from "../../src/i18n";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
-/** The routing gate's reserved-word set, restated as the test contract. */
-const RESERVED_WORKSPACE_SLUGS = [
-  "apps",
-  "api",
-  "oauth",
-  "members",
-  "login",
-  "logout",
-  "manifest",
-  "locale",
-  "healthz",
-] as const;
+/** The boot the served shell injected (the client's only identity channel). */
+function bootOf(html: string): SpaBoot {
+  const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
+  if (json === undefined) throw new Error("no injected SPA boot");
+  return JSON.parse(json) as SpaBoot;
+}
 
 function envFor(db: TestD1, mode?: "off" | "strict"): Env {
   return {
@@ -331,6 +329,27 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
     expect(res.status).toBe(404);
   });
 
+  test("the workspace 404 is the styled page on HTML navigation and a bare status on fetch", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    // HTML navigation renders the console's own 404 surface (the same page the
+    // pinned-POST 404 uses) instead of Hono's bare text.
+    const page = await worker.fetch(
+      await authedRequest("/dashboard/ghost/api/apps", "octocat", { accept: "text/html" }),
+      env,
+    );
+    expect(page.status).toBe(404);
+    expect(page.headers.get("Content-Type")).toContain("text/html");
+    expect(await page.text()).toContain(t("en", "common.error.notFoundTitle"));
+    // A fetch keeps the bare 404 body — the SPA's API reads parse status only.
+    const api = await worker.fetch(
+      await authedRequest("/dashboard/ghost/api/apps", "octocat", { accept: "application/json" }),
+      env,
+    );
+    expect(api.status).toBe(404);
+    expect(await api.text()).toBe("404 Not Found");
+  });
+
   test("non-App routes keep serving under strict", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db, "strict");
@@ -594,6 +613,43 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
       // on the page hangs off /dashboard/acme (the legacy App family 404s here).
       expect(apiBase(path), path).toBe("/dashboard/acme");
     }
+  });
+
+  test("strict: the workspace-active Members shell names the sole workspace in the boot, so its nav stays inside it", async () => {
+    // Members is not workspace-routed; only the server-resolved sole workspace
+    // can keep its Apps/brand links off the legacy `/dashboard/apps` dead end.
+    // 0026 seeds `default`; this fixture adds the membership on top of it.
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/members", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceSlug).toBe("default");
+    const sidebar = buildSidebarModel(boot, "/dashboard/members");
+    expect(sidebar.brandHref).toBe("/dashboard/default/apps");
+    expect(sidebar.items.map((item) => item.href)).toEqual([
+      "/dashboard/default/apps",
+      "/dashboard/members",
+    ]);
+  });
+
+  test("off: the Members shell keeps the legacy targets (no workspace in the boot)", async () => {
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/members", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "off")),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceSlug).toBeUndefined();
+    expect(buildSidebarModel(boot, "/dashboard/members").items.map((item) => item.href)).toEqual([
+      "/dashboard/apps",
+      "/dashboard/members",
+    ]);
   });
 
   test("off: a workspace Apps page answers 404 even with ASSETS bound (gate before dispatch)", async () => {
