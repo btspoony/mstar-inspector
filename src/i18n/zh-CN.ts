@@ -227,6 +227,25 @@ export const zhCN: Dictionary = {
     slugForbidden: "只有工作区所有者可以修改它的 URL。",
     slugFailed: "修改工作区 URL 失败，请重试。",
   },
+  /**
+   * 平台运维支持（plan 99）：运维人员的只读界面与租户不可关闭的授权通知。
+   * 通知说明谁在查看、原因与到期时间——不提供任何操作，因为租户既不能结束
+   * 也不能修改一份授权。
+   */
+  support: {
+    heading: "支持访问",
+    readOnly: "你正在限时支持授权下查看此工作区。此处全部内容为只读。",
+    workspaceId: "工作区 id",
+    createdAt: "创建时间",
+    grantsHeading: "生效中的支持授权",
+    grantLine: "{login} 拥有支持访问权限，到期时间 {expires} —— {reason}",
+    tableLogin: "GitHub 登录名",
+    tableRole: "角色",
+    /** 租户口径的常驻通知；不可关闭，不带任何操作。 */
+    noticeHeading: "支持访问已生效",
+    noticeLine: "{login} 可查看此工作区的成员，直至 {expires} —— {reason}",
+    noGrant: "当前没有生效的支持访问。",
+  },
   settings: {
     /** (AD-591) 分组 eyebrow 标签——应用信息/状态区与配置区（双语原子）。 */
     group: {

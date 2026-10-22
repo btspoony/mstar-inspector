@@ -73,8 +73,11 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
   // names no workspace. Both absent → the legacy targets.
   const workspaceRef = workspaceRefOf(pathname) ?? boot.workspaceRef ?? null;
   // No workspace yet → every nav target would 404; the shell keeps its
-  // wordmark and drops the entries (creation surface).
-  const items = boot.needsWorkspace === true ? [] : visibleNavItems(boot.role);
+  // wordmark and drops the entries (creation surface). An operator under a
+  // support grant gets the same treatment: its one page is the support view,
+  // and every other entry would only 403 that page's reads.
+  const items =
+    boot.needsWorkspace === true || boot.supportOnly === true ? [] : visibleNavItems(boot.role);
   return {
     brand: t(boot.locale, "nav.brand"),
     // The root workbench 404s its data reads under `strict`, so the wordmark

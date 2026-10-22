@@ -72,6 +72,14 @@ export type Env = {
    */
   ALERT_WEBHOOK_URL?: string;
   /**
+   * Platform-operator allowlist (plan 99): comma-separated GitHub logins,
+   * compared case-insensitively through `parseLoginList`. An operator holds NO
+   * business rights: without a live `support_grants` row for a workspace they
+   * get the outsider 404, and with one they may read that workspace's metadata
+   * and member list only. Not a secret — logins are public identity.
+   */
+  PLATFORM_OPERATORS?: string;
+  /**
    * Tenant read mode (migration 0026). `"strict"` makes every
    * execution-facing App read INNER JOIN `app_workspaces`, so an App with no
    * workspace mapping is invisible to the pipeline; unset/empty = `"off"`

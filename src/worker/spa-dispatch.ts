@@ -21,6 +21,7 @@ import { getCookie } from "hono/cookie";
 import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
 import {
+  operatorSupportWorkspace,
   strictWorkspaceAppsBase,
   strictWorkspaceBoot,
   pendingInvitesForLogin,
@@ -168,15 +169,27 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
       : await Promise.all([pendingInvitesForLogin(c.env, login), workspaceMembershipsForLogin(c.env, login)]);
   const pendingInvites = lists?.[0] ?? [];
   const memberships = lists?.[1] ?? [];
+  // A platform operator under a live grant sees the support face, not the
+  // creation surface: `needsWorkspace` below would otherwise offer to create a
+  // workspace to someone who is here to read one. The grant also names the
+  // workspace (the operator has no membership row to derive it from).
+  const supportRef =
+    login === null || route?.page === "login"
+      ? null
+      : await operatorSupportWorkspace(c.env, login, routeRef);
   // Absent fields add nothing, so `off` and a ref-less deployment keep the
   // pre-existing boot (and its JSON key order) byte-identical.
   const boot: SpaBoot = {
     ...auth.boot,
-    ...(routeRef ?? extras.workspaceRef) === undefined
+    ...(routeRef ?? supportRef ?? extras.workspaceRef) === undefined
       ? {}
-      : { workspaceRef: routeRef ?? extras.workspaceRef },
+      : { workspaceRef: routeRef ?? supportRef ?? extras.workspaceRef },
     ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
-    ...(extras.needsWorkspace === true ? { needsWorkspace: true } : {}),
+    ...(supportRef === null
+      ? extras.needsWorkspace === true
+        ? { needsWorkspace: true }
+        : {}
+      : { supportOnly: true }),
     ...(pendingInvites.length === 0 ? {} : { pendingInvites }),
     ...(memberships.length === 0 ? {} : { memberships }),
   };

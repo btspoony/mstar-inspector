@@ -1,0 +1,384 @@
+/**
+ * Platform operators and support grants — the workspace gate's operator classes
+ * (plan 99 T2).
+ *
+ * The fixture puts ONE listed operator in the env allowlist, with no membership
+ * anywhere, plus a real workspace, its members, and an App. Every case asserts
+ * BOTH the HTTP answer and the audit rows the gate wrote, because the two are
+ * one decision: the row records the attempt before dispatch, so the count must
+ * be exactly one per operator request and zero for everyone else.
+ *
+ * Pinned here:
+ *   - operator without a grant (and with an EXPIRED one) → the outsider 404
+ *     plus one `support.denied` row;
+ *   - granted operator → 200 on the support view / member list, one
+ *     `support.read` row per request;
+ *   - granted operator → 403 on every other workspace route (App settings,
+ *     credentials verify, role change, invites, audit list), one
+ *     `support.forbidden` row;
+ *   - a grant on W1 grants nothing on W2;
+ *   - an operator who IS a member keeps ordinary membership rights (AC1) and is
+ *     not audited as a support read.
+ */
+import { describe, expect, test } from "bun:test";
+import worker from "../../src/worker/index";
+import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
+import type { Env } from "../../src/worker/env";
+import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { insertSupportGrant } from "../../src/dashboard/operator-store";
+
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
+const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+
+/** The operator the allowlist names, in mixed case — the compare is NOCASE. */
+const OPERATOR = "Support-Bot";
+const DAY = 24 * 60 * 60 * 1000;
+
+function envFor(db: TestD1, operators = OPERATOR): Env {
+  return {
+    REVIEW_QUEUE: { send: async () => {} },
+    IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
+    GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
+    GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    DASHBOARD_SESSION_SECRET: SESSION_SECRET,
+    DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
+    DB: db,
+    WORKSPACE_TENANT_MODE: "strict",
+    PLATFORM_OPERATORS: operators,
+  } as unknown as Env;
+}
+
+async function authedRequest(
+  path: string,
+  login: string,
+  init: { method?: string; body?: string; accept?: string } = {},
+): Promise<Request> {
+  const session = await createSessionValue(login, null, SESSION_SECRET);
+  const headers: Record<string, string> = { Cookie: `${SESSION_COOKIE}=${session}` };
+  if (init.accept !== undefined) headers["Accept"] = init.accept;
+  if (init.body !== undefined) headers["Content-Type"] = "application/x-www-form-urlencoded";
+  return new Request(`https://worker.local${path}`, {
+    method: init.method ?? "GET",
+    headers,
+    ...(init.body === undefined ? {} : { body: init.body }),
+  });
+}
+
+function seed(db: TestD1, sql: string, ...params: Array<string | number | null>): void {
+  db.raw.prepare(sql).run(...params);
+}
+
+/** The `users.id` of a seeded login (fixtures only; bun:sqlite returns unknown). */
+function userIdOf(db: TestD1, login: string): string {
+  // bun:sqlite's `get()` is typed `unknown`; this fixture owns the query shape.
+  const row = db.raw.prepare("SELECT id FROM users WHERE github_login = ?").get(login) as
+    | { id: string }
+    | null;
+  if (row === null) throw new Error(`no users row for ${login}`);
+  return row.id;
+}
+
+/** The workspace role of a seeded member (fixtures only). */
+function roleOf(db: TestD1, userId: string): string {
+  const row = db.raw
+    .prepare("SELECT role FROM workspace_members WHERE user_id = ?")
+    .get(userId) as { role: string } | null;
+  if (row === null) throw new Error(`no membership for ${userId}`);
+  return row.role;
+}
+
+function seedUser(db: TestD1, login: string): string {
+  const id = crypto.randomUUID();
+  seed(
+    db,
+    "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, 'member', ?, NULL)",
+    id,
+    login,
+    new Date().toISOString(),
+  );
+  return id;
+}
+
+function seedWorkspace(db: TestD1, id: string, slug: string): void {
+  seed(
+    db,
+    "INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at) VALUES (?, ?, ?, NULL, ?, NULL)",
+    id,
+    slug,
+    slug,
+    new Date().toISOString(),
+  );
+}
+
+function seedMembership(db: TestD1, workspaceId: string, userId: string, role: string): void {
+  seed(
+    db,
+    "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, ?, ?)",
+    workspaceId,
+    userId,
+    role,
+    new Date().toISOString(),
+  );
+}
+
+function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): void {
+  const now = new Date().toISOString();
+  seed(
+    db,
+    `INSERT INTO github_apps
+       (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+        created_by, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
+             'dana', 'active', ?, ?)`,
+    id,
+    slug,
+    4000 + Math.floor(Math.random() * 1000),
+    slug,
+    now,
+    now,
+  );
+  seed(db, "INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+}
+
+/**
+ * Two workspaces, one member owner each, one App in W1, and the operator as a
+ * signed-in login with NO membership anywhere.
+ */
+function fixture() {
+  const db = createMigratedTestD1();
+  seedUser(db, OPERATOR);
+  const owner = seedUser(db, "dana");
+  const other = seedUser(db, "erin");
+  seedWorkspace(db, "ws-acme", "acme");
+  seedWorkspace(db, "ws-other", "other");
+  seedMembership(db, "ws-acme", owner, "owner");
+  seedMembership(db, "ws-other", other, "owner");
+  seedApp(db, "app-acme", "acme-app", "ws-acme");
+  return { db, owner };
+}
+
+/** Grant `login` on `workspaceId` from now for `ttlMs` (negative = expired). */
+function grant(db: TestD1, workspaceId: string, login: string, ttlMs: number): void {
+  const now = Date.now();
+  return void insertSupportGrant(db, {
+    workspaceId,
+    operatorLogin: login,
+    reason: "tenant-reported incident",
+    grantedBy: "deployer",
+    now: new Date(now).toISOString(),
+    expiresAt: new Date(now + ttlMs).toISOString(),
+  });
+}
+
+type AuditRow = { action: string; actor_login: string; workspace_id: string };
+
+function auditRows(db: TestD1): AuditRow[] {
+  return db.raw
+    .prepare("SELECT action, actor_login, workspace_id FROM audit_events ORDER BY created_at ASC, id ASC")
+    .all() as AuditRow[];
+}
+
+describe("operator without a valid grant", () => {
+  test("every workspace path is the outsider 404 with exactly one support.denied row", async () => {
+    const { db } = fixture();
+    const env = envFor(db);
+    for (const path of [
+      "/dashboard/acme/api/support/workspace",
+      "/dashboard/acme/api/members",
+      "/dashboard/acme/api/apps",
+      "/dashboard/acme/api/apps/acme-app/settings",
+    ]) {
+      const res = await worker.fetch(await authedRequest(path, OPERATOR), env);
+      expect(res.status, path).toBe(404);
+    }
+    const rows = auditRows(db);
+    expect(rows).toHaveLength(4);
+    expect(rows.every((row) => row.action === "support.denied")).toBe(true);
+    expect(rows.every((row) => row.actor_login === OPERATOR && row.workspace_id === "ws-acme")).toBe(true);
+  });
+
+  test("an EXPIRED grant answers exactly like no grant (404 + support.denied)", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, -DAY);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR),
+      envFor(db),
+    );
+    expect(res.status).toBe(404);
+    expect(auditRows(db).map((row) => row.action)).toEqual(["support.denied"]);
+  });
+
+  test("a login NOT in PLATFORM_OPERATORS is an ordinary outsider: 404 and no audit row", async () => {
+    const { db } = fixture();
+    seedUser(db, "stranger");
+    grant(db, "ws-acme", "stranger", DAY);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/api/support/workspace", "stranger"),
+      envFor(db),
+    );
+    expect(res.status).toBe(404);
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("operator with a valid grant", () => {
+  test("the support view returns the AC2 fields and writes one support.read row", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR),
+      envFor(db),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      workspace: Record<string, unknown>;
+      members: Array<Record<string, unknown>>;
+      grants: Array<Record<string, unknown>>;
+    };
+    expect(Object.keys(body.workspace).sort()).toEqual(["created_at", "id", "name", "slug"]);
+    expect(body.members).toEqual([{ github_login: "dana", role: "owner" }]);
+    expect(body.grants).toHaveLength(1);
+    expect(body.grants[0]?.operator_login).toBe(OPERATOR);
+    expect(body.grants[0]?.reason).toBe("tenant-reported incident");
+    expect(auditRows(db).map((row) => row.action)).toEqual(["support.read"]);
+  });
+
+  test("the member list is readable but carries only login + role", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const res = await worker.fetch(await authedRequest("/dashboard/acme/api/members", OPERATOR), envFor(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { members: Array<Record<string, unknown>> };
+    expect(body.members).toEqual([{ github_login: "dana", role: "owner" }]);
+    expect(auditRows(db).map((row) => row.action)).toEqual(["support.read"]);
+  });
+
+  test("the grants notice is readable and audited", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/api/support/grants", OPERATOR),
+      envFor(db),
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { grants: unknown[] }).grants).toHaveLength(1);
+    expect(auditRows(db).map((row) => row.action)).toEqual(["support.read"]);
+  });
+
+  test("App settings, credentials and the App list are 403 with one support.forbidden row each", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const env = envFor(db);
+    const cases: Array<{ path: string; method?: string; body?: string }> = [
+      { path: "/dashboard/acme/api/apps" },
+      { path: "/dashboard/acme/api/apps/acme-app/settings" },
+      { path: "/dashboard/acme/api/apps/acme-app/models" },
+      { path: "/dashboard/acme/api/apps/acme-app/insights/summary" },
+      { path: "/dashboard/acme/api/apps/acme-app/keys/verify", method: "POST", body: "provider=openai" },
+    ];
+    for (const item of cases) {
+      const res = await worker.fetch(
+        await authedRequest(item.path, OPERATOR, { method: item.method, body: item.body }),
+        env,
+      );
+      expect(res.status, item.path).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe("forbidden");
+    }
+    const rows = auditRows(db);
+    expect(rows).toHaveLength(cases.length);
+    expect(rows.every((row) => row.action === "support.forbidden")).toBe(true);
+  });
+
+  test("role change, member removal, invites and the audit list are 403", async () => {
+    const { db, owner } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const env = envFor(db);
+    const ownerId = userIdOf(db, "dana");
+    const cases: Array<{ path: string; method: string; body: string }> = [
+      { path: "/dashboard/acme/members/role", method: "POST", body: `userId=${ownerId}&role=member` },
+      { path: "/dashboard/acme/members/remove", method: "POST", body: `userId=${ownerId}` },
+      { path: "/dashboard/acme/api/members/invites", method: "POST", body: "login=hubot&role=member" },
+    ];
+    for (const item of cases) {
+      const res = await worker.fetch(await authedRequest(item.path, OPERATOR, item), env);
+      expect(res.status, item.path).toBe(403);
+    }
+    const audit = await worker.fetch(await authedRequest("/dashboard/acme/api/audit", OPERATOR), env);
+    expect(audit.status).toBe(403);
+    // The owner is untouched by every refused write.
+    expect(roleOf(db, owner)).toBe("owner");
+    expect(auditRows(db)).toHaveLength(4);
+    expect(auditRows(db).every((row) => row.action === "support.forbidden")).toBe(true);
+  });
+
+  test("a grant on W1 grants nothing on W2: 404 there, 200 on W1", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const env = envFor(db);
+    expect(
+      (await worker.fetch(await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR), env)).status,
+    ).toBe(200);
+    const other = await worker.fetch(
+      await authedRequest("/dashboard/other/api/support/workspace", OPERATOR),
+      env,
+    );
+    expect(other.status).toBe(404);
+    // Both rows land in the same millisecond, so compare as a set.
+    const rows = auditRows(db);
+    expect(rows.map((row) => row.action).sort()).toEqual(["support.denied", "support.read"]);
+    expect(rows.find((row) => row.action === "support.denied")?.workspace_id).toBe("ws-other");
+  });
+
+});
+
+describe("an operator who is also a member", () => {
+  test("keeps ordinary membership rights and writes no support audit row", async () => {
+    const { db } = fixture();
+    // `dana` owns W1 and is listed as an operator too.
+    grant(db, "ws-acme", "dana", DAY);
+    const env = envFor(db, `${OPERATOR},dana`);
+    // A write route the ceiling would refuse an operator: as a member it serves.
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/api/members", "dana"),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { viewer: { role: string } };
+    expect(body.viewer.role).toBe("owner");
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("tenant-visible grant notice and member audit reads", () => {
+  test("a member reads the grants notice and sees no audit rows of their own", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const res = await worker.fetch(await authedRequest("/dashboard/acme/api/support/grants", "dana"), envFor(db));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { grants: Array<{ operator_login: string }> }).grants[0]?.operator_login).toBe(
+      OPERATOR,
+    );
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("owner reads the audit list; a plain member is 403", async () => {
+    const { db, owner } = fixture();
+    seedUser(db, "mallory");
+    seedMembership(db, "ws-acme", userIdOf(db, "mallory"), "member");
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const env = envFor(db);
+    await worker.fetch(await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR), env);
+
+    const asOwner = await worker.fetch(await authedRequest("/dashboard/acme/api/audit", "dana"), env);
+    expect(asOwner.status).toBe(200);
+    const events = ((await asOwner.json()) as { events: Array<{ actor_login: string; action: string; created_at: string }> })
+      .events;
+    expect(events).toHaveLength(1);
+    expect(events[0]?.actor_login).toBe(OPERATOR);
+    expect(events[0]?.action).toBe("support.read");
+    expect(owner).toBeTruthy();
+
+    const asMember = await worker.fetch(await authedRequest("/dashboard/acme/api/audit", "mallory"), env);
+    expect(asMember.status).toBe(403);
+  });
+});

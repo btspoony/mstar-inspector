@@ -126,11 +126,18 @@ import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason 
 import {
   deleteWorkspaceMember,
   getUserByLogin,
+  parseLoginList,
   signInDashboardUser,
   updateWorkspaceMemberRole,
   type DashboardD1,
   type DashboardUserRow,
 } from "./users";
+import {
+  hasValidGrant,
+  insertAuditEvent,
+  listActiveSupportGrants,
+  listAuditEvents,
+} from "./operator-store";
 import {
   errorPage,
   forbiddenPage,
@@ -148,10 +155,16 @@ import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-head
 
 /**
  * Principal classes of a workspace request (the request-path ordering
- * contract, step 3). `invitee` may reach ONLY the invite-accept route; the operator-support plan
- * inserts its operator classes after `invitee` in the same middleware.
+ * contract, step 3). `invitee` may reach ONLY the invite-accept route;
+ * `operator-granted` may reach ONLY `read`-declared routes, and
+ * `operator-denied` answers the outsider 404.
  */
-type WorkspacePrincipal = "member" | "invitee" | "outsider";
+type WorkspacePrincipal =
+  | "member"
+  | "invitee"
+  | "operator-granted"
+  | "operator-denied"
+  | "outsider";
 
 /**
  * Per-request values the workspace tenancy middleware attaches: `tenant`
@@ -301,6 +314,39 @@ export async function strictWorkspaceBoot(
     // gives a plain member no rights — so creation is owner/admin there.
     canCreateApp: access.role === "owner" || access.role === "admin",
   };
+}
+
+/**
+ * The workspace slug a platform operator is visiting under a live support
+ * grant, or null when this login is not such a visitor. True only when the
+ * login is listed in `PLATFORM_OPERATORS`, holds NO membership in that
+ * workspace, and has an unexpired `support_grants` row there. A member operator
+ * is null: membership carries ordinary rights (AC1) and the read-only ceiling
+ * never applies to it.
+ *
+ * `workspaceRef` is the path's workspace segment when there is one, else the
+ * deployment's sole workspace. An unbound store, an unknown ref, no grant and a
+ * lapsed grant all answer null — and the shell then behaves exactly as before.
+ */
+export async function operatorSupportWorkspace(
+  env: Env,
+  login: string,
+  workspaceRef?: string,
+): Promise<string | null> {
+  if (!isPlatformOperator(env, login)) return null;
+  const db = dashboardD1(env);
+  if (db === null) return null;
+  const workspace =
+    workspaceRef === undefined
+      ? await getSoleWorkspace(db)
+      : await getWorkspaceByRef(db, workspaceRef);
+  if (workspace === null) return null;
+  const user = await getUserByLogin(db, login);
+  if (user === null) return null;
+  if ((await getMembership(db, workspace.id, user.id)) !== null) return null;
+  const now = new Date().toISOString();
+  if (!(await hasValidGrant(db, workspace.id, login, now))) return null;
+  return workspace.slug;
 }
 
 /**
@@ -684,15 +730,28 @@ dashboardApp.use("*", async (c, next) => {
  * every workspace route. It runs after the session guard (so `authUser` is the
  * verified caller) and classifies the principal in order:
  *
- *   member → invitee → outsider
+ *   member → invitee → operator-granted → operator-denied → outsider
  *
  * `member` gets the workspace scope with its `workspace_members.role`;
  * `invitee` (a live pending invite for this workspace matches the login) may
  * reach ONLY the accept route; everything else is `outsider`, which the routes
  * answer with the byte-identical tenant 404.
  *
- * The planned operator-support work inserts its operator classes after
- * `invitee` in this same list.
+ * The operator classes come LAST, after membership and the invite check: an
+ * operator who is a member keeps ordinary membership rights (AC1), so
+ * `PLATFORM_OPERATORS` is not even parsed until neither applies. A listed
+ * operator without a live `support_grants` row on THIS workspace is
+ * `operator-denied` (the outsider 404, including an expired grant); one with a
+ * live row is `operator-granted`, and the ceiling admits only the routes
+ * declared `access: "read"` — everything else answers 403.
+ *
+ * Every operator decision writes exactly ONE `audit_events` row here, before
+ * dispatch: `support.read` for a granted read-route dispatch,
+ * `support.forbidden` for a granted request the ceiling refuses, and
+ * `support.denied` for an operator without a grant. A route handler therefore
+ * cannot skip the audit — classification and the write happen before `next()`,
+ * and mounting a workspace route at all requires the route table that declares
+ * its access.
  */
 dashboardApp.use("*", async (c, next) => {
   if (c.get("workspaceScope") !== undefined) return next();
@@ -718,6 +777,37 @@ dashboardApp.use("*", async (c, next) => {
     user === undefined
       ? null
       : await getPendingInviteByLogin(db, workspace.id, user.github_login, new Date().toISOString());
+  // Operator classes come after member and invitee: a listed operator who is a
+  // member (or holds a live invite here) keeps that ordinary standing (AC1).
+  if (user !== undefined && invited === null && isPlatformOperator(c.env, user.github_login)) {
+    const now = new Date().toISOString();
+    if (!(await hasValidGrant(db, workspace.id, user.github_login, now))) {
+      // Expired and absent grants are the same answer — the outsider 404 — so
+      // the response never reveals the grant state.
+      await insertAuditEvent(db, {
+        workspaceId: workspace.id,
+        actorLogin: user.github_login,
+        action: "support.denied",
+        now,
+      });
+      c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role: null, principal: "operator-denied" });
+      c.set("workspaceScope", null);
+      return await tenantNotFound(c);
+    }
+    // The audit row records the ATTEMPT, before dispatch: it is written here,
+    // so no route handler can skip it and none can change what was decided.
+    const read = isOperatorReadPath(c.req.path);
+    await insertAuditEvent(db, {
+      workspaceId: workspace.id,
+      actorLogin: user.github_login,
+      action: read ? "support.read" : "support.forbidden",
+      now,
+    });
+    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role: null, principal: "operator-granted" });
+    c.set("workspaceScope", null);
+    if (!read) return c.json({ error: "forbidden" }, 403);
+    return next();
+  }
   c.set("tenant", {
     ref: tenant.ref,
     workspaceId: workspace.id,
@@ -727,6 +817,25 @@ dashboardApp.use("*", async (c, next) => {
   c.set("workspaceScope", null);
   return next();
 });
+
+/** Platform-operator allowlist membership — NOCASE, same parser as every login list. */
+function isPlatformOperator(env: Env, login: string): boolean {
+  return parseLoginList(env.PLATFORM_OPERATORS).some(
+    (entry) => entry.toLowerCase() === login.toLowerCase(),
+  );
+}
+
+/**
+ * The operator read ceiling: the routes declared `access: "read"` in the
+ * workspace route table. Everything else — every App read, credentials,
+ * settings, role change, invites, the audit list — is write-classified and
+ * answers 403, and an UNDECLARED route is `write` too, so a route added later
+ * cannot widen the surface by omission. Declared paths are literals (no
+ * `:param`), which is what makes the suffix match exact.
+ */
+function isOperatorReadPath(path: string): boolean {
+  return APP_ROUTES.some((route) => route.access === "read" && path.endsWith(route.path));
+}
 
 async function startOAuthLogin(c: DashboardContext): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
@@ -1368,11 +1477,23 @@ function inviteMutationResponse(
 }
 
 /**
- * The workspace's member list — every member sees it (AC4), so this route
- * is gated by `requireMember` alone. `role` is the WORKSPACE role; the legacy
- * `users.role` column is never read for authorization after this plan.
+ * The workspace's member list — every member sees it (AC4), and the route is
+ * declared `read`, so a granted platform operator reaches it too. The operator
+ * response carries ONLY the two AC2 fields (login + role): no row ids, no join
+ * stamps, no viewer role, since an operator holds no workspace role and can
+ * act on nothing here. For a member the payload is unchanged.
  */
 const memberListRoute = async (c: DashboardContext) => {
+  const tenant = c.get("tenant");
+  if (tenant?.principal === "operator-granted") {
+    const db = dashboardD1(c.env);
+    if (!db || tenant.workspaceId === null) return await tenantNotFound(c);
+    const rows = await listWorkspaceMembers(db, tenant.workspaceId);
+    return c.json({
+      viewer: { login: c.get("authUser")?.github_login ?? null, role: null },
+      members: rows.map((row) => ({ github_login: row.github_login, role: row.role })),
+    });
+  }
   const member = await requireMember(c);
   if (!member.ok) return member.response;
   if (member.scope === null) return c.json({ error: "not_found" }, 404);
@@ -1607,6 +1728,112 @@ const memberRoleRoute = async (c: DashboardContext) => {
     return inviteMutationResponse(c, "Cannot demote the last owner.", 409);
   }
   return inviteMutationResponse(c, "ok", 200);
+};
+
+// --- Support reads (plan 99) ---
+//
+// Two faces, both `read` in the route table so a granted platform operator
+// reaches them and nothing else:
+//   - `/api/support/workspace` — the operator's read-only view: the four
+//     `workspaces` fields, each member's login + role, and the active grants.
+//     Operators ONLY: a member reads the same facts through the ordinary
+//     members face, so this one refuses them (AC2 fixes its exact field set).
+//   - `/api/support/grants` — the members' undismissable notice data (operator
+//     login, `reason`, `expires_at`). Every member sees it; it carries no
+//     control that ends or edits a grant.
+// A granted operator never reaches a member-only handler: the gate refuses
+// every write-classified route before any body runs (AC3).
+const supportWorkspaceRoute = async (c: DashboardContext) => {
+  const tenant = c.get("tenant");
+  const db = dashboardD1(c.env);
+  if (!tenant || tenant.workspaceId === null || !db) return await tenantNotFound(c);
+  if (tenant.principal !== "operator-granted") {
+    // A member has the ordinary member/App faces for this data, so this one is
+    // not theirs; everyone the gate did not classify as a member gets the same
+    // 404 an outsider does (no grant state leaks either way).
+    return tenant.principal === "member"
+      ? c.json({ error: "forbidden" }, 403)
+      : await tenantNotFound(c);
+  }
+  const workspace = await getWorkspaceByRef(db, tenant.ref);
+  if (!workspace) return await tenantNotFound(c);
+  const now = new Date().toISOString();
+  const [members, grants] = await Promise.all([
+    listWorkspaceMembers(db, workspace.id),
+    listActiveSupportGrants(db, workspace.id, now),
+  ]);
+  return c.json({
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+      slug: workspace.slug,
+      created_at: workspace.created_at,
+    },
+    members: members.map((row) => ({ github_login: row.github_login, role: row.role })),
+    grants: grants.map((row) => ({
+      operator_login: row.operator_login,
+      reason: row.reason,
+      expires_at: row.expires_at,
+    })),
+  });
+};
+
+/**
+ * The active grants on this workspace — the member notice, and the same fact
+ * for a granted operator (the read ceiling admits this path). Every member
+ * reads it; an outsider is the tenant 404. It answers an empty list rather
+ * than 404 for a member, so the shell renders no notice.
+ */
+const supportGrantsRoute = async (c: DashboardContext) => {
+  const tenant = c.get("tenant");
+  const db = dashboardD1(c.env);
+  if (!tenant || !db) return await tenantNotFound(c);
+  let workspaceId: string | null;
+  if (tenant.principal === "operator-granted") {
+    workspaceId = tenant.workspaceId;
+  } else {
+    const member = await requireMember(c);
+    if (!member.ok) return member.response;
+    workspaceId = member.scope?.workspaceId ?? null;
+  }
+  if (workspaceId === null) return c.json({ error: "not_found" }, 404);
+  const grants = await listActiveSupportGrants(db, workspaceId, new Date().toISOString());
+  return c.json({
+    grants: grants.map((row) => ({
+      operator_login: row.operator_login,
+      reason: row.reason,
+      expires_at: row.expires_at,
+    })),
+  });
+};
+
+/** Rows per audit read when the caller names no `limit`. */
+const AUDIT_DEFAULT_LIMIT = 50;
+const AUDIT_MAX_LIMIT = 200;
+
+/**
+ * The workspace's audit rows — `owner`/`admin` only (a plain `member` gets the
+ * members-family 403, an outsider the tenant 404, and a granted operator the
+ * gate's 403). Read-only by construction: the store exports no update or
+ * delete path, so no caller can rewrite history.
+ */
+const auditListRoute = async (c: DashboardContext) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const raw = c.req.query("limit");
+  let limit = AUDIT_DEFAULT_LIMIT;
+  if (raw !== undefined) {
+    if (!/^\d+$/.test(raw)) return c.json({ error: "limit must be a positive integer" }, 400);
+    limit = Math.min(Number(raw), AUDIT_MAX_LIMIT);
+  }
+  const events = await listAuditEvents(gate.db, gate.scope.workspaceId, limit);
+  return c.json({
+    events: events.map((row) => ({
+      actor_login: row.actor_login,
+      action: row.action,
+      created_at: row.created_at,
+    })),
+  });
 };
 
 // --- Workspace settings: the owner-editable slug ---
@@ -3424,31 +3651,44 @@ type AppRoute = {
   handler: AppRouteHandler;
   /** `false` = workspace-only: no legacy copy is registered. Defaults to both. */
   root?: boolean;
+  /**
+   * The operator ceiling's ONE input: `read` admits a granted platform
+   * operator, `write` (the default, so an omission fails closed) answers 403.
+   * Declaring a route here is the only way to mount a workspace face.
+   */
+  access?: "read" | "write";
 };
 
 const APP_ROUTES: ReadonlyArray<AppRoute> = [
-  { method: "get", path: "/apps/:slug/onboarding", handler: appOnboardingRoute },
-  { method: "get", path: "/api/apps", handler: appListRoute },
-  { method: "post", path: "/apps/:slug/disable", handler: (c) => appStatusAction(c, "disable") },
-  { method: "post", path: "/apps/:slug/enable", handler: (c) => appStatusAction(c, "enable") },
-  { method: "post", path: "/apps/:slug/delete", handler: (c) => appStatusAction(c, "delete") },
-  { method: "post", path: "/apps/:slug/pause", handler: (c) => appReviewAction(c, "pause") },
-  { method: "post", path: "/apps/:slug/resume", handler: (c) => appReviewAction(c, "resume") },
-  { method: "post", path: "/apps/:slug/review-trigger-mode", handler: appReviewTriggerModeAction },
-  { method: "get", path: "/api/apps/:slug/settings", handler: appSettingsRoute },
-  { method: "get", path: "/api/apps/:slug/models", handler: appModelsRoute },
-  { method: "post", path: "/api/apps/:slug/keys/verify", handler: appKeyVerifyRoute },
-  { method: "post", path: "/apps/:slug/settings", handler: appSettingsSaveRoute },
-  { method: "post", path: "/apps/:slug/settings/key/delete", handler: appKeyDeleteRoute },
-  { method: "get", path: "/api/apps/:slug/insights/summary", handler: appInsightsRoute },
-  // Members + invitations: workspace-only.
-  { method: "get", path: "/api/members", handler: memberListRoute, root: false },
-  { method: "get", path: "/api/members/invites", handler: inviteListRoute, root: false },
-  { method: "post", path: "/api/members/invites", handler: inviteCreateRoute, root: false },
-  { method: "post", path: "/api/members/invites/:id/revoke", handler: inviteRevokeRoute, root: false },
-  { method: "post", path: "/api/members/invites/:id/accept", handler: inviteAcceptRoute, root: false },
-  { method: "post", path: "/members/role", handler: memberRoleRoute, root: false },
-  { method: "post", path: "/members/remove", handler: memberRemoveRoute, root: false },
+  { method: "get", path: "/apps/:slug/onboarding", handler: appOnboardingRoute, access: "write" },
+  { method: "get", path: "/api/apps", handler: appListRoute, access: "write" },
+  { method: "post", path: "/apps/:slug/disable", handler: (c) => appStatusAction(c, "disable"), access: "write" },
+  { method: "post", path: "/apps/:slug/enable", handler: (c) => appStatusAction(c, "enable"), access: "write" },
+  { method: "post", path: "/apps/:slug/delete", handler: (c) => appStatusAction(c, "delete"), access: "write" },
+  { method: "post", path: "/apps/:slug/pause", handler: (c) => appReviewAction(c, "pause"), access: "write" },
+  { method: "post", path: "/apps/:slug/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
+  { method: "post", path: "/apps/:slug/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
+  { method: "get", path: "/api/apps/:slug/settings", handler: appSettingsRoute, access: "write" },
+  { method: "get", path: "/api/apps/:slug/models", handler: appModelsRoute, access: "write" },
+  { method: "post", path: "/api/apps/:slug/keys/verify", handler: appKeyVerifyRoute, access: "write" },
+  { method: "post", path: "/apps/:slug/settings", handler: appSettingsSaveRoute, access: "write" },
+  { method: "post", path: "/apps/:slug/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
+  { method: "get", path: "/api/apps/:slug/insights/summary", handler: appInsightsRoute, access: "write" },
+  // Members + invitations: workspace-only. The member list is `read` (every
+  // member sees it, and the operator's AC2 field set is this same list); every
+  // App/settings read and invite face is `write` (AC3).
+  { method: "get", path: "/api/members", handler: memberListRoute, root: false, access: "read" },
+  { method: "get", path: "/api/members/invites", handler: inviteListRoute, root: false, access: "write" },
+  { method: "post", path: "/api/members/invites", handler: inviteCreateRoute, root: false, access: "write" },
+  { method: "post", path: "/api/members/invites/:id/revoke", handler: inviteRevokeRoute, root: false, access: "write" },
+  { method: "post", path: "/api/members/invites/:id/accept", handler: inviteAcceptRoute, root: false, access: "write" },
+  { method: "post", path: "/members/role", handler: memberRoleRoute, root: false, access: "write" },
+  { method: "post", path: "/members/remove", handler: memberRemoveRoute, root: false, access: "write" },
+  // Support + audit (plan 99): the granted operator's read-only face, the
+  // members' undismissable notice, and the owner/admin audit read.
+  { method: "get", path: "/api/support/workspace", handler: supportWorkspaceRoute, root: false, access: "read" },
+  { method: "get", path: "/api/support/grants", handler: supportGrantsRoute, root: false, access: "read" },
+  { method: "get", path: "/api/audit", handler: auditListRoute, root: false, access: "write" },
 ];
 
 /**

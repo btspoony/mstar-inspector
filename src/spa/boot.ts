@@ -59,6 +59,13 @@ export type SpaBoot = {
    * instead of the workspace pages, which would 404.
    */
   needsWorkspace?: boolean;
+  /**
+   * `true` = a platform operator holding a live support grant on the boot's
+   * workspace, with no membership anywhere. The shell shows the read-only
+   * support face instead of the creation page — an operator's grant is a visit
+   * to an existing workspace, not the start of one.
+   */
+  supportOnly?: boolean;
   pendingInvites?: Array<{
     workspaceRef: string;
     inviteId: string;

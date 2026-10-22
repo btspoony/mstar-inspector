@@ -19,6 +19,8 @@ export type WorkspaceRow = {
   id: string;
   slug: string;
   name: string;
+  /** ISO stamp — one of the four fields the support view may expose (AC2). */
+  created_at: string;
 };
 
 /** One member of a workspace (users row + its workspace role). */
@@ -62,7 +64,7 @@ export async function getWorkspaceByRef(
 ): Promise<WorkspaceRow | null> {
   const rows = await db
     .prepare(
-      `SELECT id, slug, name FROM workspaces WHERE (slug = ?1 OR id = ?1) AND deleted_at IS NULL LIMIT 2`,
+      `SELECT id, slug, name, created_at FROM workspaces WHERE (slug = ?1 OR id = ?1) AND deleted_at IS NULL LIMIT 2`,
     )
     .bind(ref)
     .all<WorkspaceRow>();
@@ -137,7 +139,7 @@ export async function getWorkspaceMember(
  */
 export async function getSoleWorkspace(db: WorkspaceStoreD1): Promise<WorkspaceRow | null> {
   const rows = await db
-    .prepare(`SELECT id, slug, name FROM workspaces WHERE deleted_at IS NULL LIMIT 2`)
+    .prepare(`SELECT id, slug, name, created_at FROM workspaces WHERE deleted_at IS NULL LIMIT 2`)
     .all<WorkspaceRow>();
   return rows.results.length === 1 ? rows.results[0]! : null;
 }
