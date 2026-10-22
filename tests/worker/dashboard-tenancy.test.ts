@@ -27,6 +27,7 @@ import {
   createHoldValue,
   createManifestStateValue,
   encryptHoldValue,
+  readManifestStateValue,
 } from "../../src/dashboard/manifest";
 import { apiBase } from "../../src/spa/workspace-base";
 import type { SpaBoot } from "../../src/spa/boot";
@@ -820,24 +821,41 @@ describe("the post-authentication landing is the workspace Apps page", () => {
     expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
   });
 
-  test("several live workspaces → the root shell is kept (no guessed slug)", async () => {
+  test("several live workspaces → the login's own first membership, never the retired /dashboard/apps", async () => {
+    // `octocat` belongs to `ws-acme` only, so the deployment's non-sole shape
+    // no longer strands them: the landing names their membership (ordered by
+    // name, then id — stable), which is a real route.
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
       withSpaAssets(envFor(db)),
     );
-    expect(res.status).toBe(200);
-    expect(bootOf(await res.text()).workspaceRef).toBeUndefined();
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps");
+    expect(res.headers.get("Location")).not.toBe("/dashboard/apps");
   });
 
-  test("a member of a non-sole workspace keeps the root shell (no guessed slug)", async () => {
-    const { db } = tenancyFixture();
+  test("a login with TWO memberships lands on the first one and keeps the switcher", async () => {
+    const { db, users } = tenancyFixture();
+    // `dana` owns `ws-acme`; give them `ws-other` too (membership order is
+    // name, then id → `acme` still sorts first).
+    seedMembership(db, "ws-other", users.wsOwner, "admin");
     const res = await worker.fetch(
-      await authedRequest("/dashboard", "mallory", { accept: "text/html" }),
+      await authedRequest("/dashboard", "dana", { accept: "text/html" }),
       withSpaAssets(envFor(db)),
     );
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain("window.__BOOT__");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps");
+
+    // The shell that redirect lands on still offers both workspaces.
+    const shell = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps", "dana", { accept: "text/html" }),
+      withSpaAssets(envFor(db)),
+    );
+    expect(shell.status).toBe(200);
+    const boot = bootOf(await shell.text());
+    expect(boot.memberships?.map((m) => m.slug).sort()).toEqual(["acme", "other"]);
+    expect(boot.workspaceRef).toBe("acme");
   });
 });
 
@@ -981,6 +999,22 @@ describe("App creation is owner/admin", () => {
     return authedRequest(path, login, { method: "POST" }).then((request) => worker.fetch(request, env));
   }
 
+  /** POST /dashboard/manifest/commit carrying a parked hold cookie. */
+  function postWithHold(login: string, hold: string, env: Env): Promise<Response> {
+    return authedRequest("/dashboard/manifest/commit", login, {
+      method: "POST",
+      extraCookies: { [MANIFEST_HOLD_COOKIE]: hold },
+    }).then((request) => worker.fetch(request, env));
+  }
+
+  const SLUG = "mstar-inspector-carol";
+  const CONVERSION = {
+    id: 987654,
+    name: SLUG,
+    pem: "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----",
+    webhook_secret: "not-a-real-webhook-secret",
+  };
+
   test("owner and admin may start the manifest flow and get the create form", async () => {
     const { db } = soleWorkspaceRoles();
     const env = envFor(db);
@@ -1004,32 +1038,134 @@ describe("App creation is owner/admin", () => {
     }
   });
 
-  test("the commit recovery route applies the same gate (member 403, owner passes to the hold check)", async () => {
+  test("the commit recovery route applies the same gate once a hold names its workspace", async () => {
     const { db } = soleWorkspaceRoles();
     const env = envFor(db);
-    const member = await post("mallory", "/dashboard/manifest/commit", env);
+    // With no hold there is no flow and no target workspace: the route's
+    // long-standing "flow expired" bounce (302 to the shell, zero writes)
+    // answers before any permission read.
+    const noHold = await post("mallory", "/dashboard/manifest/commit", env);
+    expect(noHold.status).toBe(302);
+    expect(noHold.headers.get("Location")).toBe("/dashboard");
+    // With a hold naming the sole workspace, the member is refused (403) and
+    // the hold survives, so restoring the role makes the resubmit work.
+    const hold = await createHoldValue(CONVERSION, "mallory", SESSION_SECRET, SLUG, "default");
+    const member = await postWithHold("mallory", hold, env);
     expect(member.status).toBe(403);
     expect(await member.text()).toContain(t("en", "common.error.forbiddenTitle"));
-    // The owner clears the gate; with no hold the route falls back to the flow
-    // start, which is the pre-existing no-hold contract.
-    const owner = await post("dana", "/dashboard/manifest/commit", env);
+    expect(member.headers.getSetCookie().some((c) => c.includes("Max-Age=0"))).toBe(false);
+    // The owner clears the gate and commits into the workspace the hold names.
+    const owner = await postWithHold("dana", await createHoldValue(CONVERSION, "dana", SESSION_SECRET, SLUG, "default"), env);
     expect(owner.status).toBe(302);
-    expect(owner.headers.get("Location")).toBe("/dashboard");
+    expect(owner.headers.get("Location")).toBe(`/dashboard/default/apps/${SLUG}/onboarding`);
   });
 
-  test("a deployment without a sole workspace refuses creation instead of defaulting open", async () => {
-    // `tenancyFixture` carries several live workspaces, so ownership of a new
-    // App cannot be resolved at all: the gate must refuse here, not mint a slug
-    // and only fail later inside createApp (after the state cookie and the
-    // operator's trip to GitHub).
+  test("a no-ref manifest start on a multi-workspace deployment answers a readable 409 workspace_required", async () => {
+    // `tenancyFixture` carries several live workspaces and the deployment-level
+    // start route names none, so no attribution exists. That is missing input,
+    // not a permission answer: 409 + a JSON code for a fetch, the styled error
+    // page for navigation — never the bare 403 that hid the Create action.
     const { db } = tenancyFixture();
     const env = envFor(db);
-    for (const login of ["octocat", "dana"]) {
-      const res = await post(login, "/dashboard/manifest/start", env);
-      expect(res.status, login).toBe(403);
-      expect(await res.text(), login).toContain(t("en", "common.error.forbiddenTitle"));
-      expect(res.headers.getSetCookie(), login).toEqual([]);
+    const res = await post("dana", "/dashboard/manifest/start", env);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      code: "workspace_required",
+      message: t("en", "manifest.error.workspaceRequired"),
+    });
+    expect(res.headers.getSetCookie()).toEqual([]);
+
+    const html = await authedRequest("/dashboard/manifest/start", "dana", {
+      method: "POST",
+      accept: "text/html",
+    }).then((request) => worker.fetch(request, env));
+    expect(html.status).toBe(409);
+    expect(await html.text()).toContain(t("en", "manifest.error.workspaceRequired"));
+  });
+
+  test("the creation right is judged in the ADDRESSED workspace, not the deployment", async () => {
+    // Two live workspaces. `dana` owns `other` and is a plain member of `acme`;
+    // `carol` is an admin of `acme` and nothing in `other`. The deployment's
+    // sole-workspace rule cannot answer at all here, which is the regression:
+    // each request must be judged against the ref it names.
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-acme", "acme");
+    seedWorkspace(db, "ws-other", "other");
+    const dana = seedUser(db, "dana", "member");
+    seedMembership(db, "ws-acme", dana, "member");
+    seedMembership(db, "ws-other", dana, "owner");
+    seedMembership(db, "ws-acme", seedUser(db, "carol", "member"), "admin");
+
+    const env = envFor(db);
+    // Owner of W2 creates in W2.
+    const owner = await post("dana", "/dashboard/other/manifest/start", env);
+    expect(owner.status).toBe(200);
+    expect(await owner.text()).toContain("https://github.com/settings/apps/new");
+    // …and is refused in W1, where they are only a member.
+    const memberElsewhere = await post("dana", "/dashboard/acme/manifest/start", env);
+    expect(memberElsewhere.status).toBe(403);
+    expect(await memberElsewhere.text()).toContain(t("en", "common.error.forbiddenTitle"));
+    // The admin of W2 may create there; the same login is a non-member of W1.
+    expect((await post("carol", "/dashboard/acme/manifest/start", env)).status).toBe(200);
+    expect((await post("carol", "/dashboard/other/manifest/start", env)).status).toBe(403);
+  });
+
+  test("the manifest flow carries the target workspace end to end: start → callback → commit into W2", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-acme", "acme");
+    seedWorkspace(db, "ws-other", "other");
+    // `dana` owns BOTH, so only the REF can decide where the App lands.
+    const dana = seedUser(db, "dana", "member");
+    seedMembership(db, "ws-acme", dana, "owner");
+    seedMembership(db, "ws-other", dana, "owner");
+    const env = envFor(db);
+
+    const start = await post("dana", "/dashboard/other/manifest/start", env);
+    expect(start.status).toBe(200);
+    const stateCookie =
+      start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
+    const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
+    expect((await readManifestStateValue(state, state, SESSION_SECRET))?.workspaceRef).toBe("other");
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    try {
+      const callback = await authedRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        "dana",
+        { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
+      ).then((request) => worker.fetch(request, env));
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("Location")).toBe("/dashboard/other/apps/mstar-inspector-dana/onboarding");
+    } finally {
+      globalThis.fetch = realFetch;
     }
+    // The App is mapped into the workspace the flow named — not into `acme`,
+    // and not into some "sole" workspace.
+    const mapping = db.raw
+      .prepare("SELECT app_workspaces.workspace_id AS ws FROM app_workspaces JOIN github_apps ON github_apps.id = app_workspaces.app_id WHERE github_apps.github_app_id = ?")
+      .get(CONVERSION.id) as { ws: string } | null;
+    expect(mapping?.ws).toBe("ws-other");
+  });
+
+  test("the boot's create capability follows the addressed workspace", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-acme", "acme");
+    seedWorkspace(db, "ws-other", "other");
+    const dana = seedUser(db, "dana", "member");
+    seedMembership(db, "ws-acme", dana, "member");
+    seedMembership(db, "ws-other", dana, "owner");
+    const env = withSpaAssets(envFor(db));
+    const bootAt = async (ref: string): Promise<SpaBoot> =>
+      bootOf(
+        await (
+          await worker.fetch(await authedRequest(`/dashboard/${ref}/apps`, "dana", { accept: "text/html" }), env)
+        ).text(),
+      );
+    expect((await bootAt("other")).canCreateApp).toBe(true);
+    expect((await bootAt("other")).workspaceRef).toBe("other");
+    expect((await bootAt("acme")).canCreateApp).toBe(false);
+    expect((await bootAt("acme")).workspaceRef).toBe("acme");
   });
 
   test("a deployment with an unbound store refuses creation (configuration, not permission)", async () => {
@@ -1043,7 +1179,7 @@ describe("App creation is owner/admin", () => {
     expect(res.headers.getSetCookie()).toEqual([]);
   });
 
-  test("the shell boot carries the create capability the SPA hides the action on", async () => {
+  test("the shell boot carries the addressed workspace's create capability", async () => {
     const { db } = soleWorkspaceRoles();
     const env = withSpaAssets(envFor(db));
     const bootOfLogin = async (login: string): Promise<SpaBoot> =>
@@ -1072,6 +1208,9 @@ describe("App creation is owner/admin", () => {
     );
     expect(boot.canCreateApp).toBe(false);
     expect(boot.workspaceRef).toBeUndefined();
+    // The shell names the missing input, so the disabled Create control can
+    // explain itself instead of vanishing.
+    expect(boot.workspaceRequired).toBe(true);
   });
 });
 
@@ -1113,7 +1252,7 @@ describe("a mid-flight demotion cannot finish the flow", () => {
   test("a start that began as owner still refuses the callback commit after demotion", async () => {
     const { db, userId } = ownerThenDemote();
     const env = envFor(db);
-    const state = await createManifestStateValue(SESSION_SECRET, SLUG);
+    const state = await createManifestStateValue(SESSION_SECRET, SLUG, "default");
     // The operator really did start: the gate admitted it.
     expect((await worker.fetch(await authedRequest("/dashboard/manifest/start", "mallory", { method: "POST" }), env)).status).toBe(200);
     // A concurrent admin demotes them before GitHub redirects back.
@@ -1139,7 +1278,10 @@ describe("a mid-flight demotion cannot finish the flow", () => {
   test("a parked hold no longer renders the confirm page (or its commit form) after demotion", async () => {
     const { db, userId } = ownerThenDemote();
     const env = envFor(db);
-    const hold = await encryptHoldValue(buildHoldPayload(CONVERSION, "mallory", SLUG), SESSION_SECRET);
+    const hold = await encryptHoldValue(
+      buildHoldPayload(CONVERSION, "mallory", SLUG, "default"),
+      SESSION_SECRET,
+    );
     demote(db, userId);
     const res = await worker.fetch(
       await authedRequest("/dashboard/manifest/confirm", "mallory", {
@@ -1161,7 +1303,7 @@ describe("a mid-flight demotion cannot finish the flow", () => {
   test("the same hold still resumes for a caller who is still owner", async () => {
     const { db } = ownerThenDemote();
     const env = envFor(db);
-    const hold = await createHoldValue(CONVERSION, "mallory", SESSION_SECRET, SLUG);
+    const hold = await createHoldValue(CONVERSION, "mallory", SESSION_SECRET, SLUG, "default");
     const res = await worker.fetch(
       await authedRequest("/dashboard/manifest/confirm", "mallory", {
         accept: "text/html",

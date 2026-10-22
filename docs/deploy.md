@@ -595,6 +595,25 @@ the workspace. Three invariants carry that guarantee:
 The reserved first segments (`apps`, `api`, `oauth`, `members`, `login`,
 `logout`, `manifest`, `locale`, `healthz`) never name a workspace.
 
+### App creation is workspace-scoped
+
+An App belongs to exactly one workspace, so the creation flow needs a target.
+The SPA's Create form posts to `/dashboard/<slug>/manifest/start`, which judges
+the caller's `owner`/`admin` role **in that workspace** and carries the ref
+through the signed state and the encrypted hold, so the callback and the
+recovery resubmit write the App into the same workspace they started in.
+
+The deployment-level `POST /dashboard/manifest/start` still exists for a
+single-workspace deployment (there the sole workspace is unambiguous). On a
+deployment with more than one live workspace it answers `409` with
+`{"code": "workspace_required", "message": …}` — or the styled error page for a
+browser navigation — instead of a bare `403`: nothing about the caller's rights
+is wrong, the request is simply missing its target.
+
+`GET /dashboard` follows the same rule: one membership redirects to that
+workspace's Apps page, several memberships redirect to the login's first one
+(ordered by name, then id) and the switcher offers the rest.
+
 ### The v1.2 tenant mode switch is removed
 
 The mode var that chose between the two read faces (migration `0026`) is gone

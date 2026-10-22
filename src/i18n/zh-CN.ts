@@ -128,6 +128,11 @@ export const zhCN: Dictionary = {
   apps: {
     heading: "应用",
     create: "创建 GitHub App",
+    /** Create 控件不可用的原因（见 en.ts 同名字段）。 */
+    createUnavailable: {
+      role: "只有工作区所有者或管理员可以在此创建 App。",
+      workspace: "请先进入某个工作区 — 此部署有多个工作区，App 需要归属其中一个。",
+    },
     /** 组合式空态（EmptyState 标题 + 描述）。 */
     emptyTitle: "还没有 App",
     emptyDescription: "使用「创建 GitHub App」连接第一个。",
@@ -491,6 +496,8 @@ export const zhCN: Dictionary = {
       alreadyConnected: "此 GitHub App 已在此部署上连接 — 未做任何更改。",
       dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",
+      workspaceRequired:
+        "此部署有多个工作区，App 需要归属其中一个 — 请先进入某个工作区，再从那里创建 App。",
     },
   },
 };

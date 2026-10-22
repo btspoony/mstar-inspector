@@ -978,7 +978,7 @@ describe("/dashboard/locale", () => {
 
 describe("manifest hold cookie (manifest.ts)", () => {
   const freshHold = (login = "octocat", nowMs = Date.now()) =>
-    createHoldValue(CONVERSION, login, SESSION_SECRET, buildAppSlug(login), nowMs);
+    createHoldValue(CONVERSION, login, SESSION_SECRET, buildAppSlug(login), "default", nowMs);
 
   test("round trip carries id/name/login/slug/pem/webhook_secret", async () => {
     const value = await freshHold();
@@ -987,6 +987,7 @@ describe("manifest hold cookie (manifest.ts)", () => {
       ...CONVERSION,
       login: "octocat",
       slug: buildAppSlug("octocat"),
+      workspaceRef: "default",
       exp: expect.any(Number),
     });
   });
@@ -1333,7 +1334,7 @@ describe("/dashboard manifest routes", () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     // B5: a valid manifest state carries the slug (createStateValue alone is
     // a B0 OAuth state and must NOT verify here).
-    const state = await createManifestStateValue(SESSION_SECRET, "mstar-inspector-octocat");
+    const state = await createManifestStateValue(SESSION_SECRET, "mstar-inspector-octocat", "default");
     const warns = spyOnWarn();
     const res = await worker.fetch(callbackRequest(session, state, `state=${state}`), makeEnv());
     expect(res.status).toBe(400);
@@ -1693,7 +1694,7 @@ describe("buildAppName (manifest.ts, GitHub 34-char App-name cap)", () => {
 
 describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", () => {
   const freshHold = () =>
-    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, buildAppSlug("octocat"));
+    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, buildAppSlug("octocat"), "default");
 
   function resumeRequest(path: string, session: string, hold?: string): Request {
     const cookies = hold ? `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${hold}` : `${SESSION_COOKIE}=${session}`;
@@ -1859,7 +1860,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
   }
 
   const freshHold = () =>
-    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, buildAppSlug("octocat"));
+    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, buildAppSlug("octocat"), "default");
 
   function commitEnv(overrides: Partial<Env> = {}): Env {
     // makeEnv seeds the default members (octocat is an admin) and the
@@ -1926,6 +1927,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       "octocat",
       SESSION_SECRET,
       buildAppSlug("octocat"),
+      "default",
       Date.now() - (MANIFEST_HOLD_MAX_AGE_SEC + 100) * 1000,
     );
     for (const holdValue of [tampered, expired]) {
@@ -2094,7 +2096,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     // slug exactly as /manifest/start would have minted it.
     const brokeEnv = makeEnv();
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
-    const state = await createManifestStateValue(SESSION_SECRET, "mstar-inspector-octocat");
+    const state = await createManifestStateValue(SESSION_SECRET, "mstar-inspector-octocat", "default");
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
     const failed = await worker.fetch(
       dashboardRequest(
@@ -2201,6 +2203,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       "octocat",
       SESSION_SECRET,
       "mstar-inspector-octocat",
+      "default",
     );
     // …but the slug got taken before the commit landed (the race).
     await envDb(env).createApp({

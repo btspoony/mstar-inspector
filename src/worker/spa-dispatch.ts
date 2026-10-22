@@ -22,6 +22,7 @@ import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
 import {
   operatorSupportWorkspace,
+  signedInLanding,
   workspaceBoot,
   pendingInvitesForLogin,
   workspaceMembershipsForLogin,
@@ -176,37 +177,13 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // The signed-in login of a sidebar-bearing shell; null on the login page and
   // for an anonymous boot (those take no workspace read at all).
   const login = auth.boot.login !== null && route?.page !== "login" ? auth.boot.login : null;
-  const extras = login === null ? {} : await workspaceBoot(c.env, login);
+  const extras = login === null ? {} : await workspaceBoot(c.env, login, routeRef);
   // The operator's landing must name the workspace too: the support face reads
   // `/api/support/workspace` off the pathname's workspace segment, and the bare
   // `/dashboard` carries none (root route unregistered → 404). The SAME
   // classifier the workspace gate uses answers it, so the shell cannot call an
   // invitee (or a member) a support visitor.
   const supportRef = login === null ? null : await operatorSupportWorkspace(c.env, login, routeRef);
-  if (c.req.path === "/dashboard") {
-    if (supportRef !== null) return c.redirect(`/dashboard/${supportRef}/apps`, 302);
-    // A login with no workspace of its own still needs a path into the
-    // workspace UI; a newcomer (needsWorkspace) keeps the creation surface
-    // instead of being sent to a page that answers the outsider 404. Several
-    // live workspaces leave nothing to name, so the root shell stays.
-    if (extras.needsWorkspace !== true && extras.workspaceRef !== undefined) {
-      return c.redirect(`/dashboard/${extras.workspaceRef}/apps`, 302);
-    }
-  }
-  // The shell's Apps/brand links need the active workspace, and the shell
-  // outlives the URL: a client-side navigation (spaClick → pushState) to a page
-  // whose pathname names no workspace changes the pathname but not the boot, so
-  // a boot without the ref would strand that page on the retired
-  // `/dashboard/apps` paths. Name the workspace in every sidebar-bearing boot —
-  // a workspace-scoped pathname already carries the ref in the URL and the boot
-  // copies that, but the boot ALSO carries the caller's create capability
-  // (I-000082: a plain member cannot manage the App the manifest flow creates,
-  // so the SPA offers no Create action), and one workspace-access read answers
-  // both — so the read runs on every sidebar-bearing boot either way.
-  // `/index.html` is the same shell document addressed directly (the SPA router
-  // then reads the real pathname), so it takes the same boot. The login page
-  // renders no sidebar, and `/dashboard` either redirected above or has no sole
-  // workspace to name.
   // Two independent lists behind the same login gate, so they share ONE round
   // trip — neither reads the other and both key on the login alone.
   // The invitee's discovery surface: every live pending invitation for this
@@ -219,6 +196,34 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
       : await Promise.all([pendingInvitesForLogin(c.env, login), workspaceMembershipsForLogin(c.env, login)]);
   const pendingInvites = lists?.[0] ?? [];
   const memberships = lists?.[1] ?? [];
+  if (c.req.path === "/dashboard" && login !== null) {
+    if (supportRef !== null) return c.redirect(`/dashboard/${supportRef}/apps`, 302);
+    // A login with no workspace of its own still needs a path into the
+    // workspace UI; a newcomer (needsWorkspace) keeps the creation surface
+    // instead of being sent to a page that answers the outsider 404. A
+    // multi-workspace login lands on its FIRST membership's Apps page — a real
+    // route — because the root workbench has no workspace segment (its data
+    // reads all hang off one) and `/dashboard/apps` is retired (404).
+    // ONE landing policy (`signedInLanding`), shared with the OAuth callback
+    // and the login bounce, so the root path cannot disagree with sign-in.
+    const landing = await signedInLanding(c.env, login);
+    if (landing !== "/dashboard") return c.redirect(landing, 302);
+  }
+  // The shell's Apps/brand links need the active workspace, and the shell
+  // outlives the URL: a client-side navigation (spaClick → pushState) to a page
+  // whose pathname names no workspace changes the pathname but not the boot, so
+  // a boot without the ref would strand that page on the retired
+  // `/dashboard/apps` paths. Name the workspace in every sidebar-bearing boot —
+  // a workspace-scoped pathname already carries the ref in the URL and the boot
+  // copies that, but the boot ALSO carries the caller's create capability
+  // (I-000082: a plain member cannot manage the App the manifest flow creates,
+  // so the SPA shows a disabled control with the reason), and one
+  // workspace-access read answers both — so the read runs on every
+  // sidebar-bearing boot either way.
+  // `/index.html` is the same shell document addressed directly (the SPA router
+  // then reads the real pathname), so it takes the same boot. The login page
+  // renders no sidebar, and `/dashboard` either redirected above or names no
+  // workspace of its own.
   // A platform operator under a live grant sees the support face, not the
   // creation surface: `needsWorkspace` below would otherwise offer to create a
   // workspace to someone who is here to read one. The grant also names the
@@ -234,7 +239,9 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     ...(supportRef === null
       ? extras.needsWorkspace === true
         ? { needsWorkspace: true }
-        : {}
+        : extras.workspaceRequired === true
+          ? { workspaceRequired: true }
+          : {}
       : { supportOnly: true }),
     ...(pendingInvites.length === 0 ? {} : { pendingInvites }),
     ...(memberships.length === 0 ? {} : { memberships }),

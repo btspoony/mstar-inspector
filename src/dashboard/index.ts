@@ -67,11 +67,13 @@ import {
   type ReviewTriggerMode,
 } from "./apps-store";
 import {
+  countLiveWorkspaces,
   countMembershipsForLogin,
   createWorkspace,
   getMembership,
   getSoleWorkspace,
   getSoleWorkspaceAccess,
+  getWorkspaceAccessByRef,
   getWorkspaceByRef,
   getWorkspaceMember,
   listWorkspaceMembers,
@@ -226,18 +228,6 @@ function scopedAppPath(c: DashboardContext, path: string): string {
 }
 
 /**
- * `/dashboard/<sole-workspace-slug>/apps`, or null when the deployment does not
- * carry exactly one live workspace. The manifest flow runs outside any
- * workspace path, and a committed App always lands in that sole workspace —
- * `createApp` refuses otherwise — so its onboarding page is named from here.
- */
-async function soleWorkspaceAppsBase(env: Env): Promise<string | null> {
-  const db = dashboardD1(env);
-  const workspace = db === null ? null : await getSoleWorkspace(db);
-  return workspace === null ? null : `/dashboard/${workspace.slug}/apps`;
-}
-
-/**
  * The workspace slug a platform operator is visiting under a live support
  * grant, or null when this login is not such a visitor: the shell asks the ONE
  * classifier the gate uses ({@link classifyWorkspacePrincipal}), so the boot
@@ -269,10 +259,17 @@ export async function operatorSupportWorkspace(
 
 /**
  * The boot extras for one signed-in login: whether the login belongs to no
- * live workspace yet, the deployment's sole workspace ref (the shell's nav
- * target on a path that names none), and whether this login may run the
- * App-creation flow there. ONE membership count answers the first, and one
- * workspace-access read the other two.
+ * live workspace yet, the workspace ref the SHELL should navigate with, and
+ * whether this login may run the App-creation flow.
+ *
+ * `requestedRef` is the workspace the request addresses — the `/:workspaceRef`
+ * segment of the page that carries the shell. Creation is judged in THAT
+ * workspace (owner/admin there), because the App the flow creates lands there.
+ * A request that names no workspace (the root workbench, `/index.html`, a
+ * client-side navigation whose boot outlived its pathname) falls back to the
+ * deployment's sole workspace, and only when the deployment really has one:
+ * several workspaces leave nothing to attribute the App to, so the shell says
+ * so instead of guessing.
  *
  * An unbound store answers nothing at all: storage is a configuration failure,
  * not a permission answer, and every caller already has its own honest
@@ -284,23 +281,39 @@ export async function operatorSupportWorkspace(
 export async function workspaceBoot(
   env: Env,
   login: string,
-): Promise<{ workspaceRef?: string; canCreateApp?: boolean; needsWorkspace?: boolean }> {
+  requestedRef?: string,
+): Promise<{
+  workspaceRef?: string;
+  canCreateApp?: boolean;
+  needsWorkspace?: boolean;
+  workspaceRequired?: boolean;
+}> {
   const db = dashboardD1(env);
   if (db === null) return {};
   const [access, memberships] = await Promise.all([
-    getSoleWorkspaceAccess(db, login),
+    requestedRef === undefined
+      ? getSoleWorkspaceAccess(db, login)
+      : getWorkspaceAccessByRef(db, requestedRef, login),
     countMembershipsForLogin(db, login),
   ]);
   // No live membership → no workspace to name: every workspace path 404s this
   // login, so the shell must offer creation instead.
   if (memberships === 0) return { canCreateApp: false, needsWorkspace: true };
-  if (access === null) return { canCreateApp: false };
-  return {
-    workspaceRef: access.slug,
-    // A new App lands in the sole workspace, where a plain member has no
-    // manage rights — so creation is owner/admin there.
-    canCreateApp: canManageRole(access.role),
-  };
+  if (access !== null) {
+    return {
+      workspaceRef: access.slug,
+      // A new App lands in the addressed workspace, where a plain member has
+      // no manage rights — so creation is owner/admin there.
+      canCreateApp: canManageRole(access.role),
+    };
+  }
+  // A requested ref that did not resolve is not this login's workspace: the
+  // boot names none, and the page's own guard has already answered (or will
+  // answer) the outsider 404. Only the ref-less path can reach the "several
+  // workspaces" state below.
+  if (requestedRef !== undefined) return { canCreateApp: false };
+  if ((await countLiveWorkspaces(db)) > 1) return { workspaceRequired: true, canCreateApp: false };
+  return { canCreateApp: false };
 }
 
 /**
@@ -335,54 +348,123 @@ export async function pendingInvitesForLogin(
 }
 
 /**
- * Whether `login` may run the App-creation flow — the gate every manifest route
- * consults, because each one can write the row. The flow runs outside any
- * workspace path and `createApp` attributes the App to the deployment's SOLE
- * live workspace, so creation there is `owner`/`admin` of that workspace. A
- * deployment with zero or several live workspaces cannot attribute the App at
- * all and refuses before a slug is minted (rather than failing inside
- * `createApp` after the operator's trip to GitHub). An unbound store answers
- * `true`: the routes' own `db_unbound` outcomes are the honest answer there,
- * and a 403 would burn the only copy of the App credentials (QC F-005).
+ * Where an App-creation request may land, or the reason it may not. The flow
+ * runs outside any workspace path, so the target workspace comes from the
+ * request context: the `/:workspaceRef` segment when the request has one (the
+ * SPA's create form posts under the page it is on), else an explicit
+ * `workspace_ref` field in the flow state (the recovery resubmit, which
+ * carries what the start route minted).
+ *
+ * `{ kind: "denied" }` = the caller is not owner/admin OF THAT workspace, which
+ * is a real permission answer (403). `{ kind: "workspace_required" }` = the
+ * request names no workspace and the deployment has more than one, so no
+ * attribution exists at all — a readable 409, never a bare 403 (nothing about
+ * the caller's rights is wrong; the request is missing a target).
  */
-export async function canCreateApp(env: Env, login: string): Promise<boolean> {
-  return (await workspaceBoot(env, login)).canCreateApp ?? true;
+type CreationTarget =
+  | { kind: "ok"; workspaceId: string; workspaceRef: string }
+  | { kind: "denied" }
+  | { kind: "workspace_required" }
+  | { kind: "db_unbound" };
+
+async function resolveCreationTarget(
+  env: Env,
+  login: string,
+  requestedRef: string | undefined,
+): Promise<CreationTarget> {
+  const db = dashboardD1(env);
+  if (db === null) return { kind: "db_unbound" };
+  const access =
+    requestedRef === undefined
+      ? await getSoleWorkspaceAccess(db, login)
+      : await getWorkspaceAccessByRef(db, requestedRef, login);
+  if (access === null) {
+    // The ref named no workspace this login may attribute an App to. With no
+    // ref at all that is either zero workspaces (nobody to attribute to) or
+    // several (no answer): the latter is the recoverable shape.
+    if (requestedRef === undefined && (await countLiveWorkspaces(db)) > 1) {
+      return { kind: "workspace_required" };
+    }
+    return { kind: "denied" };
+  }
+  // A ref that resolved to a workspace the caller is not a member of has
+  // `role: null` — not a creator there either.
+  if (!canManageRole(access.role)) return { kind: "denied" };
+  return { kind: "ok", workspaceId: access.id, workspaceRef: access.slug };
+}
+
+/**
+ * The target workspace an App-creation request addresses, or a refusal
+ * response. Shared by every manifest route, because each one can write the
+ * row: start mints the state, callback + commit write the App, confirm hands
+ * out the commit affordance.
+ *
+ * `denied` is a real permission answer and keeps the styled 403 page every
+ * manifest route has always served (the flow is a page navigation, not a JSON
+ * API). `workspace_required` is a missing-input answer, not a permission one:
+ * JSON `{code, message}` for a fetch, the same styled surface for navigation.
+ */
+function creationRefusal(
+  c: DashboardContext,
+  login: string,
+  target: Exclude<CreationTarget, { kind: "ok" | "db_unbound" }>,
+): Response {
+  const locale = requestLocale(c);
+  switch (target.kind) {
+    case "workspace_required":
+      return creationDeniedResponse(c, t(locale, "manifest.error.workspaceRequired"));
+    case "denied":
+      return c.html(forbiddenPage(login, locale), 403);
+  }
+}
+
+/**
+ * The one surface for a creation request that cannot be attributed to a
+ * workspace: JSON `{code, message}` for a fetch, the styled error page for a
+ * navigation. The code is the stable machine answer (`workspace_required`).
+ */
+function creationDeniedResponse(c: DashboardContext, message: string): Response {
+  if (!wantsHtml(c.req.header("Accept") ?? null) && !wantsHtmlFormNavigation(c)) {
+    return c.json({ code: "workspace_required", message }, 409);
+  }
+  return c.html(manifestErrorPage(message, false, requestLocale(c)), 409);
 }
 
 /**
  * The post-authentication landing page. `/dashboard` (the root workbench) has
  * no workspace segment, so its data reads have no base to hang off; every
- * signed-in producer (OAuth callback, the login bounce) names the workspace
- * Apps page instead.
+ * signed-in producer (OAuth callback, the login bounce) names a workspace route
+ * instead.
  *
- * A login with NO live membership never lands there: the workspace Apps page
- * would answer the outsider 404, so sign-in ends on `/dashboard`, whose shell
- * offers workspace creation. Several live workspaces are the same: the landing
- * never guesses among them.
+ * A login with NO live membership never lands on a workspace page: it would
+ * answer the outsider 404, so sign-in ends on `/dashboard`, whose shell offers
+ * workspace creation. A multi-workspace deployment has no sole workspace, so
+ * the landing names the login's OWN first membership — a real route, and the
+ * order (`name`, then `id`) is stable, so the same login lands in the same
+ * place. The switcher keeps offering every other membership from there.
  */
 export async function signedInLanding(env: Env, login: string): Promise<string> {
   const boot = await workspaceBoot(env, login);
   if (boot.workspaceRef !== undefined) return `/dashboard/${boot.workspaceRef}/apps`;
+  if (boot.needsWorkspace === true) return DASHBOARD_MOUNT;
+  const memberships = await workspaceMembershipsForLogin(env, login);
+  const first = memberships[0];
+  if (first !== undefined) return `/dashboard/${first.slug}/apps`;
   // A login that belongs to no workspace is the EXPECTED landing on the
   // creation surface, not a configuration fault; only a member the deployment
   // cannot place is the operator-facing dead end.
-  if (boot.needsWorkspace !== true) {
-    console.warn(JSON.stringify({ event: "dashboard_landing", reason: "no_sole_workspace" }));
-  }
+  console.warn(JSON.stringify({ event: "dashboard_landing", reason: "no_sole_workspace" }));
   return DASHBOARD_MOUNT;
 }
 
 /**
  * The post-commit landing page. The manifest flow's own request carries no
- * workspace segment, so `scopedAppPath` cannot rewrite this target, and the
- * App's onboarding page is named by the sole workspace the commit just mapped
- * it into. A commit that succeeded always minted an `app_workspaces` row, which
- * `createApp` only does when exactly one workspace exists, so the read
- * resolves on every success.
+ * workspace segment, so `scopedAppPath` cannot rewrite this target: the App's
+ * onboarding page is named by the workspace the commit just mapped it into,
+ * which the flow carried from start through the signed state to the hold.
  */
-async function manifestSuccessTarget(c: DashboardContext, appSlug: string): Promise<string> {
-  const base = await soleWorkspaceAppsBase(c.env);
-  return base === null ? DASHBOARD_SHELL_REDIRECT : `${base}/${appSlug}/onboarding`;
+function manifestSuccessTarget(workspaceRef: string, appSlug: string): string {
+  return `/dashboard/${workspaceRef}/apps/${appSlug}/onboarding`;
 }
 
 function isSpaFetchPost(c: DashboardContext): boolean {
@@ -617,8 +699,9 @@ dashboardApp.use("*", async (c, next) => {
   // hold and serve the resumable confirm link (QC F-005). Neither route needs
   // the membership row for that outcome: the callback reaches its own
   // `db_unbound` outcome, and confirm reads the hold cookie plus the creation
-  // gate, which answers no decision on an unbound store (`strictWorkspaceBoot`)
-  // so the hold survives instead of being burned on a configuration failure.
+  // gate, which answers no refusal on an unbound store
+  // (`resolveCreationTarget` → `db_unbound`) so the hold survives instead of
+  // being burned on a configuration failure.
   const db = dashboardD1(c.env);
   if (!db) {
     if (c.req.path === "/dashboard/manifest/callback" || c.req.path === "/dashboard/manifest/confirm") {
@@ -1030,34 +1113,40 @@ dashboardApp.post("/locale", async (c) => {
 // --- GitHub App Manifest start + callback (no secret write) ---
 // --- Per-App slug mints here and rides the signed state ---
 
-// Start: logged-in only. Mints the webhook slug (login-derived, DB
-// pre-resolved against existing slugs), the single-use CSRF state cookie
-// CARRYING it (createManifestStateValue — same createStateValue HMAC
-// discipline), and renders the zero-JS form POST to
+// Start: logged-in only. The SPA's create form posts under the workspace page
+// it is on (`/:workspaceRef/manifest/start`), so the target workspace comes
+// from the request itself; the deployment-level path resolves the sole
+// workspace instead. Then: mint the webhook slug (login-derived, DB
+// pre-resolved against existing slugs) and the single-use CSRF state cookie
+// CARRYING both slug and workspace ref (createManifestStateValue — same
+// createStateValue HMAC discipline), and render the zero-JS form POST to
 // https://github.com/settings/apps/new (state rides the form-action query).
 // The manifest's webhook URL is the App's own route /webhook/{slug}.
 // Logged out → 302 to login (IA routing table).
-dashboardApp.post("/manifest/start", async (c) => {
+async function manifestStartRoute(c: DashboardContext, workspaceRef: string | undefined): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
-  // I-000082: the App this flow creates belongs to the sole workspace, where a
-  // plain member has no manage rights — offering the flow would end in a 403 on
-  // the App it just created. Checked BEFORE the slug mint / state cookie.
-  if (!(await canCreateApp(c.env, session.login))) {
-    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
-  }
-  const db = dashboardD1(c.env);
-  if (!db) return c.text("dashboard storage is not configured", 500);
+  // Creation is owner/admin OF THE ADDRESSED workspace (I-000082): a plain
+  // member there could not manage the App the flow creates. A request that
+  // names no workspace on a multi-workspace deployment has no target at all
+  // → 409 workspace_required. Checked BEFORE the slug mint / state cookie.
+  const target = await resolveCreationTarget(c.env, session.login, workspaceRef);
+  if (target.kind === "db_unbound") return c.text("dashboard storage is not configured", 500);
+  if (target.kind !== "ok") return creationRefusal(c, session.login, target);
+  const db = dashboardD1(c.env)!;
   const slug = await resolveAvailableSlug(db, buildAppSlug(session.login));
-  const state = await createManifestStateValue(secrets.sessionSecret, slug);
+  const state = await createManifestStateValue(secrets.sessionSecret, slug, target.workspaceRef);
   c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
   const manifest = buildManifest(new URL(c.req.url).origin, session.login, slug);
   return c.html(
     manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state), requestLocale(c)),
   );
-});
+}
+
+dashboardApp.post("/manifest/start", (c) => manifestStartRoute(c, undefined));
+dashboardApp.post("/:workspaceRef/manifest/start", (c) => manifestStartRoute(c, c.req.param("workspaceRef")));
 
 // Callback: GitHub redirects here with ?code=…&state=…. Bad/missing state →
 // 4xx with ZERO secret-API calls (the conversion fetch never runs). On
@@ -1065,10 +1154,11 @@ dashboardApp.post("/manifest/start", async (c) => {
 // immediately (no second click): the shared commit path (commitManifestApp,
 // the same write the POST /manifest/commit recovery route uses) encrypts
 // the credentials with DASHBOARD_ENCRYPTION_KEY and writes one github_apps
-// row. Success → 302 to the App's onboarding page; non-retryable conflicts
-// (409) burn the hold like the commit route; retryable outcomes (500) park
-// the hold cookie so /manifest/confirm stays the resume path. The response
-// never carries PEM or webhook_secret.
+// row INTO THE WORKSPACE THE STATE NAMES (carried from start). Success → 302
+// to that workspace's onboarding page; non-retryable conflicts (409) burn the
+// hold like the commit route; retryable outcomes (500) park the hold cookie so
+// /manifest/confirm stays the resume path. The response never carries PEM or
+// webhook_secret.
 dashboardApp.get("/manifest/callback", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
@@ -1076,14 +1166,6 @@ dashboardApp.get("/manifest/callback", async (c) => {
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE));
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
-  // Creation capability is re-checked HERE, not only at start: a flow that
-  // began as owner/admin must not complete after a mid-flight demotion, and the
-  // callback writes the row itself (same rule as the start/commit routes). The
-  // state cookie is already expired above, so the flow is burned either way.
-  if (!(await canCreateApp(c.env, session.login))) {
-    logManifestFailure("callback", "not_a_creator");
-    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
-  }
   const state = await readManifestStateValue(
     getCookie(c, MANIFEST_STATE_COOKIE),
     c.req.query("state"),
@@ -1095,6 +1177,20 @@ dashboardApp.get("/manifest/callback", async (c) => {
       manifestErrorPage(t(requestLocale(c), "manifest.error.stateMismatch"), false, requestLocale(c)),
       400,
     );
+  }
+  // Creation capability is re-checked HERE, not only at start — IN THE WORKSPACE
+  // THE STATE NAMES: a flow that began as owner/admin must not complete after a
+  // mid-flight demotion, and the callback writes the row itself (same rule as
+  // the start/commit routes). The state cookie is already expired above, so the
+  // flow is burned either way. A state naming a workspace the caller cannot
+  // manage is the plain permission refusal (403).
+  // `db_unbound` is NOT a refusal: it falls through to the commit path's own
+  // config
+  // outcome, which parks the hold so the credentials survive (QC F-005).
+  const target = await resolveCreationTarget(c.env, session.login, state.workspaceRef);
+  if (target.kind === "denied" || target.kind === "workspace_required") {
+    logManifestFailure("callback", "not_a_creator");
+    return creationRefusal(c, session.login, target);
   }
   const code = c.req.query("code");
   if (!code) {
@@ -1116,13 +1212,14 @@ dashboardApp.get("/manifest/callback", async (c) => {
   const locale = requestLocale(c);
   // The payload feeds the shared commit path; the cookie string is parked on
   // retryable outcomes so /manifest/confirm can resume.
-  const holdPayload = buildHoldPayload(conversion, session.login, state.slug);
+  const holdPayload = buildHoldPayload(conversion, session.login, state.slug, state.workspaceRef);
   const hold = await encryptHoldValue(holdPayload, secrets.sessionSecret);
   const outcome = await commitManifestApp({
     db: dashboardD1(c.env),
     encryptionKey: c.env.DASHBOARD_ENCRYPTION_KEY,
     hold: holdPayload,
     login: session.login,
+    workspaceId: target.kind === "ok" ? target.workspaceId : null,
   });
   // Retryable outcomes (db_unbound / encrypt_failed / db_rejected) keep the
   // hold: park the cookie so the operator can resume via /manifest/confirm.
@@ -1136,7 +1233,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   switch (outcome.kind) {
     case "success": {
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
-      return c.redirect(await manifestSuccessTarget(c, outcome.row.slug), 302);
+      return c.redirect(manifestSuccessTarget(outcome.workspaceRef, outcome.row.slug), 302);
     }
     case "login_mismatch": {
       // Unreachable here (the hold is minted for this session) — same burn
@@ -1180,12 +1277,6 @@ dashboardApp.post("/manifest/commit", async (c) => {
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
-  // Same creation capability as the start route (I-000082): the recovery
-  // resubmit must not become the bypass. The hold is left untouched — the op
-  // never ran, and demoting the operator mid-flow is the only way in.
-  if (!(await canCreateApp(c.env, session.login))) {
-    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
-  }
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold) {
     logManifestFailure("commit", "hold_missing_or_expired");
@@ -1193,19 +1284,32 @@ dashboardApp.post("/manifest/commit", async (c) => {
     c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     return c.redirect("/dashboard", 302);
   }
+  // Same creation capability as the start route (I-000082), judged in the
+  // workspace the HOLD names — the explicit `workspace_ref` of the flow state,
+  // which is what the start route minted. The recovery resubmit must not become
+  // the bypass, and demoting the operator mid-flow must not complete either;
+  // the hold is left untouched so the op can be restored and retried.
+  // `db_unbound` falls through to the commit path's own config outcome (the
+  // hold stays parked, nothing is written).
+  const target = await resolveCreationTarget(c.env, session.login, hold.workspaceRef);
+  if (target.kind === "denied" || target.kind === "workspace_required") {
+    logManifestFailure("commit", "not_a_creator");
+    return creationRefusal(c, session.login, target);
+  }
   const locale = requestLocale(c);
   const outcome = await commitManifestApp({
     db: dashboardD1(c.env),
     encryptionKey: c.env.DASHBOARD_ENCRYPTION_KEY,
     hold,
     login: session.login,
+    workspaceId: target.kind === "ok" ? target.workspaceId : null,
   });
   switch (outcome.kind) {
     case "success": {
       // Success: the hold is single-success — burned now that the row exists;
       // the operator lands on the App's onboarding page.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      return c.redirect(await manifestSuccessTarget(c, outcome.row.slug), 302);
+      return c.redirect(manifestSuccessTarget(outcome.workspaceRef, outcome.row.slug), 302);
     }
     case "login_mismatch": {
       // The hold is bound to the login that ran the callback: a different
@@ -1232,7 +1336,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
 // /manifest/commit recovery run the same write path, spec § 5) ---
 
 type ManifestCommitOutcome =
-  | { kind: "success"; row: GithubAppRow }
+  | { kind: "success"; row: GithubAppRow; workspaceRef: string }
   | { kind: "login_mismatch" }
   | { kind: "db_unbound" }
   | { kind: "encrypt_failed" }
@@ -1257,13 +1361,19 @@ async function commitManifestApp(args: {
   encryptionKey: string | undefined;
   hold: ManifestHoldPayload;
   login: string;
+  /**
+   * The target workspace the caller resolved from the hold's ref, or null when
+   * the store itself is unbound — there is no workspace to resolve, and the
+   * `db_unbound` outcome returns before it is read.
+   */
+  workspaceId: string | null;
 }): Promise<ManifestCommitOutcome> {
-  const { db, encryptionKey, hold, login } = args;
+  const { db, encryptionKey, hold, login, workspaceId } = args;
   if (hold.login !== login) {
     logManifestFailure("commit", "login_mismatch");
     return { kind: "login_mismatch" };
   }
-  if (!db) return { kind: "db_unbound" };
+  if (!db || workspaceId === null) return { kind: "db_unbound" };
   // Review pin: the row id exists BEFORE encryption so the secretbox AAD
   // rowKey (github_apps.<column>:<id>) equals the row's primary key.
   const appId = crypto.randomUUID();
@@ -1303,8 +1413,9 @@ async function commitManifestApp(args: {
       privateKeyEnc,
       webhookSecretEnc,
       createdBy: login,
+      workspaceId,
     });
-    return { kind: "success", row };
+    return { kind: "success", row, workspaceRef: hold.workspaceRef };
   } catch (err) {
     if (isAppsUniqueViolation(err, "slug")) {
       // The GitHub App WAS created on GitHub, but its webhook slug was
@@ -1338,12 +1449,16 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
   // This page is the resume gate for the commit that /manifest/commit performs,
-  // so it applies the same creation capability (see the callback): a member
-  // demoted mid-flight must not be handed the commit affordance.
-  if (!(await canCreateApp(c.env, session.login))) {
+  // so it applies the same creation capability, in the same workspace (the
+  // hold's ref): a member demoted mid-flight must not be handed the commit
+  // affordance.
+  const target = await resolveCreationTarget(c.env, session.login, hold.workspaceRef);
+  if (target.kind === "denied" || target.kind === "workspace_required") {
+    // The resume gate is the commit affordance's only entry, so a refusal here
+    // burns the held credentials rather than leaving them parked.
     c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     logManifestFailure("confirm", "not_a_creator");
-    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+    return creationRefusal(c, session.login, target);
   }
   return c.html(
     manifestConfirmPage(

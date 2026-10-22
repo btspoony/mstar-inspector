@@ -183,9 +183,14 @@ function grant(db: TestD1, workspaceId: string, login: string, ttlMs: number): v
 
 type AuditRow = { action: string; actor_login: string; workspace_id: string };
 
+/**
+ * Every audit row in WRITE order. `created_at` ties for requests inside one
+ * test (same-millisecond ISO), and the row `id` is a random UUID — so `rowid`
+ * (insertion order) is the only deterministic tiebreak.
+ */
 function auditRows(db: TestD1): AuditRow[] {
   return db.raw
-    .prepare("SELECT action, actor_login, workspace_id FROM audit_events ORDER BY created_at ASC, id ASC")
+    .prepare("SELECT action, actor_login, workspace_id FROM audit_events ORDER BY created_at ASC, rowid ASC")
     .all() as AuditRow[];
 }
 

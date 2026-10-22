@@ -632,8 +632,10 @@ describe("Apps list → App settings wayfinding", () => {
     expect(t("zh_CN", "apps.emptyTitle")).toContain("还没有 App");
     // Creation remains the manifest-flow POST form — the same CreateAppButton
     // component is reused as the empty-state action while the header yields
-    // its slot (one form instance on the page, never duplicated).
-    expect(source).toContain('action="/dashboard/manifest/start"');
+    // its slot (one form instance on the page, never duplicated). The action
+    // hangs off the page's own workspace prefix so the App lands in the
+    // workspace the user is looking at.
+    expect(source).toContain("`${apiBase()}/manifest/start`");
     expect(source).toContain("{!appsEmpty ? createAction : null}");
     expect(source).toContain("action={createAction}");
   });

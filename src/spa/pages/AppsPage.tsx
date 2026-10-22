@@ -24,9 +24,16 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
   const [payload, setPayload] = useState<AppsPayload | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const cancelledRef = useRef(false);
-  // Boot-injected capability (I-000082): a workspace member cannot manage the
-  // App the manifest flow would create, so the action is not offered at all.
+  // Boot-injected capability: the caller's role IN THE ADDRESSED WORKSPACE
+  // (I-000082) — a plain member cannot manage the App the manifest flow would
+  // create, and a deployment that cannot be narrowed to one workspace has no
+  // target at all. The control stays visible-but-disabled with the reason, so
+  // the page explains itself instead of silently dropping the action.
   const canCreate = boot.canCreateApp !== false;
+  const unavailableReason =
+    boot.workspaceRequired === true
+      ? t(locale, "apps.createUnavailable.workspace")
+      : t(locale, "apps.createUnavailable.role");
 
   async function load(): Promise<void> {
     setState("loading");
@@ -64,6 +71,7 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       state={state}
       payload={payload}
       canCreate={canCreate}
+      unavailableReason={unavailableReason}
       onRetry={() => void load()}
     />
   );
@@ -79,16 +87,18 @@ export function AppsView({
   state,
   payload,
   canCreate,
+  unavailableReason,
   onRetry,
 }: {
   locale: SpaBoot["locale"];
   state: "ok" | "error";
   payload: AppsPayload | null;
   canCreate: boolean;
+  unavailableReason: string;
   onRetry: () => void;
 }) {
   const appsEmpty = state === "ok" && payload !== null && payload.apps.length === 0;
-  const createAction = canCreate ? <CreateAppButton locale={locale} /> : null;
+  const createAction = <CreateAppButton locale={locale} canCreate={canCreate} reason={unavailableReason} />;
 
   return (
     <div className="flex flex-col gap-6">
@@ -104,9 +114,9 @@ export function AppsView({
       {state === "ok" && payload ? (
         appsEmpty ? (
           // Composed first-App guidance: the action reuses the exact
-          // CreateAppButton form — creation is still the only path. A member
-          // cannot run that flow (I-000082), so the card keeps the honest
-          // "no Apps yet" line and drops the instruction to create one.
+          // CreateAppButton form — creation is still the only path. The card
+          // keeps the honest "no Apps yet" line and lets the button carry the
+          // unavailable reason when this caller cannot run the flow.
           <EmptyState
             icon={<GitHubMark />}
             title={t(locale, "apps.emptyTitle")}
@@ -121,11 +131,32 @@ export function AppsView({
   );
 }
 
-function CreateAppButton({ locale }: { locale: SpaBoot["locale"] }) {
+/**
+ * The Create control. It posts under the page's own workspace prefix
+ * (`apiBase()`), so the flow lands the App in the workspace the user is
+ * looking at — the deployment-level path is only for a single-workspace
+ * deployment whose page has no ref. Unavailable creation keeps the button
+ * visible but disabled, with the reason beside it: hiding the action left the
+ * user with no explanation at all (QC high).
+ */
+function CreateAppButton({
+  locale,
+  canCreate,
+  reason,
+}: {
+  locale: SpaBoot["locale"];
+  canCreate: boolean;
+  reason: string;
+}) {
   return (
-    <form method="post" action="/dashboard/manifest/start">
-      <Button type="submit">{t(locale, "apps.create")}</Button>
-    </form>
+    <div className="flex flex-wrap items-center gap-2">
+      <form method="post" action={`${apiBase()}/manifest/start`}>
+        <Button type="submit" disabled={!canCreate}>
+          {t(locale, "apps.create")}
+        </Button>
+      </form>
+      {canCreate ? null : <p className="text-sm text-muted-foreground">{reason}</p>}
+    </div>
   );
 }
 

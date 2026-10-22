@@ -43,8 +43,9 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
  * On a workspace-scoped page BOTH entries follow that workspace: Apps becomes
  * `/dashboard/<ref>/apps` and Members `/dashboard/<ref>/members`, because both
  * route families are workspace-scoped. The workspace comes from the pathname,
- * else from the boot (`SpaBoot.workspaceRef`, the server-resolved sole
- * workspace). The generic prefix rule then also marks the scoped Apps entry
+ * else from the boot (`SpaBoot.workspaceRef`), else from the login's first
+ * membership — so no entry ever points at the retired `/dashboard/apps`
+ * family. The generic prefix rule then also marks the scoped Apps entry
  * current on its own detail pages.
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
@@ -66,8 +67,11 @@ function navHref(baseHref: string, workspaceRef: string | null): string {
 export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel {
   // The page's own prefix wins (it is the route the request was matched
   // against); the boot ref covers the mode-independent pages, whose pathname
-  // names no workspace. Both absent → the legacy targets.
-  const workspaceRef = workspaceRefOf(pathname) ?? boot.workspaceRef ?? null;
+  // names no workspace. Both absent (a multi-workspace deployment has no sole
+  // workspace to name) → the login's own first membership, the same target the
+  // landing uses, so no entry points at the retired `/dashboard/apps` family.
+  const workspaceRef =
+    workspaceRefOf(pathname) ?? boot.workspaceRef ?? boot.memberships?.[0]?.slug ?? null;
   // No workspace yet → every nav target would 404; the shell keeps its
   // wordmark and drops the entries (creation surface). An operator under a
   // support grant gets the same treatment: its one page is the support view,

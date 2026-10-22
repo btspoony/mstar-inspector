@@ -166,8 +166,14 @@ function fixture() {
 const auditCount = (db: TestD1): number =>
   (db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n;
 
+/**
+ * Every audit action in WRITE order. `created_at` is a same-millisecond ISO
+ * string for requests inside one test, so it ties constantly; `rowid` is the
+ * insertion order and the only deterministic tiebreak (ordering by the random
+ * UUID `id` was sampling luck, not order).
+ */
 const auditActions = (db: TestD1): string[] =>
-  (db.raw.query("SELECT action FROM audit_events ORDER BY created_at ASC, id ASC").all() as Array<{
+  (db.raw.query("SELECT action FROM audit_events ORDER BY created_at ASC, rowid ASC").all() as Array<{
     action: string;
   }>).map((row) => row.action);
 

@@ -181,6 +181,13 @@ export type CreateAppInput = {
   /** secretbox envelope of the webhook secret (AAD `github_apps.webhook_secret_enc:<id>`). */
   webhookSecretEnc: string;
   createdBy: string;
+  /**
+   * The workspace the App belongs to. Omitted = the deployment's SOLE live
+   * workspace (the single-workspace deployment's shape); a deployment with more
+   * than one has no answer and the write is refused, so a caller that knows the
+   * target must pass it.
+   */
+  workspaceId?: string;
 };
 
 export type UpsertInstallationInput = {
@@ -322,6 +329,19 @@ export const APP_READ_SQL = {
   listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
+/**
+ * The deployment's sole live workspace id, or null when it carries zero or
+ * several — the same live-row predicate the tenant reads use, so a write and a
+ * read can never disagree on the count. Soft-deleted tenants are not candidates
+ * for ownership.
+ */
+async function soleLiveWorkspaceId(db: AppsStoreD1): Promise<string | null> {
+  const rows = await db
+    .prepare(`SELECT id FROM workspaces WHERE deleted_at IS NULL LIMIT 2`)
+    .all<{ id: string }>();
+  return rows.results.length === 1 ? rows.results[0]!.id : null;
+}
+
 /** Create the github_apps / app_installations store over one D1 handle. */
 export function createAppsStore(db: AppsStoreD1) {
   /**
@@ -380,8 +400,9 @@ export function createAppsStore(db: AppsStoreD1) {
      * Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (review pin — the caller's
      * secretbox AAD rowKey is this id), plus its `app_workspaces` mapping to
-     * the single workspace. The two inserts are ONE batch transaction, so an
-     * App never exists without an owner. sandbox_image_id is omitted: the
+     * `input.workspaceId`, or to the deployment's sole live workspace when the
+     * input names none. The two inserts are ONE batch transaction, so an App
+     * never exists without an owner. sandbox_image_id is omitted: the
      * migration 0018 DDL default materializes every new row onto the
      * registry's default image ('omp') — the store face for changing it is
      * setSandboxImage. UNIQUE violations on slug
@@ -391,21 +412,14 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
-      // Sole-workspace guard (separate read, BEFORE the batch): Deploy A ships
-      // one workspace, and a mapping write cannot guess which of several to
-      // pick. A clean throw here leaves no half-written App. Same live-row
-      // predicate as getSoleWorkspace: a soft-deleted tenant is not a candidate
-      // for ownership, so the tenant reads (which resolve the one live
-      // workspace) and this write can never disagree on the count.
-      const workspaces = await db
-        .prepare(`SELECT id FROM workspaces WHERE deleted_at IS NULL LIMIT 2`)
-        .all<{ id: string }>();
-      if (workspaces.results.length !== 1) {
-        throw new Error(
-          `apps-store: createApp requires exactly one workspace, found ${workspaces.results.length}`,
-        );
+      // Ownership resolution (separate read, BEFORE the batch): a named
+      // workspace must still be live, and an unnamed one resolves only when the
+      // deployment carries exactly one — a mapping write cannot guess which of
+      // several to pick. A clean throw here leaves no half-written App.
+      const workspaceId = input.workspaceId ?? (await soleLiveWorkspaceId(db));
+      if (workspaceId === null) {
+        throw new Error("apps-store: createApp names no workspace and the deployment has none or several");
       }
-      const workspaceId = workspaces.results[0]!.id;
       await db.batch([
         db
           .prepare(

@@ -166,16 +166,26 @@ export function buildManifestCreateUrl(state: string): string {
 
 export type ManifestStatePayload = {
   slug: string;
+  /**
+   * The workspace ref (its slug) the flow creates the App in, decided at start
+   * from the request context and carried through the signed state so the
+   * callback commits into the SAME workspace the operator started in.
+   */
+  workspaceRef: string;
 };
 
 /**
- * Signed manifest state carrying the webhook slug minted at start. Same
- * discipline as B0's createStateValue: HMAC-signed with
+ * Signed manifest state carrying the webhook slug minted at start plus the
+ * target workspace. Same discipline as B0's createStateValue: HMAC-signed with
  * DASHBOARD_SESSION_SECRET, used as BOTH the state cookie value and the
  * form-action query param, single-use (expired at the callback).
  */
-export async function createManifestStateValue(secret: string, slug: string): Promise<string> {
-  return signValue(JSON.stringify({ slug }), secret);
+export async function createManifestStateValue(
+  secret: string,
+  slug: string,
+  workspaceRef: string,
+): Promise<string> {
+  return signValue(JSON.stringify({ slug, workspaceRef }), secret);
 }
 
 /**
@@ -198,6 +208,7 @@ export async function readManifestStateValue(
     return null;
   }
   if (typeof payload.slug !== "string" || !/^[a-zA-Z0-9-]+$/.test(payload.slug)) return null;
+  if (typeof payload.workspaceRef !== "string" || payload.workspaceRef.length === 0) return null;
   return payload;
 }
 
@@ -274,6 +285,8 @@ export type ManifestHoldPayload = {
   login: string;
   /** Webhook slug minted at start (carried from the signed state). */
   slug: string;
+  /** Target workspace ref (carried from the signed state); the commit maps the App here. */
+  workspaceRef: string;
   pem: string;
   webhook_secret: string;
   /** Expiry, seconds since epoch (server-side double-check beside Max-Age). */
@@ -309,6 +322,7 @@ export function buildHoldPayload(
   conversion: ManifestConversion,
   login: string,
   slug: string,
+  workspaceRef: string,
   nowMs = Date.now(),
 ): ManifestHoldPayload {
   return {
@@ -316,6 +330,7 @@ export function buildHoldPayload(
     name: conversion.name,
     login,
     slug,
+    workspaceRef,
     pem: conversion.pem,
     webhook_secret: conversion.webhook_secret,
     exp: Math.floor(nowMs / 1000) + MANIFEST_HOLD_MAX_AGE_SEC,
@@ -344,9 +359,10 @@ export async function createHoldValue(
   login: string,
   secret: string,
   slug: string,
+  workspaceRef: string,
   nowMs = Date.now(),
 ): Promise<string> {
-  return encryptHoldValue(buildHoldPayload(conversion, login, slug, nowMs), secret);
+  return encryptHoldValue(buildHoldPayload(conversion, login, slug, workspaceRef, nowMs), secret);
 }
 
 /** Decrypts + shape/expiry check; anything off → null (treat as flow expired). */
@@ -379,6 +395,7 @@ export async function readHoldValue(
   if (typeof payload.name !== "string" || payload.name.length === 0) return null;
   if (typeof payload.login !== "string" || payload.login.length === 0) return null;
   if (typeof payload.slug !== "string" || payload.slug.length === 0) return null;
+  if (typeof payload.workspaceRef !== "string" || payload.workspaceRef.length === 0) return null;
   if (typeof payload.pem !== "string" || payload.pem.length === 0) return null;
   if (typeof payload.webhook_secret !== "string" || payload.webhook_secret.length === 0) return null;
   if (typeof payload.exp !== "number") return null;

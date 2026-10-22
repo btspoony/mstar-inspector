@@ -116,7 +116,8 @@ function concurrentBootDbStub(): Env["DB"] {
   };
   const respond = (query: string) => {
     if (query.includes("workspace_invites i JOIN workspaces w")) return { all: async () => { await arrive("invites"); return { results: [] }; } };
-    if (query.includes("w.id AS id, w.slug AS slug")) return { all: async () => { await arrive("memberships"); return { results: [] }; } };
+    // The switcher's list carries `w.name`; the boot's workspace-access read does not.
+    if (query.includes("w.name AS name")) return { all: async () => { await arrive("memberships"); return { results: [] }; } };
     if (query.includes("SELECT * FROM users WHERE github_login")) {
       return { first: async () => ({ id: "u-test", github_login: "octocat", role: "admin", created_at: new Date().toISOString(), invited_by: null }) };
     }

@@ -6,11 +6,11 @@
  * the document. The session cookie is HttpOnly, so the client cannot read the
  * login itself — this injection is the only bootstrap path.
  *
- * Shape is intentionally small (locale + identity + the deployment's sole
- * workspace ref + the caller's create capability + the login's live
- * memberships). Page data comes from the dashboard API under the page's own
- * workspace prefix (`workspace-base.ts`) — the injected ref is navigation only,
- * for the pages whose pathname names no workspace.
+ * Shape is intentionally small (locale + identity + the addressed workspace ref
+ * + the caller's create capability + the login's live memberships). Page data
+ * comes from the dashboard API under the page's own workspace prefix
+ * (`workspace-base.ts`) — the injected ref is navigation only, for the pages
+ * whose pathname names no workspace.
  */
 import type { Locale } from "../i18n";
 
@@ -19,17 +19,27 @@ export type SpaBoot = {
   login: string | null;
   name: string | null;
   /**
-   * The deployment's sole live workspace ref (its slug) when it carries
-   * exactly one, resolved server-side. Absent otherwise — the shell then keeps
-   * the root targets. A workspace-scoped pathname always wins.
+   * The workspace ref (its slug) the boot was resolved for: the path's own
+   * segment when it has one, else the deployment's sole live workspace. Absent
+   * on a multi-workspace deployment whose page names none. A workspace-scoped
+   * pathname always wins.
    */
   workspaceRef?: string;
   /**
    * Absent or `true` = the caller may run the manifest Create flow. The server
-   * sets `false` for a plain workspace member, who would not be able to manage
-   * the App the flow creates (I-000082); the SPA then renders no Create action.
+   * sets `false` for a caller who is not owner/admin of the addressed
+   * workspace, who would not be able to manage the App the flow creates
+   * (I-000082); the SPA then renders the Create control disabled and names the
+   * reason — `workspaceRequired` when the deployment could not be narrowed to
+   * one workspace, the role otherwise.
    */
   canCreateApp?: boolean;
+  /**
+   * `true` = this deployment carries more than one live workspace and the
+   * current path names none, so no single workspace can be attributed. The
+   * shell renders the login's workspace list instead of guessing one.
+   */
+  workspaceRequired?: boolean;
   /**
    * The signed-in login's live workspace memberships — the switcher's list and
    * the settings slug card's stored value. A path segment may address the

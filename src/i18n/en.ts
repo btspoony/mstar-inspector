@@ -146,6 +146,15 @@ export const en = {
   apps: {
     heading: "Apps",
     create: "Create GitHub App",
+    /**
+     * Why the Create control is disabled. `role`: the caller is not
+     * owner/admin of the workspace the page addresses. `workspace`: this
+     * deployment carries several workspaces and the page names none.
+     */
+    createUnavailable: {
+      role: "Only a workspace owner or admin can create an App here.",
+      workspace: "Open a workspace first — this deployment has more than one, so an App needs to know which it belongs to.",
+    },
     /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No Apps yet",
     emptyDescription: "Create GitHub App connects your first one.",
@@ -559,6 +568,8 @@ export const en = {
       alreadyConnected: "This GitHub App is already connected on this deployment — no changes were made.",
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
+      workspaceRequired:
+        "This deployment has more than one workspace, so an App needs to know which it belongs to — open a workspace and create the App from there.",
     },
   },
 };
