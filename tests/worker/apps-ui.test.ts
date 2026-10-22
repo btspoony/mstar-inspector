@@ -622,15 +622,17 @@ describe("Apps list → App settings wayfinding", () => {
     // component is reused as the empty-state action while the header yields
     // its slot (one form instance on the page, never duplicated).
     expect(source).toContain('action="/dashboard/manifest/start"');
-    expect(source).toContain("{!appsEmpty ? <CreateAppButton locale={locale} /> : null}");
-    expect(source).toContain('action={<CreateAppButton locale={locale} />}');
+    expect(source).toContain("{!appsEmpty ? createAction : null}");
+    expect(source).toContain("action={createAction}");
   });
 
   test("loading and load-failure feedback ride the state trio", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
     expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
-    // Retry is wired to the page's own load function.
-    expect(source).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
+    // Retry is wired to the page's own load function (the loaded face takes it
+    // as a callback so its markup is renderable in tests).
+    expect(source).toContain("onRetry={() => void load()}");
+    expect(source).toContain("<ErrorState locale={locale} onRetry={onRetry} />");
     // The old text-notice faces are retired from this page.
     expect(source).not.toContain("LoadingNotice");
     expect(source).not.toContain("LoadFailedNotice");

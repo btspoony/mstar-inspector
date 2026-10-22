@@ -128,8 +128,24 @@ function seededDashboardD1(
   const insert = db.raw.prepare(
     "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, ?, ?, NULL)",
   );
+  // 0027's mapping, for the same reason: the seed writes users rows AFTER the
+  // migrations, so it must attribute them to the sole workspace itself or every
+  // strict-mode workspace route (and the manifest creation gate) would deny
+  // them as non-members. Truncated (`through`) fixtures stop before 0026 and
+  // have no such table.
+  const hasWorkspaces = db.raw
+    .query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'workspace_members'")
+    .get() as { n: number };
+  const insertMembership = hasWorkspaces.n
+    ? db.raw.prepare(
+        "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, ?, ?)",
+      )
+    : null;
   for (const [login, role] of DEFAULT_SEEDED_MEMBERS) {
-    insert.run(crypto.randomUUID(), login, role, new Date().toISOString());
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    insert.run(id, login, role, createdAt);
+    insertMembership?.run(id, role === "admin" ? "owner" : "member", createdAt);
   }
   return db;
 }

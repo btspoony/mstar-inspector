@@ -67,6 +67,7 @@ import {
 import {
   getMembership,
   getSoleWorkspace,
+  getSoleWorkspaceAccess,
   getWorkspaceBySlug,
   type WorkspaceRole,
 } from "./workspace-store";
@@ -207,6 +208,40 @@ export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> 
     }),
   );
   return null;
+}
+
+/**
+ * The `strict` boot extras for one signed-in login: the deployment's sole
+ * workspace slug (the shell's nav targets) and whether this login may run the
+ * App-creation flow there. ONE workspace read answers both. Under `off` — and
+ * whenever the deployment cannot name exactly one live workspace — both are
+ * absent, so the shell keeps its legacy targets and creation stays ungated.
+ */
+export async function strictWorkspaceBoot(
+  env: Env,
+  login: string,
+): Promise<{ workspaceSlug?: string; canCreateApp?: boolean }> {
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return {};
+  const db = dashboardD1(env);
+  if (db === null) return {};
+  const access = await getSoleWorkspaceAccess(db, login);
+  if (access === null) return {};
+  return {
+    workspaceSlug: access.slug,
+    // I-000082: a new App lands in the sole workspace, where the scoped
+    // `canManageApp` gives a plain member no rights — so creation is
+    // owner/admin there. `off` keeps its creator rule and never asks.
+    canCreateApp: access.role === "owner" || access.role === "admin",
+  };
+}
+
+/**
+ * Whether `login` may run the App-creation flow (the manifest routes' gate).
+ * Absent capability means "no workspace to judge against" — the flow proceeds
+ * and `createApp`'s own sole-workspace guard decides.
+ */
+export async function canCreateApp(env: Env, login: string): Promise<boolean> {
+  return (await strictWorkspaceBoot(env, login)).canCreateApp ?? true;
 }
 
 /**
@@ -663,6 +698,12 @@ dashboardApp.post("/manifest/start", async (c) => {
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // I-000082: the App this flow creates belongs to the sole workspace, where a
+  // plain member has no manage rights — offering the flow would end in a 403 on
+  // the App it just created. Checked BEFORE the slug mint / state cookie.
+  if (!(await canCreateApp(c.env, session.login))) {
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
   const slug = await resolveAvailableSlug(db, buildAppSlug(session.login));
@@ -787,6 +828,12 @@ dashboardApp.post("/manifest/commit", async (c) => {
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // Same creation capability as the start route (I-000082): the recovery
+  // resubmit must not become the bypass. The hold is left untouched — the op
+  // never ran, and demoting the operator mid-flow is the only way in.
+  if (!(await canCreateApp(c.env, session.login))) {
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold) {
     logManifestFailure("commit", "hold_missing_or_expired");

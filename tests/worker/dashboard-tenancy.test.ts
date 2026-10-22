@@ -882,6 +882,94 @@ describe("strict: the onboarding CTA stays inside the workspace", () => {
   });
 });
 
+describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
+  /**
+   * ONE live workspace (`default`, 0026's seed) — the M1 shape the gate judges
+   * against — with a role matrix where `octocat` is a deployment ADMIN but only
+   * a workspace MEMBER, so the legacy rule and the workspace rule disagree.
+   */
+  function soleWorkspaceRoles() {
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "member");
+    seedMembership(db, "default", seedUser(db, "carol", "member"), "admin");
+    seedMembership(db, "default", seedUser(db, "dana", "member"), "owner");
+    seedMembership(db, "default", seedUser(db, "mallory", "member"), "member");
+    return { db };
+  }
+
+  function post(login: string, path: string, env: Env): Promise<Response> {
+    return authedRequest(path, login, { method: "POST" }).then((request) => worker.fetch(request, env));
+  }
+
+  test("owner and admin may start the manifest flow and get the create form", async () => {
+    const { db } = soleWorkspaceRoles();
+    const env = envFor(db, "strict");
+    for (const login of ["dana", "carol"]) {
+      const res = await post(login, "/dashboard/manifest/start", env);
+      expect(res.status, login).toBe(200);
+      expect(await res.text(), login).toContain("https://github.com/settings/apps/new");
+    }
+  });
+
+  test("a plain member is refused with the styled 403 page and mints no state cookie", async () => {
+    const { db } = soleWorkspaceRoles();
+    const env = envFor(db, "strict");
+    for (const login of ["mallory", "octocat"]) {
+      // octocat is a DEPLOYMENT admin but a workspace member: the workspace
+      // role decides, exactly as the scoped canManageApp does.
+      const res = await post(login, "/dashboard/manifest/start", env);
+      expect(res.status, login).toBe(403);
+      expect(await res.text(), login).toContain(t("en", "common.error.forbiddenTitle"));
+      expect(res.headers.getSetCookie(), login).toEqual([]);
+    }
+  });
+
+  test("the commit recovery route applies the same gate (member 403, owner passes to the hold check)", async () => {
+    const { db } = soleWorkspaceRoles();
+    const env = envFor(db, "strict");
+    const member = await post("mallory", "/dashboard/manifest/commit", env);
+    expect(member.status).toBe(403);
+    expect(await member.text()).toContain(t("en", "common.error.forbiddenTitle"));
+    // The owner clears the gate; with no hold the route falls back to the flow
+    // start, which is the pre-existing no-hold contract.
+    const owner = await post("dana", "/dashboard/manifest/commit", env);
+    expect(owner.status).toBe(302);
+    expect(owner.headers.get("Location")).toBe("/dashboard");
+  });
+
+  test("off keeps the ungated flow (its creator rule can manage the new App)", async () => {
+    const { db } = soleWorkspaceRoles();
+    expect((await post("mallory", "/dashboard/manifest/start", envFor(db, "off"))).status).toBe(200);
+  });
+
+  test("a strict deployment without a sole workspace does not gate creation", async () => {
+    // `tenancyFixture` carries several live workspaces: there is no workspace
+    // to judge the caller against, so the flow stays open (createApp fails
+    // closed on its own sole-workspace guard).
+    const { db } = tenancyFixture();
+    expect((await post("mallory", "/dashboard/manifest/start", envFor(db, "strict"))).status).toBe(200);
+  });
+
+  test("the shell boot carries the create capability the SPA hides the action on", async () => {
+    const { db } = soleWorkspaceRoles();
+    const env = withSpaAssets(envFor(db, "strict"));
+    const bootOfLogin = async (login: string): Promise<SpaBoot> =>
+      bootOf(await (await worker.fetch(await authedRequest("/dashboard/members", login, { accept: "text/html" }), env)).text());
+    // Owner/admin → true (the key is present, not merely defaulted).
+    expect((await bootOfLogin("dana")).canCreateApp).toBe(true);
+    expect((await bootOfLogin("carol")).canCreateApp).toBe(true);
+    // Plain member → explicitly false.
+    expect((await bootOfLogin("mallory")).canCreateApp).toBe(false);
+    expect((await bootOfLogin("octocat")).canCreateApp).toBe(false);
+    // `off` never sends the field: the legacy flow is ungated there.
+    const offEnv = withSpaAssets(envFor(db, "off"));
+    const offBoot = bootOf(
+      await (await worker.fetch(await authedRequest("/dashboard/members", "mallory", { accept: "text/html" }), offEnv)).text(),
+    );
+    expect(offBoot.canCreateApp).toBeUndefined();
+  });
+});
+
 describe("WORKSPACE_TENANT_MODE with an illegal value — fails loud", () => {
   test("every /dashboard request answers 500 with the bad value and serves no route", async () => {
     const { db } = tenancyFixture();
