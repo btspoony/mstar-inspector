@@ -17,12 +17,15 @@ category: Changed
   `off`, `off` and `strict` are the only legal values, and any other value makes the
   dashboard answer 500 and the queue consumer fail before processing a message.
 - **A strict installation must set the `WORKSPACE_TENANT_MODE` repository
-  variable.** Routine deploys (staging push, production release) now take the
-  mode from that variable instead of resolving `off`; a routine deploy that
-  still resolves to `off` warns and records `tenant_mode_change=unproven->off`
-  in the run summary rather than silently demoting a strict installation. A
-  routine `strict` deploy is not a replay: only a `tenant_mode=strict`
-  dispatch must supply `expected_deploy_sha`.
+  variable.** The `tenant_mode` dispatch input now defaults to `steady` — "use
+  the variable" — instead of `off`, so a dispatch nobody filled in (the Release
+  workflow dispatches `deploy-prod.yml` with no fields on every ordinary
+  release) and a `push` to `main` both follow the variable instead of pinning
+  `off`. A steady-state run that still resolves to `off` warns and records
+  `tenant_mode_change=unproven->off` in the run summary rather than silently
+  demoting a strict installation. Only an explicit `off` / `strict` input
+  overrides the variable, and a steady-state `strict` deploy is not a replay:
+  only a `tenant_mode=strict` dispatch must supply `expected_deploy_sha`.
 
 <!-- CN -->
 - **破坏性变更——dashboard 的 App 路由移到工作区 slug 之下。** 在
@@ -37,9 +40,11 @@ category: Changed
 - **`WORKSPACE_TENANT_MODE` 属于部署接线，不是演练**：未设置/空值为 `off`，
   `off` 与 `strict` 是唯一合法值，其他值会让 dashboard 返回 500、队列消费者在处理
   任何消息前失败。
-- **strict 安装必须设置 `WORKSPACE_TENANT_MODE` 仓库变量。** 常规部署（staging
-  的 push、production 的 release）现在从该变量取模式，不再一律解析为 `off`；
-  仍解析为 `off` 的常规部署会告警并在 run summary 记录
-  `tenant_mode_change=unproven->off`，而不是静默把 strict 安装降级。常规的
-  `strict` 部署不算 replay：只有 `tenant_mode=strict` 的 dispatch 必须提供
-  `expected_deploy_sha`。
+- **strict 安装必须设置 `WORKSPACE_TENANT_MODE` 仓库变量。** `tenant_mode`
+  dispatch 输入的默认值改为 `steady`（“用变量”），不再是 `off`：未填任何字段的
+  dispatch（Release workflow 每次常规发布都以无字段方式 dispatch
+  `deploy-prod.yml`）与 `main` 的 `push` 因此都跟随该变量，而不是把它钉成
+  `off`。仍解析为 `off` 的稳态部署会告警并在 run summary 记录
+  `tenant_mode_change=unproven->off`，而不是静默把 strict 安装降级。只有显式
+  传入的 `off` / `strict` 才覆盖变量；稳态的 `strict` 部署不算 replay：只有
+  `tenant_mode=strict` 的 dispatch 必须提供 `expected_deploy_sha`。

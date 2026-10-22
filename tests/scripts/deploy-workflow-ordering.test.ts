@@ -138,6 +138,34 @@ function runStep(
   }
 }
 
+/** The `workflow_dispatch` input defaults — the values Actions supplies for a no-field dispatch. */
+function dispatchDefaults(rel: string): Record<string, string> {
+  const wf = parseWorkflow(rel);
+  const dispatch = (wf["true"] ?? wf.on)?.workflow_dispatch;
+  expect(dispatch, `${rel}: no workflow_dispatch trigger`).toBeDefined();
+  const inputs: Record<string, { default?: unknown }> = dispatch.inputs ?? {};
+  const defaults: Record<string, string> = {};
+  for (const [name, spec] of Object.entries(inputs)) {
+    defaults[name] = String(spec.default ?? "");
+  }
+  return defaults;
+}
+
+/**
+ * The env Actions hands a step for one trigger shape: the step's OWN `env:`
+ * map, with every `${{ … }}` expression resolved from that shape's context.
+ * Feeding the values in by hand instead would test the resolver while the
+ * wiring that supplies it stayed unpinned — which is exactly how I-000070
+ * shipped green (I-000083).
+ */
+function stepEnv(step: Step, ctx: Record<string, string | undefined>): Record<string, string> {
+  const resolved: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(step.env ?? {})) {
+    resolved[key] = raw.replace(/\$\{\{\s*([\w.]+)\s*\}\}/g, (_match, expr: string) => ctx[expr] ?? "");
+  }
+  return resolved;
+}
+
 /** Steps that publish a Worker version (a `secret bulk` write does too). */
 const DEPLOY_CAPABLE = /bunx wrangler (deploy|secret bulk)\b/;
 /**
@@ -232,8 +260,8 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
         expect(step.run, `${file}: replay step must resolve ${needle}`).toContain(needle);
       }
       // The strict binding decision belongs to the executed script, which takes
-      // the RESOLVER's replay intent — not the mode. A routine arm serving
-      // `strict` from the steady-state variable must not be treated as Deploy B.
+      // the RESOLVER's replay intent — not the mode. A steady-state run serving
+      // `strict` from the variable must not be treated as Deploy B.
       expect(step.run, `${file}: replay step must call the guard`).toContain(
         'bash scripts/deploy-replay-guard.sh "$REPLAY" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA"',
       );
@@ -247,51 +275,120 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
       }
     });
 
-    test("a routine arm may serve strict without an expected SHA; only a strict dispatch is a replay", () => {
-      // Composed end to end: the resolver STEP runs, its real `replay` output is
-      // fed to the guard STEP (exactly as `steps.tenant.outputs.replay` would
-      // resolve), in a repository whose HEAD/tag the step can resolve.
+    test("every real trigger shape resolves the mode, its warning, and the replay intent", () => {
+      // One executed case per shape GitHub actually creates. The step's OWN
+      // `env:` supplies the inputs — with `${{ }}` resolved from that shape's
+      // context — so the declared default, not a hand-fed value, is what a
+      // no-field dispatch gets (I-000083). The resolver's real `replay` output
+      // then feeds the guard step, exactly as `steps.tenant.outputs.replay` does.
       const tenant = steps.find((s) => s.name === "Resolve tenant mode")!;
       const guardStep = steps.find((s) => s.name === REPLAY)!;
-      /** Run the resolver, then the guard with the resolver's own output. */
-      const resolveThenGuard = (
-        tenantEnv: Record<string, string>,
-        guardEnv: Record<string, string>,
-      ): { replay: string; code: number; out: string } => {
-        const resolved = runStep(tenant, tenantEnv);
-        const replay = /^replay=(.*)$/m.exec(resolved.output)?.[1];
-        expect(replay, `${file}: the resolver emitted no replay output\n${resolved.out}`).toBeDefined();
-        const guarded = runStep(guardStep, { REPLAY: replay!, ...guardEnv }, {}, { withGit: true });
-        return { replay: replay!, code: guarded.code, out: guarded.out };
+
+      /** Resolve for one shape, then guard with the resolver's own replay intent. */
+      const run = (
+        shape: Record<string, string>,
+        steady: string,
+        guard: Record<string, string> = { EXPECTED_DEPLOY_SHA: "", RUN_SHA: "@head", TAG: "@tag" },
+      ) => {
+        const resolved = runStep(tenant, stepEnv(tenant, { ...shape, "vars.WORKSPACE_TENANT_MODE": steady }));
+        const field = (key: string) => new RegExp(`^${key}=(.*)$`, "m").exec(resolved.output)?.[1];
+        expect(resolved.code, `${file}: resolution failed\n${resolved.out}`).toBe(0);
+        const replay = field("replay")!;
+        const guarded = runStep(guardStep, { REPLAY: replay, ...guard }, {}, { withGit: true });
+        return {
+          mode: field("mode"),
+          replay,
+          change: resolved.summary.trim(),
+          warned: resolved.out.includes("::warning::"),
+          code: guarded.code,
+          out: guarded.out,
+        };
       };
 
-      // routine release/push, steady-state strict, no dispatch input, no Deploy-A SHA
-      const routine = resolveThenGuard(
-        { TENANT_MODE: "", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "true" },
-        { EXPECTED_DEPLOY_SHA: "", RUN_SHA: "@head", TAG: "@tag" },
-      );
-      expect(routine.replay, `${file}: a routine strict arm is not a replay`).toBe("none");
+      // A dispatch nobody filled in carries the DECLARED DEFAULT
+      // (`on.workflow_dispatch.inputs.tenant_mode.default`); a `push` /
+      // `release: published` event carries no `inputs` context at all.
+      const defaults = dispatchDefaults(file);
+      const noFields = { "inputs.tenant_mode": defaults.tenant_mode ?? "" };
+      const routineShapes: { label: string; ctx: Record<string, string> }[] =
+        file === "deploy-prod.yml"
+          ? [
+              // the Release workflow's `gh workflow run deploy-prod.yml --ref <tag>`: no fields
+              { label: "release-workflow dispatch (no fields)", ctx: noFields },
+              { label: "release: published", ctx: {} },
+            ]
+          : [
+              { label: "push to main", ctx: {} },
+              { label: "workflow_dispatch with no fields", ctx: noFields },
+            ];
+
+      for (const { label, ctx } of routineShapes) {
+        // a strict installation survives an ordinary release/push
+        const strict = run(ctx, "strict");
+        expect(strict.mode, `${file}: ${label} demoted a strict installation`).toBe("strict");
+        expect(strict.replay, `${file}: ${label} must not demand a Deploy-A SHA`).toBe("none");
+        expect(strict.change, `${file}: ${label} reports a change it did not make`).toBe("tenant_mode_change=none");
+        expect(strict.warned, `${file}: ${label} warned on a steady strict deploy`).toBe(false);
+        expect(strict.code, `${file}: ${label} aborted a steady strict deploy\n${strict.out}`).toBe(0);
+
+        // no variable → off, and the unproven demotion is reported
+        const unset = run(ctx, "");
+        expect(unset.mode, `${file}: ${label} with no variable`).toBe("off");
+        expect(unset.replay).toBe("none");
+        expect(unset.warned, `${file}: ${label} demoted silently`).toBe(true);
+        expect(unset.change, `${file}: ${label} must record the unproven change`).toBe(
+          "tenant_mode_change=unproven->off",
+        );
+      }
+
+      // The release path really is a no-field dispatch: it supplies no
+      // `-f tenant_mode`, so the declared default decides there. Reverting that
+      // default to `off` fails the "release-workflow dispatch" case above.
+      if (file === "deploy-prod.yml") {
+        const release = parseWorkflow("release.yml");
+        const dispatchStep = (release.jobs.release.steps as Step[]).find((s) =>
+          (s.run ?? "").includes("gh workflow run deploy-prod.yml"),
+        )!;
+        expect(dispatchStep, "release.yml no longer dispatches deploy-prod.yml").toBeDefined();
+        expect(dispatchStep.run, "release.yml must not pick a tenant mode").not.toMatch(/-f\s+tenant_mode/);
+        expect(defaults.tenant_mode, "the no-field dispatch default must be the non-deciding steady").toBe("steady");
+      }
+
+      // An EXPLICIT human dispatch: off and strict override the variable, and
+      // only an explicit strict is a replay.
+      const off = run({ "inputs.tenant_mode": "off" }, "strict");
+      expect(off.mode).toBe("off");
+      expect(off.replay).toBe("none");
+      expect(off.change).toBe("tenant_mode_change=none");
+      expect(off.warned).toBe(false);
+      expect(off.code).toBe(0);
+
+      const strictDispatch = run({ "inputs.tenant_mode": "strict" }, "");
+      expect(strictDispatch.mode).toBe("strict");
+      expect(strictDispatch.replay).toBe("required");
       expect(
-        routine.code,
-        `${file}: a routine strict deploy must not abort on a missing expected SHA\n${routine.out}`,
-      ).toBe(0);
-      expect(routine.out).not.toContain("::error::");
+        strictDispatch.code,
+        `${file}: a strict dispatch without the Deploy-A SHA must abort\n${strictDispatch.out}`,
+      ).toBe(1);
 
-      // a dispatch explicitly asking for strict IS a replay and must bind
-      const dispatch = resolveThenGuard(
-        { TENANT_MODE: "strict", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "false" },
-        { EXPECTED_DEPLOY_SHA: "", RUN_SHA: "@head", TAG: "@tag" },
-      );
-      expect(dispatch.replay).toBe("required");
-      expect(dispatch.code, `${file}: a strict dispatch without the Deploy-A SHA must abort`).toBe(1);
+      // `steady` is the operator saying "the variable decides" — a steady-state
+      // deploy, never a replay: if it demanded a Deploy-A SHA every routine
+      // strict deploy would abort.
+      const steadyDispatch = run({ "inputs.tenant_mode": "steady" }, "strict");
+      expect(steadyDispatch.mode).toBe("strict");
+      expect(steadyDispatch.replay).toBe("none");
+      expect(steadyDispatch.warned).toBe(false);
+      expect(steadyDispatch.code, `${file}: steady + strict aborted\n${steadyDispatch.out}`).toBe(0);
+      expect(run({ "inputs.tenant_mode": "steady" }, "").change).toBe("tenant_mode_change=unproven->off");
 
-      // the same routine run with a MOVED tag still reds (identity is kept)
-      const moved = resolveThenGuard(
-        { TENANT_MODE: "", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "true" },
-        { EXPECTED_DEPLOY_SHA: "", RUN_SHA: "f".repeat(40), TAG: "@tag" },
-      );
+      // the ref identity assertion survives every non-replay shape
+      const moved = run({ "inputs.tenant_mode": "steady" }, "strict", {
+        EXPECTED_DEPLOY_SHA: "",
+        RUN_SHA: "f".repeat(40),
+        TAG: "@tag",
+      });
       expect(moved.replay).toBe("none");
-      expect(moved.code, `${file}: the tag/HEAD identity assertion must survive the replay split`).toBe(1);
+      expect(moved.code, `${file}: a moved ref must still red`).toBe(1);
     });
 
     test("the summary delegates status to the script, fed by steps.deploy.outcome", () => {
@@ -314,42 +411,6 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
         `deploy_status=not-deployed\nrequested_sha=${sha}`,
       );
       expect(failed.summary, `${file}: a failed deploy must not print a replay SHA`).not.toContain("deployed_sha=");
-    });
-
-    test("the routine (non-dispatch) arm takes the steady-state tenant mode, never a hardcoded off", () => {
-      const step = steps.find((s) => s.name === "Resolve tenant mode")!;
-      expect(step, `${file}: mode resolution step is missing`).toBeDefined();
-      expect(step.id).toBe("tenant");
-      // the steady-state variable is read from `vars`, so a strict installation
-      // survives an ordinary release/push deploy
-      expect(step.env?.STEADY_TENANT_MODE, `${file}: routine arm must read vars.WORKSPACE_TENANT_MODE`).toBe(
-        "${{ vars.WORKSPACE_TENANT_MODE }}",
-      );
-      expect(step.env?.TENANT_MODE).toBe("${{ inputs.tenant_mode }}");
-      // the arm, not the step, decides: release/push is routine, dispatch is not
-      expect(step.env?.ROUTINE_ARM).toBe("${{ github.event_name != 'workflow_dispatch' }}");
-      expect(step.run, `${file}: the resolver script owns the decision`).toContain(
-        "bash scripts/resolve-tenant-mode.sh",
-      );
-
-      // strict installation, routine arm, no dispatch input → strict, silent
-      const strict = runStep(step, { TENANT_MODE: "", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "true" });
-      expect(strict.code).toBe(0);
-      expect(strict.output).toBe("mode=strict\nreplay=none\n");
-      expect(strict.out).not.toContain("::warning::");
-
-      // no steady-state variable → off, and the demotion is reported
-      const unset = runStep(step, { TENANT_MODE: "", STEADY_TENANT_MODE: "", ROUTINE_ARM: "true" });
-      expect(unset.code).toBe(0);
-      expect(unset.output).toBe("mode=off\nreplay=none\n");
-      expect(unset.out).toContain("::warning::");
-      expect(unset.summary).toContain("tenant_mode_change=unproven->off");
-
-      // the dispatch input still overrides the steady-state variable
-      const dispatched = runStep(step, { TENANT_MODE: "off", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "false" });
-      expect(dispatched.code).toBe(0);
-      expect(dispatched.output).toBe("mode=off\nreplay=none\n");
-      expect(dispatched.summary).toContain("tenant_mode_change=none");
     });
 
     test("the mode step runs before every deploy-capable step", () => {
