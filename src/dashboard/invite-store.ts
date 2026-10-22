@@ -238,6 +238,46 @@ export async function listInvitesForLogin(
 }
 
 /**
+ * One invite of THIS workspace by id, or null — the accept route's pre-read.
+ * Workspace-scoped like `revokeInvite`, so an invite id from another workspace
+ * cannot be consumed through this workspace's path (the accept path names the
+ * workspace the request addressed).
+ */
+export async function getInviteInWorkspace(
+  db: InviteStoreD1,
+  workspaceId: string,
+  inviteId: string,
+): Promise<WorkspaceInviteRow | null> {
+  return db
+    .prepare(`SELECT ${INVITE_COLUMNS} FROM workspace_invites WHERE id = ? AND workspace_id = ?`)
+    .bind(inviteId, workspaceId)
+    .first<WorkspaceInviteRow>();
+}
+
+/**
+ * The login's live pending invites across every workspace, each paired with its
+ * workspace's path ref — the SPA boot payload's discovery rows (plan 97 T2).
+ * A soft-deleted workspace is excluded: presenting an accept link into a
+ * retired tenant would only 404.
+ */
+export async function listInviteDiscoveryForLogin(
+  db: InviteStoreD1,
+  login: string,
+  now: string,
+): Promise<Array<{ inviteId: string; workspaceRef: string; role: InviteRole; expiresAt: string }>> {
+  const { results } = await db
+    .prepare(
+      `SELECT i.id AS inviteId, w.slug AS workspaceRef, i.role AS role, i.expires_at AS expiresAt
+         FROM workspace_invites i JOIN workspaces w ON w.id = i.workspace_id
+        WHERE i.github_login = ? COLLATE NOCASE AND i.${LIVE} AND w.deleted_at IS NULL
+        ORDER BY i.created_at ASC, i.id ASC`,
+    )
+    .bind(login, now)
+    .all<{ inviteId: string; workspaceRef: string; role: InviteRole; expiresAt: string }>();
+  return results;
+}
+
+/**
  * Revoke a live pending invite. Workspace-scoped in the WHERE clause, so an
  * invite id from another workspace can never be revoked; false means no live
  * pending row matched (unknown id, already terminal, or foreign workspace).

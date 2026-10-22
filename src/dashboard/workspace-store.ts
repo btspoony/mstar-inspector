@@ -21,6 +21,14 @@ export type WorkspaceRow = {
   name: string;
 };
 
+/** One member of a workspace (users row + its workspace role). */
+export type WorkspaceMemberRow = {
+  id: string;
+  github_login: string;
+  role: WorkspaceRole;
+  created_at: string;
+};
+
 /** Narrow D1 face: single-row and bounded multi-row reads through one chain. */
 type WorkspaceStoreStatement = {
   bind(...values: unknown[]): WorkspaceStoreStatement;
@@ -60,6 +68,46 @@ export async function getMembership(
     .bind(workspaceId, userId)
     .first<{ role: WorkspaceRole }>();
   return row?.role ?? null;
+}
+
+/**
+ * Every member of one workspace, oldest first (`github_login` breaks
+ * same-millisecond `created_at` ties). The member list is visible to every
+ * member, so this read carries no role filter; the caller's own role decides
+ * what the page offers.
+ */
+export async function listWorkspaceMembers(
+  db: WorkspaceStoreD1,
+  workspaceId: string,
+): Promise<WorkspaceMemberRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT u.id AS id, u.github_login AS github_login, wm.role AS role,
+              wm.created_at AS created_at
+         FROM workspace_members wm JOIN users u ON u.id = wm.user_id
+        WHERE wm.workspace_id = ?
+        ORDER BY wm.created_at ASC, u.github_login ASC`,
+    )
+    .bind(workspaceId)
+    .all<WorkspaceMemberRow>();
+  return rows.results;
+}
+
+/** One member of this workspace by row id, or null when they are not one. */
+export async function getWorkspaceMember(
+  db: WorkspaceStoreD1,
+  workspaceId: string,
+  userId: string,
+): Promise<WorkspaceMemberRow | null> {
+  return db
+    .prepare(
+      `SELECT u.id AS id, u.github_login AS github_login, wm.role AS role,
+              wm.created_at AS created_at
+         FROM workspace_members wm JOIN users u ON u.id = wm.user_id
+        WHERE wm.workspace_id = ? AND wm.user_id = ?`,
+    )
+    .bind(workspaceId, userId)
+    .first<WorkspaceMemberRow>();
 }
 
 /**

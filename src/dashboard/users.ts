@@ -148,17 +148,17 @@ function isUniqueConstraintError(err: unknown): boolean {
 }
 
 /**
- * Insert one membership row (caller-supplied UUID, like 0001 reviews.id).
- * DELIBERATE creation — an admin's invite on the Members page, or a fixture —
- * so it also clears any removal record for that login in the same batch: an
- * explicit (re-)admission is the only thing allowed to undo a removal. The
- * automatic OAuth bootstrap does NOT call this function; it uses
- * bootstrapCreateAdmin, which never clears removal state.
+ * Insert one users row (caller-supplied UUID, like 0001 reviews.id).
+ * DELIBERATE creation — a workspace-creation flow, a fixture — so it also
+ * clears any removal record for that login in the same batch: an explicit
+ * (re-)admission is the only thing allowed to undo a removal. The automatic
+ * OAuth bootstrap does NOT call this function; it uses bootstrapCreateAdmin,
+ * which never clears removal state.
  *
- * The same batch admits the new row into the sole workspace
- * (`workspace_members`, role mapped like migration 0027), so an invited user is
- * a workspace member before their first request — under `strict` an
- * unmapped user is invisible on every workspace route.
+ * It deliberately writes NO `workspace_members` row: admission into a
+ * workspace is either its creation (creator becomes `owner`) or an accepted
+ * invite, never a side effect of a users row. A login with no membership is a
+ * non-member everywhere — under `strict` that is the outsider 404.
  *
  * Idempotent on an exact-case UNIQUE race: a concurrent callback that won
  * the insert has written THIS user's row — re-read and return it
@@ -166,8 +166,8 @@ function isUniqueConstraintError(err: unknown): boolean {
  *
  * A CASE-VARIANT race (migration 0016 NOCASE unique index — the 0003 BINARY
  * UNIQUE does not fire across cases) is surfaced as DuplicateLoginError so
- * the invite route can answer 409 instead of silently minting a dead second
- * row (W-1): bun:sqlite absorbs the NOCASE-index conflict into `ON CONFLICT
+ * the caller can answer 409 instead of silently minting a dead second row
+ * (W-1): bun:sqlite absorbs the NOCASE-index conflict into `ON CONFLICT
  * (github_login)` (changes === 0 → the case-variant re-read discriminator
  * below throws); if D1 instead raises the constraint error, the catch maps
  * it to the same typed error.
@@ -195,28 +195,13 @@ export async function createUser(
         .bind(row.id, row.github_login, row.role, row.created_at, row.invited_by),
       // A deliberate (re-)creation is the ONLY thing that may undo a removal:
       // clearing the tombstone in the SAME batch as the insert is what makes a
-      // re-invited login bootstrappable again (migration 0023). Bootstrap has
+      // re-admitted login bootstrappable again (migration 0023). Bootstrap has
       // its own creation path (bootstrapCreateAdmin) that never clears removal
       // state — an in-flight OAuth callback must not be able to undo a removal
       // that landed after its reads.
       db
         .prepare("DELETE FROM removed_logins WHERE github_login = ? COLLATE NOCASE")
         .bind(user.login),
-      // The workspace side of the SAME admission (migration 0026/0027): a new
-      // user must be a member of the sole workspace or every strict-mode
-      // workspace route 404s them forever. `users.role` maps like 0027
-      // (admin → owner, member → member). The SELECT joins the row THIS batch
-      // just inserted, so a lost insert race adds no membership; no workspace
-      // row at all affects zero rows (legal), never an error.
-      db
-        .prepare(
-          `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
-           SELECT w.id, u.id, ?, ?
-           FROM workspaces w JOIN users u ON u.id = ?
-           LIMIT 1
-           ON CONFLICT DO NOTHING`,
-        )
-        .bind(user.role === "admin" ? "owner" : "member", row.created_at, row.id),
     ]);
     inserted = results[0]!;
   } catch (err) {
@@ -392,6 +377,101 @@ export async function updateUserRoleUnlessLastAdmin(
       .bind(role === "admin" ? "owner" : "member", id, role === "admin" ? "owner" : "member", id, role),
   ]);
   return results[0]!.meta.changes > 0;
+}
+
+/**
+ * The sole-owner guard, workspace-scoped (migration 0026): a row may not be
+ * removed or demoted when it is the only `owner` of its workspace — a
+ * workspace can never be left without one. The condition is parameterized so
+ * ALL statements of a batch carry the same predicate (the `NOT_LAST_ADMIN`
+ * precedent), and it is evaluated inside the writing statement — never a
+ * read-check-then-write window.
+ */
+function notSoleOwner(workspaceId: string, userId: string): { sql: string; params: string[] } {
+  return {
+    sql: `NOT (
+      (SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?) = 'owner'
+      AND (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ? AND role = 'owner') <= 1
+    )`,
+    params: [workspaceId, userId, workspaceId],
+  };
+}
+
+/**
+ * Remove one user from one workspace: record the login as removed, drop the
+ * membership row and delete the users row, as ONE `batch` (the `removeUser`
+ * shape, workspace-scoped). The tombstone is what makes the removed login's
+ * stateless cookie fail the guard on every later request; it also keeps the
+ * login out of the automatic bootstrap, and only a deliberate re-admission
+ * clears it. A sole owner, or a target that is not in this workspace, is
+ * refused with zero writes. Returns true when this workspace's membership was
+ * removed — the users row follows only when no membership remains anywhere, so
+ * a multi-workspace login keeps the account that the other workspace's row
+ * still points at.
+ */
+export async function deleteWorkspaceMember(
+  db: DashboardD1,
+  workspaceId: string,
+  userId: string,
+  removedBy: string | null,
+): Promise<boolean> {
+  const guard = notSoleOwner(workspaceId, userId);
+  const results = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO removed_logins (github_login, removed_at, removed_by)
+         SELECT github_login, ?, ? FROM users WHERE id = ? AND ${guard.sql}
+         ON CONFLICT (github_login) DO UPDATE
+           SET removed_at = excluded.removed_at, removed_by = excluded.removed_by`,
+      )
+      .bind(new Date().toISOString(), removedBy, userId, ...guard.params),
+    db
+      .prepare(
+        `DELETE FROM workspace_members
+          WHERE workspace_id = ? AND user_id = ? AND ${guard.sql}`,
+      )
+      .bind(workspaceId, userId, ...guard.params),
+    // Keyed on the membership actually being gone rather than re-running the
+    // guard: statements run in order inside the batch, so the guard's membership
+    // subquery would read NULL here after a successful delete. A refused delete
+    // (sole owner) leaves the membership, so this is a 0-row no-op and the
+    // workspace keeps both its owner and their users row.
+    db
+      .prepare(
+        `DELETE FROM users WHERE id = ?
+           AND NOT EXISTS (SELECT 1 FROM workspace_members WHERE user_id = ?)`,
+      )
+      .bind(userId, userId),
+  ]);
+  return results[1]!.meta.changes > 0;
+}
+
+/**
+ * Change one member's role INSIDE one workspace. `users.role` is NOT written:
+ * `workspace_members.role` is the only role surface after this plan, and the
+ * legacy column is never read for a workspace-scoped decision. The sole-owner
+ * guard rides the same statement, so demoting the last owner is a 0-row update,
+ * not a read-check-then-write window. Returns true when the role changed.
+ */
+export async function updateWorkspaceMemberRole(
+  db: DashboardD1,
+  workspaceId: string,
+  userId: string,
+  role: "admin" | "member",
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE workspace_members SET role = ?
+        WHERE workspace_id = ? AND user_id = ? AND role <> ?
+          AND NOT (
+            role = 'owner'
+            AND (SELECT COUNT(*) FROM workspace_members o
+                  WHERE o.workspace_id = ? AND o.role = 'owner') <= 1
+          )`,
+    )
+    .bind(role, workspaceId, userId, role, workspaceId)
+    .run();
+  return result.meta.changes > 0;
 }
 
 /** Total membership — bootstrap rule 3 keys on the EMPTY table (any role). */

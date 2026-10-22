@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { t } from "../../src/i18n";
 import {
   activeChainTabId,
-  canViewMembers,
+  canInviteMembers,
   configuredKeySlot,
   DEFAULT_CHAIN_NAME,
   insightsRepoFromSelect,
@@ -17,6 +17,7 @@ import {
   modelChainTabs,
   parseApps,
   parseInsights,
+  parseInvites,
   parseInsightsSearch,
   parseMembers,
   parseSettings,
@@ -32,11 +33,12 @@ import {
 } from "../../src/spa/pages/data";
 import { DEFAULT_CHAIN_NAME as STORE_DEFAULT_CHAIN_NAME } from "../../src/dashboard/app-config-store";
 
-describe("admin guard", () => {
-  test("only admin can view members", () => {
-    expect(canViewMembers("admin")).toBe(true);
-    expect(canViewMembers("member")).toBe(false);
-    expect(canViewMembers(null)).toBe(false);
+describe("workspace role guard", () => {
+  test("owner and admin manage members; a plain member only reads the list", () => {
+    expect(canInviteMembers("owner")).toBe(true);
+    expect(canInviteMembers("admin")).toBe(true);
+    expect(canInviteMembers("member")).toBe(false);
+    expect(canInviteMembers(null)).toBe(false);
   });
 
   test("paused is active + reviews disabled (both wire forms: integer and boolean)", () => {
@@ -147,13 +149,32 @@ describe("insights search wiring", () => {
 });
 
 describe("members/apps/settings parsers", () => {
-  test("parseMembers requires id/login/role/created_at", () => {
-    expect(
-      parseMembers({
-        members: [{ id: "u1", github_login: "octocat", role: "admin", created_at: "2026-01-01 00:00:00" }],
-      }),
-    ).toEqual([{ id: "u1", github_login: "octocat", role: "admin", created_at: "2026-01-01 00:00:00" }]);
-    expect(parseMembers({ members: [{ github_login: "octocat" }] })).toBeNull();
+  test("parseMembers requires the viewer role plus id/login/role/created_at per row", () => {
+    const row = { id: "u1", github_login: "octocat", role: "owner" as const, created_at: "2026-01-01 00:00:00" };
+    expect(parseMembers({ viewer: { role: "owner" }, members: [row] })).toEqual({
+      viewer: { role: "owner" },
+      members: [row],
+    });
+    // An off-vocabulary role fails the parse instead of rendering it.
+    expect(parseMembers({ viewer: { role: "owner" }, members: [{ ...row, role: "adminx" }] })).toBeNull();
+    expect(parseMembers({ viewer: { role: "owner" }, members: [{ github_login: "octocat" }] })).toBeNull();
+    // No viewer role = not a members payload (a non-member cannot get here).
+    expect(parseMembers({ members: [row] })).toBeNull();
+  });
+
+  test("parseInvites requires id/login/role/created_at/expires_at, role never owner", () => {
+    const row = {
+      id: "i1",
+      github_login: "hubot",
+      role: "admin" as const,
+      created_at: "2026-01-01 00:00:00",
+      expires_at: "2026-01-08 00:00:00",
+    };
+    expect(parseInvites({ invites: [row] })).toEqual([row]);
+    // `owner` is never invitable (migration 0028 CHECK domain).
+    expect(parseInvites({ invites: [{ ...row, role: "owner" }] })).toBeNull();
+    expect(parseInvites({ invites: [{ ...row, expires_at: undefined }] })).toBeNull();
+    expect(parseInvites({})).toBeNull();
   });
 
   test("parseApps requires viewer + apps", () => {
@@ -802,8 +823,8 @@ describe("invite grammar + page copy", () => {
 
   test("resident pages interpolate bilingual keys in both dictionaries", () => {
     const keys = [
-      "members.adminOnly",
-      "members.roleAdmin",
+      "members.pendingHeading",
+      "members.role.owner",
       "apps.status.paused",
       "login.signIn",
       "settings.roleHintDeep",

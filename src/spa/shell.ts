@@ -44,12 +44,12 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
  * `/dashboard/apps` highlight the same entry. Remaining entries follow the
  * generic rule below.
  *
- * On a workspace-scoped page the Apps entry follows that workspace
- * (`/dashboard/<slug>/apps`); Members is not workspace-routed, so its own href
- * stays and the workspace comes from the boot (`SpaBoot.workspaceSlug`, the
- * server-resolved sole workspace under `strict`) instead of the pathname. The
- * generic prefix rule then also marks the scoped Apps entry current on its own
- * detail pages.
+ * On a workspace-scoped page BOTH entries follow that workspace: Apps becomes
+ * `/dashboard/<ref>/apps` and Members `/dashboard/<ref>/members`, because both
+ * route families are workspace-scoped after plan 97. The workspace comes from
+ * the pathname, else from the boot (`SpaBoot.workspaceSlug`, the server-resolved
+ * sole workspace under `strict`). The generic prefix rule then also marks the
+ * scoped Apps entry current on its own detail pages.
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
   if (href === "/dashboard/apps") {
@@ -62,10 +62,15 @@ export function isNavCurrent(href: string, pathname: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+/** One nav entry's href under a resolved workspace ref (null = legacy). */
+function navHref(baseHref: string, workspaceSlug: string | null): string {
+  return workspaceSlug === null ? baseHref : `/dashboard/${workspaceSlug}${baseHref.slice("/dashboard".length)}`;
+}
+
 export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel {
   // The page's own prefix wins (it is the route the request was matched
-  // against); the boot slug covers the mode-independent pages (Members), whose
-  // pathname names no workspace. Both absent → the legacy targets.
+  // against); the boot slug covers the mode-independent pages, whose pathname
+  // names no workspace. Both absent → the legacy targets.
   const workspaceSlug = workspaceSlugOf(pathname) ?? boot.workspaceSlug ?? null;
   return {
     brand: t(boot.locale, "nav.brand"),
@@ -74,10 +79,7 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
     brandHref: workspaceSlug === null ? "/dashboard" : `/dashboard/${workspaceSlug}/apps`,
     navLabel: t(boot.locale, "nav.primary"),
     items: visibleNavItems(boot.role).map((item) => {
-      const href =
-        workspaceSlug !== null && item.href === "/dashboard/apps"
-          ? `/dashboard/${workspaceSlug}/apps`
-          : item.href;
+      const href = navHref(item.href, workspaceSlug);
       return {
         href,
         label: t(boot.locale, item.labelKey),

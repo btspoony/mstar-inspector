@@ -29,12 +29,14 @@ import {
   createUser,
   deleteUser,
   deleteUserUnlessLastAdmin,
+  deleteWorkspaceMember,
   DuplicateLoginError,
   getUserByLogin,
   isLoginRemoved,
   listUsers,
   parseAdminLogins,
   updateUserRoleUnlessLastAdmin,
+  updateWorkspaceMemberRole,
   type DashboardD1,
   type DashboardD1BatchResult,
   type DashboardD1Statement,
@@ -2464,6 +2466,8 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0023_removed_logins.sql",
   // 0026: createApp also writes the App's workspace mapping.
   "0026_workspaces.sql",
+  // 0028: the SPA boot's pending-invite discovery read (plan 97).
+  "0028_workspace_invites.sql",
 ] as const;
 
 function createDashboardTestD1(
@@ -2897,60 +2901,60 @@ describe("dashboard users store (users.ts)", () => {
     return id;
   }
 
-  test("createUser admits the new user into the sole workspace with the 0027 role mapping", async () => {
+  test("createUser writes the users row and NO membership (plan 97: admission is invite-accept or creation)", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     await createUser(db, { login: "hubot", role: "member" });
-    expect(membershipRoles(db)).toEqual({ hubot: "member", octocat: "owner" });
+    expect(membershipRoles(db)).toEqual({});
   });
 
-  test("createUser with no workspace row still succeeds (zero membership rows, no error)", async () => {
+  test("createUser with no workspace row still succeeds (no tenant read at all)", async () => {
     const db = createDashboardTestD1();
-    db.raw.exec("DELETE FROM workspaces"); // no tenant root: the insert affects 0 rows
+    db.raw.exec("DELETE FROM workspaces");
     const user = await createUser(db, { login: "hubot", role: "member" });
     expect((await getUserByLogin(db, "hubot"))?.id).toBe(user.id);
     expect(membershipRoles(db)).toEqual({});
   });
 
-  test("removing a backfilled user drops the membership row too (0026 FK no longer blocks the delete)", async () => {
+  test("deleteWorkspaceMember drops the membership, deletes the row and records the tombstone", async () => {
     const db = createDashboardTestD1();
-    // Two admins so the last-admin guard is not what decides this removal.
-    await createUser(db, { login: "octocat", role: "admin" });
-    expect(await deleteUserUnlessLastAdmin(db, seedBackfilledUser(db, "hubot", "member"), "octocat")).toBe(true);
+    const admin = seedBackfilledUser(db, "octocat", "admin");
+    const hubot = seedBackfilledUser(db, "hubot", "member");
+    expect(await deleteWorkspaceMember(db, "default", hubot, "octocat")).toBe(true);
     expect(await getUserByLogin(db, "hubot")).toBeNull();
     expect(membershipRoles(db)).toEqual({ octocat: "owner" });
     expect(await isLoginRemoved(db, "hubot")).toBe(true);
+    expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin);
   });
 
-  test("the last-admin refusal leaves the membership row and writes no tombstone", async () => {
+  test("the sole-owner refusal leaves the membership row and writes no tombstone", async () => {
     const db = createDashboardTestD1();
-    seedBackfilledUser(db, "octocat", "admin");
-    const soleAdmin = (await getUserByLogin(db, "octocat"))!;
-    expect(await deleteUserUnlessLastAdmin(db, soleAdmin.id, "octocat")).toBe(false);
+    const soleOwner = seedBackfilledUser(db, "octocat", "admin"); // mapped to owner
+    expect(await deleteWorkspaceMember(db, "default", soleOwner, "octocat")).toBe(false);
     expect(await getUserByLogin(db, "octocat")).not.toBeNull();
     expect(membershipRoles(db)).toEqual({ octocat: "owner" });
     expect(removedRows(db)).toEqual([]);
   });
 
-  test("a role change mirrors the workspace role (admin → owner, member → member)", async () => {
+  test("updateWorkspaceMemberRole writes workspace_members only, never users.role", async () => {
     const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const member = await createUser(db, { login: "hubot", role: "member" });
-    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "admin")).toBe(true);
-    expect(membershipRoles(db)).toEqual({ hubot: "owner", octocat: "owner" });
-    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "member")).toBe(true);
+    seedBackfilledUser(db, "octocat", "admin");
+    const hubot = seedBackfilledUser(db, "hubot", "member");
+    expect(await updateWorkspaceMemberRole(db, "default", hubot, "admin")).toBe(true);
+    expect(membershipRoles(db)).toEqual({ hubot: "admin", octocat: "owner" });
+    expect((await getUserByLogin(db, "hubot"))?.role).toBe("member");
+    expect(await updateWorkspaceMemberRole(db, "default", hubot, "member")).toBe(true);
     expect(membershipRoles(db)).toEqual({ hubot: "member", octocat: "owner" });
   });
 
-  test("a refused demotion of the sole admin mirrors nothing into the membership", async () => {
+  test("a refused demotion of the sole owner changes no role", async () => {
     const db = createDashboardTestD1();
-    const admin = await createUser(db, { login: "octocat", role: "admin" });
-    expect(await updateUserRoleUnlessLastAdmin(db, admin.id, "member")).toBe(false);
-    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
+    const owner = seedBackfilledUser(db, "octocat", "admin"); // mapped to owner
+    expect(await updateWorkspaceMemberRole(db, "default", owner, "member")).toBe(false);
     expect(membershipRoles(db)).toEqual({ octocat: "owner" });
   });
 
-  test("an invited user reads the workspace App list under strict (membership written by createUser)", async () => {
+  test("an accepted invite lets the member read the workspace App list under strict", async () => {
     const env = makeEnv({ WORKSPACE_TENANT_MODE: "strict" });
     const db = dbOf(env);
     applyMigrationFile(db.raw, "0011_webhook_deliveries.sql"); // the list's health face
@@ -2963,8 +2967,16 @@ describe("dashboard users store (users.ts)", () => {
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "octocat",
     });
-    // The invite path: createUser writes the users row AND the membership.
-    await createUser(db, { login: "invitee", role: "member" });
+    // The accepted-invite shape: a users row (sign-in) plus the membership the
+    // accept POST writes. createUser alone admits nobody.
+    const invitee = await createUser(db, { login: "invitee", role: "member" });
+    expect(membershipRoles(db)).not.toHaveProperty("invitee");
+    await db
+      .prepare(
+        "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, 'member', ?)",
+      )
+      .bind(invitee.id, new Date().toISOString())
+      .run();
     const cookie = `${SESSION_COOKIE}=${await createSessionValue("invitee", null, SESSION_SECRET)}`;
 
     const res = await worker.fetch(dashboardRequest("/dashboard/default/api/apps", cookie), env);
@@ -3664,380 +3676,40 @@ describe("per-request allowlist guard (spec § AuthZ + lock L5)", () => {
   });
 });
 
-// --- members page (admin-only) + DESIGN mapping ------------------
+// --- members page: workspace-scoped SPA shell ---------------------
+//
+// Plan 97 retired the deployment-level members face: the member list and the
+// invite/member mutations live under a workspace ref only (the full API matrix
+// is `tests/worker/membership.test.ts`). What is left here is the page shell —
+// the SPA document is served for a workspace members route — plus the
+// environment-doc pin.
 
-describe("members page (admin-only)", () => {
+describe("members page (workspace-scoped shell)", () => {
   const adminCookie = async () =>
     `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
-  const memberCookie = async () =>
-    `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`;
 
-  ///T7: /dashboard/members is SPA-owned (shared spa helper).
-
-  async function membersGet(cookie: string, env?: Env): Promise<Response> {
-    return await worker.fetch(dashboardRequest("/dashboard/members", cookie), env ?? makeEnv());
-  }
-
-  async function membersPost(
-    path: string,
-    cookie: string,
-    body: string,
-    env?: Env,
-  ): Promise<Response> {
-    return await worker.fetch(
-      new Request(`https://worker.local/dashboard/members/${path}`, {
-        method: "POST",
-        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
-        body,
-      }),
-      env ?? makeEnv(),
-    );
-  }
-
-  test("the pinned POSTs sit behind the guard: no session → 302 to login; the HTML GET 302s too", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    // HTML navigation GET without a session → 302 login (the
-    // old null-boot shell was the render-then-kick flash source).
-    const get = await htmlGet("/dashboard/members", "", withSpaAssets(makeDbEnv(db)));
-    expect(get.status).toBe(302);
-    expect(get.headers.get("Location")).toBe("/dashboard/login");
-    const post = await membersPost("invite", "", "login=hubot", makeDbEnv(db));
-    expect(post.status).toBe(302);
-    expect(post.headers.get("Location")).toBe("/dashboard/login");
-  });
-
-  test("the legacy SSR handler is gone: a non-HTML GET falls through to the legacy app (guard 302)", async () => {
-    const db = createDashboardTestD1();
-    const res = await membersGet("", makeDbEnv(db));
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
-  });
-
-  test("admin HTML GET → 200 SPA index (the members data contract lives on GET /api/members)", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const res = await htmlGet("/dashboard/members", await adminCookie(), withSpaAssets(makeDbEnv(db)));
+  test("the workspace members page is the SPA shell for an HTML navigation", async () => {
+    const env = withSpaAssets(makeEnv({ WORKSPACE_TENANT_MODE: "strict" }));
+    const res = await htmlGet("/dashboard/default/members", await adminCookie(), env);
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("window.__BOOT__=");
     expect(body).not.toContain(SPA_BOOT_MARKER);
   });
 
-  test("non-admin HTML GET → 200 SPA index (the 403 face is the API route, tested in spa-page-apis)", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    await createUser(db, { login: "mallory", role: "member" });
-    const res = await htmlGet("/dashboard/members", await memberCookie(), withSpaAssets(makeDbEnv(db)));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain("window.__BOOT__=");
+  test("no session on the workspace members page 302s into the OAuth flow", async () => {
+    const env = withSpaAssets(makeEnv({ WORKSPACE_TENANT_MODE: "strict" }));
+    const get = await htmlGet("/dashboard/default/members", "", env);
+    expect(get.status).toBe(302);
+    expect(get.headers.get("Location")).toBe("/dashboard/login");
   });
 
-  test("non-admin POST invite → 403, zero mutations", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    await createUser(db, { login: "mallory", role: "member" });
-    const res = await membersPost("invite", await memberCookie(), "login=hubot", makeDbEnv(db));
-    expect(res.status).toBe(403);
-    expect(userCount(db)).toBe(2);
-    expect(await getUserByLogin(db, "hubot")).toBeNull();
-  });
-
-  test("non-admin POST remove → 403, zero mutations (target row intact)", async () => {
-    const db = createDashboardTestD1();
-    const admin = await createUser(db, { login: "octocat", role: "admin" });
-    await createUser(db, { login: "mallory", role: "member" });
-    const res = await membersPost("remove", await memberCookie(), `userId=${admin.id}`, makeDbEnv(db));
-    expect(res.status).toBe(403);
-    expect(userCount(db)).toBe(2);
-    expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin.id);
-  });
-
-  test("admin invite → 200, member row created with invitedBy (input trimmed)", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const res = await membersPost("invite", await adminCookie(), "login=%20%20hubot%20%20", makeDbEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    const row = await getUserByLogin(db, "hubot");
-    expect(row?.role).toBe("member");
-    expect(row?.invited_by).toBe("octocat");
-    expect(userCount(db)).toBe(2);
-  });
-
-  test("T1 pin (Minor 2): invite resolves case variants — existing login → idempotent no-op, NO second row", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "OctoCat", role: "admin" });
-    // Sequential path: the NOCASE pre-read catches the case variant and
-    // answers the idempotent no-op. (The CONCURRENT window is closed by the
-    // migration 0016 NOCASE unique index — pinned by the W-1 race test.)
-    const res = await membersPost("invite", await adminCookie(), "login=octocat", makeDbEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect(userCount(db)).toBe(1);
-  });
-
-  test("invite empty / whitespace login → 400, zero rows", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    for (const value of ["", "%20%20%20"]) {
-      const res = await membersPost("invite", await adminCookie(), `login=${value}`, makeDbEnv(db));
-      expect(res.status).toBe(400);
-      expect(await res.text()).toContain("Enter a GitHub login");
-    }
-    expect(userCount(db)).toBe(1);
-  });
-
-  test("invite invalid GitHub login syntax → 400, zero rows (qc1/qc2 F-003)", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    // Spaces, symbols, >39 chars, non-ASCII — all can never match a real
-    // GitHub login, so none may persist as a member row.
-    const invalid = [
-      "has%20space",
-      "under_score",
-      "dot.name",
-      "a".repeat(40),
-      "emoji%F0%9F%99%82",
-    ];
-    for (const value of invalid) {
-      const res = await membersPost("invite", await adminCookie(), `login=${value}`, makeDbEnv(db));
-      expect(res.status).toBe(400);
-      expect(await res.text()).toContain("not a valid GitHub login");
-    }
-    expect(userCount(db)).toBe(1);
-  });
-
-  test("invite accepts the 39-char login boundary (F-003 regex upper bound)", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const long = "a".repeat(39);
-    const res = await membersPost("invite", await adminCookie(), `login=${long}`, makeDbEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect((await getUserByLogin(db, long))?.role).toBe("member");
-  });
-
-  test("self-remove → 400, row intact (the only admin is always the actor, so this is also the last-admin case)", async () => {
-    const db = createDashboardTestD1();
-    const admin = await createUser(db, { login: "octocat", role: "admin" });
-    const res = await membersPost("remove", await adminCookie(), `userId=${admin.id}`, makeDbEnv(db));
-    expect(res.status).toBe(400);
-    expect(await res.text()).toContain("You cannot remove yourself.");
-    expect(await countAdmins(db)).toBe(1);
-    expect(userCount(db)).toBe(1);
-  });
-
-  test("removing another admin succeeds while 2 admins exist; the remaining last admin cannot then be removed", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const ada = await createUser(db, { login: "ada", role: "admin" });
-    const ok = await membersPost("remove", await adminCookie(), `userId=${ada.id}`, makeDbEnv(db));
-    expect(ok.status).toBe(200);
-    expect(await ok.text()).toBe("ok");
-    expect(await countAdmins(db)).toBe(1);
-    // Now octocat IS the last admin — removal must refuse, row intact.
-    const octocat = await getUserByLogin(db, "octocat");
-    const refused = await membersPost("remove", await adminCookie(), `userId=${octocat?.id}`, makeDbEnv(db));
-    expect(refused.status).toBe(400);
-    expect(await countAdmins(db)).toBe(1);
-    expect(userCount(db)).toBe(1);
-  });
-
-  test("remove unknown / blank userId → 400, rows intact", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    await createUser(db, { login: "mallory", role: "member" });
-    for (const value of ["missing-id", ""]) {
-      const res = await membersPost("remove", await adminCookie(), `userId=${value}`, makeDbEnv(db));
-      expect(res.status).toBe(400);
-    }
-    expect(userCount(db)).toBe(2);
-  });
-
-  test("remove member → 200, row gone; the removed member's old cookie then 403s everywhere", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const mallory = await createUser(db, { login: "mallory", role: "member" });
-    const staleCookie = await memberCookie(); // minted BEFORE the removal
-    const res = await membersPost("remove", await adminCookie(), `userId=${mallory.id}`, makeDbEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect(await getUserByLogin(db, "mallory")).toBeNull();
-    // Done criterion: a removed member cannot reach any /dashboard/** route
-    // with the still-valid session cookie. W-001: production always
-    // binds ASSETS, so the shell path is denied by spa-dispatch's membership
-    // gate — bind ASSETS to model production, not the legacy fall-through.
-    const shell = await worker.fetch(
-      dashboardRequest("/dashboard", staleCookie),
-      withSpaAssets(makeDbEnv(db)),
+  test("the retired root members page is not a route (no legacy copy)", async () => {
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard/members", await adminCookie()),
+      withSpaAssets(makeEnv()),
     );
-    expect(shell.status).toBe(403);
-  });
-
-  test("non-admin POST role → 403, zero mutations", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const mallory = await createUser(db, { login: "mallory", role: "member" });
-    const res = await membersPost("role", await memberCookie(), `userId=${mallory.id}&role=admin`, makeDbEnv(db));
-    expect(res.status).toBe(403);
-    expect((await getUserByLogin(db, "mallory"))?.role).toBe("member");
-    expect(userCount(db)).toBe(2);
-  });
-
-  test("admin role change member → admin → 200, row updated", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const mallory = await createUser(db, { login: "mallory", role: "member" });
-    const res = await membersPost("role", await adminCookie(), `userId=${mallory.id}&role=admin`, makeDbEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect((await getUserByLogin(db, "mallory"))?.role).toBe("admin");
-    expect(await countAdmins(db)).toBe(2);
-  });
-
-  test("admin role change admin → member succeeds while 2 admins exist; the remaining last admin cannot then be demoted", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const ada = await createUser(db, { login: "ada", role: "admin" });
-    const ok = await membersPost("role", await adminCookie(), `userId=${ada.id}&role=member`, makeDbEnv(db));
-    expect(ok.status).toBe(200);
-    expect(await ok.text()).toBe("ok");
-    expect(await countAdmins(db)).toBe(1);
-    // Now octocat IS the last admin — demotion must refuse, row intact.
-    // The actor is the only admin, so the self-demotion refusal fires
-    // (the "last admin" pre-check is unreachable at the route level: when
-    // countAdmins === 1 the actor IS the target — same shape as remove).
-    // The last-admin ENFORCEMENT itself is pinned by the store-level test
-    // and the concurrent race test below.
-    const octocat = await getUserByLogin(db, "octocat");
-    const refused = await membersPost("role", await adminCookie(), `userId=${octocat?.id}&role=member`, makeDbEnv(db));
-    expect(refused.status).toBe(400);
-    expect(await refused.text()).toContain("You cannot change your own role.");
-    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
-    expect(await countAdmins(db)).toBe(1);
-  });
-
-  test("self-demotion → 400, row intact (the only admin is always the actor, so this is also the last-admin case)", async () => {
-    const db = createDashboardTestD1();
-    const admin = await createUser(db, { login: "octocat", role: "admin" });
-    const res = await membersPost("role", await adminCookie(), `userId=${admin.id}&role=member`, makeDbEnv(db));
-    expect(res.status).toBe(400);
-    expect(await res.text()).toContain("You cannot change your own role.");
-    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
-    expect(await countAdmins(db)).toBe(1);
-  });
-
-  test("role change unknown / blank userId → 400, rows intact", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    await createUser(db, { login: "mallory", role: "member" });
-    for (const value of ["missing-id", ""]) {
-      const res = await membersPost("role", await adminCookie(), `userId=${value}&role=admin`, makeDbEnv(db));
-      expect(res.status).toBe(400);
-    }
-    expect(userCount(db)).toBe(2);
-  });
-
-  test("role change with a role outside the 0003 CHECK domain → 400, rows intact", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const mallory = await createUser(db, { login: "mallory", role: "member" });
-    for (const role of ["owner", "", "ADMIN"]) {
-      const res = await membersPost("role", await adminCookie(), `userId=${mallory.id}&role=${role}`, makeDbEnv(db));
-      expect(res.status).toBe(400);
-      expect(await res.text()).toContain("Role must be admin or member.");
-    }
-    expect((await getUserByLogin(db, "mallory"))?.role).toBe("member");
-    expect(userCount(db)).toBe(2);
-  });
-
-  test("invite with role=admin → 200, admin row created with invitedBy", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const res = await membersPost("invite", await adminCookie(), "login=ada&role=admin", makeDbEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    const row = await getUserByLogin(db, "ada");
-    expect(row?.role).toBe("admin");
-    expect(row?.invited_by).toBe("octocat");
-    expect(await countAdmins(db)).toBe(2);
-  });
-
-  test("invite with a role outside the 0003 CHECK domain → 400, zero rows", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    for (const role of ["owner", "ADMIN"]) {
-      const res = await membersPost("invite", await adminCookie(), `login=ada&role=${role}`, makeDbEnv(db));
-      expect(res.status).toBe(400);
-      expect(await res.text()).toContain("Role must be admin or member.");
-    }
-    expect(userCount(db)).toBe(1);
-    expect(await getUserByLogin(db, "ada")).toBeNull();
-  });
-
-  test("concurrent demotions of the last two admins: exactly one lands, the loser 400s (TOCTOU closed)", async () => {
-    const db = createDashboardTestD1();
-    const octocat = await createUser(db, { login: "octocat", role: "admin" });
-    const ada = await createUser(db, { login: "ada", role: "admin" });
-    const adaCookie = async () =>
-      `${SESSION_COOKIE}=${await createSessionValue("ada", null, SESSION_SECRET)}`;
-    // Two different admin actors demote each other concurrently. Both
-    // pre-checks can pass (2 admins), but the single conditional UPDATE
-    // serializes the last-admin check with the write — exactly one lands.
-    // The loser is refused either way: 403 when its actor was already
-    // demoted before requireAdmin re-read the row, or 400 when the
-    // pre-check / conditional UPDATE catches the race.
-    const [a, b] = await Promise.all([
-      membersPost("role", await adminCookie(), `userId=${ada.id}&role=member`, makeDbEnv(db)),
-      membersPost("role", await adaCookie(), `userId=${octocat.id}&role=member`, makeDbEnv(db)),
-    ]);
-    const statuses = [a.status, b.status].sort((x, y) => x - y);
-    expect(statuses[0]).toBe(200); // exactly one demotion lands
-    expect(statuses[1]).toBeGreaterThanOrEqual(400); // the loser is refused
-    expect(await countAdmins(db)).toBe(1);
-  });
-
-  test("concurrent case-variant invites: exactly one row, the loser is refused (W-1, migration 0016)", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    // Two admins invite the same GitHub identity in different cases at the
-    // same time. The NOCASE pre-read closes the sequential path; the 0016
-    // NOCASE unique index closes the concurrent window — exactly one row
-    // can land. The loser is either the sequential idempotent no-op (200 —
-    // on this single-connection harness its NOCASE pre-read serializes
-    // after the winner's commit) or the concurrent race refusal (409 — its
-    // insert hit the 0016 index; the DuplicateLoginError → 409 mapping is
-    // pinned by the store-level test above). Never a 5xx, never two rows.
-    const [a, b] = await Promise.all([
-      membersPost("invite", await adminCookie(), "login=Alice", makeDbEnv(db)),
-      membersPost("invite", await adminCookie(), "login=alice", makeDbEnv(db)),
-    ]);
-    const statuses = [a.status, b.status].sort((x, y) => x - y);
-    expect(statuses[0]).toBe(200); // exactly one invite lands
-    expect(statuses[1]).toBeGreaterThanOrEqual(200); // the loser is refused (200 no-op or 409 race)
-    expect(statuses[1]).toBeLessThan(500); // never a 5xx
-    expect(userCount(db)).toBe(2); // octocat + exactly one of Alice/alice
-    const invited = (await listUsers(db)).filter((m) => m.github_login.toLowerCase() === "alice");
-    expect(invited).toHaveLength(1);
-  });
-
-  test("demoted admin's old cookie → 403 on the members API (role change invalidates admin access immediately, QC S-001)", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const ada = await createUser(db, { login: "ada", role: "admin" });
-    const staleAdminCookie = `${SESSION_COOKIE}=${await createSessionValue("ada", null, SESSION_SECRET)}`; // minted BEFORE the demotion
-    const res = await membersPost("role", await adminCookie(), `userId=${ada.id}&role=member`, makeDbEnv(db));
-    expect(res.status).toBe(200);
-    expect((await getUserByLogin(db, "ada"))?.role).toBe("member");
-    // The demoted admin's still-valid session cookie must not reach the
-    // members API — requireAdmin re-reads the row and fails closed (403),
-    // mirroring the remove-path cookie invalidation pin (:3088-3105).
-    const api = await worker.fetch(
-      dashboardRequest("/dashboard/api/members", staleAdminCookie),
-      withSpaAssets(makeDbEnv(db)),
-    );
-    expect(api.status).toBe(403);
+    expect(res.status).toBe(404);
   });
 
   test("T1 pin (Minor 1): ADMIN_LOGINS docs name the real var mechanism, not the nonexistent `wrangler vars put`", async () => {
@@ -4049,6 +3721,7 @@ describe("members page (admin-only)", () => {
     expect(envTs).not.toContain("wrangler vars put");
   });
 });
+
 // --- Review Health insights summary API --------------------------
 // The cross-App global endpoint GET /dashboard/api/insights/summary is
 // REMOVED — insights are a per-App read face now: the store filters every

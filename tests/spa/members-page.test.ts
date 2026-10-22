@@ -4,6 +4,9 @@
  * settings-layout.test.ts — plus dictionary interpolation in both locales.
  * F-07: the Joined column renders through the shared
  * relative-time helper, with the absolute stamp kept as a native tooltip.
+ *
+ * Plan 97: every read/write hangs off the page's workspace base, and the page
+ * carries pending invitations with revoke.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -24,13 +27,13 @@ describe("members page shadcn rebuild", () => {
     expect(source).not.toMatch(/<select[\s>]/);
   });
 
-  test("columns are login / role / joined / actions with the invite-only notice on top", () => {
+  test("columns are login / role / joined / actions with the visibility notice on top", () => {
     for (const key of [
       "members.tableLogin",
       "members.roleLabel",
       "members.tableJoined",
       "members.tableActions",
-      "members.inviteOnlyNotice",
+      "members.visibleToMembers",
     ]) {
       expect(source).toContain(`"${key}"`);
     }
@@ -44,22 +47,45 @@ describe("members page shadcn rebuild", () => {
     expect(source).toContain("title={member.created_at}");
   });
 
-  test("invite posts login + role; role change and remove ride the pinned POST paths", () => {
-    expect(source).toContain('postForm("/dashboard/members/invite", { login: trimmed, role: inviteRole })');
-    expect(source).toContain('postForm("/dashboard/members/role", { userId: member.id, role: nextRole })');
-    expect(source).toContain('postForm("/dashboard/members/remove", { userId: member.id })');
+  test("every read and write hangs off the workspace base (plan 97)", () => {
+    expect(source).toContain('import { apiBase } from "../workspace-base"');
+    expect(source).toContain("const base = apiBase()");
+    expect(source).toContain("fetchJson(`${base}/api/members`)");
+    expect(source).toContain("fetchJson(`${base}/api/members/invites`)");
+    expect(source).toContain("postForm(`${base}/api/members/invites`");
+    expect(source).toContain("postForm(`${base}/api/members/invites/${invite.id}/revoke`");
+    expect(source).toContain("postForm(`${base}/members/role`");
+    expect(source).toContain("postForm(`${base}/members/remove`");
+    // The retired deployment-level paths must not come back.
+    expect(source).not.toContain('"/dashboard/api/members"');
+    expect(source).not.toContain('"/dashboard/members/');
   });
 
-  test("self row renders no actions; the last admin's demote/remove items are disabled client-side", () => {
+  test("pending invitations render with revoke, manager-only", () => {
+    expect(source).toContain("members.pendingHeading");
+    expect(source).toContain("members.tableExpires");
+    expect(source).toContain("members.revoke");
+    expect(source).toContain("members.confirmRevokeTitle");
+    // The pending table exists only for owner/admin.
+    expect(source).toContain("canInvite && invites.length > 0");
+    expect(source).toContain("canInviteMembers(memberRole)");
+  });
+
+  test("the pending invite 409 surfaces as a warning, not a retryable error", () => {
+    expect(source).toContain('body.includes("invite.pending_exists")');
+    expect(source).toContain('"notice.warn.invitePending"');
+  });
+
+  test("self row renders no actions; the sole owner's demote/remove items are disabled client-side", () => {
     expect(source).toContain("members.you");
-    expect(source).toContain('member.role === "admin" && adminCount === 1');
-    expect(source).toContain("disabled={protectedAdmin}");
+    expect(source).toContain('member.role === "owner" && ownerCount === 1');
+    expect(source).toContain("disabled={protectedMember}");
   });
 
-  test("both confirm dialogs share one Dialog with destructive remove confirm", () => {
+  test("the confirm dialogs share one Dialog with destructive remove/revoke confirm", () => {
     expect(source).toContain("members.confirmRoleTitle");
     expect(source).toContain("members.confirmRemoveTitle");
-    expect(source).toContain('pending.kind === "remove" ? "destructive" : "default"');
+    expect(source).toContain('pending.kind === "role" ? "default" : "destructive"');
   });
 
   test("invite submit is single-flight and network failures surface a notice (QC S-001/S-002)", () => {
@@ -68,6 +94,7 @@ describe("members page shadcn rebuild", () => {
     expect(source).toContain('t(locale, "notice.error.inviteFailed", { login: trimmed })');
     expect(source).toContain('t(locale, "notice.error.roleChangeFailed", { login: member.github_login })');
     expect(source).toContain('t(locale, "notice.error.removeFailed", { login: member.github_login })');
+    expect(source).toContain('t(locale, "notice.error.revokeFailed", { login: invite.github_login })');
   });
 
   test("page-level states ride the shared state trio; op notices keep the PageNotice channel", () => {
@@ -79,7 +106,13 @@ describe("members page shadcn rebuild", () => {
     expect(source).not.toContain("LoadFailedNotice");
     // Channel boundary (AD-582): op-outcome notices stay on PageNotice.
     expect(source).toContain('<PageNotice kind={notice.kind} message={notice.message} />');
-    expect(source).toContain('<PageNotice kind="error" message={t(locale, "members.adminOnly")} />');
+  });
+
+  test("no page-level admin-only face: the member list is visible to every member", () => {
+    // Plan AC4 — a plain member sees the list; only the manager actions and
+    // the pending list are gated (client-side mirror; the server decides).
+    expect(source).not.toContain("members.adminOnly");
+    expect(source).toContain("emptyDescriptionMember");
   });
 
   test("op-triggered reloads are background — only the initial load gates the skeleton (F-58-1)", () => {
@@ -95,7 +128,11 @@ describe("members page shadcn rebuild", () => {
 
   test("empty member list renders the no-action EmptyState guidance", () => {
     expect(source).toContain('t(locale, "members.emptyTitle")');
-    expect(source).toContain('t(locale, "members.emptyDescription")');
+    // The description differs for a manager (an invite form is present) and a
+    // plain member (it is not), so it is chosen by the same capability guard.
+    expect(source).toContain(
+      'canInvite ? "members.emptyDescription" : "members.emptyDescriptionMember"',
+    );
     const emptyCall = source.match(/<EmptyState[\s\S]*?\/>/);
     expect(emptyCall).not.toBeNull();
     // No action slot: the invite form above is the path.
@@ -105,10 +142,11 @@ describe("members page shadcn rebuild", () => {
   test("new copy interpolates in both locales", () => {
     const keys = [
       "common.cancel",
-      "members.inviteOnlyNotice",
+      "members.visibleToMembers",
       "members.roleLabel",
       "members.tableLogin",
       "members.tableJoined",
+      "members.tableExpires",
       "members.tableActions",
       "members.actionsMenuLabel",
       "members.makeAdmin",
@@ -118,9 +156,19 @@ describe("members page shadcn rebuild", () => {
       "members.confirmRoleButton",
       "members.confirmRemoveTitle",
       "members.confirmRemoveBody",
+      "members.pendingHeading",
+      "members.confirmRevokeTitle",
+      "members.confirmRevokeBody",
+      "members.revoke",
+      "members.role.owner",
+      "members.role.admin",
+      "members.role.member",
       "notice.success.roleChanged",
+      "notice.success.revoked",
+      "notice.warn.invitePending",
       "notice.error.inviteFailed",
       "notice.error.roleChangeFailed",
+      "notice.error.revokeFailed",
     ] as const;
     for (const key of keys) {
       const params = { login: "octocat", role: "admin" };

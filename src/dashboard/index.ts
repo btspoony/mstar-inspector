@@ -69,8 +69,20 @@ import {
   getSoleWorkspace,
   getSoleWorkspaceAccess,
   getWorkspaceBySlug,
+  getWorkspaceMember,
+  listWorkspaceMembers,
   type WorkspaceRole,
 } from "./workspace-store";
+import {
+  InvitePendingExistsError,
+  acceptInvite,
+  createInvite,
+  getInviteInWorkspace,
+  getPendingInviteByLogin,
+  listInviteDiscoveryForLogin,
+  listPendingInvites,
+  revokeInvite,
+} from "./invite-store";
 import { fetchAppMetadata, isGithubMetadataStale } from "./github-app-metadata";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
@@ -108,12 +120,9 @@ import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
   bootstrapDashboardAccess,
-  createUser,
-  deleteUserUnlessLastAdmin,
-  DuplicateLoginError,
+  deleteWorkspaceMember,
   getUserByLogin,
-  listUsers,
-  updateUserRoleUnlessLastAdmin,
+  updateWorkspaceMemberRole,
   type DashboardD1,
   type DashboardUserRow,
 } from "./users";
@@ -134,22 +143,38 @@ import { RESERVED_WORKSPACE_SLUGS, wantsHtml } from "../spa/routes";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
 
 /**
- * Per-request values the workspace tenancy middleware and the member gate
- * attach: `tenant` exists only on a strict-mode workspace path (the workspace
- * slug was classified from the first path segment), so its absence IS the
- * legacy `off` request shape. The routing gate classifies WITHOUT a database
- * read (an anonymous request must not learn whether a workspace exists or pay
- * a D1 round trip): `workspaceId`/`role` stay null until `requireMember`
- * resolves them after the session and user row are known.
+ * Principal classes of a workspace request (the request-path ordering
+ * contract, step 3). `invitee` may reach ONLY the invite-accept route; plan 99
+ * inserts its operator classes after `invitee` in the same middleware.
+ */
+type WorkspacePrincipal = "member" | "invitee" | "outsider";
+
+/**
+ * Per-request values the workspace tenancy middleware attaches: `tenant`
+ * exists only on a strict-mode workspace path (the workspace ref was classified
+ * from the first path segment), so its absence IS the legacy `off` request
+ * shape. The routing gate classifies WITHOUT a database read (an anonymous
+ * request must not learn whether a workspace exists or pay a D1 round trip);
+ * `workspaceScope` then resolves the live workspace and the caller's principal
+ * after the session and user row are known.
  */
 type DashboardVariables = {
   tenant?: {
     slug: string;
-    /** null until the member gate resolves the live workspace row. */
+    /** null until the workspace-scope middleware resolves the live row. */
     workspaceId: string | null;
-    /** null until the member gate resolves the signed-in user's membership. */
+    /** null until the workspace-scope middleware classifies the principal. */
     role: WorkspaceRole | null;
+    /** null until the workspace-scope middleware classifies the caller. */
+    principal: WorkspacePrincipal | null;
   };
+  /** The users row the session guard resolved; absent on exempt routes. */
+  authUser?: DashboardUserRow;
+  /**
+   * The workspace-scope resolution of one request (ordering-contract step 3):
+   * `undefined` = not classified yet, `null` = the caller is not a member.
+   */
+  workspaceScope?: WorkspaceScope | null;
 };
 
 type DashboardContext = Context<{ Bindings: Env; Variables: DashboardVariables }>;
@@ -244,6 +269,24 @@ export async function strictWorkspaceBoot(
     // gives a plain member no rights — so creation is owner/admin there.
     canCreateApp: access.role === "owner" || access.role === "admin",
   };
+}
+
+/**
+ * The signed-in login's live pending invitations — the invitee's discovery
+ * surface in the SPA boot (plan 97 T2). Mode-independent: an invitation exists
+ * in the workspace plane whether or not the deployment routes by workspace
+ * yet, and presenting it is what makes acceptance reachable at all.
+ *
+ * An unbound store answers `[]` (no discovery is possible, not "no invite");
+ * the accept POST still fails closed on its own storage check.
+ */
+export async function pendingInvitesForLogin(
+  env: Env,
+  login: string,
+): Promise<Array<{ workspaceRef: string; inviteId: string; role: "admin" | "member"; expiresAt: string }>> {
+  const db = dashboardD1(env);
+  if (db === null) return [];
+  return listInviteDiscoveryForLogin(db, login, new Date().toISOString());
 }
 
 /**
@@ -398,23 +441,28 @@ type DashboardPathClass =
   | { kind: "other" };
 
 /**
- * Classify a mount-pinned /dashboard path into the route family it addresses.
- * A workspace path is `/<slug>/apps…` or `/<slug>/api/apps…` with a non-reserved
- * slug; the legacy App paths are today's `/apps…` and `/api/apps…`. A reserved
- * first segment is never a workspace, so `:workspaceSlug` cannot capture a real
- * route (`/apps`, `/api/apps`, `/login`, `/members`, …).
+ * Classify a mount-pinned /dashboard path into the route family it addresses —
+ * step 1 of the request-path ordering contract, mirrored by
+ * `workspaceSlugOf` in `src/spa/routes.ts`. A workspace path is
+ * `/<slug>/{apps|members|api}…` with a non-reserved slug; the legacy App paths
+ * are today's `/apps…` and `/api/apps…`. A reserved first segment is never a
+ * workspace, so `:workspaceSlug` cannot capture a real route (`/apps`,
+ * `/api/apps`, `/login`, `/members`, …).
  */
+const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(["apps", "members", "api"]);
+
 function classifyDashboardPath(pathname: string): DashboardPathClass {
   const relative =
     pathname === DASHBOARD_MOUNT || pathname.startsWith(`${DASHBOARD_MOUNT}/`)
       ? pathname.slice(DASHBOARD_MOUNT.length)
       : pathname;
-  const [, first, second, third] = relative.split("/");
+  const [, first, second] = relative.split("/");
   if (first === "apps" || (first === "api" && second === "apps")) return { kind: "legacy-app" };
   if (
     first !== undefined &&
     !RESERVED_WORKSPACE_SLUGS.has(first) &&
-    (second === "apps" || (second === "api" && third === "apps"))
+    second !== undefined &&
+    WORKSPACE_SEGMENTS.has(second)
   ) {
     return { kind: "workspace", slug: first };
   }
@@ -468,7 +516,12 @@ export const dashboardTenantGate: Handler<{
   // are resolved by the member gate AFTER the session and user row are known,
   // so an anonymous request neither pays a pre-auth round trip nor learns from
   // the response whether the slug exists (both cases 302 to login).
-  c.set("tenant", { slug: target.slug, workspaceId: null, role: null });
+  c.set("tenant", {
+    slug: target.slug,
+    workspaceId: null,
+    role: null,
+    principal: null,
+  });
   return next();
 };
 
@@ -549,6 +602,56 @@ dashboardApp.use("*", async (c, next) => {
     }
     return c.html(removedPage(session.login, requestLocale(c)), 403);
   }
+  // The resolved users row is a per-request fact every later gate reuses.
+  c.set("authUser", user);
+  return next();
+});
+
+/**
+ * Workspace-scope resolution — ordering-contract step 3, ONE middleware for
+ * every workspace route. It runs after the session guard (so `authUser` is the
+ * verified caller) and classifies the principal in order:
+ *
+ *   member → invitee → outsider
+ *
+ * `member` gets the workspace scope with its `workspace_members.role`;
+ * `invitee` (a live pending invite for this workspace matches the login) may
+ * reach ONLY the accept route; everything else is `outsider`, which the routes
+ * answer with the byte-identical tenant 404.
+ *
+ * Plan 99 inserts its operator classes after `invitee` in this same list.
+ */
+dashboardApp.use("*", async (c, next) => {
+  if (c.get("workspaceScope") !== undefined) return next();
+  const tenant = c.get("tenant");
+  const db = dashboardD1(c.env);
+  if (!tenant || !db) {
+    c.set("workspaceScope", null);
+    return next();
+  }
+  const workspace = await getWorkspaceBySlug(db, tenant.slug);
+  if (!workspace) {
+    c.set("workspaceScope", null);
+    return next();
+  }
+  const user = c.get("authUser");
+  const role = user ? await getMembership(db, workspace.id, user.id) : null;
+  if (role !== null && user) {
+    c.set("tenant", { slug: workspace.slug, workspaceId: workspace.id, role, principal: "member" });
+    c.set("workspaceScope", { workspaceId: workspace.id, role });
+    return next();
+  }
+  const invited =
+    user === undefined
+      ? null
+      : await getPendingInviteByLogin(db, workspace.id, user.github_login, new Date().toISOString());
+  c.set("tenant", {
+    slug: workspace.slug,
+    workspaceId: workspace.id,
+    role: null,
+    principal: invited === null ? "outsider" : "invitee",
+  });
+  c.set("workspaceScope", null);
   return next();
 });
 
@@ -608,12 +711,14 @@ dashboardApp.get("/oauth/callback", async (c) => {
   }
   // Invite-only bootstrap decision (spec § AuthZ precedence:
   // row → recorded removal → ADMIN_LOGINS → empty-table fallback → deny)
-  // BEFORE any session is minted. A recorded removal denies even when the
-  // login is still on ADMIN_LOGINS (migration 0023 — an operator's removal is
-  // authoritative) and is cleared only by an explicit re-invite. Deny = 403
-  // page with ZERO Set-Cookie (spec: 零 cookie、零写入) — the single-use
-  // state-expiry header set above is withdrawn here — and zero D1 writes (the
-  // deny branch never inserts).
+  // BEFORE any session is minted. A recorded removal denies (migration 0023 —
+  // an operator's removal is authoritative) and is cleared only by a
+  // deliberate re-admission. The invite path is NOT consulted here: sign-in
+  // never joins a workspace (plan 97 AC3 — acceptance is the explicit POST),
+  // and plan 97 T3 replaces this allowlist decision with an unconditional
+  // upsert. Deny = 403 page with ZERO Set-Cookie (spec: 零 cookie、零写入) —
+  // the single-use state-expiry header set above is withdrawn here — and zero
+  // D1 writes (the deny branch never inserts).
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
   const decision = await bootstrapDashboardAccess(db, user.login, c.env.ADMIN_LOGINS);
@@ -1073,178 +1178,276 @@ const appOnboardingRoute = async (c: DashboardContext) => {
   );
 };
 
-// --- Admin-only members management (spec § AuthZ) ---
+// --- Workspace members + invitations (plan 97) ---
 //
-// The per-request guard above has already verified membership on every route
-// below; the admin gate re-resolves the acting row per request (same
-// route-local read pattern as the manifest routes) and 403s non-admins
-// BEFORE any membership read or write — zero mutations on the deny path.
-// POSTs ride the existing session cookie (same discipline as
-// manifest/commit) — no new token scheme.
+// Authority is workspace-scoped: the routing gate classified the ref, the
+// route-local member gate below resolves the workspace + the caller's row, and
+// each handler applies its own role check. The pre-workspace root faces
+// (`GET /api/members`, `POST /members/{invite,remove,role}`) are retired — a
+// deployment-level membership list has no meaning once authority is per
+// workspace. Pending invites are `owner`/`admin` only; the member list is
+// visible to every member.
 
 type AdminGate =
-  | { ok: true; session: SessionPayload; db: DashboardD1; admin: DashboardUserRow }
+  | {
+      ok: true;
+      session: SessionPayload;
+      db: DashboardDb;
+      user: DashboardUserRow;
+      scope: WorkspaceScope;
+    }
   | { ok: false; response: Response };
 
 // GitHub login syntax (qc1/qc2 F-003): letters, digits, hyphens — 1–39
 // chars. Anything else can never match a real GitHub login and would sit in
-// the table as a dead row an admin cannot fix by re-inviting.
+// the table as a dead row nobody can claim.
 const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9-]{1,39}$/;
 
-/** Route-local admin gate shared by the three /dashboard/members routes. */
+/** Invitations live for 7 days — long enough to survive a weekend sign-up. */
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Route-local workspace-manager gate: a resolved workspace scope whose role is
+ * `owner` or `admin`. A plain `member` gets the members-family 403 page; a
+ * non-member never reaches here (`requireMember` answered the outsider 404).
+ */
 async function requireAdmin(c: DashboardContext): Promise<AdminGate> {
-  const secrets = dashboardSecrets(c.env);
-  if (!secrets) return { ok: false, response: c.text("dashboard OAuth is not configured", 500) };
-  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
-  if (!session) return { ok: false, response: c.redirect("/dashboard/login", 302) };
-  const db = dashboardD1(c.env);
-  if (!db) return { ok: false, response: c.text("dashboard storage is not configured", 500) };
-  const admin = await getUserByLogin(db, session.login);
-  // Fail closed: no row (removed between guard and here) or a plain member
-  // is equally non-admin — the 403 view carries zero membership data.
-  if (!admin || admin.role !== "admin") {
-    return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
+  const member = await requireMember(c);
+  if (!member.ok) return { ok: false, response: member.response };
+  const { scope } = member;
+  if (scope === null || (scope.role !== "owner" && scope.role !== "admin")) {
+    return {
+      ok: false,
+      response: c.html(forbiddenPage(member.session.login, requestLocale(c)), 403),
+    };
   }
-  return { ok: true, session, db, admin };
+  return { ok: true, session: member.session, db: member.db, user: member.user, scope };
 }
 
-/** SPA JSON face — same requireAdmin gate and listUsers assembly as the retired GET /members. */
-dashboardApp.get("/api/members", async (c) => {
-  const gate = await requireAdmin(c);
-  if (!gate.ok) return gate.response;
-  const members = await listUsers(gate.db);
+/**
+ * The plain-text body of a members-family refusal. The SPA's `postForm`
+ * branches on the status only, so the text is for operators and tests; the
+ * plan pins `invite.pending_exists` / `invite.expired` as stable codes.
+ */
+function inviteMutationResponse(
+  c: DashboardContext,
+  message: string,
+  status: 200 | 400 | 403 | 404 | 409 | 410,
+): Response {
+  return c.text(message, status);
+}
+
+/**
+ * The workspace's member list — every member sees it (plan AC4), so this route
+ * is gated by `requireMember` alone. `role` is the WORKSPACE role; the legacy
+ * `users.role` column is never read for authorization after this plan.
+ */
+const memberListRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (member.scope === null) return c.json({ error: "not_found" }, 404);
+  const members = await listWorkspaceMembers(member.db, member.scope.workspaceId);
   return c.json({
-    members: members.map((m) => ({
-      id: m.id,
-      github_login: m.github_login,
-      role: m.role,
-      created_at: m.created_at,
+    viewer: { login: member.user.github_login, role: member.scope.role },
+    members: members.map((row) => ({
+      id: row.id,
+      github_login: row.github_login,
+      role: row.role,
+      created_at: row.created_at,
     })),
   });
-});
+};
 
-// The members page is SPA-owned; these pinned POSTs answer the
-// SPA's postForm (2xx → refetch + client notice; 4xx → client error notice)
-// with plain-text bodies — the re-rendered HTML page is retired.
-dashboardApp.post("/members/invite", async (c) => {
+/** The workspace's live pending invites — `owner`/`admin` only (plan AC4). */
+const inviteListRoute = async (c: DashboardContext) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const now = new Date().toISOString();
+  const invites = await listPendingInvites(gate.db, gate.scope.workspaceId, now);
+  return c.json({
+    invites: invites.map((row) => ({
+      id: row.id,
+      github_login: row.github_login,
+      role: row.role,
+      created_at: row.created_at,
+      expires_at: row.expires_at,
+    })),
+  });
+};
+
+/**
+ * Create one pending invite (plan AC2). `owner` or `admin` only; inviting an
+ * existing member or a login that already has a live pending invite is 409 and
+ * writes nothing. A lapsed pending row is flipped terminal by the store before
+ * the insert, so re-inviting after expiry is legal.
+ */
+const inviteCreateRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const login = typeof form.login === "string" ? form.login.trim() : "";
-  // The invite accepts an explicit role (default member — the legacy
-  // behavior). Value domain = the 0003 CHECK ('admin'|'member');
-  // anything else is rejected here before any read or write.
   const role = typeof form.role === "string" ? form.role : "member";
   if (role !== "admin" && role !== "member") {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Role must be admin or member.", 400);
+    return inviteMutationResponse(c, "Role must be admin or member.", 400);
   }
   if (login.length === 0) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Enter a GitHub login to invite.", 400);
+    return inviteMutationResponse(c, "Enter a GitHub login to invite.", 400);
   }
-  // F-003: reject values outside the GitHub login syntax before any read or
-  // write — they would persist as rows that no real login can ever claim.
   if (!GITHUB_LOGIN_PATTERN.test(login)) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`, 400);
+    return inviteMutationResponse(
+      c,
+      `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`,
+      400,
+    );
   }
-  // Review pin (minor 2): resolve the login case-insensitively BEFORE any
-  // createUser call — the sequential duplicate path ("OctoCat" exists →
-  // invite "octocat") is an idempotent no-op here. The CONCURRENT window is
-  // closed by the migration 0016 NOCASE unique index: a case-variant insert
-  // that slips past this pre-read hits the index and createUser throws
-  // DuplicateLoginError → 409 duplicate-invite semantics (W-1).
-  if (await getUserByLogin(gate.db, login)) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok"); // already a member — idempotent no-op
+  // Already a member → 409, zero writes (plan AC2). Resolution is on the
+  // WORKSPACE row, not the users row: a signed-in outsider is not a member.
+  const now = new Date();
+  const members = await listWorkspaceMembers(gate.db, gate.scope.workspaceId);
+  if (members.some((row) => row.github_login.toLowerCase() === login.toLowerCase())) {
+    return inviteMutationResponse(c, "Already a member.", 409);
   }
   try {
-    await createUser(gate.db, { login, role, invitedBy: gate.admin.github_login });
+    await createInvite(gate.db, {
+      workspaceId: gate.scope.workspaceId,
+      login,
+      role,
+      invitedBy: gate.user.id,
+      now: now.toISOString(),
+      expiresAt: new Date(now.getTime() + INVITE_TTL_MS).toISOString(),
+    });
   } catch (err) {
-    if (err instanceof DuplicateLoginError) {
-      // Lost the concurrent case-variant race: the row exists now (the
-      // winner's invite created it) — 409, zero partial state.
-      return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Already a member.", 409);
+    if (err instanceof InvitePendingExistsError) {
+      // A live pending invite already exists (sequential pre-state or a lost
+      // concurrent race) — the first row is untouched.
+      return inviteMutationResponse(c, "invite.pending_exists", 409);
     }
     throw err;
   }
-  return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
-});
+  return inviteMutationResponse(c, "ok", 200);
+};
 
-dashboardApp.post("/members/remove", async (c) => {
+/**
+ * Revoke a live pending invite (plan AC6). Workspace-scoped in the store's
+ * WHERE clause, so a foreign invite id is indistinguishable from an unknown
+ * one; both are 404, and a later accept of the revoked row is 410.
+ */
+const inviteRevokeRoute = async (c: DashboardContext) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const revoked = await revokeInvite(gate.db, gate.scope.workspaceId, c.req.param("id") ?? "");
+  if (!revoked) return inviteMutationResponse(c, "unknown invite", 404);
+  return inviteMutationResponse(c, "ok", 200);
+};
+
+/**
+ * Accept an invite as the signed-in login (plan AC3). This is the ONLY write
+ * that creates a membership from outside. It is reachable by an `invitee`
+ * principal (a signed-in login holding a live pending invite in this
+ * workspace) as well as by a member, so it gates on the workspace + session
+ * instead of `requireMember`.
+ *
+ * Outcomes follow the plan's failure table exactly: login mismatch or unknown
+ * invite → 404; terminal (revoked/expired) → 410; lapsed-but-pending → 409
+ * `invite.expired` (the store flips the row in the same request, so a repeat is
+ * 410); success → 200.
+ */
+const inviteAcceptRoute = async (c: DashboardContext) => {
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+  const tenant = c.get("tenant");
+  if (!tenant || tenant.workspaceId === null) return await tenantNotFound(c);
+  const user = c.get("authUser");
+  if (!user) return await tenantNotFound(c);
+  const inviteId = c.req.param("id") ?? "";
+  // Workspace-scoped pre-read: an invite id from another workspace answers the
+  // same 404 as an unknown one, and the accept cannot be replayed across refs.
+  // The pre-read deliberately ignores expiry: a LAPSED pending invite must still
+  // reach `acceptInvite` so the plan's 409 `invite.expired` (and its terminal
+  // flip) answers instead of a 404. `acceptInvite` owns the rest of the
+  // classification — login mismatch → not_found (404), terminal → 410.
+  const invite = await getInviteInWorkspace(db, tenant.workspaceId, inviteId);
+  if (!invite) return await tenantNotFound(c);
+
+  const outcome = await acceptInvite(db, inviteId, user.github_login, new Date().toISOString());
+  switch (outcome.kind) {
+    case "accepted":
+      return inviteMutationResponse(c, `ok ${outcome.role}`, 200);
+    case "expired":
+      return inviteMutationResponse(c, "invite.expired", 409);
+    case "gone":
+      return inviteMutationResponse(c, "invite is no longer pending", 410);
+    case "not_found":
+      return await tenantNotFound(c);
+  }
+};
+
+/**
+ * Remove a member from this workspace (`owner`/`admin`; plan AC5 table).
+ * The role boundary is checked on the TARGET's workspace role: an `admin` may
+ * not touch an `owner` or another `admin` (403), and the sole-owner refusal
+ * lives in the store's conditional batch (409, zero writes). Removing a
+ * non-member of this workspace is 404 — the same answer an unknown id gets.
+ */
+const memberRemoveRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const userId = typeof form.userId === "string" ? form.userId : "";
-  const members = await listUsers(gate.db);
-  const target = members.find((m) => m.id === userId);
+  const target = await getWorkspaceMember(gate.db, gate.scope.workspaceId, userId);
   if (!target) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Unknown member — nothing was removed, try again.", 400);
+    return inviteMutationResponse(c, "unknown member", 404);
   }
-  // Refuse self-removal: an admin must not be able to lock themselves out.
-  if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "You cannot remove yourself.", 400);
+  // Self-removal is refused: a manager must not be able to lock themselves out.
+  if (target.github_login.toLowerCase() === gate.user.github_login.toLowerCase()) {
+    return inviteMutationResponse(c, "You cannot remove yourself.", 400);
   }
-  // The last-admin ENFORCEMENT is the single conditional DELETE below,
-  // which closes the read-check-delete TOCTOU (qc1): two concurrent
-  // removes of the last two admins cannot both land. (A route-level
-  // "last admin" pre-check would be unreachable — when countAdmins === 1
-  // the actor IS the sole admin and the self-removal refusal above fires
-  // first; qc3 S-003.)
-  if (!(await deleteUserUnlessLastAdmin(gate.db, target.id, gate.admin.github_login))) {
-    // Lost a race (the row vanished or just became the last admin between
-    // the reads above and this delete): 400 with a retry message —
-    // zero partial state either way.
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `Could not remove ${target.github_login} — the member list just changed, try again.`, 400);
+  // An `admin` may not remove an `owner` or another `admin`. An `owner` may
+  // remove an `owner` only when they are not the sole one — that is the store's
+  // 409, so the role boundary here stops at the admin case.
+  if (gate.scope.role === "admin" && target.role !== "member") {
+    return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   }
-  return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
-});
+  if (!(await deleteWorkspaceMember(gate.db, gate.scope.workspaceId, target.id, gate.user.github_login))) {
+    return inviteMutationResponse(c, "Cannot remove the last owner.", 409);
+  }
+  return inviteMutationResponse(c, "ok", 200);
+};
 
-// Role change — same pinned-POST family as invite/remove
-// (spec §3: members family is pinned paths, NOT the settings op
-// discriminator). Same requireAdmin gate + form parse +
-// pinnedPostMutationResponse shape. The last-admin and self-demotion
-// refusals mirror the remove route; the ENFORCEMENT of the last-admin
-// invariant is the single conditional UPDATE in the store (closes the
-// read-check-update TOCTOU — two concurrent demotions of the last two
-// admins cannot both land).
-dashboardApp.post("/members/role", async (c) => {
+/**
+ * Change a member's workspace role (`owner`/`admin`; plan AC5 table).
+ * `admin` may only touch plain members and may not promote — every other
+ * combination is 403. The sole-owner demotion refusal is the store's 0-row
+ * update (409, zero writes).
+ */
+const memberRoleRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const userId = typeof form.userId === "string" ? form.userId : "";
   const role = typeof form.role === "string" ? form.role : "";
-  // Value domain = the 0003 CHECK ('admin'|'member'); reject anything else
-  // before any read or write.
   if (role !== "admin" && role !== "member") {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Role must be admin or member.", 400);
+    return inviteMutationResponse(c, "Role must be admin or member.", 400);
   }
-  const members = await listUsers(gate.db);
-  const target = members.find((m) => m.id === userId);
+  const target = await getWorkspaceMember(gate.db, gate.scope.workspaceId, userId);
   if (!target) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Unknown member — nothing was changed, try again.", 400);
+    return inviteMutationResponse(c, "unknown member", 404);
   }
-  // Refuse self role change (mirror of the self-removal ban): an admin
-  // must be demoted by another admin, and cannot promote themselves.
-  if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "You cannot change your own role.", 400);
+  if (target.github_login.toLowerCase() === gate.user.github_login.toLowerCase()) {
+    // Self-demotion of the sole owner is exactly the 409 the store refuses.
+    return target.role === "owner" && role === "member"
+      ? inviteMutationResponse(c, "Cannot demote the last owner.", 409)
+      : inviteMutationResponse(c, "You cannot change your own role.", 400);
   }
-  // Same role → idempotent no-op (the store's conditional UPDATE would
-  // also report changes === 0, but the explicit no-op keeps the message
-  // honest for the common "already that role" case).
-  if (target.role === role) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
+  if (gate.scope.role === "admin" && target.role !== "member") {
+    return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   }
-  // The last-admin ENFORCEMENT is the single conditional UPDATE below,
-  // which closes the read-check-update TOCTOU (deleteUserUnlessLastAdmin
-  // precedent, qc1). (A route-level "last admin" pre-check would be
-  // unreachable — when countAdmins === 1 the actor IS the sole admin and
-  // the self-change refusal above fires first; qc3 S-003.)
-  if (!(await updateUserRoleUnlessLastAdmin(gate.db, target.id, role))) {
-    // Lost a race (the row vanished or just became the last admin between
-    // the reads above and this update): 400 with a retry message —
-    // zero partial state either way.
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `Could not change ${target.github_login}'s role — the member list just changed, try again.`, 400);
+  if (target.role === role) return inviteMutationResponse(c, "ok", 200);
+  if (!(await updateWorkspaceMemberRole(gate.db, gate.scope.workspaceId, target.id, role))) {
+    return inviteMutationResponse(c, "Cannot demote the last owner.", 409);
   }
-  return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
-});
+  return inviteMutationResponse(c, "ok", 200);
+};
 
 // --- Apps list + per-App management (spec § Multi-App 契约,
 // Clarify #6, architect-pinned POST action paths) ---
@@ -1279,24 +1482,17 @@ async function requireMember(c: DashboardContext): Promise<
   // Fail closed: no row (removed between guard and here) → 403, the 403 view
   // carries zero membership data.
   if (!user) return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
-  // Workspace path: the routing gate only classified the slug. Resolve the
-  // live workspace and the membership row HERE, after the session and user
-  // read, so an anonymous request cannot distinguish an existing workspace
-  // from a missing one (both never reach this line: the guard 302s to login)
-  // and pays no workspace D1 read. Not a member → the same 404 an unknown
-  // workspace answers (no tenant-existence oracle).
+  // The workspace resolution itself is the workspace-scope middleware's job
+  // (ordering-contract step 3). This gate only turns its verdict into the
+  // route shape: no scope on a workspace path IS the outsider 404 — the same
+  // surface an unknown workspace answers, so there is no existence oracle.
   const tenant = c.get("tenant");
-  if (tenant) {
-    // Tenant invisibility is final on a workspace-scoped request — the same
-    // surface the routing gate answers with.
-    const workspace = await getWorkspaceBySlug(db, tenant.slug);
-    if (!workspace) return { ok: false, response: await tenantNotFound(c) };
-    const role = await getMembership(db, workspace.id, user.id);
-    if (!role) return { ok: false, response: await tenantNotFound(c) };
-    c.set("tenant", { slug: workspace.slug, workspaceId: workspace.id, role });
-    return { ok: true, session, db, user, scope: { workspaceId: workspace.id, role } };
+  if (!tenant) return { ok: true, session, db, user, scope: null };
+  const scope = c.get("workspaceScope") ?? null;
+  if (scope === null || tenant.principal !== "member") {
+    return { ok: false, response: await tenantNotFound(c) };
   }
-  return { ok: true, session, db, user, scope: null };
+  return { ok: true, session, db, user, scope };
 }
 
 /**
@@ -2982,23 +3178,32 @@ const appInsightsRoute = async (c: DashboardContext) => {
 // the SPA reads the per-App JSON face above). The legacy GET handlers are
 // gone; the global URL answers 404.
 
-// --- App route table (Deploy B dual registration) --------------------------
+// --- App + member route table (Deploy B dual registration) -----------------
 //
-// ONE table, ONE registration loop: every App-scoped route is reachable on the
-// legacy prefix (today's paths, live under `off`) and on the workspace prefix
-// (live under `strict`). Handlers read the workspace from the request context,
-// so no handler body exists twice. The workspace copy is gated by
-// `workspaceOnly`: the routing middleware attaches a scope only for a
-// resolvable, non-reserved slug, so a request that matched `:workspaceSlug`
-// without one (`/login/apps…`, `/members/api/apps…`) is a 404 and never falls
-// back to the legacy face.
+// ONE table, ONE registration loop: every route is reachable on the legacy
+// prefix (today's paths, live under `off`) and on the workspace prefix
+// (live under `strict`) — except the ones flagged `root: false`, which exist
+// ONLY under a workspace ref. The members/invite family is workspace-only: a
+// deployment-level member list or invitation has no meaning once authority is
+// per workspace, so no legacy copy is registered and the retired root paths
+// (`/api/members`, `/members/{invite,remove,role}`) fall through to the
+// catch-all 404.
+// Handlers read the workspace from the request context, so no handler body
+// exists twice. The workspace copy is gated by `workspaceOnly`: the routing
+// middleware attaches a scope only for a resolvable, non-reserved slug, so a
+// request that matched `:workspaceSlug` without one (`/login/apps…`,
+// `/login/members…`) is a 404 and never falls back to the legacy face.
 type AppRouteHandler = (c: DashboardContext) => Response | Promise<Response>;
 
-const APP_ROUTES: ReadonlyArray<{
+type AppRoute = {
   method: "get" | "post";
   path: string;
   handler: AppRouteHandler;
-}> = [
+  /** `false` = workspace-only: no legacy copy is registered. Defaults to both. */
+  root?: boolean;
+};
+
+const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/apps/:slug/onboarding", handler: appOnboardingRoute },
   { method: "get", path: "/api/apps", handler: appListRoute },
   { method: "post", path: "/apps/:slug/disable", handler: (c) => appStatusAction(c, "disable") },
@@ -3013,6 +3218,14 @@ const APP_ROUTES: ReadonlyArray<{
   { method: "post", path: "/apps/:slug/settings", handler: appSettingsSaveRoute },
   { method: "post", path: "/apps/:slug/settings/key/delete", handler: appKeyDeleteRoute },
   { method: "get", path: "/api/apps/:slug/insights/summary", handler: appInsightsRoute },
+  // Members + invitations: workspace-only (plan 97).
+  { method: "get", path: "/api/members", handler: memberListRoute, root: false },
+  { method: "get", path: "/api/members/invites", handler: inviteListRoute, root: false },
+  { method: "post", path: "/api/members/invites", handler: inviteCreateRoute, root: false },
+  { method: "post", path: "/api/members/invites/:id/revoke", handler: inviteRevokeRoute, root: false },
+  { method: "post", path: "/api/members/invites/:id/accept", handler: inviteAcceptRoute, root: false },
+  { method: "post", path: "/members/role", handler: memberRoleRoute, root: false },
+  { method: "post", path: "/members/remove", handler: memberRemoveRoute, root: false },
 ];
 
 /**
@@ -3031,10 +3244,10 @@ function workspaceOnly(
 
 for (const route of APP_ROUTES) {
   if (route.method === "get") {
-    dashboardApp.get(route.path, route.handler);
+    if (route.root !== false) dashboardApp.get(route.path, route.handler);
     dashboardApp.get(`/:workspaceSlug${route.path}`, workspaceOnly(route.handler));
   } else {
-    dashboardApp.post(route.path, route.handler);
+    if (route.root !== false) dashboardApp.post(route.path, route.handler);
     dashboardApp.post(`/:workspaceSlug${route.path}`, workspaceOnly(route.handler));
   }
 }

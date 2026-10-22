@@ -20,7 +20,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
-import { strictWorkspaceAppsBase, strictWorkspaceBoot } from "../dashboard/index";
+import { strictWorkspaceAppsBase, strictWorkspaceBoot, pendingInvitesForLogin } from "../dashboard/index";
 import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
@@ -145,6 +145,13 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     auth.boot.login === null || route?.page === "login"
       ? {}
       : await strictWorkspaceBoot(c.env, auth.boot.login);
+  // The invitee's discovery surface: every live pending invitation for this
+  // login, so an invited outsider sees a path to accept without knowing the
+  // workspace's ref (they are not a member yet, so no member list names it).
+  const pendingInvites =
+    auth.boot.login === null || route?.page === "login"
+      ? []
+      : await pendingInvitesForLogin(c.env, auth.boot.login);
   // Absent fields add nothing, so `off` and a slug-less deployment keep the
   // pre-existing boot (and its JSON key order) byte-identical.
   const boot: SpaBoot = {
@@ -153,6 +160,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
       ? {}
       : { workspaceSlug: routeSlug ?? extras.workspaceSlug },
     ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
+    ...(pendingInvites.length === 0 ? {} : { pendingInvites }),
   };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   if (c.req.method === "HEAD") {

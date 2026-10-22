@@ -33,6 +33,17 @@ export type SpaBoot = {
    * Create action. `off` never sets it, so its output is unchanged.
    */
   canCreateApp?: boolean;
+  /**
+   * The signed-in login's live pending workspace invitations — the invitee's
+   * discovery surface (plan 97 T2). Empty/absent for a login nobody invited.
+   * Each row names the workspace ref plus the invite id the accept POST takes.
+   */
+  pendingInvites?: Array<{
+    workspaceRef: string;
+    inviteId: string;
+    role: "admin" | "member";
+    expiresAt: string;
+  }>;
 };
 
 export const EMPTY_BOOT: SpaBoot = { locale: "en", login: null, name: null, role: null };

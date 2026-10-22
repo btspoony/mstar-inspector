@@ -82,12 +82,14 @@ export const en = {
   },
   notice: {
     success: {
-      invited: "Invited {login} — they can sign in with GitHub now.",
+      invited: "Invited {login} — they can accept from this workspace now.",
       removedMember: "Removed {login}.",
       roleChanged: "{login} is now {role}.",
+      revoked: "Revoked the invitation for {login}.",
     },
     warn: {
       alreadyMember: "{login} is already a member — nothing changed.",
+      invitePending: "{login} already has a pending invitation — nothing changed.",
     },
     error: {
       enterLogin: "Enter a GitHub login to invite.",
@@ -95,6 +97,7 @@ export const en = {
       inviteFailed: "Could not invite {login} — try again.",
       roleChangeFailed: "Could not change {login}'s role — the member list just changed, try again.",
       removeFailed: "Could not remove {login} — the member list just changed, try again.",
+      revokeFailed: "Could not revoke {login}'s invitation — try again.",
     },
   },
   /** App detail page (App detail IA): the two-tab shell. */
@@ -179,13 +182,14 @@ export const en = {
   },
   members: {
     heading: "Members",
-    inviteOnlyNotice: "Only the GitHub users listed here can sign in to this deployment.",
+    visibleToMembers: "Everyone in this workspace can see who is a member.",
     inviteLabel: "Invite by GitHub login",
     invitePlaceholder: "e.g. octocat",
     inviteButton: "Invite member",
     roleLabel: "Role",
     tableLogin: "GitHub login",
     tableJoined: "Joined",
+    tableExpires: "Expires",
     tableActions: "Actions",
     actionsMenuLabel: "Open actions for {login}",
     makeAdmin: "Change to admin",
@@ -197,13 +201,21 @@ export const en = {
     confirmRemoveBody:
       "{login} will no longer be able to sign in — their session stops working right away. Apps they created stay in place and remain manageable by admins.",
     remove: "Remove",
+    pendingHeading: "Pending invitations",
+    confirmRevokeTitle: "Revoke {login}'s invitation?",
+    confirmRevokeBody: "{login} will not be able to accept this invitation. They can be invited again later.",
+    revoke: "Revoke",
     you: "you",
-    adminOnly: "This page is restricted to dashboard admins.",
-    roleAdmin: "admin",
-    roleMember: "member",
+    /** Workspace role vocabulary (`workspace_members.role`), including owner. */
+    role: {
+      owner: "owner",
+      admin: "admin",
+      member: "member",
+    },
     /** Composed empty state — no-action variant (the invite form is the path). */
     emptyTitle: "No members yet",
     emptyDescription: "Invite the first member with the form above.",
+    emptyDescriptionMember: "This workspace has no other members yet.",
   },
   settings: {
     /**
