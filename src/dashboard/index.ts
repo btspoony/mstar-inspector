@@ -1447,9 +1447,11 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
 /**
  * Remove a member from this workspace (`owner`/`admin`; plan AC5 table).
  * The role boundary is checked on the TARGET's workspace role: an `admin` may
- * not touch an `owner` or another `admin` (403), and the sole-owner refusal
- * lives in the store's conditional batch (409, zero writes). Removing a
- * non-member of this workspace is 404 — the same answer an unknown id gets.
+ * only remove a plain `member` — an `owner` or another `admin` is 403, even
+ * when that owner is the last one (the 403 answers before any 409 could). The
+ * sole-owner refusal lives in the store's conditional batch (409, zero writes).
+ * Removing a non-member of this workspace is 404 — the same answer an unknown
+ * id gets.
  */
 const memberRemoveRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
@@ -1461,6 +1463,9 @@ const memberRemoveRoute = async (c: DashboardContext) => {
     return inviteMutationResponse(c, "unknown member", 404);
   }
   // Self-removal is refused: a manager must not be able to lock themselves out.
+  // The last-owner 409 covers a PEER's attempt (the store's conditional batch
+  // owns it); a sole owner is the only one who could reach themselves, and this
+  // 400 refuses them first — zero writes either way.
   if (target.github_login.toLowerCase() === gate.user.github_login.toLowerCase()) {
     return inviteMutationResponse(c, "You cannot remove yourself.", 400);
   }
@@ -1477,10 +1482,15 @@ const memberRemoveRoute = async (c: DashboardContext) => {
 };
 
 /**
- * Change a member's workspace role (`owner`/`admin`; plan AC5 table).
- * `admin` may only touch plain members and may not promote — every other
- * combination is 403. The sole-owner demotion refusal is the store's 0-row
- * update (409, zero writes).
+ * Change a member's workspace role (`owner`-only; plan AC5 table), including
+ * promotion to `owner` — that promotion IS the ownership-transfer path, so
+ * there is no separate transfer route.
+ *
+ * An `admin` may not change any role (403, including a target that is the last
+ * owner: the role boundary answers 403, never the 409). The sole-owner demotion
+ * refusal is the store's 0-row update (409, zero writes) for a peer owner and,
+ * at this level, for the actor demoting THEMSELVES while sole owner — the store
+ * predicate cannot tell who the actor is.
  */
 const memberRoleRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
@@ -1488,23 +1498,29 @@ const memberRoleRoute = async (c: DashboardContext) => {
   const form = await c.req.parseBody();
   const userId = typeof form.userId === "string" ? form.userId : "";
   const role = typeof form.role === "string" ? form.role : "";
-  if (role !== "admin" && role !== "member") {
-    return inviteMutationResponse(c, "Role must be admin or member.", 400);
+  if (role !== "owner" && role !== "admin" && role !== "member") {
+    return inviteMutationResponse(c, "Role must be owner, admin or member.", 400);
   }
   const target = await getWorkspaceMember(gate.db, gate.scope.workspaceId, userId);
   if (!target) {
     return inviteMutationResponse(c, "unknown member", 404);
   }
-  if (target.github_login.toLowerCase() === gate.user.github_login.toLowerCase()) {
-    // Self-demotion of the sole owner is exactly the 409 the store refuses.
-    return target.role === "owner" && role === "member"
-      ? inviteMutationResponse(c, "Cannot demote the last owner.", 409)
-      : inviteMutationResponse(c, "You cannot change your own role.", 400);
-  }
-  if (gate.scope.role === "admin" && target.role !== "member") {
+  if (gate.scope.role === "admin") {
     return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   }
   if (target.role === role) return inviteMutationResponse(c, "ok", 200);
+  if (target.github_login.toLowerCase() === gate.user.github_login.toLowerCase()) {
+    // Self-demotion, refused only while the actor is the sole owner. The store
+    // predicate cannot see WHO is acting — it refuses a sole-owner demotion
+    // whoever asks — so the actor-aware answer lives here, and its body is what
+    // pins this check (a store refusal answers the generic last-owner text).
+    const owners = (await listWorkspaceMembers(gate.db, gate.scope.workspaceId)).filter(
+      (row) => row.role === "owner",
+    );
+    if (owners.length <= 1) {
+      return inviteMutationResponse(c, "You cannot demote yourself while you are the only owner.", 409);
+    }
+  }
   if (!(await updateWorkspaceMemberRole(gate.db, gate.scope.workspaceId, target.id, role))) {
     return inviteMutationResponse(c, "Cannot demote the last owner.", 409);
   }

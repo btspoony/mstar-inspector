@@ -23,11 +23,9 @@ import { APP_VERSION } from "../../src/version";
 import { exchangeCodeForToken, fetchGitHubUser } from "../../src/dashboard/oauth";
 import type { Env } from "../../src/worker/env";
 import {
-  countAdmins,
   countUsers,
   createUser,
   deleteUser,
-  deleteUserUnlessLastAdmin,
   deleteWorkspaceMember,
   DuplicateLoginError,
   getUserByLogin,
@@ -35,7 +33,6 @@ import {
   listUsers,
   parseLoginList,
   signInDashboardUser,
-  updateUserRoleUnlessLastAdmin,
   updateWorkspaceMemberRole,
   type DashboardD1,
   type DashboardD1BatchResult,
@@ -3028,12 +3025,11 @@ describe("dashboard users store (users.ts)", () => {
     expect(userCount(db)).toBe(1);
   });
 
-  test("listUsers / deleteUser / countUsers / countAdmins", async () => {
+  test("listUsers / deleteUser / countUsers", async () => {
     const db = createDashboardTestD1();
     const admin = await createUser(db, { login: "octocat", role: "admin" });
     const member = await createUser(db, { login: "hubot", role: "member" });
     expect(await countUsers(db)).toBe(2);
-    expect(await countAdmins(db)).toBe(1);
     const logins = (await listUsers(db)).map((u) => u.github_login).sort();
     expect(logins).toEqual(["hubot", "octocat"]);
     expect(await deleteUser(db, member.id)).toBe(true);
@@ -3041,83 +3037,6 @@ describe("dashboard users store (users.ts)", () => {
     expect(await deleteUser(db, "missing-id")).toBe(false);
     expect(await countUsers(db)).toBe(1);
     expect((await getUserByLogin(db, admin.github_login))?.id).toBe(admin.id);
-  });
-
-  test("removal records the tombstone in the SAME batch as the row delete (row gone ⇔ removal recorded)", async () => {
-    const db = createDashboardTestD1();
-    const member = await createUser(db, { login: "hubot", role: "member" });
-    expect(await deleteUser(db, member.id, "octocat")).toBe(true);
-    expect(await getUserByLogin(db, "hubot")).toBeNull();
-    expect(removedRows(db)).toEqual([
-      { github_login: "hubot", removed_at: expect.any(String), removed_by: "octocat" },
-    ]);
-    // Case-insensitive read, like users.github_login (migration 0016 parity).
-    expect(await isLoginRemoved(db, "HUBOT")).toBe(true);
-    expect(await isLoginRemoved(db, "octocat")).toBe(false);
-    // Already-gone / unknown ids write nothing — no tombstone without a delete.
-    expect(await deleteUser(db, member.id, "octocat")).toBe(false);
-    expect(await deleteUser(db, "missing-id")).toBe(false);
-    expect(removedRows(db)).toHaveLength(1);
-  });
-
-  test("deleteUserUnlessLastAdmin: members and non-last admins delete; the sole admin is refused (qc1 hardening)", async () => {
-    const db = createDashboardTestD1();
-    const admin = await createUser(db, { login: "octocat", role: "admin" });
-    const member = await createUser(db, { login: "hubot", role: "member" });
-    // Member row: unconditional delete.
-    expect(await deleteUserUnlessLastAdmin(db, member.id)).toBe(true);
-    expect(await getUserByLogin(db, "hubot")).toBeNull();
-    expect(removedRows(db).map((r) => r.github_login)).toEqual(["hubot"]);
-    // Sole admin: the conditional statement refuses, row intact — and the
-    // refusal records NO tombstone, because both statements of the removal
-    // batch carry the same guard (a removal can never be recorded without the
-    // row actually being gone).
-    expect(await deleteUserUnlessLastAdmin(db, admin.id)).toBe(false);
-    expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin.id);
-    expect(await countAdmins(db)).toBe(1);
-    expect(removedRows(db).map((r) => r.github_login)).toEqual(["hubot"]);
-    // With a second admin present, either row is deletable again.
-    await createUser(db, { login: "ada", role: "admin" });
-    expect(await deleteUserUnlessLastAdmin(db, admin.id)).toBe(true);
-    expect(await countAdmins(db)).toBe(1);
-    expect(await deleteUserUnlessLastAdmin(db, "missing-id")).toBe(false);
-  });
-
-  test("updateUserRoleUnlessLastAdmin: promotes members, demotes non-last admins, refuses the sole admin", async () => {
-    const db = createDashboardTestD1();
-    const admin = await createUser(db, { login: "octocat", role: "admin" });
-    const member = await createUser(db, { login: "hubot", role: "member" });
-    // Member → admin promotion.
-    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "admin")).toBe(true);
-    expect((await getUserByLogin(db, "hubot"))?.role).toBe("admin");
-    // With two admins, either row is demotable.
-    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "member")).toBe(true);
-    expect(await countAdmins(db)).toBe(1);
-    expect((await getUserByLogin(db, "hubot"))?.role).toBe("member");
-    // Now octocat IS the sole admin — demotion must refuse, row intact.
-    expect(await updateUserRoleUnlessLastAdmin(db, admin.id, "member")).toBe(false);
-    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
-    expect(await countAdmins(db)).toBe(1);
-    // Missing id → false; same-role set → false (no-op, changes === 0).
-    expect(await updateUserRoleUnlessLastAdmin(db, "missing-id", "admin")).toBe(false);
-    expect(await updateUserRoleUnlessLastAdmin(db, admin.id, "admin")).toBe(false);
-    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
-  });
-
-  test("concurrent demotions of the last two admins cannot both land (TOCTOU closed by the single conditional UPDATE)", async () => {
-    const db = createDashboardTestD1();
-    const octocat = await createUser(db, { login: "octocat", role: "admin" });
-    const ada = await createUser(db, { login: "ada", role: "admin" });
-    // Interleaved demotions of the two admins: the single conditional
-    // UPDATE serializes the last-admin check with the write, so exactly
-    // one lands and the loser sees changes === 0 — no read-check-write
-    // window (deleteUserUnlessLastAdmin precedent, qc1).
-    const [a, b] = await Promise.all([
-      updateUserRoleUnlessLastAdmin(db, octocat.id, "member"),
-      updateUserRoleUnlessLastAdmin(db, ada.id, "member"),
-    ]);
-    expect([a, b].filter(Boolean)).toHaveLength(1);
-    expect(await countAdmins(db)).toBe(1);
   });
 
   test("listUsers breaks created_at ties by github_login (deterministic order, qc1/qc3)", async () => {
@@ -3231,7 +3150,7 @@ describe("signInDashboardUser precedence (plan 97 AC1: login is member)", () => 
     await createUser(db, { login: "root-admin", role: "admin" });
     const racy = bootstrapRaceD1(db, async () => {
       const created = await createUser(db, { login: "octocat", role: "member" });
-      expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
+      expect(await deleteUser(db, created.id, "root-admin")).toBe(true);
     });
     expect(await signInDashboardUser(racy, "octocat")).toEqual({ outcome: "deny" });
     expect(await getUserByLogin(db, "octocat")).toBeNull();
@@ -3245,7 +3164,7 @@ describe("signInDashboardUser precedence (plan 97 AC1: login is member)", () => 
     await createUser(db, { login: "root-admin", role: "admin" });
     const racy = bootstrapRaceD1(db, async () => {
       const created = await createUser(db, { login: "octocat", role: "member" });
-      expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
+      expect(await deleteUser(db, created.id, "root-admin")).toBe(true);
     });
     expect(await signInDashboardUser(racy, "OCTOCAT")).toEqual({ outcome: "deny" });
     expect(await getUserByLogin(db, "OCTOCAT")).toBeNull();
@@ -3318,7 +3237,7 @@ describe("/dashboard/oauth/callback sign-in", () => {
     stubGitHubIdentity("octocat");
     const racy = bootstrapRaceD1(db, async () => {
       const created = await createUser(db, { login: "octocat", role: "member" });
-      expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
+      expect(await deleteUser(db, created.id, "root-admin")).toBe(true);
     });
     const res = await oauthCallback("octocat", makeDbEnv(racy));
     // The ordinary deny shape (spec: 零 cookie、零写入): no session is minted

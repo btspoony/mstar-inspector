@@ -492,22 +492,25 @@ describe("member role change and removal (plan AC5)", () => {
     expect(legacy?.role).toBe("member");
   });
 
-  test("admin may not change another admin's or an owner's role (403)", async () => {
+  test("admin may not change any role — owner's, another admin's, or a plain member's (403)", async () => {
     const { db, users } = fixture();
     use(db);
-    for (const target of [users.owner, users.secondOwner]) {
+    for (const target of [users.owner, users.secondOwner, users.member]) {
       const res = await request("/dashboard/acme/members/role", "carol", {
         method: "POST",
         body: `userId=${target}&role=member`,
       });
-      expect(res.status).toBe(403);
+      expect(res.status, target).toBe(403);
     }
     // …and an admin may not promote a plain member to owner either.
     const promote = await request("/dashboard/acme/members/role", "carol", {
       method: "POST",
-      body: `userId=${users.member}&role=member`,
+      body: `userId=${users.member}&role=owner`,
     });
-    expect(promote.status).toBe(200); // same role = no-op, not a privilege change
+    expect(promote.status).toBe(403);
+    // Zero writes on every refusal: the roles are exactly the seeded ones.
+    expect(memberRole(db, "mallory")).toBe("member");
+    expect(memberRole(db, "dana")).toBe("owner");
   });
 
   test("the last owner cannot be demoted or removed (409, zero writes)", async () => {

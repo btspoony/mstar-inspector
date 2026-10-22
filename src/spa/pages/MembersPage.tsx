@@ -304,13 +304,14 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
                     const self =
                       boot.login !== null && member.github_login.toLowerCase() === boot.login.toLowerCase();
                     // Client-side mirror of the server guards: the sole owner
-                    // cannot be demoted or removed, and an admin may only act on
-                    // plain members. The routes remain the SSOT (conditional
-                    // UPDATE/DELETE close the race); this only greys out the
-                    // actions the server would refuse anyway.
+                    // cannot be demoted or removed; an `admin` may only remove
+                    // plain members and may not change any role (plan 97 AC5).
+                    // The routes remain the SSOT (conditional UPDATE/DELETE
+                    // close the race); this only greys out the actions the
+                    // server would refuse anyway.
                     const soleOwner = member.role === "owner" && ownerCount === 1;
-                    const adminBlocked = memberRole === "admin" && member.role !== "member";
-                    const protectedMember = soleOwner || adminBlocked;
+                    const roleBlocked = memberRole !== "owner";
+                    const protectedMember = soleOwner || (memberRole === "admin" && member.role !== "member");
                     const nextRole: "admin" | "member" = member.role === "member" ? "admin" : "member";
                     return (
                       <TableRow key={member.id}>
@@ -343,7 +344,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end">
                                 <DropdownMenuItem
-                                  disabled={protectedMember}
+                                  disabled={protectedMember || roleBlocked}
                                   onSelect={() => setPending({ kind: "role", member, nextRole })}
                                 >
                                   {t(

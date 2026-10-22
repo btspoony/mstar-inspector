@@ -224,13 +224,6 @@ export async function listUsers(db: DashboardD1): Promise<DashboardUserRow[]> {
 
 // --- removal: the tombstone and the row delete are ONE transaction (0023) ---
 
-/**
- * The last-admin guard, shared by BOTH statements of the removal batch: a row
- * is removable only when it is not the sole remaining admin.
- */
-const NOT_LAST_ADMIN =
-  "NOT (role = 'admin' AND (SELECT COUNT(*) FROM users WHERE role = 'admin') <= 1)";
-
 /** Case-insensitive tombstone lookup — same NOCASE comparison as getUserByLogin. */
 export async function isLoginRemoved(db: DashboardD1, login: string): Promise<boolean> {
   const row = await db
@@ -242,43 +235,27 @@ export async function isLoginRemoved(db: DashboardD1, login: string): Promise<bo
 
 /**
  * Removal = record the login as removed (migration 0023), drop the user's
- * workspace membership and delete its row, as ONE D1 `batch` — a transaction
+ * workspace memberships and delete its row, as ONE D1 `batch` — a transaction
  * (d1-batch-atomicity), so a removal can never be recorded without the row
- * actually being gone, or a row deleted without being recorded. The tombstone
- * statement and the membership delete read the row under the SAME `condition`
- * as the DELETE (and all three evaluate it inside the one transaction), so a
- * refused removal writes nothing on any side. `removedBy` is the acting
- * admin's login, NULL when the caller has no actor in scope. Returns true when
- * the row was deleted.
+ * actually being gone, or a row deleted without being recorded. `removedBy` is
+ * the acting member's login, NULL when the caller has no actor in scope.
+ * Returns true when the row was deleted.
  */
-async function removeUser(
-  db: DashboardD1,
-  id: string,
-  removedBy: string | null,
-  condition?: string,
-): Promise<boolean> {
-  const guard = condition ? ` AND ${condition}` : "";
+async function removeUser(db: DashboardD1, id: string, removedBy: string | null): Promise<boolean> {
   const results = await db.batch([
     db
       .prepare(
         `INSERT INTO removed_logins (github_login, removed_at, removed_by)
-         SELECT github_login, ?, ? FROM users WHERE id = ?${guard}
+         SELECT github_login, ?, ? FROM users WHERE id = ?
          ON CONFLICT (github_login) DO UPDATE
            SET removed_at = excluded.removed_at, removed_by = excluded.removed_by`,
       )
       .bind(new Date().toISOString(), removedBy, id),
     // The workspace side first: 0026 declares `workspace_members.user_id
     // REFERENCES users(id)` with no cascade, so the row delete below is
-    // impossible while a membership points at it. Same `condition` (the
-    // EXISTS reads the users row the DELETE still sees), same transaction —
-    // a refused removal leaves the membership intact too.
-    db
-      .prepare(
-        `DELETE FROM workspace_members WHERE user_id = ?
-           AND EXISTS (SELECT 1 FROM users WHERE id = ?${guard})`,
-      )
-      .bind(id, id),
-    db.prepare(`DELETE FROM users WHERE id = ?${guard}`).bind(id),
+    // impossible while a membership points at it.
+    db.prepare("DELETE FROM workspace_members WHERE user_id = ?").bind(id),
+    db.prepare("DELETE FROM users WHERE id = ?").bind(id),
   ]);
   return results[2]!.meta.changes > 0;
 }
@@ -296,84 +273,26 @@ export async function deleteUser(
   return removeUser(db, id, removedBy);
 }
 
-/**
- * Remove by row id UNLESS the row is the last remaining admin — the guard
- * rides BOTH statements of the removal batch, so the last-admin invariant
- * still does not ride a read-check-then-delete window (qc1): two concurrent
- * removes of the last two admins cannot both land; the loser's DELETE takes no
- * row AND records no tombstone. Returns true when the row was deleted.
- */
-export async function deleteUserUnlessLastAdmin(
-  db: DashboardD1,
-  id: string,
-  removedBy: string | null = null,
-): Promise<boolean> {
-  return removeUser(db, id, removedBy, NOT_LAST_ADMIN);
-}
+// --- workspace membership: removal, role change (migration 0026) ---
 
-/**
- * Change a user's role UNLESS the row is the last remaining admin being
- * demoted — ONE conditional statement, so the last-admin invariant does
- * not ride a read-check-then-update window (deleteUserUnlessLastAdmin
- * precedent, qc1): two concurrent demotions of the last two admins cannot
- * both land; the loser sees changes === 0. Returns true when the role
- * actually changed (setting the same role is a no-op, changes === 0).
- *
- * Atomicity basis (qc2/qc3 W-002): the guard subquery
- * `(SELECT COUNT(*) FROM users WHERE role = 'admin')` is evaluated INSIDE
- * the same statement as the write, and the statement is atomic — SQLite
- * serializes concurrent writers on the write lock, and D1 runs each
- * statement as its own serialized transaction (single-writer model), so
- * the count cannot observe a half-applied concurrent demotion. The local
- * bun:sqlite harness validates the SQL under serialization; the production
- * guarantee is D1's write serialization — a platform behavior, not
- * code-proven mutual exclusion (Needs L4/QA verification).
- *
- * The workspace role is the same fact (migration 0026/0027): the second
- * statement of the SAME batch mirrors it into `workspace_members`, guarded by
- * `users.role = <new role>` so a REFUSED demotion (the sole admin keeps
- * 'admin') mirrors nothing. Mapping matches 0027: admin → owner, member →
- * member.
- */
-export async function updateUserRoleUnlessLastAdmin(
-  db: DashboardD1,
-  id: string,
-  role: "admin" | "member",
-): Promise<boolean> {
-  const results = await db.batch([
-    db
-      .prepare(
-        `UPDATE users
-         SET role = ?
-         WHERE id = ?
-           AND role <> ?
-           AND NOT (role = 'admin' AND ? = 'member' AND (SELECT COUNT(*) FROM users WHERE role = 'admin') <= 1)`,
-      )
-      .bind(role, id, role, role),
-    db
-      .prepare(
-        `UPDATE workspace_members SET role = ?
-         WHERE user_id = ? AND role <> ?
-           AND EXISTS (SELECT 1 FROM users WHERE id = ? AND role = ?)`,
-      )
-      .bind(role === "admin" ? "owner" : "member", id, role === "admin" ? "owner" : "member", id, role),
-  ]);
-  return results[0]!.meta.changes > 0;
-}
+/** `workspace_members.role` domain (0026 CHECK; `workspace-store` owns the same type). */
+export type WorkspaceMemberRole = "owner" | "admin" | "member";
 
 /**
  * The sole-owner guard, workspace-scoped (migration 0026): a row may not be
  * removed or demoted when it is the only `owner` of its workspace — a
- * workspace can never be left without one. The condition is parameterized so
- * ALL statements of a batch carry the same predicate (the `NOT_LAST_ADMIN`
- * precedent), and it is evaluated inside the writing statement — never a
- * read-check-then-write window.
+ * workspace can never be left without one. `role` is the target row's CURRENT
+ * role, so a promotion to `owner` is never refused by it.
+ *
+ * The condition is parameterized so EVERY statement of a batch carries the
+ * same predicate (the `NOT_LAST_ADMIN` 0023 precedent), and it is evaluated
+ * inside the writing statement — never a read-check-then-write window.
  */
 function notSoleOwner(workspaceId: string, userId: string): { sql: string; params: string[] } {
   return {
     sql: `NOT (
       (SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?) = 'owner'
-      AND (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ? AND role = 'owner') <= 1
+      AND (SELECT COUNT(*) FROM workspace_members o WHERE o.workspace_id = ? AND o.role = 'owner') <= 1
     )`,
     params: [workspaceId, userId, workspaceId],
   };
@@ -429,29 +348,30 @@ export async function deleteWorkspaceMember(
 }
 
 /**
- * Change one member's role INSIDE one workspace. `users.role` is NOT written:
- * `workspace_members.role` is the only role surface after this plan, and the
- * legacy column is never read for a workspace-scoped decision. The sole-owner
- * guard rides the same statement, so demoting the last owner is a 0-row update,
- * not a read-check-then-write window. Returns true when the role changed.
+ * Change one member's role INSIDE one workspace, including promotion to
+ * `owner` — that promotion IS the ownership-transfer path (there is no separate
+ * transfer action). `users.role` is NOT written: `workspace_members.role` is the
+ * only role surface after this plan, and the legacy column is never read for a
+ * workspace-scoped decision.
+ *
+ * The sole-owner guard rides the same statement, so demoting the last owner is
+ * a 0-row update, not a read-check-then-write window. The guard reads the
+ * target's CURRENT role, so it never refuses a promotion. Returns true when the
+ * role changed (same-role write is a 0-row no-op).
  */
 export async function updateWorkspaceMemberRole(
   db: DashboardD1,
   workspaceId: string,
   userId: string,
-  role: "admin" | "member",
+  role: WorkspaceMemberRole,
 ): Promise<boolean> {
+  const guard = notSoleOwner(workspaceId, userId);
   const result = await db
     .prepare(
       `UPDATE workspace_members SET role = ?
-        WHERE workspace_id = ? AND user_id = ? AND role <> ?
-          AND NOT (
-            role = 'owner'
-            AND (SELECT COUNT(*) FROM workspace_members o
-                  WHERE o.workspace_id = ? AND o.role = 'owner') <= 1
-          )`,
+        WHERE workspace_id = ? AND user_id = ? AND role <> ? AND ${guard.sql}`,
     )
-    .bind(role, workspaceId, userId, role, workspaceId)
+    .bind(role, workspaceId, userId, role, ...guard.params)
     .run();
   return result.meta.changes > 0;
 }
@@ -459,14 +379,6 @@ export async function updateWorkspaceMemberRole(
 /** Total users rows on the deployment (any role) — fixtures and tests. */
 export async function countUsers(db: DashboardD1): Promise<number> {
   const row = await db.prepare("SELECT COUNT(*) AS n FROM users").first<{ n: number }>();
-  return row?.n ?? 0;
-}
-
-/** Admin count — last-admin protection (remove guard). */
-export async function countAdmins(db: DashboardD1): Promise<number> {
-  const row = await db
-    .prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")
-    .first<{ n: number }>();
   return row?.n ?? 0;
 }
 
