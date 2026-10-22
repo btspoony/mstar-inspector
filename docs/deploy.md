@@ -117,11 +117,12 @@ production path itself, both ahead of its first mutating command:
 `GITHUB_TOKEN` does **not** create a `release: published` run — GitHub
 suppresses workflow events caused by `GITHUB_TOKEN` (`workflow_dispatch` and
 `repository_dispatch` are the exempt trigger types) — so the Release workflow
-runs `gh workflow run deploy-prod.yml --ref <tag>` itself, and the dispatched
-run's head SHA is the tag's commit. That step is fail-fast **after** the tag and
-Release are created, and it needs `actions: write` on the release job; the
-dispatched run is then approved like any other production run
-(§ Production approval gate and the tag gate). The
+runs `gh workflow run deploy-prod.yml --ref <tag>` itself (no `-f` fields: an
+ordinary release takes the workflow's non-deciding `steady` tenant mode, §
+Rollout), and the dispatched run's head SHA is the tag's commit. That step is
+fail-fast **after** the tag and Release are created, and it needs `actions:
+write` on the release job; the dispatched run is then approved like any other
+production run (§ Production approval gate and the tag gate). The
 `release: published` trigger stays declared and **does** deploy when a human
 publishes a non-prerelease Release in the UI (its job-level guard requires the
 Release to be non-prerelease **and** its tag to carry no `-`). The release chain,
@@ -538,31 +539,38 @@ locale, healthz) answer in both modes.
 workflows resolve the mode with `scripts/resolve-tenant-mode.sh`, in this
 precedence:
 
-1. the `tenant_mode` dispatch input (an operator deciding a specific run),
+1. an **explicit** `tenant_mode` dispatch input — `off` or `strict` (an operator
+   deciding a specific run),
 2. else `vars.WORKSPACE_TENANT_MODE` — the steady-state value for routine runs,
 3. else `off`.
 
-The routine arms (staging `push` to `main`, prod `release: published`) carry no
-input, so before this rule they resolved `off` unconditionally: the first
-ordinary push/tag after Deploy B silently redeployed a `strict` installation as
-`off` (legacy routes back, workspace routes 404). **A strict installation MUST
-set `WORKSPACE_TENANT_MODE=strict`** as a repository (or `staging` /
-`production` environment) variable *in the same change that runs Deploy B* —
-that variable, not the Deploy B dispatch, is what keeps the installation
-strict. A routine arm that resolves to `off` never observed the live mode, so
-it cannot claim a strict→off change: it emits a `::warning::` and records
+The input's default is **`steady`**, meaning exactly that third rule: *take the
+variable*. A dispatch nobody filled in therefore still follows the installation
+instead of deciding for it. This is the release path — the Release workflow runs
+`gh workflow run deploy-prod.yml --ref <tag>` with **no fields**, so an
+ordinary release carries the `steady` default — and staging's `push` to `main`
+carries no dispatch input at all. Before this rule a declared `off` default won
+over the variable on every such run: the first ordinary push/release after
+Deploy B silently redeployed a `strict` installation as `off` (legacy routes
+back, workspace routes 404). **A strict installation MUST set
+`WORKSPACE_TENANT_MODE=strict`** as a repository (or `staging` /`production`
+environment) variable *in the same change that runs Deploy B* — that variable,
+not the Deploy B dispatch, is what keeps the installation strict. A `steady`
+run that resolves to `off` never observed the live mode, so it cannot claim a
+strict→off change: it emits a `::warning::` and records
 `tenant_mode_change=unproven->off` in the run summary. `tenant_mode_change=none`
-means no demotion is being reported (a dispatch, or a non-`off` resolution).
+means no demotion is being reported (an explicit dispatch input, or a non-`off`
+resolution).
 
 The same resolver separates **steady state** from a **replay**: it reports
-`replay=required` only for a dispatch whose `tenant_mode` input is `strict`,
-and `replay=none` otherwise (including a routine arm serving `strict`). Only a
-replay must bind `expected_deploy_sha`; see *Replay identity* below.
+`replay=required` only for a dispatch whose `tenant_mode` input is explicitly
+`strict`, and `replay=none` otherwise (including `steady` resolving to `strict`).
+Only a replay must bind `expected_deploy_sha`; see *Replay identity* below.
 
-Both workflows take a `tenant_mode` dispatch input (`off` default, `strict`
-allowed) and pass the resolved mode as `wrangler deploy --var
-WORKSPACE_TENANT_MODE:<mode>` — production gained that `--var` for this
-rollout, and `env.production` declares `off` as the manual-deploy default.
+Both workflows take a `tenant_mode` dispatch input (`steady` default — use the
+variable; `off` / `strict` explicit) and pass the resolved mode as `wrangler
+deploy --var WORKSPACE_TENANT_MODE:<mode>` — production gained that `--var` for
+this rollout, and `env.production` declares `off` as the manual-deploy default.
 In both workflows that deploy is the LAST version-creating command: a
 `wrangler secret bulk` republishes the config default and cannot carry `--var`
 (a named environment rejects `keep_vars`), so the mode that serves is the one
@@ -594,12 +602,14 @@ asserts the checked-out `HEAD`; production asserts the release tag through
 `git rev-parse refs/tags/<tag>^{commit}`), so a tag or branch that moved
 between A and B cannot pass by agreeing with itself.
 
-A **routine** arm (`push` / `release: published`) resolving `strict` from
-`vars.WORKSPACE_TENANT_MODE` is *not* a replay: there is no Deploy A to bind,
-so it reports `replay=none`, deploys `strict`, and still passes every ref
-identity assertion above. It never fabricates an `expected_deploy_sha` — the
-binding it would claim was never proven. An `off` run may leave the input empty
-in either case.
+A **steady-state** run — a `push` to `main`, a `release: published` event, or
+the Release workflow's no-field `deploy-prod.yml` dispatch (all of which carry
+`steady` or no input) — resolving `strict` from `vars.WORKSPACE_TENANT_MODE` is
+*not* a replay: there is no Deploy A to bind, so it reports `replay=none`,
+deploys `strict`, and still passes every ref identity assertion above. It never
+fabricates an `expected_deploy_sha` — the binding it would claim was never
+proven. A rollback dispatch names `tenant_mode=off` explicitly; `steady` with
+the variable back at `off` is the same deploy.
 
 **The container image is rebuilt, not byte-identical.** Both images are built
 from a rolling apt base, so a byte-identical rebuild is not provable. Pass
@@ -809,11 +819,14 @@ secrets keep working as the fallback for any name not set at the environment
 level.
 
 `WORKSPACE_TENANT_MODE` is a **GitHub Actions variable, not a Worker secret**:
-it is the steady-state tenant mode both workflows read on a routine
-release/push arm (§ Rollout). Set it to `strict` for a strict installation,
-`off` (or leave unset) otherwise. It is read as `vars.WORKSPACE_TENANT_MODE`,
-never injected by `secret bulk` — the deployed value still rides `wrangler
-deploy --var` so the same SHA can be replayed with the other mode.
+it is the steady-state tenant mode both workflows read on every run that does
+not pass an explicit `tenant_mode` input — a `push` to `main`, a
+`release: published` event, and an ordinary release's no-field
+`deploy-prod.yml` dispatch (§ Rollout). Set it to `strict` for a strict
+installation, `off` (or leave unset) otherwise. It is read as
+`vars.WORKSPACE_TENANT_MODE`, never injected by `secret bulk` — the deployed
+value still rides `wrangler deploy --var` so the same SHA can be replayed with
+the other mode.
 
 The four required secrets are asserted non-empty in the workflow **before the
 first mutating command** (a pure preflight beside the environment-marker
