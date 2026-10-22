@@ -24,6 +24,7 @@ import {
   strictWorkspaceAppsBase,
   strictWorkspaceBoot,
   pendingInvitesForLogin,
+  workspaceMembershipsForLogin,
 } from "../dashboard/index";
 import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
@@ -161,6 +162,12 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     auth.boot.login === null || route?.page === "login"
       ? []
       : await pendingInvitesForLogin(c.env, auth.boot.login);
+  // The switcher's list. Same login gate as the invites: a login page renders
+  // no sidebar, so it needs no switcher rows.
+  const memberships =
+    auth.boot.login === null || route?.page === "login"
+      ? []
+      : await workspaceMembershipsForLogin(c.env, auth.boot.login);
   // Absent fields add nothing, so `off` and a ref-less deployment keep the
   // pre-existing boot (and its JSON key order) byte-identical.
   const boot: SpaBoot = {
@@ -171,6 +178,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
     ...(extras.needsWorkspace === true ? { needsWorkspace: true } : {}),
     ...(pendingInvites.length === 0 ? {} : { pendingInvites }),
+    ...(memberships.length === 0 ? {} : { memberships }),
   };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   if (c.req.method === "HEAD") {

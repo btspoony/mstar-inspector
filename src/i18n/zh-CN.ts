@@ -23,6 +23,7 @@ export const zhCN: Dictionary = {
     themeLight: "浅色",
     logout: "退出登录",
     signedInAs: "已登录：{name}",
+    workspaceSwitcher: "工作区",
   },
   common: {
     pageTitle: "{page} — {brand}",

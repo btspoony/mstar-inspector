@@ -12,8 +12,10 @@ import { createAppsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
 import { createTestD1 } from "../store/helpers";
+import type { SpaBoot } from "../../src/spa/boot";
 import { LOCALE_COOKIE } from "../../src/i18n";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
+import { htmlGetRequest, withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -49,6 +51,10 @@ function createDb(): ReturnType<typeof createTestD1> {
     "0024_provider_multi_key.sql",
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
+    // 0027/0028: the shell boot names the caller's workspaces (switcher rows)
+    // and their pending invites, so this world carries both tables.
+    "0027_workspace_backfill.sql",
+    "0028_workspace_invites.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -273,5 +279,63 @@ describe("membership stays enforcing outside locale", () => {
     const html = await res.text();
     expect(html).toContain("管理员");
     expect(html).not.toContain("restricted to dashboard admins");
+  });
+});
+
+/** The boot the served shell injected (the client's only identity channel). */
+function bootOf(html: string): SpaBoot {
+  const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
+  if (json === undefined) throw new Error("no injected SPA boot");
+  return JSON.parse(json) as SpaBoot;
+}
+
+function seedWorkspace(db: ReturnType<typeof createTestD1>, id: string, slug: string, name: string, deletedAt: string | null = null): void {
+  db.raw
+    .prepare("INSERT INTO workspaces (id, slug, name, created_at, deleted_at) VALUES (?, ?, ?, '2026-01-01T00:00:00.000Z', ?)")
+    .run(id, slug, name, deletedAt);
+}
+
+function seedMembership(db: ReturnType<typeof createTestD1>, workspaceId: string, login: string, role: string): void {
+  db.raw
+    .prepare(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       SELECT ?, id, ?, '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = ?`,
+    )
+    .run(workspaceId, role, login);
+}
+
+describe("SPA boot payload — workspace memberships (plan 98 T3)", () => {
+  test("lists every live membership as {ref, name, role} with ref = the slug", async () => {
+    const db = await seededWorld();
+    seedWorkspace(db, "ws-acme", "acme", "Acme");
+    seedWorkspace(db, "ws_7d41", "ws_7d41", "Side project");
+    seedWorkspace(db, "ws-gone", "gone", "Retired", "2026-02-01T00:00:00.000Z");
+    seedMembership(db, "ws-acme", "mallory", "owner");
+    seedMembership(db, "ws_7d41", "mallory", "member");
+    seedMembership(db, "ws-gone", "mallory", "member");
+    const env = { ...makeEnv(db), WORKSPACE_TENANT_MODE: "strict" } as Env;
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard/acme/apps", { Cookie: `${SESSION_COOKIE}=${await cookie("mallory")}` }),
+      withSpaAssets(env),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    // Ordering is by name; the soft-deleted workspace never becomes a switch
+    // target, and `ref` is the slug the path actually carries.
+    expect(boot.memberships).toEqual([
+      { ref: "acme", name: "Acme", role: "owner" },
+      { ref: "ws_7d41", name: "Side project", role: "member" },
+    ]);
+  });
+
+  test("off carries no memberships (the workspace route family 404s there)", async () => {
+    const db = await seededWorld();
+    seedWorkspace(db, "ws-acme", "acme", "Acme");
+    seedMembership(db, "ws-acme", "mallory", "owner");
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard/apps", { Cookie: `${SESSION_COOKIE}=${await cookie("mallory")}` }),
+      withSpaAssets(makeEnv(db)),
+    );
+    expect(bootOf(await res.text()).memberships).toBeUndefined();
   });
 });

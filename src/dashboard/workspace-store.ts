@@ -190,6 +190,34 @@ export async function countMembershipsForLogin(
   return row?.n ?? 0;
 }
 
+/** One row of the SPA switcher: the workspace's path ref + what to show. */
+export type WorkspaceMembershipOption = { ref: string; name: string; role: WorkspaceRole };
+
+/**
+ * Every live workspace this login belongs to, as the SPA boot's switcher rows.
+ * `ref` is `workspaces.slug` — the same segment the path carries (slug equals
+ * id until the owner renames it, so there is no second field to resolve).
+ * Same predicate as {@link countMembershipsForLogin}: a retired tenant is not
+ * a home and never appears as a switch target.
+ */
+export async function listWorkspaceMembershipOptions(
+  db: WorkspaceStoreD1,
+  login: string,
+): Promise<WorkspaceMembershipOption[]> {
+  const rows = await db
+    .prepare(
+      `SELECT w.slug AS ref, w.name AS name, wm.role AS role
+         FROM workspace_members wm
+         JOIN users u ON u.id = wm.user_id
+         JOIN workspaces w ON w.id = wm.workspace_id
+        WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL
+        ORDER BY w.name ASC, w.id ASC`,
+    )
+    .bind(login)
+    .all<WorkspaceMembershipOption>();
+  return rows.results;
+}
+
 /** The creation write face: prepared statements run as ONE `batch`. */
 type WorkspaceStoreWriteD1 = {
   prepare(query: string): WorkspaceStoreStatement;

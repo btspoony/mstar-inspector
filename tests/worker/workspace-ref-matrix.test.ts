@@ -26,7 +26,7 @@ const SESSION_SECRET = ["test", "ref", "matrix", "session", "32-bytes!"].join("-
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
-function envFor(db: TestD1, mode: "off" | "strict" = "strict"): Env {
+function envFor(db: TestD1): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} },
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
@@ -35,7 +35,7 @@ function envFor(db: TestD1, mode: "off" | "strict" = "strict"): Env {
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
-    WORKSPACE_TENANT_MODE: mode,
+    WORKSPACE_TENANT_MODE: "strict",
   } as unknown as Env;
 }
 

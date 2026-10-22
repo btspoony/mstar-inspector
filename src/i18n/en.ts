@@ -33,6 +33,8 @@ export const en = {
     themeLight: "light",
     logout: "Logout",
     signedInAs: "Signed in as {name}",
+    /** Label of the shell's workspace switcher (the select itself shows names). */
+    workspaceSwitcher: "Workspace",
   },
   common: {
     pageTitle: "{page} — {brand}",

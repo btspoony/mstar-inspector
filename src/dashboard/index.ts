@@ -73,7 +73,9 @@ import {
   getWorkspaceByRef,
   getWorkspaceMember,
   listWorkspaceMembers,
+  listWorkspaceMembershipOptions,
   setWorkspaceSlug,
+  type WorkspaceMembershipOption,
   type WorkspaceRole,
 } from "./workspace-store";
 import {
@@ -299,6 +301,22 @@ export async function strictWorkspaceBoot(
     // gives a plain member no rights — so creation is owner/admin there.
     canCreateApp: access.role === "owner" || access.role === "admin",
   };
+}
+
+/**
+ * The signed-in login's live workspace memberships as the SPA boot's switcher
+ * rows (`{ref, name, role}`). `strict`-only: under `off` the workspace route
+ * family answers 404, so a switch target would be a dead link and the shell
+ * renders no switcher. An unbound store answers `[]` (nothing to list).
+ */
+export async function workspaceMembershipsForLogin(
+  env: Env,
+  login: string,
+): Promise<WorkspaceMembershipOption[]> {
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return [];
+  const db = dashboardD1(env);
+  if (db === null) return [];
+  return listWorkspaceMembershipOptions(db, login);
 }
 
 /**

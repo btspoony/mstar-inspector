@@ -10,7 +10,7 @@ import { t } from "../i18n";
 import type { SpaBoot } from "./boot";
 import { AppSidebar } from "./components/AppSidebar";
 import { matchSpaRoute } from "./routes";
-import { buildNavbarModel, buildSidebarModel } from "./shell";
+import { buildNavbarModel, buildSidebarModel, buildWorkspaceSwitcherModel } from "./shell";
 
 type LayoutProps = {
   boot: SpaBoot;
@@ -45,6 +45,7 @@ function LoginChrome({ children }: { children: ReactNode }) {
 
 function DashboardChrome({ boot, pathname, children }: LayoutProps) {
   const sidebar = buildSidebarModel(boot, pathname);
+  const switcher = buildWorkspaceSwitcherModel(boot, pathname);
   const navbar = buildNavbarModel(boot);
   const [theme, setTheme] = useState<Theme>(effectiveTheme);
 
@@ -61,7 +62,7 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
 
   return (
     <SidebarProvider defaultOpen>
-      <AppSidebar model={sidebar} />
+      <AppSidebar model={sidebar} switcher={switcher} />
       <SidebarInset>
         {/* v0.3 (DESIGN.md): navbar sits on background-200, one step above the
             page canvas, matching the sidebar chrome layer. Control states

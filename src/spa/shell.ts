@@ -92,6 +92,39 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
   };
 }
 
+/**
+ * The switcher's list: the login's memberships in the boot (server-resolved)
+ * with the CURRENT path's workspace marked. Null when the login belongs to at
+ * most one workspace — a one-entry select is not a choice, so the shell renders
+ * no control at all. `currentRef` is the pathname's ref when it names one (it
+ * is the page actually being served), else the boot's ref (a page that names no
+ * workspace), else null so the control shows a placeholder rather than a
+ * false selection.
+ */
+export type WorkspaceSwitcherModel = {
+  label: string;
+  currentRef: string | null;
+  options: Array<{ ref: string; name: string }>;
+};
+
+export function buildWorkspaceSwitcherModel(
+  boot: SpaBoot,
+  pathname: string,
+): WorkspaceSwitcherModel | null {
+  const memberships = boot.memberships ?? [];
+  if (memberships.length < 2) return null;
+  const options = memberships.map(({ ref, name }) => ({ ref, name }));
+  // A path can still carry a ref this login no longer lists (a renamed slug, a
+  // revoked membership): the control then shows no selection rather than a
+  // wrong one.
+  const ref = workspaceRefOf(pathname) ?? boot.workspaceRef ?? null;
+  return {
+    label: t(boot.locale, "nav.workspaceSwitcher"),
+    currentRef: options.some((option) => option.ref === ref) ? ref : null,
+    options,
+  };
+}
+
 export function buildNavbarModel(boot: SpaBoot): NavbarModel {
   return {
     languageLabel: t(boot.locale, "nav.language"),

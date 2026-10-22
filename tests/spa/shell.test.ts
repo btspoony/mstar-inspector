@@ -127,7 +127,7 @@ describe("shell models", () => {
     expect(sidebar.items.find((item) => item.href === "/dashboard/acme/members")?.current).toBe(true);
   });
 
-  test("the page's own workspace wins over the boot slug (one workspace identity per page)", () => {
+  test("the page's own workspace wins over the boot ref (one workspace identity per page)", () => {
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
@@ -136,7 +136,7 @@ describe("shell models", () => {
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
   });
 
-  test("the boot slug still scopes a pathname that names no workspace", () => {
+  test("the boot ref still scopes a pathname that names no workspace", () => {
     // `/dashboard/apps` is the legacy page; on a strict deployment the boot's
     // server-resolved slug carries the workspace into both nav targets.
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "acme" }, "/dashboard/apps");
@@ -147,7 +147,7 @@ describe("shell models", () => {
     ]);
   });
 
-  test("no boot slug → the legacy targets are unchanged", () => {
+  test("no boot ref → the legacy targets are unchanged", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/apps");
     expect(sidebar.brandHref).toBe("/dashboard");
     expect(sidebar.items.map((item) => item.href)).toEqual([

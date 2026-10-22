@@ -34,6 +34,17 @@ export type SpaBoot = {
    */
   canCreateApp?: boolean;
   /**
+   * The signed-in login's live workspace memberships — the switcher's list.
+   * `ref` is the workspace's path segment (its slug): the switcher rewrites
+   * the current path's segment to it and nothing else. Empty/absent for a
+   * login in no workspace, which renders no switcher.
+   */
+  memberships?: Array<{
+    ref: string;
+    name: string;
+    role: "owner" | "admin" | "member";
+  }>;
+  /**
    * The signed-in login's live pending workspace invitations — the invitee's
    * discovery surface. Empty/absent for a login nobody invited.
    * Each row names the workspace ref plus the invite id the accept POST takes.
