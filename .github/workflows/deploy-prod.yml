@@ -68,7 +68,7 @@ on:
         required: false
         default: ''
       expected_deploy_sha:
-        description: "Deploy B (strict) only: the SHA Deploy A shipped — required for a strict replay; Deploy A's run summary prints deployed_sha=<sha>"
+        description: "Deploy B (strict) only: the SHA Deploy A shipped — required for, and only accepted on, a strict dispatch (empty on a steady/off run); Deploy A's run summary prints deployed_sha=<sha>"
         required: false
         default: ''
 
@@ -261,7 +261,7 @@ jobs:
       # summary. A `steady` run serving `strict` from the variable has no
       # Deploy A to bind (the resolver reports `replay=none`), so it keeps
       # every tag identity assertion below without demanding — or inventing — a
-      # Deploy-A SHA.
+      # Deploy-A SHA; supplying one anyway is refused by the guard (I-000089).
       - name: Assert replay identity
         env:
           TAG: ${{ github.ref_name }}

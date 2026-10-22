@@ -381,7 +381,22 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
       expect(steadyDispatch.code, `${file}: steady + strict aborted\n${steadyDispatch.out}`).toBe(0);
       expect(run({ "inputs.tenant_mode": "steady" }, "").change).toBe("tenant_mode_change=unproven->off");
 
-      // the ref identity assertion survives every non-replay shape
+      // A SHA-ONLY dispatch: the operator fills `expected_deploy_sha` and leaves
+      // `tenant_mode` at its `steady` default — the shape that looks exactly
+      // like Deploy B. `steady` can SERVE `strict` from the variable, so the run
+      // must not deploy while silently skipping the Deploy-A binding (I-000089).
+      const shaOnly = run({ "inputs.tenant_mode": "steady" }, "strict", {
+        EXPECTED_DEPLOY_SHA: "@head",
+        RUN_SHA: "@head",
+        TAG: "@tag",
+      });
+      expect(shaOnly.mode).toBe("strict");
+      expect(shaOnly.replay).toBe("none");
+      expect(shaOnly.code, `${file}: a SHA-only dispatch deployed without binding it\n${shaOnly.out}`).toBe(1);
+      expect(shaOnly.out).toContain("was supplied but this run is not a strict replay");
+      expect(shaOnly.out).toContain("-f tenant_mode=strict");
+
+      // The ref identity assertion survives every non-replay shape
       const moved = run({ "inputs.tenant_mode": "steady" }, "strict", {
         EXPECTED_DEPLOY_SHA: "",
         RUN_SHA: "f".repeat(40),

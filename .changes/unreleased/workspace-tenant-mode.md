@@ -25,7 +25,9 @@ category: Changed
   `tenant_mode_change=unproven->off` in the run summary rather than silently
   demoting a strict installation. Only an explicit `off` / `strict` input
   overrides the variable, and a steady-state `strict` deploy is not a replay:
-  only a `tenant_mode=strict` dispatch must supply `expected_deploy_sha`.
+  only a `tenant_mode=strict` dispatch must supply `expected_deploy_sha`, and a
+  run that supplies it without that binding aborts instead of deploying as if
+  the replay had been proven.
 
 <!-- CN -->
 - **破坏性变更——dashboard 的 App 路由移到工作区 slug 之下。** 在
@@ -47,4 +49,5 @@ category: Changed
   `off`。仍解析为 `off` 的稳态部署会告警并在 run summary 记录
   `tenant_mode_change=unproven->off`，而不是静默把 strict 安装降级。只有显式
   传入的 `off` / `strict` 才覆盖变量；稳态的 `strict` 部署不算 replay：只有
-  `tenant_mode=strict` 的 dispatch 必须提供 `expected_deploy_sha`。
+  `tenant_mode=strict` 的 dispatch 必须提供 `expected_deploy_sha`，而在不具备该
+  绑定的运行中提供它会让运行中止，而不是像已证明 replay 那样继续部署。
