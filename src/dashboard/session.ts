@@ -20,6 +20,15 @@ export const SESSION_COOKIE = "__Host-mstar-session";
 export const OAUTH_STATE_COOKIE = "__Host-mstar-oauth-state";
 export const SESSION_MAX_AGE_SEC = 60 * 60 * 24 * 7; // 7d
 export const OAUTH_STATE_MAX_AGE_SEC = 600;
+/**
+ * One-shot carrier of "this sign-in created the instance's first account"
+ * from the OAuth callback (the last moment the `users` table is empty) to the
+ * shell it redirects to. Signed with the session secret so the guidance
+ * cannot be claimed by a later request, and short-lived because the shell
+ * expires it on read.
+ */
+export const FIRST_INSTANCE_COOKIE = "__Host-mstar-first-instance";
+export const FIRST_INSTANCE_MAX_AGE_SEC = 120;
 
 export type SessionPayload = {
   login: string;
@@ -131,8 +140,47 @@ export async function readSessionValue(
   return payload;
 }
 
-// --- OAuth CSRF state ---
+// --- first-account marker (self-hosted empty-instance guidance) ---
 
+/**
+ * Mint the marker for the login that just created this instance's first
+ * account. Bound to that login: the shell only honours it for the same
+ * session, so a copied cookie cannot tell another account the instance story.
+ */
+export async function createFirstInstanceValue(
+  login: string,
+  secret: string,
+  nowMs = Date.now(),
+): Promise<string> {
+  const nowSec = Math.floor(nowMs / 1000);
+  return signValue(
+    JSON.stringify({ login, iat: nowSec, exp: nowSec + FIRST_INSTANCE_MAX_AGE_SEC }),
+    secret,
+  );
+}
+
+/** Whether the marker is valid for THIS login (bad signature / expired / another login → false). */
+export async function readFirstInstanceValue(
+  value: string | undefined,
+  login: string,
+  secret: string,
+  nowMs = Date.now(),
+): Promise<boolean> {
+  if (!value) return false;
+  const raw = await verifyValue(value, secret);
+  if (!raw) return false;
+  let payload: { login?: unknown; exp?: unknown };
+  try {
+    payload = JSON.parse(raw) as { login?: unknown; exp?: unknown };
+  } catch {
+    return false;
+  }
+  if (payload.login !== login) return false;
+  if (typeof payload.exp !== "number") return false;
+  return payload.exp > Math.floor(nowMs / 1000);
+}
+
+// --- OAuth CSRF state ---
 /** Random token via crypto.getRandomValues (a security red line). */
 export function randomToken(byteLength = 16): string {
   const bytes = new Uint8Array(byteLength);

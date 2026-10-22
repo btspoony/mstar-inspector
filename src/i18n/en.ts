@@ -227,6 +227,13 @@ export const en = {
     setupHeading: "Create a workspace",
     setupDescription:
       "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",
+    /**
+     * The `self-hosted` empty-instance line: this sign-in created the
+     * deployment's first account. Absent on `saas` and once `users` is
+     * non-empty.
+     */
+    emptyInstance:
+      "This instance has no accounts yet. Your login is now this instance's first account — create a workspace to start.",
     nameLabel: "Workspace name",
     namePlaceholder: "e.g. Acme",
     create: "Create workspace",

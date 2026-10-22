@@ -103,6 +103,7 @@ function baseEnv(overrides: Partial<Env> = {}): Env {
     } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: CLIENT_ID,
     GITHUB_OAUTH_CLIENT_SECRET: CLIENT_SECRET,
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
   };

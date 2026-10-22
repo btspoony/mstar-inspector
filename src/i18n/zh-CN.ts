@@ -207,6 +207,8 @@ export const zhCN: Dictionary = {
   workspace: {
     setupHeading: "创建工作区",
     setupDescription: "你还不属于任何工作区。创建后你将成为它的所有者，之后可以邀请队友。",
+    /** `self-hosted` 空实例提示：本次登录创建了部署的第一个账号。 */
+    emptyInstance: "本实例还没有任何账号。你的登录现在已是本实例的第一个账号——创建一个工作区即可开始。",
     nameLabel: "工作区名称",
     namePlaceholder: "例如 Acme",
     create: "创建工作区",

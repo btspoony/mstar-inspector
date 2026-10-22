@@ -22,14 +22,17 @@
  */
 import { Hono, type Context, type Handler } from "hono";
 import { getCookie } from "hono/cookie";
-import type { Env } from "../worker/env";
+import { deploymentModeOf, type DeploymentMode, type Env } from "../worker/env";
 import { tenantModeOf, type TenantMode } from "../worker/tenant-mode";
 import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
 import {
+  FIRST_INSTANCE_COOKIE,
+  FIRST_INSTANCE_MAX_AGE_SEC,
   OAUTH_STATE_COOKIE,
   OAUTH_STATE_MAX_AGE_SEC,
   SESSION_COOKIE,
   SESSION_MAX_AGE_SEC,
+  createFirstInstanceValue,
   createSessionValue,
   createStateValue,
   expireCookie,
@@ -124,6 +127,7 @@ import { isCommandConfigKey } from "../contracts/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
+  countUsers,
   deleteWorkspaceMember,
   getUserByLogin,
   parseLoginList,
@@ -930,6 +934,20 @@ dashboardApp.get("/oauth/callback", async (c) => {
   // withdrawn here — and zero D1 writes (the deny branch never inserts).
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
+  // The callback is the SECOND (and last) `DEPLOYMENT_MODE` read face: it
+  // decides whether this sign-in's landing carries the empty-instance
+  // guidance. A bad value fails the callback with the named error before
+  // anything is written, so no session is minted from a guessed shape.
+  let deploymentMode: DeploymentMode;
+  try {
+    deploymentMode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+  } catch (error) {
+    return c.text((error as Error).message, 500);
+  }
+  // Read BEFORE the sign-in writes its row: after it, `users` is non-empty on
+  // a first sign-in and the fact is gone. `self-hosted` is the only shape that
+  // tells the instance story; `saas` never does.
+  const emptyInstance = deploymentMode === "self-hosted" && (await countUsers(db)) === 0;
   const decision = await signInDashboardUser(db, user.login);
   if (decision.outcome === "deny") {
     // The only deny is a recorded removal, so the deny face is the removal
@@ -942,7 +960,24 @@ dashboardApp.get("/oauth/callback", async (c) => {
   c.header("Set-Cookie", serializeCookie(SESSION_COOKIE, session, SESSION_MAX_AGE_SEC), {
     append: true,
   });
-  return c.redirect(await signedInLanding(c.env, user.login), 302);
+  const landing = await signedInLanding(c.env, user.login);
+  // A first-account sign-in lands on the creation surface (it joins no
+  // workspace) and carries the empty-instance marker for the shell it lands
+  // on. Only a CREATED row can be the first account, and only the shell that
+  // reads the marker may render the guidance — it is signed for this login and
+  // expires on first read.
+  if (emptyInstance && decision.created) {
+    c.header(
+      "Set-Cookie",
+      serializeCookie(
+        FIRST_INSTANCE_COOKIE,
+        await createFirstInstanceValue(user.login, secrets.sessionSecret),
+        FIRST_INSTANCE_MAX_AGE_SEC,
+      ),
+      { append: true },
+    );
+  }
+  return c.redirect(landing, 302);
 });
 
 dashboardApp.get("/logout", (c) => {

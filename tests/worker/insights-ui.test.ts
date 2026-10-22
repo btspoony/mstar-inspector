@@ -41,6 +41,7 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
   return withSpaAssets({
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
   } as Env);

@@ -80,6 +80,16 @@ export type Env = {
    */
   PLATFORM_OPERATORS?: string;
   /**
+   * Deployment shape: `"self-hosted"` or `"saas"`. It decides ONE product
+   * question — whether an instance with no accounts yet tells its first
+   * signer-in that this sign-in created the first account. A SaaS user never
+   * sees that instance story. Resolve it through `deploymentModeOf`: unset,
+   * empty and any other value throw (a deploy var with no value has no
+   * defensible meaning, and a silent default is what this switch exists to
+   * prevent).
+   */
+  DEPLOYMENT_MODE?: string;
+  /**
    * Tenant read mode (migration 0026). `"strict"` makes every
    * execution-facing App read INNER JOIN `app_workspaces`, so an App with no
    * workspace mapping is invisible to the pipeline; unset/empty = `"off"`
@@ -103,3 +113,23 @@ export type Env = {
  * recovery — the sweep itself never touches it.
  */
 export type ScheduledEnv = Pick<Env, "DB" | "ALERT_WEBHOOK_URL" | "DASHBOARD_ENCRYPTION_KEY">;
+
+/** The two deployment shapes `DEPLOYMENT_MODE` accepts. */
+export type DeploymentMode = "self-hosted" | "saas";
+
+/**
+ * Resolve `DEPLOYMENT_MODE`. Only the two shapes pass; unset, empty and every
+ * other value throw — there is no default (contrast `tenantModeOf`, which read
+ * unset as `off`). A deployment that cannot name its own shape has no
+ * defensible first-login story to tell, and a silent fallback would tell one
+ * of the two shapes a story that is not theirs. Both read faces
+ * (`src/worker/spa-dispatch.ts`, the OAuth callback) map the throw to a named
+ * 500.
+ */
+export function deploymentModeOf(value: string | undefined): DeploymentMode {
+  if (value === "self-hosted" || value === "saas") return value;
+  // `<value>` is rendered so a blank var is distinguishable from an absent
+  // one: `unset` vs `""` — an operator reading the 500 needs to know which.
+  const received = value === undefined ? "unset" : JSON.stringify(value);
+  throw new Error(`DEPLOYMENT_MODE must be "self-hosted" or "saas", received ${received}`);
+}

@@ -1,0 +1,280 @@
+/**
+ * `DEPLOYMENT_MODE` — the deployment-shape switch (plan 100 Task 1).
+ *
+ * It decides ONE product question: does a deployment with no accounts yet
+ * tell its first signer-in that this sign-in created the first account? The
+ * matrix is `self-hosted` / `saas` / invalid × empty and populated `users`,
+ * driven through the two REAL read faces over the worker mount: the OAuth
+ * callback (which observes the empty table) and the SPA boot (which renders
+ * the guidance).
+ *
+ * The failure rule is the point of the switch: unset, empty and typo'd values
+ * throw with the named error and answer 500 — never a fallback, never a
+ * guidance page. `deploymentModeOf` is the single resolver, so the unit cases
+ * pin the message and the surface cases pin that both faces carry it.
+ */
+import { afterEach, describe, expect, test } from "bun:test";
+import worker from "../../src/worker/index";
+import { deploymentModeOf, type Env } from "../../src/worker/env";
+import {
+  FIRST_INSTANCE_COOKIE,
+  OAUTH_STATE_COOKIE,
+  SESSION_COOKIE,
+  createFirstInstanceValue,
+  createSessionValue,
+  createStateValue,
+} from "../../src/dashboard/session";
+import type { SpaBoot } from "../../src/spa/boot";
+import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { withSpaAssets } from "../helpers/spa";
+
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
+const CLIENT_ID = "oauth-client-id";
+const CLIENT_SECRET = "oauth-client-secret";
+
+const INVALID_MODE_MESSAGE = 'DEPLOYMENT_MODE must be "self-hosted" or "saas", received';
+
+/** A migrated store with NO accounts — the empty-instance fixture. */
+function emptyInstance(): TestD1 {
+  return createMigratedTestD1();
+}
+
+/** The same store with one existing account (the "populated table" row of the matrix). */
+function populatedInstance(): TestD1 {
+  const db = createMigratedTestD1();
+  db.raw
+    .prepare("INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, 'member', ?, NULL)")
+    .run(crypto.randomUUID(), "veteran", new Date().toISOString());
+  return db;
+}
+
+function envFor(db: TestD1, mode: string | undefined): Env {
+  return {
+    REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
+    IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
+    GITHUB_OAUTH_CLIENT_ID: CLIENT_ID,
+    GITHUB_OAUTH_CLIENT_SECRET: CLIENT_SECRET,
+    DASHBOARD_SESSION_SECRET: SESSION_SECRET,
+    DB: db,
+    ...(mode === undefined ? {} : { DEPLOYMENT_MODE: mode }),
+  } as unknown as Env;
+}
+
+const origFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = origFetch;
+});
+
+/** GitHub identity stub: token exchange then `/user` for the given login. */
+function stubGitHubIdentity(login: string): void {
+  globalThis.fetch = (async (url: unknown) => {
+    const target = String(url);
+    if (target === "https://github.com/login/oauth/access_token") {
+      return new Response(JSON.stringify({ access_token: "gho_test-token" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (target === "https://api.github.com/user") {
+      return new Response(JSON.stringify({ login, name: null }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch target: ${target}`);
+  }) as unknown as typeof fetch;
+}
+
+/** Run the real OAuth callback for `login` and answer with the response. */
+async function oauthCallback(login: string, env: Env): Promise<Response> {
+  stubGitHubIdentity(login);
+  const state = await createStateValue(SESSION_SECRET);
+  return worker.fetch(
+    new Request(`https://worker.local/dashboard/oauth/callback?code=x&state=${state}`, {
+      headers: { Cookie: `${OAUTH_STATE_COOKIE}=${state}` },
+    }),
+    env,
+  );
+}
+
+/** The marker value the callback minted, or null when it set none. */
+function firstInstanceMarker(res: Response): string | null {
+  const cookie = res.headers
+    .getSetCookie()
+    .find((value) => value.startsWith(`${FIRST_INSTANCE_COOKIE}=`) && !value.includes("Max-Age=0"));
+  return cookie === null || cookie === undefined ? null : cookie.split(";")[0]!.slice(FIRST_INSTANCE_COOKIE.length + 1);
+}
+
+/** Read the injected boot out of a shell document. */
+function bootOf(html: string): SpaBoot {
+  const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
+  if (json === undefined) throw new Error("no boot in shell");
+  return JSON.parse(json) as SpaBoot;
+}
+
+/** GET a shell path with the given cookies, assets bound. */
+async function shell(path: string, env: Env, cookies: string[]): Promise<Response> {
+  return worker.fetch(
+    new Request(`https://worker.local${path}`, {
+      headers: { Accept: "text/html", ...(cookies.length === 0 ? {} : { Cookie: cookies.join("; ") }) },
+    }),
+    withSpaAssets(env),
+  );
+}
+
+describe("deploymentModeOf", () => {
+  test("accepts exactly self-hosted and saas", () => {
+    expect(deploymentModeOf("self-hosted")).toBe("self-hosted");
+    expect(deploymentModeOf("saas")).toBe("saas");
+  });
+
+  test("unset and empty are invalid — there is no default", () => {
+    expect(() => deploymentModeOf(undefined)).toThrow(`${INVALID_MODE_MESSAGE} unset`);
+    expect(() => deploymentModeOf("")).toThrow(`${INVALID_MODE_MESSAGE} ""`);
+  });
+
+  test("a near-miss typo is not a mode", () => {
+    for (const value of ["Self-Hosted", "selfhosted", "SaaS", "self_hosted", " saas "]) {
+      expect(() => deploymentModeOf(value)).toThrow(INVALID_MODE_MESSAGE);
+    }
+  });
+});
+
+describe("OAuth callback face — empty instance", () => {
+  test("self-hosted: the first account is marked, and it lands on workspace creation", async () => {
+    const db = emptyInstance();
+    const res = await oauthCallback("founder", envFor(db, "self-hosted"));
+    expect(res.status).toBe(302);
+    // Sign-in joins no workspace, so the landing is the creation surface.
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(firstInstanceMarker(res)).not.toBeNull();
+    // The sign-in itself wrote the account.
+    expect(db.raw.query("SELECT github_login FROM users").all()).toEqual([{ github_login: "founder" }]);
+  });
+
+  test("saas: no instance story — the marker is never minted", async () => {
+    const db = emptyInstance();
+    const res = await oauthCallback("founder", envFor(db, "saas"));
+    expect(res.status).toBe(302);
+    expect(firstInstanceMarker(res)).toBeNull();
+    expect(db.raw.query("SELECT github_login FROM users").all()).toEqual([{ github_login: "founder" }]);
+  });
+});
+
+describe("OAuth callback face — populated instance", () => {
+  for (const mode of ["self-hosted", "saas"] as const) {
+    test(`${mode}: an existing table never shows the empty-instance story`, async () => {
+      const db = populatedInstance();
+      const res = await oauthCallback("newcomer", envFor(db, mode));
+      expect(res.status).toBe(302);
+      expect(firstInstanceMarker(res)).toBeNull();
+    });
+  }
+});
+
+describe("OAuth callback face — invalid mode is a named 500", () => {
+  const cases: Array<[label: string, mode: string | undefined, received: string]> = [
+    ["unset", undefined, "unset"],
+    ["empty", "", '""'],
+    ["typo", "selfhosted", '"selfhosted"'],
+  ];
+  for (const [label, mode, received] of cases) {
+    test(`${label}: 500 with the named error, zero writes, no session`, async () => {
+      const db = emptyInstance();
+      const res = await oauthCallback("founder", envFor(db, mode));
+      expect(res.status).toBe(500);
+      expect(await res.text()).toBe(`${INVALID_MODE_MESSAGE} ${received}`);
+      // Fail loud BEFORE any write: no account, no session cookie.
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM users").get()).toEqual({ n: 0 });
+      expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(false);
+    });
+  }
+});
+
+describe("SPA boot face — the marker drives the guidance", () => {
+  // A seeded account: the shell re-reads the users row (QC W-001), so a
+  // session whose login has no row is the removed-member 302 instead.
+  const LOGIN = "veteran";
+
+  async function signedInShell(db: TestD1, mode: string | undefined, marker: string | null) {
+    const session = await createSessionValue(LOGIN, null, SESSION_SECRET);
+    const cookies = [`${SESSION_COOKIE}=${session}`, ...(marker === null ? [] : [`${FIRST_INSTANCE_COOKIE}=${marker}`])];
+    return shell("/dashboard", envFor(db, mode), cookies);
+  }
+
+  test("self-hosted + marker → the boot carries emptyInstance and the marker is spent", async () => {
+    const db = populatedInstance();
+    const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);
+    const res = await signedInShell(db, "self-hosted", marker);
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).emptyInstance).toBe(true);
+    // One-shot: a statement about the sign-in, never a session property.
+    expect(
+      res.headers.getSetCookie().some((c) => c.startsWith(`${FIRST_INSTANCE_COOKIE}=`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+  });
+
+  test("saas + marker → no guidance (a mode flip cannot resurrect it)", async () => {
+    const db = populatedInstance();
+    const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);
+    const res = await signedInShell(db, "saas", marker);
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).emptyInstance).toBeUndefined();
+  });
+
+  test("a marker minted for another login is refused", async () => {
+    const db = populatedInstance();
+    const marker = await createFirstInstanceValue("somebody-else", SESSION_SECRET);
+    const res = await signedInShell(db, "self-hosted", marker);
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).emptyInstance).toBeUndefined();
+  });
+
+  test("no marker → no guidance, on either mode", async () => {
+    for (const mode of ["self-hosted", "saas"] as const) {
+      const res = await signedInShell(populatedInstance(), mode, null);
+      expect(res.status).toBe(200);
+      expect(bootOf(await res.text()).emptyInstance).toBeUndefined();
+    }
+  });
+});
+
+describe("SPA boot face — invalid mode is a named 500", () => {
+  test("no shell, no guidance page: the named error is the whole response", async () => {
+    const db = populatedInstance();
+    const session = await createSessionValue("founder", null, SESSION_SECRET);
+    for (const [mode, received] of [
+      [undefined, "unset"],
+      ["", '""'],
+      ["production", '"production"'],
+    ] as const) {
+      const res = await shell("/dashboard", envFor(db, mode), [`${SESSION_COOKIE}=${session}`]);
+      expect(res.status).toBe(500);
+      expect(await res.text()).toBe(`${INVALID_MODE_MESSAGE} ${received}`);
+    }
+  });
+
+  test("the login page fails the same way — validation precedes every screen", async () => {
+    const res = await shell("/dashboard/login", envFor(emptyInstance(), undefined), []);
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe(`${INVALID_MODE_MESSAGE} unset`);
+  });
+});
+
+describe("SPA creation page copy", () => {
+  test("the guidance line exists in both locales", async () => {
+    const { t } = await import("../../src/i18n");
+    expect(t("en", "workspace.emptyInstance")).toContain("no accounts yet");
+    expect(t("zh_CN", "workspace.emptyInstance")).toContain("还没有任何账号");
+  });
+
+  test("the page renders it only when the boot carries emptyInstance", async () => {
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { WorkspaceSetupPage } = await import("../../src/spa/pages/WorkspaceSetupPage");
+    const base: SpaBoot = { locale: "en", login: "founder", name: null, role: null, needsWorkspace: true };
+    const plain = renderToStaticMarkup(createElement(WorkspaceSetupPage, { boot: base }));
+    const empty = renderToStaticMarkup(
+      createElement(WorkspaceSetupPage, { boot: { ...base, emptyInstance: true } }),
+    );
+    expect(plain).not.toContain("no accounts yet");
+    expect(empty).toContain("no accounts yet");
+  });
+});

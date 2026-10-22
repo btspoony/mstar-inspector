@@ -27,11 +27,17 @@ import {
   pendingInvitesForLogin,
   workspaceMembershipsForLogin,
 } from "../dashboard/index";
-import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
+import {
+  FIRST_INSTANCE_COOKIE,
+  SESSION_COOKIE,
+  expireCookie,
+  readFirstInstanceValue,
+  readSessionValue,
+} from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
 import { isSpaAssetPath, matchSpaRoute, wantsHtml } from "../spa/routes";
-import type { Env } from "./env";
+import { deploymentModeOf, type DeploymentMode, type Env } from "./env";
 
 type SpaContext = Context<{ Bindings: Env }>;
 
@@ -118,9 +124,33 @@ async function readShellAuth(c: SpaContext): Promise<ShellAuth> {
 export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   const assets = c.env.ASSETS;
   if (!assets) return new Response("SPA assets unbound", { status: 500 });
+  // The boot payload carries the deployment shape, so an unusable value fails
+  // HERE — before any page (login included) is served. No guidance page, no
+  // fallback: a deployment that cannot name its shape has no first-login story
+  // to tell.
+  let deploymentMode: DeploymentMode;
+  try {
+    deploymentMode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+  } catch (error) {
+    return c.text((error as Error).message, 500);
+  }
+  // The OAuth callback mints a signed, one-shot marker for the ONE sign-in
+  // that created a self-hosted instance's first account: it is the last moment
+  // the table is empty, so the fact cannot be re-read here. The marker is bound
+  // to that login and dropped on read (one-shot), and a SaaS deployment never
+  // honours it.
   const auth = await readShellAuth(c);
   if (auth.kind === "deny") return auth.response;
   if (auth.kind === "redirect") return c.redirect(auth.location, 302);
+  const firstInstance =
+    deploymentMode === "self-hosted" &&
+    auth.boot.login !== null &&
+    c.env.DASHBOARD_SESSION_SECRET !== undefined &&
+    (await readFirstInstanceValue(
+      getCookie(c, FIRST_INSTANCE_COOKIE),
+      auth.boot.login,
+      c.env.DASHBOARD_SESSION_SECRET,
+    ));
   // `/dashboard` (the root workbench) is mode-independent, but its first data
   // read derives the base from the pathname — the retired legacy App family —
   // so under `strict` it is a dead end. Send it to the workspace Apps page (the
@@ -185,6 +215,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // pre-existing boot (and its JSON key order) byte-identical.
   const boot: SpaBoot = {
     ...auth.boot,
+    ...(firstInstance ? { emptyInstance: true } : {}),
     ...(routeRef ?? supportRef ?? extras.workspaceRef) === undefined
       ? {}
       : { workspaceRef: routeRef ?? supportRef ?? extras.workspaceRef },
@@ -203,13 +234,17 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   }
   if (!assetResponse.ok) return assetResponse as unknown as Response;
   const html = await assetResponse.text();
-  const headers: Record<string, string> = {
+  const headers = new Headers({
     "content-type": "text/html; charset=utf-8",
     // QC S-001: the injected boot personalizes the document
     // (login/name/role) — never cache it.
     "cache-control": "private, no-store",
-  };
-  if (auth.setCookie) headers["set-cookie"] = auth.setCookie;
+  });
+  if (auth.setCookie) headers.append("set-cookie", auth.setCookie);
+  // One-shot: the guidance is a statement about the sign-in that just
+  // happened, never a property of the session, so the marker dies on first
+  // use (RFC 6265 forbids comma-joining Set-Cookie — append instead).
+  if (firstInstance) headers.append("set-cookie", expireCookie(FIRST_INSTANCE_COOKIE));
   return new Response(injectSpaBoot(html, boot), {
     status: assetResponse.status,
     headers,

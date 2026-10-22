@@ -53,6 +53,12 @@ export type SpaBoot = {
    * discovery surface. Empty/absent for a login nobody invited.
    * Each row names the workspace ref plus the invite id the accept POST takes.
    */
+  pendingInvites?: Array<{
+    workspaceRef: string;
+    inviteId: string;
+    role: "admin" | "member";
+    expiresAt: string;
+  }>;
   /**
    * `true` = this login belongs to no live workspace yet, so the shell is the
    * creation surface: the SPA renders the workspace-creation page
@@ -66,12 +72,15 @@ export type SpaBoot = {
    * to an existing workspace, not the start of one.
    */
   supportOnly?: boolean;
-  pendingInvites?: Array<{
-    workspaceRef: string;
-    inviteId: string;
-    role: "admin" | "member";
-    expiresAt: string;
-  }>;
+  /**
+   * `true` = this sign-in created the first account on a `self-hosted`
+   * instance, so the creation page also says the instance has no accounts
+   * besides this one. Only the OAuth callback marks it (its own insert is what
+   * makes `users` non-empty, so the shell cannot recompute the fact), and only
+   * a `self-hosted` deployment ever carries it — a `saas` landing shows
+   * workspace creation and nothing about the instance.
+   */
+  emptyInstance?: boolean;
 };
 
 export const EMPTY_BOOT: SpaBoot = { locale: "en", login: null, name: null, role: null };

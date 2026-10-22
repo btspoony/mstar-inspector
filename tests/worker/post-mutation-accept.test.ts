@@ -64,6 +64,7 @@ function makeEnv(db: unknown): Env {
   return {
     GITHUB_OAUTH_CLIENT_ID: "id",
     GITHUB_OAUTH_CLIENT_SECRET: "secret",
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
     DB: db,

@@ -81,6 +81,7 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
       put: async () => {},
     } as unknown as Env["IDEMPOTENCY_KV"],
     ASSETS: stubAssets({ "/index.html": SPA_INDEX_HTML, "/assets/app.js": "js" }, calls),
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
   };
