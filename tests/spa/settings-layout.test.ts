@@ -1335,10 +1335,19 @@ describe("App workflow boundaries", () => {
     expect(t("zh_CN", "appDetail.backToApps")).toBe("返回应用");
     // The decorative ArrowLeft rides the link — aria-hidden keeps the
     // accessible name at the backToApps text alone; inline-flex aligns
-    // icon + label.
-    expect(scoped).toContain("<svg");
-    expect(scoped).toContain('aria-hidden="true"');
-    expect(scoped).toContain("inline-flex items-center gap-1.5");
+    // icon + label. Scoped to the ANCHOR's own markup: the loading skeleton
+    // beside it also emits an aria-hidden <svg>, so a page-wide assertion
+    // passed with the link's own icon entirely absent.
+    const backLink = /<a [^>]*href="\/dashboard\/acme\/apps"[^>]*>[\s\S]*?<\/a>/.exec(scoped)?.[0] ?? "";
+    expect(backLink).not.toBe("");
+    expect(backLink).not.toContain("page-skeleton");
+    expect(backLink).toContain("inline-flex items-center gap-1.5");
+    // Exactly ONE icon, and it is hidden from assistive tech (lucide supplies
+    // aria-hidden by default; the assertion guards against a decorative icon
+    // that announces itself instead).
+    expect(backLink.match(/<svg/g)?.length).toBe(1);
+    expect(backLink).toContain('aria-hidden="true"');
+    expect(backLink).toContain(t("en", "appDetail.backToApps"));
   });
 
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {
@@ -1391,14 +1400,11 @@ describe("notice channel (reviewer handoffs)", () => {
       source.indexOf("const confirmCopy"),
     );
     expect(deleteBranch).toContain('t(locale, "settings.deleteSuccess")');
-    expect(deleteBranch).toContain("reload: false");
-    // Source pin (qc2 F-001): the property-form `reload: false` call site is
+    expect(deleteBranch).toContain("refetch: false");
+    // Source pin (qc2 F-001): the property-form `refetch: false` call site is
     // the delete branch's alone — any other op copied onto it would silently
-    // lose its background reload and fail this count. (Two prose mentions of
-    // the flag — the runPinnedWithBody JSDoc and the branch comment — have
-    // prose tails, so only a real `reload: false }`/`reload: false,` object
-    // property matches.)
-    expect(source.match(/reload: false\s*[},]/g)?.length).toBe(1);
+    // lose its background reload and fail this count.
+    expect(source.match(/refetch: false\s*[},]/g)?.length).toBe(1);
     expect(t("en", "settings.deleteSuccess")).toContain("deleted");
     expect(t("zh_CN", "settings.deleteSuccess")).toContain("已删除");
     // Configuration saves keep the generic saved notice.

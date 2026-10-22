@@ -291,8 +291,8 @@ export function SettingsView({
     return outcome;
   }
 
-  async function runPinned(path: string): Promise<OpNotice> {
-    return runPinnedWithBody(path, {});
+  async function runPinned(path: string, fields: Record<string, string> = {}): Promise<OpNotice> {
+    return postPinnedOutcome(path, fields, locale, () => onReload({ background: true }));
   }
 
   /**
@@ -304,25 +304,6 @@ export function SettingsView({
    */
   async function runTriggerMode(mode: ReviewTriggerMode): Promise<OpNotice> {
     return submitTriggerMode(app.slug, mode, locale, () => onReload({ background: true }));
-  }
-
-  /**
-   * POST a pinned ops path and resolve the outcome to the calling card.
-   * Options: `successMessage` differentiates an outcome the generic
-   * "Changes saved." would misrepresent; `reload: false` skips the background
-   * refetch when the follow-up settings GET is guaranteed to fail — a
-   * soft-deleted App is invisible to that route, so a delete's refetch would
-   * 404 and overwrite the outcome with "Load failed."
-   */
-  async function runPinnedWithBody(
-    path: string,
-    fields: Record<string, string>,
-    { successMessage, reload = true }: { successMessage?: string; reload?: boolean } = {},
-  ): Promise<OpNotice> {
-    return postPinnedOutcome(path, fields, locale, () => onReload({ background: true }), {
-      successMessage,
-      refetch: reload,
-    });
   }
 
   async function onConfirm(): Promise<void> {
@@ -353,7 +334,7 @@ export function SettingsView({
         // identity's, so a pool with a sibling key keeps it.
         const slot = configuredKeySlot(configured, action.provider, action.keyId);
         setProvidersRemoveOutcome({
-          notice: await runPinnedWithBody(`${base}/key/delete`, {
+          notice: await runPinned(`${base}/key/delete`, {
             provider: action.provider,
             key_id: action.keyId,
           }),
@@ -362,13 +343,13 @@ export function SettingsView({
       } else if (action.kind === "delete") {
         // Irreversible outcome with its own copy: "Changes saved." reads wrong
         // after a delete, and the user stays on the deleted App's page.
-        // reload: false — the deleted App's settings GET is a guaranteed 404.
+        // refetch: false — the deleted App's settings GET is a guaranteed 404,
+        // so refetching would overwrite the outcome with "Load failed."
         setOpsNotice(
-          await runPinnedWithBody(
-            `${appPath}/delete`,
-            {},
-            { successMessage: t(locale, "settings.deleteSuccess"), reload: false },
-          ),
+          await postPinnedOutcome(`${appPath}/delete`, {}, locale, () => onReload({ background: true }), {
+            successMessage: t(locale, "settings.deleteSuccess"),
+            refetch: false,
+          }),
         );
       } else {
         setOpsNotice(await runPinned(`${appPath}/${action.kind}`));

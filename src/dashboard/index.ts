@@ -67,6 +67,7 @@ import {
 import {
   getMembership,
   getSoleWorkspace,
+  getSoleWorkspaceAccess,
   getWorkspaceBySlug,
   type WorkspaceRole,
 } from "./workspace-store";
@@ -207,6 +208,44 @@ export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> 
     }),
   );
   return null;
+}
+
+/**
+ * The `strict` boot extras for one signed-in login: the deployment's sole
+ * workspace slug (the shell's nav targets) and whether this login may run the
+ * App-creation flow there. ONE workspace read answers both.
+ *
+ * Under `strict` the answer is always a decision: an unbound store or a
+ * deployment that does not carry exactly one live workspace cannot attribute
+ * the App the flow would create, so creation is refused (`canCreateApp: false`)
+ * rather than falling through to `createApp`'s guard after the slug is minted.
+ * `off` returns `{}` — nothing is read and nothing is gated.
+ */
+export async function strictWorkspaceBoot(
+  env: Env,
+  login: string,
+): Promise<{ workspaceSlug?: string; canCreateApp?: boolean }> {
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return {};
+  const db = dashboardD1(env);
+  if (db === null) return { canCreateApp: false };
+  const access = await getSoleWorkspaceAccess(db, login);
+  if (access === null) return { canCreateApp: false };
+  return {
+    workspaceSlug: access.slug,
+    // A new App lands in the sole workspace, where the scoped `canManageApp`
+    // gives a plain member no rights — so creation is owner/admin there.
+    canCreateApp: access.role === "owner" || access.role === "admin",
+  };
+}
+
+/**
+ * Whether `login` may run the App-creation flow — the gate every manifest route
+ * consults, because each one can write the row. `strict` always resolves a
+ * decision; `off` never resolves extras, so its creator rule keeps the flow
+ * open (the caller can manage what it creates there).
+ */
+export async function canCreateApp(env: Env, login: string): Promise<boolean> {
+  return (await strictWorkspaceBoot(env, login)).canCreateApp ?? true;
 }
 
 /**
@@ -373,6 +412,18 @@ function classifyDashboardPath(pathname: string): DashboardPathClass {
 }
 
 /**
+ * Tenant invisibility 404, the ONE surface for every hidden path: HTML
+ * navigation renders the console's styled page (the same surface the
+ * pinned-POST 404 uses), a fetch keeps the bare status — the SPA's API reads
+ * parse status only.
+ */
+async function tenantNotFound(c: DashboardContext): Promise<Response> {
+  return wantsHtml(c.req.header("Accept") ?? null)
+    ? c.html(notFoundPage(requestLocale(c)), 404)
+    : await c.notFound();
+}
+
+/**
  * The tenant route-family gate. Mounted twice: by `src/worker/index.ts` on
  * `/dashboard/*` BEFORE SPA dispatch (so a strict legacy-App HTML request
  * cannot be served by the SPA shell before the 404 decision) and by
@@ -398,11 +449,11 @@ export const dashboardTenantGate: Handler<{
   if (target.kind === "legacy-app") {
     // Deploy B retires the pre-workspace App face: the same 404 an unmatched
     // path answered with before the switch.
-    return mode === "strict" ? c.notFound() : next();
+    return mode === "strict" ? tenantNotFound(c) : next();
   }
   if (target.kind !== "workspace") return next();
   // Deploy A: the workspace face does not exist yet.
-  if (mode !== "strict") return c.notFound();
+  if (mode !== "strict") return tenantNotFound(c);
   // CLASSIFY ONLY — no D1 read. The workspace row and the caller's membership
   // are resolved by the member gate AFTER the session and user row are known,
   // so an anonymous request neither pays a pre-auth round trip nor learns from
@@ -651,6 +702,12 @@ dashboardApp.post("/manifest/start", async (c) => {
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // I-000082: the App this flow creates belongs to the sole workspace, where a
+  // plain member has no manage rights — offering the flow would end in a 403 on
+  // the App it just created. Checked BEFORE the slug mint / state cookie.
+  if (!(await canCreateApp(c.env, session.login))) {
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
   const slug = await resolveAvailableSlug(db, buildAppSlug(session.login));
@@ -679,6 +736,14 @@ dashboardApp.get("/manifest/callback", async (c) => {
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE));
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // Creation capability is re-checked HERE, not only at start: a flow that
+  // began as owner/admin must not complete after a mid-flight demotion, and the
+  // callback writes the row itself (same rule as the start/commit routes). The
+  // state cookie is already expired above, so the flow is burned either way.
+  if (!(await canCreateApp(c.env, session.login))) {
+    logManifestFailure("callback", "not_a_creator");
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   const state = await readManifestStateValue(
     getCookie(c, MANIFEST_STATE_COOKIE),
     c.req.query("state"),
@@ -775,6 +840,12 @@ dashboardApp.post("/manifest/commit", async (c) => {
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // Same creation capability as the start route (I-000082): the recovery
+  // resubmit must not become the bypass. The hold is left untouched — the op
+  // never ran, and demoting the operator mid-flow is the only way in.
+  if (!(await canCreateApp(c.env, session.login))) {
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold) {
     logManifestFailure("commit", "hold_missing_or_expired");
@@ -926,6 +997,14 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   if (!session) return c.redirect("/dashboard/login", 302);
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
+  // This page is the resume gate for the commit that /manifest/commit performs,
+  // so it applies the same creation capability (see the callback): a member
+  // demoted mid-flight must not be handed the commit affordance.
+  if (!(await canCreateApp(c.env, session.login))) {
+    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+    logManifestFailure("confirm", "not_a_creator");
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   return c.html(
     manifestConfirmPage(
       session,
@@ -1195,17 +1274,12 @@ async function requireMember(c: DashboardContext): Promise<
   // workspace answers (no tenant-existence oracle).
   const tenant = c.get("tenant");
   if (tenant) {
-    // Tenant invisibility is final on a workspace-scoped request: HTML
-    // navigation renders the styled 404 page (the same surface the pinned-POST
-    // 404 uses), a fetch keeps the bare status.
-    const invisible = async (): Promise<Response> =>
-      wantsHtml(c.req.header("Accept") ?? null)
-        ? c.html(notFoundPage(requestLocale(c)), 404)
-        : await c.notFound();
+    // Tenant invisibility is final on a workspace-scoped request — the same
+    // surface the routing gate answers with.
     const workspace = await getWorkspaceBySlug(db, tenant.slug);
-    if (!workspace) return { ok: false, response: await invisible() };
+    if (!workspace) return { ok: false, response: await tenantNotFound(c) };
     const role = await getMembership(db, workspace.id, user.id);
-    if (!role) return { ok: false, response: await invisible() };
+    if (!role) return { ok: false, response: await tenantNotFound(c) };
     c.set("tenant", { slug: workspace.slug, workspaceId: workspace.id, role });
     return { ok: true, session, db, user, scope: { workspaceId: workspace.id, role } };
   }

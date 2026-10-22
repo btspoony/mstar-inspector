@@ -23,6 +23,14 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
+import {
+  MANIFEST_HOLD_COOKIE,
+  MANIFEST_STATE_COOKIE,
+  buildHoldPayload,
+  createHoldValue,
+  createManifestStateValue,
+  encryptHoldValue,
+} from "../../src/dashboard/manifest";
 import { apiBase } from "../../src/spa/workspace-base";
 import type { SpaBoot } from "../../src/spa/boot";
 import { RESERVED_WORKSPACE_SLUGS } from "../../src/spa/routes";
@@ -85,10 +93,18 @@ function envFor(db: TestD1, mode?: "off" | "strict"): Env {
 async function authedRequest(
   path: string,
   login: string,
-  init: { method?: string; body?: string; accept?: string } = {},
+  init: {
+    method?: string;
+    body?: string;
+    accept?: string;
+    /** Extra cookies beside the session (manifest state / hold). */
+    extraCookies?: Record<string, string>;
+  } = {},
 ): Promise<Request> {
   const session = await createSessionValue(login, null, SESSION_SECRET);
-  const headers: Record<string, string> = { Cookie: `${SESSION_COOKIE}=${session}` };
+  const cookies = [`${SESSION_COOKIE}=${session}`];
+  for (const [name, value] of Object.entries(init.extraCookies ?? {})) cookies.push(`${name}=${value}`);
+  const headers: Record<string, string> = { Cookie: cookies.join("; ") };
   if (init.accept !== undefined) headers["Accept"] = init.accept;
   if (init.body !== undefined) headers["Content-Type"] = "application/x-www-form-urlencoded";
   return new Request(`https://worker.local${path}`, {
@@ -381,6 +397,29 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
     expect(api.status).toBe(404);
     expect(api.headers.get("Content-Type")).toStartWith("text/plain");
     expect(await api.text()).not.toContain(t("en", "common.error.notFoundTitle"));
+  });
+
+  test("the ROUTING gate's 404s carry the same styled page (N2)", async () => {
+    // Both gate branches answer a hidden route family before any session or
+    // membership read: the strict legacy-App face and the off workspace face.
+    // Their HTML navigation must render the member gate's page, not bare text.
+    for (const [mode, path] of [
+      ["strict", "/dashboard/apps"],
+      ["off", "/dashboard/acme/apps"],
+    ] as const) {
+      const { db } = tenancyFixture();
+      const env = envFor(db, mode);
+      const page = await worker.fetch(
+        await authedRequest(path, "octocat", { accept: "text/html" }),
+        env,
+      );
+      expect(page.status, path).toBe(404);
+      expect(page.headers.get("Content-Type"), path).toContain("text/html");
+      expect(await page.text(), path).toContain(t("en", "common.error.notFoundTitle"));
+      const api = await worker.fetch(await authedRequest(path, "octocat"), env);
+      expect(api.status, path).toBe(404);
+      expect(await api.text(), path).toBe("404 Not Found");
+    }
   });
 
   test("non-App routes keep serving under strict", async () => {
@@ -706,6 +745,29 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(hrefs).not.toContain("/dashboard/apps");
   });
 
+  test("strict: the direct /index.html shell names the sole workspace too (N1)", async () => {
+    // `/index.html` is the same shell document addressed directly — the SPA
+    // router then reads the real pathname — so it must carry the same boot or
+    // its sidebar keeps the legacy dead end.
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      new Request("https://worker.local/index.html", {
+        headers: {
+          Accept: "text/html",
+          Cookie: `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`,
+        },
+      }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceSlug).toBe("default");
+    const hrefs = await renderMembersHrefs(boot);
+    expect(hrefs).toContain("/dashboard/default/apps");
+    expect(hrefs).not.toContain("/dashboard/apps");
+  });
+
   test("off: a workspace-shaped shell never exists, so no boot carries a slug", async () => {
     const { db } = tenancyFixture();
     const res = await worker.fetch(
@@ -836,6 +898,237 @@ describe("strict: the onboarding CTA stays inside the workspace", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.text()).toContain('href="/dashboard/apps/acme-app/settings"');
+  });
+});
+
+describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
+  /**
+   * ONE live workspace (`default`, 0026's seed) — the M1 shape the gate judges
+   * against — with a role matrix where `octocat` is a deployment ADMIN but only
+   * a workspace MEMBER, so the legacy rule and the workspace rule disagree.
+   */
+  function soleWorkspaceRoles() {
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "member");
+    seedMembership(db, "default", seedUser(db, "carol", "member"), "admin");
+    seedMembership(db, "default", seedUser(db, "dana", "member"), "owner");
+    seedMembership(db, "default", seedUser(db, "mallory", "member"), "member");
+    return { db };
+  }
+
+  function post(login: string, path: string, env: Env): Promise<Response> {
+    return authedRequest(path, login, { method: "POST" }).then((request) => worker.fetch(request, env));
+  }
+
+  test("owner and admin may start the manifest flow and get the create form", async () => {
+    const { db } = soleWorkspaceRoles();
+    const env = envFor(db, "strict");
+    for (const login of ["dana", "carol"]) {
+      const res = await post(login, "/dashboard/manifest/start", env);
+      expect(res.status, login).toBe(200);
+      expect(await res.text(), login).toContain("https://github.com/settings/apps/new");
+    }
+  });
+
+  test("a plain member is refused with the styled 403 page and mints no state cookie", async () => {
+    const { db } = soleWorkspaceRoles();
+    const env = envFor(db, "strict");
+    for (const login of ["mallory", "octocat"]) {
+      // octocat is a DEPLOYMENT admin but a workspace member: the workspace
+      // role decides, exactly as the scoped canManageApp does.
+      const res = await post(login, "/dashboard/manifest/start", env);
+      expect(res.status, login).toBe(403);
+      expect(await res.text(), login).toContain(t("en", "common.error.forbiddenTitle"));
+      expect(res.headers.getSetCookie(), login).toEqual([]);
+    }
+  });
+
+  test("the commit recovery route applies the same gate (member 403, owner passes to the hold check)", async () => {
+    const { db } = soleWorkspaceRoles();
+    const env = envFor(db, "strict");
+    const member = await post("mallory", "/dashboard/manifest/commit", env);
+    expect(member.status).toBe(403);
+    expect(await member.text()).toContain(t("en", "common.error.forbiddenTitle"));
+    // The owner clears the gate; with no hold the route falls back to the flow
+    // start, which is the pre-existing no-hold contract.
+    const owner = await post("dana", "/dashboard/manifest/commit", env);
+    expect(owner.status).toBe(302);
+    expect(owner.headers.get("Location")).toBe("/dashboard");
+  });
+
+  test("off keeps the ungated flow (its creator rule can manage the new App)", async () => {
+    const { db } = soleWorkspaceRoles();
+    expect((await post("mallory", "/dashboard/manifest/start", envFor(db, "off"))).status).toBe(200);
+  });
+
+  test("a strict deployment without a sole workspace refuses creation instead of defaulting open", async () => {
+    // `tenancyFixture` carries several live workspaces, so ownership of a new
+    // App cannot be resolved at all: strict must refuse here, not mint a slug
+    // and only fail later inside createApp (after the state cookie and the
+    // operator's trip to GitHub).
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    for (const login of ["octocat", "dana"]) {
+      const res = await post(login, "/dashboard/manifest/start", env);
+      expect(res.status, login).toBe(403);
+      expect(await res.text(), login).toContain(t("en", "common.error.forbiddenTitle"));
+      expect(res.headers.getSetCookie(), login).toEqual([]);
+    }
+  });
+
+  test("a strict deployment with an unbound store refuses creation (configuration, not permission)", async () => {
+    // Without D1 nothing can attribute the App: the dashboard face already
+    // fails closed on the missing binding before the route runs, so the flow
+    // never starts and no slug/state cookie is minted.
+    const env = { ...envFor(createMigratedTestD1(), "strict"), DB: undefined } as unknown as Env;
+    const res = await post("octocat", "/dashboard/manifest/start", env);
+    expect(res.status).toBe(500);
+    expect(await res.text()).toContain("dashboard storage is not configured");
+    expect(res.headers.getSetCookie()).toEqual([]);
+  });
+
+  test("the shell boot carries the create capability the SPA hides the action on", async () => {
+    const { db } = soleWorkspaceRoles();
+    const env = withSpaAssets(envFor(db, "strict"));
+    const bootOfLogin = async (login: string): Promise<SpaBoot> =>
+      bootOf(await (await worker.fetch(await authedRequest("/dashboard/members", login, { accept: "text/html" }), env)).text());
+    // Owner/admin → true (the key is present, not merely defaulted).
+    expect((await bootOfLogin("dana")).canCreateApp).toBe(true);
+    expect((await bootOfLogin("carol")).canCreateApp).toBe(true);
+    // Plain member → explicitly false.
+    expect((await bootOfLogin("mallory")).canCreateApp).toBe(false);
+    expect((await bootOfLogin("octocat")).canCreateApp).toBe(false);
+    // `off` never sends the field: the legacy flow is ungated there.
+    const offEnv = withSpaAssets(envFor(db, "off"));
+    const offBoot = bootOf(
+      await (await worker.fetch(await authedRequest("/dashboard/members", "mallory", { accept: "text/html" }), offEnv)).text(),
+    );
+    expect(offBoot.canCreateApp).toBeUndefined();
+  });
+
+  test("a strict deployment that cannot name one workspace advertises no create capability", async () => {
+    const { db } = tenancyFixture(); // several live workspaces
+    const env = withSpaAssets(envFor(db, "strict"));
+    const boot = bootOf(
+      await (await worker.fetch(await authedRequest("/dashboard/members", "octocat", { accept: "text/html" }), env)).text(),
+    );
+    expect(boot.canCreateApp).toBe(false);
+    expect(boot.workspaceSlug).toBeUndefined();
+  });
+});
+
+describe("WORKSPACE_TENANT_MODE=strict — a mid-flight demotion cannot finish the flow", () => {
+  const SLUG = "mstar-inspector-mallory";
+  const CONVERSION = {
+    id: 987654,
+    name: SLUG,
+    pem: "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----",
+    webhook_secret: "not-a-real-webhook-secret",
+  };
+
+  /** ONE live workspace where the caller starts as owner. */
+  function ownerThenDemote() {
+    const db = createMigratedTestD1();
+    const userId = seedUser(db, "mallory", "member");
+    seedMembership(db, "default", userId, "owner");
+    return { db, userId };
+  }
+
+  /** The role change a concurrent admin performs while the flow is open. */
+  function demote(db: TestD1, userId: string): void {
+    db.raw
+      .prepare("UPDATE workspace_members SET role = 'member' WHERE workspace_id = 'default' AND user_id = ?")
+      .run(userId);
+  }
+
+  /** GET /manifest/callback with a valid single-use state for `mallory`. */
+  async function callback(env: Env, state: string): Promise<Response> {
+    return worker.fetch(
+      await authedRequest("/dashboard/manifest/callback?code=manifest-code&state=" + state, "mallory", {
+        accept: "text/html",
+        extraCookies: { [MANIFEST_STATE_COOKIE]: state },
+      }),
+      env,
+    );
+  }
+
+  test("a start that began as owner still refuses the callback commit after demotion", async () => {
+    const { db, userId } = ownerThenDemote();
+    const env = envFor(db, "strict");
+    const state = await createManifestStateValue(SESSION_SECRET, SLUG);
+    // The operator really did start: the gate admitted it.
+    expect((await worker.fetch(await authedRequest("/dashboard/manifest/start", "mallory", { method: "POST" }), env)).status).toBe(200);
+    // A concurrent admin demotes them before GitHub redirects back.
+    demote(db, userId);
+    let networkCalls = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      networkCalls += 1;
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+    try {
+      const res = await callback(env, state);
+      expect(res.status).toBe(403);
+      expect(await res.text()).toContain(t("en", "common.error.forbiddenTitle"));
+      expect(networkCalls).toBe(0); // no code exchange behind the denial
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const rows = db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number };
+    expect(rows.n).toBe(0);
+  });
+
+  test("a parked hold no longer renders the confirm page (or its commit form) after demotion", async () => {
+    const { db, userId } = ownerThenDemote();
+    const env = envFor(db, "strict");
+    const hold = await encryptHoldValue(buildHoldPayload(CONVERSION, "mallory", SLUG), SESSION_SECRET);
+    demote(db, userId);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/manifest/confirm", "mallory", {
+        accept: "text/html",
+        extraCookies: { [MANIFEST_HOLD_COOKIE]: hold },
+      }),
+      env,
+    );
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).toContain(t("en", "common.error.forbiddenTitle"));
+    expect(body).not.toContain('action="/dashboard/manifest/commit"');
+    // The hold is burned: a demoted operator keeps no resumable credential.
+    expect(
+      res.headers.getSetCookie().some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+  });
+
+  test("the same hold still resumes for a caller who is still owner", async () => {
+    const { db } = ownerThenDemote();
+    const env = envFor(db, "strict");
+    const hold = await createHoldValue(CONVERSION, "mallory", SESSION_SECRET, SLUG);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/manifest/confirm", "mallory", {
+        accept: "text/html",
+        extraCookies: { [MANIFEST_HOLD_COOKIE]: hold },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('action="/dashboard/manifest/commit"');
+  });
+
+  test("off adds no gate and no read: a demoted-shape flow still completes there", async () => {
+    const { db, userId } = ownerThenDemote();
+    const env = envFor(db, "off");
+    demote(db, userId);
+    const hold = await createHoldValue(CONVERSION, "mallory", SESSION_SECRET, SLUG);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/manifest/confirm", "mallory", {
+        accept: "text/html",
+        extraCookies: { [MANIFEST_HOLD_COOKIE]: hold },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('action="/dashboard/manifest/commit"');
   });
 });
 

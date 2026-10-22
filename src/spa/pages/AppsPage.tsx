@@ -24,6 +24,9 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
   const [payload, setPayload] = useState<AppsPayload | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const cancelledRef = useRef(false);
+  // Boot-injected capability (I-000082): a workspace member cannot manage the
+  // App the manifest flow would create, so the action is not offered at all.
+  const canCreate = boot.canCreateApp !== false;
 
   async function load(): Promise<void> {
     setState("loading");
@@ -55,7 +58,37 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
     return <PageSkeleton locale={locale} kind="table" />;
   }
 
+  return (
+    <AppsView
+      locale={locale}
+      state={state}
+      payload={payload}
+      canCreate={canCreate}
+      onRetry={() => void load()}
+    />
+  );
+}
+
+/**
+ * The loaded face of the Apps page, split out of the stateful page so the
+ * rendered markup — the Create action included — is assertable without a DOM
+ * runner (the AppDetailShell precedent).
+ */
+export function AppsView({
+  locale,
+  state,
+  payload,
+  canCreate,
+  onRetry,
+}: {
+  locale: SpaBoot["locale"];
+  state: "ok" | "error";
+  payload: AppsPayload | null;
+  canCreate: boolean;
+  onRetry: () => void;
+}) {
   const appsEmpty = state === "ok" && payload !== null && payload.apps.length === 0;
+  const createAction = canCreate ? <CreateAppButton locale={locale} /> : null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -65,18 +98,20 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
         </h1>
         {/* One create-form instance on the page: while the empty state
             carries the action, the header yields its slot to it. */}
-        {!appsEmpty ? <CreateAppButton locale={locale} /> : null}
+        {!appsEmpty ? createAction : null}
       </div>
-      {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
+      {state === "error" ? <ErrorState locale={locale} onRetry={onRetry} /> : null}
       {state === "ok" && payload ? (
         appsEmpty ? (
           // Composed first-App guidance: the action reuses the exact
-          // CreateAppButton form — creation is still the only path.
+          // CreateAppButton form — creation is still the only path. A member
+          // cannot run that flow (I-000082), so the card keeps the honest
+          // "no Apps yet" line and drops the instruction to create one.
           <EmptyState
             icon={<GitHubMark />}
             title={t(locale, "apps.emptyTitle")}
-            description={t(locale, "apps.emptyDescription")}
-            action={<CreateAppButton locale={locale} />}
+            description={canCreate ? t(locale, "apps.emptyDescription") : undefined}
+            action={createAction}
           />
         ) : (
           <AppsList locale={locale} payload={payload} />

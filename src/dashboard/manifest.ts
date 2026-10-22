@@ -59,7 +59,7 @@ const GITHUB_MANIFEST_HEADERS = {
  * values — stages, reasons, and upstream statuses are not secrets.
  */
 export function logManifestFailure(
-  stage: "state_verify" | "callback" | "conversion" | "commit",
+  stage: "state_verify" | "callback" | "conversion" | "confirm" | "commit",
   reason: string,
   extra: Record<string, unknown> = {},
 ): void {

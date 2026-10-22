@@ -20,7 +20,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
-import { strictWorkspaceAppsBase, strictWorkspaceSlug } from "../dashboard/index";
+import { strictWorkspaceAppsBase, strictWorkspaceBoot } from "../dashboard/index";
 import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
@@ -132,18 +132,28 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // `/dashboard/apps` dead end under `strict`. Name the workspace in every
   // sidebar-bearing boot — a workspace-scoped pathname already carries it (no
   // read), otherwise the deployment's sole workspace answers (one read, the
-  // sign-in landing's resolver, which returns null without touching D1 under
-  // `off`). The login page renders no sidebar, and `/dashboard` either
+  // sign-in landing's resolver). `/index.html` is the same shell document
+  // addressed directly (the SPA router then reads the real pathname), so it
+  // takes the same boot. The same read also yields the caller's workspace role,
+  // which the boot carries as `canCreateApp` (I-000082: a plain member cannot
+  // manage the App the manifest flow creates, so the SPA offers no Create
+  // action). The login page renders no sidebar, and `/dashboard` either
   // redirected above or has no sole workspace to name.
   const route = matchSpaRoute(c.req.path);
-  const workspaceSlug =
-    auth.boot.login === null || route === null || route.page === "login"
-      ? undefined
-      : (("workspaceSlug" in route ? route.workspaceSlug : undefined) ??
-        (await strictWorkspaceSlug(c.env)) ??
-        undefined);
-  const boot =
-    workspaceSlug === undefined ? auth.boot : { ...auth.boot, workspaceSlug };
+  const routeSlug = route !== null && "workspaceSlug" in route ? route.workspaceSlug : undefined;
+  const extras =
+    auth.boot.login === null || route?.page === "login"
+      ? {}
+      : await strictWorkspaceBoot(c.env, auth.boot.login);
+  // Absent fields add nothing, so `off` and a slug-less deployment keep the
+  // pre-existing boot (and its JSON key order) byte-identical.
+  const boot: SpaBoot = {
+    ...auth.boot,
+    ...(routeSlug ?? extras.workspaceSlug) === undefined
+      ? {}
+      : { workspaceSlug: routeSlug ?? extras.workspaceSlug },
+    ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
+  };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   if (c.req.method === "HEAD") {
     return new Response(null, { status: assetResponse.status });

@@ -21,14 +21,15 @@ export type WorkspaceRow = {
   name: string;
 };
 
-/** Narrow D1 face: single-row reads plus the one bounded two-row probe below. */
+/** Narrow D1 face: single-row and bounded multi-row reads through one chain. */
+type WorkspaceStoreStatement = {
+  bind(...values: unknown[]): WorkspaceStoreStatement;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+};
+
 type WorkspaceStoreD1 = {
-  prepare(query: string): {
-    bind(...values: unknown[]): {
-      first<T = Record<string, unknown>>(): Promise<T | null>;
-    };
-    all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
-  };
+  prepare(query: string): WorkspaceStoreStatement;
 };
 
 /**
@@ -72,4 +73,30 @@ export async function getSoleWorkspace(db: WorkspaceStoreD1): Promise<WorkspaceR
     .prepare(`SELECT id, slug, name FROM workspaces WHERE deleted_at IS NULL LIMIT 2`)
     .all<WorkspaceRow>();
   return rows.results.length === 1 ? rows.results[0]! : null;
+}
+
+/**
+ * The sole live workspace's slug plus the login's role inside it — ONE read,
+ * because the SPA shell boot needs both facts and the manifest gate needs the
+ * role alone. Null under the same predicate as {@link getSoleWorkspace}; a
+ * login with no users row or no membership resolves `role: null` (not a
+ * member), never an error.
+ */
+export async function getSoleWorkspaceAccess(
+  db: WorkspaceStoreD1,
+  login: string,
+): Promise<{ slug: string; role: WorkspaceRole | null } | null> {
+  const rows = await db
+    .prepare(
+      `SELECT w.slug AS slug, wm.role AS role
+         FROM workspaces w
+         LEFT JOIN users u ON u.github_login = ? COLLATE NOCASE
+         LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = u.id
+        WHERE w.deleted_at IS NULL
+        LIMIT 2`,
+    )
+    .bind(login)
+    .all<{ slug: string; role: WorkspaceRole | null }>();
+  const row = rows.results.length === 1 ? rows.results[0]! : null;
+  return row === null ? null : { slug: row.slug, role: row.role };
 }
