@@ -227,6 +227,46 @@ describe("SPA boot face — the marker drives the guidance", () => {
     expect(bootOf(await res.text()).emptyInstance).toBeUndefined();
   });
 
+  test("a tampered signature is refused", async () => {
+    const db = populatedInstance();
+    const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);
+    const [body, sig] = marker.split(".");
+    const flipped = sig!.slice(0, -1) + (sig!.at(-1) === "A" ? "B" : "A");
+    const res = await signedInShell(db, "self-hosted", `${body}.${flipped}`);
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).emptyInstance).toBeUndefined();
+  });
+
+  test("an expired marker is refused", async () => {
+    const db = populatedInstance();
+    // Minted 200 s ago: past FIRST_INSTANCE_MAX_AGE_SEC (120 s).
+    const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET, Date.now() - 200_000);
+    const res = await signedInShell(db, "self-hosted", marker);
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).emptyInstance).toBeUndefined();
+  });
+
+  test("a session cookie value is not a marker (same secret, different purpose)", async () => {
+    const db = populatedInstance();
+    const session = await createSessionValue(LOGIN, null, SESSION_SECRET);
+    const res = await signedInShell(db, "self-hosted", session);
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).emptyInstance).toBeUndefined();
+  });
+
+  test("the marker is spent on the no-session redirect branch too", async () => {
+    const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);
+    // No session cookie → the login redirect, which still must not leave the
+    // marker alive for the shell the next request loads.
+    const res = await shell("/dashboard/apps", envFor(populatedInstance(), "self-hosted"), [
+      `${FIRST_INSTANCE_COOKIE}=${marker}`,
+    ]);
+    expect(res.status).toBe(302);
+    expect(
+      res.headers.getSetCookie().some((c) => c.startsWith(`${FIRST_INSTANCE_COOKIE}=`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+  });
+
   test("no marker → no guidance, on either mode", async () => {
     for (const mode of ["self-hosted", "saas"] as const) {
       const res = await signedInShell(populatedInstance(), mode, null);

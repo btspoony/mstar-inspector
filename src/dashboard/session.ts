@@ -23,12 +23,14 @@ export const OAUTH_STATE_MAX_AGE_SEC = 600;
 /**
  * One-shot carrier of "this sign-in created the instance's first account"
  * from the OAuth callback (the last moment the `users` table is empty) to the
- * shell it redirects to. Signed with the session secret so the guidance
- * cannot be claimed by a later request, and short-lived because the shell
- * expires it on read.
+ * shell it redirects to. Signed with the session secret AND purpose-bound by
+ * `kind`, so neither a later request nor a value minted for any other carrier
+ * can claim the guidance; short-lived because the shell expires it on read.
  */
 export const FIRST_INSTANCE_COOKIE = "__Host-mstar-first-instance";
 export const FIRST_INSTANCE_MAX_AGE_SEC = 120;
+/** Purpose binding inside the marker payload — the session cookie shares the secret. */
+const FIRST_INSTANCE_KIND = "first-instance";
 
 export type SessionPayload = {
   login: string;
@@ -153,8 +155,10 @@ export async function createFirstInstanceValue(
   nowMs = Date.now(),
 ): Promise<string> {
   const nowSec = Math.floor(nowMs / 1000);
+  // `kind` purpose-binds the payload: same secret as the session cookie, so
+  // without it a copied session value would pass every check below.
   return signValue(
-    JSON.stringify({ login, iat: nowSec, exp: nowSec + FIRST_INSTANCE_MAX_AGE_SEC }),
+    JSON.stringify({ kind: FIRST_INSTANCE_KIND, login, iat: nowSec, exp: nowSec + FIRST_INSTANCE_MAX_AGE_SEC }),
     secret,
   );
 }
@@ -169,12 +173,13 @@ export async function readFirstInstanceValue(
   if (!value) return false;
   const raw = await verifyValue(value, secret);
   if (!raw) return false;
-  let payload: { login?: unknown; exp?: unknown };
+  let payload: { kind?: unknown; login?: unknown; exp?: unknown };
   try {
-    payload = JSON.parse(raw) as { login?: unknown; exp?: unknown };
+    payload = JSON.parse(raw) as { kind?: unknown; login?: unknown; exp?: unknown };
   } catch {
     return false;
   }
+  if (payload.kind !== FIRST_INSTANCE_KIND) return false;
   if (payload.login !== login) return false;
   if (typeof payload.exp !== "number") return false;
   return payload.exp > Math.floor(nowMs / 1000);

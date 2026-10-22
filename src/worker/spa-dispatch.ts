@@ -141,7 +141,15 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // honours it.
   const auth = await readShellAuth(c);
   if (auth.kind === "deny") return auth.response;
-  if (auth.kind === "redirect") return c.redirect(auth.location, 302);
+  if (auth.kind === "redirect") {
+    // No session, so nothing honours the marker here — but it must not outlive
+    // the request either: a surviving marker would tell the post-sign-in shell
+    // a story about a sign-in this browser never witnessed.
+    if (getCookie(c, FIRST_INSTANCE_COOKIE) !== undefined) {
+      c.header("Set-Cookie", expireCookie(FIRST_INSTANCE_COOKIE), { append: true });
+    }
+    return c.redirect(auth.location, 302);
+  }
   const firstInstance =
     deploymentMode === "self-hosted" &&
     auth.boot.login !== null &&
@@ -151,6 +159,10 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
       auth.boot.login,
       c.env.DASHBOARD_SESSION_SECRET,
     ));
+  // One-shot from here on: spent by whichever branch answers, redirects
+  // included. c.header rides on every c.redirect/c.html below; the raw
+  // Responses (HEAD, the shell document) add it explicitly.
+  if (firstInstance) c.header("Set-Cookie", expireCookie(FIRST_INSTANCE_COOKIE), { append: true });
   // `/dashboard` (the root workbench) is mode-independent, but its first data
   // read derives the base from the pathname — the retired legacy App family —
   // so under `strict` it is a dead end. Send it to the workspace Apps page (the
@@ -229,10 +241,22 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     ...(memberships.length === 0 ? {} : { memberships }),
   };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
+  // Raw Responses do not inherit the context headers, so the one-shot expiry is
+  // copied onto them by hand (c.header above covers every c.redirect branch).
+  const markerExpiry = firstInstance ? expireCookie(FIRST_INSTANCE_COOKIE) : null;
   if (c.req.method === "HEAD") {
-    return new Response(null, { status: assetResponse.status });
+    return new Response(null, {
+      status: assetResponse.status,
+      ...(markerExpiry === null ? {} : { headers: { "set-cookie": markerExpiry } }),
+    });
   }
-  if (!assetResponse.ok) return assetResponse as unknown as Response;
+  if (!assetResponse.ok) {
+    if (markerExpiry === null) return assetResponse as unknown as Response;
+    const headers = new Headers();
+    assetResponse.headers.forEach((value, key) => headers.append(key, value));
+    headers.append("set-cookie", markerExpiry);
+    return new Response(assetResponse.body, { status: assetResponse.status, headers });
+  }
   const html = await assetResponse.text();
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",
@@ -244,7 +268,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // One-shot: the guidance is a statement about the sign-in that just
   // happened, never a property of the session, so the marker dies on first
   // use (RFC 6265 forbids comma-joining Set-Cookie — append instead).
-  if (firstInstance) headers.append("set-cookie", expireCookie(FIRST_INSTANCE_COOKIE));
+  if (markerExpiry !== null) headers.append("set-cookie", markerExpiry);
   return new Response(injectSpaBoot(html, boot), {
     status: assetResponse.status,
     headers,

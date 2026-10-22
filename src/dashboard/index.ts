@@ -947,6 +947,8 @@ dashboardApp.get("/oauth/callback", async (c) => {
   // Read BEFORE the sign-in writes its row: after it, `users` is non-empty on
   // a first sign-in and the fact is gone. `self-hosted` is the only shape that
   // tells the instance story; `saas` never does.
+  // Not atomic with the insert below: two concurrent first sign-ins can both
+  // read 0 and both claim "first account". Cosmetic sentence only, so no lock.
   const emptyInstance = deploymentMode === "self-hosted" && (await countUsers(db)) === 0;
   const decision = await signInDashboardUser(db, user.login);
   if (decision.outcome === "deny") {
