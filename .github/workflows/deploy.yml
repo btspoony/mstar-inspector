@@ -71,32 +71,30 @@ jobs:
           fetch-depth: 0   # Bugbot #14: digest write-back merges origin/main — shallow clone has no merge base
 
       # The mode is a dispatch input, never a code edit: the SAME build is
-      # deployed twice on the tenant rollout (off, then strict). A `push` run
-      # carries no input → off. An illegal value fails HERE, before any step
-      # that can create or deploy a Worker version.
+      # deployed twice on the tenant rollout (off, then strict). A ROUTINE arm
+      # (`push` to main) carries no input: it takes the steady-state variable
+      # `vars.WORKSPACE_TENANT_MODE`, because reading the mode from the event
+      # would demote a `strict` installation to `off` on the next ordinary push
+      # without saying so — resolving to `off` there warns and records
+      # `tenant_mode_change` instead. An illegal value fails HERE, before any
+      # step that can create or deploy a Worker version.
       - name: Resolve tenant mode
         id: tenant
         env:
           TENANT_MODE: ${{ inputs.tenant_mode }}
-        run: |
-          MODE="${TENANT_MODE:-off}"
-          case "$MODE" in
-            off|strict) ;;
-            *)
-              echo "::error::invalid tenant_mode '$MODE' — expected off or strict"
-              exit 1
-              ;;
-          esac
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
-          echo "tenant_mode=$MODE"
+          STEADY_TENANT_MODE: ${{ vars.WORKSPACE_TENANT_MODE }}
+          ROUTINE_ARM: ${{ github.event_name != 'workflow_dispatch' }}
+        run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE" "$ROUTINE_ARM"
 
-      # Replay identity (before anything is deployed). The strict binding lives
-      # in scripts/deploy-replay-guard.sh (executed by the behaviour tests); the
-      # checkout assertion below stays here because it is about the tree on
-      # disk, not about which SHA was requested.
+      # Replay identity (before anything is deployed). The strict replay binding
+      # lives in scripts/deploy-replay-guard.sh (executed by the behaviour
+      # tests); the checkout assertion below stays here because it is about the
+      # tree on disk, not about which SHA was requested. `replay=required` only
+      # for a dispatch that asked for `strict` — a ROUTINE push serving `strict`
+      # from the steady-state variable has no Deploy A to bind.
       - name: Assert replay identity
         env:
-          MODE: ${{ steps.tenant.outputs.mode }}
+          REPLAY: ${{ steps.tenant.outputs.replay }}
           RUN_SHA: ${{ github.sha }}
           EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}
         run: |
@@ -106,7 +104,7 @@ jobs:
             echo "::error::checked-out HEAD $HEAD_SHA != run SHA $RUN_SHA — the replay must execute the SHA it names"
             exit 1
           fi
-          bash scripts/deploy-replay-guard.sh "$MODE" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA" "$HEAD_SHA"
+          bash scripts/deploy-replay-guard.sh "$REPLAY" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA" "$HEAD_SHA"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

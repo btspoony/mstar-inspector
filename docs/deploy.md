@@ -534,8 +534,33 @@ locale, healthz) answer in both modes.
 
 ### Rollout: two deploys of the same tag/SHA
 
+**Steady state is a repository/environment variable, not the event.** Both
+workflows resolve the mode with `scripts/resolve-tenant-mode.sh`, in this
+precedence:
+
+1. the `tenant_mode` dispatch input (an operator deciding a specific run),
+2. else `vars.WORKSPACE_TENANT_MODE` — the steady-state value for routine runs,
+3. else `off`.
+
+The routine arms (staging `push` to `main`, prod `release: published`) carry no
+input, so before this rule they resolved `off` unconditionally: the first
+ordinary push/tag after Deploy B silently redeployed a `strict` installation as
+`off` (legacy routes back, workspace routes 404). **A strict installation MUST
+set `WORKSPACE_TENANT_MODE=strict`** as a repository (or `staging` /
+`production` environment) variable *in the same change that runs Deploy B* —
+that variable, not the Deploy B dispatch, is what keeps the installation
+strict. A routine arm that resolves to `off` never observed the live mode, so
+it cannot claim a strict→off change: it emits a `::warning::` and records
+`tenant_mode_change=unproven->off` in the run summary. `tenant_mode_change=none`
+means no demotion is being reported (a dispatch, or a non-`off` resolution).
+
+The same resolver separates **steady state** from a **replay**: it reports
+`replay=required` only for a dispatch whose `tenant_mode` input is `strict`,
+and `replay=none` otherwise (including a routine arm serving `strict`). Only a
+replay must bind `expected_deploy_sha`; see *Replay identity* below.
+
 Both workflows take a `tenant_mode` dispatch input (`off` default, `strict`
-allowed) and pass it as `wrangler deploy --var
+allowed) and pass the resolved mode as `wrangler deploy --var
 WORKSPACE_TENANT_MODE:<mode>` — production gained that `--var` for this
 rollout, and `env.production` declares `off` as the manual-deploy default.
 In both workflows that deploy is the LAST version-creating command: a
@@ -550,20 +575,31 @@ that last deploy bound, and the run summary reports that value.
    -f expected_deploy_sha=<deploy A sha>`
    (staging: dispatch `deploy.yml` on `main` for the same commit, same flags).
    The workspace pages and the INNER-JOIN reads go live; **the Worker code is
-   the same SHA in both runs**.
-3. **Rollback** is Deploy A again — the same tag with `tenant_mode=off`; the
-   read face and the routes revert together.
+   the same SHA in both runs**. Set `vars.WORKSPACE_TENANT_MODE=strict` in the
+   same window: the dispatch only decides THIS run, the variable decides every
+   routine run after it.
+3. **Rollback** is Deploy A again — the same tag with `tenant_mode=off`, and
+   `vars.WORKSPACE_TENANT_MODE` back to `off` (otherwise the next routine
+   release redeploys `strict`); the read face and the routes revert together.
 
-**Replay identity is asserted, not assumed.** Both workflows take
-`expected_deploy_sha`, which is **required when `tenant_mode=strict`** (a
-strict run IS Deploy B; leaving it empty aborts with `strict replay requires
-the SHA deployed by Deploy A`). Deploy A's run summary is the source of that
+**Replay identity is asserted, not assumed — for the replay, and only for it.**
+A *strict replay* is a `workflow_dispatch` whose `tenant_mode` input is
+`strict`: that run IS Deploy B and must name the SHA Deploy A shipped. The
+resolver reports `replay=required` for exactly that case, and the run aborts
+with `strict replay requires the SHA deployed by Deploy A` when
+`expected_deploy_sha` is empty. Deploy A's run summary is the source of that
 value — it prints `deployed_sha=<sha>`. The run aborts unless `github.sha`
 equals the input **and** the run's ref resolves to the same SHA (staging
 asserts the checked-out `HEAD`; production asserts the release tag through
 `git rev-parse refs/tags/<tag>^{commit}`), so a tag or branch that moved
-between A and B cannot pass by agreeing with itself. An `off` deploy may leave
-the input empty.
+between A and B cannot pass by agreeing with itself.
+
+A **routine** arm (`push` / `release: published`) resolving `strict` from
+`vars.WORKSPACE_TENANT_MODE` is *not* a replay: there is no Deploy A to bind,
+so it reports `replay=none`, deploys `strict`, and still passes every ref
+identity assertion above. It never fabricates an `expected_deploy_sha` — the
+binding it would claim was never proven. An `off` run may leave the input empty
+in either case.
 
 **The container image is rebuilt, not byte-identical.** Both images are built
 from a rolling apt base, so a byte-identical rebuild is not provable. Pass
@@ -572,12 +608,16 @@ records `container_digest_match=true|false` in its summary; a mismatch is a
 **warning** naming the rolling-base reason, never a silent pass. With the
 input omitted, the summary says `unreported`.
 
-Every run records `deployed_sha=<sha>` **only when its deploy step
-succeeded**; a failed or skipped deploy records `deploy_status=not-deployed`
-plus the `requested_sha` instead, so the summary never claims a deploy that
-did not happen. The Worker version id is captured in a separate, non-fatal
-step (`version_id=unreported` on a log-shape problem), so a capture failure
-can never contradict a successful deploy.
+Every run records `deployed_sha=<sha>` **only when every step that creates a
+Worker version succeeded**; a failed or skipped deploy records
+`deploy_status=not-deployed` plus the `requested_sha` instead, so the summary
+never claims a deploy that did not happen. Production has two such steps — the
+bindings deploy (`steps.deploy`) and the mode-bearing serving deploy
+(`steps.serving`) — so a run whose first deploy went green but whose serving
+deploy failed reports `not-deployed`: the SHA is not offered as a replay
+source. The Worker version id is captured in a separate, non-fatal step
+(`version_id=unreported` on a log-shape problem), so a capture failure can never
+contradict a successful deploy.
 
 ### Gate ordering (zero-orphan abort gate)
 
@@ -767,6 +807,13 @@ is a good environment variable candidate, though it is also read from a repo
 variable / secret per the CI-credentials note below). Repository-level
 secrets keep working as the fallback for any name not set at the environment
 level.
+
+`WORKSPACE_TENANT_MODE` is a **GitHub Actions variable, not a Worker secret**:
+it is the steady-state tenant mode both workflows read on a routine
+release/push arm (§ Rollout). Set it to `strict` for a strict installation,
+`off` (or leave unset) otherwise. It is read as `vars.WORKSPACE_TENANT_MODE`,
+never injected by `secret bulk` — the deployed value still rides `wrangler
+deploy --var` so the same SHA can be replayed with the other mode.
 
 The four required secrets are asserted non-empty in the workflow **before the
 first mutating command** (a pure preflight beside the environment-marker
