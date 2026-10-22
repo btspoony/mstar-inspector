@@ -12,6 +12,7 @@ import { apiBase } from "../workspace-base";
 import { usePathname } from "../router";
 import { workspaceRefOf } from "../routes";
 import { storedSlugForRef } from "../shell";
+import { useLiveMemberships } from "../workspace-memberships";
 import { PageNotice, type NoticeKind } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -91,9 +92,10 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const locale = boot.locale;
   // The workspace's STORED slug for the rename control. Read from the CURRENT
   // path (the router re-renders on the rename's synthetic popstate), resolved
-  // through the boot membership so an id- or old-slug-addressed page still
-  // shows the real stored value — the boot itself does not refresh.
-  const storedSlug = storedSlugForRef(boot, workspaceRefOf(usePathname()));
+  // through the LIVE membership list so an id- or old-slug-addressed page still
+  // shows the real stored value after this document renamed it.
+  const memberships = useLiveMemberships(boot);
+  const storedSlug = storedSlugForRef({ ...boot, memberships }, workspaceRefOf(usePathname()));
   const [payload, setPayload] = useState<SettingsPayload | null>(null);
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");

@@ -11,8 +11,9 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarProvider } from "../../src/spa/components/ui/sidebar";
 import { AppSidebar } from "../../src/spa/components/AppSidebar";
-import { buildSidebarModel, buildWorkspaceSwitcherModel, storedSlugForRef } from "../../src/spa/shell";
+import { buildSidebarModel, buildWorkspaceSwitcherModel, renameWorkspaceMembership, storedSlugForRef } from "../../src/spa/shell";
 import { WorkspaceSwitcher, switchWorkspace } from "../../src/spa/components/WorkspaceSwitcher";
+import { commitWorkspaceRename } from "../../src/spa/pages/SettingsPage";
 import type { SpaBoot } from "../../src/spa/boot";
 
 const boot: SpaBoot = {
@@ -30,6 +31,7 @@ const boot: SpaBoot = {
 
 type Recorder = {
   pushed: string[];
+  replaced: string[];
   events: string[];
   requests: unknown[];
   cookieWrites: string[];
@@ -38,7 +40,7 @@ type Recorder = {
 
 /** Install the browser faces `navigate` + the switcher touch, recording each. */
 function withBrowser(pathname: string, search: string, run: () => void, hash = ""): Recorder {
-  const rec: Recorder = { pushed: [], events: [], requests: [], cookieWrites: [], locationWrites: [] };
+  const rec: Recorder = { pushed: [], replaced: [], events: [], requests: [], cookieWrites: [], locationWrites: [] };
   const scope = globalThis as Record<string, unknown>;
   const savedFetch = globalThis.fetch;
   const saved = {
@@ -57,7 +59,10 @@ function withBrowser(pathname: string, search: string, run: () => void, hash = "
   }) as typeof fetch;
   scope.window = {
     location,
-    history: { pushState: (_state: unknown, _title: string, url: string) => rec.pushed.push(url) },
+    history: {
+      pushState: (_state: unknown, _title: string, url: string) => rec.pushed.push(url),
+      replaceState: (_state: unknown, _title: string, url: string) => rec.replaced.push(url),
+    },
     dispatchEvent: (event: { type: string }) => {
       rec.events.push(event.type);
       return true;
@@ -146,6 +151,27 @@ describe("workspace switcher — the control's list", () => {
     const model = buildWorkspaceSwitcherModel(boot, "/dashboard/ws_acme/apps");
     expect(model?.currentRef).toBe("acme");
     expect(model?.options.map((option) => option.ref)).toEqual(["acme", "ws_7d41"]);
+  });
+
+  test("after an in-page rename the stale boot no longer offers the retired slug", () => {
+    // `boot` still lists `acme` — the document's snapshot never refreshes — so
+    // the rename must patch the list the switcher reads. Without the patch the
+    // option value stays `acme` and the new path names no current row.
+    let live = boot.memberships;
+    const rec = withBrowser("/dashboard/acme/apps", "", () => {
+      commitWorkspaceRename("acme-labs", (ref, slug) => {
+        live = renameWorkspaceMembership(live, ref, slug);
+      });
+    });
+    // The page stays on its own path under the new ref, as a replace (the old
+    // ref answers 404 — Back must not return to it).
+    expect(rec.replaced).toEqual(["/dashboard/acme-labs/apps"]);
+    expect(rec.pushed).toEqual([]);
+    const model = buildWorkspaceSwitcherModel({ ...boot, memberships: live }, "/dashboard/acme-labs/apps");
+    expect(model?.options.map((option) => option.ref)).toEqual(["acme-labs", "ws_7d41"]);
+    expect(model?.currentRef).toBe("acme-labs");
+    // The rename moved the readable ref only: the stable id is untouched.
+    expect(live?.[0]).toEqual({ id: "ws_acme", slug: "acme-labs", name: "Acme", role: "owner" });
   });
 
   test("a path holding a just-renamed old slug shows no current row — never the first option", () => {

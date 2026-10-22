@@ -29,8 +29,11 @@ import {
   WorkspaceSlugCard,
   draftChainTabLabel,
   githubAppSettingsUrl,
+  submitWorkspaceSlug,
 } from "../../src/spa/pages/SettingsPage";
 import { replaceWorkspaceRef } from "../../src/spa/routes";
+import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
+import type { SpaBoot } from "../../src/spa/boot";
 import { slugFailureKey, WORKSPACE_SLUG_PATTERN } from "../../src/spa/pages/data";
 import type { DictionaryKey } from "../../src/i18n";
 import { AppDetailPage } from "../../src/spa/pages/AppDetailPage";
@@ -2036,14 +2039,76 @@ describe("workspace slug control", () => {
     expect(html).not.toContain('value="ws_acme"');
   });
 
-  test("no auto-suffix: a refusal never rewrites the typed slug", () => {
-    // The form posts the trimmed value verbatim and renders the refusal in
-    // place — a suffixing control would need a mutation path here.
-    const settingsSource = readFileSync(
-      join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"),
-      "utf8",
-    );
-    expect(settingsSource).toContain("putJson(`${apiBase()}/api/settings/slug`, { slug: next })");
-    expect(settingsSource).not.toMatch(/slug\s*\+\s*[\w"`'-]/);
+  test("a refusal never rewrites the typed slug, the list or the path", async () => {
+    // The save posts the trimmed value verbatim and renders the refusal in
+    // place: a suffixing control would need a second mutation path, and a
+    // refusal that still committed would leave the switcher on a slug the
+    // server rejected.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('{"code":"slug_taken","message":"x"}', { status: 409 })) as unknown as typeof fetch;
+    const renames: string[] = [];
+    try {
+      // `withLocation` installs and removes the window face itself; the await
+      // stays inside it so `putJson`'s redirect handling sees the same window.
+      const outcome = await withLocation("/dashboard/acme/apps/acme-app", async () =>
+        submitWorkspaceSlug("acme-labs", "en", (ref, slug) => renames.push(`${ref}>${slug}`)),
+      );
+      expect(outcome).toEqual({ kind: "error", message: t("en", "workspace.slugTaken") });
+      expect(renames).toEqual([]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("a successful save patches the stale boot's list before the page moves", async () => {
+    // The boot (`acme`) is a per-document snapshot the rename never refreshes.
+    // The REAL save pipeline runs: the list the switcher reads must carry the
+    // new slug by the time the path names it — otherwise the switcher offers
+    // `acme` (a 404 under D8) and marks no row current.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('{"slug":"acme-labs"}', { status: 200 })) as unknown as typeof fetch;
+    let live: SpaBoot["memberships"] = [
+      { id: "ws_acme", slug: "acme", name: "Acme", role: "owner" },
+      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member" },
+    ];
+    const replaced: string[] = [];
+    // A window face that survives the whole await: the commit reads
+    // `location.pathname` after the response lands.
+    const scope = globalThis as Record<string, unknown>;
+    const saved = { window: scope.window, PopStateEvent: scope.PopStateEvent };
+    scope.window = {
+      location: { pathname: "/dashboard/acme/apps/acme-app", search: "", hash: "" },
+      history: { replaceState: (_s: unknown, _t: string, url: string) => replaced.push(url) },
+      dispatchEvent: () => true,
+    };
+    scope.PopStateEvent = class {
+      type: string;
+      constructor(type: string) {
+        this.type = type;
+      }
+    };
+    try {
+      const outcome = await submitWorkspaceSlug("acme-labs", "en", (ref, slug) => {
+        live = live?.map((m) => (ref === m.id || ref === m.slug ? { ...m, slug } : m));
+      });
+      expect(outcome).toEqual({ kind: "success", message: t("en", "workspace.slugSaved") });
+      // The slug moved only in the readable ref: the stable id is the same row.
+      expect(live?.[0]).toEqual({ id: "ws_acme", slug: "acme-labs", name: "Acme", role: "owner" });
+      expect(replaced).toEqual(["/dashboard/acme-labs/apps/acme-app"]);
+      const model = buildWorkspaceSwitcherModel(
+        { ...adminBoot, memberships: live },
+        "/dashboard/acme-labs/apps/acme-app",
+      );
+      expect(model?.options.map((option) => option.ref)).toEqual(["acme-labs", "ws_7d41"]);
+      expect(model?.currentRef).toBe("acme-labs");
+    } finally {
+      globalThis.fetch = realFetch;
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete scope[key];
+        else scope[key] = value;
+      }
+    }
   });
 });

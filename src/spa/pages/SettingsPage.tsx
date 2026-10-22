@@ -30,7 +30,8 @@ import { SectionCard, SectionCardTitle, SectionGroup } from "../components/Secti
 import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { navigate } from "../router";
-import { replaceWorkspaceRef } from "../routes";
+import { useRenameMembership } from "../workspace-memberships";
+import { replaceWorkspaceRef, workspaceRefOf } from "../routes";
 import { apiBase } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
@@ -877,13 +878,55 @@ function OpsCard({
 }
 
 /**
- * The workspace's readable URL (plan 98 T2). The control is owner-only and the
- * server enforces it. Its value is the workspace's STORED slug (threaded from
- * the boot membership), never the address bar's segment: the segment may be
- * the stable id, and after a rename the page re-renders in place, so a value
- * captured at mount would save the old slug again. A rename is not a redirect
- * (plan 98 D8 — the old ref answers 404 afterwards), so the page REPLACES its
- * history entry instead of pushing one: Back must not return to a dead ref.
+ * Land a successful rename: patch the live membership list, then point the
+ * current page at the new ref. The patch comes FIRST — the navigate dispatches
+ * the popstate that re-renders the shell, and a switcher still built from the
+ * retired slug would render a dead option and an empty current row.
+ *
+ * The page keeps its own path, and REPLACES rather than pushes, because the old
+ * ref answers 404 under D8 — Back must not return to it.
+ */
+export function commitWorkspaceRename(slug: string, rename: (ref: string | null, slug: string) => void): void {
+  const pathname = window.location.pathname;
+  rename(workspaceRefOf(pathname), slug);
+  const href = replaceWorkspaceRef(pathname, slug);
+  if (href !== null) navigate(href, { replace: true });
+}
+
+/**
+ * The rename's ONE save pipeline: PUT the slug, resolve the refusal, and on
+ * success land it ({@link commitWorkspaceRename}). Extracted like
+ * `submitTriggerMode` so a test can execute the real save for the real page
+ * context instead of supplying a path of its own.
+ */
+export async function submitWorkspaceSlug(
+  slug: string,
+  locale: SpaBoot["locale"],
+  rename: (ref: string | null, slug: string) => void,
+): Promise<OpNotice> {
+  let status: number;
+  let body: string;
+  try {
+    ({ status, body } = await putJson(`${apiBase()}/api/settings/slug`, { slug }));
+  } catch {
+    // Nothing landed, so nothing to commit: the list and the path stay put.
+    return { kind: "error", message: t(locale, "workspace.slugFailed") };
+  }
+  if (status >= 400) {
+    return { kind: "error", message: t(locale, slugFailureKey(status, body)) };
+  }
+  commitWorkspaceRename(slug, rename);
+  return { kind: "success", message: t(locale, "workspace.slugSaved") };
+}
+
+/**
+ * Renames the workspace's readable URL (plan 98 T2) — owner-only, enforced by
+ * the server. Its value is the workspace's STORED slug, resolved through the
+ * live membership list: the address bar's segment may be the stable id, and a
+ * rename happens in place, so a value captured at mount would save the old slug
+ * again. A rename is not a redirect (plan 98 D8 — the old ref answers 404
+ * afterwards), so the page REPLACES its history entry instead of pushing one:
+ * Back must not return to a dead ref.
  */
 export function WorkspaceSlugCard({ locale, storedSlug }: { locale: SpaBoot["locale"]; storedSlug: string }) {
   // Only what the operator has typed is local; the display falls back to the
@@ -894,6 +937,7 @@ export function WorkspaceSlugCard({ locale, storedSlug }: { locale: SpaBoot["loc
   // Card-local channel: an op outcome never rides the page-level notice.
   const [slugNotice, setSlugNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  const renameMembership = useRenameMembership();
 
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -905,18 +949,12 @@ export function WorkspaceSlugCard({ locale, storedSlug }: { locale: SpaBoot["loc
     }
     setBusy(true);
     try {
-      const { status, body } = await putJson(`${apiBase()}/api/settings/slug`, { slug: next });
-      if (status >= 400) {
-        setSlugNotice({ kind: "error", message: t(locale, slugFailureKey(status, body)) });
-        return;
-      }
-      // The page keeps its own path under the new ref; nothing else moves.
-      const href = replaceWorkspaceRef(window.location.pathname, next);
-      if (href !== null) navigate(href, { replace: true });
-      setDraft(null);
-      setSlugNotice({ kind: "success", message: t(locale, "workspace.slugSaved") });
-    } catch {
-      setSlugNotice({ kind: "error", message: t(locale, "workspace.slugFailed") });
+      // The pipeline patches the live list BEFORE navigating: the switcher
+      // would otherwise keep offering the retired slug (a 404 under D8) and
+      // show no current row on the new path.
+      const outcome = await submitWorkspaceSlug(next, locale, renameMembership);
+      if (outcome.kind === "success") setDraft(null);
+      setSlugNotice(outcome);
     } finally {
       setBusy(false);
     }

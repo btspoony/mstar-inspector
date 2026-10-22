@@ -11,6 +11,7 @@ import type { SpaBoot } from "./boot";
 import { AppSidebar } from "./components/AppSidebar";
 import { matchSpaRoute } from "./routes";
 import { buildNavbarModel, buildSidebarModel, buildWorkspaceSwitcherModel } from "./shell";
+import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-memberships";
 
 type LayoutProps = {
   boot: SpaBoot;
@@ -45,7 +46,10 @@ function LoginChrome({ children }: { children: ReactNode }) {
 
 function DashboardChrome({ boot, pathname, children }: LayoutProps) {
   const sidebar = buildSidebarModel(boot, pathname);
-  const switcher = buildWorkspaceSwitcherModel(boot, pathname);
+  // The LIVE list, not the boot's snapshot: an in-page rename patches it, and
+  // a switcher built from the frozen boot would keep offering the retired slug.
+  const memberships = useLiveMemberships(boot);
+  const switcher = buildWorkspaceSwitcherModel({ ...boot, memberships }, pathname);
   const navbar = buildNavbarModel(boot);
   const [theme, setTheme] = useState<Theme>(effectiveTheme);
 
@@ -98,9 +102,13 @@ export function Layout({ boot, pathname, children }: LayoutProps) {
   if (route?.page === "login") {
     return <LoginChrome>{children}</LoginChrome>;
   }
+  // Provider above the chrome: the switcher reads the live list here, and the
+  // page's rename card (rendered as `children`) writes it.
   return (
-    <DashboardChrome boot={boot} pathname={pathname}>
-      {children}
-    </DashboardChrome>
+    <WorkspaceMembershipsProvider boot={boot}>
+      <DashboardChrome boot={boot} pathname={pathname}>
+        {children}
+      </DashboardChrome>
+    </WorkspaceMembershipsProvider>
   );
 }

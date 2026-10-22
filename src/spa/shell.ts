@@ -93,8 +93,9 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
 }
 
 /**
- * The switcher's list: the login's memberships in the boot (server-resolved)
- * with the CURRENT path's workspace marked.
+ * The switcher's list: the login's workspace memberships (the boot's
+ * server-resolved rows, patched in place by an in-page rename) with the CURRENT
+ * path's workspace marked.
  *
  * A path segment addresses a workspace by EITHER identifier — the stable `id`
  * or the readable `slug` (they are equal until an owner renames it) — so the
@@ -138,16 +139,29 @@ export function buildWorkspaceSwitcherModel(
 }
 
 /**
- * The workspace's STORED slug for a path ref — what the settings rename control
- * shows and saves. The boot membership is authoritative (the path segment may
- * be the stable `id`, or a slug that this page's own rename has already moved
- * away from); the segment is only the fallback for a ref this login does not
- * list.
+ * The membership list after one workspace's slug changed. The path segment
+ * names a workspace by EITHER identifier (the same predicate the switcher and
+ * {@link storedSlugForRef} use), and `id` never changes — so a renamed row is
+ * addressed by whatever the page carried. Returns the list unchanged for a ref
+ * this login does not list, and for the absent list.
  *
- * shortcut: the boot is per-document, so after an in-page rename only the NEW
- * segment resolves (the boot still lists the old slug). Navigating back to the
- * stable id within that same document would show the pre-rename slug. Upgrade
- * to a per-rename boot patch if that path is ever reachable through the UI.
+ * The boot is a per-document snapshot, so without this patch the switcher keeps
+ * offering the retired slug (a 404 under D8) and the current row goes empty
+ * after the rename navigates to the new one.
+ */
+export function renameWorkspaceMembership(
+  memberships: SpaBoot["memberships"],
+  ref: string | null,
+  slug: string,
+): SpaBoot["memberships"] {
+  return memberships?.map((m) => (ref === m.id || ref === m.slug ? { ...m, slug } : m));
+}
+
+/**
+ * The workspace's STORED slug for a path ref — what the settings rename control
+ * shows and saves. The membership list is authoritative (the path segment may
+ * be the stable `id`, or a slug something else already renamed away from); the
+ * segment is only the fallback for a ref this login does not list.
  */
 export function storedSlugForRef(boot: SpaBoot, ref: string | null): string {
   if (ref === null) return "";
