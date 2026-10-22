@@ -269,3 +269,44 @@ describe("the slug route is workspace-only", () => {
     expect(slugOf(db, "ws-acme")).toBe("ws-acme");
   });
 });
+
+describe("the store's refusal classification", () => {
+  test("a target row that vanished between the gate and the UPDATE is not a conflict", async () => {
+    const { db } = fixture();
+    // The member gate resolved a live row; the workspace is soft-deleted in the
+    // window before the write — the zero-change fallback must name that, not a
+    // guard that never matched.
+    seed(db, "UPDATE workspaces SET deleted_at = ? WHERE id = 'ws-acme'", new Date().toISOString());
+    expect(await setWorkspaceSlug(db, "ws-acme", "acme-labs")).toBe("workspace_not_found");
+    expect(slugOf(db, "ws-acme")).toBe("acme");
+  });
+
+  test("the UNIQUE index backstop maps to slug_taken, never a 500", async () => {
+    // A concurrent writer can slip past the WHERE guards; the index is the last
+    // line. Its message is the only conflict signal D1 exposes, so the mapping
+    // is pinned here — drift must show up as a failing test, not a 500.
+    const { db } = fixture();
+    const uniqueViolation = {
+      prepare: () => ({
+        bind: () => ({
+          run: () => {
+            throw new Error("D1_ERROR: UNIQUE constraint failed: workspaces.slug");
+          },
+        }),
+      }),
+    };
+    expect(await setWorkspaceSlug(uniqueViolation as never, "ws-acme", "beta-x")).toBe("slug_taken");
+    // Any other driver failure still surfaces as a failure.
+    const other = {
+      prepare: () => ({
+        bind: () => ({
+          run: () => {
+            throw new Error("D1_ERROR: network unavailable");
+          },
+        }),
+      }),
+    };
+    await expect(setWorkspaceSlug(other as never, "ws-acme", "beta-x")).rejects.toThrow("network unavailable");
+    expect(slugOf(db, "ws-acme")).toBe("acme");
+  });
+});

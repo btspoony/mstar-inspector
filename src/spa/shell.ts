@@ -94,15 +94,21 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
 
 /**
  * The switcher's list: the login's memberships in the boot (server-resolved)
- * with the CURRENT path's workspace marked. Null when the login belongs to at
- * most one workspace — a one-entry select is not a choice, so the shell renders
- * no control at all — and null when the path has no workspace segment to
- * rewrite (`/dashboard`, `/dashboard/apps`, `/index.html`), where a control
- * would render and then no-op every choice. `currentRef` is the membership the
- * pathname already names (detected by the same substitution the switch uses),
- * else null when the path names a ref this login no longer lists, so the
- * control must fall back to a deterministic value rather than a false
- * selection.
+ * with the CURRENT path's workspace marked.
+ *
+ * A path segment addresses a workspace by EITHER identifier — the stable `id`
+ * or the readable `slug` (they are equal until an owner renames it) — so the
+ * current row matches on both while the value shown and navigated to is always
+ * the `slug` (a switch target must be the readable ref, never a stale one).
+ * Null when the login belongs to at most one workspace — a one-entry select is
+ * not a choice, so the shell renders no control at all — and null when the path
+ * has no workspace segment to rewrite, where a control would render and then
+ * no-op every choice.
+ *
+ * `currentRef` is the `slug` of the membership the pathname names, else null:
+ * the path can carry an identifier this login no longer lists (a slug renamed
+ * away, a revoked membership). Then the control marks NO row — a wrong current
+ * row is worse than none, so there is no fallback to the first membership.
  */
 export type WorkspaceSwitcherModel = {
   label: string;
@@ -116,22 +122,37 @@ export function buildWorkspaceSwitcherModel(
 ): WorkspaceSwitcherModel | null {
   const memberships = boot.memberships ?? [];
   if (memberships.length < 2) return null;
-  const options = memberships.map(({ ref, name }) => ({ ref, name }));
-  // A path with no workspace segment to rewrite (`/dashboard`, `/dashboard/apps`,
-  // `/index.html`) renders NO control: one that rendered could only no-op, and
-  // `/dashboard` is the post-login landing of a multi-workspace deployment.
-  if (replaceWorkspaceRef(pathname, options[0]!.ref) === null) return null;
-  // The current ref is the option whose substitution leaves the path unchanged
-  // (same grammar as the switch itself). A path can still carry a ref this
-  // login no longer lists (a renamed slug, a revoked membership): the control
-  // then marks nothing, so it must render a deterministic value (the component
-  // falls back to the first membership).
-  const currentRef = options.find((option) => replaceWorkspaceRef(pathname, option.ref) === pathname)?.ref ?? null;
+  const options = memberships.map(({ slug, name }) => ({ ref: slug, name }));
+  const pathRef = workspaceRefOf(pathname);
+  // ONE predicate for "this path can be switched": the path grammar the route
+  // matcher and the API base read, plus the rewrite the switch itself performs.
+  // A path outside either has no segment to rewrite, so the control would only
+  // no-op every choice.
+  if (pathRef === null || replaceWorkspaceRef(pathname, pathRef) === null) return null;
+  const current = memberships.find((m) => pathRef === m.id || pathRef === m.slug);
   return {
     label: t(boot.locale, "nav.workspaceSwitcher"),
-    currentRef,
+    currentRef: current?.slug ?? null,
     options,
   };
+}
+
+/**
+ * The workspace's STORED slug for a path ref — what the settings rename control
+ * shows and saves. The boot membership is authoritative (the path segment may
+ * be the stable `id`, or a slug that this page's own rename has already moved
+ * away from); the segment is only the fallback for a ref this login does not
+ * list.
+ *
+ * shortcut: the boot is per-document, so after an in-page rename only the NEW
+ * segment resolves (the boot still lists the old slug). Navigating back to the
+ * stable id within that same document would show the pre-rename slug. Upgrade
+ * to a per-rename boot patch if that path is ever reachable through the UI.
+ */
+export function storedSlugForRef(boot: SpaBoot, ref: string | null): string {
+  if (ref === null) return "";
+  const membership = (boot.memberships ?? []).find((m) => ref === m.id || ref === m.slug);
+  return membership?.slug ?? ref;
 }
 
 export function buildNavbarModel(boot: SpaBoot): NavbarModel {

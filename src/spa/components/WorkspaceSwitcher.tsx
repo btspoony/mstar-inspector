@@ -38,10 +38,11 @@ export function WorkspaceSwitcher({ model }: { model: WorkspaceSwitcherModel | n
   if (model === null) return null;
   return (
     <Select
-      // Always controlled: an unlisted ref in the path would leave an
-      // uncontrolled select showing whatever row was clicked last, so fall
-      // back to the first membership instead.
-      value={model.currentRef ?? model.options[0]!.ref}
+      // Always controlled, and never a stand-in value: when the path names a
+      // workspace this login does not list (a slug renamed away, a revoked
+      // membership) NO row is current, so the trigger stays empty. Showing the
+      // first membership there would claim a workspace the URL does not name.
+      value={model.currentRef ?? ""}
       onValueChange={(ref) => void switchWorkspace(ref)}
     >
       <SelectTrigger size="sm" className="w-full" aria-label={model.label}>

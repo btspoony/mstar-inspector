@@ -9,6 +9,9 @@ import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
 import { apiBase } from "../workspace-base";
+import { usePathname } from "../router";
+import { workspaceRefOf } from "../routes";
+import { storedSlugForRef } from "../shell";
 import { PageNotice, type NoticeKind } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -86,6 +89,11 @@ export function AppDetailShell({
  */
 export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const locale = boot.locale;
+  // The workspace's STORED slug for the rename control. Read from the CURRENT
+  // path (the router re-renders on the rename's synthetic popstate), resolved
+  // through the boot membership so an id- or old-slug-addressed page still
+  // shows the real stored value — the boot itself does not refresh.
+  const storedSlug = storedSlugForRef(boot, workspaceRefOf(usePathname()));
   const [payload, setPayload] = useState<SettingsPayload | null>(null);
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
@@ -252,6 +260,7 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
         <AppDetailView
           locale={locale}
           slug={slug}
+          storedSlug={storedSlug}
           payload={payload}
           groups={groups}
           notice={notice}
@@ -274,6 +283,7 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
 export function AppDetailView({
   locale,
   slug,
+  storedSlug,
   payload,
   groups,
   notice,
@@ -283,6 +293,8 @@ export function AppDetailView({
 }: {
   locale: SpaBoot["locale"];
   slug: string;
+  /** The workspace's stored slug — the rename control's current value. */
+  storedSlug: string;
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
   notice: { kind: NoticeKind; message: string } | null;
@@ -345,7 +357,13 @@ export function AppDetailView({
             `data-[state=inactive]:hidden` carries the one-visible-panel
             invariant (ui-bugs knowledge pin, source-tested below). */}
         <TabsContent value="settings" forceMount>
-          <SettingsView locale={locale} payload={payload} groups={groups} onReload={onReload} />
+          <SettingsView
+            locale={locale}
+            payload={payload}
+            groups={groups}
+            storedSlug={storedSlug}
+            onReload={onReload}
+          />
         </TabsContent>
         {canManage ? (
           <TabsContent value="insights" forceMount>

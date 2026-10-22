@@ -169,11 +169,14 @@ export function SettingsView({
   locale,
   payload,
   groups,
+  storedSlug,
   onReload,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
+  /** The workspace's stored slug — the rename control's current value. */
+  storedSlug: string;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const { app } = payload;
@@ -437,7 +440,7 @@ export function SettingsView({
             <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
             {/* Owner-only by the server's role check; the card is part of the
                 manage face because a non-manager never loads this tab. */}
-            <WorkspaceSlugCard locale={locale} />
+            <WorkspaceSlugCard locale={locale} storedSlug={storedSlug} />
           </SectionGroup>
         ) : null}
       </div>
@@ -875,17 +878,19 @@ function OpsCard({
 
 /**
  * The workspace's readable URL (plan 98 T2). The control is owner-only and the
- * server enforces it; the ref cannot be derived from the payload, so the
- * current segment is read from the address bar. A rename is not a redirect
+ * server enforces it. Its value is the workspace's STORED slug (threaded from
+ * the boot membership), never the address bar's segment: the segment may be
+ * the stable id, and after a rename the page re-renders in place, so a value
+ * captured at mount would save the old slug again. A rename is not a redirect
  * (plan 98 D8 — the old ref answers 404 afterwards), so the page REPLACES its
  * history entry instead of pushing one: Back must not return to a dead ref.
  */
-export function WorkspaceSlugCard({ locale }: { locale: SpaBoot["locale"] }) {
-  // The segment the address bar shows — read through the same base every
-  // other path on this page uses, so a DOM-less render stays safe.
-  const base = apiBase();
-  const currentRef = base.startsWith("/dashboard/") ? base.slice("/dashboard/".length) : "";
-  const [slug, setSlug] = useState(currentRef);
+export function WorkspaceSlugCard({ locale, storedSlug }: { locale: SpaBoot["locale"]; storedSlug: string }) {
+  // Only what the operator has typed is local; the display falls back to the
+  // stored slug, so an external change (the rename this card just made) lands
+  // without a mount-time copy going stale.
+  const [draft, setDraft] = useState<string | null>(null);
+  const slug = draft ?? storedSlug;
   // Card-local channel: an op outcome never rides the page-level notice.
   const [slugNotice, setSlugNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
@@ -908,6 +913,7 @@ export function WorkspaceSlugCard({ locale }: { locale: SpaBoot["locale"] }) {
       // The page keeps its own path under the new ref; nothing else moves.
       const href = replaceWorkspaceRef(window.location.pathname, next);
       if (href !== null) navigate(href, { replace: true });
+      setDraft(null);
       setSlugNotice({ kind: "success", message: t(locale, "workspace.slugSaved") });
     } catch {
       setSlugNotice({ kind: "error", message: t(locale, "workspace.slugFailed") });
@@ -934,7 +940,7 @@ export function WorkspaceSlugCard({ locale }: { locale: SpaBoot["locale"] }) {
               autoComplete="off"
               spellCheck={false}
               value={slug}
-              onChange={(event) => setSlug(event.target.value)}
+              onChange={(event) => setDraft(event.target.value)}
             />
           </div>
           <Button type="submit" disabled={busy}>

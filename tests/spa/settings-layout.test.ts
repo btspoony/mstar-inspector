@@ -2015,14 +2015,25 @@ describe("workspace slug control", () => {
 
   test("the owner's control renders on the settings page with its own region", () => {
     const html = withLocation("/dashboard/acme/apps/acme-app", () =>
-      renderToStaticMarkup(createElement(WorkspaceSlugCard, { locale: "en" })),
+      renderToStaticMarkup(createElement(WorkspaceSlugCard, { locale: "en", storedSlug: "acme" })),
     );
     expect(html).toContain(t("en", "workspace.slugHeading"));
     expect(html).toContain(t("en", "workspace.slugSave"));
-    // Prefilled with the segment the address bar shows, so a save is a rename
-    // of the CURRENT ref rather than a guess.
+    // Prefilled with the STORED slug, so a save is a rename of the current
+    // workspace rather than a guess.
     expect(html).toContain('value="acme"');
     expect(html).toContain(`id="workspace-slug"`);
+  });
+
+  test("the input shows the stored slug, not the path segment", () => {
+    // `ws_acme` is the stable id in the address bar; the readable slug is
+    // `acme-labs`. A mount-time copy of the segment would show — and then
+    // re-save — the wrong value.
+    const html = withLocation("/dashboard/ws_acme/apps/acme-app", () =>
+      renderToStaticMarkup(createElement(WorkspaceSlugCard, { locale: "en", storedSlug: "acme-labs" })),
+    );
+    expect(html).toContain('value="acme-labs"');
+    expect(html).not.toContain('value="ws_acme"');
   });
 
   test("no auto-suffix: a refusal never rewrites the typed slug", () => {

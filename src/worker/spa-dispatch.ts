@@ -155,19 +155,19 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // addressed directly (the SPA router then reads the real pathname), so it
   // takes the same boot. The login page renders no sidebar, and `/dashboard`
   // either redirected above or has no sole workspace to name.
+  // Two independent lists behind the same login gate, so they share ONE round
+  // trip — neither reads the other and both key on the login alone.
   // The invitee's discovery surface: every live pending invitation for this
   // login, so an invited outsider sees a path to accept without knowing the
   // workspace's ref (they are not a member yet, so no member list names it).
-  const pendingInvites =
-    auth.boot.login === null || route?.page === "login"
-      ? []
-      : await pendingInvitesForLogin(c.env, auth.boot.login);
-  // The switcher's list. Same login gate as the invites: a login page renders
-  // no sidebar, so it needs no switcher rows.
-  const memberships =
-    auth.boot.login === null || route?.page === "login"
-      ? []
-      : await workspaceMembershipsForLogin(c.env, auth.boot.login);
+  // The switcher's list: the same login's live memberships.
+  const login = auth.boot.login;
+  const lists =
+    login === null || route?.page === "login"
+      ? null
+      : await Promise.all([pendingInvitesForLogin(c.env, login), workspaceMembershipsForLogin(c.env, login)]);
+  const pendingInvites = lists?.[0] ?? [];
+  const memberships = lists?.[1] ?? [];
   // Absent fields add nothing, so `off` and a ref-less deployment keep the
   // pre-existing boot (and its JSON key order) byte-identical.
   const boot: SpaBoot = {

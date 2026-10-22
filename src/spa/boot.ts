@@ -34,13 +34,17 @@ export type SpaBoot = {
    */
   canCreateApp?: boolean;
   /**
-   * The signed-in login's live workspace memberships — the switcher's list.
-   * `ref` is the workspace's path segment (its slug): the switcher rewrites
-   * the current path's segment to it and nothing else. Empty/absent for a
-   * login in no workspace, which renders no switcher.
+   * The signed-in login's live workspace memberships — the switcher's list and
+   * the settings slug card's stored value. A path segment may address the
+   * workspace by EITHER identifier, so both ride the payload: `id` (stable) and
+   * `slug` (the readable segment, equal to `id` until renamed). The switcher
+   * matches the current row on either and rewrites the path to `slug`; `role`
+   * serves the members surface. Empty/absent for a login in no workspace,
+   * which renders no switcher.
    */
   memberships?: Array<{
-    ref: string;
+    id: string;
+    slug: string;
     name: string;
     role: "owner" | "admin" | "member";
   }>;

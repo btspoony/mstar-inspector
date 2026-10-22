@@ -81,6 +81,7 @@ function renderDetail(payload: typeof identityPayload | typeof managePayload, ca
     createElement(AppDetailView, {
       locale: "en",
       slug: "demo",
+      storedSlug: "acme",
       payload,
       groups: [],
       notice: null,

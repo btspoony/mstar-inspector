@@ -3774,11 +3774,11 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
       expect(res.headers.getSetCookie(), ref).toEqual([]);
       const body = await res.text();
       // The document really was resolved for the asked-for workspace, and the
-      // boot's switcher list offers BOTH workspaces (by their public ref) — so a
-      // switch was available on this very page.
+      // boot's switcher list offers BOTH workspaces (by their stored slug) — so
+      // a switch was available on this very page.
       expect(body, ref).toContain(`"workspaceRef":"${ref}"`);
-      expect(body, ref).toContain('"ref":"beta"');
-      expect(body, ref).toContain('"ref":"default"');
+      expect(body, ref).toContain('"slug":"beta"');
+      expect(body, ref).toContain('"slug":"default"');
       // No header carries a workspace identifier: the URL is the only state.
       for (const [name, header] of res.headers) {
         expect(header, `${ref} ${name}`).not.toContain("ws_beta");

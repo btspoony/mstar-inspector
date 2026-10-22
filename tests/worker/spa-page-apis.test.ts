@@ -305,7 +305,7 @@ function seedMembership(db: ReturnType<typeof createTestD1>, workspaceId: string
 }
 
 describe("SPA boot payload — workspace memberships (plan 98 T3)", () => {
-  test("lists every live membership as {ref, name, role} with ref = the slug", async () => {
+  test("lists every live membership as {id, slug, name, role} — both identifiers, not one ref", async () => {
     const db = await seededWorld();
     seedWorkspace(db, "ws-acme", "acme", "Acme");
     seedWorkspace(db, "ws_7d41", "ws_7d41", "Side project");
@@ -321,10 +321,11 @@ describe("SPA boot payload — workspace memberships (plan 98 T3)", () => {
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
     // Ordering is by name; the soft-deleted workspace never becomes a switch
-    // target, and `ref` is the slug the path actually carries.
+    // target. Both identifiers ride the row: `ws-acme` was renamed to `acme`,
+    // so a path addressing either form must resolve to this same membership.
     expect(boot.memberships).toEqual([
-      { ref: "acme", name: "Acme", role: "owner" },
-      { ref: "ws_7d41", name: "Side project", role: "member" },
+      { id: "ws-acme", slug: "acme", name: "Acme", role: "owner" },
+      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member" },
     ]);
   });
 

@@ -88,6 +88,48 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
 }
 
 
+/**
+ * D1 double whose two BOOT LIST reads (pending invites, memberships) each wait
+ * for the other to be in flight. A sequential boot deadlocks into the barrier's
+ * timeout → 500; only a boot that issues both reads together returns the shell.
+ * Everything else the boot resolves (users row, sole workspace, membership
+ * count) answers inline.
+ */
+function concurrentBootDbStub(): Env["DB"] {
+  const arrived = new Set<string>();
+  let release: (() => void) | null = null;
+  const bothInFlight = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const arrive = async (kind: string): Promise<void> => {
+    arrived.add(kind);
+    if (arrived.size === 2) release?.();
+    // A sequential boot never reaches the second read: fail loudly instead of
+    // hanging the suite.
+    await Promise.race([
+      bothInFlight,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`boot list reads ran sequentially (${kind} first)`)), 1000),
+      ),
+    ]);
+  };
+  const respond = (query: string) => {
+    if (query.includes("workspace_invites i JOIN workspaces w")) return { all: async () => { await arrive("invites"); return { results: [] }; } };
+    if (query.includes("w.id AS id, w.slug AS slug")) return { all: async () => { await arrive("memberships"); return { results: [] }; } };
+    if (query.includes("SELECT * FROM users WHERE github_login")) {
+      return { first: async () => ({ id: "u-test", github_login: "octocat", role: "admin", created_at: new Date().toISOString(), invited_by: null }) };
+    }
+    if (query.includes("COUNT(*) AS n")) return { first: async () => ({ n: 1 }) };
+    return { all: async () => ({ results: [] }), first: async () => null };
+  };
+  return {
+    prepare: (query: string) => ({
+      ...respond(query),
+      bind: () => ({ ...respond(query), run: async () => ({ meta: { changes: 0 } }) }),
+    }),
+  } as unknown as Env["DB"];
+}
+
 describe("SPA dispatch", () => {
   test("SPA page GET with Accept: text/html fetches /index.html", async () => {
     // Members is workspace-scoped, so the tenant gate must admit the ref.
@@ -389,6 +431,19 @@ describe("SPA dispatch", () => {
     expect(setCookie).toHaveLength(1);
     expect(setCookie[0]).toContain(`${SESSION_COOKIE}=;`);
     expect(setCookie[0]).toContain("Max-Age=0");
+    expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
+  });
+  test("the two boot list reads share one round trip (neither waits for the other)", async () => {
+    // L2: the pending-invite and membership lists both key on the login alone,
+    // so they overlap. The stub only answers once BOTH are in flight.
+    const { env, calls } = makeEnv({ DB: concurrentBootDbStub(), WORKSPACE_TENANT_MODE: "strict" });
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard/acme/apps", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("window.__BOOT__=");
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
   });
 });

@@ -305,9 +305,9 @@ export async function strictWorkspaceBoot(
 
 /**
  * The signed-in login's live workspace memberships as the SPA boot's switcher
- * rows (`{ref, name, role}`). `strict`-only: under `off` the workspace route
- * family answers 404, so a switch target would be a dead link and the shell
- * renders no switcher. An unbound store answers `[]` (nothing to list).
+ * rows (`{id, slug, name, role}`). `strict`-only: under `off` the workspace
+ * route family answers 404, so a switch target would be a dead link and the
+ * shell renders no switcher. An unbound store answers `[]` (nothing to list).
  */
 export async function workspaceMembershipsForLogin(
   env: Env,
@@ -1617,7 +1617,7 @@ const memberRoleRoute = async (c: DashboardContext) => {
 // redirect (plan 98 D8), so this is a workspace-wide decision.
 const WORKSPACE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{1,38}$/;
 
-/** English faces for the store's two 409s; the SPA keys its copy on `code`. */
+/** English faces for the store's two 409 guards; the SPA keys its copy on `code`. */
 const SLUG_CONFLICT_KEYS = {
   slug_taken: "workspace.slugTaken",
   slug_is_workspace_id: "workspace.slugIsWorkspaceId",
@@ -1628,7 +1628,9 @@ const SLUG_CONFLICT_KEYS = {
  * guarded UPDATE. The shape gate and the reserved set run BEFORE the write
  * (they need no row read); the store answers the two 409 conflicts, and a
  * concurrent write that slips past its guards lands on the slug UNIQUE index,
- * which the store maps to the same 409 rather than a 500.
+ * which the store maps to the same 409 rather than a 500. A target row that
+ * vanished between the member gate and the UPDATE is the same 404 an unknown
+ * ref gets — never a mislabelled conflict.
  */
 const workspaceSlugRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
@@ -1663,6 +1665,7 @@ const workspaceSlugRoute = async (c: DashboardContext) => {
     );
   }
   const conflict = await setWorkspaceSlug(member.db, member.scope.workspaceId, slug);
+  if (conflict === "workspace_not_found") return await tenantNotFound(c);
   if (conflict !== null) {
     return c.json({ code: conflict, message: t("en", SLUG_CONFLICT_KEYS[conflict]) }, 409);
   }

@@ -11,7 +11,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarProvider } from "../../src/spa/components/ui/sidebar";
 import { AppSidebar } from "../../src/spa/components/AppSidebar";
-import { buildSidebarModel, buildWorkspaceSwitcherModel } from "../../src/spa/shell";
+import { buildSidebarModel, buildWorkspaceSwitcherModel, storedSlugForRef } from "../../src/spa/shell";
 import { WorkspaceSwitcher, switchWorkspace } from "../../src/spa/components/WorkspaceSwitcher";
 import type { SpaBoot } from "../../src/spa/boot";
 
@@ -22,8 +22,9 @@ const boot: SpaBoot = {
   role: "admin",
   workspaceRef: "acme",
   memberships: [
-    { ref: "acme", name: "Acme", role: "owner" },
-    { ref: "ws_7d41", name: "Side project", role: "member" },
+    // `acme` was renamed away from its id; `ws_7d41` still answers to both.
+    { id: "ws_acme", slug: "acme", name: "Acme", role: "owner" },
+    { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member" },
   ],
 };
 
@@ -129,7 +130,7 @@ describe("workspace switcher — the control's list", () => {
     expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps")).not.toBeNull();
   });
 
-  test("marks the workspace the path names", () => {
+  test("marks the row a slug-addressed path names, and navigates to the slug", () => {
     const model = buildWorkspaceSwitcherModel(boot, "/dashboard/ws_7d41/members");
     expect(model?.currentRef).toBe("ws_7d41");
     expect(model?.options).toEqual([
@@ -137,6 +138,28 @@ describe("workspace switcher — the control's list", () => {
       { ref: "ws_7d41", name: "Side project" },
     ]);
     expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps")?.currentRef).toBe("acme");
+  });
+
+  test("marks the row an ID-addressed path names (the stable ref is the same workspace)", () => {
+    // `ws_acme` is the stored id whose readable slug is `acme`: the path may
+    // carry either, and both name the same row.
+    const model = buildWorkspaceSwitcherModel(boot, "/dashboard/ws_acme/apps");
+    expect(model?.currentRef).toBe("acme");
+    expect(model?.options.map((option) => option.ref)).toEqual(["acme", "ws_7d41"]);
+  });
+
+  test("a path holding a just-renamed old slug shows no current row — never the first option", () => {
+    // The workspace was renamed `acme` → `acme-labs`; a tab still on the old
+    // slug names nothing this login lists, so no row may claim to be current.
+    const renamed: SpaBoot = {
+      ...boot,
+      memberships: [{ id: "ws_acme", slug: "acme-labs", name: "Acme", role: "owner" }, boot.memberships![1]!],
+    };
+    const model = buildWorkspaceSwitcherModel(renamed, "/dashboard/acme/apps");
+    expect(model?.currentRef).toBeNull();
+    // The control still renders: the path is switchable, only the current row
+    // is unknown.
+    expect(model?.options.map((option) => option.ref)).toEqual(["acme-labs", "ws_7d41"]);
   });
 
   test("no control on a path with no workspace segment to rewrite", () => {
@@ -147,12 +170,12 @@ describe("workspace switcher — the control's list", () => {
     }
   });
 
-  test("a path naming an unlisted ref marks nothing, so the control renders a stable value", () => {
-    // `gone` is a renamed slug / revoked membership: the switch still rewrites
-    // the segment, but no row can claim to be the current one.
-    const model = buildWorkspaceSwitcherModel(boot, "/dashboard/gone/apps");
-    expect(model?.currentRef).toBeNull();
-    expect(model?.options.map((option) => option.ref)).toEqual(["acme", "ws_7d41"]);
+  test("no control where only one of the two path grammars holds", () => {
+    // `workspaceRefOf` reads `apps|members|api` as the second segment; a path
+    // outside that family has no workspace route to switch, so the control
+    // must not render even though `replaceWorkspaceRef` could rewrite it.
+    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/nope")).toBeNull();
+    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps/thing")).not.toBeNull();
   });
 });
 
@@ -174,17 +197,28 @@ describe("workspace switcher — rendered surface", () => {
     expect(html).not.toContain("<form");
   });
 
-  test("an unlisted current ref renders the first membership's value (controlled, never blank)", () => {
+  test("a path naming an unlisted ref renders NO current row — never a stand-in value", () => {
     const model = buildWorkspaceSwitcherModel(boot, "/dashboard/gone/apps");
     expect(model?.currentRef).toBeNull();
     const html = renderToStaticMarkup(createElement(WorkspaceSwitcher, { model }));
-    // Radix marks `data-placeholder` only for an empty/unset value, so its
-    // absence pins a controlled select showing the first membership.
-    expect(html).not.toContain("data-placeholder");
-    // The same holds for the normal case: the value never goes uncontrolled.
-    expect(
-      renderToStaticMarkup(createElement(WorkspaceSwitcher, { model: buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps") })),
-    ).not.toContain("data-placeholder");
+    // Radix marks `data-placeholder` only for an empty value: its presence pins
+    // the honest empty trigger. A first-membership fallback would have made the
+    // trigger claim a workspace the URL does not name.
+    expect(html).toContain("data-placeholder");
+    // The normal case stays controlled on the row the path names.
+    const named = renderToStaticMarkup(
+      createElement(WorkspaceSwitcher, { model: buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps") }),
+    );
+    expect(named).not.toContain("data-placeholder");
+  });
+
+  test("the option values are the stored slugs, so an id-addressed page switches to a readable ref", () => {
+    const model = buildWorkspaceSwitcherModel(boot, "/dashboard/ws_acme/apps");
+    expect(model?.currentRef).toBe("acme");
+    const record = withBrowser("/dashboard/ws_acme/apps", "", () => {
+      switchWorkspace(model!.currentRef!);
+    });
+    expect(record.pushed).toEqual(["/dashboard/acme/apps"]);
   });
 
   test("the shell mounts it beside the sidebar wordmark", () => {
@@ -221,5 +255,25 @@ describe("workspace switcher — rendered surface", () => {
       ),
     );
     expect(html).not.toContain('aria-label="Workspace"');
+  });
+});
+
+describe("slug card value — the stored slug, not the path segment", () => {
+  test("resolves the membership's stored slug through either identifier", () => {
+    // `acme` is a readable slug whose id is `ws_acme`; `ws_7d41` was never
+    // renamed, so both forms name the same stored value.
+    expect(storedSlugForRef(boot, "ws_acme")).toBe("acme");
+    expect(storedSlugForRef(boot, "acme")).toBe("acme");
+    expect(storedSlugForRef(boot, "ws_7d41")).toBe("ws_7d41");
+  });
+
+  test("after this page's own rename the new segment is the stored value", () => {
+    // The boot still carries the pre-rename row, so the new segment falls
+    // through to the fallback — the value the field must show, not the old slug.
+    expect(storedSlugForRef(boot, "acme-labs")).toBe("acme-labs");
+  });
+
+  test("no workspace segment → no value to show", () => {
+    expect(storedSlugForRef(boot, null)).toBe("");
   });
 });
