@@ -21,6 +21,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
+/** Release-shaped tag the git fixture creates at HEAD (`@tag` in a step's env). */
+const FIXTURE_TAG = "v0.0.1-fixture";
 const PY_DUMP = "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))";
 
 type Step = {
@@ -63,12 +65,17 @@ function parseText(rel: string, text: string): Step[] {
  * `env:` resolved from `vars`), in a scratch directory whose `scripts/` points
  * at the repository's. Returns what landed in `$GITHUB_OUTPUT` /
  * `$GITHUB_STEP_SUMMARY` — the emitted content, not the YAML shape.
+ *
+ * `opts.withGit` adds a real repository (HEAD + tag) so a step's
+ * `git rev-parse` assertions run; the env value `"@head"` is then substituted
+ * with that commit, which is how a step gets a SHA it can actually resolve.
  */
 function runStep(
   step: Step,
   env: Record<string, string>,
   files: Record<string, string> = {},
-): { code: number; out: string; output: string; summary: string } {
+  opts: { withGit?: boolean } = {},
+): { code: number; out: string; output: string; summary: string; head: string } {
   const dir = mkdtempSync(join(tmpdir(), "step-"));
   try {
     symlinkSync(join(REPO_ROOT, "scripts"), join(dir, "scripts"));
@@ -77,6 +84,34 @@ function runStep(
     const summary = join(dir, "summary.md");
     writeFileSync(output, "");
     writeFileSync(summary, "");
+    let head = "";
+    if (opts.withGit === true) {
+      // `-c …Sign=false`: an operator's global signing config must not decide
+      // whether the fixture can create a commit/tag.
+      const git = (...args: string[]) =>
+        Bun.spawnSync(["git", "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", ...args], {
+          cwd: dir,
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "fixture",
+            GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+            GIT_COMMITTER_NAME: "fixture",
+            GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+          },
+        });
+      git("init", "-q");
+      git("commit", "-q", "--allow-empty", "-m", "fixture");
+      head = git("rev-parse", "HEAD").stdout.toString().trim();
+      // prod asserts `refs/tags/<github.ref_name>^{commit}`; the fixture tag is a
+      // real release-shaped name pointing at HEAD, so `@tag` resolves.
+      git("tag", FIXTURE_TAG);
+    }
+    const resolved: Record<string, string> = {};
+    for (const [key, value] of Object.entries(env)) {
+      resolved[key] = value === "@head" ? head : value === "@tag" ? FIXTURE_TAG : value;
+    }
     const proc = Bun.spawnSync(["bash", "-eo", "pipefail", "-c", step.run ?? ""], {
       cwd: dir,
       stdout: "pipe",
@@ -88,7 +123,7 @@ function runStep(
         GITHUB_SERVER_URL: "https://github.com",
         GITHUB_REPOSITORY: "o/r",
         GITHUB_RUN_ID: "42",
-        ...env,
+        ...resolved,
       },
     });
     return {
@@ -96,6 +131,7 @@ function runStep(
       out: proc.stdout.toString() + proc.stderr.toString(),
       output: readFileSync(output, "utf8"),
       summary: readFileSync(summary, "utf8"),
+      head,
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -195,15 +231,49 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
       for (const needle of replayNeedles) {
         expect(step.run, `${file}: replay step must resolve ${needle}`).toContain(needle);
       }
-      // The strict binding decision belongs to the executed script.
+      // The strict binding decision belongs to the executed script, which takes
+      // the RESOLVER's replay intent — not the mode. A routine arm serving
+      // `strict` from the steady-state variable must not be treated as Deploy B.
       expect(step.run, `${file}: replay step must call the guard`).toContain(
-        'bash scripts/deploy-replay-guard.sh "$MODE" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA"',
+        'bash scripts/deploy-replay-guard.sh "$REPLAY" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA"',
       );
-      expect(step.env?.MODE, `${file}: replay step needs the resolved mode`).toBe("${{ steps.tenant.outputs.mode }}");
+      expect(step.env?.REPLAY, `${file}: replay step needs the resolver's replay intent`).toBe(
+        "${{ steps.tenant.outputs.replay }}",
+      );
+      expect(step.env?.MODE, `${file}: the replay step must not key off the mode`).toBeUndefined();
       expect(step.env?.EXPECTED_DEPLOY_SHA).toBe("${{ inputs.expected_deploy_sha }}");
       for (const i of deployCapable) {
         expect(i, `${file}: "${steps[i]!.name}" runs before the replay-identity assertion`).toBeGreaterThan(index);
       }
+    });
+
+    test("a routine arm may serve strict without an expected SHA; only a strict dispatch is a replay", () => {
+      // Composed end to end: the resolver's outputs into the real guard, in a
+      // repository whose HEAD/tag the step can resolve.
+      const tenant = steps.find((s) => s.name === "Resolve tenant mode")!;
+      const guardStep = steps.find((s) => s.name === REPLAY)!;
+
+      // routine release/push, steady-state strict, no dispatch input
+      const resolved = runStep(tenant, { TENANT_MODE: "", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "true" });
+      expect(resolved.output).toBe("mode=strict\nreplay=none\n");
+
+      const routine = runStep(
+        guardStep,
+        { REPLAY: "none", EXPECTED_DEPLOY_SHA: "", RUN_SHA: "@head", TAG: "@tag" },
+        {},
+        { withGit: true },
+      );
+      expect(routine.code, `${file}: a routine strict deploy must not abort on a missing expected SHA\n${routine.out}`).toBe(0);
+      expect(routine.out).not.toContain("::error::");
+
+      // the same routine run with a MOVED tag still reds (identity is kept)
+      const moved = runStep(
+        guardStep,
+        { REPLAY: "none", EXPECTED_DEPLOY_SHA: "", RUN_SHA: "f".repeat(40), TAG: "@tag" },
+        {},
+        { withGit: true },
+      );
+      expect(moved.code, `${file}: the tag/HEAD identity assertion must survive the replay split`).toBe(1);
     });
 
     test("the summary delegates status to the script, fed by steps.deploy.outcome", () => {
@@ -247,20 +317,20 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
       // strict installation, routine arm, no dispatch input → strict, silent
       const strict = runStep(step, { TENANT_MODE: "", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "true" });
       expect(strict.code).toBe(0);
-      expect(strict.output).toBe("mode=strict\n");
+      expect(strict.output).toBe("mode=strict\nreplay=none\n");
       expect(strict.out).not.toContain("::warning::");
 
       // no steady-state variable → off, and the demotion is reported
       const unset = runStep(step, { TENANT_MODE: "", STEADY_TENANT_MODE: "", ROUTINE_ARM: "true" });
       expect(unset.code).toBe(0);
-      expect(unset.output).toBe("mode=off\n");
+      expect(unset.output).toBe("mode=off\nreplay=none\n");
       expect(unset.out).toContain("::warning::");
       expect(unset.summary).toContain("tenant_mode_change=unproven->off");
 
       // the dispatch input still overrides the steady-state variable
       const dispatched = runStep(step, { TENANT_MODE: "off", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "false" });
       expect(dispatched.code).toBe(0);
-      expect(dispatched.output).toBe("mode=off\n");
+      expect(dispatched.output).toBe("mode=off\nreplay=none\n");
       expect(dispatched.summary).toContain("tenant_mode_change=none");
     });
 

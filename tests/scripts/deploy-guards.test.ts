@@ -29,27 +29,29 @@ const SHA_B = "b".repeat(40);
 describe("deploy-replay-guard.sh", () => {
   const guard = (...args: string[]) => runBash(join(SCRIPTS, "deploy-replay-guard.sh"), args);
 
-  test("a non-strict mode always passes (normal deploy, empty input allowed)", () => {
+  test("replay=none never binds, whatever the SHAs say (routine steady-state strict, off, empty)", () => {
     for (const args of [
+      ["none", "", "", ""],
+      ["none", "", SHA_A, SHA_A],
+      ["none", SHA_A, SHA_B, SHA_B],
       ["off", "", "", ""],
-      ["off", SHA_A, SHA_B, SHA_B],
       ["", "", "", ""],
     ]) {
       expect(guard(...args).code, args.join("|")).toBe(0);
     }
   });
 
-  test("strict with all three SHAs equal passes", () => {
-    const result = guard("strict", SHA_A, SHA_A, SHA_A);
+  test("replay=required with all three SHAs equal passes", () => {
+    const result = guard("required", SHA_A, SHA_A, SHA_A);
     expect(result.code).toBe(0);
     expect(result.out).toContain("strict replay bound to");
   });
 
-  test("strict with any empty SHA fails and names the missing input", () => {
+  test("replay=required with any empty SHA fails and names the missing input", () => {
     for (const [missing, args] of [
-      ["expected_deploy_sha", ["strict", "", SHA_A, SHA_A]],
-      ["github_sha", ["strict", SHA_A, "", SHA_A]],
-      ["resolved_ref_sha", ["strict", SHA_A, SHA_A, ""]],
+      ["expected_deploy_sha", ["required", "", SHA_A, SHA_A]],
+      ["github_sha", ["required", SHA_A, "", SHA_A]],
+      ["resolved_ref_sha", ["required", SHA_A, SHA_A, ""]],
     ] as const) {
       const result = guard(...args);
       expect(result.code, missing).toBe(1);
@@ -59,14 +61,14 @@ describe("deploy-replay-guard.sh", () => {
     }
   });
 
-  test("strict with a mismatched expected SHA fails", () => {
-    const result = guard("strict", SHA_B, SHA_A, SHA_A);
+  test("replay=required with a mismatched expected SHA fails", () => {
+    const result = guard("required", SHA_B, SHA_A, SHA_A);
     expect(result.code).toBe(1);
     expect(result.err).toContain(`expected_deploy_sha ${SHA_B} != this run's SHA ${SHA_A}`);
   });
 
-  test("strict with a moved ref fails", () => {
-    const result = guard("strict", SHA_A, SHA_A, SHA_B);
+  test("replay=required with a moved ref fails", () => {
+    const result = guard("required", SHA_A, SHA_A, SHA_B);
     expect(result.code).toBe(1);
     expect(result.err).toContain("the ref moved");
   });
@@ -105,7 +107,9 @@ describe("resolve-tenant-mode.sh", () => {
     ] as const) {
       const result = resolveWithFiles(input, steady, "false");
       expect(result.code, `${input}|${steady}`).toBe(0);
-      expect(result.output, `${input}|${steady}`).toBe(`mode=${expected}\n`);
+      expect(result.output, `${input}|${steady}`).toBe(
+        `mode=${expected}\nreplay=${expected === "strict" ? "required" : "none"}\n`,
+      );
       // an explicit dispatch is the operator's decision: never a change warning
       expect(result.summary, `${input}|${steady}`).toBe("tenant_mode_change=none\n");
       expect(result.out, `${input}|${steady}`).not.toContain("::warning::");
@@ -115,7 +119,7 @@ describe("resolve-tenant-mode.sh", () => {
   test("a routine release/push arm deploys the steady-state mode — strict stays strict", () => {
     const result = resolveWithFiles("", "strict", "true");
     expect(result.code).toBe(0);
-    expect(result.output).toBe("mode=strict\n");
+    expect(result.output).toBe("mode=strict\nreplay=none\n");
     expect(result.summary).toBe("tenant_mode_change=none\n");
     expect(result.out).not.toContain("::warning::");
   });
@@ -124,7 +128,7 @@ describe("resolve-tenant-mode.sh", () => {
     for (const steady of ["off", ""]) {
       const result = resolveWithFiles("", steady, "true");
       expect(result.code, steady).toBe(0);
-      expect(result.output, steady).toBe("mode=off\n");
+      expect(result.output, steady).toBe("mode=off\nreplay=none\n");
       expect(result.out, steady).toContain("::warning::");
       expect(result.out, steady).toContain("not observed");
       expect(result.summary, steady).toBe("tenant_mode_change=unproven->off\n");
@@ -134,7 +138,7 @@ describe("resolve-tenant-mode.sh", () => {
   test("no input, no steady-state variable, no routine arm (manual local run) is plain off", () => {
     const result = resolveWithFiles("", "", "false");
     expect(result.code).toBe(0);
-    expect(result.output).toBe("mode=off\n");
+    expect(result.output).toBe("mode=off\nreplay=none\n");
     expect(result.summary).toBe("tenant_mode_change=none\n");
     expect(result.out).not.toContain("::warning::");
   });
@@ -150,6 +154,55 @@ describe("resolve-tenant-mode.sh", () => {
       expect(result.out, args.join("|")).toContain("::error::invalid tenant mode");
       expect(result.output, args.join("|")).toBe(""); // no mode resolved
     }
+  });
+
+  test("COMPOSED: the resolver's replay output into the guard decides the three real cases", () => {
+    // The wiring both workflows use: resolve the mode, then feed `replay` into
+    // deploy-replay-guard.sh. Nothing here restates either decision.
+    const decide = (
+      input: string,
+      steady: string,
+      routine: string,
+      expectedSha: string,
+      runSha: string,
+    ): { mode: string; replay: string; code: number; err: string } => {
+      const resolved = resolveWithFiles(input, steady, routine);
+      const replay = /^replay=(.*)$/m.exec(resolved.output)?.[1] ?? "";
+      const mode = /^mode=(.*)$/m.exec(resolved.output)?.[1] ?? "";
+      const guarded = runBash(join(SCRIPTS, "deploy-replay-guard.sh"), [replay, expectedSha, runSha, runSha]);
+      return { mode, replay, code: guarded.code, err: guarded.err };
+    };
+
+    // 1. ROUTINE arm + steady-state strict, no dispatch input, no Deploy-A SHA:
+    //    deploys strict and is NOT refused (the L2 regression).
+    const routine = decide("", "strict", "true", "", SHA_A);
+    expect(routine.mode).toBe("strict");
+    expect(routine.replay).toBe("none");
+    expect(routine.code).toBe(0);
+
+    // 2. DISPATCH strict without the expected SHA: refused, never fabricated.
+    const noBinding = decide("strict", "", "false", "", SHA_A);
+    expect(noBinding.mode).toBe("strict");
+    expect(noBinding.replay).toBe("required");
+    expect(noBinding.code).toBe(1);
+    expect(noBinding.err).toContain("expected_deploy_sha is empty");
+
+    // 3. DISPATCH strict with the matching SHA: the real Deploy B replay.
+    const replayRun = decide("strict", "", "false", SHA_A, SHA_A);
+    expect(replayRun.replay).toBe("required");
+    expect(replayRun.code).toBe(0);
+
+    // 4. A dispatch `off` is no replay at all (the rollback door).
+    const rollback = decide("off", "strict", "false", "", SHA_A);
+    expect(rollback.mode).toBe("off");
+    expect(rollback.replay).toBe("none");
+    expect(rollback.code).toBe(0);
+
+    // 5. A routine arm with the variable OFF stays a plain non-replay deploy.
+    const routineOff = decide("", "", "true", "", SHA_A);
+    expect(routineOff.mode).toBe("off");
+    expect(routineOff.replay).toBe("none");
+    expect(routineOff.code).toBe(0);
   });
 });
 
