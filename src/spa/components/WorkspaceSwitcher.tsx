@@ -25,10 +25,11 @@ export function switchWorkspace(
   nextRef: string,
   pathname: string = window.location.pathname,
   search: string = window.location.search,
+  hash: string = window.location.hash,
 ): boolean {
   const path = replaceWorkspaceRef(pathname, nextRef);
   if (path === null) return false;
-  navigate(`${path}${search}`);
+  navigate(`${path}${search}${hash}`);
   return true;
 }
 
@@ -37,7 +38,10 @@ export function WorkspaceSwitcher({ model }: { model: WorkspaceSwitcherModel | n
   if (model === null) return null;
   return (
     <Select
-      value={model.currentRef ?? undefined}
+      // Always controlled: an unlisted ref in the path would leave an
+      // uncontrolled select showing whatever row was clicked last, so fall
+      // back to the first membership instead.
+      value={model.currentRef ?? model.options[0]!.ref}
       onValueChange={(ref) => void switchWorkspace(ref)}
     >
       <SelectTrigger size="sm" className="w-full" aria-label={model.label}>

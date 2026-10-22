@@ -7,11 +7,11 @@
  * write to the address bar, the cookie jar or the document.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
+import { SidebarProvider } from "../../src/spa/components/ui/sidebar";
+import { AppSidebar } from "../../src/spa/components/AppSidebar";
+import { buildSidebarModel, buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import { WorkspaceSwitcher, switchWorkspace } from "../../src/spa/components/WorkspaceSwitcher";
 import type { SpaBoot } from "../../src/spa/boot";
 
@@ -36,7 +36,7 @@ type Recorder = {
 };
 
 /** Install the browser faces `navigate` + the switcher touch, recording each. */
-function withBrowser(pathname: string, search: string, run: () => void): Recorder {
+function withBrowser(pathname: string, search: string, run: () => void, hash = ""): Recorder {
   const rec: Recorder = { pushed: [], events: [], requests: [], cookieWrites: [], locationWrites: [] };
   const scope = globalThis as Record<string, unknown>;
   const savedFetch = globalThis.fetch;
@@ -45,10 +45,10 @@ function withBrowser(pathname: string, search: string, run: () => void): Recorde
     document: scope.document,
     PopStateEvent: scope.PopStateEvent,
   };
-  const location: Record<string, unknown> = { pathname, search, assign: () => rec.locationWrites.push("assign"), replace: () => rec.locationWrites.push("replace") };
+  const location: Record<string, unknown> = { pathname, search, hash, assign: () => rec.locationWrites.push("assign"), replace: () => rec.locationWrites.push("replace") };
   Object.defineProperty(location, "href", {
     set: () => rec.locationWrites.push("href"),
-    get: () => `${pathname}${search}`,
+    get: () => `${pathname}${search}${hash}`,
   });
   globalThis.fetch = (async (input: unknown) => {
     rec.requests.push(input);
@@ -97,6 +97,13 @@ describe("workspace switcher — URL-only switch", () => {
     expect(rec.events).toEqual(["popstate"]);
   });
 
+  test("preserves the query and the hash along with the path", () => {
+    const rec = withBrowser("/dashboard/acme/apps/thing", "?tab=insights", () => {
+      switchWorkspace("ws_7d41");
+    }, "#runs");
+    expect(rec.pushed).toEqual(["/dashboard/ws_7d41/apps/thing?tab=insights#runs"]);
+  });
+
   test("issues no request, no reload and no session/cookie write", () => {
     const rec = withBrowser("/dashboard/acme/members", "", () => {
       switchWorkspace("ws_7d41");
@@ -122,14 +129,30 @@ describe("workspace switcher — the control's list", () => {
     expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps")).not.toBeNull();
   });
 
-  test("marks the workspace the path names, else the boot ref", () => {
+  test("marks the workspace the path names", () => {
     const model = buildWorkspaceSwitcherModel(boot, "/dashboard/ws_7d41/members");
     expect(model?.currentRef).toBe("ws_7d41");
     expect(model?.options).toEqual([
       { ref: "acme", name: "Acme" },
       { ref: "ws_7d41", name: "Side project" },
     ]);
-    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/apps")?.currentRef).toBe("acme");
+    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps")?.currentRef).toBe("acme");
+  });
+
+  test("no control on a path with no workspace segment to rewrite", () => {
+    // `/dashboard` is the post-login landing of a multi-workspace deployment: a
+    // control there would render and no-op every choice.
+    for (const pathname of ["/dashboard", "/dashboard/apps", "/dashboard/apps/thing", "/index.html"]) {
+      expect(buildWorkspaceSwitcherModel(boot, pathname), pathname).toBeNull();
+    }
+  });
+
+  test("a path naming an unlisted ref marks nothing, so the control renders a stable value", () => {
+    // `gone` is a renamed slug / revoked membership: the switch still rewrites
+    // the segment, but no row can claim to be the current one.
+    const model = buildWorkspaceSwitcherModel(boot, "/dashboard/gone/apps");
+    expect(model?.currentRef).toBeNull();
+    expect(model?.options.map((option) => option.ref)).toEqual(["acme", "ws_7d41"]);
   });
 });
 
@@ -151,11 +174,52 @@ describe("workspace switcher — rendered surface", () => {
     expect(html).not.toContain("<form");
   });
 
+  test("an unlisted current ref renders the first membership's value (controlled, never blank)", () => {
+    const model = buildWorkspaceSwitcherModel(boot, "/dashboard/gone/apps");
+    expect(model?.currentRef).toBeNull();
+    const html = renderToStaticMarkup(createElement(WorkspaceSwitcher, { model }));
+    // Radix marks `data-placeholder` only for an empty/unset value, so its
+    // absence pins a controlled select showing the first membership.
+    expect(html).not.toContain("data-placeholder");
+    // The same holds for the normal case: the value never goes uncontrolled.
+    expect(
+      renderToStaticMarkup(createElement(WorkspaceSwitcher, { model: buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps") })),
+    ).not.toContain("data-placeholder");
+  });
+
   test("the shell mounts it beside the sidebar wordmark", () => {
-    const sidebar = readFileSync(join(import.meta.dir, "../../src/spa/components/AppSidebar.tsx"), "utf8");
-    expect(sidebar).toContain("<WorkspaceSwitcher model={switcher} />");
-    const layout = readFileSync(join(import.meta.dir, "../../src/spa/Layout.tsx"), "utf8");
-    expect(layout).toContain("buildWorkspaceSwitcherModel(boot, pathname)");
-    expect(layout).toContain("switcher={switcher}");
+    const pathname = "/dashboard/acme/apps";
+    const html = renderToStaticMarkup(
+      createElement(
+        SidebarProvider,
+        { defaultOpen: true },
+        createElement(AppSidebar, {
+          model: buildSidebarModel(boot, pathname),
+          switcher: buildWorkspaceSwitcherModel(boot, pathname),
+        }),
+      ),
+    );
+    // The wordmark link comes first, then the switcher trigger — and both sit
+    // in the sidebar header, above the nav list (not inside it).
+    const headerStart = html.indexOf('data-slot="sidebar-header"');
+    const header = html.slice(headerStart, html.indexOf('data-slot="sidebar-content"'));
+    expect(headerStart).toBeGreaterThan(-1);
+    expect(header).toContain(`href="${buildSidebarModel(boot, pathname).brandHref}"`);
+    expect(header).toContain('aria-label="Workspace"');
+    expect(header.indexOf('aria-label="Workspace"')).toBeGreaterThan(header.indexOf("href="));
+  });
+
+  test("no switcher in the shell on a path with no workspace segment", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        SidebarProvider,
+        { defaultOpen: true },
+        createElement(AppSidebar, {
+          model: buildSidebarModel(boot, "/dashboard"),
+          switcher: buildWorkspaceSwitcherModel(boot, "/dashboard"),
+        }),
+      ),
+    );
+    expect(html).not.toContain('aria-label="Workspace"');
   });
 });
