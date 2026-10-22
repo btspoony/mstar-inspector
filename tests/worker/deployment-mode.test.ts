@@ -377,6 +377,45 @@ describe("SPA boot face — invalid mode is a named 500", () => {
   });
 });
 
+describe("empty instance end to end — the sign-in that created the account", () => {
+  /**
+   * The two halves of the empty-instance matrix above are asserted separately
+   * (the callback mints the marker on an empty table; the shell renders it from
+   * a marker). This walks the real pair: the callback's cookies are followed
+   * through its redirects to the shell document, so the marker minted at the
+   * LAST empty moment has to survive the 302 and be honoured after the account
+   * exists — the headline of the feature.
+   */
+  async function landingShell(res: Response, env: Env): Promise<{ status: number; html: string }> {
+    const cookies = res.headers.getSetCookie().map((value) => value.split(";")[0]!);
+    let target = res.headers.get("Location");
+    if (target === null) throw new Error("callback did not land anywhere");
+    for (let hop = 0; hop < 4; hop += 1) {
+      const next = await shell(target, env, cookies);
+      if (next.status !== 302) return { status: next.status, html: await next.text() };
+      target = next.headers.get("Location");
+      if (target === null) throw new Error("302 without a Location");
+    }
+    throw new Error("redirect loop after the callback");
+  }
+
+  for (const [mode, showsGuidance] of [
+    ["self-hosted", true],
+    ["saas", false],
+  ] as const) {
+    test(`${mode}: an empty users table → ${showsGuidance ? "guidance" : "no guidance"}`, async () => {
+      const db = emptyInstance();
+      const env = envFor(db, mode);
+      const landed = await landingShell(await oauthCallback("founder", env), env);
+      expect(landed.status).toBe(200);
+      expect(bootOf(landed.html).emptyInstance).toBe(showsGuidance ? true : undefined);
+      // The sign-in itself wrote the only account, so this asserted the
+      // guidance against a table that is no longer empty.
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM users").get()).toEqual({ n: 1 });
+    });
+  }
+});
+
 describe("SPA creation page copy", () => {
   test("the guidance line exists in both locales", async () => {
     const { t } = await import("../../src/i18n");

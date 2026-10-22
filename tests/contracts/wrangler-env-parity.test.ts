@@ -372,6 +372,24 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
   });
 
   /**
+   * The top-level `vars` is the LOCAL shape (`wrangler dev`, and a manual
+   * staging deploy): it must declare `self-hosted`, so a laptop starts a
+   * self-hosted instance instead of failing loud on an unset var. The two
+   * blocks disagree ON PURPOSE — that is why `vars` is not in the leaf
+   * fingerprints above; both values are still pinned to the accepted shapes.
+   */
+  test("DEPLOYMENT_MODE: the top-level vars declares the local self-hosted shape", () => {
+    expect(
+      asObject(staging.vars).DEPLOYMENT_MODE,
+      `wrangler.jsonc: top-level vars must declare the local deployment shape`,
+    ).toBe("self-hosted");
+    expect([asObject(staging.vars).DEPLOYMENT_MODE, asObject(production.vars).DEPLOYMENT_MODE]).toEqual([
+      "self-hosted",
+      "saas",
+    ]);
+  });
+
+  /**
    * `env.production.vars` is the plain-var roster for prod. The open-sign-in
    * change removed the deployment allowlist and plan 100 removed the tenant
    * read mode, so the ONLY prod var left is the deployment shape — a config var

@@ -640,7 +640,11 @@ or kill reviews.
 workflows pass `--var DEPLOYMENT_MODE:saas`; the parity lock in
 `tests/contracts/wrangler-env-parity.test.ts` pins that against
 `env.production.vars`, because a deploy that lost the flag would silently fall
-back to the config value.
+back to the config value. The **top-level `vars`** declares
+`DEPLOYMENT_MODE: "self-hosted"` instead — that block is what `wrangler dev` and
+a manual staging deploy resolve, so a local instance starts self-hosted without
+any `--var`. The two values disagree on purpose; the parity lock pins each to
+its block.
 
 **The container image is rebuilt, not byte-identical.** Both images are built
 from a rolling apt base, so a byte-identical rebuild is not provable. Pass a
@@ -940,7 +944,7 @@ settings; redeploy to change:
 
 | Name | Default | Purpose |
 |---|---|---|
-| `DEPLOYMENT_MODE` | `saas` | deployment shape (`self-hosted` \| `saas`); no default — unset/invalid fails loud. Both deploy workflows pass it through `--var` |
+| `DEPLOYMENT_MODE` | `self-hosted` locally, `saas` in `env.production` | deployment shape (`self-hosted` \| `saas`); no default — unset/invalid fails loud. Both deploy workflows pass `saas` through `--var` |
 | `REVIEW_ENABLED` | unset | **emergency brake only**: per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
 
 > **REVIEW_ENABLED cutover checklist (上线即生效 — run BEFORE the deploy that

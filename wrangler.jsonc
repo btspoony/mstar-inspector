@@ -154,6 +154,14 @@
     "binding": "ASSETS",
     "run_worker_first": true
   },
+  // Plan 100: the deployment shape for local dev (`wrangler dev`) and a manual
+  // staging deploy. Both deploy workflows re-supply `saas` with `--var`, so
+  // this top-level value never decides what staging/production run — it only
+  // keeps a local instance from failing loud on an unset var. There is no
+  // default in code: `deploymentModeOf` throws on unset/empty/invalid.
+  "vars": {
+    "DEPLOYMENT_MODE": "self-hosted"
+  },
   // Production: one release-gated Worker served at inspector.mstar.page, built
   // only by the non-prerelease release workflow; the top-level Worker above
   // stays the staging instance on every main push. A named environment does
