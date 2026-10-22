@@ -9,6 +9,7 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { t } from "../i18n";
 import type { SpaBoot } from "./boot";
 import { AppSidebar } from "./components/AppSidebar";
+import { SupportNotice } from "./components/SupportNotice";
 import { matchSpaRoute } from "./routes";
 import { buildNavbarModel, buildSidebarModel, buildWorkspaceSwitcherModel } from "./shell";
 import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-memberships";
@@ -91,7 +92,13 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
             </Button>
           ) : null}
         </header>
-        <div className="flex flex-1 flex-col p-4 md:p-6">{children}</div>
+        <div className="flex flex-1 flex-col p-4 md:p-6">
+          {/* The undismissable support notice sits above every workspace page:
+              the tenant must see an active operator grant on any screen, and it
+              carries no control (AC4). */}
+          <SupportNotice boot={boot} pathname={pathname} />
+          {children}
+        </div>
       </SidebarInset>
     </SidebarProvider>
   );

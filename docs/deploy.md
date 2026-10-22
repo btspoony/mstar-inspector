@@ -504,6 +504,72 @@ restores by hand.
   (previous bullet). Rotate explicitly when the rollback is
   security-motivated.
 
+## Platform operators (`PLATFORM_OPERATORS`)
+
+Deploying the product does not grant sight of any tenant. `PLATFORM_OPERATORS`
+is a comma-separated, case-insensitive list of GitHub logins (a **Worker var**,
+never a secret — logins are public identity) and holds **no business rights**:
+
+| Caller | What they get |
+|---|---|
+| workspace member that is also listed | ordinary membership rights — the ceiling never applies |
+| listed, not a member, no live `support_grants` row | the outsider 404 on every workspace path |
+| listed, not a member, live grant | `read`-declared routes only: the workspace view, the member list (login + role); every other path is 403 |
+
+Expiry is read from `support_grants.expires_at` on every request — there is no
+scheduled job and no status column, so an expired grant answers exactly like no
+grant. Every operator decision the workspace gate makes appends one
+`audit_events` row **before dispatch** (`support.read` / `support.forbidden` /
+`support.denied`), so a route added later cannot skip the record. HTML shell
+loads (`/dashboard`, `/dashboard/<ref>/apps`) are served by `spa-dispatch`
+rather than the workspace gate, so they are classified by the same function but
+append no row.
+
+A membership-less operator's landing is `/dashboard/<ref>/apps`: the shell
+redirects the bare `/dashboard` there whenever the gate would classify that
+login `operator-granted`, because the support view derives its API base from
+the pathname's workspace segment.
+
+`PLATFORM_OPERATORS` is not declared in `wrangler.jsonc`; set it with
+`wrangler deploy --var "PLATFORM_OPERATORS:<login>[,<login>]"` or as a plain
+var on the Worker. An empty/unset value means "no operators", which is the
+default and is safe: nobody gains access.
+
+### Opening a support window (no UI this iteration)
+
+Grant creation is an explicit operator action against the store, never an HTTP
+route — there is no self-grant. Pick the window, then insert one row
+(`migrations/0029_operator_support.sql` owns the DDL):
+
+```sql
+-- `id` is any UUID; `granted_by` is the creating operator's login (not a FK).
+INSERT INTO support_grants
+  (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at)
+VALUES
+  ('<uuid>', '<workspace_id>', '<operator login>', '<why support is needed>',
+   '<your login>', '<ISO now>', '<ISO now + window>');
+```
+
+```sh
+wrangler d1 execute mstar-inspector --remote \
+  --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','<reason>','<you>','$(date -u +%FT%TZ)','<ISO expiry>')"
+```
+
+While the row is live the workspace members see an undismissable notice (who,
+why, until when) and the operator sees only the read-only support face. Ending
+the window early is the same explicit store action — there is no tenant-facing
+control at all:
+
+```sh
+wrangler d1 execute mstar-inspector --remote \
+  --command "DELETE FROM support_grants WHERE workspace_id = '<workspace_id>' AND operator_login = '<operator>'"
+```
+
+`audit_events` is append-only: no code path updates or deletes a row, and the
+migration declares no cascade. `owner`/`admin` read them through
+`GET /dashboard/<ref>/api/audit?limit=`, which a plain `member` and a granted
+operator both get 403 from.
+
 ## Workspace tenant mode (`WORKSPACE_TENANT_MODE`)
 
 One Worker var switches both the dashboard route family and the App read face

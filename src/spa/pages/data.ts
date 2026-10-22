@@ -730,6 +730,81 @@ export function parseInvites(data: unknown): InviteRow[] | null {
   return invites;
 }
 
+/**
+ * One active support grant — the members' undismissable notice row
+ * (`GET /:ref/api/support/grants`): who, why, and until when. Nothing here is
+ * actionable by the tenant: the server has no route that ends or edits a grant.
+ */
+export type SupportGrantRow = {
+  operator_login: string;
+  reason: string;
+  expires_at: string;
+};
+
+/** `GET /:ref/api/support/grants` — the workspace's live grants. */
+export function parseSupportGrants(data: unknown): SupportGrantRow[] | null {
+  if (!isRecord(data) || !Array.isArray(data.grants)) return null;
+  const grants: SupportGrantRow[] = [];
+  for (const row of data.grants) {
+    if (!isRecord(row)) return null;
+    if (
+      typeof row.operator_login !== "string" ||
+      typeof row.reason !== "string" ||
+      typeof row.expires_at !== "string"
+    ) {
+      return null;
+    }
+    grants.push({
+      operator_login: row.operator_login,
+      reason: row.reason,
+      expires_at: row.expires_at,
+    });
+  }
+  return grants;
+}
+
+/**
+ * The granted operator's read-only view (`GET /:ref/api/support/workspace`) —
+ * exactly the AC2 field set: the workspace's four identity fields, members as
+ * login + role, and the active grants. A drifted payload fails the parse rather
+ * than rendering a field the server never grants.
+ */
+export type SupportWorkspaceView = {
+  workspace: { id: string; name: string; slug: string; created_at: string };
+  members: Array<{ github_login: string; role: WorkspaceRole }>;
+  grants: SupportGrantRow[];
+};
+
+export function parseSupportView(data: unknown): SupportWorkspaceView | null {
+  if (!isRecord(data) || !isRecord(data.workspace) || !Array.isArray(data.members)) return null;
+  const workspace = data.workspace;
+  if (
+    typeof workspace.id !== "string" ||
+    typeof workspace.name !== "string" ||
+    typeof workspace.slug !== "string" ||
+    typeof workspace.created_at !== "string"
+  ) {
+    return null;
+  }
+  const members: SupportWorkspaceView["members"] = [];
+  for (const row of data.members) {
+    if (!isRecord(row) || typeof row.github_login !== "string" || !isWorkspaceRole(row.role)) return null;
+    members.push({ github_login: row.github_login, role: row.role });
+  }
+  const grants = parseSupportGrants({ grants: data.grants });
+  if (grants === null) return null;
+  return {
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+      slug: workspace.slug,
+      created_at: workspace.created_at,
+    },
+    members,
+    grants,
+  };
+}
+
 export function parseApps(data: unknown): AppsPayload | null {
   if (!isRecord(data) || !isRecord(data.viewer) || !Array.isArray(data.apps)) return null;
   const login = data.viewer.login;

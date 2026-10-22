@@ -247,6 +247,26 @@ export const en = {
     slugForbidden: "Only the workspace owner can change its URL.",
     slugFailed: "Could not change the workspace URL — try again.",
   },
+  /**
+   * Platform-operator support (plan 99): the operator's read-only face and the
+   * tenant's undismissable grant notice. The notice states who is looking, why,
+   * and until when — and offers no action, because the tenant can neither end
+   * nor edit a grant.
+   */
+  support: {
+    heading: "Support access",
+    readOnly: "You are viewing this workspace under a time-boxed support grant. Everything here is read-only.",
+    workspaceId: "Workspace id",
+    createdAt: "Created",
+    grantsHeading: "Active support grants",
+    grantLine: "{login} has support access until {expires} — {reason}",
+    tableLogin: "GitHub login",
+    tableRole: "Role",
+    /** The tenant's always-on notice; not dismissible, carries no action. */
+    noticeHeading: "Support access is active",
+    noticeLine: "{login} can read this workspace's members until {expires} — {reason}",
+    noGrant: "No support access is active.",
+  },
   settings: {
     /**
      * (AD-591): section-group eyebrow labels for the two tier
