@@ -133,15 +133,16 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // sidebar-bearing boot — a workspace-scoped pathname already carries it (no
   // read), otherwise the deployment's sole workspace answers (one read, the
   // sign-in landing's resolver, which returns null without touching D1 under
-  // `off`). The login page renders no sidebar, and `/dashboard` either
-  // redirected above or has no sole workspace to name.
+  // `off`). `/index.html` is the same shell document addressed directly (the
+  // SPA router then reads the real pathname), so it takes the same boot. The
+  // login page renders no sidebar, and `/dashboard` either redirected above or
+  // has no sole workspace to name.
   const route = matchSpaRoute(c.req.path);
+  const routeSlug = route !== null && "workspaceSlug" in route ? route.workspaceSlug : undefined;
   const workspaceSlug =
-    auth.boot.login === null || route === null || route.page === "login"
+    auth.boot.login === null || route?.page === "login"
       ? undefined
-      : (("workspaceSlug" in route ? route.workspaceSlug : undefined) ??
-        (await strictWorkspaceSlug(c.env)) ??
-        undefined);
+      : (routeSlug ?? (await strictWorkspaceSlug(c.env)) ?? undefined);
   const boot =
     workspaceSlug === undefined ? auth.boot : { ...auth.boot, workspaceSlug };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));

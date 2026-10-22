@@ -726,6 +726,29 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(hrefs).not.toContain("/dashboard/apps");
   });
 
+  test("strict: the direct /index.html shell names the sole workspace too (N1)", async () => {
+    // `/index.html` is the same shell document addressed directly — the SPA
+    // router then reads the real pathname — so it must carry the same boot or
+    // its sidebar keeps the legacy dead end.
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      new Request("https://worker.local/index.html", {
+        headers: {
+          Accept: "text/html",
+          Cookie: `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`,
+        },
+      }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceSlug).toBe("default");
+    const hrefs = await renderMembersHrefs(boot);
+    expect(hrefs).toContain("/dashboard/default/apps");
+    expect(hrefs).not.toContain("/dashboard/apps");
+  });
+
   test("off: a workspace-shaped shell never exists, so no boot carries a slug", async () => {
     const { db } = tenancyFixture();
     const res = await worker.fetch(
