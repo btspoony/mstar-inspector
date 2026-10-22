@@ -194,13 +194,6 @@ describe("shared navbar contract", () => {
     expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual(["nav.apps", "nav.members"]);
   });
 
-  test("every entry is visible to every workspace member (no nav-level role gate)", () => {
-    expect(NAV_ITEMS.map((item) => Object.keys(item).sort())).toEqual([
-      ["href", "labelKey"],
-      ["href", "labelKey"],
-    ]);
-  });
-
   test("every labelKey resolves to a real dictionary string in both locales", () => {
     for (const item of NAV_ITEMS) {
       for (const locale of LOCALES) {

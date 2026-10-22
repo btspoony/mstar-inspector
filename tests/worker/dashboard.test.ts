@@ -987,7 +987,7 @@ describe("manifest hold cookie (manifest.ts)", () => {
       ...CONVERSION,
       login: "octocat",
       slug: buildAppSlug("octocat"),
-      workspaceRef: "default",
+      workspaceId: "default",
       exp: expect.any(Number),
     });
   });

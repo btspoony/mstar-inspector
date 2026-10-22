@@ -73,6 +73,7 @@ import {
   getMembership,
   getSoleWorkspace,
   getSoleWorkspaceAccess,
+  getWorkspaceAccessById,
   getWorkspaceAccessByRef,
   getWorkspaceByRef,
   getWorkspaceMember,
@@ -362,6 +363,7 @@ export async function pendingInvitesForLogin(
  * the caller's rights is wrong; the request is missing a target).
  */
 type CreationTarget =
+  /** `workspaceRef` is the workspace's CURRENT slug — URLs only, never identity. */
   | { kind: "ok"; workspaceId: string; workspaceRef: string }
   | { kind: "denied" }
   | { kind: "workspace_required" }
@@ -371,13 +373,16 @@ async function resolveCreationTarget(
   env: Env,
   login: string,
   requestedRef: string | undefined,
+  byId = false,
 ): Promise<CreationTarget> {
   const db = dashboardD1(env);
   if (db === null) return { kind: "db_unbound" };
   const access =
     requestedRef === undefined
       ? await getSoleWorkspaceAccess(db, login)
-      : await getWorkspaceAccessByRef(db, requestedRef, login);
+      : byId
+        ? await getWorkspaceAccessById(db, requestedRef, login)
+        : await getWorkspaceAccessByRef(db, requestedRef, login);
   if (access === null) {
     // The ref named no workspace this login may attribute an App to. With no
     // ref at all that is either zero workspaces (nobody to attribute to) or
@@ -460,11 +465,20 @@ export async function signedInLanding(env: Env, login: string): Promise<string> 
 /**
  * The post-commit landing page. The manifest flow's own request carries no
  * workspace segment, so `scopedAppPath` cannot rewrite this target: the App's
- * onboarding page is named by the workspace the commit just mapped it into,
- * which the flow carried from start through the signed state to the hold.
+ * onboarding page is named by the workspace the commit just mapped it into.
+ *
+ * The URL needs the workspace's CURRENT slug, while the flow carried the stable
+ * id — so the slug is resolved HERE, after the write, not carried through the
+ * state. A workspace renamed mid-flow therefore still lands on the right
+ * onboarding page (and the App is in the right tenant either way, because the
+ * mapping was written from the id). A workspace retired mid-flow resolves
+ * nothing and falls back to the shell, which lands on a live route.
  */
-function manifestSuccessTarget(workspaceRef: string, appSlug: string): string {
-  return `/dashboard/${workspaceRef}/apps/${appSlug}/onboarding`;
+async function manifestSuccessTarget(env: Env, workspaceId: string, appSlug: string): Promise<string> {
+  const db = dashboardD1(env);
+  const workspace = db === null || workspaceId === "" ? null : await getWorkspaceByRef(db, workspaceId);
+  if (workspace === null) return DASHBOARD_SHELL_REDIRECT;
+  return `/dashboard/${workspace.slug}/apps/${appSlug}/onboarding`;
 }
 
 function isSpaFetchPost(c: DashboardContext): boolean {
@@ -1137,7 +1151,7 @@ async function manifestStartRoute(c: DashboardContext, workspaceRef: string | un
   if (target.kind !== "ok") return creationRefusal(c, session.login, target);
   const db = dashboardD1(c.env)!;
   const slug = await resolveAvailableSlug(db, buildAppSlug(session.login));
-  const state = await createManifestStateValue(secrets.sessionSecret, slug, target.workspaceRef);
+  const state = await createManifestStateValue(secrets.sessionSecret, slug, target.workspaceId);
   c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
   const manifest = buildManifest(new URL(c.req.url).origin, session.login, slug);
   return c.html(
@@ -1187,7 +1201,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   // `db_unbound` is NOT a refusal: it falls through to the commit path's own
   // config
   // outcome, which parks the hold so the credentials survive (QC F-005).
-  const target = await resolveCreationTarget(c.env, session.login, state.workspaceRef);
+  const target = await resolveCreationTarget(c.env, session.login, state.workspaceId, true);
   if (target.kind === "denied" || target.kind === "workspace_required") {
     logManifestFailure("callback", "not_a_creator");
     return creationRefusal(c, session.login, target);
@@ -1212,7 +1226,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   const locale = requestLocale(c);
   // The payload feeds the shared commit path; the cookie string is parked on
   // retryable outcomes so /manifest/confirm can resume.
-  const holdPayload = buildHoldPayload(conversion, session.login, state.slug, state.workspaceRef);
+  const holdPayload = buildHoldPayload(conversion, session.login, state.slug, state.workspaceId);
   const hold = await encryptHoldValue(holdPayload, secrets.sessionSecret);
   const outcome = await commitManifestApp({
     db: dashboardD1(c.env),
@@ -1233,7 +1247,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   switch (outcome.kind) {
     case "success": {
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
-      return c.redirect(manifestSuccessTarget(outcome.workspaceRef, outcome.row.slug), 302);
+      return c.redirect(await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug), 302);
     }
     case "login_mismatch": {
       // Unreachable here (the hold is minted for this session) — same burn
@@ -1291,7 +1305,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
   // the hold is left untouched so the op can be restored and retried.
   // `db_unbound` falls through to the commit path's own config outcome (the
   // hold stays parked, nothing is written).
-  const target = await resolveCreationTarget(c.env, session.login, hold.workspaceRef);
+  const target = await resolveCreationTarget(c.env, session.login, hold.workspaceId, true);
   if (target.kind === "denied" || target.kind === "workspace_required") {
     logManifestFailure("commit", "not_a_creator");
     return creationRefusal(c, session.login, target);
@@ -1309,7 +1323,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       // Success: the hold is single-success — burned now that the row exists;
       // the operator lands on the App's onboarding page.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      return c.redirect(manifestSuccessTarget(outcome.workspaceRef, outcome.row.slug), 302);
+      return c.redirect(await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug), 302);
     }
     case "login_mismatch": {
       // The hold is bound to the login that ran the callback: a different
@@ -1336,7 +1350,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
 // /manifest/commit recovery run the same write path, spec § 5) ---
 
 type ManifestCommitOutcome =
-  | { kind: "success"; row: GithubAppRow; workspaceRef: string }
+  | { kind: "success"; row: GithubAppRow; workspaceId: string }
   | { kind: "login_mismatch" }
   | { kind: "db_unbound" }
   | { kind: "encrypt_failed" }
@@ -1415,7 +1429,7 @@ async function commitManifestApp(args: {
       createdBy: login,
       workspaceId,
     });
-    return { kind: "success", row, workspaceRef: hold.workspaceRef };
+    return { kind: "success", row, workspaceId };
   } catch (err) {
     if (isAppsUniqueViolation(err, "slug")) {
       // The GitHub App WAS created on GitHub, but its webhook slug was
@@ -1452,7 +1466,7 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   // so it applies the same creation capability, in the same workspace (the
   // hold's ref): a member demoted mid-flight must not be handed the commit
   // affordance.
-  const target = await resolveCreationTarget(c.env, session.login, hold.workspaceRef);
+  const target = await resolveCreationTarget(c.env, session.login, hold.workspaceId, true);
   if (target.kind === "denied" || target.kind === "workspace_required") {
     // The resume gate is the commit affordance's only entry, so a refusal here
     // burns the held credentials rather than leaving them parked.

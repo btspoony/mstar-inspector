@@ -6,8 +6,9 @@ category: Fixed
   right is now judged in the workspace the request addresses (`owner`/`admin`
   there), not in "the deployment's only workspace", which stopped existing the
   moment a second workspace was created. The SPA's Create action posts under the
-  page's own workspace prefix and the chosen workspace rides the signed state
-  and the encrypted hold, so the App lands where the operator started.
+  page's own workspace prefix and the chosen workspace's stable id rides the signed
+  state and the encrypted hold, so the App lands where the operator started
+  even if that workspace is renamed mid-flow.
   A request that names no workspace on a multi-workspace deployment now answers
   `409 {"code": "workspace_required", …}` (styled error page for a navigation)
   instead of a bare `403`.

@@ -171,6 +171,31 @@ export async function getSoleWorkspaceAccess(
 }
 
 /**
+ * The workspace with this stable `workspaces.id` plus the login's role inside
+ * it. `id` never changes and can never be another workspace's slug (the slug
+ * write guard forbids it), so this is the SAFE key for a value that must
+ * outlive a rename — the manifest flow binds it and re-resolves the current
+ * slug only when it needs a URL. A retired or unknown id resolves null.
+ */
+export async function getWorkspaceAccessById(
+  db: WorkspaceStoreD1,
+  workspaceId: string,
+  login: string,
+): Promise<{ id: string; slug: string; role: WorkspaceRole | null } | null> {
+  const row = await db
+    .prepare(
+      `SELECT w.id AS id, w.slug AS slug, wm.role AS role
+         FROM workspaces w
+         LEFT JOIN users u ON u.github_login = ?2 COLLATE NOCASE
+         LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = u.id
+        WHERE w.id = ?1 AND w.deleted_at IS NULL`,
+    )
+    .bind(workspaceId, login)
+    .first<{ id: string; slug: string; role: WorkspaceRole | null }>();
+  return row === null ? null : { id: row.id, slug: row.slug, role: row.role };
+}
+
+/**
  * The workspace a path/flow ref names (an id or a slug, the same predicate as
  * {@link getWorkspaceByRef}) plus the login's role inside it — the addressed
  * counterpart of {@link getSoleWorkspaceAccess}, used wherever the request

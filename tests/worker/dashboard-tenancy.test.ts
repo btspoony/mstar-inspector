@@ -1125,7 +1125,7 @@ describe("App creation is owner/admin", () => {
     const stateCookie =
       start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
     const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
-    expect((await readManifestStateValue(state, state, SESSION_SECRET))?.workspaceRef).toBe("other");
+    expect((await readManifestStateValue(state, state, SESSION_SECRET))?.workspaceId).toBe("ws-other");
 
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
@@ -1146,6 +1146,56 @@ describe("App creation is owner/admin", () => {
       .prepare("SELECT app_workspaces.workspace_id AS ws FROM app_workspaces JOIN github_apps ON github_apps.id = app_workspaces.app_id WHERE github_apps.github_app_id = ?")
       .get(CONVERSION.id) as { ws: string } | null;
     expect(mapping?.ws).toBe("ws-other");
+  });
+
+  test("a workspace RENAMED mid-flow still receives the App (the flow binds the stable id, not the slug)", async () => {
+    // F-001: the state/hold must not carry a mutable identity. Start in `acme`,
+    // rename it to `acme-renamed` before GitHub redirects back, and — the worse
+    // half of the same bug — let a NEW workspace take the freed `acme` slug. A
+    // slug-bound flow would attribute the App to that stranger; the id-bound
+    // flow must still land it in the original workspace.
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-acme", "acme");
+    seedWorkspace(db, "ws-other", "other");
+    const dana = seedUser(db, "dana", "member");
+    seedMembership(db, "ws-acme", dana, "owner");
+    const env = envFor(db);
+
+    const start = await post("dana", "/dashboard/acme/manifest/start", env);
+    expect(start.status).toBe(200);
+    const stateCookie =
+      start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
+    const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
+    expect((await readManifestStateValue(state, state, SESSION_SECRET))?.workspaceId).toBe("ws-acme");
+
+    // The rename, plus a squatter on the freed slug.
+    seed(db, "UPDATE workspaces SET slug = 'acme-renamed' WHERE id = 'ws-acme'");
+    seedWorkspace(db, "ws-squatter", "acme");
+    seedMembership(db, "ws-squatter", seedUser(db, "mallory", "member"), "owner");
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    try {
+      const callback = await authedRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        "dana",
+        { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
+      ).then((request) => worker.fetch(request, env));
+      expect(callback.status).toBe(302);
+      // The redirect names the workspace's CURRENT slug (resolved after the
+      // write), never the stale one the flow started with.
+      expect(callback.headers.get("Location")).toBe(
+        "/dashboard/acme-renamed/apps/mstar-inspector-dana/onboarding",
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const mapping = db.raw
+      .prepare("SELECT app_workspaces.workspace_id AS ws FROM app_workspaces JOIN github_apps ON github_apps.id = app_workspaces.app_id WHERE github_apps.github_app_id = ?")
+      .get(CONVERSION.id) as { ws: string } | null;
+    // The App belongs to the ORIGINAL workspace — the one that owns the id —
+    // and emphatically not to `ws-squatter`, which merely holds the old slug.
+    expect(mapping?.ws).toBe("ws-acme");
   });
 
   test("the boot's create capability follows the addressed workspace", async () => {

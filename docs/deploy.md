@@ -599,9 +599,12 @@ The reserved first segments (`apps`, `api`, `oauth`, `members`, `login`,
 
 An App belongs to exactly one workspace, so the creation flow needs a target.
 The SPA's Create form posts to `/dashboard/<slug>/manifest/start`, which judges
-the caller's `owner`/`admin` role **in that workspace** and carries the ref
-through the signed state and the encrypted hold, so the callback and the
-recovery resubmit write the App into the same workspace they started in.
+the caller's `owner`/`admin` role **in that workspace** and carries the
+workspace's stable **id** through the signed state and the encrypted hold, so
+the callback and the recovery resubmit write the App into the same workspace
+they started in — a mid-flow rename (or a later workspace taking the old slug)
+cannot redirect the App to another tenant. The current slug is resolved from
+that id only when a URL is built, after the write.
 
 The deployment-level `POST /dashboard/manifest/start` still exists for a
 single-workspace deployment (there the sole workspace is unambiguous). On a
