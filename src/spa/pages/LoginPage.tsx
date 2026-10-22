@@ -52,7 +52,7 @@ export function LoginPage({ boot }: { boot: SpaBoot }) {
               {t(locale, "login.signIn")}
             </Button>
           </form>
-          <p className="text-sm text-muted-foreground">{t(locale, "login.inviteOnly")}</p>
+          <p className="text-sm text-muted-foreground">{t(locale, "login.openAccess")}</p>
         </CardContent>
       </Card>
     </div>

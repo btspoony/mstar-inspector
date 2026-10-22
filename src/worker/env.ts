@@ -64,22 +64,6 @@ export type Env = {
    */
   DASHBOARD_ENCRYPTION_KEY?: string;
   /**
-   * Invite-only dashboard bootstrap: comma-separated GitHub
-   * logins that are created as `admin` at the OAuth callback when they have
-   * no users row yet and no removal record (compared case-insensitively —
-   * GitHub logins are
-   * case-insensitive). A Worker VAR, NOT a secret (login names are public
-   * identity): present on every deploy via the Deploy workflow's
-   * `wrangler deploy --var` (or the same `--var` on a documented manual
-   * deploy); .dev.vars locally. Unset → the
-   * first login against an EMPTY users table
-   * bootstraps as admin (first-login fallback); every other unknown login
-   * is denied (403, zero cookies) until an admin invites it. A login whose
-   * removal an operator recorded (migration 0023) is denied even while the
-   * list still spells it — only a deliberate re-invite clears that record.
-   */
-  ADMIN_LOGINS?: string;
-  /**
    * Optional ops alert webhook (architect verdict AL-6): when
    * set, the cron sweep POSTs the `ops_sweep_alert` payload here on
    * threshold breach (JSON body, 3s timeout; a POST failure degrades to a

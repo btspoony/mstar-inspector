@@ -21,6 +21,9 @@ type AssetCall = { method: string; pathname: string };
 function memberDbStub(): Env["DB"] {
   return {
     prepare: () => ({
+      // Unbound reads (the sole-workspace / landing resolver) answer "none".
+      all: async () => ({ results: [] }),
+      first: async () => null,
       bind: () => ({
         first: async () => ({
           id: "u-test",
@@ -29,6 +32,8 @@ function memberDbStub(): Env["DB"] {
           created_at: new Date().toISOString(),
           invited_by: null,
         }),
+        // The boot's invite discovery read: this login has no invitations.
+        all: async () => ({ results: [] }),
       }),
     }),
   } as unknown as Env["DB"];
@@ -41,8 +46,11 @@ function memberDbStub(): Env["DB"] {
 function removedMemberDbStub(): Env["DB"] {
   return {
     prepare: () => ({
+      all: async () => ({ results: [] }),
+      first: async () => null,
       bind: () => ({
         first: async () => null,
+        all: async () => ({ results: [] }),
       }),
     }),
   } as unknown as Env["DB"];
@@ -82,10 +90,11 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
 
 describe("SPA dispatch", () => {
   test("SPA page GET with Accept: text/html fetches /index.html", async () => {
-    const { env, calls } = makeEnv({ DB: memberDbStub() });
+    // Members is workspace-scoped, so the tenant gate must admit the ref.
+    const { env, calls } = makeEnv({ DB: memberDbStub(), WORKSPACE_TENANT_MODE: "strict" });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
-      htmlGetRequest("/dashboard/members", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      htmlGetRequest("/dashboard/acme/members", { Cookie: `${SESSION_COOKIE}=${session}` }),
       env,
     );
     expect(res.status).toBe(200);
@@ -96,15 +105,22 @@ describe("SPA dispatch", () => {
   });
 
   test("each enumerated page GET hits ASSETS (with a session)", async () => {
-    const pages = [
-      "/dashboard",
-      "/dashboard/apps",
-      "/dashboard/members",
-      "/dashboard/login",
-      "/dashboard/apps/acme/settings",
+    // The tenant gate decides which family a path may address, so each page
+    // carries the mode that admits it: the legacy App pages live under `off`,
+    // the workspace pages under `strict`.
+    const pages: Array<{ path: string; mode?: "off" | "strict" }> = [
+      { path: "/dashboard" },
+      { path: "/dashboard/apps", mode: "off" },
+      { path: "/dashboard/apps/acme/settings", mode: "off" },
+      // Members is workspace-scoped after plan 97: the root path is retired.
+      { path: "/dashboard/acme/members", mode: "strict" },
+      { path: "/dashboard/login" },
     ];
-    for (const path of pages) {
-      const { env, calls } = makeEnv({ DB: memberDbStub() });
+    for (const { path, mode } of pages) {
+      const { env, calls } = makeEnv({
+        DB: memberDbStub(),
+        ...(mode === undefined ? {} : { WORKSPACE_TENANT_MODE: mode }),
+      });
       const session = await createSessionValue("octocat", null, SESSION_SECRET);
       const res = await worker.fetch(
         htmlGetRequest(path, { Cookie: `${SESSION_COOKIE}=${session}` }),
@@ -118,7 +134,7 @@ describe("SPA dispatch", () => {
   test("POST to an SPA path does not call ASSETS (legacy)", async () => {
     const { env, calls } = makeEnv();
     await worker.fetch(
-      new Request("https://worker.local/dashboard/members", {
+      new Request("https://worker.local/dashboard/acme/members", {
         method: "POST",
         headers: { Accept: "text/html" },
       }),
@@ -164,7 +180,7 @@ describe("SPA dispatch", () => {
   test("Accept: application/json stays on legacy", async () => {
     const { env, calls } = makeEnv();
     await worker.fetch(
-      new Request("https://worker.local/dashboard/members", {
+      new Request("https://worker.local/dashboard/acme/members", {
         headers: { Accept: "application/json" },
       }),
       env,
@@ -174,7 +190,7 @@ describe("SPA dispatch", () => {
 
   test("default Accept */* stays on legacy (existing tests)", async () => {
     const { env, calls } = makeEnv();
-    await worker.fetch(new Request("https://worker.local/dashboard/members"), env);
+    await worker.fetch(new Request("https://worker.local/dashboard/apps"), env);
     expect(calls).toEqual([]);
   });
 

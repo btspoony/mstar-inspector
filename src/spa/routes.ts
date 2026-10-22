@@ -20,7 +20,7 @@ export type SpaPageId = (typeof SPA_PAGES)[number];
  */
 export type SpaRoute =
   | { page: "apps"; pathname: string; workspaceSlug?: string }
-  | { page: "members"; pathname: "/dashboard/members" }
+  | { page: "members"; pathname: string; workspaceSlug: string }
   | { page: "login"; pathname: "/dashboard/login" }
   | { page: "app-detail"; pathname: string; slug: string; workspaceSlug?: string };
 
@@ -43,18 +43,21 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The non-reserved workspace slug a `/dashboard/<slug>/apps…` path is scoped
- * to, otherwise null. The ONE workspace-path grammar: the route matcher, the
- * API-base derivation (`workspace-base.ts`) and the sidebar links all read it,
- * so a page's prefix cannot disagree with its matched route.
+ * The non-reserved workspace slug a `/dashboard/<slug>/{apps|members|api}…`
+ * path is scoped to, otherwise null — the request-path ordering contract's
+ * step 1 grammar, mirrored by the Worker's `classifyDashboardPath`. The ONE
+ * workspace-path grammar: the route matcher, the API-base derivation
+ * (`workspace-base.ts`) and the sidebar links all read it, so a page's prefix
+ * cannot disagree with its matched route.
  */
 export function workspaceSlugOf(pathname: string): string | null {
-  const slug = /^\/dashboard\/([^/]+)\/apps(?:\/|$)/.exec(pathname)?.[1];
+  const slug = /^\/dashboard\/([^/]+)\/(?:apps|members|api)(?:\/|$)/.exec(pathname)?.[1];
   return slug !== undefined && !RESERVED_WORKSPACE_SLUGS.has(slug) ? slug : null;
 }
 
 const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/settings)?$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
+const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;
 const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/settings)?$/;
 
 /**
@@ -73,14 +76,13 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     case "/dashboard":
     case "/dashboard/apps":
       return { page: "apps", pathname };
-    case "/dashboard/members":
-      return { page: "members", pathname };
     case "/dashboard/login":
       return { page: "login", pathname };
   }
   const workspaceSlug = workspaceSlugOf(pathname);
   if (workspaceSlug !== null) {
     if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceSlug };
+    if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceSlug };
     const appSlug = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
     if (appSlug) return { page: "app-detail", pathname, slug: appSlug, workspaceSlug };
     return null;

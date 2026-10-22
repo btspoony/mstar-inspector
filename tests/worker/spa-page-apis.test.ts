@@ -95,27 +95,13 @@ async function get(path: string, login?: string, env?: Env): Promise<Response> {
   return worker.fetch(new Request(`https://worker.local${path}`, { headers }), env ?? makeEnv(await seededWorld()));
 }
 
-describe("GET /dashboard/api/members", () => {
-  test("admin 200, member 403, anon 302", async () => {
-    const db = await seededWorld();
-    const env = makeEnv(db);
-
-    const admin = await get("/dashboard/api/members", "octocat", env);
-    expect(admin.status).toBe(200);
-    const body = (await admin.json()) as { members: Array<{ github_login: string; role: string }> };
-    expect(body.members.map((m) => m.github_login).sort()).toEqual(["hubot", "mallory", "octocat"]);
-    expect(body.members.some((m) => m.role === "admin")).toBe(true);
-    expect(body.members.every((m) => !("invited_by" in m))).toBe(true);
-
-    const member = await get("/dashboard/api/members", "mallory", env);
-    expect(member.status).toBe(403);
-    const forbidden = await member.text();
-    expect(forbidden).toContain("restricted to dashboard admins");
-    expect(forbidden).not.toContain('"members"');
-
-    const anon = await get("/dashboard/api/members", undefined, env);
-    expect(anon.status).toBe(302);
-    expect(anon.headers.get("Location")).toBe("/dashboard/login");
+describe("the retired deployment-level members face", () => {
+  test("GET /dashboard/api/members is gone; the workspace face serves", async () => {
+    // Plan 97: authority is workspace-scoped, so a deployment-level member list
+    // has no meaning. `off` (no tenant plane) therefore 404s the root path.
+    const env = makeEnv(await seededWorld());
+    const root = await get("/dashboard/api/members", "octocat", env);
+    expect(root.status).toBe(404);
   });
 });
 
@@ -255,25 +241,33 @@ describe("GET /dashboard/api/apps/:slug/settings", () => {
 });
 
 describe("membership stays enforcing outside locale", () => {
-  test("row-less session cannot read members or apps JSON", async () => {
+  test("row-less session cannot read the members or apps JSON", async () => {
     const env = makeEnv(await seededWorld());
     const headers = { Cookie: `${SESSION_COOKIE}=${await cookie("stranger")}`, Accept: "application/json" };
-    const members = await worker.fetch(new Request("https://worker.local/dashboard/api/members", { headers }), env);
-    expect(members.status).toBe(403);
     const apps = await worker.fetch(new Request("https://worker.local/dashboard/api/apps", { headers }), env);
     expect(apps.status).toBe(403);
   });
 
-  test("forbidden members HTML follows mstar_locale (the HTML GET is SPA-owned, so the 403 face is the API route)", async () => {
-    const env = makeEnv(await seededWorld());
+  test("the members-family 403 follows mstar_locale (workspace-scoped face)", async () => {
+    // Members + invites are workspace routes now, so the 403 surface is the
+    // workspace one: a plain member asking for the pending list.
+    const db = await seededWorld();
+    db.raw.exec(
+      "INSERT INTO workspaces (id, slug, name, created_at) VALUES ('ws-locale', 'acme', 'Acme', '2026-01-01T00:00:00.000Z')",
+    );
+    db.raw.exec(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       SELECT 'ws-locale', id, 'member', '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = 'mallory'`,
+    );
+    const env = makeEnv(db);
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/api/members", {
+      new Request("https://worker.local/dashboard/acme/api/members/invites", {
         headers: {
           Cookie: `${SESSION_COOKIE}=${await cookie("mallory")}; ${LOCALE_COOKIE}=zh_CN`,
           Accept: "application/json",
         },
       }),
-      env,
+      { ...env, WORKSPACE_TENANT_MODE: "strict" } as Env,
     );
     expect(res.status).toBe(403);
     const html = await res.text();

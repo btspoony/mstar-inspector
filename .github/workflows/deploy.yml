@@ -59,7 +59,6 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}   # account id is public — configured as a variable
-      ADMIN_LOGINS: ${{ vars.ADMIN_LOGINS }}   # login names are public identity — configured as a variable, not a secret
       OAUTH_CLIENT_ID: ${{ vars.OAUTH_CLIENT_ID }}   # client id is not sensitive — configured as a variable
       OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
       DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
@@ -119,27 +118,6 @@ jobs:
       - name: Build SPA
         run: bun run build:spa
 
-      # Runs before the FIRST wrangler invocation of any kind (`whoami` below,
-      # then every `wrangler secret bulk` and the final `wrangler deploy`): the
-      # secret write creates and deploys a Worker version, so a gate placed
-      # after it would already have published a version without the required
-      # binding — "fail before deploy" has to mean before the first one.
-      - name: Verify required ADMIN_LOGINS variable
-        run: |
-          # The RUNTIME rule itself, imported (src/dashboard/users.ts
-          # parseAdminLogins) — not a shell approximation of it: split on
-          # commas, JS String.trim() each entry, drop empties. Unset / blank /
-          # whitespace-only / comma-only / U+FEFF+"," all parse to zero logins
-          # and must fail closed BEFORE any deploy-capable step.
-          : "${ADMIN_LOGINS:?required — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (login names are public identity, so a variable, not a secret)}"
-          bun -e '
-            import { parseAdminLogins } from "./src/dashboard/users.ts";
-            if (parseAdminLogins(process.env.ADMIN_LOGINS).length === 0) {
-              console.error("::error::ADMIN_LOGINS is blank, whitespace-only or comma-only — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (e.g. alice,bob)");
-              process.exit(1);
-            }
-          '
-
       - name: Verify Cloudflare account
         run: |
           test -n "$CLOUDFLARE_ACCOUNT_ID"   # account id is a variable — must be configured
@@ -189,14 +167,11 @@ jobs:
         env:
           TENANT_MODE: ${{ steps.tenant.outputs.mode }}
         run: |
-          # ADMIN_LOGINS comes from the GitHub Actions variable and is injected
-          # here as a plain Worker var (`--var NAME:VALUE`, wrangler 4.147.0
-          # splits on the FIRST colon only, so a comma-separated login list
-          # survives intact). keep_vars: true in wrangler.jsonc still preserves
-          # the other dashboard-managed var (REVIEW_ENABLED).
+          # keep_vars: true in wrangler.jsonc preserves the dashboard-managed
+          # plaintext var (REVIEW_ENABLED).
           # WORKSPACE_TENANT_MODE is the dispatch input resolved above — the
           # same SHA can be replayed with the other mode.
-          bunx wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS" --var "WORKSPACE_TENANT_MODE:$TENANT_MODE" 2>&1 | tee deploy.log
+          bunx wrangler deploy --var "WORKSPACE_TENANT_MODE:$TENANT_MODE" 2>&1 | tee deploy.log
           # The deploy command succeeded: this run's SHA is what it shipped.
           # The summary key is derived from this step's outcome in the
           # always-run summary step, never from the version-id capture below.
@@ -276,43 +251,6 @@ jobs:
       # pre-deploy gate approved; the same question is asked against it.
       - name: Assert zero orphan Apps (post-deploy)
         run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-db
-
-      # ADMIN_LOGINS is a plain Worker var injected by this workflow's
-      # `wrangler deploy --var ADMIN_LOGINS:…` (login names are public
-      # identity, hence a variable, not a secret). `wrangler secret list`
-      # cannot observe it, so read the Worker settings instead; the observed
-      # value is fed through the RUNTIME parser itself (parseAdminLogins in
-      # src/dashboard/users.ts) rather than a shell approximation of it. This
-      # is an ASSERTION: the deploy is already live (containers/versions have
-      # no pre-flight dry run), so a missing/blank value must fail the run red
-      # rather than warn.
-      - name: "Assert ADMIN_LOGINS is set on the deployed Worker (first-login admin fallback)"
-        run: |
-          # Transport failure (no payload at all) FAILS the job: we cannot
-          # positively confirm the value, and a silent pass here would turn a
-          # flaky API read into a false green for exactly the check that guards
-          # the first-login-becomes-admin fallback.
-          settings=$(curl -sf --max-time 30 --connect-timeout 5 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/mstar-inspector/settings") || {
-            echo "::error::could not read the deployed Worker settings (transport failure) — cannot confirm ADMIN_LOGINS; re-run the workflow"
-            exit 1
-          }
-          # A 200 with a malformed / non-success body is NOT a positively
-          # observed set: never read a parse failure as a configured value.
-          if ! printf '%s' "$settings" | jq -e '.success == true' >/dev/null 2>&1; then
-            echo "::error::deployed Worker settings payload failed the jq success check (malformed JSON or success != true) — cannot confirm ADMIN_LOGINS"
-            exit 1
-          fi
-          value=$(printf '%s' "$settings" \
-            | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")')
-          ADMIN_LOGINS_DEPLOYED="$value" bun -e '
-            import { parseAdminLogins } from "./src/dashboard/users.ts";
-            if (parseAdminLogins(process.env.ADMIN_LOGINS_DEPLOYED).length === 0) {
-              console.error("::error::ADMIN_LOGINS is unset or blank/whitespace-only/comma-only on the deployed Worker — set the GitHub Actions variable ADMIN_LOGINS (comma-separated GitHub logins) and re-run the deploy; with an empty dashboard_users table the first OAuth login would become admin (self-disarming once any user row exists). See docs/deploy.md § 6.");
-              process.exit(1);
-            }
-          '
-          echo "ADMIN_LOGINS is set on the deployed Worker — the first-login admin fallback is disarmed"
 
       - name: Upload deploy evidence artifacts
         uses: actions/upload-artifact@v7

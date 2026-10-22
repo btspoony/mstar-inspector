@@ -48,8 +48,6 @@ export const en = {
       unknown: "unknown",
     },
     error: {
-      deniedTitle: "Access denied",
-      deniedBody: "This deployment is invite-only. Ask an admin to add {login}.",
       removedTitle: "Access removed",
       removedBody: "Your dashboard access was removed. Ask an admin to re-invite {login}.",
       forbiddenTitle: "Forbidden",
@@ -78,16 +76,19 @@ export const en = {
     heading: "Sign in",
     description: "Use your GitHub account to access the console.",
     signIn: "Sign in with GitHub",
-    inviteOnly: "This deployment is invite-only — ask an admin to add your GitHub login.",
+    /** Plan 97: sign-in is open — no access list stands between here and a workspace. */
+    openAccess: "Any GitHub account can sign in — create a workspace, or accept an invitation.",
   },
   notice: {
     success: {
-      invited: "Invited {login} — they can sign in with GitHub now.",
+      invited: "Invited {login} — they can accept from this workspace now.",
       removedMember: "Removed {login}.",
       roleChanged: "{login} is now {role}.",
+      revoked: "Revoked the invitation for {login}.",
     },
     warn: {
       alreadyMember: "{login} is already a member — nothing changed.",
+      invitePending: "{login} already has a pending invitation — nothing changed.",
     },
     error: {
       enterLogin: "Enter a GitHub login to invite.",
@@ -95,6 +96,7 @@ export const en = {
       inviteFailed: "Could not invite {login} — try again.",
       roleChangeFailed: "Could not change {login}'s role — the member list just changed, try again.",
       removeFailed: "Could not remove {login} — the member list just changed, try again.",
+      revokeFailed: "Could not revoke {login}'s invitation — try again.",
     },
   },
   /** App detail page (App detail IA): the two-tab shell. */
@@ -179,13 +181,14 @@ export const en = {
   },
   members: {
     heading: "Members",
-    inviteOnlyNotice: "Only the GitHub users listed here can sign in to this deployment.",
+    visibleToMembers: "Everyone in this workspace can see who is a member.",
     inviteLabel: "Invite by GitHub login",
     invitePlaceholder: "e.g. octocat",
     inviteButton: "Invite member",
     roleLabel: "Role",
     tableLogin: "GitHub login",
     tableJoined: "Joined",
+    tableExpires: "Expires",
     tableActions: "Actions",
     actionsMenuLabel: "Open actions for {login}",
     makeAdmin: "Change to admin",
@@ -197,13 +200,37 @@ export const en = {
     confirmRemoveBody:
       "{login} will no longer be able to sign in — their session stops working right away. Apps they created stay in place and remain manageable by admins.",
     remove: "Remove",
+    pendingHeading: "Pending invitations",
+    confirmRevokeTitle: "Revoke {login}'s invitation?",
+    confirmRevokeBody: "{login} will not be able to accept this invitation. They can be invited again later.",
+    revoke: "Revoke",
     you: "you",
-    adminOnly: "This page is restricted to dashboard admins.",
-    roleAdmin: "admin",
-    roleMember: "member",
+    /** Workspace role vocabulary (`workspace_members.role`), including owner. */
+    role: {
+      owner: "owner",
+      admin: "admin",
+      member: "member",
+    },
     /** Composed empty state — no-action variant (the invite form is the path). */
     emptyTitle: "No members yet",
     emptyDescription: "Invite the first member with the form above.",
+    emptyDescriptionMember: "This workspace has no other members yet.",
+  },
+  /**
+   * Workspace creation — the signed-in landing for a login that belongs to no
+   * workspace yet (plan 97 T3). Sign-in joins nobody, so this is the only path
+   * into a first workspace besides accepting an invitation.
+   */
+  workspace: {
+    setupHeading: "Create a workspace",
+    setupDescription:
+      "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",
+    nameLabel: "Workspace name",
+    namePlaceholder: "e.g. Acme",
+    create: "Create workspace",
+    nameRequired: "Enter a workspace name.",
+    nameTooLong: "Use at most {max} characters.",
+    createFailed: "Could not create the workspace — try again.",
   },
   settings: {
     /**

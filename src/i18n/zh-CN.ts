@@ -38,8 +38,6 @@ export const zhCN: Dictionary = {
       unknown: "未知",
     },
     error: {
-      deniedTitle: "访问被拒绝",
-      deniedBody: "此部署仅限受邀成员。请让管理员添加 {login}。",
       removedTitle: "访问已移除",
       removedBody: "你的控制台访问已被移除。请让管理员重新邀请 {login}。",
       forbiddenTitle: "禁止访问",
@@ -65,16 +63,19 @@ export const zhCN: Dictionary = {
     heading: "登录",
     description: "使用你的 GitHub 账号访问控制台。",
     signIn: "使用 GitHub 登录",
-    inviteOnly: "此部署仅限受邀成员 — 请让管理员添加你的 GitHub 登录名。",
+    /** plan 97：登录开放 —— 没有访问名单挡在工作区之前。 */
+    openAccess: "任意 GitHub 账号均可登录 —— 创建工作区，或接受邀请。",
   },
   notice: {
     success: {
-      invited: "已邀请 {login} — 现在可以使用 GitHub 登录了。",
+      invited: "已邀请 {login} — 对方现在可以在本工作区接受邀请。",
       removedMember: "已移除 {login}。",
       roleChanged: "{login} 现在是{role}。",
+      revoked: "已撤销给 {login} 的邀请。",
     },
     warn: {
       alreadyMember: "{login} 已是成员 — 未做更改。",
+      invitePending: "{login} 已有待接受的邀请 — 未做更改。",
     },
     error: {
       enterLogin: "请输入要邀请的 GitHub 登录名。",
@@ -82,6 +83,7 @@ export const zhCN: Dictionary = {
       inviteFailed: "无法邀请 {login} — 请重试。",
       roleChangeFailed: "无法更改 {login} 的角色 — 成员列表刚刚发生变化，请重试。",
       removeFailed: "无法移除 {login} — 成员列表刚刚发生变化，请重试。",
+      revokeFailed: "无法撤销给 {login} 的邀请 — 请重试。",
     },
   },
   /** App 详情页（App detail IA）：双标签页外壳。 */
@@ -162,17 +164,18 @@ export const zhCN: Dictionary = {
   },
   members: {
     heading: "成员",
-    inviteOnlyNotice: "仅列表中的 GitHub 用户可登录本平台。",
+    visibleToMembers: "本工作区的所有成员都能看到成员名单。",
     inviteLabel: "按 GitHub 登录名邀请",
     invitePlaceholder: "例如 octocat",
     inviteButton: "邀请成员",
     roleLabel: "角色",
     tableLogin: "GitHub 登录名",
     tableJoined: "加入时间",
+    tableExpires: "过期时间",
     tableActions: "操作",
     actionsMenuLabel: "打开 {login} 的操作菜单",
     makeAdmin: "改为管理员",
-    makeMember: "改为成员",
+    makeMember: "改为普通成员",
     confirmRoleTitle: "更改 {login} 的角色？",
     confirmRoleBody: "{login} 将成为{role}。更改立即生效。",
     confirmRoleButton: "更改角色",
@@ -180,13 +183,35 @@ export const zhCN: Dictionary = {
     confirmRemoveBody:
       "{login} 将无法再登录 — 其会话立即失效。他们创建的 App 保留，管理员仍可管理。",
     remove: "移除",
+    pendingHeading: "待接受的邀请",
+    confirmRevokeTitle: "撤销对 {login} 的邀请？",
+    confirmRevokeBody: "{login} 将无法接受此邀请。之后可以重新邀请。",
+    revoke: "撤销",
     you: "你",
-    adminOnly: "此页面仅限控制台管理员访问。",
-    roleAdmin: "管理员",
-    roleMember: "成员",
+    /** 工作区角色词表（`workspace_members.role`），含 owner。 */
+    role: {
+      owner: "所有者",
+      admin: "管理员",
+      member: "成员",
+    },
     /** 组合式空态——无动作变体（上方邀请表单即路径）。 */
     emptyTitle: "还没有成员",
     emptyDescription: "使用上方表单邀请第一位成员。",
+    emptyDescriptionMember: "本工作区目前没有其他成员。",
+  },
+  /**
+   * 工作区创建 —— 尚未加入任何工作区的登录用户的落地页（plan 97 T3）：
+   * 登录不会自动加入工作区，除了接受邀请，这里是进入首个工作区的唯一路径。
+   */
+  workspace: {
+    setupHeading: "创建工作区",
+    setupDescription: "你还不属于任何工作区。创建后你将成为它的所有者，之后可以邀请队友。",
+    nameLabel: "工作区名称",
+    namePlaceholder: "例如 Acme",
+    create: "创建工作区",
+    nameRequired: "请输入工作区名称。",
+    nameTooLong: "最多 {max} 个字符。",
+    createFailed: "创建工作区失败，请重试。",
   },
   settings: {
     /** (AD-591) 分组 eyebrow 标签——应用信息/状态区与配置区（双语原子）。 */

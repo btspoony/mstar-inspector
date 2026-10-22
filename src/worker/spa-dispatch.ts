@@ -20,7 +20,11 @@ import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
-import { strictWorkspaceAppsBase, strictWorkspaceBoot } from "../dashboard/index";
+import {
+  strictWorkspaceAppsBase,
+  strictWorkspaceBoot,
+  pendingInvitesForLogin,
+} from "../dashboard/index";
 import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
@@ -117,11 +121,22 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   if (auth.kind === "redirect") return c.redirect(auth.location, 302);
   // `/dashboard` (the root workbench) is mode-independent, but its first data
   // read derives the base from the pathname — the retired legacy App family —
-  // so under `strict` it is a dead end. Send it to the sole workspace's Apps
-  // page (the same target the OAuth callback and the login bounce use);
-  // unresolvable keeps today's shell. `/index.html` and the login page never
-  // take this branch.
-  if (c.req.path === "/dashboard") {
+  // so under `strict` it is a dead end. Send it to the workspace Apps page (the
+  // same target the OAuth callback and the login bounce use). The boot extras
+  // are resolved FIRST so a login with NO workspace keeps today's shell instead
+  // of being sent to a page that answers the outsider 404: that shell is where
+  // workspace creation lives (plan 97 AC1). `/index.html` and the login page
+  // never take the redirect branch.
+  const route = matchSpaRoute(c.req.path);
+  const routeSlug = route !== null && "workspaceSlug" in route ? route.workspaceSlug : undefined;
+  const extras =
+    auth.boot.login === null || route?.page === "login"
+      ? {}
+      : await strictWorkspaceBoot(c.env, auth.boot.login);
+  // The redirect target keeps the resolver that warns when a strict deployment
+  // cannot name its workspace (that warning is the operator signal for the
+  // landing). A login with no workspace stays on the shell either way.
+  if (c.req.path === "/dashboard" && extras.needsWorkspace !== true) {
     const workspaceBase = await strictWorkspaceAppsBase(c.env);
     if (workspaceBase !== null) return c.redirect(workspaceBase, 302);
   }
@@ -139,12 +154,13 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // addressed directly (the SPA router then reads the real pathname), so it
   // takes the same boot. The login page renders no sidebar, and `/dashboard`
   // either redirected above or has no sole workspace to name.
-  const route = matchSpaRoute(c.req.path);
-  const routeSlug = route !== null && "workspaceSlug" in route ? route.workspaceSlug : undefined;
-  const extras =
+  // The invitee's discovery surface: every live pending invitation for this
+  // login, so an invited outsider sees a path to accept without knowing the
+  // workspace's ref (they are not a member yet, so no member list names it).
+  const pendingInvites =
     auth.boot.login === null || route?.page === "login"
-      ? {}
-      : await strictWorkspaceBoot(c.env, auth.boot.login);
+      ? []
+      : await pendingInvitesForLogin(c.env, auth.boot.login);
   // Absent fields add nothing, so `off` and a slug-less deployment keep the
   // pre-existing boot (and its JSON key order) byte-identical.
   const boot: SpaBoot = {
@@ -153,6 +169,8 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
       ? {}
       : { workspaceSlug: routeSlug ?? extras.workspaceSlug },
     ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
+    ...(extras.needsWorkspace === true ? { needsWorkspace: true } : {}),
+    ...(pendingInvites.length === 0 ? {} : { pendingInvites }),
   };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   if (c.req.method === "HEAD") {

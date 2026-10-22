@@ -19,7 +19,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -363,5 +363,59 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
       );
     }
     expect(asObject(production.vars).WORKSPACE_TENANT_MODE).toBe("off");
+  });
+
+  /**
+   * `env.production.vars` is the plain-var roster for prod. Plan 97 T3 removed
+   * the deployment allowlist, so the ONLY prod var left is the tenant read mode
+   * — a config var that a deploy re-supplies must not quietly come back as a
+   * half-configured bootstrap list.
+   */
+  test("env.production.vars carries exactly the tenant mode", () => {
+    expect(Object.keys(asObject(production.vars)).sort()).toEqual(["WORKSPACE_TENANT_MODE"]);
+  });
+});
+
+/**
+ * The deployment allowlist is GONE end to end (plan 97 T3, issue I-000064):
+ * sign-in no longer consults a list of blessed logins, so a surviving reference
+ * anywhere in the shipped code, the tests, the workflows or the docs would be a
+ * second, undocumented authority. `.changes/unreleased/*` is release history
+ * and is deliberately NOT scanned.
+ */
+describe("no deployment allowlist survives (plan 97 T3)", () => {
+  /**
+   * The retired allowlist var name, assembled from fragments so THIS file does
+   * not match its own scan — a grep-assertion that trips on itself proves
+   * nothing.
+   */
+  const RETIRED_VAR = ["ADMIN", "LOGINS"].join("_");
+
+  const SCANNED_ROOTS = ["src", "tests", "docs"] as const;
+  const SCANNED_FILES = [
+    ".github/workflows/deploy.yml",
+    ".github/workflows/deploy-prod.yml",
+    "wrangler.jsonc",
+    ".env.example",
+    "README.md",
+    "README_CN.md",
+  ] as const;
+
+  function walk(dir: string): string[] {
+    return readdirSync(join(REPO_ROOT, dir), { withFileTypes: true }).flatMap((entry) => {
+      const path = `${dir}/${entry.name}`;
+      return entry.isDirectory() ? walk(path) : [path];
+    });
+  }
+
+  test(`${RETIRED_VAR} has zero references in src/, tests/, docs/, the workflows and the deploy config`, () => {
+    const files = [...SCANNED_ROOTS.flatMap(walk), ...SCANNED_FILES];
+    const offenders = files.filter((path) =>
+      readFileSync(join(REPO_ROOT, path), "utf8").includes(RETIRED_VAR),
+    );
+    expect(
+      offenders,
+      `${RETIRED_VAR} is retired (plan 97 T3): sign-in is unconditional, so nothing may still read or document an allowlist`,
+    ).toEqual([]);
   });
 });

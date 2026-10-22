@@ -29,7 +29,7 @@ describe("login SPA face (A3)", () => {
     expect(loginPage).toContain("<GitHubMark />");
     expect(loginPage).toContain('{t(locale, "login.signIn")}');
     expect(loginPage).toContain('{t(locale, "login.description")}');
-    expect(loginPage).toContain('{t(locale, "login.inviteOnly")}');
+    expect(loginPage).toContain('{t(locale, "login.openAccess")}');
   });
 
   test("centered-card reinforced form: wordmark echo + concise heading card", () => {
@@ -112,11 +112,10 @@ describe("login SSR face sync (A3 dual-track)", () => {
   });
 
   test("auth-journey faces render the centered-card language with the alert role intact", async () => {
-    const { deniedPage, removedPage, forbiddenPage, errorPage } = await import(
+    const { removedPage, forbiddenPage, errorPage } = await import(
       "../../src/dashboard/views"
     );
     const faces: [string, string][] = [
-      ["denied", deniedPage("octocat")],
       ["removed", removedPage("octocat")],
       ["forbidden", forbiddenPage("octocat")],
       ["error", errorPage("boom")],

@@ -5,6 +5,29 @@
 
 export type Role = "admin" | "member";
 
+/** A workspace member's role (migration 0026 CHECK domain). */
+export type WorkspaceRole = "owner" | "admin" | "member";
+
+/** One row of the workspace member list (`GET /:ref/api/members`). */
+export type MemberRow = {
+  id: string;
+  github_login: string;
+  role: WorkspaceRole;
+  created_at: string;
+};
+
+/** The member-list payload: the caller's own role + every workspace member. */
+export type MembersPayload = { viewer: { role: WorkspaceRole }; members: MemberRow[] };
+
+/** One live pending invite (`GET /:ref/api/members/invites`). */
+export type InviteRow = {
+  id: string;
+  github_login: string;
+  role: Role;
+  created_at: string;
+  expires_at: string;
+};
+
 export type InsightsSearch = { window: string; repo: string };
 
 /**
@@ -81,13 +104,6 @@ export function insightsRepoOptions(repos: readonly string[], current: string): 
   if (current !== "") set.add(current);
   return [...set].sort();
 }
-
-export type MemberRow = {
-  id: string;
-  github_login: string;
-  role: Role;
-  created_at: string;
-};
 
 export type AppsPayload = {
   viewer: { login: string; role: Role };
@@ -412,8 +428,9 @@ export type ModelOptionGroup = {
 
 export type ModelsPayload = { groups: ModelOptionGroup[] };
 
-export function canViewMembers(role: Role | null): boolean {
-  return role === "admin";
+/** The member list is visible to every member; the manager actions are not. */
+export function canInviteMembers(role: WorkspaceRole | null): boolean {
+  return role === "owner" || role === "admin";
 }
 
 /**
@@ -651,15 +668,27 @@ export function appDetailSearchQuery(search: AppDetailSearch): string {
   return query === "" ? "" : `?${query}`;
 }
 
-export function parseMembers(data: unknown): MemberRow[] | null {
-  if (!isRecord(data) || !Array.isArray(data.members)) return null;
+/** The role vocabulary of `workspace_members.role` (migration 0026 CHECK). */
+function isWorkspaceRole(value: unknown): value is WorkspaceRole {
+  return value === "owner" || value === "admin" || value === "member";
+}
+
+/**
+ * `GET /:ref/api/members` — the caller's own workspace role plus the member
+ * list. A drifted row (unknown role) fails the parse instead of rendering a
+ * role the server never grants.
+ */
+export function parseMembers(data: unknown): MembersPayload | null {
+  if (!isRecord(data) || !isRecord(data.viewer) || !Array.isArray(data.members)) return null;
+  const viewerRole = data.viewer.role;
+  if (!isWorkspaceRole(viewerRole)) return null;
   const members: MemberRow[] = [];
   for (const row of data.members) {
     if (!isRecord(row)) return null;
     if (typeof row.id !== "string" || typeof row.github_login !== "string" || typeof row.created_at !== "string") {
       return null;
     }
-    if (row.role !== "admin" && row.role !== "member") return null;
+    if (!isWorkspaceRole(row.role)) return null;
     members.push({
       id: row.id,
       github_login: row.github_login,
@@ -667,7 +696,36 @@ export function parseMembers(data: unknown): MemberRow[] | null {
       created_at: row.created_at,
     });
   }
-  return members;
+  return { viewer: { role: viewerRole }, members };
+}
+
+/**
+ * `GET /:ref/api/members/invites` — the live pending invites. An invite role is
+ * `admin` or `member` only (`owner` is never invitable, migration 0028).
+ */
+export function parseInvites(data: unknown): InviteRow[] | null {
+  if (!isRecord(data) || !Array.isArray(data.invites)) return null;
+  const invites: InviteRow[] = [];
+  for (const row of data.invites) {
+    if (!isRecord(row)) return null;
+    if (
+      typeof row.id !== "string" ||
+      typeof row.github_login !== "string" ||
+      typeof row.created_at !== "string" ||
+      typeof row.expires_at !== "string"
+    ) {
+      return null;
+    }
+    if (row.role !== "admin" && row.role !== "member") return null;
+    invites.push({
+      id: row.id,
+      github_login: row.github_login,
+      role: row.role,
+      created_at: row.created_at,
+      expires_at: row.expires_at,
+    });
+  }
+  return invites;
 }
 
 export function parseApps(data: unknown): AppsPayload | null {
