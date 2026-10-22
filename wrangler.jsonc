@@ -272,12 +272,12 @@
           "custom_domain": true
         }
       ],
-      // WORKSPACE_TENANT_MODE is the migration 0026 tenant read mode: `off`
-      // is the safe default for a manual deploy — both deploy workflows
-      // override it with `--var WORKSPACE_TENANT_MODE:$TENANT_MODE`, which is
-      // how the same artifact is replayed as `strict` (Deploy B).
+      // DEPLOYMENT_MODE is the deployment shape: `self-hosted` or `saas`, with
+      // no default — an unset/empty/typo value fails loud at startup. Both
+      // deploy workflows pass `--var DEPLOYMENT_MODE:saas`; this block is the
+      // manual-deploy value for the SaaS production instance.
       "vars": {
-        "WORKSPACE_TENANT_MODE": "off"
+        "DEPLOYMENT_MODE": "saas"
       }
     }
   }

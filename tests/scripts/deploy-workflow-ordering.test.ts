@@ -6,14 +6,16 @@
  * idempotent `0027` backfill and the zero-orphan abort gate all run BEFORE the
  * first deploy-capable step — not merely before the final `wrangler deploy`.
  *
- * Also pinned here: replay identity is bound to the SHA Deploy A shipped (not
- * to whatever the ref points at now), the container-digest comparison is
- * reported, the routine (`push` / `release`) arm takes its tenant mode from the
- * steady-state variable instead of hardcoding `off`, and the always-run summary
- * derives its status keys from the deploy steps' outcomes — never from the
- * non-fatal version-id capture. The summary pins assert the CONTENT the step
- * actually writes into `$GITHUB_STEP_SUMMARY` (the step body is executed), not
- * the markdown source shape.
+ * Also pinned here: the ref-identity assertion still runs before every
+ * deploy-capable step (the tenant-mode rollout that needed a replay binding is
+ * gone; a moved tag/branch must never deploy), the container-digest comparison
+ * is reported, the last version-creating step binds `DEPLOYMENT_MODE` (the one
+ * remaining deployment-shape switch), no deploy command passes the retired
+ * tenant-mode var, and the always-run summary derives its status keys from the
+ * deploy steps' outcomes — never from the non-fatal version-id capture. The
+ * summary pins assert the CONTENT the step actually writes into
+ * `$GITHUB_STEP_SUMMARY` (the step body is executed), not the markdown source
+ * shape.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -138,34 +140,6 @@ function runStep(
   }
 }
 
-/** The `workflow_dispatch` input defaults — the values Actions supplies for a no-field dispatch. */
-function dispatchDefaults(rel: string): Record<string, string> {
-  const wf = parseWorkflow(rel);
-  const dispatch = (wf["true"] ?? wf.on)?.workflow_dispatch;
-  expect(dispatch, `${rel}: no workflow_dispatch trigger`).toBeDefined();
-  const inputs: Record<string, { default?: unknown }> = dispatch.inputs ?? {};
-  const defaults: Record<string, string> = {};
-  for (const [name, spec] of Object.entries(inputs)) {
-    defaults[name] = String(spec.default ?? "");
-  }
-  return defaults;
-}
-
-/**
- * The env Actions hands a step for one trigger shape: the step's OWN `env:`
- * map, with every `${{ … }}` expression resolved from that shape's context.
- * Feeding the values in by hand instead would test the resolver while the
- * wiring that supplies it stayed unpinned — which is exactly how I-000070
- * shipped green (I-000083).
- */
-function stepEnv(step: Step, ctx: Record<string, string | undefined>): Record<string, string> {
-  const resolved: Record<string, string> = {};
-  for (const [key, raw] of Object.entries(step.env ?? {})) {
-    resolved[key] = raw.replace(/\$\{\{\s*([\w.]+)\s*\}\}/g, (_match, expr: string) => ctx[expr] ?? "");
-  }
-  return resolved;
-}
-
 /** Steps that publish a Worker version (a `secret bulk` write does too). */
 const DEPLOY_CAPABLE = /bunx wrangler (deploy|secret bulk)\b/;
 /**
@@ -173,31 +147,28 @@ const DEPLOY_CAPABLE = /bunx wrangler (deploy|secret bulk)\b/;
  * traffic is the version made by the LAST of these, whatever its kind.
  */
 const VERSION_CREATING = /bunx wrangler (deploy|secret bulk|versions)\b/;
-/** The var that decides which tenant face the created version serves. */
-const MODE_VAR = '--var "WORKSPACE_TENANT_MODE:$TENANT_MODE"';
+/** The deployment-shape var the serving version must bind. */
+const DEPLOYMENT_VAR = '--var "DEPLOYMENT_MODE:saas"';
+/** The retired tenant-mode var, assembled so this file does not match its own scan. */
+const RETIRED_VAR = ["WORKSPACE", "TENANT", "MODE"].join("_");
 const GATE = "Assert zero orphan Apps (pre-deploy gate)";
 const BACKFILL = "Re-run workspace backfill (0027, idempotent)";
-const REPLAY = "Assert replay identity";
 
 /**
  * The version that serves a deploy is created by the LAST version-creating
- * command, and it must bind the resolved tenant mode. `wrangler secret bulk`
- * cannot carry `--var` (a named environment rejects `keep_vars`, so the bulk
- * version always falls back to the config default `off`), so the last such
- * command has to be a `wrangler deploy` that passes the var.
+ * command, and it must bind the deployment shape. `wrangler secret bulk`
+ * cannot carry `--var` (a named environment rejects `keep_vars`), so the last
+ * such command has to be a `wrangler deploy` that passes the var.
  */
-function assertServingStepBindsMode(file: string, steps: Step[]): void {
+function assertServingStepBindsDeploymentMode(file: string, steps: Step[]): void {
   const versionCreating = steps.filter((s) => VERSION_CREATING.test(s.run ?? ""));
   expect(versionCreating.length, `${file}: no version-creating step found`).toBeGreaterThan(0);
   const last = versionCreating[versionCreating.length - 1]!;
   expect(last.run, `${file}: last version-creating step "${last.name}" is not a mode-binding deploy`).toContain(
     "bunx wrangler deploy",
   );
-  expect(last.run, `${file}: last version-creating step "${last.name}" drops the tenant mode var`).toContain(
-    MODE_VAR,
-  );
-  expect(last.env?.TENANT_MODE, `${file}: the serving deploy needs the resolved mode`).toBe(
-    "${{ steps.tenant.outputs.mode }}",
+  expect(last.run, `${file}: last version-creating step "${last.name}" drops the deployment mode var`).toContain(
+    DEPLOYMENT_VAR,
   );
 }
 
@@ -215,7 +186,8 @@ const WORKFLOWS = [
   {
     file: "deploy.yml",
     migrations: "Apply D1 migrations (remote)",
-    replayNeedles: ["HEAD_SHA", "EXPECTED_DEPLOY_SHA"],
+    refIdentity: "Assert checkout identity",
+    refNeedles: ["HEAD_SHA"],
     // Staging's `wrangler deploy` IS the last version-creating step, so the
     // summary takes no separate serving outcome.
     serving: undefined,
@@ -223,14 +195,15 @@ const WORKFLOWS = [
   {
     file: "deploy-prod.yml",
     migrations: "Apply prod D1 migrations (remote)",
-    replayNeedles: ["refs/tags/", "EXPECTED_DEPLOY_SHA"],
-    // Production re-deploys the mode-bearing version in a LATER step: the
+    refIdentity: "Assert tag identity",
+    refNeedles: ["refs/tags/", "TAG_SHA"],
+    // Production re-deploys the deployment-shape version in a LATER step: the
     // summary must consume that outcome too (I-000071).
-    serving: { id: "serving", name: "Deploy serving version (prod, mode var)" },
+    serving: { id: "serving", name: "Deploy serving version (prod)" },
   },
 ] as const;
 
-for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
+for (const { file, migrations, refIdentity, refNeedles, serving } of WORKFLOWS) {
   describe(`${file} gate ordering`, () => {
     const steps = parseWorkflow(file).jobs.deploy.steps as Step[];
     const deployCapable = steps
@@ -252,158 +225,69 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
       }
     });
 
-    test("replay identity is delegated to the guard script, before every deploy-capable step", () => {
-      const index = steps.findIndex((s) => s.name === REPLAY);
-      expect(index, `${file}: replay-identity step is missing`).toBeGreaterThan(-1);
+    test("ref identity is asserted before every deploy-capable step", () => {
+      // The tenant-mode replay binding died with the mode; the REF IDENTITY
+      // assertion is what remains, and it applies to every run: a ref that
+      // moved between the approval and the deploy must never deploy.
+      const index = steps.findIndex((s) => s.name === refIdentity);
+      expect(index, `${file}: ref-identity step "${refIdentity}" is missing`).toBeGreaterThan(-1);
       const step = steps[index]!;
-      for (const needle of replayNeedles) {
-        expect(step.run, `${file}: replay step must resolve ${needle}`).toContain(needle);
+      for (const needle of refNeedles) {
+        expect(step.run, `${file}: ref-identity step must resolve ${needle}`).toContain(needle);
       }
-      // The strict binding decision belongs to the executed script, which takes
-      // the RESOLVER's replay intent — not the mode. A steady-state run serving
-      // `strict` from the variable must not be treated as Deploy B.
-      expect(step.run, `${file}: replay step must call the guard`).toContain(
-        'bash scripts/deploy-replay-guard.sh "$REPLAY" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA"',
-      );
-      expect(step.env?.REPLAY, `${file}: replay step needs the resolver's replay intent`).toBe(
-        "${{ steps.tenant.outputs.replay }}",
-      );
-      expect(step.env?.MODE, `${file}: the replay step must not key off the mode`).toBeUndefined();
-      expect(step.env?.EXPECTED_DEPLOY_SHA).toBe("${{ inputs.expected_deploy_sha }}");
+      expect(step.env?.RUN_SHA, `${file}: ref-identity step needs the run SHA`).toBe("${{ github.sha }}");
       for (const i of deployCapable) {
-        expect(i, `${file}: "${steps[i]!.name}" runs before the replay-identity assertion`).toBeGreaterThan(index);
+        expect(i, `${file}: "${steps[i]!.name}" runs before the ref-identity assertion`).toBeGreaterThan(index);
       }
     });
 
-    test("every real trigger shape resolves the mode, its warning, and the replay intent", () => {
-      // One executed case per shape GitHub actually creates. The step's OWN
-      // `env:` supplies the inputs — with `${{ }}` resolved from that shape's
-      // context — so the declared default, not a hand-fed value, is what a
-      // no-field dispatch gets (I-000083). The resolver's real `replay` output
-      // then feeds the guard step, exactly as `steps.tenant.outputs.replay` does.
-      const tenant = steps.find((s) => s.name === "Resolve tenant mode")!;
-      const guardStep = steps.find((s) => s.name === REPLAY)!;
+    test("ref identity EXECUTES: the tree it checks out passes, a moved ref reds before any deploy", () => {
+      // The property the deleted replay guard also carried: on a real repo the
+      // step compares the resolved ref with the run's SHA, and a disagreement
+      // must exit non-zero — a substring pin cannot see that.
+      const step = steps.find((s) => s.name === refIdentity)!;
+      const matching = runStep(
+        step,
+        { RUN_SHA: "@head", TAG: "@tag" },
+        {},
+        { withGit: true },
+      );
+      expect(matching.code, `${file}: a matching ref must pass\n${matching.out}`).toBe(0);
+      expect(matching.out, `${file}: a matching ref must not report an error`).not.toContain("::error::");
 
-      /** Resolve for one shape, then guard with the resolver's own replay intent. */
-      const run = (
-        shape: Record<string, string>,
-        steady: string,
-        guard: Record<string, string> = { EXPECTED_DEPLOY_SHA: "", RUN_SHA: "@head", TAG: "@tag" },
-      ) => {
-        const resolved = runStep(tenant, stepEnv(tenant, { ...shape, "vars.WORKSPACE_TENANT_MODE": steady }));
-        const field = (key: string) => new RegExp(`^${key}=(.*)$`, "m").exec(resolved.output)?.[1];
-        expect(resolved.code, `${file}: resolution failed\n${resolved.out}`).toBe(0);
-        const replay = field("replay")!;
-        const guarded = runStep(guardStep, { REPLAY: replay, ...guard }, {}, { withGit: true });
-        return {
-          mode: field("mode"),
-          replay,
-          change: resolved.summary.trim(),
-          warned: resolved.out.includes("::warning::"),
-          code: guarded.code,
-          out: guarded.out,
-        };
-      };
+      const moved = runStep(
+        step,
+        { RUN_SHA: "f".repeat(40), TAG: "@tag" },
+        {},
+        { withGit: true },
+      );
+      expect(moved.code, `${file}: a moved ref must red\n${moved.out}`).toBe(1);
+      expect(moved.out, `${file}: a moved ref must say why`).toContain("::error::");
+    });
 
-      // A dispatch nobody filled in carries the DECLARED DEFAULT
-      // (`on.workflow_dispatch.inputs.tenant_mode.default`); a `push` /
-      // `release: published` event carries no `inputs` context at all.
-      const defaults = dispatchDefaults(file);
-      const noFields = { "inputs.tenant_mode": defaults.tenant_mode ?? "" };
-      const routineShapes: { label: string; ctx: Record<string, string> }[] =
-        file === "deploy-prod.yml"
-          ? [
-              // the Release workflow's `gh workflow run deploy-prod.yml --ref <tag>`: no fields
-              { label: "release-workflow dispatch (no fields)", ctx: noFields },
-              { label: "release: published", ctx: {} },
-            ]
-          : [
-              { label: "push to main", ctx: {} },
-              { label: "workflow_dispatch with no fields", ctx: noFields },
-            ];
-
-      for (const { label, ctx } of routineShapes) {
-        // a strict installation survives an ordinary release/push
-        const strict = run(ctx, "strict");
-        expect(strict.mode, `${file}: ${label} demoted a strict installation`).toBe("strict");
-        expect(strict.replay, `${file}: ${label} must not demand a Deploy-A SHA`).toBe("none");
-        expect(strict.change, `${file}: ${label} reports a change it did not make`).toBe("tenant_mode_change=none");
-        expect(strict.warned, `${file}: ${label} warned on a steady strict deploy`).toBe(false);
-        expect(strict.code, `${file}: ${label} aborted a steady strict deploy\n${strict.out}`).toBe(0);
-
-        // no variable → off, and the unproven demotion is reported
-        const unset = run(ctx, "");
-        expect(unset.mode, `${file}: ${label} with no variable`).toBe("off");
-        expect(unset.replay).toBe("none");
-        expect(unset.warned, `${file}: ${label} demoted silently`).toBe(true);
-        expect(unset.change, `${file}: ${label} must record the unproven change`).toBe(
-          "tenant_mode_change=unproven->off",
+    test("no deploy command passes the retired tenant-mode var, and the shape var is the only one", () => {
+      // Scanned from the step bodies rather than the raw text so the assertion
+      // is about what a deploy actually hands wrangler. The repo-wide grep for
+      // the retired name lives in tests/contracts/wrangler-env-parity.test.ts.
+      const passedVars = steps.flatMap((s) =>
+        [...(s.run ?? "").matchAll(/--var\s+"?([A-Za-z_][A-Za-z0-9_]*):/g)].map((m) => m[1]!),
+      );
+      expect(passedVars, `${file}: a deploy still passes a mode var`).not.toContain(RETIRED_VAR);
+      expect(passedVars, `${file}: the deployment shape var is missing`).toContain("DEPLOYMENT_MODE");
+      for (const s of steps) {
+        expect(s.run ?? "", `${file}: step "${s.name}" names the retired var`).not.toContain(RETIRED_VAR);
+        expect(JSON.stringify(s.env ?? {}), `${file}: step "${s.name}" wires the retired var`).not.toContain(
+          RETIRED_VAR,
         );
       }
+    });
 
-      // The release path really is a no-field dispatch: it supplies no
-      // `-f tenant_mode`, so the declared default decides there. Reverting that
-      // default to `off` fails the "release-workflow dispatch" case above.
-      if (file === "deploy-prod.yml") {
-        const release = parseWorkflow("release.yml");
-        const dispatchStep = (release.jobs.release.steps as Step[]).find((s) =>
-          (s.run ?? "").includes("gh workflow run deploy-prod.yml"),
-        )!;
-        expect(dispatchStep, "release.yml no longer dispatches deploy-prod.yml").toBeDefined();
-        expect(dispatchStep.run, "release.yml must not pick a tenant mode").not.toMatch(/-f\s+tenant_mode/);
-        expect(defaults.tenant_mode, "the no-field dispatch default must be the non-deciding steady").toBe("steady");
-      }
-
-      // An EXPLICIT human dispatch: off and strict override the variable, and
-      // only an explicit strict is a replay.
-      const off = run({ "inputs.tenant_mode": "off" }, "strict");
-      expect(off.mode).toBe("off");
-      expect(off.replay).toBe("none");
-      expect(off.change).toBe("tenant_mode_change=none");
-      expect(off.warned).toBe(false);
-      expect(off.code).toBe(0);
-
-      const strictDispatch = run({ "inputs.tenant_mode": "strict" }, "");
-      expect(strictDispatch.mode).toBe("strict");
-      expect(strictDispatch.replay).toBe("required");
-      expect(
-        strictDispatch.code,
-        `${file}: a strict dispatch without the Deploy-A SHA must abort\n${strictDispatch.out}`,
-      ).toBe(1);
-
-      // `steady` is the operator saying "the variable decides" — a steady-state
-      // deploy, never a replay: if it demanded a Deploy-A SHA every routine
-      // strict deploy would abort.
-      const steadyDispatch = run({ "inputs.tenant_mode": "steady" }, "strict");
-      expect(steadyDispatch.mode).toBe("strict");
-      expect(steadyDispatch.replay).toBe("none");
-      expect(steadyDispatch.warned).toBe(false);
-      expect(steadyDispatch.code, `${file}: steady + strict aborted\n${steadyDispatch.out}`).toBe(0);
-      expect(run({ "inputs.tenant_mode": "steady" }, "").change).toBe("tenant_mode_change=unproven->off");
-
-      // A SHA-ONLY dispatch: the operator fills `expected_deploy_sha` and leaves
-      // `tenant_mode` at its `steady` default — the shape that looks exactly
-      // like Deploy B. `steady` can SERVE `strict` from the variable, so the run
-      // must not deploy while silently skipping the Deploy-A binding (I-000089).
-      const shaOnly = run({ "inputs.tenant_mode": "steady" }, "strict", {
-        EXPECTED_DEPLOY_SHA: "@head",
-        RUN_SHA: "@head",
-        TAG: "@tag",
-      });
-      expect(shaOnly.mode).toBe("strict");
-      expect(shaOnly.replay).toBe("none");
-      expect(shaOnly.code, `${file}: a SHA-only dispatch deployed without binding it\n${shaOnly.out}`).toBe(1);
-      expect(shaOnly.out).toContain("was supplied but this run is not a strict replay");
-      expect(shaOnly.out).toContain("-f tenant_mode=strict");
-
-      // The ref identity assertion survives every non-replay shape
-      const moved = run({ "inputs.tenant_mode": "steady" }, "strict", {
-        EXPECTED_DEPLOY_SHA: "",
-        RUN_SHA: "f".repeat(40),
-        TAG: "@tag",
-      });
-      expect(moved.replay).toBe("none");
-      expect(moved.code, `${file}: a moved ref must still red`).toBe(1);
+    test("the dispatch carries no mode or replay input", () => {
+      const wf = parseWorkflow(file);
+      const dispatch = (wf["true"] ?? wf.on).workflow_dispatch;
+      expect(Object.keys(dispatch.inputs ?? {}).sort(), `${file}: dispatch inputs`).toEqual([
+        "expected_container_digest",
+      ]);
     });
 
     test("the summary delegates status to the script, fed by steps.deploy.outcome", () => {
@@ -425,19 +309,11 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
       expect(failed.summary, `${file}: a failed deploy certifies nothing`).toContain(
         `deploy_status=not-deployed\nrequested_sha=${sha}`,
       );
-      expect(failed.summary, `${file}: a failed deploy must not print a replay SHA`).not.toContain("deployed_sha=");
+      expect(failed.summary, `${file}: a failed deploy must not print a deployed SHA`).not.toContain("deployed_sha=");
     });
 
-    test("the mode step runs before every deploy-capable step", () => {
-      const tenant = steps.findIndex((s) => s.name === "Resolve tenant mode");
-      expect(tenant).toBeGreaterThan(-1);
-      for (const i of deployCapable) {
-        expect(tenant, `${file}: mode resolution must precede "${steps[i]!.name}"`).toBeLessThan(i);
-      }
-    });
-
-    test("the LAST version-creating step is a deploy that binds the resolved tenant mode", () => {
-      assertServingStepBindsMode(file, steps);
+    test("the LAST version-creating step is a deploy that binds the deployment mode", () => {
+      assertServingStepBindsDeploymentMode(file, steps);
     });
 
     test("the summary certifies a deployed SHA only when every version-creating deploy succeeded", () => {
@@ -459,7 +335,7 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
         `\${{ steps.${serving.id}.outcome }}`,
       );
 
-      // First deploy green, serving deploy failed → the SHA is NOT replayable.
+      // First deploy green, serving deploy failed → the SHA is NOT certified.
       const partial = runStep(summary, {
         DEPLOY_OUTCOME: "success",
         SERVING_OUTCOME: "failure",
@@ -471,7 +347,7 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
       );
       expect(partial.summary).not.toContain("deployed_sha=");
 
-      // Both green → the SHA is the replay source Deploy B needs.
+      // Both green → the SHA is what this run shipped.
       const both = runStep(summary, {
         DEPLOY_OUTCOME: "success",
         SERVING_OUTCOME: "success",
@@ -491,7 +367,7 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
       const version = "11111111-2222-3333-4444-555555555555";
       const emitted = runStep(
         evidence,
-        { TENANT_MODE: "off", EXPECTED_DIGEST: "", RUN_SHA: "e".repeat(40), DEPLOY_OUTCOME: "failure", SERVING_OUTCOME: "failure" },
+        { EXPECTED_DIGEST: "", RUN_SHA: "e".repeat(40), DEPLOY_OUTCOME: "failure", SERVING_OUTCOME: "failure" },
         { "version_id.txt": `${version}\n`, "image_digest.txt": `sha256:${"f".repeat(64)}\n` },
       );
       expect(emitted.code, `${file}: the evidence step must never fail the run`).toBe(0);
@@ -503,23 +379,23 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
 
     test("mutation: an appended bulk after the serving deploy, or a serving deploy without the var, fails the pin", () => {
       // The hazard this pin exists for: every bulk write deploys a version from
-      // the config default (`off`), so anything version-creating appended after
-      // the mode-binding deploy silently becomes the serving version.
+      // the config, so anything version-creating appended after the
+      // mode-binding deploy silently becomes the serving version.
       const src = readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8");
       const appended =
         src +
         '\n      - name: Late secret write\n        run: |\n          jq -n \'{}\' | bunx wrangler secret bulk\n';
       expect(appended).not.toBe(src);
       const appendedSteps = parseText(file, appended);
-      expect(() => assertServingStepBindsMode(file, appendedSteps)).toThrow();
+      expect(() => assertServingStepBindsDeploymentMode(file, appendedSteps)).toThrow();
 
       // and dropping the var from that last deploy leaves a serving version on
-      // the config default while the run summary claims a mode.
-      const lastIdx = src.lastIndexOf(MODE_VAR);
+      // whatever the config declares.
+      const lastIdx = src.lastIndexOf(DEPLOYMENT_VAR);
       expect(lastIdx).toBeGreaterThan(-1);
-      const stripped = src.slice(0, lastIdx) + src.slice(lastIdx + MODE_VAR.length);
+      const stripped = src.slice(0, lastIdx) + src.slice(lastIdx + DEPLOYMENT_VAR.length);
       expect(stripped).not.toBe(src);
-      expect(() => assertServingStepBindsMode(file, parseText(file, stripped))).toThrow();
+      expect(() => assertServingStepBindsDeploymentMode(file, parseText(file, stripped))).toThrow();
     });
 
     if (file === "deploy.yml") {

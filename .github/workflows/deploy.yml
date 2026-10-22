@@ -6,21 +6,8 @@ on:
     paths-ignore: ['docs/**', '.mstar/**', '*.md', 'LICENSE', '.env.example']
   workflow_dispatch:
     inputs:
-      tenant_mode:
-        description: 'Workspace tenant read mode — steady: use vars.WORKSPACE_TENANT_MODE (routine); off: Deploy A; strict: Deploy B replay'
-        required: false
-        default: 'steady'
-        type: choice
-        options:
-          - 'steady'
-          - 'off'
-          - 'strict'
-      expected_deploy_sha:
-        description: "Deploy B (strict) only: the SHA Deploy A shipped — required for, and only accepted on, a strict dispatch (empty on a steady/off run); Deploy A's run summary prints deployed_sha=<sha>"
-        required: false
-        default: ''
       expected_container_digest:
-        description: "Deploy B only: Deploy A's sandbox image digest (sha256:…) — compared and reported, never assumed identical"
+        description: "Optional: a previously recorded sandbox image digest (sha256:…) — compared and reported, never assumed identical"
         required: false
         default: ''
 
@@ -70,42 +57,20 @@ jobs:
         with:
           fetch-depth: 0   # Bugbot #14: digest write-back merges origin/main — shallow clone has no merge base
 
-      # The mode is a dispatch input, never a code edit: the SAME build is
-      # deployed twice on the tenant rollout (off, then strict). The input's
-      # default is `steady`, NOT `off`: a `push` to main carries no input, and a
-      # declared `off` would win over `vars.WORKSPACE_TENANT_MODE` and demote a
-      # `strict` installation on the next ordinary push without saying so.
-      # `steady` means "take the variable"; a `steady` run that still resolves
-      # to `off` warns and records `tenant_mode_change` instead. An illegal
-      # value fails HERE, before any step that can create or deploy a Worker
-      # version.
-      - name: Resolve tenant mode
-        id: tenant
+      # Ref identity, before anything is deployed: the tree on disk must be the
+      # SHA this run executes. The mode machinery that used to follow it (a
+      # dispatch input, a replay binding against a previous deploy's SHA) is
+      # gone with the tenant read switch — one artifact is one deploy now.
+      - name: Assert checkout identity
         env:
-          TENANT_MODE: ${{ inputs.tenant_mode }}
-          STEADY_TENANT_MODE: ${{ vars.WORKSPACE_TENANT_MODE }}
-        run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE"
-
-      # Replay identity (before anything is deployed). The strict replay binding
-      # lives in scripts/deploy-replay-guard.sh (executed by the behaviour
-      # tests); the checkout assertion below stays here because it is about the
-      # tree on disk, not about which SHA was requested. `replay=required` only
-      # for a dispatch that asked for `strict` — a `steady` push serving
-      # `strict` from the variable has no Deploy A to bind, and a SHA supplied
-      # on such a run is refused rather than ignored (I-000089).
-      - name: Assert replay identity
-        env:
-          REPLAY: ${{ steps.tenant.outputs.replay }}
           RUN_SHA: ${{ github.sha }}
-          EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}
         run: |
           set -euo pipefail
           HEAD_SHA=$(git rev-parse HEAD)
           if [ "$HEAD_SHA" != "$RUN_SHA" ]; then
-            echo "::error::checked-out HEAD $HEAD_SHA != run SHA $RUN_SHA — the replay must execute the SHA it names"
+            echo "::error::checked-out HEAD $HEAD_SHA != run SHA $RUN_SHA — the deploy must execute the SHA it names"
             exit 1
           fi
-          bash scripts/deploy-replay-guard.sh "$REPLAY" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA" "$HEAD_SHA"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -136,10 +101,10 @@ jobs:
       - name: Re-run workspace backfill (0027, idempotent)
         run: bunx wrangler d1 execute mstar-inspector-db --remote --file migrations/0027_workspace_backfill.sql
 
-      # ABORT GATE (both modes): `strict` App reads INNER JOIN app_workspaces,
-      # so an unmapped App silently vanishes from the pipeline. Ordered before
-      # EVERY deploy-capable step — `wrangler secret bulk` publishes a version
-      # just as `wrangler deploy` does.
+      # ABORT GATE: every execution-facing App read INNER JOINs
+      # `app_workspaces`, so an unmapped App silently vanishes from the
+      # pipeline. Ordered before EVERY deploy-capable step — `wrangler secret
+      # bulk` publishes a version just as `wrangler deploy` does.
       - name: Assert zero orphan Apps (pre-deploy gate)
         run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-db
 
@@ -164,14 +129,13 @@ jobs:
       - name: Deploy Worker
         id: deploy
         shell: bash
-        env:
-          TENANT_MODE: ${{ steps.tenant.outputs.mode }}
         run: |
           # keep_vars: true in wrangler.jsonc preserves the dashboard-managed
           # plaintext var (REVIEW_ENABLED).
-          # WORKSPACE_TENANT_MODE is the dispatch input resolved above — the
-          # same SHA can be replayed with the other mode.
-          bunx wrangler deploy --var "WORKSPACE_TENANT_MODE:$TENANT_MODE" 2>&1 | tee deploy.log
+          # DEPLOYMENT_MODE is the deployment shape, not a rollout switch: the
+          # staging instance is a SaaS deployment (`saas`), so the empty-instance
+          # first-login story never shows here. See plan 100.
+          bunx wrangler deploy --var "DEPLOYMENT_MODE:saas" 2>&1 | tee deploy.log
           # The deploy command succeeded: this run's SHA is what it shipped.
           # The summary key is derived from this step's outcome in the
           # always-run summary step, never from the version-id capture below.
@@ -265,7 +229,6 @@ jobs:
 
       - name: Record image digest (DOCS-01 baseline)
         env:
-          TENANT_MODE: ${{ steps.tenant.outputs.mode }}
           EXPECTED_DIGEST: ${{ inputs.expected_container_digest }}
         run: |
           set -euo pipefail
@@ -277,11 +240,10 @@ jobs:
             echo "## Deploy evidence (DOCS-01 baseline)"
             echo "- Image digest: \`$DIGEST\`"
             echo "- Worker version: \`$VERSION\`"
-            echo "- Tenant mode: \`$TENANT_MODE\`"
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "- Source: \`registry.cloudflare.com\` container reference printed by this run's \`wrangler deploy\` — \`wrangler containers list --json\` reports an empty \`image\` for the 1.0 durable_object application"
           } >> "$GITHUB_STEP_SUMMARY"
-          # Replay audit, never a silent pass: the sandbox image rebuilds from a
+          # Digest audit, never a silent pass: the sandbox image rebuilds from a
           # rolling apt base, so byte-identical output is not provable. A
           # different digest is reported (and warned) with that reason.
           if [ -z "$EXPECTED_DIGEST" ]; then
@@ -290,7 +252,7 @@ jobs:
             MATCH=true
           else
             MATCH=false
-            echo "::warning::container digest $DIGEST differs from Deploy A's $EXPECTED_DIGEST — the sandbox image rebuilds from a rolling base, so a byte-identical rebuild is not provable; the Worker code is the same SHA"
+            echo "::warning::container digest $DIGEST differs from the supplied expected_container_digest $EXPECTED_DIGEST — the sandbox image rebuilds from a rolling base, so a byte-identical rebuild is not provable; the Worker code is the same SHA"
           fi
           echo "container_digest_match=$MATCH" >> "$GITHUB_STEP_SUMMARY"
           echo "container_digest_match=$MATCH"

@@ -90,6 +90,14 @@ function asArray(value: unknown): Json[] {
   return Array.isArray(value) ? (value as Json[]) : [];
 }
 
+/** Every file under one repo-relative directory (the stale-var scans use it). */
+function walk(dir: string): string[] {
+  return readdirSync(join(REPO_ROOT, dir), { withFileTypes: true }).flatMap((entry) => {
+    const path = `${dir}/${entry.name}`;
+    return entry.isDirectory() ? walk(path) : [path];
+  });
+}
+
 const config: Json = JSON.parse(stripJsonComments(readFileSync(CONFIG_PATH, "utf8")));
 const staging: Json = config;
 const production: Json = asObject(asObject(config.env).production);
@@ -348,31 +356,30 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
   });
 
   /**
-   * `WORKSPACE_TENANT_MODE` (migration 0026) is the tenant route/read switch.
-   * It rides `--var` on BOTH deploy commands, so the artifact and the mode stay
-   * independent: the same SHA is deployed `off` (Deploy A) and replayed
-   * `strict` (Deploy B). A workflow that lost the `--var` would fall back to the
-   * config default and ship a different mode than its run says.
+   * `DEPLOYMENT_MODE` is the deployment-shape switch (plan 100): `self-hosted`
+   * or `saas`, validated at startup, read by the login/landing faces only. Both
+   * deploy workflows pass it with `--var` so a config default cannot silently
+   * disagree with the instance the run is deploying.
    */
-  test("WORKSPACE_TENANT_MODE: both deploy workflows pass --var, and prod config carries the default", () => {
+  test("DEPLOYMENT_MODE: both deploy workflows pass --var, and each config block declares a value", () => {
     for (const name of ["deploy.yml", "deploy-prod.yml"]) {
       const text = readFileSync(join(REPO_ROOT, ".github", "workflows", name), "utf8");
-      expect(text, `${name}: tenant_mode dispatch input is missing`).toMatch(/\n\s+tenant_mode:\n/);
-      expect(text, `${name}: deploy command does not pass the tenant mode`).toContain(
-        '--var "WORKSPACE_TENANT_MODE:$TENANT_MODE"',
+      expect(text, `${name}: deploy command does not pass the deployment shape`).toContain(
+        '--var "DEPLOYMENT_MODE:saas"',
       );
     }
-    expect(asObject(production.vars).WORKSPACE_TENANT_MODE).toBe("off");
+    expect(asObject(production.vars).DEPLOYMENT_MODE).toBe("saas");
   });
 
   /**
-   * `env.production.vars` is the plain-var roster for prod. The open-sign-in change removed
-   * the deployment allowlist, so the ONLY prod var left is the tenant read mode
-   * — a config var that a deploy re-supplies must not quietly come back as a
-   * half-configured bootstrap list.
+   * `env.production.vars` is the plain-var roster for prod. The open-sign-in
+   * change removed the deployment allowlist and plan 100 removed the tenant
+   * read mode, so the ONLY prod var left is the deployment shape — a config var
+   * that a deploy re-supplies must not quietly come back as a half-configured
+   * bootstrap list.
    */
-  test("env.production.vars carries exactly the tenant mode", () => {
-    expect(Object.keys(asObject(production.vars)).sort()).toEqual(["WORKSPACE_TENANT_MODE"]);
+  test("env.production.vars carries exactly the deployment shape", () => {
+    expect(Object.keys(asObject(production.vars)).sort()).toEqual(["DEPLOYMENT_MODE"]);
   });
 });
 
@@ -401,13 +408,6 @@ describe("no deployment allowlist survives", () => {
     "README_CN.md",
   ] as const;
 
-  function walk(dir: string): string[] {
-    return readdirSync(join(REPO_ROOT, dir), { withFileTypes: true }).flatMap((entry) => {
-      const path = `${dir}/${entry.name}`;
-      return entry.isDirectory() ? walk(path) : [path];
-    });
-  }
-
   test(`${RETIRED_VAR} has zero references in src/, tests/, docs/, the workflows and the deploy config`, () => {
     const files = [...SCANNED_ROOTS.flatMap(walk), ...SCANNED_FILES];
     const offenders = files.filter((path) =>
@@ -416,6 +416,37 @@ describe("no deployment allowlist survives", () => {
     expect(
       offenders,
       `${RETIRED_VAR} is retired: sign-in is unconditional, so nothing may still read or document an allowlist`,
+    ).toEqual([]);
+  });
+});
+
+/**
+ * The v1.2 tenant read mode is GONE end to end (plan 100): one SQL face, one
+ * App route family, no mode var — so a surviving reference in the shipped
+ * code, the deploy scripts, the workflows, the tests, the docs or the deploy
+ * config would either resurrect a second read path or document a variable
+ * nothing reads. `.changes/unreleased/*` is release history and is
+ * deliberately NOT scanned (the removal note names the retired var there).
+ */
+describe("no tenant read mode survives", () => {
+  /** Assembled from fragments so THIS file does not match its own scan. */
+  const RETIRED_VAR = ["WORKSPACE", "TENANT", "MODE"].join("_");
+
+  const SCANNED_ROOTS = ["src", "scripts", "tests", "docs"] as const;
+  const SCANNED_FILES = [
+    ".github/workflows/deploy.yml",
+    ".github/workflows/deploy-prod.yml",
+    "wrangler.jsonc",
+  ] as const;
+
+  test(`${RETIRED_VAR} has zero references in src/, scripts/, tests/, docs/, the workflows and the deploy config`, () => {
+    const files = [...SCANNED_ROOTS.flatMap(walk), ...SCANNED_FILES];
+    const offenders = files.filter((path) =>
+      readFileSync(join(REPO_ROOT, path), "utf8").includes(RETIRED_VAR),
+    );
+    expect(
+      offenders,
+      `${RETIRED_VAR} is retired: tenant reads are unconditional, so no workflow may pass it and no script, test or doc may read it`,
     ).toEqual([]);
   });
 });
