@@ -7,7 +7,7 @@
  * F-07: the Joined column renders through the shared
  * relative-time helper, with the absolute stamp kept as a native tooltip.
  *
- * Every read/write hangs off the page's workspace base, and the page
+ * Every read and write hangs off the page's workspace base, and the page
  * carries pending invitations with revoke.
  */
 import { describe, expect, test } from "bun:test";
@@ -17,6 +17,7 @@ import { t } from "../../src/i18n";
 import {
   inviteFailureNotice,
   loadMembersPage,
+  postMemberWrite,
   showsPendingInvites,
 } from "../../src/spa/pages/MembersPage";
 import type { InviteRow } from "../../src/spa/pages/data";
@@ -63,7 +64,7 @@ describe("members page shadcn rebuild", () => {
     expect(source).toContain("title={member.created_at}");
   });
 
-  test("every read and write hangs off the workspace base", async () => {
+  test("every read hangs off the workspace base", async () => {
     const calls: string[] = [];
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown) => {
@@ -90,6 +91,34 @@ describe("members page shadcn rebuild", () => {
         invites: [],
       });
       expect(calls).toEqual(["/dashboard/acme/api/members"]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("every member write posts under the workspace base, never a retired root path", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      calls.push({ url: String(input), method: init?.method ?? "GET" });
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await postMemberWrite("/dashboard/acme", { kind: "invite", login: "hubot", role: "admin" });
+      await postMemberWrite("/dashboard/acme", { kind: "revoke", inviteId: "i1" });
+      await postMemberWrite("/dashboard/acme", { kind: "role", userId: "u1", nextRole: "admin" });
+      await postMemberWrite("/dashboard/acme", { kind: "remove", userId: "u1" });
+      expect(calls).toEqual([
+        { url: "/dashboard/acme/api/members/invites", method: "POST" },
+        { url: "/dashboard/acme/api/members/invites/i1/revoke", method: "POST" },
+        { url: "/dashboard/acme/members/role", method: "POST" },
+        { url: "/dashboard/acme/members/remove", method: "POST" },
+      ]);
+      // The workspace-only route family dropped the deployment-level copies;
+      // posting there would answer 404.
+      for (const { url } of calls) {
+        expect(url.startsWith("/dashboard/acme/")).toBe(true);
+      }
     } finally {
       globalThis.fetch = realFetch;
     }

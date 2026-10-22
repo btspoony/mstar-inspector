@@ -106,6 +106,34 @@ export function showsPendingInvites(role: WorkspaceRole | null, invites: readonl
   return canInviteMembers(role) && invites.length > 0;
 }
 
+/** The four member writes the page issues, before the URL is resolved. */
+export type MemberWrite =
+  | { kind: "invite"; login: string; role: "admin" | "member" }
+  | { kind: "revoke"; inviteId: string }
+  | { kind: "role"; userId: string; nextRole: "admin" | "member" }
+  | { kind: "remove"; userId: string };
+
+/**
+ * The one write path: every member mutation POSTs under `base`, so no write
+ * can reach the retired deployment-level paths (`/dashboard/api/members`,
+ * `/dashboard/members/…`) that the workspace-only route family dropped.
+ */
+export function postMemberWrite(
+  base: string,
+  write: MemberWrite,
+): Promise<{ status: number; body: string }> {
+  switch (write.kind) {
+    case "invite":
+      return postForm(`${base}/api/members/invites`, { login: write.login, role: write.role });
+    case "revoke":
+      return postForm(`${base}/api/members/invites/${write.inviteId}/revoke`, {});
+    case "role":
+      return postForm(`${base}/members/role`, { userId: write.userId, role: write.nextRole });
+    case "remove":
+      return postForm(`${base}/members/remove`, { userId: write.userId });
+  }
+}
+
 export function MembersPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const base = apiBase();
@@ -168,10 +196,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
     const existed = members?.some((m) => m.github_login.toLowerCase() === trimmed.toLowerCase()) ?? false;
     setBusy(true);
     try {
-      const { status, body } = await postForm(`${base}/api/members/invites`, {
-        login: trimmed,
-        role: inviteRole,
-      });
+      const { status, body } = await postMemberWrite(base, { kind: "invite", login: trimmed, role: inviteRole });
       if (status >= 400) {
         // 409 `invite.pending_exists` is the one refusal with its own copy —
         // the invite is already pending, which is not an error the actor must
@@ -203,7 +228,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
     try {
       if (action.kind === "revoke") {
         const { invite } = action;
-        const { status } = await postForm(`${base}/api/members/invites/${invite.id}/revoke`, {});
+        const { status } = await postMemberWrite(base, { kind: "revoke", inviteId: invite.id });
         setNotice(
           status >= 400
             ? { kind: "error", message: t(locale, "notice.error.revokeFailed", { login: invite.github_login }) }
@@ -211,7 +236,11 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
         );
       } else if (action.kind === "role") {
         const { member, nextRole } = action;
-        const { status } = await postForm(`${base}/members/role`, { userId: member.id, role: nextRole });
+        const { status } = await postMemberWrite(base, {
+          kind: "role",
+          userId: member.id,
+          nextRole,
+        });
         setNotice(
           status >= 400
             ? { kind: "error", message: t(locale, "notice.error.roleChangeFailed", { login: member.github_login }) }
@@ -222,7 +251,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
         );
       } else {
         const { member } = action;
-        const { status } = await postForm(`${base}/members/remove`, { userId: member.id });
+        const { status } = await postMemberWrite(base, { kind: "remove", userId: member.id });
         setNotice(
           status >= 400
             ? { kind: "error", message: t(locale, "notice.error.removeFailed", { login: member.github_login }) }

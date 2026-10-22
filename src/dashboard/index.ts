@@ -323,7 +323,15 @@ export async function pendingInvitesForLogin(
  * from the workspace role, except on an unbound store where no decision is
  * possible (see `strictWorkspaceBoot` — the routes' own `db_unbound` outcomes
  * answer there); `off` never gates, so its creator rule keeps the flow open
- * (the caller can manage what it creates there) and reads nothing.
+ * (the caller can manage what it creates there) and this function issues no
+ * read at all.
+ *
+ * The SIDEBAR boot is a different caller: `strictWorkspaceBoot` reads one
+ * membership count in every mode — `off` included, because `needsWorkspace`
+ * is mode-independent — so one `workspace_members` read happens per
+ * sidebar-bearing request regardless of mode. Migrations are forward-only, so
+ * a database without that table is a schema fault, not a mode we answer for;
+ * the count carries no fallback.
  */
 export async function canCreateApp(env: Env, login: string): Promise<boolean> {
   if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return true;
