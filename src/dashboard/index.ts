@@ -373,6 +373,18 @@ function classifyDashboardPath(pathname: string): DashboardPathClass {
 }
 
 /**
+ * Tenant invisibility 404, the ONE surface for every hidden path: HTML
+ * navigation renders the console's styled page (the same surface the
+ * pinned-POST 404 uses), a fetch keeps the bare status — the SPA's API reads
+ * parse status only.
+ */
+async function tenantNotFound(c: DashboardContext): Promise<Response> {
+  return wantsHtml(c.req.header("Accept") ?? null)
+    ? c.html(notFoundPage(requestLocale(c)), 404)
+    : await c.notFound();
+}
+
+/**
  * The tenant route-family gate. Mounted twice: by `src/worker/index.ts` on
  * `/dashboard/*` BEFORE SPA dispatch (so a strict legacy-App HTML request
  * cannot be served by the SPA shell before the 404 decision) and by
@@ -398,11 +410,11 @@ export const dashboardTenantGate: Handler<{
   if (target.kind === "legacy-app") {
     // Deploy B retires the pre-workspace App face: the same 404 an unmatched
     // path answered with before the switch.
-    return mode === "strict" ? c.notFound() : next();
+    return mode === "strict" ? tenantNotFound(c) : next();
   }
   if (target.kind !== "workspace") return next();
   // Deploy A: the workspace face does not exist yet.
-  if (mode !== "strict") return c.notFound();
+  if (mode !== "strict") return tenantNotFound(c);
   // CLASSIFY ONLY — no D1 read. The workspace row and the caller's membership
   // are resolved by the member gate AFTER the session and user row are known,
   // so an anonymous request neither pays a pre-auth round trip nor learns from
@@ -1195,17 +1207,12 @@ async function requireMember(c: DashboardContext): Promise<
   // workspace answers (no tenant-existence oracle).
   const tenant = c.get("tenant");
   if (tenant) {
-    // Tenant invisibility is final on a workspace-scoped request: HTML
-    // navigation renders the styled 404 page (the same surface the pinned-POST
-    // 404 uses), a fetch keeps the bare status.
-    const invisible = async (): Promise<Response> =>
-      wantsHtml(c.req.header("Accept") ?? null)
-        ? c.html(notFoundPage(requestLocale(c)), 404)
-        : await c.notFound();
+    // Tenant invisibility is final on a workspace-scoped request — the same
+    // surface the routing gate answers with.
     const workspace = await getWorkspaceBySlug(db, tenant.slug);
-    if (!workspace) return { ok: false, response: await invisible() };
+    if (!workspace) return { ok: false, response: await tenantNotFound(c) };
     const role = await getMembership(db, workspace.id, user.id);
-    if (!role) return { ok: false, response: await invisible() };
+    if (!role) return { ok: false, response: await tenantNotFound(c) };
     c.set("tenant", { slug: workspace.slug, workspaceId: workspace.id, role });
     return { ok: true, session, db, user, scope: { workspaceId: workspace.id, role } };
   }

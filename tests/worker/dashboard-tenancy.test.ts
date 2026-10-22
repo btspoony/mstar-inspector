@@ -380,6 +380,29 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
     expect(await api.text()).toBe("404 Not Found");
   });
 
+  test("the ROUTING gate's 404s carry the same styled page (N2)", async () => {
+    // Both gate branches answer a hidden route family before any session or
+    // membership read: the strict legacy-App face and the off workspace face.
+    // Their HTML navigation must render the member gate's page, not bare text.
+    for (const [mode, path] of [
+      ["strict", "/dashboard/apps"],
+      ["off", "/dashboard/acme/apps"],
+    ] as const) {
+      const { db } = tenancyFixture();
+      const env = envFor(db, mode);
+      const page = await worker.fetch(
+        await authedRequest(path, "octocat", { accept: "text/html" }),
+        env,
+      );
+      expect(page.status, path).toBe(404);
+      expect(page.headers.get("Content-Type"), path).toContain("text/html");
+      expect(await page.text(), path).toContain(t("en", "common.error.notFoundTitle"));
+      const api = await worker.fetch(await authedRequest(path, "octocat"), env);
+      expect(api.status, path).toBe(404);
+      expect(await api.text(), path).toBe("404 Not Found");
+    }
+  });
+
   test("non-App routes keep serving under strict", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db, "strict");
