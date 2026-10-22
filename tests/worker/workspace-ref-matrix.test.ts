@@ -1,11 +1,20 @@
 /**
- * Plan 98 T1 — the workspace segment resolves by id OR slug.
+ * The workspace ref matrix (workspace URL identifiers, 2026-10 — I-000059).
  *
- * One table of ref shapes × the two request surfaces that RESOLVE a workspace
+ * Six ref shapes × the two request surfaces that RESOLVE a workspace
  * server-side: an HTML navigation to a dashboard-rendered page (which answers a
- * rendered page or the styled 404) and an API read (bare status). Every hidden
- * shape must be the same 404 on both — a difference between an id-addressed and
- * a slug-addressed 404 would be an existence oracle for the other form.
+ * rendered page or the styled 404) and an API read (bare status).
+ *
+ *   id          the row's generated `ws_…` PK             → serves
+ *   slug        the human-readable segment                → serves
+ *   both-equal  the creation shape, `slug = id`           → serves
+ *   unknown     no row matches                            → 404
+ *   soft-deleted a matching row with `deleted_at` set      → 404
+ *   two-row     a slug equal to another row's id           → 404 + one warn
+ *
+ * Every hidden shape must be the same 404 on both surfaces, and every hidden
+ * 404 must be the same BYTES: a difference between an id-addressed and a
+ * slug-addressed 404 would be an existence oracle for the other form.
  *
  * Each fixture workspace owns a mapped App, so a 404 can never come from a
  * missing resource: only the ref resolution can produce it.
@@ -92,7 +101,7 @@ function seedMembership(db: TestD1, workspaceId: string, userId: string): void {
 let nextGithubAppId = 7000;
 
 /** An App plus its workspace mapping; the slug is derived from the workspace id. */
-function seedApp(db: TestD1, workspaceId: string): string {
+function seedApp(db: TestD1, workspaceId: string): void {
   const slug = `${workspaceId}-app`;
   const now = new Date().toISOString();
   seed(
@@ -110,10 +119,7 @@ function seedApp(db: TestD1, workspaceId: string): string {
     now,
   );
   seed(db, "INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", `app-${workspaceId}`, workspaceId);
-  return slug;
 }
-
-type Fixture = { db: TestD1; app: (workspaceId: string) => string };
 
 /**
  * One login (`dana`) owns EVERY workspace seeded here and every one carries a
@@ -122,7 +128,7 @@ type Fixture = { db: TestD1; app: (workspaceId: string) => string };
  * `dup`: workspace `ws_dup` carries the slug `dup`, workspace `dup` carries the
  * id `dup`.
  */
-function refFixture(): Fixture {
+function refFixture(): TestD1 {
   const db = createMigratedTestD1();
   const dana = seedUser(db, "dana");
   const workspaces: Array<[string, string, string | null]> = [
@@ -137,48 +143,114 @@ function refFixture(): Fixture {
     seedMembership(db, id, dana);
     seedApp(db, id);
   }
-  return { db, app: (workspaceId) => `${workspaceId}-app` };
+  return db;
 }
 
 /** The two surfaces that resolve a workspace server-side. */
-function surfaces(appOf: (workspaceId: string) => string) {
+function surfaces() {
   return [
     {
-      surface: "HTML GET",
+      surface: "HTML dashboard read",
       // A dashboard-rendered page: the tenant gate resolves the ref, then the
       // member gate answers the page or the styled 404.
       path: (ref: string, workspaceId: string) =>
-        `/dashboard/${ref}/apps/${appOf(workspaceId)}/onboarding`,
+        `/dashboard/${ref}/apps/${workspaceId}-app/onboarding`,
       accept: "text/html",
     },
     {
-      surface: "API GET",
-      path: (ref: string) => `/dashboard/${ref}/api/apps`,
+      surface: "API read",
+      // Same signature as the HTML surface so one call site drives both; the
+      // API read names no resource, only the workspace.
+      path: (ref: string, _workspaceId: string) => `/dashboard/${ref}/api/apps`,
       accept: "application/json",
     },
   ] as const;
 }
 
-describe("workspace ref resolution — id, slug and both-equal serve", () => {
-  test("id, slug and the creation shape (slug = id) all serve", async () => {
-    const { db, app } = refFixture();
-    for (const { surface, path, accept } of surfaces(app)) {
-      for (const [ref, workspaceId] of [
-        ["ws-acme", "ws-acme"], // the id, whose slug is `acme`
-        ["acme", "ws-acme"], // the slug, whose id is `ws-acme`
-        ["ws_same", "ws_same"], // creation shape: slug = id
-      ] as const) {
-        const res = await worker.fetch(
-          await request(path(ref, workspaceId), "dana", accept),
-          withSpaAssets(envFor(db)),
-        );
-        expect(res.status, `${surface} ${ref}`).toBe(200);
+type RefCase = {
+  shape: string;
+  /** Every ref that names this shape; a shape may have more than one form. */
+  refs: readonly string[];
+  /** The workspace whose App the HTML detail path names — never a missing App. */
+  workspaceId: string;
+  status: 200 | 404;
+  /** Structured `workspace_ref_ambiguous` lines expected per request. */
+  ambiguousWarns: 0 | 1;
+};
+
+const REF_CASES: readonly RefCase[] = [
+  { shape: "id", refs: ["ws-acme"], workspaceId: "ws-acme", status: 200, ambiguousWarns: 0 },
+  { shape: "slug", refs: ["acme"], workspaceId: "ws-acme", status: 200, ambiguousWarns: 0 },
+  {
+    shape: "both-equal (slug = id)",
+    refs: ["ws_same"],
+    workspaceId: "ws_same",
+    status: 200,
+    ambiguousWarns: 0,
+  },
+  { shape: "unknown", refs: ["ghost"], workspaceId: "ws-acme", status: 404, ambiguousWarns: 0 },
+  {
+    shape: "soft-deleted",
+    refs: ["ws-gone", "gone"],
+    workspaceId: "ws-gone",
+    status: 404,
+    ambiguousWarns: 0,
+  },
+  { shape: "two-row", refs: ["dup"], workspaceId: "ws_dup", status: 404, ambiguousWarns: 1 },
+];
+
+describe("workspace ref matrix — six ref shapes × two resolving surfaces", () => {
+  for (const { surface, path, accept } of surfaces()) {
+    test(`${surface}: serves id, slug and slug=id; unknown, soft-deleted and two-row are the same 404`, async () => {
+      const db = refFixture();
+      // Premise of the two-row cell: BOTH rows exist and BOTH grant `dana`
+      // access, so picking one would have answered 200.
+      const ambiguousRows = db.raw
+        .query("SELECT COUNT(*) AS n FROM workspaces WHERE id = 'dup' OR slug = 'dup'")
+        .get() as { n: number };
+      expect(ambiguousRows.n).toBe(2);
+
+      const hiddenBodies: string[] = [];
+      for (const { shape, refs, workspaceId, status, ambiguousWarns } of REF_CASES) {
+        for (const ref of refs) {
+          const label = `${surface} · ${shape} · ${ref}`;
+          const warns: string[] = [];
+          const original = console.warn;
+          console.warn = (msg: unknown) => {
+            warns.push(String(msg));
+          };
+          let res: Response;
+          let body: string;
+          try {
+            res = await worker.fetch(
+              await request(path(ref, workspaceId), "dana", accept),
+              withSpaAssets(envFor(db)),
+            );
+            body = await res.text();
+          } finally {
+            console.warn = original;
+          }
+          expect(res.status, label).toBe(status);
+          const ambiguous = warns.filter((line) =>
+            line.includes('"event":"workspace_ref_ambiguous"'),
+          );
+          expect(ambiguous.length, label).toBe(ambiguousWarns);
+          if (ambiguousWarns === 1) expect(ambiguous[0], label).toContain(`"ref":"${ref}"`);
+          if (status === 200) {
+            expect(body, label).toContain(`${workspaceId}-app`);
+          } else {
+            hiddenBodies.push(body);
+          }
+        }
       }
-    }
-  });
+      // One body for every hidden shape and every hidden ref form: the 404
+      // cannot tell an id-addressed from a slug-addressed miss.
+      expect(new Set(hiddenBodies).size, surface).toBe(1);
+    });
+  }
 
   test("an id-addressed read and a slug-addressed read serve the SAME workspace", async () => {
-    const { db } = refFixture();
+    const db = refFixture();
     const read = async (ref: string) => {
       const res = await worker.fetch(
         await request(`/dashboard/${ref}/api/apps`, "dana", "application/json"),
@@ -191,63 +263,5 @@ describe("workspace ref resolution — id, slug and both-equal serve", () => {
     const bySlug = await read("acme");
     expect(byId.apps.map((app) => app.slug)).toEqual(["ws-acme-app"]);
     expect(bySlug).toEqual(byId);
-  });
-});
-
-describe("workspace ref resolution — hidden shapes are the same 404 on both surfaces", () => {
-  test("an unknown ref answers 404", async () => {
-    const { db, app } = refFixture();
-    for (const { surface, path, accept } of surfaces(app)) {
-      const res = await worker.fetch(
-        await request(path("ghost", "ws-acme"), "dana", accept),
-        withSpaAssets(envFor(db)),
-      );
-      expect(res.status, surface).toBe(404);
-    }
-  });
-
-  test("a soft-deleted workspace answers 404 by id and by slug", async () => {
-    const { db, app } = refFixture();
-    for (const { surface, path, accept } of surfaces(app)) {
-      for (const ref of ["ws-gone", "gone"]) {
-        const res = await worker.fetch(
-          await request(path(ref, "ws-gone"), "dana", accept),
-          withSpaAssets(envFor(db)),
-        );
-        expect(res.status, `${surface} ${ref}`).toBe(404);
-      }
-    }
-  });
-
-  test("an ambiguous ref answers 404 and warns once, never picking a row", async () => {
-    const { db, app } = refFixture();
-    // Both rows are real and BOTH have an App `dana` may manage, so a pick
-    // would answer 200: the 404 is the exactly-one-row rule.
-    const rows = db.raw
-      .query("SELECT COUNT(*) AS n FROM workspaces WHERE id = 'dup' OR slug = 'dup'")
-      .get() as { n: number };
-    expect(rows.n).toBe(2);
-
-    for (const { surface, path, accept } of surfaces(app)) {
-      const warns: string[] = [];
-      const original = console.warn;
-      console.warn = (msg: unknown) => {
-        warns.push(String(msg));
-      };
-      let status: number;
-      try {
-        const res = await worker.fetch(
-          await request(path("dup", "ws_dup"), "dana", accept),
-          withSpaAssets(envFor(db)),
-        );
-        status = res.status;
-      } finally {
-        console.warn = original;
-      }
-      expect(status, surface).toBe(404);
-      const ambiguous = warns.filter((line) => line.includes('"event":"workspace_ref_ambiguous"'));
-      expect(ambiguous.length, surface).toBe(1);
-      expect(ambiguous[0]).toContain('"ref":"dup"');
-    }
   });
 });
