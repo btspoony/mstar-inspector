@@ -6,10 +6,17 @@
  * would keep offering the retired slug (a 404 under D8) while its current row
  * went empty on the new path.
  *
- * A context rather than props: the renamer and the reader sit on opposite sides
- * of the router — `Layout` renders the switcher from its own props, while the
- * rename happens four levels down inside the settings card, whose page
- * (`DashboardPage`) is a child node `main.tsx` builds outside `Layout`.
+ * A context rather than a callback prop: `main.tsx` renders the page as
+ * `Layout`'s already-built `children` — `<Layout><Router>{DashboardPage}</Router></Layout>`
+ * — so `Layout` renders the switcher from its own props yet cannot pass a
+ * renamer down to the slug card four levels inside that child subtree
+ * (`DashboardPage → AppDetailPage → AppDetailView → SettingsView`). Only
+ * context spans it.
+ *
+ * Consequence of the wiring: the card's `useRenameMembership` reads the nearest
+ * provider, so a future change that renders the card OUTSIDE this provider gets
+ * a silent no-op rename (not an error) and the stale-slug behaviour returns —
+ * the switcher keeps offering the retired slug and marks no current row.
  */
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import type { SpaBoot } from "./boot";
