@@ -150,3 +150,34 @@ export function createMigratedTestD1(): TestD1 {
   applyMigration(db, ALL_MIGRATIONS);
   return wrapDb(db);
 }
+
+/**
+ * Attribute a raw-seeded App row to the `default` workspace. The one App read
+ * face INNER JOINs `app_workspaces`, so a fixture that inserts `github_apps`
+ * directly (not through `createApp`) must map it or the row is invisible.
+ */
+export async function mapAppToDefaultWorkspace(db: D1Like, appId: string): Promise<void> {
+  await db
+    .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
+    .bind(appId)
+    .run();
+}
+
+/**
+ * Join seeded users to the `default` workspace (0026 seeds it). Authority is
+ * per workspace, so a suite driving a workspace route needs the membership row
+ * — `users.role` grants nothing.
+ */
+export function seedDefaultMemberships(
+  db: TestD1,
+  roles: Record<string, "owner" | "admin" | "member">,
+): void {
+  for (const [login, role] of Object.entries(roles)) {
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+         SELECT 'default', id, ?, '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = ?`,
+      )
+      .run(role, login);
+  }
+}

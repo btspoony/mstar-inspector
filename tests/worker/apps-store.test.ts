@@ -546,7 +546,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect(mappingRows(db)).toHaveLength(2);
   });
 
-  test("read faces stay single-statement github_apps selects (no tenant join, no extra query)", async () => {
+  test("every execution-facing read joins app_workspaces in ONE statement", async () => {
     const queries: string[] = [];
     const statement: RecordingStatement = {
       bind: () => statement,
@@ -567,9 +567,8 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     await s.listApps();
     expect(queries).toHaveLength(3);
     for (const query of queries) {
-      expect(query).toMatch(/^SELECT \* FROM github_apps/);
-      expect(query).not.toContain("app_workspaces");
-      expect(query).not.toContain("workspaces");
+      expect(query).toContain("INNER JOIN app_workspaces");
+      expect(query).toContain("w.workspace_id");
     }
   });
 

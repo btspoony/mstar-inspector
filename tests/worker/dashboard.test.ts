@@ -147,7 +147,10 @@ function seededDashboardD1(
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     insert.run(id, login, role, createdAt);
-    insertMembership?.run(id, role === "admin" ? "owner" : "member", createdAt);
+    // `users.role` no longer grants anything: workspace roles decide. Both
+    // seeded identities that must run the App flow are `owner`s.
+    const workspaceRole = role === "admin" ? "owner" : login === "octocat-with-a-long-login" ? "owner" : "member";
+    insertMembership?.run(id, workspaceRole, createdAt);
   }
   return db;
 }
@@ -161,6 +164,13 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
 function dashboardRequest(path: string, cookie?: string): Request {
   return new Request(`https://worker.local${path}`, {
     headers: cookie ? { Cookie: cookie } : {},
+  });
+}
+
+/** An HTML navigation request (SPA dispatch serves enumerated pages only for it). */
+function htmlDashboardRequest(path: string, cookie?: string): Request {
+  return new Request(`https://worker.local${path}`, {
+    headers: { Accept: "text/html", ...(cookie ? { Cookie: cookie } : {}) },
   });
 }
 /**
@@ -441,19 +451,31 @@ describe("/dashboard routes", () => {
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
-  test("GET /dashboard with a valid session cookie → 200 SPA shell (boot-injected)", async () => {
+  test("GET /dashboard with a valid session cookie → the sole workspace's Apps shell", async () => {
+    // The root workbench has no workspace segment, so its data reads have no
+    // base: the landing names the deployment's sole live workspace instead.
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
       withSpaAssets(makeEnv()),
     );
-    expect(res.status).toBe(200);
-    const body = await res.text();
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+
+    // The shell that redirect lands on injects the boot: identity + the
+    // workspace membership, never `users.role`.
+    const shell = await worker.fetch(
+      htmlDashboardRequest("/dashboard/default/apps", `${SESSION_COOKIE}=${session}`),
+      withSpaAssets(makeEnv()),
+    );
+    expect(shell.status).toBe(200);
+    const body = await shell.text();
     expect(body).toContain("window.__BOOT__=");
     expect(body).toContain('"login":"octocat"');
-    // qc1/qc2 F-001: octocat is an admin (default seed) — the boot carries
-    // the admin role so the SPA renders the Members entry.
-    expect(body).toContain('"role":"admin"');
+    // The identity block carries no top-level role any more: the workspace
+    // role rides `memberships[]` (pinned here), and nothing else does.
+    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"owner"}]');
+    expect(body).toContain('{"locale":"en","login":"octocat","name":"octocat","workspaceRef":"default"');
     // The legacy three-card home is retired: no SSR sections,
     // no manifest start form, no REVIEW_ENABLED copy.
     expect(body).not.toContain("Model keys");
@@ -468,22 +490,26 @@ describe("/dashboard routes", () => {
     expect(indexHtml).not.toContain("Dashboard —");
   });
 
-  test("boot role is admin-aware: member sessions carry role member, not admin (F-001)", async () => {
+  test("the boot carries the WORKSPACE role, never users.role (F-001)", async () => {
+    // `users.role` left the public boot contract with plan 100: nav visibility
+    // and page capabilities read the workspace role in `memberships[]`.
     const admin = await worker.fetch(
-      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`),
+      htmlDashboardRequest("/dashboard/default/apps", `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`),
       withSpaAssets(makeEnv()),
     );
     expect(admin.status).toBe(200);
-    expect(await admin.text()).toContain('"role":"admin"');
+    const adminBody = await admin.text();
+    expect(adminBody).toContain('"login":"octocat"');
+    expect(adminBody).toContain('"role":"owner"');
+    expect(adminBody).not.toContain('"role":"admin"');
     const member = await worker.fetch(
-      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`),
+      htmlDashboardRequest("/dashboard/default/apps", `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`),
       withSpaAssets(makeEnv()),
     );
     expect(member.status).toBe(200);
     const memberBody = await member.text();
     expect(memberBody).toContain('"login":"mallory"');
-    expect(memberBody).toContain('"role":"member"');
-    expect(memberBody).not.toContain('"role":"admin"');
+    expect(memberBody).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member"}]');
   });
 
   test("GET /dashboard with a tampered session cookie → 302 to login (treated as logged out)", async () => {
@@ -537,14 +563,16 @@ describe("/dashboard routes", () => {
     expect(location.pathname).toBe("/login/oauth/authorize");
   });
 
-  test("GET /dashboard/login with a live session → 302 back to /dashboard", async () => {
+  test("GET /dashboard/login with a live session → 302 to the signed-in landing", async () => {
+    // The landing is the deployment's sole workspace Apps page; `/dashboard`
+    // has no workspace segment to hang its data reads off.
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       dashboardRequest("/dashboard/login", `${SESSION_COOKIE}=${session}`),
       makeEnv(),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
   });
 
   test("callback without state cookie → 400 and no session cookie (fail-closed)", async () => {
@@ -1358,7 +1386,7 @@ describe("/dashboard manifest routes", () => {
     expect(seenHeaders.Authorization).toBeUndefined();
     // Success lands on the App's onboarding page — no confirm click required.
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps/mstar-inspector-octocat/onboarding");
     const cookies = res.headers.getSetCookie();
     // State cookie single-use: expired on the callback.
     expect(
@@ -1382,7 +1410,7 @@ describe("/dashboard manifest routes", () => {
     // Landing page: name / id / slug / webhook URL + the Settings CTA, never
     // secrets, never REVIEW_ENABLED.
     const landing = await worker.fetch(
-      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding", `${SESSION_COOKIE}=${session}`),
+      dashboardRequest("/dashboard/default/apps/mstar-inspector-octocat/onboarding", `${SESSION_COOKIE}=${session}`),
       env,
     );
     expect(landing.status).toBe(200);
@@ -1390,7 +1418,7 @@ describe("/dashboard manifest routes", () => {
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(body).toContain(CONVERSION.name);
     expect(body).toContain("https://worker.local/webhook/mstar-inspector-octocat");
-    expect(body).toContain('href="/dashboard/apps/mstar-inspector-octocat/settings"');
+    expect(body).toContain('href="/dashboard/default/apps/mstar-inspector-octocat/settings"');
     expect(body).toContain(">Open Settings</a>");
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
@@ -1556,13 +1584,13 @@ describe("/dashboard manifest routes", () => {
     expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("STRICT + unbound D1: the creation gate does not 403 the callback into burning the hold (I-000090)", async () => {
-    // The same resumable path, on a strict deployment whose D1 binding is lost
+  test("unbound D1: the creation gate does not 403 the callback into burning the hold (I-000090)", async () => {
+    // The same resumable path, on a deployment whose D1 binding is lost
     // between start and callback. Storage is a configuration failure, not a
     // permission answer: a `canCreateApp: false` here would 403 before the
     // state/commit and expire the hold, and the App credentials exist ONLY in
     // that hold — recovery would mean creating a second GitHub App.
-    const env = baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, WORKSPACE_TENANT_MODE: "strict" });
+    const env = baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
     const { session, state } = await startManifest();
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
     const res = await worker.fetch(
@@ -1596,12 +1624,21 @@ describe("/dashboard manifest routes", () => {
   });
 
   test("callback retryable 500 (github_apps missing) → hold parked, confirm gate reachable", async () => {
-    // through=3: a pre-apps DB (users only — no github_apps table). The
-    // guard passes (membership reads users), the inline commit fails on the
-    // missing table: retryable, hold parked for the resume path.
+    // A pre-apps DB: users + the workspace plane, but no github_apps table.
+    // The creation gate resolves the caller as the workspace owner, and the
+    // inline commit then fails on the missing table: retryable, hold parked
+    // for the resume path.
+    const db = seededDashboardD1(3);
+    applyMigrationFile(db.raw, "0026_workspaces.sql");
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+         SELECT 'default', id, 'owner', '2026-01-01T00:00:00.000Z' FROM users`,
+      )
+      .run();
     const env = {
       ...baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }),
-      DB: seededDashboardD1(3),
+      DB: db,
     } as unknown as Env;
     const { session, state } = await startManifest();
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
@@ -1903,7 +1940,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const rec = stubFetchRecording();
     const warns = spyOnWarn();
     // Hold minted for "octocat" presented by a different logged-in operator.
-    const res = await doCommit({ holdValue: await freshHold(), sessionLogin: "mallory" });
+    // The presenter is a workspace OWNER so the creation gate admits them and
+    // the hold's own login binding is what refuses the commit.
+    const res = await doCommit({ holdValue: await freshHold(), sessionLogin: "octocat-with-a-long-login" });
     expect(res.status).toBe(403);
     expect(rec.urls).toHaveLength(0);
     expectHoldExpired(res);
@@ -1972,7 +2011,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       env,
     );
     expect(callback.status).toBe(302);
-    expect(callback.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
+    expect(callback.headers.get("Location")).toBe("/dashboard/default/apps/mstar-inspector-octocat/onboarding");
     // AC-B5-nocf: no api.cloudflare.com anywhere in the whole flow.
     for (const url of rec.urls) expect(url).not.toContain("api.cloudflare.com");
     expect(rec.urls).toEqual([
@@ -2022,7 +2061,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(decryptedPem).not.toBe(normalizePrivateKey(FAKE_PEM));
     // Landing HTML: slug + webhook URL + numeric id; never the secrets.
     const landing = await worker.fetch(
-      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding", `${SESSION_COOKIE}=${session}`),
+      dashboardRequest("/dashboard/default/apps/mstar-inspector-octocat/onboarding", `${SESSION_COOKIE}=${session}`),
       env,
     );
     expect(landing.status).toBe(200);
@@ -2035,10 +2074,10 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("strict: a successful commit lands on the workspace onboarding URL (the legacy App path is retired there)", async () => {
+  test("a successful commit lands on the workspace onboarding URL", async () => {
     // 0026 seeds exactly one workspace (`default`), and the commit's createApp
     // maps the new App into it — the same workspace the landing page names.
-    const env = commitEnv({ WORKSPACE_TENANT_MODE: "strict" });
+    const env = commitEnv();
     const res = await doCommit({ env, holdValue: await freshHold() });
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe(
@@ -2076,7 +2115,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       holdValue,
     });
     expect(committed.status).toBe(302);
-    expect(committed.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
+    expect(committed.headers.get("Location")).toBe("/dashboard/default/apps/mstar-inspector-octocat/onboarding");
     expectHoldExpired(committed);
     const rows = dbOf(brokeEnv).raw.query("SELECT slug FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string }>;
     expect(rows).toHaveLength(1);
@@ -2142,7 +2181,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     // The committed slug equals the URL the manifest registered with GitHub.
     expect(`https://worker.local/webhook/${rows[0]!.slug}`).toBe(startUrl);
     const landing = await worker.fetch(
-      dashboardRequest(`/dashboard/apps/${rows[0]!.slug}/onboarding`, `${SESSION_COOKIE}=${session}`),
+      dashboardRequest(`/dashboard/default/apps/${rows[0]!.slug}/onboarding`, `${SESSION_COOKIE}=${session}`),
       env,
     );
     expect(landing.status).toBe(200);
@@ -2238,9 +2277,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       extraHeaders: { "Accept-Language": "zh-CN,zh;q=0.9" },
     });
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps/mstar-inspector-octocat/onboarding");
     const landing = await worker.fetch(
-      new Request("https://worker.local/dashboard/apps/mstar-inspector-octocat/onboarding", {
+      new Request("https://worker.local/dashboard/default/apps/mstar-inspector-octocat/onboarding", {
         headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Accept-Language": "zh-CN,zh;q=0.9" },
       }),
       env,
@@ -2631,7 +2670,7 @@ function makeDbEnv(db: DashboardD1, overrides: Partial<Env> = {}): Env {
   return { ...baseEnv(overrides), DB: db } as Env;
 }
 
-describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
+describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
@@ -2657,13 +2696,13 @@ describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
 
   function onboardingRequest(slug: string, login = "octocat"): Promise<Request> {
     return createSessionValue(login, null, SESSION_SECRET).then((session) =>
-      dashboardRequest(`/dashboard/apps/${slug}/onboarding`, `${SESSION_COOKIE}=${session}`),
+      dashboardRequest(`/dashboard/default/apps/${slug}/onboarding`, `${SESSION_COOKIE}=${session}`),
     );
   }
 
   test("no session → 302 to login", async () => {
     const res = await worker.fetch(
-      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding"),
+      dashboardRequest("/dashboard/default/apps/mstar-inspector-octocat/onboarding"),
       makeEnv(),
     );
     expect(res.status).toBe(302);
@@ -2682,7 +2721,7 @@ describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
     expect(res.status).toBe(404);
   });
 
-  test("member without manage (not the creator, not admin) → 403 forbidden page", async () => {
+  test("plain workspace member → 403 forbidden page", async () => {
     const env = makeEnv();
     await seedApp(env, { createdBy: "someone-else" });
     const res = await worker.fetch(await onboardingRequest("mstar-inspector-octocat", "mallory"), env);
@@ -2692,7 +2731,10 @@ describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
     expect(body).not.toContain(FAKE_PEM);
   });
 
-  test("creator (member role) → 200 with name / id / slug / webhook URL + Settings CTA, no secrets", async () => {
+  test("owner → 200 with name / id / slug / webhook URL + Settings CTA, no secrets", async () => {
+    // Manage is the workspace role: `octocat-with-a-long-login` is an owner,
+    // and the App's `created_by` grants nothing (plan 100 removed the
+    // creator-or-deployment-admin rule from the null-scope face).
     const env = makeEnv();
     const row = await seedApp(env, { createdBy: "octocat-with-a-long-login" });
     const res = await worker.fetch(await onboardingRequest(row.slug, "octocat-with-a-long-login"), env);
@@ -2701,7 +2743,7 @@ describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
     expect(body).toContain("mstar-inspector-octocat");
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(body).toContain(`https://worker.local/webhook/${row.slug}`);
-    expect(body).toContain(`href="/dashboard/apps/${row.slug}/settings"`);
+    expect(body).toContain(`href="/dashboard/default/apps/${row.slug}/settings"`);
     expect(body).toContain(">Open Settings</a>");
     expect(body).toContain("Next: open Settings and configure a provider");
     expect(body).not.toContain("BEGIN");
@@ -2715,7 +2757,7 @@ describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
     await seedApp(env, { createdBy: "someone-else" });
     const res = await worker.fetch(await onboardingRequest("mstar-inspector-octocat"), env);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain('href="/dashboard/apps/mstar-inspector-octocat/settings"');
+    expect(await res.text()).toContain('href="/dashboard/default/apps/mstar-inspector-octocat/settings"');
   });
 
   test("Accept-Language zh renders the onboarding page in zh_CN", async () => {
@@ -2723,7 +2765,7 @@ describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
     await seedApp(env);
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const zh = await worker.fetch(
-      new Request("https://worker.local/dashboard/apps/mstar-inspector-octocat/onboarding", {
+      new Request("https://worker.local/dashboard/default/apps/mstar-inspector-octocat/onboarding", {
         headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Accept-Language": "zh-CN,zh;q=0.9" },
       }),
       env,
@@ -2736,40 +2778,6 @@ describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
     expect(body).not.toContain("GitHub App connected");
     expect(body).not.toContain("Open Settings");
     expect(body).not.toContain("REVIEW_ENABLED");
-  });
-});
-
-describe("workspace (tenant) paths under off — T5 routing gate", () => {
-  test("workspace-shaped App paths 404 without reaching a handler", async () => {
-    const env = makeEnv();
-    const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
-    for (const path of [
-      "/dashboard/default/apps/mstar-inspector-octocat/onboarding",
-      "/dashboard/default/api/apps",
-    ]) {
-      const res = await worker.fetch(dashboardRequest(path, cookie), env);
-      expect(res.status, path).toBe(404);
-    }
-  });
-
-  test("the legacy App face keeps today's payload under off", async () => {
-    const env = makeEnv();
-    await envDb(env).createApp({
-      id: crypto.randomUUID(),
-      slug: "mstar-inspector-octocat",
-      githubAppId: CONVERSION.id,
-      name: CONVERSION.name,
-      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
-      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
-      createdBy: "octocat",
-    });
-    const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
-    const onboarding = await worker.fetch(
-      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding", cookie),
-      env,
-    );
-    expect(onboarding.status).toBe(200);
-    expect(await onboarding.text()).toContain("mstar-inspector-octocat");
   });
 });
 
@@ -2970,8 +2978,8 @@ describe("dashboard users store (users.ts)", () => {
     expect(membershipRoles(db)).toEqual({ octocat: "owner" });
   });
 
-  test("an accepted invite lets the member read the workspace App list under strict", async () => {
-    const env = makeEnv({ WORKSPACE_TENANT_MODE: "strict" });
+  test("an accepted invite lets the member read the workspace App list", async () => {
+    const env = makeEnv();
     const db = dbOf(env);
     applyMigrationFile(db.raw, "0011_webhook_deliveries.sql"); // the list's health face
     await envDb(env).createApp({
@@ -3284,25 +3292,25 @@ describe("/dashboard/oauth/callback sign-in", () => {
     expect(userCount(db)).toBe(1);
   });
 
-  test("strict: a login with no workspace lands on the shell, not a workspace page it cannot open", async () => {
+  test("a login with no workspace lands on the shell, not a workspace page it cannot open", async () => {
     // 0026 seeds exactly one workspace (`default`), but sign-in joins nobody:
     // the outsider 404 would be the first thing this login saw.
     const db = createDashboardTestD1();
     stubGitHubIdentity("octocat");
-    const res = await oauthCallback("octocat", makeDbEnv(db, { WORKSPACE_TENANT_MODE: "strict" }));
+    const res = await oauthCallback("octocat", makeDbEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard");
     expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(true);
   });
 
-  test("strict: a workspace MEMBER lands on that workspace's Apps page", async () => {
+  test("a workspace MEMBER lands on that workspace's Apps page", async () => {
     const db = createDashboardTestD1();
     const user = await createUser(db, { login: "octocat", role: "member" });
     db.raw
       .prepare("INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, 'owner', ?)")
       .run(user.id, new Date().toISOString());
     stubGitHubIdentity("octocat");
-    const res = await oauthCallback("octocat", makeDbEnv(db, { WORKSPACE_TENANT_MODE: "strict" }));
+    const res = await oauthCallback("octocat", makeDbEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
   });
@@ -3505,14 +3513,17 @@ describe("per-request allowlist guard (spec § AuthZ + lock L5)", () => {
   test("member requests pass the guard and reach the routes unchanged (SPA shell + B1 manifest)", async () => {
     const env = makeEnv();
     const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
-    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), withSpaAssets(env));
+    const shell = await worker.fetch(
+      htmlDashboardRequest("/dashboard/default/apps", cookie),
+      withSpaAssets(env),
+    );
     expect(shell.status).toBe(200);
     const shellBody = await shell.text();
     expect(shellBody).toContain("window.__BOOT__=");
     expect(shellBody).toContain('"login":"octocat"');
-    // W-001: the shell gate's shared D1 lookup still resolves the
-    // role for valid members (octocat is the seeded admin).
-    expect(shellBody).toContain('"role":"admin"');
+    // W-001: the shell gate's shared D1 lookup still resolves the caller, and
+    // the boot carries the workspace role (octocat is the seeded owner).
+    expect(shellBody).toContain('"role":"owner"');
     const start = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/start", {
         method: "POST",
@@ -3533,7 +3544,7 @@ describe("per-request allowlist guard (spec § AuthZ + lock L5)", () => {
     // another casing — getUserByLogin is COLLATE NOCASE (spec § AuthZ).
     const session = await createSessionValue("OctoCat", null, SESSION_SECRET);
     const res = await worker.fetch(
-      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
+      htmlDashboardRequest("/dashboard/default/apps", `${SESSION_COOKIE}=${session}`),
       withSpaAssets(makeEnv()),
     );
     expect(res.status).toBe(200);
@@ -3583,7 +3594,7 @@ describe("members page (workspace-scoped shell)", () => {
     `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
 
   test("the workspace members page is the SPA shell for an HTML navigation", async () => {
-    const env = withSpaAssets(makeEnv({ WORKSPACE_TENANT_MODE: "strict" }));
+    const env = withSpaAssets(makeEnv());
     const res = await htmlGet("/dashboard/default/members", await adminCookie(), env);
     expect(res.status).toBe(200);
     const body = await res.text();
@@ -3592,7 +3603,7 @@ describe("members page (workspace-scoped shell)", () => {
   });
 
   test("no session on the workspace members page 302s into the OAuth flow", async () => {
-    const env = withSpaAssets(makeEnv({ WORKSPACE_TENANT_MODE: "strict" }));
+    const env = withSpaAssets(makeEnv());
     const get = await htmlGet("/dashboard/default/members", "", env);
     expect(get.status).toBe(302);
     expect(get.headers.get("Location")).toBe("/dashboard/login");
@@ -3751,7 +3762,7 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
   }
 
   test("navigating between workspaces presents the same cookie bytes and sets none", async () => {
-    const env = withSpaAssets(makeDbEnv(twoWorkspaceDb(), { WORKSPACE_TENANT_MODE: "strict" }));
+    const env = withSpaAssets(makeDbEnv(twoWorkspaceDb()));
     const value = await createSessionValue("octocat", null, SESSION_SECRET);
     // The cookie the browser's jar holds before the switch, and the ONLY thing
     // it sends afterwards: the switcher is a pushState, so the jar can only
@@ -3799,7 +3810,7 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
   test("selecting the only workspace is a no-op: no control, no cookie, same bytes", async () => {
     // `octocat` in the default seed belongs to `default` alone — the
     // empty-choice case AC6 names.
-    const env = withSpaAssets(makeDbEnv(seededDashboardD1(), { WORKSPACE_TENANT_MODE: "strict" }));
+    const env = withSpaAssets(makeDbEnv(seededDashboardD1()));
     const value = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await htmlGet("/dashboard/default/apps", `${SESSION_COOKIE}=${value}`, env);
     expect(res.status).toBe(200);

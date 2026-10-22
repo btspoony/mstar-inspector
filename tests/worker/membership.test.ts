@@ -79,7 +79,6 @@ function envFor(db: TestD1): Env {
     DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DB: db,
-    WORKSPACE_TENANT_MODE: "strict",
   } as unknown as Env;
 }
 

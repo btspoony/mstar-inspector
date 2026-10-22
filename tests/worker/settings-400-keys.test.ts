@@ -7,7 +7,7 @@
  * no new reason value. Static-key bodies carry no `params` field.
  */
 import { describe, expect, spyOn, test } from "bun:test";
-import { createMigratedTestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -18,14 +18,15 @@ import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-const SETTINGS = "/dashboard/apps/mallorys-app/settings";
-const VERIFY = "/dashboard/api/apps/mallorys-app/keys/verify";
+const SETTINGS = "/dashboard/default/apps/mallorys-app/settings";
+const VERIFY = "/dashboard/default/api/apps/mallorys-app/keys/verify";
 const ACCOUNT_ID = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
 
 async function seededWorld() {
   const db = createMigratedTestD1();
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
+  seedDefaultMemberships(db, { octocat: "owner", mallory: "owner" });
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
   const app = await createAppsStore(db).createApp({
@@ -206,7 +207,7 @@ describe("settings 400 key transport", () => {
 
   test("review-trigger-mode invalid value → keyed JSON naming the rejected mode", async () => {
     const { db } = await seededWorld();
-    const res = await postForm("/dashboard/apps/mallorys-app/review-trigger-mode", "mallory", makeEnv(db), {
+    const res = await postForm("/dashboard/default/apps/mallorys-app/review-trigger-mode", "mallory", makeEnv(db), {
       mode: "whenever",
     });
     expect(res.status).toBe(400);
@@ -237,7 +238,7 @@ describe("settings 400 key transport", () => {
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/apps/mallorys-app/settings");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps/mallorys-app/settings");
   });
 });
 

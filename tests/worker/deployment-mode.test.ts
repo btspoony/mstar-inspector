@@ -51,7 +51,7 @@ function populatedInstance(): TestD1 {
 function envFor(
   db: TestD1,
   mode: string | undefined,
-  tenant: { strict?: true; operators?: string } = {},
+  tenant: { operators?: string } = {},
 ): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
@@ -61,7 +61,6 @@ function envFor(
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DB: db,
     ...(mode === undefined ? {} : { DEPLOYMENT_MODE: mode }),
-    ...(tenant.strict === undefined ? {} : { WORKSPACE_TENANT_MODE: "strict" }),
     ...(tenant.operators === undefined ? {} : { PLATFORM_OPERATORS: tenant.operators }),
   } as unknown as Env;
 }
@@ -273,7 +272,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
     const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);
     // No session cookie → the login redirect, which still must not leave the
     // marker alive for the shell the next request loads.
-    const res = await shell("/dashboard/apps", envFor(populatedInstance(), "self-hosted"), [
+    const res = await shell("/dashboard", envFor(populatedInstance(), "self-hosted"), [
       `${FIRST_INSTANCE_COOKIE}=${marker}`,
     ]);
     expect(res.status).toBe(302);
@@ -308,7 +307,6 @@ describe("SPA boot face — the marker drives the guidance", () => {
   for (const role of ["member", "operator"] as const) {
     test(`a /dashboard 302 (${role}) does not spend the marker; the shell that follows shows it`, async () => {
       const env = envFor(strictInstance(role), "self-hosted", {
-        strict: true,
         ...(role === "operator" ? { operators: LOGIN } : {}),
       });
       const cookies = [
@@ -390,7 +388,7 @@ describe("SPA creation page copy", () => {
     const { createElement } = await import("react");
     const { renderToStaticMarkup } = await import("react-dom/server");
     const { WorkspaceSetupPage } = await import("../../src/spa/pages/WorkspaceSetupPage");
-    const base: SpaBoot = { locale: "en", login: "founder", name: null, role: null, needsWorkspace: true };
+    const base: SpaBoot = { locale: "en", login: "founder", name: null, needsWorkspace: true };
     const plain = renderToStaticMarkup(createElement(WorkspaceSetupPage, { boot: base }));
     const empty = renderToStaticMarkup(
       createElement(WorkspaceSetupPage, { boot: { ...base, emptyInstance: true } }),

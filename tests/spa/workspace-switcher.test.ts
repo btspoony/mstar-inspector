@@ -20,7 +20,6 @@ const boot: SpaBoot = {
   locale: "en",
   login: "octocat",
   name: "The Octocat",
-  role: "admin",
   workspaceRef: "acme",
   memberships: [
     // `acme` was renamed away from its id; `ws_7d41` still answers to both.

@@ -31,7 +31,6 @@ import type { PipelineEnv } from "../pipeline/consumer";
 import { classifyWebhook, WEBHOOK_BODY_LIMIT, type WebhookOutcome } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
 import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
-import { tenantModeOf, type TenantMode } from "./tenant-mode";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
 import { trailingSlashRedirect } from "./redirects";
@@ -40,13 +39,11 @@ import { APP_VERSION } from "../version";
 
 const app = new Hono<{ Bindings: Env }>();
 // `/dashboard*` GET/HEAD redirects (trailing
-// slash + the `/dashboard/apps` exact alias), then the tenant route-family
-// gate, then SPA dispatch. The gate runs HERE, ahead of SPA dispatch: under
-// `strict` a legacy App path (`/dashboard/apps…`, `/dashboard/api/apps…`) must
-// answer 404 even when the SPA shell could serve it, and under `off` a
-// workspace path must 404 before the shell is reached. Requests the gate
-// passes are unchanged; the dashboard app re-mounts the same (idempotent) gate
-// ahead of its own routes so direct mounts keep working.
+// slash), then the tenant route-family gate, then SPA dispatch. The gate runs
+// HERE, ahead of SPA dispatch: a retired App path (`/dashboard/apps…`,
+// `/dashboard/api/apps…`) must answer 404 even when the SPA shell could serve
+// it. Requests the gate passes are unchanged; the dashboard app re-mounts the
+// same (idempotent) gate ahead of its own routes so direct mounts keep working.
 app.use("*", trailingSlashRedirect());
 app.use("/dashboard/*", dashboardTenantGate);
 app.use("*", spaDispatch());
@@ -243,22 +240,11 @@ app.post("/webhook/:appSlug", async (c) => {
     );
     return c.text("db binding missing", 500);
   }
-  // The webhook's slug lookup is a tenant-facing `github_apps` read (AC2):
-  // resolve the deploy var through the SAME resolver as the dashboard and the
-  // consumer, so a strict deployment classifies an unmapped App as unknown and
-  // answers 404 with zero decrypt, zero delivery row and zero enqueue.
-  let tenantMode: TenantMode;
-  try {
-    tenantMode = tenantModeOf(c.env.WORKSPACE_TENANT_MODE);
-  } catch (error) {
-    webhookWarn(
-      "invalid_workspace_tenant_mode",
-      (error as Error).message,
-      "per-App webhook rejected with 500 — invalid WORKSPACE_TENANT_MODE (fail-closed)",
-    );
-    return c.text((error as Error).message, 500);
-  }
-  const appsStore = createAppsStore(db, tenantMode);
+  // The webhook's slug lookup is a tenant-facing `github_apps` read (AC2): the
+  // store's one read face joins `app_workspaces`, so an App with no workspace
+  // mapping is unknown here too (404 with zero decrypt, zero delivery row and
+  // zero enqueue).
+  const appsStore = createAppsStore(db);
 
   // Slug lookup: exactly one active, non-deleted App may serve this route.
   // Unknown / disabled / soft-deleted are all 404 with zero side effects

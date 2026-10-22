@@ -55,7 +55,6 @@ function envFor(db: TestD1, operators = OPERATOR): Env {
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
-    WORKSPACE_TENANT_MODE: "strict",
     PLATFORM_OPERATORS: operators,
   } as unknown as Env;
 }
@@ -519,17 +518,5 @@ describe("the shell boot asks the gate's own classifier", () => {
     // shell must not replace the acceptance surface with the support face.
     expect(boot.supportOnly).toBeUndefined();
     expect(boot.pendingInvites?.map((invite) => invite.workspaceRef)).toEqual(["acme"]);
-  });
-
-  test("off: a granted operator gets no supportOnly boot (the workspace face does not exist)", async () => {
-    const { db } = soleWorkspaceFixture();
-    grant(db, "default", OPERATOR, DAY);
-    const env = withSpaAssets({ ...envFor(db), WORKSPACE_TENANT_MODE: "off" } as Env);
-    const res = await worker.fetch(
-      await authedRequest("/dashboard", OPERATOR, { accept: "text/html" }),
-      env,
-    );
-    expect(res.status).toBe(200);
-    expect(bootOf(await res.text()).supportOnly).toBeUndefined();
   });
 });

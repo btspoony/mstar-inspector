@@ -100,6 +100,12 @@ async function seedApp(
        VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now')${mode !== undefined ? ", ?" : ""})`,
     )
     .run(...(mode !== undefined ? [...baseArgs, mode] : [...baseArgs]));
+  // Production shape: createApp writes the App and its workspace mapping in
+  // one batch, so every execution-facing read (which joins app_workspaces)
+  // resolves it.
+  db.raw
+    .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
+    .run(id);
   return { id, slug: opts.slug };
 }
 
@@ -722,21 +728,20 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
   });
 });
 
-describe("WORKSPACE_TENANT_MODE on the webhook read face", () => {
-  /** Map a seeded App into the `default` workspace (the 0027 production shape). */
-  function mapToDefault(db: ReturnType<typeof createTestD1>, appId: string): void {
-    db.raw
-      .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
-      .run(appId);
+describe("tenant attribution on the webhook read face", () => {
+  /** Drop the seed's mapping: what a pre-0026 row looks like before backfill. */
+  function dropWorkspaceMapping(db: ReturnType<typeof createTestD1>, appId: string): void {
+    db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = ?").run(appId);
   }
 
-  test("strict: an unmapped (orphan) App answers 404 with zero decrypt, zero delivery row, zero enqueue", async () => {
+  test("an unmapped (orphan) App answers 404 with zero decrypt, zero delivery row, zero enqueue", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    dropWorkspaceMapping(db, appRow.id);
     const { queue, sent } = makeQueue();
     // No DASHBOARD_ENCRYPTION_KEY: a decrypt attempt would 500, so a 404 also
     // proves the route never reached decryptSecret.
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, WORKSPACE_TENANT_MODE: "strict", DASHBOARD_ENCRYPTION_KEY: undefined });
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DASHBOARD_ENCRYPTION_KEY: undefined });
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
@@ -750,12 +755,11 @@ describe("WORKSPACE_TENANT_MODE on the webhook read face", () => {
     expect(rows.n).toBe(0);
   });
 
-  test("strict: a workspace-mapped App still serves and enqueues", async () => {
+  test("a workspace-mapped App serves and enqueues", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    mapToDefault(db, appRow.id);
     const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, WORKSPACE_TENANT_MODE: "strict" });
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
@@ -766,32 +770,6 @@ describe("WORKSPACE_TENANT_MODE on the webhook read face", () => {
     expect(sent[0]!.appRef).toEqual({ appId: appRow.id });
   });
 
-  test("off (the deploy default): the same unmapped App is still a live webhook", async () => {
-    const db = createMigratedD1();
-    await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    const body = JSON.stringify(PR_PAYLOAD);
-
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
-
-    expect(res.status).toBe(200);
-    expect(sent).toHaveLength(1);
-  });
-
-  test("an illegal mode fails loud instead of silently reading as off", async () => {
-    const db = createMigratedD1();
-    await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, WORKSPACE_TENANT_MODE: "on" as never });
-    const body = JSON.stringify(PR_PAYLOAD);
-
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
-
-    expect(res.status).toBe(500);
-    expect(await res.text()).toBe('invalid WORKSPACE_TENANT_MODE on — expected "off" or "strict"');
-    expect(sent).toHaveLength(0);
-  });
 });
 
 describe("REVIEW_ENABLED semantic matrix (AC4a — per-App governs; env is an emergency brake)", () => {

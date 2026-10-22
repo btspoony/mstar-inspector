@@ -22,8 +22,7 @@ import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
 import {
   operatorSupportWorkspace,
-  strictWorkspaceAppsBase,
-  strictWorkspaceBoot,
+  workspaceBoot,
   pendingInvitesForLogin,
   workspaceMembershipsForLogin,
 } from "../dashboard/index";
@@ -47,8 +46,8 @@ type SpaContext = Context<{ Bindings: Env }>;
  * boot-injected shell cannot rely on the guard's 403 — a removed member with
  * a still-valid session cookie would get the workbench with their own
  * identity echoed in `window.__BOOT__`. Re-read membership the way the guard
- * does: ONE D1 lookup on the users store, shared with the boot's role (a
- * session-bearing shell request costs a single read). No valid session →
+ * does: ONE D1 lookup on the users store per session-bearing shell request. No
+ * valid session →
  * 302 `/dashboard/login` (spec §1.3 — the old null-boot shell was the
  * render-then-kick flash source); session with no users row → session cookie
  * expired, HTML navigation 302s to login while API/fetch keeps the
@@ -69,7 +68,7 @@ type ShellAuth =
  */
 function noSessionShell(c: SpaContext, locale: Locale): ShellAuth {
   if (c.req.path === "/index.html" || c.req.path === "/dashboard/login") {
-    return { kind: "shell", boot: { locale, login: null, name: null, role: null } };
+    return { kind: "shell", boot: { locale, login: null, name: null } };
   }
   return { kind: "redirect", location: "/dashboard/login" };
 }
@@ -106,7 +105,7 @@ async function readShellAuth(c: SpaContext): Promise<ShellAuth> {
       // on the result rather than the context.
       return {
         kind: "shell",
-        boot: { locale, login: null, name: null, role: null },
+        boot: { locale, login: null, name: null },
         setCookie: expireCookie(SESSION_COOKIE),
       };
     }
@@ -117,7 +116,7 @@ async function readShellAuth(c: SpaContext): Promise<ShellAuth> {
   }
   return {
     kind: "shell",
-    boot: { locale, login: session.login, name: session.name ?? session.login, role: user.role },
+    boot: { locale, login: session.login, name: session.name ?? session.login },
   };
 }
 
@@ -177,7 +176,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // The signed-in login of a sidebar-bearing shell; null on the login page and
   // for an anonymous boot (those take no workspace read at all).
   const login = auth.boot.login !== null && route?.page !== "login" ? auth.boot.login : null;
-  const extras = login === null ? {} : await strictWorkspaceBoot(c.env, login);
+  const extras = login === null ? {} : await workspaceBoot(c.env, login);
   // The operator's landing must name the workspace too: the support face reads
   // `/api/support/workspace` off the pathname's workspace segment, and the bare
   // `/dashboard` carries none (root route unregistered → 404). The SAME
@@ -188,26 +187,26 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     if (supportRef !== null) return c.redirect(`/dashboard/${supportRef}/apps`, 302);
     // A login with no workspace of its own still needs a path into the
     // workspace UI; a newcomer (needsWorkspace) keeps the creation surface
-    // instead of being sent to a page that answers the outsider 404.
-    if (extras.needsWorkspace !== true) {
-      const workspaceBase = await strictWorkspaceAppsBase(c.env);
-      if (workspaceBase !== null) return c.redirect(workspaceBase, 302);
+    // instead of being sent to a page that answers the outsider 404. Several
+    // live workspaces leave nothing to name, so the root shell stays.
+    if (extras.needsWorkspace !== true && extras.workspaceRef !== undefined) {
+      return c.redirect(`/dashboard/${extras.workspaceRef}/apps`, 302);
     }
   }
   // The shell's Apps/brand links need the active workspace, and the shell
-  // outlives the URL: a client-side navigation (spaClick → pushState) to the
-  // mode-independent Members page changes the pathname but not the boot, so a
-  // boot without the ref would strand that page on the legacy
-  // `/dashboard/apps` dead end under `strict`. Name the workspace in every
-  // sidebar-bearing boot — a workspace-scoped pathname already carries the ref
-  // in the URL and the boot copies that, but the boot ALSO carries the caller's
-  // workspace role as `canCreateApp` (I-000082: a plain member cannot manage the
-  // App the manifest flow creates, so the SPA offers no Create action), and one
-  // sole-workspace read answers both — so the read runs on every strict
-  // sidebar-bearing boot either way. `/index.html` is the same shell document
-  // addressed directly (the SPA router then reads the real pathname), so it
-  // takes the same boot. The login page renders no sidebar, and `/dashboard`
-  // either redirected above or has no sole workspace to name.
+  // outlives the URL: a client-side navigation (spaClick → pushState) to a page
+  // whose pathname names no workspace changes the pathname but not the boot, so
+  // a boot without the ref would strand that page on the retired
+  // `/dashboard/apps` paths. Name the workspace in every sidebar-bearing boot —
+  // a workspace-scoped pathname already carries the ref in the URL and the boot
+  // copies that, but the boot ALSO carries the caller's create capability
+  // (I-000082: a plain member cannot manage the App the manifest flow creates,
+  // so the SPA offers no Create action), and one workspace-access read answers
+  // both — so the read runs on every sidebar-bearing boot either way.
+  // `/index.html` is the same shell document addressed directly (the SPA router
+  // then reads the real pathname), so it takes the same boot. The login page
+  // renders no sidebar, and `/dashboard` either redirected above or has no sole
+  // workspace to name.
   // Two independent lists behind the same login gate, so they share ONE round
   // trip — neither reads the other and both key on the login alone.
   // The invitee's discovery surface: every live pending invitation for this
@@ -224,8 +223,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // creation surface: `needsWorkspace` below would otherwise offer to create a
   // workspace to someone who is here to read one. The grant also names the
   // workspace (the operator has no membership row to derive it from).
-  // Absent fields add nothing, so `off` and a ref-less deployment keep the
-  // pre-existing boot (and its JSON key order) byte-identical.
+  // Absent fields add nothing, so a ref-less boot keeps its JSON key order.
   const boot: SpaBoot = {
     ...auth.boot,
     ...(firstInstance ? { emptyInstance: true } : {}),
@@ -253,7 +251,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",
     // QC S-001: the injected boot personalizes the document
-    // (login/name/role) — never cache it.
+    // (login/name) — never cache it.
     "cache-control": "private, no-store",
   });
   if (auth.setCookie) headers.append("set-cookie", auth.setCookie);

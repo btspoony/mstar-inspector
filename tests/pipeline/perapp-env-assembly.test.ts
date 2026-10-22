@@ -43,7 +43,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
-import { createMigratedTestD1 } from "../store/helpers";
+import { createMigratedTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
@@ -93,6 +93,7 @@ async function seedApp(
        VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, slug, githubAppId, slug, privateKeyEnc, webhookSecretEnc);
+  await mapAppToDefaultWorkspace(db, id);
   if (opts.configured !== false) {
     await configureApp(db, id);
   }

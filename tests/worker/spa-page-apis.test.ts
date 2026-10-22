@@ -66,6 +66,11 @@ async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
+  // Every user joins the migration-seeded `default` workspace: manage is the
+  // workspace role, so one owner plus plain members is the interesting shape.
+  seedMembership(db, "default", "octocat", "owner");
+  seedMembership(db, "default", "mallory", "member");
+  seedMembership(db, "default", "hubot", "member");
   const id = crypto.randomUUID();
   const enc = await encryptedColumns(id);
   await createAppsStore(db).createApp({
@@ -104,19 +109,24 @@ async function get(path: string, login?: string, env?: Env): Promise<Response> {
 
 describe("the retired deployment-level members face", () => {
   test("GET /dashboard/api/members is gone; the workspace face serves", async () => {
-    // Authority is workspace-scoped, so a deployment-level member list
-    // has no meaning. `off` (no tenant plane) therefore 404s the root path.
+    // Authority is workspace-scoped, so a deployment-level member list has no
+    // meaning: the root path is a 404 and the workspace face is the only one.
     const env = makeEnv(await seededWorld());
-    const root = await get("/dashboard/api/members", "octocat", env);
+    const root = await worker.fetch(
+      new Request("https://worker.local/dashboard/api/members", {
+        headers: { Accept: "application/json", Cookie: `${SESSION_COOKIE}=${await cookie("octocat")}` },
+      }),
+      env,
+    );
     expect(root.status).toBe(404);
   });
 });
 
-describe("GET /dashboard/api/apps", () => {
+describe("GET /dashboard/default/api/apps", () => {
   test("member 200 JSON with health, never encrypted columns", async () => {
     const db = await seededWorld();
     const env = makeEnv(db);
-    const res = await get("/dashboard/api/apps", "hubot", env);
+    const res = await get("/dashboard/default/api/apps", "hubot", env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       viewer: { login: string; role: string };
@@ -133,12 +143,14 @@ describe("GET /dashboard/api/apps", () => {
   });
 });
 
-describe("GET /dashboard/api/apps/:slug/settings", () => {
+describe("GET /dashboard/default/api/apps/:slug/settings", () => {
   test("creator 200 can_manage; other member 200 can_manage false; unknown slug 404", async () => {
     const db = await seededWorld();
     const env = makeEnv(db);
 
-    const owner = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "mallory", env);
+    // Manage is the workspace role, not App creation: 0027 maps the seeded
+    // deployment admin to `owner` and every other user to `member`.
+    const owner = await get("/dashboard/default/api/apps/mstar-inspector-mallory/settings", "octocat", env);
     expect(owner.status).toBe(200);
     const body = (await owner.json()) as {
       can_manage: boolean;
@@ -175,7 +187,9 @@ describe("GET /dashboard/api/apps/:slug/settings", () => {
     expect(body.provider_catalog!.some((p) => p.id === "omp")).toBe(false);
     expect(owner.headers.get("cache-control")).toBe("private, no-store");
 
-    const other = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "hubot", env);
+    // The App's creator is a plain workspace member here, so creation no
+    // longer grants the manage face.
+    const other = await get("/dashboard/default/api/apps/mstar-inspector-mallory/settings", "mallory", env);
     expect(other.status).toBe(200);
     // identity-only non-manager face: the D4 identity set + the cached
     // public GitHub profile + can_manage false — NO health or ops data.
@@ -225,7 +239,7 @@ describe("GET /dashboard/api/apps/:slug/settings", () => {
     expect(otherBody.sandbox_images).toBeUndefined();
     expect(other.headers.get("cache-control")).toBe("private, no-store");
 
-    const missing = await get("/dashboard/api/apps/no-such-app/settings", "octocat", env);
+    const missing = await get("/dashboard/default/api/apps/no-such-app/settings", "octocat", env);
     expect(missing.status).toBe(404);
   });
 
@@ -233,7 +247,7 @@ describe("GET /dashboard/api/apps/:slug/settings", () => {
     const db = await seededWorld();
     const env = makeEnv(db);
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/apps/mstar-inspector-mallory/settings", {
+      new Request("https://worker.local/dashboard/default/apps/mstar-inspector-mallory/settings", {
         method: "POST",
         headers: {
           Cookie: `${SESSION_COOKIE}=${await cookie("hubot")}`,
@@ -251,7 +265,7 @@ describe("membership stays enforcing outside locale", () => {
   test("row-less session cannot read the members or apps JSON", async () => {
     const env = makeEnv(await seededWorld());
     const headers = { Cookie: `${SESSION_COOKIE}=${await cookie("stranger")}`, Accept: "application/json" };
-    const apps = await worker.fetch(new Request("https://worker.local/dashboard/api/apps", { headers }), env);
+    const apps = await worker.fetch(new Request("https://worker.local/dashboard/default/api/apps", { headers }), env);
     expect(apps.status).toBe(403);
   });
 
@@ -274,7 +288,7 @@ describe("membership stays enforcing outside locale", () => {
           Accept: "application/json",
         },
       }),
-      { ...env, WORKSPACE_TENANT_MODE: "strict" } as Env,
+      env,
     );
     expect(res.status).toBe(403);
     const html = await res.text();
@@ -308,15 +322,18 @@ function seedMembership(db: ReturnType<typeof createTestD1>, workspaceId: string
 describe("SPA boot payload — workspace memberships (plan 98 T3)", () => {
   test("lists every live membership as {id, slug, name, role} — both identifiers, not one ref", async () => {
     const db = await seededWorld();
+    // A login outside the seeded `default` workspace, so the list is exactly
+    // the three rows below.
+    await createUser(db, { login: "switcher", role: "member" });
     seedWorkspace(db, "ws-acme", "acme", "Acme");
     seedWorkspace(db, "ws_7d41", "ws_7d41", "Side project");
     seedWorkspace(db, "ws-gone", "gone", "Retired", "2026-02-01T00:00:00.000Z");
-    seedMembership(db, "ws-acme", "mallory", "owner");
-    seedMembership(db, "ws_7d41", "mallory", "member");
-    seedMembership(db, "ws-gone", "mallory", "member");
-    const env = { ...makeEnv(db), WORKSPACE_TENANT_MODE: "strict" } as Env;
+    seedMembership(db, "ws-acme", "switcher", "owner");
+    seedMembership(db, "ws_7d41", "switcher", "member");
+    seedMembership(db, "ws-gone", "switcher", "member");
+    const env = makeEnv(db);
     const res = await worker.fetch(
-      htmlGetRequest("/dashboard/acme/apps", { Cookie: `${SESSION_COOKIE}=${await cookie("mallory")}` }),
+      htmlGetRequest("/dashboard/acme/apps", { Cookie: `${SESSION_COOKIE}=${await cookie("switcher")}` }),
       withSpaAssets(env),
     );
     expect(res.status).toBe(200);
@@ -330,12 +347,11 @@ describe("SPA boot payload — workspace memberships (plan 98 T3)", () => {
     ]);
   });
 
-  test("off carries no memberships (the workspace route family 404s there)", async () => {
-    const db = await seededWorld();
-    seedWorkspace(db, "ws-acme", "acme", "Acme");
-    seedMembership(db, "ws-acme", "mallory", "owner");
+  test("a login with no workspace carries no memberships", async () => {
+    const db = createDb();
+    await createUser(db, { login: "loner", role: "member" });
     const res = await worker.fetch(
-      htmlGetRequest("/dashboard/apps", { Cookie: `${SESSION_COOKIE}=${await cookie("mallory")}` }),
+      htmlGetRequest("/dashboard", { Cookie: `${SESSION_COOKIE}=${await cookie("loner")}` }),
       withSpaAssets(makeEnv(db)),
     );
     expect(bootOf(await res.text()).memberships).toBeUndefined();

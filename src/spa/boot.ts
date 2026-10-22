@@ -3,14 +3,14 @@
  *
  * Channel: the Worker SPA dispatcher fetches `dist/spa/index.html` and
  * replaces `<!--SPA_BOOT-->` with `window.__BOOT__ = {…}` before returning
- * the document. The session cookie is HttpOnly, so the client cannot read
- * login/role itself — this injection is the only bootstrap path.
+ * the document. The session cookie is HttpOnly, so the client cannot read the
+ * login itself — this injection is the only bootstrap path.
  *
  * Shape is intentionally small (locale + identity + the deployment's sole
- * workspace ref + the caller's create capability). Page data comes from the
- * dashboard API under the page's own workspace prefix (`workspace-base.ts`) —
- * the injected ref is navigation only, for the pages whose pathname names no
- * workspace (Members).
+ * workspace ref + the caller's create capability + the login's live
+ * memberships). Page data comes from the dashboard API under the page's own
+ * workspace prefix (`workspace-base.ts`) — the injected ref is navigation only,
+ * for the pages whose pathname names no workspace.
  */
 import type { Locale } from "../i18n";
 
@@ -18,19 +18,16 @@ export type SpaBoot = {
   locale: Locale;
   login: string | null;
   name: string | null;
-  role: "admin" | "member" | null;
   /**
-   * The deployment's sole live workspace ref (its slug) under `strict`,
-   * resolved server-side through the sign-in landing's resolver. Absent under
-   * `off` and whenever the deployment cannot name exactly one — the shell then
-   * keeps its legacy targets. A workspace-scoped pathname always wins.
+   * The deployment's sole live workspace ref (its slug) when it carries
+   * exactly one, resolved server-side. Absent otherwise — the shell then keeps
+   * the root targets. A workspace-scoped pathname always wins.
    */
   workspaceRef?: string;
   /**
    * Absent or `true` = the caller may run the manifest Create flow. The server
-   * sets `false` under `strict` for a plain workspace member, who would not be
-   * able to manage the App the flow creates (I-000082); the SPA then renders no
-   * Create action. `off` never sets it, so its output is unchanged.
+   * sets `false` for a plain workspace member, who would not be able to manage
+   * the App the flow creates (I-000082); the SPA then renders no Create action.
    */
   canCreateApp?: boolean;
   /**
@@ -39,8 +36,8 @@ export type SpaBoot = {
    * workspace by EITHER identifier, so both ride the payload: `id` (stable) and
    * `slug` (the readable segment, equal to `id` until renamed). The switcher
    * matches the current row on either and rewrites the path to `slug`; `role`
-   * serves the members surface. Empty/absent for a login in no workspace,
-   * which renders no switcher.
+   * decides nav visibility (the Members entry is for every workspace member).
+   * Empty/absent for a login in no workspace, which renders no switcher.
    */
   memberships?: Array<{
     id: string;
@@ -83,7 +80,7 @@ export type SpaBoot = {
   emptyInstance?: boolean;
 };
 
-export const EMPTY_BOOT: SpaBoot = { locale: "en", login: null, name: null, role: null };
+export const EMPTY_BOOT: SpaBoot = { locale: "en", login: null, name: null };
 
 export const SPA_BOOT_MARKER = "<!--SPA_BOOT-->";
 

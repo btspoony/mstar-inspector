@@ -17,19 +17,16 @@
  *      covered by tests/worker/dashboard-tenancy.test.ts (no-membership 404)
  *   3. workspace member — reads the list, denied every management write.
  *      covered by tests/worker/dashboard-tenancy.test.ts (member 403)
- *   4. orphan App — absent from the strict workspace list, present under off.
+ *   4. orphan App — absent from every workspace list, indistinguishable from a
+ *      missing slug on its detail route.
  *      covered by tests/store/tenant-read-face.test.ts (store-level invisibility)
- *   5. soft-deleted workspace — its slug answers 404 under strict.
+ *   5. soft-deleted workspace — its slug answers 404.
  *      NEW cell (no task-level owner): the `workspaces.deleted_at` filter.
- *   6. off keeps the legacy App face for the same fixture.
- *      covered by tests/worker/dashboard-tenancy.test.ts (off legacy intact)
+ *   6. soft-deleted workspace × App lifecycle — an App whose workspace was
+ *      retired is unreachable on the one route family.
  *   7. workspace ref grammar — the same workspace answers on its id and on its
  *      slug; every hidden ref form answers 404.
  *      NEW cell (workspace URL identifiers, 2026-10 — I-000059).
- *   8. illegal WORKSPACE_TENANT_MODE — dashboard 500 and consumer refusal
- *      before any store write, from one env value.
- *      covered by tests/worker/dashboard-tenancy.test.ts (dashboard 500) and
- *      tests/pipeline/consumer.test.ts (eager throw), composed across layers.
  *
  * Every cross-workspace cell (rows 1, 2, 4, 5, 6, 7) runs through BOTH address
  * forms — the slug and the generated id — because the segment is now
@@ -42,9 +39,6 @@
  * tests/pipeline/consumer.test.ts.
  */
 import { describe, expect, test } from "bun:test";
-// Load shim only: the consumer statically imports ./sandbox → the workerd
-// builtin `cloudflare:workers` (unresolvable in Bun's test runner).
-import "../helpers/cloudflare-workers-mock";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { insertSupportGrant } from "../../src/dashboard/operator-store";
@@ -53,13 +47,12 @@ import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 // Dynamic AFTER the shim: the static import order would resolve the workerd
 // builtin before mock.module had a chance to register it.
 const { default: worker } = await import("../../src/worker/index");
-const { createReviewConsumer } = await import("../../src/pipeline/consumer");
 
 const SESSION_SECRET = ["test", "matrix", "session", "secret", "32-bytes!"].join("-");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
-function envFor(db: TestD1, mode?: "off" | "strict", operators?: string): Env {
+function envFor(db: TestD1, operators?: string): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} },
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
@@ -69,7 +62,6 @@ function envFor(db: TestD1, mode?: "off" | "strict", operators?: string): Env {
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
-    ...(mode === undefined ? {} : { WORKSPACE_TENANT_MODE: mode }),
     ...(operators === undefined ? {} : { PLATFORM_OPERATORS: operators }),
   } as unknown as Env;
 }
@@ -260,7 +252,7 @@ const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string; ownerStat
   { route: "/apps/acme-app/delete", ownerStatus: 200 },
 ];
 
-describe("tenant isolation matrix (scenario × mode)", () => {
+describe("tenant isolation matrix (scenario × layer)", () => {
   // row 1 — layers: route family gate → membership gate → scoped App resolve
   //         → strict store read. covered by tests/worker/dashboard-tenancy.test.ts
   //         (cross-workspace 404); composed here on a manager of BOTH tenants,
@@ -269,7 +261,7 @@ describe("tenant isolation matrix (scenario × mode)", () => {
   //         rule holding for one form only would not be isolation.
   test("row 1 · cross-workspace App serves only inside its own workspace, 404 in the sibling — by slug and by id", async () => {
     const { db } = matrixFixture();
-    const strict = envFor(db, "strict");
+    const env = envFor(db);
 
     for (const [ownRefs, ownApp, siblingRefs] of [
       [["acme", "ws-acme"], "acme-app", ["other", "ws-other"]],
@@ -278,7 +270,7 @@ describe("tenant isolation matrix (scenario × mode)", () => {
       for (const own of ownRefs) {
         const served = await worker.fetch(
           await request(`/dashboard/${own}/apps/${ownApp}/onboarding`, "dana"),
-          strict,
+          env,
         );
         expect(served.status, `${own}/${ownApp}`).toBe(200);
       }
@@ -286,7 +278,7 @@ describe("tenant isolation matrix (scenario × mode)", () => {
       for (const sibling of siblingRefs) {
         const crossed = await worker.fetch(
           await request(`/dashboard/${sibling}/apps/${ownApp}/onboarding`, "dana"),
-          strict,
+          env,
         );
         expect(crossed.status, `${sibling}/${ownApp}`).toBe(404);
       }
@@ -299,7 +291,7 @@ describe("tenant isolation matrix (scenario × mode)", () => {
   //         absence of a membership row cannot leak as 403 on either.
   test("row 2 · a signed-in non-member gets 404 — never 403 — on the list and the detail face, by slug and by id", async () => {
     const { db } = matrixFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
 
     for (const ref of ["acme", "ws-acme"]) {
       const list = await worker.fetch(await request(`/dashboard/${ref}/api/apps`, "bob"), env);
@@ -326,7 +318,7 @@ describe("tenant isolation matrix (scenario × mode)", () => {
   //         accepted — so no 403 can be a payload rejection in disguise.
   test("row 3 · a workspace member reads the App list but every management write is 403 and lands nothing", async () => {
     const { db } = matrixFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     // A stored chain makes the save-chain write observable: a permitted actor
     // would CLEAR it with the same empty value.
     seed(
@@ -385,46 +377,30 @@ describe("tenant isolation matrix (scenario × mode)", () => {
     expect((after.app as { deleted_at: string | null }).deleted_at).not.toBeNull();
   });
 
-  // row 4 — layers: strict INNER JOIN read face → workspace list route / off
-  //         single-table read → legacy list route. covered by
-  //         tests/store/tenant-read-face.test.ts at the store level; composed
-  //         here through the HTTP faces both modes serve.
-  test("row 4 · an orphan App is absent from the strict workspace list and present under off, on both ref forms", async () => {
+  // row 4 — layers: the INNER JOIN read face → workspace list route → detail
+  //         resolve. covered by tests/store/tenant-read-face.test.ts at the
+  //         store level; composed here through the HTTP faces.
+  test("row 4 · an orphan App is absent from every workspace list, on both ref forms", async () => {
     const { db } = matrixFixture();
 
     for (const ref of ["acme", "ws-acme"]) {
-      const strictList = await worker.fetch(
+      const list = await worker.fetch(
         await request(`/dashboard/${ref}/api/apps`, "dana"),
-        envFor(db, "strict"),
+        envFor(db),
       );
-      expect(strictList.status, ref).toBe(200);
-      const strictSlugs = ((await strictList.json()) as ListBody).apps.map((app) => app.slug);
-      expect(strictSlugs, ref).toContain("acme-app");
-      expect(strictSlugs, ref).not.toContain("orphan-app");
+      expect(list.status, ref).toBe(200);
+      const slugs = ((await list.json()) as ListBody).apps.map((app) => app.slug);
+      expect(slugs, ref).toContain("acme-app");
+      expect(slugs, ref).not.toContain("orphan-app");
 
-      // Strict detail agrees: the same unmapped row is indistinguishable from a
+      // The detail agrees: the same unmapped row is indistinguishable from a
       // missing slug (no workspace can claim it).
-      const strictDetail = await worker.fetch(
+      const detail = await worker.fetch(
         await request(`/dashboard/${ref}/apps/orphan-app/onboarding`, "dana"),
-        envFor(db, "strict"),
+        envFor(db),
       );
-      expect(strictDetail.status, ref).toBe(404);
+      expect(detail.status, ref).toBe(404);
     }
-
-    // off is unchanged: the legacy list is single-table, so the orphan shows.
-    const offList = await worker.fetch(
-      await request("/dashboard/api/apps", "octocat"),
-      envFor(db, "off"),
-    );
-    expect(offList.status).toBe(200);
-    const offSlugs = ((await offList.json()) as ListBody).apps.map((app) => app.slug);
-    expect(offSlugs).toContain("orphan-app");
-
-    const offDetail = await worker.fetch(
-      await request("/dashboard/apps/orphan-app/onboarding", "octocat"),
-      envFor(db, "off"),
-    );
-    expect(offDetail.status).toBe(200);
   });
 
   // row 5 — NEW cell (no task-level owner): layers: route classification →
@@ -433,7 +409,7 @@ describe("tenant isolation matrix (scenario × mode)", () => {
   //         mapped App, so only the soft-delete filter can produce the 404.
   test("row 5 · a soft-deleted workspace answers 404 under strict on both ref forms despite membership and a mapped App", async () => {
     const { db } = matrixFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
 
     for (const ref of ["gone", "ws-gone"]) {
       const list = await worker.fetch(await request(`/dashboard/${ref}/api/apps`, "dana"), env);
@@ -456,38 +432,24 @@ describe("tenant isolation matrix (scenario × mode)", () => {
     expect(live).toEqual({ members: 1, apps: 1 });
   });
 
-  // row 6 — layers: mode switch × workspace lifecycle × route family. The
-  //         `off` rows in tests/worker/dashboard-tenancy.test.ts pin the legacy
-  //         face only for LIVE workspaces; this composes the soft-deleted
-  //         workspace from row 5 with the switch, proving the mode decides
-  //         whether workspace lifecycle gates an App at all — the same App is
-  //         reachable on the legacy face under `off` and on neither face under
-  //         `strict`.
-  test("row 6 · off still serves an App whose workspace was soft-deleted; strict serves it on neither face", async () => {
+  // row 6 — layers: workspace lifecycle × App lifecycle × route family. Row 5
+  //         pins the ref itself; this composes it with the App resolve, proving
+  //         a retired workspace takes its Apps with it on the one route family.
+  test("row 6 · a retired workspace serves none of its Apps", async () => {
     const { db } = matrixFixture();
+    const env = envFor(db);
 
-    const off = envFor(db, "off");
-    const offList = await worker.fetch(await request("/dashboard/api/apps", "octocat"), off);
-    expect(offList.status).toBe(200);
-    expect(((await offList.json()) as ListBody).apps.map((app) => app.slug)).toContain("gone-app");
-    const offDetail = await worker.fetch(
+    const legacy = await worker.fetch(
       await request("/dashboard/apps/gone-app/onboarding", "octocat"),
-      off,
+      env,
     );
-    expect(offDetail.status).toBe(200);
-
-    const strict = envFor(db, "strict");
-    const strictLegacy = await worker.fetch(
-      await request("/dashboard/apps/gone-app/onboarding", "octocat"),
-      strict,
-    );
-    expect(strictLegacy.status).toBe(404);
+    expect(legacy.status).toBe(404);
     for (const ref of ["gone", "ws-gone"]) {
-      const strictWorkspace = await worker.fetch(
+      const scoped = await worker.fetch(
         await request(`/dashboard/${ref}/apps/gone-app/onboarding`, "dana"),
-        strict,
+        env,
       );
-      expect(strictWorkspace.status, ref).toBe(404);
+      expect(scoped.status, ref).toBe(404);
     }
   });
 
@@ -499,7 +461,7 @@ describe("tenant isolation matrix (scenario × mode)", () => {
   //         when it landed and sat between rows 5 and 7.)
   test("row 7 · a workspace answers on its id and on its slug, and every hidden ref form answers 404", async () => {
     const { db } = matrixFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const list = async (ref: string) => {
       const res = await worker.fetch(await request(`/dashboard/${ref}/api/apps`, "dana"), env);
       expect(res.status, ref).toBe(200);
@@ -515,35 +477,6 @@ describe("tenant isolation matrix (scenario × mode)", () => {
     }
   });
 
-  // row 8 — layers: tenantModeOf (single resolver) → dashboard gate AND
-  //         consumer creation. covered by tests/worker/dashboard-tenancy.test.ts
-  //         (500) and tests/pipeline/consumer.test.ts (eager throw); composed
-  //         here from ONE env value so the two faces cannot drift, and the
-  //         consumer is proven to refuse before it touches the store.
-  test("row 8 · an illegal mode answers 500 on every dashboard face and refuses the consumer before any write", async () => {
-    const { db } = matrixFixture();
-    const env = { ...envFor(db), WORKSPACE_TENANT_MODE: "on" } as unknown as Env;
-    const expected = 'invalid WORKSPACE_TENANT_MODE on — expected "off" or "strict"';
-
-    for (const path of ["/dashboard/apps", "/dashboard/acme/apps", "/dashboard/login"]) {
-      const res = await worker.fetch(await request(path, "octocat"), env);
-      expect(res.status, path).toBe(500);
-      expect(await res.text(), path).toContain(expected);
-    }
-
-    // The consumer resolves the same value eagerly: the throw happens while
-    // the deps are built, before a message body is read or a store is written.
-    expect(() => createReviewConsumer(env as never, { info() {}, warn() {}, error() {} })).toThrow(
-      expected,
-    );
-    const counts = db.raw
-      .query(
-        `SELECT (SELECT COUNT(*) FROM reviews) AS reviews,
-                (SELECT COUNT(*) FROM review_failures) AS failures`,
-      )
-      .get() as { reviews: number; failures: number };
-    expect(counts).toEqual({ reviews: 0, failures: 0 });
-  });
   // row 9 — layers: workspace gate operator classification → support_grants
   //         workspace-keyed lookup → route access declaration. covered at the
   //         unit level by tests/worker/operator-store.test.ts (`hasValidGrant`
@@ -561,7 +494,7 @@ describe("tenant isolation matrix (scenario × mode)", () => {
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
-    const env = envFor(db, "strict", "support-bot");
+    const env = envFor(db, "support-bot");
 
     for (const ref of ["acme", "ws-acme"]) {
       const res = await worker.fetch(

@@ -12,7 +12,7 @@ import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { createSessionValue, SESSION_COOKIE } from "../../src/dashboard/session";
 import { SPA_BOOT_MARKER, withSpaAssets } from "../helpers/spa";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createUser } from "../../src/dashboard/users";
@@ -103,6 +103,7 @@ async function insightsWorld(): Promise<{
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
+  seedDefaultMemberships(db, { octocat: "owner", mallory: "owner", hubot: "member" });
   const appId = crypto.randomUUID();
   const otherAppId = crypto.randomUUID();
   const box = createSecretbox(API_TEST_KEY);
@@ -163,7 +164,7 @@ function apiCookie(sessionSecret: string, login: string): Promise<string> {
 
 function appsInsightsGet(env: Env, slug: string, cookie: string, query = "") {
   return worker.fetch(
-    new Request(`https://worker.local/dashboard/api/apps/${slug}/insights/summary${query === "" ? "" : `?${query}`}`, {
+    new Request(`https://worker.local/dashboard/default/api/apps/${slug}/insights/summary${query === "" ? "" : `?${query}`}`, {
       headers: { Cookie: `${SESSION_COOKIE}=${cookie}` },
     }),
     env,

@@ -53,7 +53,7 @@ import {
   type PublicationPayload,
   type VerifiedResolution,
 } from "../../src/store/finding-lifecycle";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../store/helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const GITHUB_APP_ID = 1001;
@@ -77,7 +77,7 @@ const uuid = (n: number): string => `${String(n).padStart(8, "0")}-aaaa-bbbb-ccc
 // finding + pending association) and the §7.5 intent/body built from them.
 // ---------------------------------------------------------------------------
 
-function createSeededTestD1(): TestD1 {
+async function createSeededTestD1(): Promise<TestD1> {
   const db = createMigratedTestD1();
   db.raw
     .prepare(
@@ -87,6 +87,7 @@ function createSeededTestD1(): TestD1 {
        VALUES (?, ?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(APP_ID, SLUG, GITHUB_APP_ID, SLUG);
+  await mapAppToDefaultWorkspace(db, APP_ID);
   db.raw
     .prepare(`INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES (?, ?, ?, 'acme', datetime('now'))`)
     .run(uuid(1), APP_ID, INSTALLATION_ID);
@@ -501,7 +502,7 @@ describe("opaque marker wire (§7.5)", () => {
 
 describe("discoverThread — ownership proof precedes adoption", () => {
   test("happy path (reviewId known): unique complete match → found + ids persisted on the row", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const rootBody = buildLineCommentBody(intent);
     const { octokit, calls } = fakeOctokit({
@@ -523,7 +524,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("a copied marker at ANOTHER review is foreign (known reviewId must match exactly)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const { octokit } = fakeOctokit({
       reviews: [batchReview(PUB_ID, { fullDatabaseId: "999" })],
@@ -534,7 +535,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("a known reviewId whose body does NOT carry our line-batch marker is foreign (marker check is unconditional)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const { octokit, calls } = fakeOctokit({
       reviews: [batchReview(PUB_ID, { body: "an edited/replaced review body without our batch marker" })],
@@ -547,7 +548,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("a copied marker on a human account / with a different body is foreign, never authority", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     // Human-planted marker with the exact marker text.
     const human = fakeOctokit({
@@ -578,7 +579,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("no batch-marker review → unknown; TWO batch-marker reviews → ambiguous (response-loss path)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const none = fakeOctokit({ reviews: [], reviewThreadsPages: [{ threads: [discoveryThread(intent)], hasNextPage: false }] });
     expect(
@@ -595,7 +596,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("P67-QC-002: an OWNED OUTDATED thread (line null, originalLine matches) stays discoverable", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     // The real response shape once the commented line leaves the diff: `line`
     // is null and the anchor survives only in `originalLine`.
@@ -610,7 +611,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("P67-QC-002: the original anchor NEVER widens ownership to another thread", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const cases: Array<[string, Partial<Parameters<typeof discoveryThread>[1]>]> = [
       // Original anchor of a DIFFERENT line.
@@ -638,7 +639,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("two threads claiming the same association → ambiguous; zero threads → unknown", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const dup = fakeOctokit({
       reviews: [batchReview(PUB_ID)],
@@ -655,7 +656,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("scope mismatch / unknown association rejected BEFORE any API call", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const { octokit, calls } = fakeOctokit({ reviews: [] });
     const ops = createReviewThreads(makeDeps(db, octokit));
@@ -666,7 +667,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("identity-unavailable and slug-vs-live-App disagreement fail closed (unknown)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const { octokit, calls } = fakeOctokit({ reviews: [batchReview(PUB_ID)] });
     const base = makeDeps(db, octokit);
@@ -685,14 +686,14 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("discovery read-path transport failures are TYPED unknown (reviews scan, thread scan, mint)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const failingReviews = fakeOctokit({ throwOn: "reviews" });
     expect(
       await createReviewThreads(makeDeps(db, failingReviews.octokit)).discoverThread({ scope: SCOPE, intent, reviewId: null }),
     ).toEqual({ kind: "unknown" });
 
-    const db2 = createSeededTestD1();
+    const db2 = await createSeededTestD1();
     const intent2 = await seedLifecycle(db2);
     const failingThreads = fakeOctokit({ reviews: [batchReview(PUB_ID)], throwOn: "reviewThreads" });
     expect(
@@ -701,7 +702,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
 
     // A mint outage inside resolveAppContext fails closed to the typed
     // outcome instead of throwing out of the adapter.
-    const db3 = createSeededTestD1();
+    const db3 = await createSeededTestD1();
     const intent3 = await seedLifecycle(db3);
     const base = makeDeps(db3, fakeOctokit({ reviews: [batchReview(PUB_ID)] }).octokit);
     expect(
@@ -715,7 +716,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("incomplete reviewThreads pagination (5-page bound) is unknown, never authority", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const { octokit } = fakeOctokit({
       reviews: [batchReview(PUB_ID)],
@@ -729,7 +730,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 
   test("unconfirmed publication → unknown, no API call", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     // Force the publication back to `sending` (not confirmed).
     db.raw.prepare(`UPDATE review_publications SET phase = 'sending' WHERE id = ?`).run(PUB_ID);
@@ -778,7 +779,7 @@ async function resolvedFixture(db: TestD1, intent: LineIntent): Promise<Verified
 
 describe("resolveFindingThread — fences, adoption, mutation confirmation", () => {
   test("happy path: owned thread resolves, row stores resolved, mutation got the exact threadId", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -802,7 +803,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("crash window: remote ids were never bound → resolve DISCOVERS them from the stored intent, then resolves (P67-QC-004)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -845,7 +846,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("crash window with unprovable ownership: retry + durable error, never a terminal abandon (P67-QC-004)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     db.raw
@@ -881,7 +882,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("discovery does NOT spend the resolution attempt budget (P67-QC-005)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
     const { octokit } = fakeOctokit({
@@ -907,7 +908,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("HEAD changed after verification → needs-recheck head-changed, no mutation", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -929,7 +930,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("conversation changed (new reply) → needs-recheck conversation-changed; digest is never refreshed", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -948,7 +949,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("conversation incomplete (older page remains after the 2-page bound) blocks resolution", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -969,7 +970,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("concern no longer addressed by THIS publication → needs-recheck concern-unresolved", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     db.raw.prepare(`UPDATE review_findings SET state = 'open' WHERE id = ?`).run(FINDING_ROW_ID);
@@ -987,7 +988,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("unverifiable verified assessment never authorizes a resolve", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = {
       ...(await resolvedFixture(db, intent)),
@@ -1004,7 +1005,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("incomplete recorded coverage (truncated capture) blocks resolution", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = {
       ...(await resolvedFixture(db, intent)),
@@ -1021,7 +1022,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("OUTDATED owned thread still resolves (isOutdated is recorded, not a veto)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -1039,7 +1040,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("P67-QC-002: an outdated owned thread with NO live line resolves on its original anchor", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -1062,7 +1063,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("P67-QC-002: a null live line whose original anchor differs is never resolved on faith", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -1080,7 +1081,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("already-resolved owned thread is ADOPTED (no mutation, provenance re-proven first)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -1100,7 +1101,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("mutation not confirmed (isResolved false / wrong id / API error) → retry, never a false resolved claim", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
@@ -1130,7 +1131,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     expect(row1.last_error).toContain("not confirmed");
 
     // Mutation transport error.
-    const db2 = createSeededTestD1();
+    const db2 = await createSeededTestD1();
     await seedLifecycle(db2);
     const failing = fakeOctokit({
       threadPages: [{ comments: [root, REPLY] }],
@@ -1149,7 +1150,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("slug-vs-live-App identity disagreement fails closed (retry, no mutation)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const { octokit, calls } = fakeOctokit({ threadPages: [{ comments: [] }] });
@@ -1164,7 +1165,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("superseded association is abandoned (never resolved through the old mapping)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     db.raw.prepare(`UPDATE review_threads SET superseded_by_publication_id = ? WHERE id = ?`).run(uuid(9), ASSOC_ID);
@@ -1179,7 +1180,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("foreign root (author is not the authenticated bot) → abandoned identity-mismatch", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent), authorLogin: "someone-else[bot]" };
@@ -1197,7 +1198,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("a live lease held by another claimant → retry without stealing the lease", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     db.raw
@@ -1217,7 +1218,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("thread capture transport failure → typed retry:api with the lease released (never an escaping throw)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const { octokit, calls } = fakeOctokit({
@@ -1240,7 +1241,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("issue capture transport failure → typed retry:api (a thrown read is never a false fence verdict)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const { octokit, calls } = fakeOctokit({
@@ -1258,7 +1259,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("re-entry on an already-RESOLVED row is a typed terminal no-op (no lease steal, zero API calls)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     await seedLifecycle(db);
     db.raw
       .prepare(`UPDATE review_threads SET resolution_state = 'resolved', resolved_ms = 9000, thread_id = ? WHERE id = ?`)
@@ -1282,7 +1283,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("re-entry on an already-ABANDONED row is a typed terminal no-op (supersession recoverable from the column)", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const { octokit, calls } = fakeOctokit({});
@@ -1294,7 +1295,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     ).toEqual({ kind: "abandoned", reason: "foreign" });
 
     // Superseded abandon → terminal superseded.
-    const db2 = createSeededTestD1();
+    const db2 = await createSeededTestD1();
     await seedLifecycle(db2);
     db2.raw
       .prepare(`UPDATE review_threads SET resolution_state = 'abandoned', superseded_by_publication_id = ? WHERE id = ?`)
@@ -1306,7 +1307,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("post-mutation late change (HEAD moved between mutation and post-read) is recorded, resolution stands", async () => {
-    const db = createSeededTestD1();
+    const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };

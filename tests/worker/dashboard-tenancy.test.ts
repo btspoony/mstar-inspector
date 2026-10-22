@@ -1,15 +1,12 @@
 /**
- * Workspace (tenant) routing + authorization — Deploy B of
- * `WORKSPACE_TENANT_MODE` (migration 0026 data plane).
+ * Workspace (tenant) routing + authorization (migration 0026 data plane).
  *
- * The mode switch governs the request path in `src/dashboard/index.ts`: under
- * `off` the workspace-shaped paths do not exist (404) and the legacy App face
- * behaves exactly as before; under `strict` the legacy App face is 404 and the
- * workspace paths serve, with authorization decided by the actor's workspace
- * role instead of `canManageApp`'s creator-or-deployment-admin rule. The
- * routing gate only CLASSIFIES the slug — the workspace row and the membership
- * are resolved after the session/user read, so an anonymous request learns
- * nothing about slug existence (pinned below).
+ * There is exactly one route family: the workspace named by the first path
+ * segment. The retired pre-workspace App family answers 404, and authorization
+ * is decided by the actor's workspace role. The routing gate only CLASSIFIES
+ * the slug — the workspace row and the membership are resolved after the
+ * session/user read, so an anonymous request learns nothing about slug
+ * existence (pinned below).
  *
  * The fixture runs against the full migration set (the store helper walks
  * `migrations/`), so 0026/0027 are real: `default` is seeded by 0026 and the
@@ -77,7 +74,7 @@ async function renderMembersHrefs(boot: SpaBoot, pathname = "/dashboard/default/
   return [...html.matchAll(/href="([^"]+)"/g)].map((match) => match[1] ?? "");
 }
 
-function envFor(db: TestD1, mode?: "off" | "strict"): Env {
+function envFor(db: TestD1): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} },
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
@@ -87,7 +84,6 @@ function envFor(db: TestD1, mode?: "off" | "strict"): Env {
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
-    ...(mode === undefined ? {} : { WORKSPACE_TENANT_MODE: mode }),
   } as unknown as Env;
 }
 
@@ -231,42 +227,10 @@ function reservedFixture() {
   return { db };
 }
 
-describe("WORKSPACE_TENANT_MODE=off — workspace paths stay invisible", () => {
-  test("workspace-shaped App paths answer 404", async () => {
+describe("the pre-workspace App face is retired", () => {
+  test("every legacy App path answers 404", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "off");
-    for (const path of [
-      "/dashboard/acme/apps/acme-app/onboarding",
-      "/dashboard/acme/api/apps",
-      "/dashboard/acme/apps/acme-app/settings",
-      "/dashboard/acme/api/apps/acme-app/models",
-    ]) {
-      const res = await worker.fetch(await authedRequest(path, "octocat"), env);
-      expect(res.status, path).toBe(404);
-    }
-  });
-
-  test("the legacy App face keeps today's behavior and authorization", async () => {
-    const { db } = tenancyFixture();
-    const env = envFor(db, "off");
-    // Deployment admin (workspace member) manages the App: the legacy rule.
-    const onboarding = await worker.fetch(
-      await authedRequest("/dashboard/apps/acme-app/onboarding", "octocat"),
-      env,
-    );
-    expect(onboarding.status).toBe(200);
-    // The legacy list still serves every App, unfiltered by workspace.
-    const list = await worker.fetch(await authedRequest("/dashboard/api/apps", "mallory"), env);
-    expect(list.status).toBe(200);
-    const body = (await list.json()) as { apps: Array<{ slug: string }> };
-    expect(body.apps.map((app) => app.slug).sort()).toEqual(["acme-app", "other-app"]);
-  });
-});
-
-describe("WORKSPACE_TENANT_MODE=strict — legacy App paths are retired", () => {
-  test("the pre-workspace App face answers 404", async () => {
-    const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     for (const path of [
       "/dashboard/apps/acme-app/onboarding",
       "/dashboard/apps/acme-app/settings",
@@ -282,7 +246,7 @@ describe("WORKSPACE_TENANT_MODE=strict — legacy App paths are retired", () => 
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/acme/api/apps"),
-      envFor(db, "strict"),
+      envFor(db),
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
@@ -290,7 +254,7 @@ describe("WORKSPACE_TENANT_MODE=strict — legacy App paths are retired", () => 
 
   test("an anonymous request cannot tell an existing workspace from a missing one (no pre-auth oracle)", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     // `acme` exists, `ghost` does not. Both must answer the same 302 to login:
     // the gate classifies the slug without a D1 read, and the workspace row is
     // only resolved after the session + user read.
@@ -324,17 +288,17 @@ describe("WORKSPACE_TENANT_MODE=strict — legacy App paths are retired", () => 
     } as TestD1;
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/acme/api/apps"),
-      envFor(observed, "strict"),
+      envFor(observed),
     );
     expect(res.status).toBe(302);
     expect(statements.filter((sql) => sql.includes("FROM workspaces"))).toEqual([]);
   });
 });
 
-describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
+describe("workspace paths serve", () => {
   test("the workspace list serves its members and lists only its own Apps", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const res = await worker.fetch(await authedRequest("/dashboard/acme/api/apps", "mallory"), env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { viewer: { login: string }; apps: Array<{ slug: string }> };
@@ -344,7 +308,7 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
 
   test("the workspace onboarding page serves managers and 403s a plain member", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const path = "/dashboard/acme/apps/acme-app/onboarding";
 
     const owner = await worker.fetch(await authedRequest(path, "dana"), env);
@@ -360,7 +324,7 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
 
   test("an App from another workspace answers 404 even for this workspace's owner", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/apps/other-app/onboarding", "dana"),
       env,
@@ -370,7 +334,7 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
 
   test("a signed-in non-member sees 404, not the workspace", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     // bob owns `other`; he has no membership in `acme`.
     const res = await worker.fetch(await authedRequest("/dashboard/acme/api/apps", "bob"), env);
     expect(res.status).toBe(404);
@@ -380,7 +344,7 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/ghost/api/apps", "octocat"),
-      envFor(db, "strict"),
+      envFor(db),
     );
     expect(res.status).toBe(404);
   });
@@ -389,7 +353,7 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
     // Plan 98 T1: the segment is a ref — `ws-acme` is the row id, `acme` its
     // slug; both name the same workspace, for the same member.
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const list = async (ref: string) => {
       const res = await worker.fetch(await authedRequest(`/dashboard/${ref}/api/apps`, "dana"), env);
       expect(res.status, ref).toBe(200);
@@ -414,7 +378,7 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
       warns.push(String(msg));
     };
     try {
-      const res = await worker.fetch(await authedRequest("/dashboard/dup/api/apps", "dana"), envFor(db, "strict"));
+      const res = await worker.fetch(await authedRequest("/dashboard/dup/api/apps", "dana"), envFor(db));
       expect(res.status).toBe(404);
     } finally {
       console.warn = original;
@@ -424,7 +388,7 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
 
   test("the workspace 404 is the styled page on HTML navigation and a bare status on fetch", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     // HTML navigation renders the console's own 404 surface (the same page the
     // pinned-POST 404 uses) instead of Hono's bare text.
     const page = await worker.fetch(
@@ -447,34 +411,29 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
   });
 
   test("the ROUTING gate's 404s carry the same styled page (N2)", async () => {
-    // Both gate branches answer a hidden route family before any session or
-    // membership read: the strict legacy-App face and the off workspace face.
-    // Their HTML navigation must render the member gate's page, not bare text.
-    for (const [mode, path] of [
-      ["strict", "/dashboard/apps"],
-      ["off", "/dashboard/acme/apps"],
-    ] as const) {
-      const { db } = tenancyFixture();
-      const env = envFor(db, mode);
-      const page = await worker.fetch(
-        await authedRequest(path, "octocat", { accept: "text/html" }),
-        env,
-      );
-      expect(page.status, path).toBe(404);
-      expect(page.headers.get("Content-Type"), path).toContain("text/html");
-      expect(await page.text(), path).toContain(t("en", "common.error.notFoundTitle"));
-      const api = await worker.fetch(await authedRequest(path, "octocat"), env);
-      expect(api.status, path).toBe(404);
-      // The fetch contract is the status and its content type — never Hono's
-      // exact default body text (I-000087: that pin is not ours to keep).
-      expect(api.headers.get("Content-Type"), path).toStartWith("text/plain");
-      expect(await api.text(), path).not.toContain(t("en", "common.error.notFoundTitle"));
-    }
+    // The gate answers a retired route family before any session or membership
+    // read. HTML navigation must render the member gate's page, not bare text.
+    const { db } = tenancyFixture();
+    const env = envFor(db);
+    const path = "/dashboard/apps";
+    const page = await worker.fetch(
+      await authedRequest(path, "octocat", { accept: "text/html" }),
+      env,
+    );
+    expect(page.status, path).toBe(404);
+    expect(page.headers.get("Content-Type"), path).toContain("text/html");
+    expect(await page.text(), path).toContain(t("en", "common.error.notFoundTitle"));
+    const api = await worker.fetch(await authedRequest(path, "octocat"), env);
+    expect(api.status, path).toBe(404);
+    // The fetch contract is the status and its content type — never Hono's
+    // exact default body text (I-000087: that pin is not ours to keep).
+    expect(api.headers.get("Content-Type"), path).toStartWith("text/plain");
+    expect(await api.text(), path).not.toContain(t("en", "common.error.notFoundTitle"));
   });
 
   test("non-App routes keep serving under strict; the retired root members API is gone", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const locale = await worker.fetch(await authedRequest("/dashboard/login", "octocat"), env);
     expect(locale.status).toBe(302);
     // The deployment-level member face is retired: it answers 404 on both
@@ -488,12 +447,12 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
   });
 });
 
-describe("WORKSPACE_TENANT_MODE=strict — manage is the workspace role", () => {
+describe("manage is the workspace role", () => {
   const SETTINGS_BODY = "op=save-sandbox-image&sandbox_image_id=omp";
 
   test("member 403 while admin and owner succeed on the settings POST", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const post = (login: string) =>
       authedRequest("/dashboard/acme/apps/acme-app/settings", login, {
         method: "POST",
@@ -507,26 +466,25 @@ describe("WORKSPACE_TENANT_MODE=strict — manage is the workspace role", () => 
     expect((await worker.fetch(await post("dana"), env)).status).toBe(200); // workspace owner
   });
 
-  test("the same settings POST is 403 for that non-manager on the legacy face under off", async () => {
+  test("the deployment-level settings path is retired (404, not a second authz rule)", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "off");
     const res = await worker.fetch(
       await authedRequest("/dashboard/apps/acme-app/settings", "carol", {
         method: "POST",
         body: SETTINGS_BODY,
       }),
-      env,
+      envFor(db),
     );
-    expect(res.status).toBe(403); // legacy rule: not the creator, not a deployment admin
+    expect(res.status).toBe(404);
   });
 });
 
-describe("WORKSPACE_TENANT_MODE=strict — success redirects stay in the workspace route family", () => {
+describe("success redirects stay in the workspace route family", () => {
   const SETTINGS_BODY = "op=save-sandbox-image&sandbox_image_id=omp";
 
   test("a native settings form post answers 302 to the workspace-prefixed settings URL", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/apps/acme-app/settings", "carol", {
         method: "POST",
@@ -541,7 +499,7 @@ describe("WORKSPACE_TENANT_MODE=strict — success redirects stay in the workspa
 
   test("a native validation 400 keeps the same workspace-prefixed target", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/apps/acme-app/settings", "carol", {
         method: "POST",
@@ -556,7 +514,7 @@ describe("WORKSPACE_TENANT_MODE=strict — success redirects stay in the workspa
 
   test("a native pause form post redirects to the workspace apps list (Referer-derived)", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/apps/acme-app/pause", "carol", {
         method: "POST",
@@ -570,7 +528,7 @@ describe("WORKSPACE_TENANT_MODE=strict — success redirects stay in the workspa
 
   test("the SPA fetch form post keeps its plain 2xx body (no redirect)", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const request = await authedRequest("/dashboard/acme/apps/acme-app/settings", "carol", {
       method: "POST",
       body: SETTINGS_BODY,
@@ -583,26 +541,25 @@ describe("WORKSPACE_TENANT_MODE=strict — success redirects stay in the workspa
     expect(await res.text()).toContain("Saved the omp runtime image for acme-app.");
   });
 
-  test("off: the same native post still redirects to the legacy settings URL", async () => {
+  test("a native settings post on the retired deployment path answers 404 in the workspace family", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "off");
     const res = await worker.fetch(
       await authedRequest("/dashboard/apps/acme-app/settings", "octocat", {
         method: "POST",
         body: SETTINGS_BODY,
         accept: "text/html",
       }),
-      env,
+      envFor(db),
     );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/apps/acme-app/settings");
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Location")).toBeNull();
   });
 });
 
-describe("WORKSPACE_TENANT_MODE=strict — reserved slugs are never captured", () => {
+describe("reserved slugs are never captured", () => {
   test("a workspace whose slug is a reserved word is unreachable", async () => {
     const { db } = reservedFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     for (const word of RESERVED_WORKSPACE_SLUGS) {
       const res = await worker.fetch(
         await authedRequest(`/dashboard/${word}/apps/reserved-${word}-app/onboarding`, "octocat"),
@@ -616,16 +573,16 @@ describe("WORKSPACE_TENANT_MODE=strict — reserved slugs are never captured", (
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/apps/acme-app/onboarding", "dana"),
-      envFor(db, "strict"),
+      envFor(db),
     );
     expect(res.status).toBe(200);
   });
 });
 
-describe("invisible App stays a 404 on both faces (never a redirect)", () => {
-  test("strict: HTML GET and POST on a cross-workspace App answer 404 with no Location", async () => {
+describe("invisible App stays a 404 (never a redirect)", () => {
+  test("HTML GET and POST on a cross-workspace App answer 404 with no Location", async () => {
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
 
     const get = await worker.fetch(
       await authedRequest("/dashboard/acme/apps/other-app/onboarding", "dana", {
@@ -648,37 +605,23 @@ describe("invisible App stays a 404 on both faces (never a redirect)", () => {
     expect(post.headers.get("Location")).toBeNull();
   });
 
-  test("strict: a fetch POST on an invisible App answers the legacy 404 body", async () => {
+  test("a fetch POST on an invisible App answers the plain 404 body", async () => {
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/apps/other-app/disable", "dana", { method: "POST" }),
-      envFor(db, "strict"),
+      envFor(db),
     );
     expect(res.status).toBe(404);
     expect(await res.text()).toBe("unknown app");
   });
-
-  test("off: the legacy HTML GET and POST still redirect exactly as today", async () => {
-    const { db } = tenancyFixture();
-    const env = envFor(db, "off");
-    const cases: Array<{ path: string; init: { method?: string; accept: string } }> = [
-      { path: "/dashboard/apps/ghost-app/onboarding", init: { accept: "text/html" } },
-      { path: "/dashboard/apps/ghost-app/disable", init: { method: "POST", accept: "text/html" } },
-    ];
-    for (const { path, init } of cases) {
-      const res = await worker.fetch(await authedRequest(path, "octocat", init), env);
-      expect(res.status, path).toBe(302);
-      expect(res.headers.get("Location"), path).toBe("/dashboard");
-    }
-  });
 });
 
-describe("off: unmatched reserved-shaped paths keep their original answer", () => {
+describe("unmatched reserved-shaped paths keep their answer", () => {
   test("a POST under a reserved first segment still reaches the placeholder catch-all", async () => {
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/login/apps/anything/disable", "octocat", { method: "POST" }),
-      envFor(db, "off"),
+      envFor(db),
     );
     expect(res.status).toBe(405);
     expect(await res.text()).toBe("placeholder actions are not implemented");
@@ -688,16 +631,16 @@ describe("off: unmatched reserved-shaped paths keep their original answer", () =
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/login/apps/anything/onboarding", "octocat"),
-      envFor(db, "off"),
+      envFor(db),
     );
     expect(res.status).toBe(404);
   });
 });
 
 describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
-  test("strict: legacy App HTML GET and HEAD answer 404, not the SPA shell", async () => {
+  test("retired App HTML GET and HEAD answer 404, not the SPA shell", async () => {
     const { db } = tenancyFixture();
-    const env = withSpaAssets(envFor(db, "strict"));
+    const env = withSpaAssets(envFor(db));
     for (const path of ["/dashboard/apps", "/dashboard/apps/acme-app/settings"]) {
       const get = await worker.fetch(
         await authedRequest(path, "octocat", { accept: "text/html" }),
@@ -714,9 +657,9 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     }
   });
 
-  test("strict: a workspace App page still serves with ASSETS bound", async () => {
+  test("a workspace App page still serves with ASSETS bound", async () => {
     const { db } = tenancyFixture();
-    const env = withSpaAssets(envFor(db, "strict"));
+    const env = withSpaAssets(envFor(db));
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/apps/acme-app/onboarding", "dana", {
         accept: "text/html",
@@ -729,9 +672,9 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(body).not.toContain("window.__BOOT__");
   });
 
-  test("strict: the workspace Apps pages serve the shell over the workspace API base", async () => {
+  test("the workspace Apps pages serve the shell over the workspace API base", async () => {
     const { db } = tenancyFixture();
-    const env = withSpaAssets(envFor(db, "strict"));
+    const env = withSpaAssets(envFor(db));
     for (const path of ["/dashboard/acme/apps", "/dashboard/acme/apps/acme-app"]) {
       const res = await worker.fetch(
         await authedRequest(path, "dana", { accept: "text/html" }),
@@ -745,7 +688,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     }
   });
 
-  test("strict: the workspace Members shell serves and keeps its nav inside the workspace", async () => {
+  test("the workspace Members shell serves and keeps its nav inside the workspace", async () => {
     // Members is workspace-routed: the pathname names the
     // workspace, so every nav target stays inside it.
     // 0026 seeds `default`; this fixture adds the membership on top of it.
@@ -753,7 +696,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
     const res = await worker.fetch(
       await authedRequest("/dashboard/default/members", "octocat", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "strict")),
+      withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
@@ -764,29 +707,17 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(hrefs).not.toContain("/dashboard/apps");
   });
 
-  test("strict: the retired root Members path answers 404 (retired, not redirected)", async () => {
+  test("the retired root Members path answers 404 (retired, not redirected)", async () => {
     const db = createMigratedTestD1();
     seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
     const res = await worker.fetch(
       await authedRequest("/dashboard/members", "octocat", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "strict")),
+      withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(404);
   });
 
-  test("off: the root Members page is not a route either (no legacy copy)", async () => {
-    // The root members faces are retired: with no workspace plane there is
-    // no member list to serve, so the legacy path is a plain 404.
-    const db = createMigratedTestD1();
-    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
-    const res = await worker.fetch(
-      await authedRequest("/dashboard/members", "octocat", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "off")),
-    );
-    expect(res.status).toBe(404);
-  });
-
-  test("strict: the workspace Apps boot keeps its workspace after a client-side navigation to Members", async () => {
+  test("the workspace Apps boot keeps its workspace after a client-side navigation to Members", async () => {
     // spaClick → pushState changes the pathname but NOT `window.__BOOT__`, so a
     // boot that omitted the slug on workspace pages would strand Members on the
     // legacy targets the moment the admin clicked through (I-000072).
@@ -796,7 +727,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
     const res = await worker.fetch(
       await authedRequest("/dashboard/default/apps", "octocat", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "strict")),
+      withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
@@ -809,7 +740,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(hrefs).not.toContain("/dashboard/apps");
   });
 
-  test("strict: the direct /index.html shell names the sole workspace too (N1)", async () => {
+  test("the direct /index.html shell names the sole workspace too (N1)", async () => {
     // `/index.html` is the same shell document addressed directly — the SPA
     // router then reads the real pathname — so it must carry the same boot or
     // its sidebar keeps the legacy dead end.
@@ -822,7 +753,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
           Cookie: `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`,
         },
       }),
-      withSpaAssets(envFor(db, "strict")),
+      withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
@@ -832,42 +763,21 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(hrefs).not.toContain("/dashboard/apps");
   });
 
-  test("off: a workspace-shaped shell never exists, so no boot carries a slug", async () => {
+  test("a retired App page answers 404 even with ASSETS bound (gate before dispatch)", async () => {
     const { db } = tenancyFixture();
-    const res = await worker.fetch(
-      await authedRequest("/dashboard/apps", "octocat", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "off")),
-    );
-    expect(res.status).toBe(200);
-    expect(bootOf(await res.text()).workspaceRef).toBeUndefined();
-  });
-
-  test("off: a workspace Apps page answers 404 even with ASSETS bound (gate before dispatch)", async () => {
-    const { db } = tenancyFixture();
-    const env = withSpaAssets(envFor(db, "off"));
-    const res = await worker.fetch(
-      await authedRequest("/dashboard/acme/apps", "octocat", { accept: "text/html" }),
-      env,
-    );
-    expect(res.status).toBe(404);
-    expect(await res.text()).not.toContain("window.__BOOT__");
-  });
-
-  test("off: the legacy SPA pages still serve with ASSETS bound", async () => {
-    const { db } = tenancyFixture();
-    const env = withSpaAssets(envFor(db, "off"));
+    const env = withSpaAssets(envFor(db));
     for (const path of ["/dashboard/apps", "/dashboard/apps/acme-app/settings"]) {
       const res = await worker.fetch(
         await authedRequest(path, "octocat", { accept: "text/html" }),
         env,
       );
-      expect(res.status, path).toBe(200);
-      expect(await res.text()).toContain("window.__BOOT__");
+      expect(res.status, path).toBe(404);
+      expect(await res.text(), path).not.toContain("window.__BOOT__");
     }
   });
 });
 
-describe("strict: the post-authentication landing is the workspace Apps page", () => {
+describe("the post-authentication landing is the workspace Apps page", () => {
   /** ONE live workspace — the M1 shape `getSoleWorkspace` resolves. */
   function soleWorkspaceFixture() {
     const db = createMigratedTestD1();
@@ -878,7 +788,7 @@ describe("strict: the post-authentication landing is the workspace Apps page", (
 
   test("a signed-in HTML GET /dashboard 302s to the workspace Apps list, not the legacy root", async () => {
     const { db } = soleWorkspaceFixture();
-    const env = withSpaAssets(envFor(db, "strict"));
+    const env = withSpaAssets(envFor(db));
     const res = await worker.fetch(
       await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
       env,
@@ -893,7 +803,7 @@ describe("strict: the post-authentication landing is the workspace Apps page", (
     const { db } = soleWorkspaceFixture();
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard", { headers: { Accept: "text/html" } }),
-      withSpaAssets(envFor(db, "strict")),
+      withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
@@ -903,45 +813,34 @@ describe("strict: the post-authentication landing is the workspace Apps page", (
     const { db } = soleWorkspaceFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/login", "octocat"),
-      envFor(db, "strict"),
+      envFor(db),
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
   });
 
-  test("no sole workspace → the legacy root shell is kept (no guessed slug)", async () => {
-    const { db } = tenancyFixture();
-    const env = withSpaAssets(envFor(db, "strict"));
-    const warns: string[] = [];
-    const original = console.warn;
-    console.warn = (msg: unknown) => {
-      warns.push(String(msg));
-    };
-    try {
-      const res = await worker.fetch(
-        await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
-        env,
-      );
-      expect(res.status).toBe(200);
-      expect(await res.text()).toContain("window.__BOOT__");
-    } finally {
-      console.warn = original;
-    }
-    expect(warns.some((line) => line.includes('"reason":"no_sole_workspace"'))).toBe(true);
-  });
-
-  test("off: the legacy root shell is unchanged", async () => {
+  test("several live workspaces → the root shell is kept (no guessed slug)", async () => {
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard", "octocat", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "off")),
+      withSpaAssets(envFor(db)),
+    );
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).workspaceRef).toBeUndefined();
+  });
+
+  test("a member of a non-sole workspace keeps the root shell (no guessed slug)", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", "mallory", { accept: "text/html" }),
+      withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("window.__BOOT__");
   });
 });
 
-describe("strict: a login with no workspace gets the creation surface", () => {
+describe("a login with no workspace gets the creation surface", () => {
   /** A signed-in users row with no membership anywhere. */
   function newcomer() {
     const db = createMigratedTestD1();
@@ -953,7 +852,7 @@ describe("strict: a login with no workspace gets the creation surface", () => {
     const { db } = newcomer();
     const res = await worker.fetch(
       await authedRequest("/dashboard", "newcomer", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "strict")),
+      withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
@@ -967,7 +866,7 @@ describe("strict: a login with no workspace gets the creation surface", () => {
     const { db } = newcomer();
     const res = await worker.fetch(
       await authedRequest("/dashboard", "newcomer", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "strict")),
+      withSpaAssets(envFor(db)),
     );
     const boot = bootOf(await res.text());
     const hrefs = await renderMembersHrefs(boot, "/dashboard");
@@ -997,7 +896,7 @@ describe("strict: a login with no workspace gets the creation surface", () => {
         method: "POST",
         body: new URLSearchParams({ name: "Acme" }).toString(),
       }),
-      envFor(db, "strict"),
+      envFor(db),
     );
     expect(res.status).toBe(201);
     // The 201 names the landing: with 0026's `default` workspace already
@@ -1012,7 +911,7 @@ describe("strict: a login with no workspace gets the creation surface", () => {
       await authedRequest(`/dashboard/${created.slug}/apps`, "newcomer", {
         accept: "text/html",
       }),
-      withSpaAssets(envFor(db, "strict")),
+      withSpaAssets(envFor(db)),
     );
     expect(shell.status).toBe(200);
     const boot = bootOf(await shell.text());
@@ -1020,61 +919,31 @@ describe("strict: a login with no workspace gets the creation surface", () => {
     expect(boot.workspaceRef).toBe(created.slug);
     const api = await worker.fetch(
       await authedRequest(`/dashboard/${created.slug}/api/members`, "newcomer"),
-      envFor(db, "strict"),
+      envFor(db),
     );
     expect(api.status).toBe(200);
     const members = (await api.json()) as { viewer: { login: string; role: string } };
     expect(members.viewer).toEqual({ login: "newcomer", role: "owner" });
   });
 
-  test("off: a login with no workspace gets the same creation surface", async () => {
-    // Creation is the ONLY way into a first workspace and its route is outside
-    // the workspace gate, so the offer cannot be a `strict`-only affordance —
-    // `off` is the documented default mode.
-    const { db } = newcomer();
-    const res = await worker.fetch(
-      await authedRequest("/dashboard/apps", "newcomer", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "off")),
-    );
-    expect(res.status).toBe(200);
-    const boot = bootOf(await res.text());
-    expect(boot.needsWorkspace).toBe(true);
-    // The workspace plane is invisible under `off`: nothing to name, and the
-    // legacy creator rule keeps the App flow open.
-    expect(boot.workspaceRef).toBeUndefined();
-    expect(boot.canCreateApp).toBeUndefined();
-    const spa = "../../src/spa";
-    const { createElement } = await import("react");
-    const { renderToStaticMarkup } = await import("react-dom/server");
-    type Component = (props: Record<string, unknown>) => ReactElement;
-    const { DashboardPage } = (await import(`${spa}/pages`)) as { DashboardPage: Component };
-    const { matchRoute } = (await import(`${spa}/router`)) as {
-      matchRoute: (pathname: string) => unknown;
-    };
-    const html = renderToStaticMarkup(
-      createElement(DashboardPage, { route: matchRoute("/dashboard"), boot }),
-    );
-    expect(html).toContain(t(boot.locale, "workspace.setupHeading"));
-    expect(html).toContain(t(boot.locale, "workspace.create"));
-  });
-
-  test("off: a login that already belongs to a workspace sees no creation form", async () => {
+  test("a login that already belongs to a workspace is sent to it, not to creation", async () => {
     const { db } = newcomer();
     seedMembership(db, "default", seedUserId(db, "newcomer"), "member");
     const res = await worker.fetch(
-      await authedRequest("/dashboard/apps", "newcomer", { accept: "text/html" }),
-      withSpaAssets(envFor(db, "off")),
+      await authedRequest("/dashboard", "newcomer", { accept: "text/html" }),
+      withSpaAssets(envFor(db)),
     );
-    expect(bootOf(await res.text()).needsWorkspace).toBeUndefined();
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
   });
 });
 
-describe("strict: the onboarding CTA stays inside the workspace", () => {
+describe("the onboarding CTA stays inside the workspace", () => {
   test("the Open Settings CTA targets the workspace settings page", async () => {
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/apps/acme-app/onboarding", "dana"),
-      envFor(db, "strict"),
+      envFor(db),
     );
     expect(res.status).toBe(200);
     const body = await res.text();
@@ -1082,18 +951,17 @@ describe("strict: the onboarding CTA stays inside the workspace", () => {
     expect(body).not.toContain('href="/dashboard/apps/acme-app/settings"');
   });
 
-  test("off: the CTA keeps the legacy href", async () => {
+  test("the retired deployment-level onboarding path is a 404", async () => {
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/apps/acme-app/onboarding", "octocat"),
-      envFor(db, "off"),
+      envFor(db),
     );
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain('href="/dashboard/apps/acme-app/settings"');
+    expect(res.status).toBe(404);
   });
 });
 
-describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
+describe("App creation is owner/admin", () => {
   /**
    * ONE live workspace (`default`, 0026's seed) — the M1 shape the gate judges
    * against — with a role matrix where `octocat` is a deployment ADMIN but only
@@ -1114,7 +982,7 @@ describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
 
   test("owner and admin may start the manifest flow and get the create form", async () => {
     const { db } = soleWorkspaceRoles();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     for (const login of ["dana", "carol"]) {
       const res = await post(login, "/dashboard/manifest/start", env);
       expect(res.status, login).toBe(200);
@@ -1124,7 +992,7 @@ describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
 
   test("a plain member is refused with the styled 403 page and mints no state cookie", async () => {
     const { db } = soleWorkspaceRoles();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     for (const login of ["mallory", "octocat"]) {
       // octocat is a DEPLOYMENT admin but a workspace member: the workspace
       // role decides, exactly as the scoped canManageApp does.
@@ -1137,7 +1005,7 @@ describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
 
   test("the commit recovery route applies the same gate (member 403, owner passes to the hold check)", async () => {
     const { db } = soleWorkspaceRoles();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const member = await post("mallory", "/dashboard/manifest/commit", env);
     expect(member.status).toBe(403);
     expect(await member.text()).toContain(t("en", "common.error.forbiddenTitle"));
@@ -1148,18 +1016,13 @@ describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
     expect(owner.headers.get("Location")).toBe("/dashboard");
   });
 
-  test("off keeps the ungated flow (its creator rule can manage the new App)", async () => {
-    const { db } = soleWorkspaceRoles();
-    expect((await post("mallory", "/dashboard/manifest/start", envFor(db, "off"))).status).toBe(200);
-  });
-
-  test("a strict deployment without a sole workspace refuses creation instead of defaulting open", async () => {
+  test("a deployment without a sole workspace refuses creation instead of defaulting open", async () => {
     // `tenancyFixture` carries several live workspaces, so ownership of a new
-    // App cannot be resolved at all: strict must refuse here, not mint a slug
+    // App cannot be resolved at all: the gate must refuse here, not mint a slug
     // and only fail later inside createApp (after the state cookie and the
     // operator's trip to GitHub).
     const { db } = tenancyFixture();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     for (const login of ["octocat", "dana"]) {
       const res = await post(login, "/dashboard/manifest/start", env);
       expect(res.status, login).toBe(403);
@@ -1168,11 +1031,11 @@ describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
     }
   });
 
-  test("a strict deployment with an unbound store refuses creation (configuration, not permission)", async () => {
+  test("a deployment with an unbound store refuses creation (configuration, not permission)", async () => {
     // Without D1 nothing can attribute the App: the dashboard face already
     // fails closed on the missing binding before the route runs, so the flow
     // never starts and no slug/state cookie is minted.
-    const env = { ...envFor(createMigratedTestD1(), "strict"), DB: undefined } as unknown as Env;
+    const env = { ...envFor(createMigratedTestD1()), DB: undefined } as unknown as Env;
     const res = await post("octocat", "/dashboard/manifest/start", env);
     expect(res.status).toBe(500);
     expect(await res.text()).toContain("dashboard storage is not configured");
@@ -1181,7 +1044,7 @@ describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
 
   test("the shell boot carries the create capability the SPA hides the action on", async () => {
     const { db } = soleWorkspaceRoles();
-    const env = withSpaAssets(envFor(db, "strict"));
+    const env = withSpaAssets(envFor(db));
     const bootOfLogin = async (login: string): Promise<SpaBoot> =>
       bootOf(await (await worker.fetch(await authedRequest("/dashboard/default/members", login, { accept: "text/html" }), env)).text());
     // Owner/admin → true (the key is present, not merely defaulted).
@@ -1190,20 +1053,14 @@ describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
     // Plain member → explicitly false.
     expect((await bootOfLogin("mallory")).canCreateApp).toBe(false);
     expect((await bootOfLogin("octocat")).canCreateApp).toBe(false);
-    // `off` never sends the field: the legacy flow is ungated there.
-    const offEnv = withSpaAssets(envFor(db, "off"));
-    const offBoot = bootOf(
-      await (await worker.fetch(await authedRequest("/dashboard/apps", "mallory", { accept: "text/html" }), offEnv)).text(),
-    );
-    expect(offBoot.canCreateApp).toBeUndefined();
   });
 
-  test("a strict deployment that cannot name one workspace advertises no create capability", async () => {
+  test("a deployment that cannot name one workspace advertises no create capability", async () => {
     // Several live workspaces ⇒ no sole workspace to attribute a new App to.
     // `/index.html` is the shell document with no workspace-scoped pathname, so
     // the boot's only workspace source is the server-resolved sole workspace.
     const { db } = tenancyFixture();
-    const env = withSpaAssets(envFor(db, "strict"));
+    const env = withSpaAssets(envFor(db));
     const boot = bootOf(
       await (
         await worker.fetch(
@@ -1217,7 +1074,7 @@ describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
   });
 });
 
-describe("WORKSPACE_TENANT_MODE=strict — a mid-flight demotion cannot finish the flow", () => {
+describe("a mid-flight demotion cannot finish the flow", () => {
   const SLUG = "mstar-inspector-mallory";
   const CONVERSION = {
     id: 987654,
@@ -1254,7 +1111,7 @@ describe("WORKSPACE_TENANT_MODE=strict — a mid-flight demotion cannot finish t
 
   test("a start that began as owner still refuses the callback commit after demotion", async () => {
     const { db, userId } = ownerThenDemote();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const state = await createManifestStateValue(SESSION_SECRET, SLUG);
     // The operator really did start: the gate admitted it.
     expect((await worker.fetch(await authedRequest("/dashboard/manifest/start", "mallory", { method: "POST" }), env)).status).toBe(200);
@@ -1280,7 +1137,7 @@ describe("WORKSPACE_TENANT_MODE=strict — a mid-flight demotion cannot finish t
 
   test("a parked hold no longer renders the confirm page (or its commit form) after demotion", async () => {
     const { db, userId } = ownerThenDemote();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const hold = await encryptHoldValue(buildHoldPayload(CONVERSION, "mallory", SLUG), SESSION_SECRET);
     demote(db, userId);
     const res = await worker.fetch(
@@ -1302,7 +1159,7 @@ describe("WORKSPACE_TENANT_MODE=strict — a mid-flight demotion cannot finish t
 
   test("the same hold still resumes for a caller who is still owner", async () => {
     const { db } = ownerThenDemote();
-    const env = envFor(db, "strict");
+    const env = envFor(db);
     const hold = await createHoldValue(CONVERSION, "mallory", SESSION_SECRET, SLUG);
     const res = await worker.fetch(
       await authedRequest("/dashboard/manifest/confirm", "mallory", {
@@ -1315,35 +1172,4 @@ describe("WORKSPACE_TENANT_MODE=strict — a mid-flight demotion cannot finish t
     expect(await res.text()).toContain('action="/dashboard/manifest/commit"');
   });
 
-  test("off adds no gate and no read: a demoted-shape flow still completes there", async () => {
-    const { db, userId } = ownerThenDemote();
-    const env = envFor(db, "off");
-    demote(db, userId);
-    const hold = await createHoldValue(CONVERSION, "mallory", SESSION_SECRET, SLUG);
-    const res = await worker.fetch(
-      await authedRequest("/dashboard/manifest/confirm", "mallory", {
-        accept: "text/html",
-        extraCookies: { [MANIFEST_HOLD_COOKIE]: hold },
-      }),
-      env,
-    );
-    expect(res.status).toBe(200);
-    expect(await res.text()).toContain('action="/dashboard/manifest/commit"');
-  });
-});
-
-describe("WORKSPACE_TENANT_MODE with an illegal value — fails loud", () => {
-  test("every /dashboard request answers 500 with the bad value and serves no route", async () => {
-    const { db } = tenancyFixture();
-    const env = { ...envFor(db), WORKSPACE_TENANT_MODE: "on" } as unknown as Env;
-    // Legacy, workspace-shaped and mode-independent paths alike: refusing to
-    // pick a face is safer than serving either one from a typo'd deploy var.
-    for (const path of ["/dashboard/apps", "/dashboard/acme/apps", "/dashboard/login"]) {
-      const res = await worker.fetch(await authedRequest(path, "octocat"), env);
-      expect(res.status, path).toBe(500);
-      expect(await res.text(), path).toContain(
-        'invalid WORKSPACE_TENANT_MODE on — expected "off" or "strict"',
-      );
-    }
-  });
 });

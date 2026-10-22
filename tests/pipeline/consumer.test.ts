@@ -81,7 +81,6 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../src/review/credential-payload";
-import { tenantModeOf } from "../../src/worker/tenant-mode";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../src/contracts/recheck";
 import { sk, gh, AWS_CANARY_KEY, fakePem } from "../helpers/fake-secrets";
 
@@ -1558,6 +1557,9 @@ describe("createReviewConsumer", () => {
         await box.encryptSecret(TEST_APP_PEM, `github_apps.private_key_enc:${commaAppId}`),
         await box.encryptSecret("whsec-comma-app", `github_apps.webhook_secret_enc:${commaAppId}`),
       );
+    db.raw
+      .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
+      .run(commaAppId);
     await seedAppConfig(db, commaAppId, ",");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1632,6 +1634,9 @@ describe("createReviewConsumer", () => {
           `github_apps.webhook_secret_enc:${overrideAppId}`,
         ),
       );
+    db.raw
+      .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')`)
+      .run(overrideAppId);
     await seedAppConfig(db, overrideAppId); // healthy base chain + ark key
     db.raw
       .prepare(
@@ -1778,6 +1783,10 @@ describe("createReviewConsumer", () => {
       "0021_review_checks.sql",
       "0022_app_trigger_mode.sql",
       "0024_provider_multi_key.sql",
+      "0026_workspaces.sql",
+      // The workspace plane every App read joins; 0027 attributes the legacy
+      // App above to the 'default' workspace exactly as a real deployment does.
+      "0027_workspace_backfill.sql",
     ]) {
       db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
     }
@@ -4780,41 +4789,22 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 });
 
-describe("tenantModeOf (WORKSPACE_TENANT_MODE)", () => {
-  test("unset/empty → off, the two legal values pass through, anything else throws", () => {
-    expect(tenantModeOf(undefined)).toBe("off");
-    expect(tenantModeOf("")).toBe("off");
-    expect(tenantModeOf("off")).toBe("off");
-    expect(tenantModeOf("strict")).toBe("strict");
-    expect(() => tenantModeOf("STRICT")).toThrow(
-      'invalid WORKSPACE_TENANT_MODE STRICT — expected "off" or "strict"',
-    );
-    expect(() => tenantModeOf(" on ")).toThrow(
-      'invalid WORKSPACE_TENANT_MODE  on  — expected "off" or "strict"',
-    );
-  });
-});
-
-describe("workspace tenant mode (WORKSPACE_TENANT_MODE)", () => {
+describe("workspace attribution gate (one read face)", () => {
   /**
    * The seeded App minus its `app_workspaces` row: what a pre-0026 row looks
-   * like when the backfill never ran. Under `off` it is a normal App; under
-   * `strict` the INNER JOIN read face cannot see it at all.
+   * like when the backfill never ran. The join read face cannot see it at all,
+   * so the pipeline must fail closed rather than review an unattributed App.
    */
   function dropWorkspaceMapping(db: TestD1): void {
     db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = ?").run(TEST_APP_ID);
   }
 
-  test("strict: an unmapped App fails at the credential gate — zero sandbox/token/GitHub, same retry→DLQ path", async () => {
+  test("an unmapped App fails at the credential gate — zero sandbox/token/GitHub, same retry→DLQ path", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     dropWorkspaceMapping(db);
-    const consumer = createReviewConsumer(
-      await makeEnv({ DB: db as never, WORKSPACE_TENANT_MODE: "strict" }),
-      testLog,
-      testOverrides,
-    );
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
       /per-App credential resolution failed: app 11111111-2222-3333-4444-555555555555 not found or has no workspace mapping/,
@@ -4835,46 +4825,18 @@ describe("workspace tenant mode (WORKSPACE_TENANT_MODE)", () => {
     expect(String(failureRows(db)[0]!.error)).toContain("not found or has no workspace mapping");
   });
 
-  test("off: the same unmapped App resolves through the single-table read face and the review completes", async () => {
-    reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    dropWorkspaceMapping(db);
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    expect(reviewCount(db)).toBe(1);
-    expect(commenterCalls.filter((c) => c.op === "token")).toHaveLength(1);
-    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
-  });
-
-  test("off: a genuinely missing App keeps the current message byte-for-byte", async () => {
+  test("a genuinely missing App takes the same not-found path", async () => {
     reset();
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
       consumer(makeBatch(makePayload({ appRef: { appId: "no-such-app" } }))),
-    ).rejects.toThrow(/per-App credential resolution failed: app no-such-app not found$/);
-
-    expect(commenterCalls).toHaveLength(0);
-    expect(sandboxCalls).toHaveLength(0);
-  });
-
-  test("an illegal mode throws at consumer creation — no message is read, no side effect", async () => {
-    reset();
-    const db = await createSeededTestD1();
-    const env = await makeEnv({ DB: db as never, WORKSPACE_TENANT_MODE: "on" as never });
-
-    // The deploy var is validated eagerly: a typo must never pick a read face.
-    expect(() => createReviewConsumer(env, testLog, testOverrides)).toThrow(
-      'invalid WORKSPACE_TENANT_MODE on — expected "off" or "strict"',
+    ).rejects.toThrow(
+      /per-App credential resolution failed: app no-such-app not found or has no workspace mapping$/,
     );
 
-    expect(sandboxCalls).toHaveLength(0);
     expect(commenterCalls).toHaveLength(0);
-    expect(kvGuardPuts).toHaveLength(0);
-    expect(reviewCount(db)).toBe(0);
+    expect(sandboxCalls).toHaveLength(0);
   });
 });

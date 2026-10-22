@@ -1,7 +1,7 @@
 /**
  * Unit tests: migration 0006 + the per-App config store
  * (`app_provider_keys` BYOK keys + `app_model_config` model chain) + the
- * /dashboard/apps/:slug/settings route family (spec
+ * /dashboard/default/apps/:slug/settings route family (spec
  * dashboard-multi-app-platform § Per-App BYOK + § Crypto envelope, architect
  * locks L1/L2).
  *
@@ -328,6 +328,22 @@ async function seededWorld(): Promise<{ db: ReturnType<typeof createAppConfigD1>
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "ada", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
+  // Manage is the workspace role: `octocat` and `mallory` are owners, the
+  // other two are plain members — the creator column grants nothing.
+  db.raw
+    .prepare(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       SELECT 'default', id, CASE github_login WHEN 'octocat' THEN 'owner' ELSE 'member' END,
+              '2026-01-01T00:00:00.000Z'
+       FROM users WHERE github_login <> 'mallory'`,
+    )
+    .run();
+  db.raw
+    .prepare(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       SELECT 'default', id, 'owner', '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = 'mallory'`,
+    )
+    .run();
   const app = await seedApp(db, { slug: "mallorys-app", createdBy: "mallory", githubAppId: 1001 });
   const otherApp = await seedApp(db, { slug: "adas-app", createdBy: "ada", githubAppId: 1002 });
   return { db, app, otherApp };
@@ -373,7 +389,7 @@ async function postForm(
 
 // SPA ownership: settings HTML GET is SPA-owned (shared spa helper).
 
-const SETTINGS = "/dashboard/apps/mallorys-app/settings";
+const SETTINGS = "/dashboard/default/apps/mallorys-app/settings";
 
 // --- migration 0006 ---
 
@@ -2463,7 +2479,7 @@ describe("duplication locks", () => {
 
 // --- routes ---
 
-describe("GET /dashboard/apps/:slug/settings (SPA-owned)", () => {
+describe("GET /dashboard/default/apps/:slug/settings (SPA-owned)", () => {
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const { db } = await seededWorld();
     const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
@@ -2482,7 +2498,7 @@ describe("GET /dashboard/apps/:slug/settings (SPA-owned)", () => {
 });
 
 describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
-  const SETTINGS_API = "/dashboard/api/apps/mallorys-app/settings";
+  const SETTINGS_API = "/dashboard/default/api/apps/mallorys-app/settings";
 
   test("manage face: app.sandbox_image_id + sandbox_images ({ id, enabled } rows, enabled entries only)", async () => {
     const { db } = await seededWorld();
@@ -2585,7 +2601,7 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
   });
 });
 
-describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
+describe("POST /dashboard/default/apps/:slug/settings — add-key (op=add-key)", () => {
   let fetchSpy: ReturnType<typeof spyOn>;
   beforeEach(() => {
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
@@ -2725,7 +2741,7 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
   });
 });
 
-describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", () => {
+describe("POST /dashboard/default/apps/:slug/settings — save-chain (op=save-chain)", () => {
   test("owner saves the chain: stored VERBATIM (spaces and :thinking suffix kept)", async () => {
     const { db, app } = await seededWorld();
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
@@ -3075,7 +3091,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
 
 // --- named chains (settings ops add-chain / remove-chain) ---
 
-describe("POST /dashboard/apps/:slug/settings — named chains (op=add-chain / remove-chain)", () => {
+describe("POST /dashboard/default/apps/:slug/settings — named chains (op=add-chain / remove-chain)", () => {
   test("owner adds a named chain: stored with is_default=0, plain-text 200", async () => {
     const { db, app } = await seededWorld();
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
@@ -3177,7 +3193,7 @@ describe("POST /dashboard/apps/:slug/settings — named chains (op=add-chain / r
   });
 });
 
-describe("POST /dashboard/apps/:slug/settings/key/delete (per-key delete route)", () => {
+describe("POST /dashboard/default/apps/:slug/settings/key/delete (per-key delete route)", () => {
   const SECOND_ANTHROPIC_KEY = sk("ant-mallory-second-7766");
 
   test("owner removes ONE stored key by its id: that row goes, its sibling stays", async () => {
@@ -3233,7 +3249,7 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (per-key delete route)"
 
 // --- custom provider declarations (settings ops) ---
 
-describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custom-provider / remove-custom-provider)", () => {
+describe("POST /dashboard/default/apps/:slug/settings — custom providers (op=add-custom-provider / remove-custom-provider)", () => {
   let fetchSpy: ReturnType<typeof spyOn>;
   beforeEach(() => {
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => new Response("{}", { status: 200 })) as unknown as typeof fetch);

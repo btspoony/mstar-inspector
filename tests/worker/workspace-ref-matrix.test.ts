@@ -45,7 +45,6 @@ function envFor(db: TestD1): Env {
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
-    WORKSPACE_TENANT_MODE: "strict",
   } as unknown as Env;
 }
 

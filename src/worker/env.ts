@@ -89,15 +89,6 @@ export type Env = {
    * prevent).
    */
   DEPLOYMENT_MODE?: string;
-  /**
-   * Tenant read mode (migration 0026). `"strict"` makes every
-   * execution-facing App read INNER JOIN `app_workspaces`, so an App with no
-   * workspace mapping is invisible to the pipeline; unset/empty = `"off"`
-   * (today's single-table reads). Resolve it through `tenantModeOf`
-   * (src/worker/tenant-mode.ts) — an illegal value throws instead of
-   * silently reading as `off`.
-   */
-  WORKSPACE_TENANT_MODE?: "off" | "strict";
 };
 
 /**
@@ -119,10 +110,9 @@ export type DeploymentMode = "self-hosted" | "saas";
 
 /**
  * Resolve `DEPLOYMENT_MODE`. Only the two shapes pass; unset, empty and every
- * other value throw — there is no default (contrast `tenantModeOf`, which read
- * unset as `off`). A deployment that cannot name its own shape has no
- * defensible first-login story to tell, and a silent fallback would tell one
- * of the two shapes a story that is not theirs. Both read faces
+ * other value throw — there is no default. A deployment that cannot name its
+ * own shape has no defensible first-login story to tell, and a silent fallback
+ * would tell one of the two shapes a story that is not theirs. Both read faces
  * (`src/worker/spa-dispatch.ts`, the OAuth callback) map the throw to a named
  * 500.
  */

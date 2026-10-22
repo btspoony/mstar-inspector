@@ -194,8 +194,11 @@ describe("shared navbar contract", () => {
     expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual(["nav.apps", "nav.members"]);
   });
 
-  test("Members is the only admin-only item", () => {
-    expect(NAV_ITEMS.map((item) => item.adminOnly ?? false)).toEqual([false, true]);
+  test("every entry is visible to every workspace member (no nav-level role gate)", () => {
+    expect(NAV_ITEMS.map((item) => Object.keys(item).sort())).toEqual([
+      ["href", "labelKey"],
+      ["href", "labelKey"],
+    ]);
   });
 
   test("every labelKey resolves to a real dictionary string in both locales", () => {
