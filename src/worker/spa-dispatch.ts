@@ -159,10 +159,11 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
       auth.boot.login,
       c.env.DASHBOARD_SESSION_SECRET,
     ));
-  // One-shot from here on: spent by whichever branch answers, redirects
-  // included. c.header rides on every c.redirect/c.html below; the raw
-  // Responses (HEAD, the shell document) add it explicitly.
-  if (firstInstance) c.header("Set-Cookie", expireCookie(FIRST_INSTANCE_COOKIE), { append: true });
+  // The marker is NOT spent here. It carries a statement only the shell
+  // document can deliver (`emptyInstance` in the boot), and a self-hosted
+  // deployer usually lands on a 302 first (`/dashboard` → the workspace Apps
+  // page, or an operator's support redirect), so spending it before the
+  // branches would burn the guidance on a response that never renders it.
   // `/dashboard` (the root workbench) is mode-independent, but its first data
   // read derives the base from the pathname — the retired legacy App family —
   // so under `strict` it is a dead end. Send it to the workspace Apps page (the
@@ -241,22 +242,13 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     ...(memberships.length === 0 ? {} : { memberships }),
   };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
-  // Raw Responses do not inherit the context headers, so the one-shot expiry is
-  // copied onto them by hand (c.header above covers every c.redirect branch).
-  const markerExpiry = firstInstance ? expireCookie(FIRST_INSTANCE_COOKIE) : null;
+  // Only the document below delivers the boot, so only it spends the marker.
+  // HEAD and an asset failure carry no boot: expiring there would drop the
+  // guidance before it ever reached a screen.
   if (c.req.method === "HEAD") {
-    return new Response(null, {
-      status: assetResponse.status,
-      ...(markerExpiry === null ? {} : { headers: { "set-cookie": markerExpiry } }),
-    });
+    return new Response(null, { status: assetResponse.status });
   }
-  if (!assetResponse.ok) {
-    if (markerExpiry === null) return assetResponse as unknown as Response;
-    const headers = new Headers();
-    assetResponse.headers.forEach((value, key) => headers.append(key, value));
-    headers.append("set-cookie", markerExpiry);
-    return new Response(assetResponse.body, { status: assetResponse.status, headers });
-  }
+  if (!assetResponse.ok) return assetResponse as unknown as Response;
   const html = await assetResponse.text();
   const headers = new Headers({
     "content-type": "text/html; charset=utf-8",
@@ -266,9 +258,11 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   });
   if (auth.setCookie) headers.append("set-cookie", auth.setCookie);
   // One-shot: the guidance is a statement about the sign-in that just
-  // happened, never a property of the session, so the marker dies on first
-  // use (RFC 6265 forbids comma-joining Set-Cookie — append instead).
-  if (markerExpiry !== null) headers.append("set-cookie", markerExpiry);
+  // happened, never a property of the session, so the marker dies on the one
+  // response that carries it (RFC 6265 forbids comma-joining Set-Cookie —
+  // append instead). HEAD and an asset failure above return before this line,
+  // so neither can spend it for a shell that never showed the boot.
+  if (firstInstance) headers.append("set-cookie", expireCookie(FIRST_INSTANCE_COOKIE));
   return new Response(injectSpaBoot(html, boot), {
     status: assetResponse.status,
     headers,

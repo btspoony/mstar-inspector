@@ -48,7 +48,11 @@ function populatedInstance(): TestD1 {
   return db;
 }
 
-function envFor(db: TestD1, mode: string | undefined): Env {
+function envFor(
+  db: TestD1,
+  mode: string | undefined,
+  tenant: { strict?: true; operators?: string } = {},
+): Env {
   return {
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
@@ -57,6 +61,8 @@ function envFor(db: TestD1, mode: string | undefined): Env {
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DB: db,
     ...(mode === undefined ? {} : { DEPLOYMENT_MODE: mode }),
+    ...(tenant.strict === undefined ? {} : { WORKSPACE_TENANT_MODE: "strict" }),
+    ...(tenant.operators === undefined ? {} : { PLATFORM_OPERATORS: tenant.operators }),
   } as unknown as Env;
 }
 
@@ -109,14 +115,23 @@ function bootOf(html: string): SpaBoot {
   return JSON.parse(json) as SpaBoot;
 }
 
+/** Does this response clear the first-instance marker? */
+function spendsMarker(res: Response): boolean {
+  return res.headers
+    .getSetCookie()
+    .some((value) => value.startsWith(`${FIRST_INSTANCE_COOKIE}=`) && value.includes("Max-Age=0"));
+}
+
 /** GET a shell path with the given cookies, assets bound. */
 async function shell(path: string, env: Env, cookies: string[]): Promise<Response> {
-  return worker.fetch(
-    new Request(`https://worker.local${path}`, {
-      headers: { Accept: "text/html", ...(cookies.length === 0 ? {} : { Cookie: cookies.join("; ") }) },
-    }),
-    withSpaAssets(env),
-  );
+  return worker.fetch(shellRequest(path, cookies, "GET"), withSpaAssets(env));
+}
+
+function shellRequest(path: string, cookies: string[], method: "GET" | "HEAD"): Request {
+  return new Request(`https://worker.local${path}`, {
+    method,
+    headers: { Accept: "text/html", ...(cookies.length === 0 ? {} : { Cookie: cookies.join("; ") }) },
+  });
 }
 
 describe("deploymentModeOf", () => {
@@ -262,9 +277,75 @@ describe("SPA boot face — the marker drives the guidance", () => {
       `${FIRST_INSTANCE_COOKIE}=${marker}`,
     ]);
     expect(res.status).toBe(302);
-    expect(
-      res.headers.getSetCookie().some((c) => c.startsWith(`${FIRST_INSTANCE_COOKIE}=`) && c.includes("Max-Age=0")),
-    ).toBe(true);
+    expect(spendsMarker(res)).toBe(true);
+  });
+
+  // A self-hosted deployer is usually an operator or already has a workspace,
+  // so the FIRST request after the callback is the `/dashboard` 302 and the
+  // shell is the SECOND one. Only the response that delivers the boot may
+  // spend the marker — otherwise the 302 eats the guidance (AC2's headline).
+  function strictInstance(role: "member" | "operator"): TestD1 {
+    const db = populatedInstance();
+    const { id } = db.raw.query("SELECT id FROM users WHERE github_login = ?").get(LOGIN) as { id: string };
+    const now = new Date().toISOString();
+    if (role === "member") {
+      db.raw
+        .prepare("INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, 'member', ?)")
+        .run(id, now);
+    } else {
+      // A live grant on the migration-seeded `default` workspace: the operator
+      // landing, which redirects through the support classifier.
+      db.raw
+        .prepare(
+          `INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at)
+           VALUES (?, 'default', ?, 'first login', 'deployer', ?, ?)`,
+        )
+        .run(crypto.randomUUID(), LOGIN, now, new Date(Date.now() + 60_000).toISOString());
+    }
+    return db;
+  }
+
+  for (const role of ["member", "operator"] as const) {
+    test(`a /dashboard 302 (${role}) does not spend the marker; the shell that follows shows it`, async () => {
+      const env = envFor(strictInstance(role), "self-hosted", {
+        strict: true,
+        ...(role === "operator" ? { operators: LOGIN } : {}),
+      });
+      const cookies = [
+        `${SESSION_COOKIE}=${await createSessionValue(LOGIN, null, SESSION_SECRET)}`,
+        `${FIRST_INSTANCE_COOKIE}=${await createFirstInstanceValue(LOGIN, SESSION_SECRET)}`,
+      ];
+
+      const landed = await shell("/dashboard", env, cookies);
+      expect(landed.status).toBe(302);
+      expect(landed.headers.get("Location")).toBe("/dashboard/default/apps");
+      expect(spendsMarker(landed)).toBe(false);
+
+      // The browser follows that 302; this response renders the first-login
+      // screen, so this is the one that carries — and spends — the marker.
+      const rendered = await shell("/dashboard/default/apps", env, cookies);
+      expect(rendered.status).toBe(200);
+      expect(bootOf(await rendered.text()).emptyInstance).toBe(true);
+      expect(spendsMarker(rendered)).toBe(true);
+    });
+  }
+
+  test("a HEAD shell request does not spend the marker", async () => {
+    const env = envFor(populatedInstance(), "self-hosted");
+    const cookies = [
+      `${SESSION_COOKIE}=${await createSessionValue(LOGIN, null, SESSION_SECRET)}`,
+      `${FIRST_INSTANCE_COOKIE}=${await createFirstInstanceValue(LOGIN, SESSION_SECRET)}`,
+    ];
+
+    // HEAD carries no document, so it has no boot to deliver the guidance in;
+    // spending the marker there would lose it for the GET that follows.
+    const head = await worker.fetch(shellRequest("/dashboard", cookies, "HEAD"), withSpaAssets(env));
+    expect(head.status).toBe(200);
+    expect(spendsMarker(head)).toBe(false);
+
+    const get = await shell("/dashboard", env, cookies);
+    expect(bootOf(await get.text()).emptyInstance).toBe(true);
+    expect(spendsMarker(get)).toBe(true);
   });
 
   test("no marker → no guidance, on either mode", async () => {
