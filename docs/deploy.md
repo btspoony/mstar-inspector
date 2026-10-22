@@ -781,7 +781,7 @@ take the snapshot **before pushing the merge** that carries `0024`/`0025`
 | `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (spec §7.1) |
 | `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (spec §7.1/§7.9) |
 | `0022_app_trigger_mode` | `github_apps.review_trigger_mode` TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual')) — the per-App review trigger mode (spec `review-trigger-policy.md` §2); metadata-only ADD COLUMN, existing rows (live and soft-deleted) materialize to the `every_push` default, no manager visit needed |
-| `0023_removed_logins` | `removed_logins` — removal tombstones: the key is `github_login` with the same NOCASE comparison as `users.github_login` (0016 parity), `removed_at` is required, `removed_by` is the acting admin's login (NULL when no actor was in scope). Written in the SAME transaction as the membership row delete, so `signInDashboardUser` denies a removed login on every later sign-in — the removal outranks the open sign-in — while `createUser` clears the record on a deliberate re-admission |
+| `0023_removed_logins` | `removed_logins` — removal tombstones: the key is `github_login` with the same NOCASE comparison as `users.github_login` (0016 parity), `removed_at` is required, `removed_by` is the acting operator's login (NULL when no actor was in scope). Written in the SAME transaction as the `users` row delete by the deployment-operator removal path, so `signInDashboardUser` denies a removed login on every later sign-in — the removal outranks the open sign-in — while `createUser` clears the record on a deliberate re-admission. A workspace membership removal never writes it |
 | `0024_provider_multi_key` | `app_provider_keys` moves to the per-key pool primary key `(app_id, provider, key_id)`, and the new `app_custom_provider_keys` table takes over the custom-provider key material `app_custom_providers` no longer holds. SQLite cannot change a primary key in place, so both tables are rebuilt (create → copy → drop → rename); existing rows are carried across verbatim under the empty-string `key_id` sentinel and the store promotes each row on its first touch. Forward-only: a rollback means reverting the deploy AND restoring the pre-apply snapshot taken before the apply (§ Rollback). Must apply after `0004`/`0006`/`0012`/`0015` |
 | `0025_provider_model_evidence` | `app_provider_models` moves to the per-key primary key `(app_id, provider, key_id)` — one EVIDENCE row per key instead of one aggregate row per provider, and the store recomputes the models the settings faces offer as the intersection over the current pool's keys on every read. Rebuilt (create → copy → drop → rename) with a deliberately EMPTY copy: the pre-`0025` rows are un-attributable aggregates, and this is a rebuildable derived cache, so an affected provider shows the probe-only face until EVERY current key of that provider has been re-verified: the offered set is recomputed on read as the intersection over the current pool's per-key reports, so re-verifying only ONE key of a multi-key pool still leaves it empty — each key needs its own report, and those reports must share at least one model, because that shared model is what becomes offerable. Key material, envelopes and chains are untouched. Forward-only: a rollback means reverting the deploy AND restoring the same pre-apply snapshot `0024` needs (§ Rollback). Must apply after `0004` and `0015` |
 
@@ -1315,8 +1315,8 @@ reads as `undefined`, which the classifier treats as every_push). What
 fails closed instead is the dashboard: the Settings page
 (`parseSettings` rejects the payload without the mode field) and the
 trigger-mode POST (its D1 UPDATE errors on the missing column). A missing
-`0023` also fails the dashboard closed, not open: the bootstrap's tombstone
-read and the members-remove batch both error out (500) instead of quietly
+`0023` also fails the dashboard closed, not open: the sign-in tombstone read
+and the operator-removal batch both error out (500) instead of quietly
 dropping the removal record. A missing `0024` fails the provider faces
 closed instead: the per-key pool tables it creates are the only shape the
 store writes to. A missing `0025` likewise fails the provider faces closed:
@@ -1480,14 +1480,20 @@ in one transaction. From then on authority is workspace-scoped: an `owner` or
 `admin` invites people from the workspace Members page, and the last `owner`
 can be neither removed nor demoted.
 
-The one refusal is a **recorded removal**. A removal deletes the `users` row
-and writes a tombstone into `removed_logins` (migration `0023`) in the same
-transaction; sign-in consults that record and denies with the 403 removal page
-and **zero** Set-Cookie. Only a deliberate re-admission (`createUser`, which
-clears the record) lets the login back in — the record survives every later
-deploy. The admission `INSERT` carries the same check at the write boundary
-(`WHERE NOT EXISTS (removal record)`), so a sign-in already in flight when the
-removal lands is denied instead of resurrecting the login.
+The one refusal is a **recorded removal**. A deployment-operator removal
+deletes the `users` row and writes a tombstone into `removed_logins` (migration
+`0023`) in the same transaction; sign-in consults that record and denies with
+the 403 removal page and **zero** Set-Cookie. Only a deliberate re-admission
+(`createUser`, which clears the record) lets the login back in — the record
+survives every later deploy. The admission `INSERT` carries the same check at
+the write boundary (`WHERE NOT EXISTS (removal record)`), so a sign-in already
+in flight when the removal lands is denied instead of resurrecting the login.
+
+**Leaving a workspace is not that.** Removing someone from a workspace deletes
+only their `workspace_members` row: the `users` row, the invites they created
+and their GitHub login all survive, so they can still sign in, be invited into
+another workspace, or create their own. Workspace membership is a container
+relationship, not the identity itself.
 
 Operationally that means:
 

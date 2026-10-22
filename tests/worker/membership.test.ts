@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createInvite } from "../../src/dashboard/invite-store";
+import { signInDashboardUser } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
@@ -538,7 +539,7 @@ describe("member role change and removal (plan AC5)", () => {
     expect(memberRows(db)).toBe(2);
   });
 
-  test("owner removal: allowed for a non-last owner, 409 for the last one", async () => {
+  test("owner removal: allowed for a non-last owner, the actor's own removal is 409", async () => {
     const { db, users } = fixture();
     use(db);
     // Two owners exist, so removing one is allowed.
@@ -549,12 +550,12 @@ describe("member role change and removal (plan AC5)", () => {
     expect(first.status).toBe(200);
     expect(memberRows(db)).toBe(3);
 
-    // Now `dana` is the last owner: her removal is refused with zero writes.
+    // Now `dana` is the last owner: her own removal is the last-owner conflict.
     const second = await request("/dashboard/acme/members/remove", "dana", {
       method: "POST",
       body: `userId=${users.owner}`,
     });
-    expect(second.status).toBe(400); // self-removal is refused first
+    expect(second.status).toBe(409);
     const third = await request("/dashboard/acme/members/remove", "carol", {
       method: "POST",
       body: `userId=${users.owner}`,
@@ -563,18 +564,64 @@ describe("member role change and removal (plan AC5)", () => {
     expect(memberRows(db)).toBe(3);
   });
 
-  test("a removed member's stateless cookie stops working", async () => {
+  test("removing a member deletes only the membership: identity and invites survive", async () => {
     const { db, users } = fixture();
     use(db);
+    // `mallory` created an invite, so workspace_invites.invited_by points at her.
+    await createInvite(db, {
+      workspaceId: WORKSPACE,
+      login: "hubot",
+      role: "member",
+      invitedBy: users.member,
+      now: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
     const res = await request("/dashboard/acme/members/remove", "dana", {
       method: "POST",
       body: `userId=${users.member}`,
     });
     expect(res.status).toBe(200);
     expect(memberRows(db)).toBe(3);
-    // The removal tombstone denies the login on every later request.
-    const after = await request(MEMBERS, "mallory");
-    expect(after.status).toBe(403);
+    // The users row stays — removal is workspace-scoped, never a login ban …
+    expect(count(db, "SELECT COUNT(*) AS n FROM users WHERE github_login = 'mallory'")).toBe(1);
+    // … nothing is tombstoned at the deployment level …
+    expect(count(db, "SELECT COUNT(*) AS n FROM removed_logins")).toBe(0);
+    // … and the invite she created is intact (its FK target still exists).
+    expect(count(db, "SELECT COUNT(*) AS n FROM workspace_invites WHERE invited_by = ?", users.member)).toBe(1);
+    // She is out of THIS workspace, so its pages answer the outsider 404.
+    expect((await request(MEMBERS, "mallory")).status).toBe(404);
+  });
+
+  test("the removed person can still sign in and be invited into another workspace", async () => {
+    const { db, users } = fixture();
+    use(db);
+    expect(
+      (
+        await request("/dashboard/acme/members/remove", "dana", {
+          method: "POST",
+          body: `userId=${users.member}`,
+        })
+      ).status,
+    ).toBe(200);
+
+    // Sign-in is unaffected: no tombstone, so the login is admitted.
+    expect((await signInDashboardUser(db, "mallory")).outcome).toBe("allow");
+
+    // …and another workspace can invite them, which they accept.
+    const invite = await createInvite(db, {
+      workspaceId: "ws-other",
+      login: "mallory",
+      role: "member",
+      invitedBy: users.outsider,
+      now: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const accept = await request(`/dashboard/other/api/members/invites/${invite.id}/accept`, "mallory", {
+      method: "POST",
+    });
+    expect(accept.status).toBe(200);
+    expect(memberRole(db, "mallory", "ws-other")).toBe("member");
   });
 
   test("a plain member cannot change roles or remove anyone (403)", async () => {

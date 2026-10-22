@@ -6,9 +6,8 @@
  * dashboard/index.ts header contract): NO pipeline/store/review imports.
  * The narrow D1 face below mirrors src/store/types.ts `D1Like`
  * structurally, so a real `D1Database` and the bun:sqlite test double both
- * satisfy it; the store's multi-write paths — removal (tombstone + membership
- * delete + row delete) and role change (users update + membership mirror) —
- * are each ONE `batch`.
+ * satisfy it; the store's multi-write path — operator removal (tombstone +
+ * membership delete + row delete) — is ONE `batch`.
  *
  * Sign-in is NOT operator-gated (plan 97 AC1): a `users` row is the only
  * requirement, so any GitHub login completes the OAuth callback. There is no
@@ -24,14 +23,14 @@
  *                          deliberate re-admission)
  *   3. otherwise         → create a `member` row, allow
  *
- * There is NO status column: removal = row delete (migration 0003), and that
- * delete records a tombstone in the SAME transaction (migration 0023) so a
- * later sign-in cannot resurrect a login an operator removed. Removal state
- * has exactly two writers — the removal batch (records it) and createUser
- * (clears it, deliberate re-admission); the automatic sign-in path touches
- * neither, so an in-flight OAuth callback cannot undo a removal. The delete is
- * what makes removed members' stateless cookies fail the per-request guard —
- * never soften this into a flag.
+ * There is NO status column: operator removal = row delete (migration 0003),
+ * and that delete records a tombstone in the SAME transaction (migration 0023)
+ * so a later sign-in cannot resurrect a login an operator removed. Removal
+ * state has exactly two writers — the operator removal batch (records it) and
+ * createUser (clears it, deliberate re-admission); the automatic sign-in path
+ * touches neither, so an in-flight OAuth callback cannot undo a removal.
+ * Leaving a WORKSPACE is not that: {@link deleteWorkspaceMember} deletes the
+ * membership row only, so it writes neither the tombstone nor the users row.
  *
  * Case handling: GitHub logins are case-insensitive upstream, so row
  * lookups and the removal record are case-insensitive; the UNIQUE index on
@@ -67,12 +66,9 @@ export type DashboardD1BatchResult = {
 
 /**
  * Narrow D1 face the users store depends on (mirror of src/store/types.ts
- * `D1Like`): single-statement reads and writes, plus `batch` — the multi-write
- * paths are a removal (tombstone + membership delete + row delete), a
- * (re-)invite (row insert + tombstone clear + membership), a role change
- * (users update + membership mirror) and a bootstrap creation (same as the
- * invite), each ONE `batch` transaction. A real `D1Database` statement face
- * satisfies this structurally.
+ * `D1Like`): single-statement reads and writes, plus `batch` — the operator
+ * removal (tombstone + membership delete + row delete) is ONE `batch`
+ * transaction. A real `D1Database` statement face satisfies this structurally.
  */
 export type DashboardD1 = {
   prepare(query: string): DashboardD1Statement;
@@ -299,52 +295,37 @@ function notSoleOwner(workspaceId: string, userId: string): { sql: string; param
 }
 
 /**
- * Remove one user from one workspace: record the login as removed, drop the
- * membership row and delete the users row, as ONE `batch` (the `removeUser`
- * shape, workspace-scoped). The tombstone is what makes the removed login's
- * stateless cookie fail the guard on every later request; it also keeps the
- * login out of the automatic bootstrap, and only a deliberate re-admission
- * clears it. A sole owner, or a target that is not in this workspace, is
- * refused with zero writes. Returns true when this workspace's membership was
- * removed — the users row follows only when no membership remains anywhere, so
- * a multi-workspace login keeps the account that the other workspace's row
- * still points at.
+ * Remove one user from one workspace: delete the membership row and nothing
+ * else. A workspace is a container, so leaving it must not destroy the
+ * person's identity — the `users` row survives (they stay signed in, keep
+ * their invites as `invited_by`, and can be invited elsewhere or create their
+ * own workspace), and the deployment-level `removed_logins` tombstone is
+ * written ONLY by the operator removal path (`removeUser`, migration 0023),
+ * never as a side effect of a workspace membership change.
+ *
+ * This also keeps the delete legal: `workspace_invites.invited_by` references
+ * `users(id)` with NO ACTION (0028), so a `users` delete would roll the batch
+ * back for anyone who ever created an invite. The membership itself is the only
+ * workspace-scoped artifact keyed by the member; accepted invites stay as
+ * history.
+ *
+ * A sole owner, or a target that is not in this workspace, is refused with
+ * zero writes. Returns true when this workspace's membership was removed.
  */
 export async function deleteWorkspaceMember(
   db: DashboardD1,
   workspaceId: string,
   userId: string,
-  removedBy: string | null,
 ): Promise<boolean> {
   const guard = notSoleOwner(workspaceId, userId);
-  const results = await db.batch([
-    db
-      .prepare(
-        `INSERT INTO removed_logins (github_login, removed_at, removed_by)
-         SELECT github_login, ?, ? FROM users WHERE id = ? AND ${guard.sql}
-         ON CONFLICT (github_login) DO UPDATE
-           SET removed_at = excluded.removed_at, removed_by = excluded.removed_by`,
-      )
-      .bind(new Date().toISOString(), removedBy, userId, ...guard.params),
-    db
-      .prepare(
-        `DELETE FROM workspace_members
-          WHERE workspace_id = ? AND user_id = ? AND ${guard.sql}`,
-      )
-      .bind(workspaceId, userId, ...guard.params),
-    // Keyed on the membership actually being gone rather than re-running the
-    // guard: statements run in order inside the batch, so the guard's membership
-    // subquery would read NULL here after a successful delete. A refused delete
-    // (sole owner) leaves the membership, so this is a 0-row no-op and the
-    // workspace keeps both its owner and their users row.
-    db
-      .prepare(
-        `DELETE FROM users WHERE id = ?
-           AND NOT EXISTS (SELECT 1 FROM workspace_members WHERE user_id = ?)`,
-      )
-      .bind(userId, userId),
-  ]);
-  return results[1]!.meta.changes > 0;
+  const result = await db
+    .prepare(
+      `DELETE FROM workspace_members
+        WHERE workspace_id = ? AND user_id = ? AND ${guard.sql}`,
+    )
+    .bind(workspaceId, userId, ...guard.params)
+    .run();
+  return result.meta.changes > 0;
 }
 
 /**

@@ -282,7 +282,7 @@ describe("promote is the ownership-transfer path (no separate route)", () => {
 describe("last_owner: the workspace can never lose its final owner", () => {
   test("the store refuses to remove the sole owner: zero writes, no tombstone", async () => {
     const { db, ids } = soleOwnerWorld();
-    expect(await deleteWorkspaceMember(db, WORKSPACE, ids.dana, "dana")).toBe(false);
+    expect(await deleteWorkspaceMember(db, WORKSPACE, ids.dana)).toBe(false);
     expect(roleOf(db, ids.dana)).toBe("owner");
     const tombstones = db.raw.prepare("SELECT COUNT(*) AS n FROM removed_logins").get() as { n: number };
     expect(tombstones.n).toBe(0);
@@ -298,12 +298,23 @@ describe("last_owner: the workspace can never lose its final owner", () => {
     expect(roleOf(db, ids.dana)).toBe("member");
   });
 
-  test("self-removal is refused with zero writes, so the sole owner cannot orphan the workspace", async () => {
+  test("the sole owner removing themselves is the last-owner 409, zero writes", async () => {
     const { db, ids } = soleOwnerWorld();
+    const res = await post(db, `${BASE}/members/remove`, "dana", { userId: ids.dana });
+    // The last-owner conflict wins over the generic self-removal 400.
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain("last owner");
+    expect(roleOf(db, ids.dana)).toBe("owner");
+    expect(memberCount(db)).toBe(4);
+  });
+
+  test("an owner who is not the last one removing themselves is the self-removal 400, zero writes", async () => {
+    const { db, ids } = world();
+    // `dana` and `olive` are both owners, so the last-owner guard does not fire.
     const res = await post(db, `${BASE}/members/remove`, "dana", { userId: ids.dana });
     expect(res.status).toBe(400);
     expect(roleOf(db, ids.dana)).toBe("owner");
-    expect(memberCount(db)).toBe(4);
+    expect(memberCount(db)).toBe(6);
   });
 });
 

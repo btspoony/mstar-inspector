@@ -218,6 +218,20 @@ export async function strictWorkspaceSlug(env: Env): Promise<string | null> {
 }
 
 /**
+ * Operator signal for a strict landing that cannot name its workspace — a
+ * dead end for the person being redirected. Shared by the two landing
+ * producers that can reach it.
+ */
+function warnUnresolvableLanding(env: Env): void {
+  console.warn(
+    JSON.stringify({
+      event: "dashboard_landing",
+      reason: dashboardD1(env) === null ? "db_unbound" : "no_sole_workspace",
+    }),
+  );
+}
+
+/**
  * `/dashboard/<sole-workspace-slug>/apps` under `strict`, otherwise null, with
  * the operator warning for an unresolvable landing (the redirect owner).
  */
@@ -227,12 +241,7 @@ export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> 
   // Null is also `off`'s normal answer; only a strict deployment that cannot
   // name its workspace reaches the operator warning (a dead-end landing).
   if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return null;
-  console.warn(
-    JSON.stringify({
-      event: "dashboard_landing",
-      reason: dashboardD1(env) === null ? "db_unbound" : "no_sole_workspace",
-    }),
-  );
+  warnUnresolvableLanding(env);
   return null;
 }
 
@@ -319,14 +328,21 @@ export async function canCreateApp(env: Env, login: string): Promise<boolean> {
  * would answer the outsider 404, so sign-in ends on `/dashboard`, whose shell
  * offers workspace creation (plan 97 AC1 — sign-in joins nobody to a
  * workspace, so a newcomer's first stop is making one). Unresolvable → today's
- * target (already warned by the resolver).
+ * target.
+ *
+ * The boot read IS this decision: it resolves the sole workspace slug and the
+ * login's membership count together, so the landing never re-queries either.
  */
 export async function signedInLanding(env: Env, login: string): Promise<string> {
-  const base = await strictWorkspaceAppsBase(env);
-  if (base === null) return DASHBOARD_MOUNT;
-  const db = dashboardD1(env);
-  if (db !== null && (await countMembershipsForLogin(db, login)) === 0) return DASHBOARD_MOUNT;
-  return base;
+  const boot = await strictWorkspaceBoot(env, login);
+  if (boot.workspaceSlug !== undefined) return `/dashboard/${boot.workspaceSlug}/apps`;
+  // Only a strict deployment that still cannot name its workspace is the
+  // operator-facing dead end. A newcomer (`needsWorkspace`) is the EXPECTED
+  // landing on the creation surface, not a configuration fault.
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) === "strict" && boot.needsWorkspace !== true) {
+    warnUnresolvableLanding(env);
+  }
+  return DASHBOARD_MOUNT;
 }
 
 /**
@@ -1448,10 +1464,15 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
  * Remove a member from this workspace (`owner`/`admin`; plan AC5 table).
  * The role boundary is checked on the TARGET's workspace role: an `admin` may
  * only remove a plain `member` — an `owner` or another `admin` is 403, even
- * when that owner is the last one (the 403 answers before any 409 could). The
- * sole-owner refusal lives in the store's conditional batch (409, zero writes).
+ * when that owner is the last one (the 403 answers before any 409 could).
  * Removing a non-member of this workspace is 404 — the same answer an unknown
  * id gets.
+ *
+ * Self-removal is refused (400: a manager must not lock themselves out), but
+ * the last-owner conflict answers FIRST — the plan pins 409 for an `owner`
+ * removing or demoting the last owner, and the sole owner is exactly the actor
+ * who reaches themselves. Both refusals write nothing; the store's conditional
+ * delete still owns the peer case (409, zero writes).
  */
 const memberRemoveRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
@@ -1462,10 +1483,19 @@ const memberRemoveRoute = async (c: DashboardContext) => {
   if (!target) {
     return inviteMutationResponse(c, "unknown member", 404);
   }
-  // Self-removal is refused: a manager must not be able to lock themselves out.
-  // The last-owner 409 covers a PEER's attempt (the store's conditional batch
-  // owns it); a sole owner is the only one who could reach themselves, and this
-  // 400 refuses them first — zero writes either way.
+  // The sole-owner conflict answers FIRST. An `owner` removing the last owner
+  // is necessarily removing themselves, so without this order the generic
+  // self-removal 400 would make the plan's 409 unreachable. An `admin` never
+  // reaches this branch: the role boundary below answers 403 for any owner
+  // target, the last one included.
+  if (gate.scope.role === "owner" && target.role === "owner") {
+    const owners = (await listWorkspaceMembers(gate.db, gate.scope.workspaceId)).filter(
+      (row) => row.role === "owner",
+    );
+    if (owners.length <= 1) {
+      return inviteMutationResponse(c, "Cannot remove the last owner.", 409);
+    }
+  }
   if (target.github_login.toLowerCase() === gate.user.github_login.toLowerCase()) {
     return inviteMutationResponse(c, "You cannot remove yourself.", 400);
   }
@@ -1475,7 +1505,7 @@ const memberRemoveRoute = async (c: DashboardContext) => {
   if (gate.scope.role === "admin" && target.role !== "member") {
     return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   }
-  if (!(await deleteWorkspaceMember(gate.db, gate.scope.workspaceId, target.id, gate.user.github_login))) {
+  if (!(await deleteWorkspaceMember(gate.db, gate.scope.workspaceId, target.id))) {
     return inviteMutationResponse(c, "Cannot remove the last owner.", 409);
   }
   return inviteMutationResponse(c, "ok", 200);

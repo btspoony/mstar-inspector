@@ -2911,21 +2911,39 @@ describe("dashboard users store (users.ts)", () => {
     expect(membershipRoles(db)).toEqual({});
   });
 
-  test("deleteWorkspaceMember drops the membership, deletes the row and records the tombstone", async () => {
+  test("deleteWorkspaceMember drops the membership only: the users row and any invites survive", async () => {
     const db = createDashboardTestD1();
     const admin = seedBackfilledUser(db, "octocat", "admin");
     const hubot = seedBackfilledUser(db, "hubot", "member");
-    expect(await deleteWorkspaceMember(db, "default", hubot, "octocat")).toBe(true);
-    expect(await getUserByLogin(db, "hubot")).toBeNull();
+    // `hubot` created an invite, so workspace_invites.invited_by points at the row.
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_invites (id, workspace_id, github_login, role, status, invited_by, created_at, expires_at)
+         VALUES (?, 'default', 'newcomer', 'member', 'pending', ?, ?, ?)`,
+      )
+      .run(
+        crypto.randomUUID(),
+        hubot,
+        new Date().toISOString(),
+        new Date(Date.now() + 60_000).toISOString(),
+      );
+    expect(await deleteWorkspaceMember(db, "default", hubot)).toBe(true);
+    // The identity survives — removal is workspace-scoped, never a login ban.
+    expect((await getUserByLogin(db, "hubot"))?.id).toBe(hubot);
     expect(membershipRoles(db)).toEqual({ octocat: "owner" });
-    expect(await isLoginRemoved(db, "hubot")).toBe(true);
+    expect(await isLoginRemoved(db, "hubot")).toBe(false);
+    expect(removedRows(db)).toEqual([]);
+    // The invite it created is untouched (and still references the surviving row).
+    expect(
+      db.raw.prepare("SELECT COUNT(*) AS n FROM workspace_invites WHERE invited_by = ?").get(hubot),
+    ).toEqual({ n: 1 });
     expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin);
   });
 
   test("the sole-owner refusal leaves the membership row and writes no tombstone", async () => {
     const db = createDashboardTestD1();
     const soleOwner = seedBackfilledUser(db, "octocat", "admin"); // mapped to owner
-    expect(await deleteWorkspaceMember(db, "default", soleOwner, "octocat")).toBe(false);
+    expect(await deleteWorkspaceMember(db, "default", soleOwner)).toBe(false);
     expect(await getUserByLogin(db, "octocat")).not.toBeNull();
     expect(membershipRoles(db)).toEqual({ octocat: "owner" });
     expect(removedRows(db)).toEqual([]);
