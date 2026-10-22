@@ -3,6 +3,8 @@
  * Tested without a DOM runner.
  */
 
+import type { DictionaryKey } from "../../i18n";
+
 export type Role = "admin" | "member";
 
 /** A workspace member's role (migration 0026 CHECK domain). */
@@ -958,4 +960,29 @@ export function inviteLoginNoticeKey(login: string): "notice.error.enterLogin" |
   if (trimmed.length === 0) return "notice.error.enterLogin";
   if (!GITHUB_LOGIN_PATTERN.test(trimmed)) return "notice.error.invalidLogin";
   return null;
+}
+
+/** The server's workspace slug grammar — mirrored so the input can refuse before the round trip. */
+export const WORKSPACE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{1,38}$/;
+
+/**
+ * How a `PUT …/api/settings/slug` refusal reads in the operator's locale.
+ * Every refusal the route emits is keyed on `code` (the three 409s) or `key`
+ * (the 400 shape gate), so the copy follows the machine-readable value — a
+ * body without one means the request never reached the route (403/5xx).
+ */
+export function slugFailureKey(status: number, body: string): DictionaryKey {
+  if (status === 403) return "workspace.slugForbidden";
+  try {
+    const parsed = JSON.parse(body) as { code?: unknown; key?: unknown };
+    if (typeof parsed.code === "string") {
+      if (parsed.code === "slug_reserved") return "workspace.slugReserved";
+      if (parsed.code === "slug_taken") return "workspace.slugTaken";
+      if (parsed.code === "slug_is_workspace_id") return "workspace.slugIsWorkspaceId";
+    }
+    if (parsed.key === "workspace.slugInvalid") return "workspace.slugInvalid";
+  } catch {
+    /* non-JSON body → the generic failure face */
+  }
+  return "workspace.slugFailed";
 }

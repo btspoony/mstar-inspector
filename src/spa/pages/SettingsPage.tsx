@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
@@ -27,8 +27,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
-import { postForm } from "../api";
+import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
+import { navigate } from "../router";
+import { useRenameMembership } from "../workspace-memberships";
+import { replaceWorkspaceRef, workspaceRefOf } from "../routes";
 import { apiBase } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
@@ -46,7 +49,9 @@ import {
   seatRoleValues,
   seatSelectValue,
   selectedCatalogProvider,
+  slugFailureKey,
   splitModelChain,
+  WORKSPACE_SLUG_PATTERN,
   type CatalogProvider,
   type ChainTab,
   type ConfiguredProvider,
@@ -165,11 +170,14 @@ export function SettingsView({
   locale,
   payload,
   groups,
+  storedSlug,
   onReload,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
+  /** The workspace's stored slug — the rename control's current value. */
+  storedSlug: string;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const { app } = payload;
@@ -431,6 +439,9 @@ export function SettingsView({
               onOutcome={setChainsNotice}
             />
             <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
+            {/* Owner-only by the server's role check; the card is part of the
+                manage face because a non-manager never loads this tab. */}
+            <WorkspaceSlugCard locale={locale} storedSlug={storedSlug} />
           </SectionGroup>
         ) : null}
       </div>
@@ -861,6 +872,122 @@ function OpsCard({
           <NoticeRegion notice={notice} />
         </div>
         <HealthBody locale={locale} payload={payload} />
+      </CardContent>
+    </SectionCard>
+  );
+}
+
+/**
+ * Land a successful rename: patch the live membership list, then point the
+ * current page at the new ref. The patch comes FIRST — the navigate dispatches
+ * the popstate that re-renders the shell, and a switcher still built from the
+ * retired slug would render a dead option and an empty current row.
+ *
+ * The page keeps its own path, and REPLACES rather than pushes, because the old
+ * ref answers 404 under D8 — Back must not return to it.
+ */
+export function commitWorkspaceRename(slug: string, rename: (ref: string | null, slug: string) => void): void {
+  const pathname = window.location.pathname;
+  rename(workspaceRefOf(pathname), slug);
+  const href = replaceWorkspaceRef(pathname, slug);
+  if (href !== null) navigate(href, { replace: true });
+}
+
+/**
+ * The rename's ONE save pipeline: PUT the slug, resolve the refusal, and on
+ * success land it ({@link commitWorkspaceRename}). Extracted like
+ * `submitTriggerMode` so a test can execute the real save for the real page
+ * context instead of supplying a path of its own.
+ */
+export async function submitWorkspaceSlug(
+  slug: string,
+  locale: SpaBoot["locale"],
+  rename: (ref: string | null, slug: string) => void,
+): Promise<OpNotice> {
+  let status: number;
+  let body: string;
+  try {
+    ({ status, body } = await putJson(`${apiBase()}/api/settings/slug`, { slug }));
+  } catch {
+    // Nothing landed, so nothing to commit: the list and the path stay put.
+    return { kind: "error", message: t(locale, "workspace.slugFailed") };
+  }
+  if (status >= 400) {
+    return { kind: "error", message: t(locale, slugFailureKey(status, body)) };
+  }
+  commitWorkspaceRename(slug, rename);
+  return { kind: "success", message: t(locale, "workspace.slugSaved") };
+}
+
+/**
+ * Renames the workspace's readable URL (plan 98 T2) — owner-only, enforced by
+ * the server. Its value is the workspace's STORED slug, resolved through the
+ * live membership list: the address bar's segment may be the stable id, and a
+ * rename happens in place, so a value captured at mount would save the old slug
+ * again. A rename is not a redirect (plan 98 D8 — the old ref answers 404
+ * afterwards), so the page REPLACES its history entry instead of pushing one:
+ * Back must not return to a dead ref.
+ */
+export function WorkspaceSlugCard({ locale, storedSlug }: { locale: SpaBoot["locale"]; storedSlug: string }) {
+  // Only what the operator has typed is local; the display falls back to the
+  // stored slug, so an external change (the rename this card just made) lands
+  // without a mount-time copy going stale.
+  const [draft, setDraft] = useState<string | null>(null);
+  const slug = draft ?? storedSlug;
+  // Card-local channel: an op outcome never rides the page-level notice.
+  const [slugNotice, setSlugNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
+  const renameMembership = useRenameMembership();
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    const next = slug.trim();
+    if (!WORKSPACE_SLUG_PATTERN.test(next)) {
+      setSlugNotice({ kind: "error", message: t(locale, "workspace.slugInvalid") });
+      return;
+    }
+    setBusy(true);
+    try {
+      // The pipeline patches the live list BEFORE navigating: the switcher
+      // would otherwise keep offering the retired slug (a 404 under D8) and
+      // show no current row on the new path.
+      const outcome = await submitWorkspaceSlug(next, locale, renameMembership);
+      if (outcome.kind === "success") setDraft(null);
+      setSlugNotice(outcome);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SectionCard tier="secondary">
+      <CardHeader>
+        <SectionCardTitle>{t(locale, "workspace.slugHeading")}</SectionCardTitle>
+        <CardDescription>{t(locale, "workspace.slugDescription")}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium" htmlFor="workspace-slug">
+              {t(locale, "workspace.slugLabel")}
+            </label>
+            <Input
+              id="workspace-slug"
+              className="w-64"
+              autoComplete="off"
+              spellCheck={false}
+              value={slug}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+          </div>
+          <Button type="submit" disabled={busy}>
+            {t(locale, "workspace.slugSave")}
+          </Button>
+        </form>
+        <div className="mt-3">
+          <NoticeRegion notice={slugNotice} />
+        </div>
       </CardContent>
     </SectionCard>
   );

@@ -53,3 +53,20 @@ export async function postForm(url: string, body: Record<string, string>): Promi
   return { status: res.status, body: await res.text() };
 }
 
+/** PUT a JSON body on a settings path; the 4xx body comes back for its keyed `code`/`key`. */
+export async function putJson(url: string, body: unknown): Promise<{ status: number; body: string }> {
+  const res = await fetch(url, {
+    method: "PUT",
+    credentials: "same-origin",
+    redirect: "manual",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status >= 300 && res.status < 400) {
+    const location = res.headers.get("Location");
+    if (location) window.location.replace(location);
+    throw new ApiError(res.status, "");
+  }
+  return { status: res.status, body: await res.text() };
+}
+

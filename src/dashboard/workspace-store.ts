@@ -2,8 +2,8 @@
  * Workspace (tenant) resolution for the dashboard request path — the read-only
  * companion of `apps-store`'s tenant read face. Migrations 0026/0027 are the
  * DDL single sources; this module owns no write path and only answers the two
- * questions the routing layer needs: which workspace does this slug name, and
- * what is this user's role inside it.
+ * questions the routing layer needs: which workspace does this path ref (id or
+ * slug) name, and what is this user's role inside it.
  *
  * Zero-dependency leaf (the `apps-store` module boundary): the `db` parameter
  * is a locally-declared narrow D1 face (types only, zero imports), satisfied
@@ -45,17 +45,32 @@ type WorkspaceStoreD1 = {
 };
 
 /**
- * Resolve a workspace by its path slug. Soft-deleted workspaces are invisible
- * (the same 404 as an unknown slug): a retired tenant must never serve traffic.
+ * Resolve a workspace by its path ref — the same segment may be the row's id or
+ * its slug, and BOTH must resolve to exactly one workspace. Soft-deleted
+ * workspaces are invisible (the same 404 as an unknown ref): a retired tenant
+ * must never serve traffic.
+ *
+ * Zero rows is an unknown ref; TWO rows means a slug equals another workspace's
+ * id, so the segment names no single tenant — it answers the same 404 and
+ * never picks one (the alternative is a cross-tenant read). The T2 slug write
+ * guard forbids such data, so this is the defensive backstop, and the
+ * concurrent-write race it cannot close degrades to a 404, never a leak.
  */
-export async function getWorkspaceBySlug(
+export async function getWorkspaceByRef(
   db: WorkspaceStoreD1,
-  slug: string,
+  ref: string,
 ): Promise<WorkspaceRow | null> {
-  return db
-    .prepare(`SELECT id, slug, name FROM workspaces WHERE slug = ? AND deleted_at IS NULL`)
-    .bind(slug)
-    .first<WorkspaceRow>();
+  const rows = await db
+    .prepare(
+      `SELECT id, slug, name FROM workspaces WHERE (slug = ?1 OR id = ?1) AND deleted_at IS NULL LIMIT 2`,
+    )
+    .bind(ref)
+    .all<WorkspaceRow>();
+  if (rows.results.length === 1) return rows.results[0]!;
+  if (rows.results.length > 1) {
+    console.warn(JSON.stringify({ event: "workspace_ref_ambiguous", ref }));
+  }
+  return null;
 }
 
 /**
@@ -175,6 +190,40 @@ export async function countMembershipsForLogin(
   return row?.n ?? 0;
 }
 
+/** One row of the SPA switcher: both identifiers of the workspace + what to show. */
+export type WorkspaceMembershipOption = {
+  id: string;
+  slug: string;
+  name: string;
+  role: WorkspaceRole;
+};
+
+/**
+ * Every live workspace this login belongs to, as the SPA boot's switcher rows.
+ * Both identifiers ride the row: the path segment may be the stable `id` or the
+ * readable `slug`, so a consumer cannot decide "which row is current" from one
+ * field (and right after a rename the path still holds the OLD slug while the
+ * stored `slug` is new). Same predicate as {@link countMembershipsForLogin}: a
+ * retired tenant is not a home and never appears as a switch target.
+ */
+export async function listWorkspaceMembershipOptions(
+  db: WorkspaceStoreD1,
+  login: string,
+): Promise<WorkspaceMembershipOption[]> {
+  const rows = await db
+    .prepare(
+      `SELECT w.id AS id, w.slug AS slug, w.name AS name, wm.role AS role
+         FROM workspace_members wm
+         JOIN users u ON u.id = wm.user_id
+         JOIN workspaces w ON w.id = wm.workspace_id
+        WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL
+        ORDER BY w.name ASC, w.id ASC`,
+    )
+    .bind(login)
+    .all<WorkspaceMembershipOption>();
+  return rows.results;
+}
+
 /** The creation write face: prepared statements run as ONE `batch`. */
 type WorkspaceStoreWriteD1 = {
   prepare(query: string): WorkspaceStoreStatement;
@@ -182,6 +231,62 @@ type WorkspaceStoreWriteD1 = {
     { results: unknown[]; meta: { changes: number; last_row_id: number } }[]
   >;
 };
+
+/** Why a slug write was refused: a guard hit, or the target row is gone. */
+export type WorkspaceSlugConflict = "slug_taken" | "slug_is_workspace_id" | "workspace_not_found";
+
+/**
+ * The rename: both guards live in the UPDATE's own WHERE, so the statement is
+ * atomic by construction — a guard hit changes no row (`changes === 0`), which
+ * is what a two-statement pre-check batch cannot promise. The guards are the
+ * pinned pair: no OTHER workspace may carry the slug in any case, and the value
+ * may not be any workspace's id (that would make the path ref ambiguous). The
+ * TARGET must still be live — a workspace soft-deleted between the caller's
+ * resolution and this statement is a vanished row, not a rename.
+ */
+const SET_SLUG_SQL = `UPDATE workspaces SET slug = ?1
+   WHERE id = ?2
+     AND deleted_at IS NULL
+     AND NOT EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2)
+     AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2)`;
+
+/** Which guard matched, read once after a refused write (index order = precedence). */
+const SLUG_CONFLICT_SQL = `SELECT
+     EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2) AS slug_taken,
+     EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2) AS id_taken`;
+
+/**
+ * Rename one workspace's slug. Returns the conflict that refused the write, or
+ * null when it landed. A concurrent write that slipped past the guards is
+ * caught by the UNIQUE index and maps to `slug_taken`, never a 500.
+ */
+export async function setWorkspaceSlug(
+  db: WorkspaceStoreD1,
+  workspaceId: string,
+  slug: string,
+): Promise<WorkspaceSlugConflict | null> {
+  let changes: number;
+  try {
+    changes = (await db.prepare(SET_SLUG_SQL).bind(slug, workspaceId).run()).meta.changes;
+  } catch (err) {
+    // Pinned to the D1 driver's message, the only conflict signal it exposes:
+    // if that wording drifts this falls through to a 500 (visible, not a wrong
+    // 409). Re-check when the D1 face starts carrying a structured error code.
+    if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) return "slug_taken";
+    throw err;
+  }
+  if (changes > 0) return null;
+  const guard = await db
+    .prepare(SLUG_CONFLICT_SQL)
+    .bind(slug, workspaceId)
+    .first<{ slug_taken: number; id_taken: number }>();
+  if (guard?.slug_taken) return "slug_taken";
+  if (guard?.id_taken) return "slug_is_workspace_id";
+  // Neither guard matched, so the WHERE's `id = ?2 AND deleted_at IS NULL` hit
+  // no live row: the workspace was soft-deleted between the caller's resolution
+  // and this statement. A vanished row is the 404 family, not a conflict.
+  return "workspace_not_found";
+}
 
 /**
  * Create one workspace and its creator's `owner` membership as ONE `batch` — a

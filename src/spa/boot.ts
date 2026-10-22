@@ -7,9 +7,9 @@
  * login/role itself — this injection is the only bootstrap path.
  *
  * Shape is intentionally small (locale + identity + the deployment's sole
- * workspace slug + the caller's create capability). Page data comes from the
+ * workspace ref + the caller's create capability). Page data comes from the
  * dashboard API under the page's own workspace prefix (`workspace-base.ts`) —
- * the injected slug is navigation only, for the pages whose pathname names no
+ * the injected ref is navigation only, for the pages whose pathname names no
  * workspace (Members).
  */
 import type { Locale } from "../i18n";
@@ -20,12 +20,12 @@ export type SpaBoot = {
   name: string | null;
   role: "admin" | "member" | null;
   /**
-   * The deployment's sole live workspace under `strict`, resolved server-side
-   * through the sign-in landing's resolver. Absent under `off` and whenever the
-   * deployment cannot name exactly one — the shell then keeps its legacy
-   * targets. A workspace-scoped pathname always wins over this value.
+   * The deployment's sole live workspace ref (its slug) under `strict`,
+   * resolved server-side through the sign-in landing's resolver. Absent under
+   * `off` and whenever the deployment cannot name exactly one — the shell then
+   * keeps its legacy targets. A workspace-scoped pathname always wins.
    */
-  workspaceSlug?: string;
+  workspaceRef?: string;
   /**
    * Absent or `true` = the caller may run the manifest Create flow. The server
    * sets `false` under `strict` for a plain workspace member, who would not be
@@ -33,6 +33,21 @@ export type SpaBoot = {
    * Create action. `off` never sets it, so its output is unchanged.
    */
   canCreateApp?: boolean;
+  /**
+   * The signed-in login's live workspace memberships — the switcher's list and
+   * the settings slug card's stored value. A path segment may address the
+   * workspace by EITHER identifier, so both ride the payload: `id` (stable) and
+   * `slug` (the readable segment, equal to `id` until renamed). The switcher
+   * matches the current row on either and rewrites the path to `slug`; `role`
+   * serves the members surface. Empty/absent for a login in no workspace,
+   * which renders no switcher.
+   */
+  memberships?: Array<{
+    id: string;
+    slug: string;
+    name: string;
+    role: "owner" | "admin" | "member";
+  }>;
   /**
    * The signed-in login's live pending workspace invitations — the invitee's
    * discovery surface. Empty/absent for a login nobody invited.

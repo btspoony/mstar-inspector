@@ -6,7 +6,7 @@
  * `/dashboard` and `/dashboard/apps` are one root-routing rule: both render
  * the Apps workbench (the insights home at the root is retired, as is the
  * Worker 301 alias). Under `strict` the same pages live under the workspace
- * prefix (`/dashboard/<workspaceSlug>/apps…`) — the Worker's tenant gate
+ * prefix (`/dashboard/<workspaceRef>/apps…`) — the Worker's tenant gate
  * admits those paths and this matcher serves their shell. History fallback is
  * this matcher, not wrangler `not_found_handling`.
  */
@@ -15,14 +15,15 @@ export const SPA_PAGES = ["apps", "members", "login", "app-detail"] as const;
 export type SpaPageId = (typeof SPA_PAGES)[number];
 
 /**
- * `workspaceSlug` is present exactly on a workspace-scoped route: the legacy
- * App paths carry no prefix and therefore no field.
+ * `workspaceRef` is the workspace segment — an id or a slug — and is present
+ * exactly on a workspace-scoped route: the legacy App paths carry no prefix and
+ * therefore no field.
  */
 export type SpaRoute =
-  | { page: "apps"; pathname: string; workspaceSlug?: string }
-  | { page: "members"; pathname: string; workspaceSlug: string }
+  | { page: "apps"; pathname: string; workspaceRef?: string }
+  | { page: "members"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
-  | { page: "app-detail"; pathname: string; slug: string; workspaceSlug?: string };
+  | { page: "app-detail"; pathname: string; slug: string; workspaceRef?: string };
 
 /**
  * First path segments that can never name a workspace (today's routes). ONE
@@ -43,16 +44,28 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The non-reserved workspace slug a `/dashboard/<slug>/{apps|members|api}…`
- * path is scoped to, otherwise null — the request-path ordering contract's
- * step 1 grammar, mirrored by the Worker's `classifyDashboardPath`. The ONE
- * workspace-path grammar: the route matcher, the API-base derivation
- * (`workspace-base.ts`) and the sidebar links all read it, so a page's prefix
- * cannot disagree with its matched route.
+ * The non-reserved workspace ref (an id or a slug) a
+ * `/dashboard/<ref>/{apps|members|api}…` path is scoped to, otherwise null —
+ * the request-path ordering contract's step 1 grammar, mirrored by the Worker's
+ * `classifyDashboardPath`. The ONE workspace-path grammar: the route matcher,
+ * the API-base derivation (`workspace-base.ts`) and the sidebar links all read
+ * it, so a page's prefix cannot disagree with its matched route.
  */
-export function workspaceSlugOf(pathname: string): string | null {
-  const slug = /^\/dashboard\/([^/]+)\/(?:apps|members|api)(?:\/|$)/.exec(pathname)?.[1];
-  return slug !== undefined && !RESERVED_WORKSPACE_SLUGS.has(slug) ? slug : null;
+export function workspaceRefOf(pathname: string): string | null {
+  const ref = /^\/dashboard\/([^/]+)\/(?:apps|members|api)(?:\/|$)/.exec(pathname)?.[1];
+  return ref !== undefined && !RESERVED_WORKSPACE_SLUGS.has(ref) ? ref : null;
+}
+
+/**
+ * The same path with its workspace segment replaced — every other segment and
+ * the query are preserved, so a renamed workspace lands on the SAME page under
+ * its new ref. Null when the pathname carries no workspace segment (a
+ * deployment-level page has nothing to rewrite).
+ */
+export function replaceWorkspaceRef(pathname: string, nextRef: string): string | null {
+  const match = /^\/dashboard\/([^/]+)(\/.*)?$/.exec(pathname);
+  if (!match || match[1] === undefined || RESERVED_WORKSPACE_SLUGS.has(match[1])) return null;
+  return `/dashboard/${nextRef}${match[2] ?? ""}`;
 }
 
 const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/settings)?$/;
@@ -66,7 +79,7 @@ const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/sett
  * `/dashboard/apps/:slug/settings` — a PERMANENT settings-tab deep link
  * (the settings POST family's HTML-nav 302 targets are pinned to it,
  * spec § IA), not a compat shim. The workspace twin
- * (`/dashboard/<workspaceSlug>/apps/:slug`, `/settings` likewise) is the same
+ * (`/dashboard/<workspaceRef>/apps/:slug`, `/settings` likewise) is the same
  * page under that workspace's route family. The active tab is query-derived
  * (`?tab=insights`), so every path lands on the same page and the default
  * settings tab.
@@ -79,12 +92,12 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     case "/dashboard/login":
       return { page: "login", pathname };
   }
-  const workspaceSlug = workspaceSlugOf(pathname);
-  if (workspaceSlug !== null) {
-    if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceSlug };
-    if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceSlug };
+  const workspaceRef = workspaceRefOf(pathname);
+  if (workspaceRef !== null) {
+    if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceRef };
+    if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceRef };
     const appSlug = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
-    if (appSlug) return { page: "app-detail", pathname, slug: appSlug, workspaceSlug };
+    if (appSlug) return { page: "app-detail", pathname, slug: appSlug, workspaceRef };
     return null;
   }
   const slug = APP_DETAIL_PATH.exec(pathname)?.[1];

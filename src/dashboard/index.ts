@@ -70,9 +70,12 @@ import {
   getMembership,
   getSoleWorkspace,
   getSoleWorkspaceAccess,
-  getWorkspaceBySlug,
+  getWorkspaceByRef,
   getWorkspaceMember,
   listWorkspaceMembers,
+  listWorkspaceMembershipOptions,
+  setWorkspaceSlug,
+  type WorkspaceMembershipOption,
   type WorkspaceRole,
 } from "./workspace-store";
 import {
@@ -161,7 +164,8 @@ type WorkspacePrincipal = "member" | "invitee" | "outsider";
  */
 type DashboardVariables = {
   tenant?: {
-    slug: string;
+    /** The workspace segment the request named: an id or a slug. */
+    ref: string;
     /** null until the workspace-scope middleware resolves the live row. */
     workspaceId: string | null;
     /** null until the workspace-scope middleware classifies the principal. */
@@ -198,9 +202,9 @@ const APPS_LIST_REDIRECT = "/dashboard/apps";
 function scopedAppPath(c: DashboardContext, path: string): string {
   const tenant = c.get("tenant");
   if (!tenant) return path;
-  if (path === APPS_LIST_REDIRECT) return `/dashboard/${tenant.slug}/apps`;
+  if (path === APPS_LIST_REDIRECT) return `/dashboard/${tenant.ref}/apps`;
   if (path.startsWith(`${APPS_LIST_REDIRECT}/`)) {
-    return `/dashboard/${tenant.slug}${path.slice(DASHBOARD_MOUNT.length)}`;
+    return `/dashboard/${tenant.ref}${path.slice(DASHBOARD_MOUNT.length)}`;
   }
   return path;
 }
@@ -276,7 +280,7 @@ export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> 
 export async function strictWorkspaceBoot(
   env: Env,
   login: string,
-): Promise<{ workspaceSlug?: string; canCreateApp?: boolean; needsWorkspace?: boolean }> {
+): Promise<{ workspaceRef?: string; canCreateApp?: boolean; needsWorkspace?: boolean }> {
   const db = dashboardD1(env);
   if (db === null) return {};
   const strict = tenantModeOf(env.WORKSPACE_TENANT_MODE) === "strict";
@@ -292,11 +296,27 @@ export async function strictWorkspaceBoot(
   if (memberships === 0) return { canCreateApp: false, needsWorkspace: true };
   if (access === null) return { canCreateApp: false };
   return {
-    workspaceSlug: access.slug,
+    workspaceRef: access.slug,
     // A new App lands in the sole workspace, where the scoped `canManageApp`
     // gives a plain member no rights — so creation is owner/admin there.
     canCreateApp: access.role === "owner" || access.role === "admin",
   };
+}
+
+/**
+ * The signed-in login's live workspace memberships as the SPA boot's switcher
+ * rows (`{id, slug, name, role}`). `strict`-only: under `off` the workspace
+ * route family answers 404, so a switch target would be a dead link and the
+ * shell renders no switcher. An unbound store answers `[]` (nothing to list).
+ */
+export async function workspaceMembershipsForLogin(
+  env: Env,
+  login: string,
+): Promise<WorkspaceMembershipOption[]> {
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return [];
+  const db = dashboardD1(env);
+  if (db === null) return [];
+  return listWorkspaceMembershipOptions(db, login);
 }
 
 /**
@@ -356,7 +376,7 @@ export async function canCreateApp(env: Env, login: string): Promise<boolean> {
  */
 export async function signedInLanding(env: Env, login: string): Promise<string> {
   const boot = await strictWorkspaceBoot(env, login);
-  if (boot.workspaceSlug !== undefined) return `/dashboard/${boot.workspaceSlug}/apps`;
+  if (boot.workspaceRef !== undefined) return `/dashboard/${boot.workspaceRef}/apps`;
   // Only a strict deployment that still cannot name its workspace is the
   // operator-facing dead end. A newcomer (`needsWorkspace`) is the EXPECTED
   // landing on the creation surface, not a configuration fault.
@@ -488,17 +508,17 @@ async function resolveAvailableSlug(db: DashboardD1, base: string): Promise<stri
 const DASHBOARD_MOUNT = "/dashboard";
 
 type DashboardPathClass =
-  | { kind: "workspace"; slug: string }
+  | { kind: "workspace"; ref: string }
   | { kind: "legacy-app" }
   | { kind: "other" };
 
 /**
  * Classify a mount-pinned /dashboard path into the route family it addresses —
  * step 1 of the request-path ordering contract, mirrored by
- * `workspaceSlugOf` in `src/spa/routes.ts`. A workspace path is
- * `/<slug>/{apps|members|api}…` with a non-reserved slug; the legacy App paths
+ * `workspaceRefOf` in `src/spa/routes.ts`. A workspace path is
+ * `/<ref>/{apps|members|api}…` with a non-reserved ref; the legacy App paths
  * are today's `/apps…` and `/api/apps…`. A reserved first segment is never a
- * workspace, so `:workspaceSlug` cannot capture a real route (`/apps`,
+ * workspace, so `:workspaceRef` cannot capture a real route (`/apps`,
  * `/api/apps`, `/login`, `/members`, …).
  */
 const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(["apps", "members", "api"]);
@@ -516,7 +536,7 @@ function classifyDashboardPath(pathname: string): DashboardPathClass {
     second !== undefined &&
     WORKSPACE_SEGMENTS.has(second)
   ) {
-    return { kind: "workspace", slug: first };
+    return { kind: "workspace", ref: first };
   }
   return { kind: "other" };
 }
@@ -569,7 +589,7 @@ export const dashboardTenantGate: Handler<{
   // so an anonymous request neither pays a pre-auth round trip nor learns from
   // the response whether the slug exists (both cases 302 to login).
   c.set("tenant", {
-    slug: target.slug,
+    ref: target.ref,
     workspaceId: null,
     role: null,
     principal: null,
@@ -682,7 +702,7 @@ dashboardApp.use("*", async (c, next) => {
     c.set("workspaceScope", null);
     return next();
   }
-  const workspace = await getWorkspaceBySlug(db, tenant.slug);
+  const workspace = await getWorkspaceByRef(db, tenant.ref);
   if (!workspace) {
     c.set("workspaceScope", null);
     return next();
@@ -690,7 +710,7 @@ dashboardApp.use("*", async (c, next) => {
   const user = c.get("authUser");
   const role = user ? await getMembership(db, workspace.id, user.id) : null;
   if (role !== null && user) {
-    c.set("tenant", { slug: workspace.slug, workspaceId: workspace.id, role, principal: "member" });
+    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role, principal: "member" });
     c.set("workspaceScope", { workspaceId: workspace.id, role });
     return next();
   }
@@ -699,7 +719,7 @@ dashboardApp.use("*", async (c, next) => {
       ? null
       : await getPendingInviteByLogin(db, workspace.id, user.github_login, new Date().toISOString());
   c.set("tenant", {
-    slug: workspace.slug,
+    ref: tenant.ref,
     workspaceId: workspace.id,
     role: null,
     principal: invited === null ? "outsider" : "invitee",
@@ -1283,7 +1303,7 @@ const appOnboardingRoute = async (c: DashboardContext) => {
       },
       requestLocale(c),
       // Set only on a workspace-scoped request; the view never reads env.
-      c.get("tenant")?.slug ?? null,
+      c.get("tenant")?.ref ?? null,
     ),
   );
 };
@@ -1587,6 +1607,69 @@ const memberRoleRoute = async (c: DashboardContext) => {
     return inviteMutationResponse(c, "Cannot demote the last owner.", 409);
   }
   return inviteMutationResponse(c, "ok", 200);
+};
+
+// --- Workspace settings: the owner-editable slug ---
+//
+// The path segment IS the workspace's public identity, so only the OWNER may
+// rewrite it (owner-only, unlike the App settings family's owner-or-admin): a
+// slug change kills every shared link that used the old value — there is no
+// redirect (plan 98 D8), so this is a workspace-wide decision.
+const WORKSPACE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{1,38}$/;
+
+/** English faces for the store's two 409 guards; the SPA keys its copy on `code`. */
+const SLUG_CONFLICT_KEYS = {
+  slug_taken: "workspace.slugTaken",
+  slug_is_workspace_id: "workspace.slugIsWorkspaceId",
+} as const;
+
+/**
+ * `PUT /:workspaceRef/api/settings/slug` — validate, then the store's single
+ * guarded UPDATE. The shape gate and the reserved set run BEFORE the write
+ * (they need no row read); the store answers the two 409 conflicts, and a
+ * concurrent write that slips past its guards lands on the slug UNIQUE index,
+ * which the store maps to the same 409 rather than a 500. A target row that
+ * vanished between the member gate and the UPDATE is the same 404 an unknown
+ * ref gets — never a mislabelled conflict.
+ */
+const workspaceSlugRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  // `workspaceOnly` guarantees a tenant, but a request whose ref did not
+  // resolve has no workspace to rename — the same 404 as an unknown ref.
+  if (!member.scope) return await tenantNotFound(c);
+  if (member.scope.role !== "owner") {
+    // Same split as the members family: a navigation gets the rendered denial,
+    // a fetch the bare status the SPA parses.
+    return wantsHtml(c.req.header("Accept") ?? null)
+      ? c.html(forbiddenPage(member.session.login, requestLocale(c)), 403)
+      : c.json({ error: "forbidden" }, 403);
+  }
+  let slug = "";
+  try {
+    const body = (await c.req.json()) as { slug?: unknown };
+    slug = typeof body.slug === "string" ? body.slug : "";
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (!WORKSPACE_SLUG_PATTERN.test(slug)) {
+    return c.json(
+      { key: "workspace.slugInvalid", message: t("en", "workspace.slugInvalid") },
+      400,
+    );
+  }
+  if (RESERVED_WORKSPACE_SLUGS.has(slug)) {
+    return c.json(
+      { code: "slug_reserved", message: t("en", "workspace.slugReserved") },
+      409,
+    );
+  }
+  const conflict = await setWorkspaceSlug(member.db, member.scope.workspaceId, slug);
+  if (conflict === "workspace_not_found") return await tenantNotFound(c);
+  if (conflict !== null) {
+    return c.json({ code: conflict, message: t("en", SLUG_CONFLICT_KEYS[conflict]) }, 409);
+  }
+  return c.json({ slug });
 };
 
 // --- Apps list + per-App management (spec § Multi-App 契约,
@@ -3330,8 +3413,8 @@ const appInsightsRoute = async (c: DashboardContext) => {
 // catch-all 404.
 // Handlers read the workspace from the request context, so no handler body
 // exists twice. The workspace copy is gated by `workspaceOnly`: the routing
-// middleware attaches a scope only for a resolvable, non-reserved slug, so a
-// request that matched `:workspaceSlug` without one (`/login/apps…`,
+// middleware attaches a scope only for a resolvable, non-reserved ref, so a
+// request that matched `:workspaceRef` without one (`/login/apps…`,
 // `/login/members…`) is a 404 and never falls back to the legacy face.
 type AppRouteHandler = (c: DashboardContext) => Response | Promise<Response>;
 
@@ -3370,7 +3453,7 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
 
 /**
  * Registration wrapper for the workspace copy of a route. Hono matches
- * `:workspaceSlug` without knowing the reserved set, so a request that reached
+ * `:workspaceRef` without knowing the reserved set, so a request that reached
  * this registration without a tenant scope (`/login/apps/...`, or any path the
  * gate classified `other`) falls through to the ORIGINAL handling — the legacy
  * route or the placeholder catch-all — exactly as before the workspace block
@@ -3385,12 +3468,17 @@ function workspaceOnly(
 for (const route of APP_ROUTES) {
   if (route.method === "get") {
     if (route.root !== false) dashboardApp.get(route.path, route.handler);
-    dashboardApp.get(`/:workspaceSlug${route.path}`, workspaceOnly(route.handler));
+    dashboardApp.get(`/:workspaceRef${route.path}`, workspaceOnly(route.handler));
   } else {
     if (route.root !== false) dashboardApp.post(route.path, route.handler);
-    dashboardApp.post(`/:workspaceSlug${route.path}`, workspaceOnly(route.handler));
+    dashboardApp.post(`/:workspaceRef${route.path}`, workspaceOnly(route.handler));
   }
 }
+
+// The workspace settings family is workspace-only and PUT-shaped (the table
+// above carries GET/POST only): the slug is the workspace's own identity, so
+// there is no deployment-level copy to register.
+dashboardApp.put("/:workspaceRef/api/settings/slug", workspaceOnly(workspaceSlugRoute));
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
 // not a wired route above is a placeholder submit and must never succeed —

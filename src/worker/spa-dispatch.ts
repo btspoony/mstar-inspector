@@ -24,6 +24,7 @@ import {
   strictWorkspaceAppsBase,
   strictWorkspaceBoot,
   pendingInvitesForLogin,
+  workspaceMembershipsForLogin,
 } from "../dashboard/index";
 import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
@@ -128,7 +129,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // workspace creation lives. `/index.html` and the login page
   // never take the redirect branch.
   const route = matchSpaRoute(c.req.path);
-  const routeSlug = route !== null && "workspaceSlug" in route ? route.workspaceSlug : undefined;
+  const routeRef = route !== null && "workspaceRef" in route ? route.workspaceRef : undefined;
   const extras =
     auth.boot.login === null || route?.page === "login"
       ? {}
@@ -143,9 +144,9 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // The shell's Apps/brand links need the active workspace, and the shell
   // outlives the URL: a client-side navigation (spaClick → pushState) to the
   // mode-independent Members page changes the pathname but not the boot, so a
-  // boot without the slug would strand that page on the legacy
+  // boot without the ref would strand that page on the legacy
   // `/dashboard/apps` dead end under `strict`. Name the workspace in every
-  // sidebar-bearing boot — a workspace-scoped pathname already carries the slug
+  // sidebar-bearing boot — a workspace-scoped pathname already carries the ref
   // in the URL and the boot copies that, but the boot ALSO carries the caller's
   // workspace role as `canCreateApp` (I-000082: a plain member cannot manage the
   // App the manifest flow creates, so the SPA offers no Create action), and one
@@ -154,23 +155,30 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // addressed directly (the SPA router then reads the real pathname), so it
   // takes the same boot. The login page renders no sidebar, and `/dashboard`
   // either redirected above or has no sole workspace to name.
+  // Two independent lists behind the same login gate, so they share ONE round
+  // trip — neither reads the other and both key on the login alone.
   // The invitee's discovery surface: every live pending invitation for this
   // login, so an invited outsider sees a path to accept without knowing the
   // workspace's ref (they are not a member yet, so no member list names it).
-  const pendingInvites =
-    auth.boot.login === null || route?.page === "login"
-      ? []
-      : await pendingInvitesForLogin(c.env, auth.boot.login);
-  // Absent fields add nothing, so `off` and a slug-less deployment keep the
+  // The switcher's list: the same login's live memberships.
+  const login = auth.boot.login;
+  const lists =
+    login === null || route?.page === "login"
+      ? null
+      : await Promise.all([pendingInvitesForLogin(c.env, login), workspaceMembershipsForLogin(c.env, login)]);
+  const pendingInvites = lists?.[0] ?? [];
+  const memberships = lists?.[1] ?? [];
+  // Absent fields add nothing, so `off` and a ref-less deployment keep the
   // pre-existing boot (and its JSON key order) byte-identical.
   const boot: SpaBoot = {
     ...auth.boot,
-    ...(routeSlug ?? extras.workspaceSlug) === undefined
+    ...(routeRef ?? extras.workspaceRef) === undefined
       ? {}
-      : { workspaceSlug: routeSlug ?? extras.workspaceSlug },
+      : { workspaceRef: routeRef ?? extras.workspaceRef },
     ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
     ...(extras.needsWorkspace === true ? { needsWorkspace: true } : {}),
     ...(pendingInvites.length === 0 ? {} : { pendingInvites }),
+    ...(memberships.length === 0 ? {} : { memberships }),
   };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   if (c.req.method === "HEAD") {

@@ -74,6 +74,8 @@ import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pi
 import { LOCALE_COOKIE, t } from "../../src/i18n";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../../src/spa/post-form-headers";
+import { replaceWorkspaceRef } from "../../src/spa/routes";
+import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import { gh, OAUTH_CLIENT_SECRET, fakePem, pemBanner } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -3723,5 +3725,93 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
     expect(workspaceCount(db)).toBe(before);
+  });
+});
+
+describe("workspace switch leaves the session untouched (workspace URL identifiers, 2026-10 — I-000059)", () => {
+  /** `octocat` is a member of `default` (the seed) AND of `beta`. */
+  function twoWorkspaceDb() {
+    const db = seededDashboardD1();
+    const now = new Date().toISOString();
+    db.raw
+      .prepare(
+        "INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at) VALUES ('ws_beta', 'beta', 'Beta', NULL, ?, NULL)",
+      )
+      .run(now);
+    const user = db.raw
+      .query("SELECT id FROM users WHERE github_login = 'octocat'")
+      .get() as { id: string };
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('ws_beta', ?, 'owner', ?)",
+      )
+      .run(user.id, now);
+    return db;
+  }
+
+  test("navigating between workspaces presents the same cookie bytes and sets none", async () => {
+    const env = withSpaAssets(makeDbEnv(twoWorkspaceDb(), { WORKSPACE_TENANT_MODE: "strict" }));
+    const value = await createSessionValue("octocat", null, SESSION_SECRET);
+    // The cookie the browser's jar holds before the switch, and the ONLY thing
+    // it sends afterwards: the switcher is a pushState, so the jar can only
+    // survive byte-identically if no response sets (or expires) a cookie.
+    const jar = `${SESSION_COOKIE}=${value}`;
+
+    const before = "/dashboard/default/apps";
+    // The path the switcher itself would push — the same rewrite it hands the
+    // router, so this is the real navigation and not a hand-written URL.
+    const after = replaceWorkspaceRef(before, "beta");
+    expect(after).toBe("/dashboard/beta/apps");
+
+    for (const [ref, path] of [
+      ["default", before],
+      ["beta", after as string],
+    ] as const) {
+      const res = await htmlGet(path, jar, env);
+      expect(res.status, ref).toBe(200);
+      // Byte-identity: the response carries no Set-Cookie at all, so the jar
+      // cannot change — not a refresh, not an expiry, not a workspace claim.
+      expect(res.headers.getSetCookie(), ref).toEqual([]);
+      const body = await res.text();
+      // The document really was resolved for the asked-for workspace, and the
+      // boot's switcher list offers BOTH workspaces (by their stored slug) — so
+      // a switch was available on this very page.
+      expect(body, ref).toContain(`"workspaceRef":"${ref}"`);
+      expect(body, ref).toContain('"slug":"beta"');
+      expect(body, ref).toContain('"slug":"default"');
+      // No header carries a workspace identifier: the URL is the only state.
+      for (const [name, header] of res.headers) {
+        expect(header, `${ref} ${name}`).not.toContain("ws_beta");
+        expect(header, `${ref} ${name}`).not.toContain("beta");
+      }
+    }
+
+    // The payload a workspace switch cannot touch: identity and lifetime only.
+    const payload = JSON.parse((await verifyValue(value, SESSION_SECRET)) ?? "{}") as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(payload).sort()).toEqual(["exp", "iat", "login"]);
+    expect(payload.login).toBe("octocat");
+  });
+
+  test("selecting the only workspace is a no-op: no control, no cookie, same bytes", async () => {
+    // `octocat` in the default seed belongs to `default` alone — the
+    // empty-choice case AC6 names.
+    const env = withSpaAssets(makeDbEnv(seededDashboardD1(), { WORKSPACE_TENANT_MODE: "strict" }));
+    const value = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await htmlGet("/dashboard/default/apps", `${SESSION_COOKIE}=${value}`, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.getSetCookie()).toEqual([]);
+
+    const body = await res.text();
+    expect(body).toContain('"workspaceRef":"default"');
+    const boot = JSON.parse(
+      /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(body)?.[1] ?? "{}",
+    ) as Parameters<typeof buildWorkspaceSwitcherModel>[0];
+    // One membership: the shell offers no control, so the only possible
+    // "switch" cannot be initiated at all.
+    expect(boot.memberships).toHaveLength(1);
+    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/default/apps")).toBeNull();
   });
 });

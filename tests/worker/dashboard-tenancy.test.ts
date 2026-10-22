@@ -217,7 +217,7 @@ function tenancyFixture() {
 /**
  * A workspace per reserved word, each with a real App and a member. The DB has
  * no CHECK on `workspaces.slug`, so the routing guard is the ONLY thing keeping
- * `:workspaceSlug` off these names — a capture regression would serve the App.
+ * `:workspaceRef` off these names — a capture regression would serve the App.
  */
 function reservedFixture() {
   const db = createMigratedTestD1();
@@ -382,6 +382,43 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
       envFor(db, "strict"),
     );
     expect(res.status).toBe(404);
+  });
+
+  test("the workspace id resolves exactly like its slug", async () => {
+    // Plan 98 T1: the segment is a ref — `ws-acme` is the row id, `acme` its
+    // slug; both name the same workspace, for the same member.
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    const list = async (ref: string) => {
+      const res = await worker.fetch(await authedRequest(`/dashboard/${ref}/api/apps`, "dana"), env);
+      expect(res.status, ref).toBe(200);
+      return (await res.json()) as { apps: Array<{ slug: string }> };
+    };
+    const byId = await list("ws-acme");
+    expect(byId.apps.map((app) => app.slug)).toEqual(["acme-app"]);
+    expect(await list("acme")).toEqual(byId);
+  });
+
+  test("a ref that names two workspaces answers 404 and warns (never picks one)", async () => {
+    // A slug equal to ANOTHER workspace's id is the only way the single read
+    // can return two rows. Here `ws-acme`'s slug becomes `dup` while a second
+    // workspace IS `dup`; `dana` owns `ws-acme`, so picking that row would
+    // answer 200 — the 404 is the exactly-one-row rule, the cross-tenant backstop.
+    const { db } = tenancyFixture();
+    seedWorkspace(db, "dup", "dup-owner");
+    seed(db, "UPDATE workspaces SET slug = 'dup' WHERE id = 'ws-acme'");
+    const warns: string[] = [];
+    const original = console.warn;
+    console.warn = (msg: unknown) => {
+      warns.push(String(msg));
+    };
+    try {
+      const res = await worker.fetch(await authedRequest("/dashboard/dup/api/apps", "dana"), envFor(db, "strict"));
+      expect(res.status).toBe(404);
+    } finally {
+      console.warn = original;
+    }
+    expect(warns.some((line) => line.includes('"event":"workspace_ref_ambiguous"'))).toBe(true);
   });
 
   test("the workspace 404 is the styled page on HTML navigation and a bare status on fetch", async () => {
@@ -719,7 +756,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     );
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
-    expect(boot.workspaceSlug).toBe("default");
+    expect(boot.workspaceRef).toBe("default");
     const hrefs = await renderMembersHrefs(boot);
     expect(hrefs).toContain("/dashboard/default/apps");
     expect(hrefs).toContain("/dashboard/default/members");
@@ -762,7 +799,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     );
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
-    expect(boot.workspaceSlug).toBe("default");
+    expect(boot.workspaceRef).toBe("default");
     // The Members PAGE the click lands on, rendered from THAT boot: the
     // sidebar hrefs are read off the markup, not off the model behind it.
     const hrefs = await renderMembersHrefs(boot);
@@ -788,7 +825,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     );
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
-    expect(boot.workspaceSlug).toBe("default");
+    expect(boot.workspaceRef).toBe("default");
     const hrefs = await renderMembersHrefs(boot);
     expect(hrefs).toContain("/dashboard/default/apps");
     expect(hrefs).not.toContain("/dashboard/apps");
@@ -801,7 +838,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
       withSpaAssets(envFor(db, "off")),
     );
     expect(res.status).toBe(200);
-    expect(bootOf(await res.text()).workspaceSlug).toBeUndefined();
+    expect(bootOf(await res.text()).workspaceRef).toBeUndefined();
   });
 
   test("off: a workspace Apps page answers 404 even with ASSETS bound (gate before dispatch)", async () => {
@@ -921,7 +958,7 @@ describe("strict: a login with no workspace gets the creation surface", () => {
     const boot = bootOf(await res.text());
     expect(boot.needsWorkspace).toBe(true);
     // No workspace to name: no nav target may point at a workspace path.
-    expect(boot.workspaceSlug).toBeUndefined();
+    expect(boot.workspaceRef).toBeUndefined();
     expect(boot.canCreateApp).toBe(false);
   });
 
@@ -979,7 +1016,7 @@ describe("strict: a login with no workspace gets the creation surface", () => {
     expect(shell.status).toBe(200);
     const boot = bootOf(await shell.text());
     expect(boot.needsWorkspace).toBeUndefined();
-    expect(boot.workspaceSlug).toBe(created.slug);
+    expect(boot.workspaceRef).toBe(created.slug);
     const api = await worker.fetch(
       await authedRequest(`/dashboard/${created.slug}/api/members`, "newcomer"),
       envFor(db, "strict"),
@@ -1003,7 +1040,7 @@ describe("strict: a login with no workspace gets the creation surface", () => {
     expect(boot.needsWorkspace).toBe(true);
     // The workspace plane is invisible under `off`: nothing to name, and the
     // legacy creator rule keeps the App flow open.
-    expect(boot.workspaceSlug).toBeUndefined();
+    expect(boot.workspaceRef).toBeUndefined();
     expect(boot.canCreateApp).toBeUndefined();
     const spa = "../../src/spa";
     const { createElement } = await import("react");
@@ -1175,7 +1212,7 @@ describe("WORKSPACE_TENANT_MODE=strict — App creation is owner/admin", () => {
       ).text(),
     );
     expect(boot.canCreateApp).toBe(false);
-    expect(boot.workspaceSlug).toBeUndefined();
+    expect(boot.workspaceRef).toBeUndefined();
   });
 });
 
