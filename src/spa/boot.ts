@@ -7,9 +7,9 @@
  * login/role itself — this injection is the only bootstrap path.
  *
  * Shape is intentionally small (locale + identity + the deployment's sole
- * workspace slug + the caller's create capability). Page data comes from the
+ * workspace ref + the caller's create capability). Page data comes from the
  * dashboard API under the page's own workspace prefix (`workspace-base.ts`) —
- * the injected slug is navigation only, for the pages whose pathname names no
+ * the injected ref is navigation only, for the pages whose pathname names no
  * workspace (Members).
  */
 import type { Locale } from "../i18n";
@@ -20,12 +20,12 @@ export type SpaBoot = {
   name: string | null;
   role: "admin" | "member" | null;
   /**
-   * The deployment's sole live workspace under `strict`, resolved server-side
-   * through the sign-in landing's resolver. Absent under `off` and whenever the
-   * deployment cannot name exactly one — the shell then keeps its legacy
-   * targets. A workspace-scoped pathname always wins over this value.
+   * The deployment's sole live workspace ref (its slug) under `strict`,
+   * resolved server-side through the sign-in landing's resolver. Absent under
+   * `off` and whenever the deployment cannot name exactly one — the shell then
+   * keeps its legacy targets. A workspace-scoped pathname always wins.
    */
-  workspaceSlug?: string;
+  workspaceRef?: string;
   /**
    * Absent or `true` = the caller may run the manifest Create flow. The server
    * sets `false` under `strict` for a plain workspace member, who would not be

@@ -4,7 +4,7 @@
  */
 import { NAV_ITEMS, t, type Locale } from "../i18n";
 import type { SpaBoot } from "./boot";
-import { workspaceSlugOf } from "./routes";
+import { workspaceRefOf } from "./routes";
 
 export type ShellNavItem = { href: string; label: string; current: boolean };
 
@@ -47,7 +47,7 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
  * On a workspace-scoped page BOTH entries follow that workspace: Apps becomes
  * `/dashboard/<ref>/apps` and Members `/dashboard/<ref>/members`, because both
  * route families are workspace-scoped. The workspace comes from
- * the pathname, else from the boot (`SpaBoot.workspaceSlug`, the server-resolved
+ * the pathname, else from the boot (`SpaBoot.workspaceRef`, the server-resolved
  * sole workspace under `strict`). The generic prefix rule then also marks the
  * scoped Apps entry current on its own detail pages.
  */
@@ -63,15 +63,15 @@ export function isNavCurrent(href: string, pathname: string): boolean {
 }
 
 /** One nav entry's href under a resolved workspace ref (null = legacy). */
-function navHref(baseHref: string, workspaceSlug: string | null): string {
-  return workspaceSlug === null ? baseHref : `/dashboard/${workspaceSlug}${baseHref.slice("/dashboard".length)}`;
+function navHref(baseHref: string, workspaceRef: string | null): string {
+  return workspaceRef === null ? baseHref : `/dashboard/${workspaceRef}${baseHref.slice("/dashboard".length)}`;
 }
 
 export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel {
   // The page's own prefix wins (it is the route the request was matched
-  // against); the boot slug covers the mode-independent pages, whose pathname
+  // against); the boot ref covers the mode-independent pages, whose pathname
   // names no workspace. Both absent → the legacy targets.
-  const workspaceSlug = workspaceSlugOf(pathname) ?? boot.workspaceSlug ?? null;
+  const workspaceRef = workspaceRefOf(pathname) ?? boot.workspaceRef ?? null;
   // No workspace yet → every nav target would 404; the shell keeps its
   // wordmark and drops the entries (creation surface).
   const items = boot.needsWorkspace === true ? [] : visibleNavItems(boot.role);
@@ -79,10 +79,10 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
     brand: t(boot.locale, "nav.brand"),
     // The root workbench 404s its data reads under `strict`, so the wordmark
     // follows the same workspace Apps target as the nav entry there.
-    brandHref: workspaceSlug === null ? "/dashboard" : `/dashboard/${workspaceSlug}/apps`,
+    brandHref: workspaceRef === null ? "/dashboard" : `/dashboard/${workspaceRef}/apps`,
     navLabel: t(boot.locale, "nav.primary"),
     items: items.map((item) => {
-      const href = navHref(item.href, workspaceSlug);
+      const href = navHref(item.href, workspaceRef);
       return {
         href,
         label: t(boot.locale, item.labelKey),

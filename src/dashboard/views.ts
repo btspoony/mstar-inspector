@@ -545,8 +545,8 @@ export function manifestOnboardingPage(
   user: { login: string; name?: string },
   app: { id: number; name: string; slug: string; webhookUrl: string },
   locale: Locale = "en",
-  /** Workspace slug under `strict`; null renders today's legacy targets. */
-  workspaceSlug: string | null = null,
+  /** Workspace ref (id or slug) under `strict`; null renders today's legacy targets. */
+  workspaceRef: string | null = null,
 ): string {
   const connected = t(locale, "manifest.onboarding.connected", {
     appName: `<strong>${escapeHtml(app.name)}</strong>`,
@@ -557,9 +557,9 @@ export function manifestOnboardingPage(
   // stays `/dashboard`: under `strict` the root now redirects into the
   // workspace Apps page (`signedInLanding`).
   const settingsBase =
-    workspaceSlug === null
+    workspaceRef === null
       ? "/dashboard/apps"
-      : `/dashboard/${escapeHtml(workspaceSlug)}/apps`;
+      : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
   return page(
     t(locale, "manifest.onboarding.title"),
     `${shellHeader(user, false, locale)}

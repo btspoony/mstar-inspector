@@ -2,8 +2,8 @@
  * Workspace (tenant) resolution for the dashboard request path — the read-only
  * companion of `apps-store`'s tenant read face. Migrations 0026/0027 are the
  * DDL single sources; this module owns no write path and only answers the two
- * questions the routing layer needs: which workspace does this slug name, and
- * what is this user's role inside it.
+ * questions the routing layer needs: which workspace does this path ref (id or
+ * slug) name, and what is this user's role inside it.
  *
  * Zero-dependency leaf (the `apps-store` module boundary): the `db` parameter
  * is a locally-declared narrow D1 face (types only, zero imports), satisfied
@@ -45,17 +45,32 @@ type WorkspaceStoreD1 = {
 };
 
 /**
- * Resolve a workspace by its path slug. Soft-deleted workspaces are invisible
- * (the same 404 as an unknown slug): a retired tenant must never serve traffic.
+ * Resolve a workspace by its path ref — the same segment may be the row's id or
+ * its slug, and BOTH must resolve to exactly one workspace. Soft-deleted
+ * workspaces are invisible (the same 404 as an unknown ref): a retired tenant
+ * must never serve traffic.
+ *
+ * Zero rows is an unknown ref; TWO rows means a slug equals another workspace's
+ * id, so the segment names no single tenant — it answers the same 404 and
+ * never picks one (the alternative is a cross-tenant read). The T2 slug write
+ * guard forbids such data, so this is the defensive backstop, and the
+ * concurrent-write race it cannot close degrades to a 404, never a leak.
  */
-export async function getWorkspaceBySlug(
+export async function getWorkspaceByRef(
   db: WorkspaceStoreD1,
-  slug: string,
+  ref: string,
 ): Promise<WorkspaceRow | null> {
-  return db
-    .prepare(`SELECT id, slug, name FROM workspaces WHERE slug = ? AND deleted_at IS NULL`)
-    .bind(slug)
-    .first<WorkspaceRow>();
+  const rows = await db
+    .prepare(
+      `SELECT id, slug, name FROM workspaces WHERE (slug = ?1 OR id = ?1) AND deleted_at IS NULL LIMIT 2`,
+    )
+    .bind(ref)
+    .all<WorkspaceRow>();
+  if (rows.results.length === 1) return rows.results[0]!;
+  if (rows.results.length > 1) {
+    console.warn(JSON.stringify({ event: "workspace_ref_ambiguous", ref }));
+  }
+  return null;
 }
 
 /**

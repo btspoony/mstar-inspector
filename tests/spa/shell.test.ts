@@ -118,7 +118,7 @@ describe("shell models", () => {
   test("a workspace-active Members page names its own workspace from the pathname", () => {
     // Members is workspace-routed, so the pathname itself names
     // the workspace; every nav target stays inside it.
-    const sidebar = buildSidebarModel({ ...admin, workspaceSlug: "other" }, "/dashboard/acme/members");
+    const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/members");
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
@@ -128,7 +128,7 @@ describe("shell models", () => {
   });
 
   test("the page's own workspace wins over the boot slug (one workspace identity per page)", () => {
-    const sidebar = buildSidebarModel({ ...admin, workspaceSlug: "other" }, "/dashboard/acme/apps");
+    const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
@@ -139,7 +139,7 @@ describe("shell models", () => {
   test("the boot slug still scopes a pathname that names no workspace", () => {
     // `/dashboard/apps` is the legacy page; on a strict deployment the boot's
     // server-resolved slug carries the workspace into both nav targets.
-    const sidebar = buildSidebarModel({ ...admin, workspaceSlug: "acme" }, "/dashboard/apps");
+    const sidebar = buildSidebarModel({ ...admin, workspaceRef: "acme" }, "/dashboard/apps");
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",

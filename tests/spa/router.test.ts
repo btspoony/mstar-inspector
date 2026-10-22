@@ -11,7 +11,7 @@ import { SPA_PAGES, RESERVED_WORKSPACE_SLUGS, isSpaAssetPath, matchSpaRoute, wan
 /** True when the matched route is workspace-scoped (legacy variants carry no field). */
 function isWorkspaceRoute(pathname: string): boolean {
   const route = matchSpaRoute(pathname);
-  return route !== null && "workspaceSlug" in route;
+  return route !== null && "workspaceRef" in route;
 }
 
 describe("SPA_PAGES enum", () => {
@@ -29,7 +29,7 @@ describe("matchSpaRoute", () => {
     expect(matchSpaRoute("/dashboard/acme/members")).toEqual({
       page: "members",
       pathname: "/dashboard/acme/members",
-      workspaceSlug: "acme",
+      workspaceRef: "acme",
     });
     expect(matchSpaRoute("/dashboard/login")).toEqual({ page: "login", pathname: "/dashboard/login" });
   });
@@ -75,13 +75,13 @@ describe("matchSpaRoute — workspace-scoped App pages", () => {
     expect(matchSpaRoute("/dashboard/acme/apps")).toEqual({
       page: "apps",
       pathname: "/dashboard/acme/apps",
-      workspaceSlug: "acme",
+      workspaceRef: "acme",
     });
     expect(matchSpaRoute("/dashboard/acme/apps/acme-app")).toEqual({
       page: "app-detail",
       pathname: "/dashboard/acme/apps/acme-app",
       slug: "acme-app",
-      workspaceSlug: "acme",
+      workspaceRef: "acme",
     });
     // The permanent settings-tab deep link exists on the workspace family too
     // (the settings POST family's HTML-nav 302 targets it under strict).
@@ -89,7 +89,7 @@ describe("matchSpaRoute — workspace-scoped App pages", () => {
       page: "app-detail",
       pathname: "/dashboard/acme/apps/acme-app/settings",
       slug: "acme-app",
-      workspaceSlug: "acme",
+      workspaceRef: "acme",
     });
   });
 

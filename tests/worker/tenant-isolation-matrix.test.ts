@@ -407,7 +407,7 @@ describe("tenant isolation matrix (scenario × mode)", () => {
   });
 
   // row 5 — NEW cell (no task-level owner): layers: route classification →
-  //         getWorkspaceBySlug `deleted_at IS NULL` (after the session/user
+  //         getWorkspaceByRef `deleted_at IS NULL` (after the session/user
   //         read) → scoped read. The tenant has a live membership row and a
   //         mapped App, so only the soft-delete filter can produce the 404.
   test("row 5 · a soft-deleted workspace slug answers 404 under strict despite membership and a mapped App", async () => {
@@ -464,6 +464,27 @@ describe("tenant isolation matrix (scenario × mode)", () => {
       strict,
     );
     expect(strictWorkspace.status).toBe(404);
+  });
+
+  // row 8 — NEW cell (plan 98 T1): the ref grammar. `ws-acme` is the row id
+  //         and `acme` its slug, so both reach the SAME tenant — the layer that
+  //         would silently answer 404 for one of the two forms is this read.
+  test("row 8 · a workspace answers on its id and on its slug, and every hidden ref form answers 404", async () => {
+    const { db } = matrixFixture();
+    const env = envFor(db, "strict");
+    const list = async (ref: string) => {
+      const res = await worker.fetch(await request(`/dashboard/${ref}/api/apps`, "dana"), env);
+      expect(res.status, ref).toBe(200);
+      return ((await res.json()) as ListBody).apps.map((app) => app.slug);
+    };
+    expect(await list("acme")).toEqual(await list("ws-acme"));
+    expect(await list("acme")).toEqual(["acme-app"]);
+
+    // Unknown and soft-deleted refs are the same invisibility, by either form.
+    for (const ref of ["ghost", "gone", "ws-gone"]) {
+      const res = await worker.fetch(await request(`/dashboard/${ref}/api/apps`, "dana"), env);
+      expect(res.status, ref).toBe(404);
+    }
   });
 
   // row 7 — layers: tenantModeOf (single resolver) → dashboard gate AND

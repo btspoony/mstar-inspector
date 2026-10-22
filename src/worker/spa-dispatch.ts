@@ -128,7 +128,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // workspace creation lives. `/index.html` and the login page
   // never take the redirect branch.
   const route = matchSpaRoute(c.req.path);
-  const routeSlug = route !== null && "workspaceSlug" in route ? route.workspaceSlug : undefined;
+  const routeRef = route !== null && "workspaceRef" in route ? route.workspaceRef : undefined;
   const extras =
     auth.boot.login === null || route?.page === "login"
       ? {}
@@ -143,9 +143,9 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // The shell's Apps/brand links need the active workspace, and the shell
   // outlives the URL: a client-side navigation (spaClick → pushState) to the
   // mode-independent Members page changes the pathname but not the boot, so a
-  // boot without the slug would strand that page on the legacy
+  // boot without the ref would strand that page on the legacy
   // `/dashboard/apps` dead end under `strict`. Name the workspace in every
-  // sidebar-bearing boot — a workspace-scoped pathname already carries the slug
+  // sidebar-bearing boot — a workspace-scoped pathname already carries the ref
   // in the URL and the boot copies that, but the boot ALSO carries the caller's
   // workspace role as `canCreateApp` (I-000082: a plain member cannot manage the
   // App the manifest flow creates, so the SPA offers no Create action), and one
@@ -161,13 +161,13 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     auth.boot.login === null || route?.page === "login"
       ? []
       : await pendingInvitesForLogin(c.env, auth.boot.login);
-  // Absent fields add nothing, so `off` and a slug-less deployment keep the
+  // Absent fields add nothing, so `off` and a ref-less deployment keep the
   // pre-existing boot (and its JSON key order) byte-identical.
   const boot: SpaBoot = {
     ...auth.boot,
-    ...(routeSlug ?? extras.workspaceSlug) === undefined
+    ...(routeRef ?? extras.workspaceRef) === undefined
       ? {}
-      : { workspaceSlug: routeSlug ?? extras.workspaceSlug },
+      : { workspaceRef: routeRef ?? extras.workspaceRef },
     ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
     ...(extras.needsWorkspace === true ? { needsWorkspace: true } : {}),
     ...(pendingInvites.length === 0 ? {} : { pendingInvites }),
