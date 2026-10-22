@@ -125,22 +125,25 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     const workspaceBase = await strictWorkspaceAppsBase(c.env);
     if (workspaceBase !== null) return c.redirect(workspaceBase, 302);
   }
-  // Mode-independent pages (Members) carry no workspace in their pathname, so
-  // the shell's Apps/brand links would fall back to the legacy `/dashboard/apps`
-  // dead end under `strict`. Name the deployment's sole workspace in the boot.
-  // Skipped where the slug cannot matter or is already known: a
-  // workspace-scoped pathname wins client-side, the login page renders no
-  // sidebar, and `/dashboard` either redirected above or resolved no sole
-  // workspace — this read would repeat that answer.
+  // The shell's Apps/brand links need the active workspace, and the shell
+  // outlives the URL: a client-side navigation (spaClick → pushState) to the
+  // mode-independent Members page changes the pathname but not the boot, so a
+  // boot without the slug would strand that page on the legacy
+  // `/dashboard/apps` dead end under `strict`. Name the workspace in every
+  // sidebar-bearing boot — a workspace-scoped pathname already carries it (no
+  // read), otherwise the deployment's sole workspace answers (one read, the
+  // sign-in landing's resolver, which returns null without touching D1 under
+  // `off`). The login page renders no sidebar, and `/dashboard` either
+  // redirected above or has no sole workspace to name.
   const route = matchSpaRoute(c.req.path);
+  const workspaceSlug =
+    auth.boot.login === null || route === null || route.page === "login"
+      ? undefined
+      : (("workspaceSlug" in route ? route.workspaceSlug : undefined) ??
+        (await strictWorkspaceSlug(c.env)) ??
+        undefined);
   const boot =
-    auth.boot.login !== null &&
-    route !== null &&
-    route.page !== "apps" &&
-    route.page !== "login" &&
-    !("workspaceSlug" in route)
-      ? { ...auth.boot, workspaceSlug: (await strictWorkspaceSlug(c.env)) ?? undefined }
-      : auth.boot;
+    workspaceSlug === undefined ? auth.boot : { ...auth.boot, workspaceSlug };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   if (c.req.method === "HEAD") {
     return new Response(null, { status: assetResponse.status });

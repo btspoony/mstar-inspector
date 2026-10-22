@@ -652,6 +652,41 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     ]);
   });
 
+  test("strict: the workspace Apps boot keeps its workspace after a client-side navigation to Members", async () => {
+    // spaClick → pushState changes the pathname but NOT `window.__BOOT__`, so a
+    // boot that omitted the slug on workspace pages would strand Members on the
+    // legacy targets the moment the admin clicked through (I-000072).
+    // A deployment ADMIN carries the Members entry; 0026 seeds `default` as
+    // the sole live workspace, so it is also what the server resolves.
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/default/apps", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceSlug).toBe("default");
+    // The same boot object, rendered at the Members route the click lands on.
+    const sidebar = buildSidebarModel(boot, "/dashboard/members");
+    expect(sidebar.brandHref).toBe("/dashboard/default/apps");
+    expect(sidebar.items.map((item) => item.href)).toEqual([
+      "/dashboard/default/apps",
+      "/dashboard/members",
+    ]);
+    expect(sidebar.items.find((item) => item.href === "/dashboard/members")?.current).toBe(true);
+  });
+
+  test("off: a workspace-shaped shell never exists, so no boot carries a slug", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/apps", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "off")),
+    );
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).workspaceSlug).toBeUndefined();
+  });
+
   test("off: a workspace Apps page answers 404 even with ASSETS bound (gate before dispatch)", async () => {
     const { db } = tenancyFixture();
     const env = withSpaAssets(envFor(db, "off"));
