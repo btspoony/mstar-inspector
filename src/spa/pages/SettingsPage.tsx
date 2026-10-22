@@ -303,7 +303,8 @@ export function SettingsView({
    * via the awaited background reload.
    */
   async function runTriggerMode(mode: ReviewTriggerMode): Promise<OpNotice> {
-    return runPinnedWithBody(reviewTriggerModePath(appPath), { mode });
+    const request = reviewTriggerModeRequest(appPath, mode);
+    return runPinnedWithBody(request.path, request.fields);
   }
 
   /**
@@ -899,11 +900,21 @@ function OpsCard({
 
 /**
  * The pinned POST target of the review-trigger-mode save, under one App path.
- * Exported so a test can execute the derivation instead of pinning the call
- * site's source text.
  */
 export function reviewTriggerModePath(appPath: string): string {
   return `${appPath}/review-trigger-mode`;
+}
+
+/**
+ * The review-trigger-mode save request: the pinned path plus the verbatim mode
+ * body. The one derivation the component posts, so a test can execute the real
+ * wire target through the real transport instead of matching source text.
+ */
+export function reviewTriggerModeRequest(
+  appPath: string,
+  mode: ReviewTriggerMode,
+): { path: string; fields: Record<string, string> } {
+  return { path: reviewTriggerModePath(appPath), fields: { mode } };
 }
 
 /**

@@ -20,8 +20,6 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList } from "../../src/spa/pages/AppsPage";
-import { matchSpaRoute } from "../../src/spa/routes";
-import { apiBase } from "../../src/spa/workspace-base";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const appsPage = readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8");
@@ -36,44 +34,53 @@ describe("AppsPage table reinforcement (AD-581)", () => {
   });
 
   test("whole-row click and the visible detail anchor keep their channels", () => {
-    // Rendered from the real row component: both links target the page's own
-    // API base, so a wrong base (or a /settings deep link) fails here.
-    const html = renderToStaticMarkup(
-      createElement(AppsList, {
-        locale: "en",
-        payload: {
-          viewer: { login: "mallory", role: "member" },
-          apps: [
-            {
-              slug: "demo",
-              github_app_id: 1,
-              status: "active",
-              review_enabled: 1,
-              created_by: "mallory",
-              health: { latest: null, rejected24h: 0 },
+    // Rendered from the real row component under the two ACTUAL pathnames: the
+    // emitted links are the page's own base, so a wrong base, a legacy target
+    // under a workspace page, or a /settings deep link fails here.
+    const render = (pathname: string): string => {
+      // Bun's test runtime has no document; `apiBase()` reads
+      // `location.pathname` through a narrow structural type.
+      const scope = globalThis as { location?: { pathname: string } };
+      scope.location = { pathname };
+      try {
+        return renderToStaticMarkup(
+          createElement(AppsList, {
+            locale: "en",
+            payload: {
+              viewer: { login: "mallory", role: "member" },
+              apps: [
+                {
+                  slug: "demo",
+                  github_app_id: 1,
+                  status: "active",
+                  review_enabled: 1,
+                  created_by: "mallory",
+                  health: { latest: null, rejected24h: 0 },
+                },
+              ],
             },
-          ],
-        },
-      }),
-    );
-    const hrefs = [...html.matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
-    // The identity link and the visible detail anchor — one target, no
-    // /settings deep link.
-    expect(hrefs).toEqual(["/dashboard/apps/demo", "/dashboard/apps/demo"]);
-    // Workspace-scoped pages carry the workspace prefix (the legacy App
-    // family 404s under strict) — the same base the detail route resolves on.
-    expect(apiBase("/dashboard/acme/apps/demo")).toBe("/dashboard/acme");
-    expect(matchSpaRoute("/dashboard/acme/apps/demo")).toEqual({
-      page: "app-detail",
-      pathname: "/dashboard/acme/apps/demo",
-      slug: "demo",
-      workspaceSlug: "acme",
-    });
+          }),
+        );
+      } finally {
+        delete scope.location;
+      }
+    };
+    // Legacy Apps page: the historical detail path, identity link + anchor.
+    expect(
+      [...render("/dashboard/apps").matchAll(/href="([^"]+)"/g)].map((match) => match[1]),
+    ).toEqual(["/dashboard/apps/demo", "/dashboard/apps/demo"]);
+    // Workspace Apps page: the workspace copy of the same route — the legacy
+    // App family answers 404 under strict.
+    expect(
+      [...render("/dashboard/acme/apps").matchAll(/href="([^"]+)"/g)].map((match) => match[1]),
+    ).toEqual(["/dashboard/acme/apps/demo", "/dashboard/acme/apps/demo"]);
+    const scoped = render("/dashboard/acme/apps");
     // Row-level and identity-link spaClick handlers (behavior).
     expect(appsPage.split("onClick={(event) => spaClick(href, event)}").length - 1).toBe(3);
-    expect(html).toContain('class="text-primary underline-offset-4 hover:underline"');
+    expect(scoped).toContain('class="text-primary underline-offset-4 hover:underline"');
+    expect(scoped).not.toContain("/settings");
     // Row action copy is detail semantics in both locales.
-    expect(html).toContain(">Detail<");
+    expect(scoped).toContain(">Detail<");
     expect(t("en", "apps.detail")).toBe("Detail");
     expect(t("zh_CN", "apps.detail")).toBe("详情");
   });

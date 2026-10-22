@@ -150,23 +150,24 @@ describe("tab shell rendering (static SSR)", () => {
 
 describe("tab shell source contracts", () => {
   test("wayfinding: the back link is the shell's first element on both faces — before the identity-header h1", () => {
-    // The back link moved out of the settings tab body (SettingsView) to
-    // the stateful AppDetailPage shell, so it renders on the error face
-    // AND the ok face (both roles — the shell serves managers and
-    // non-managers alike) as the page's first element. The loading
-    // skeleton early returns stay excluded (transient faces). The link face
-    // itself (ArrowLeft aria-hidden + label + target) is asserted on rendered
-    // markup in settings-layout.test.ts.
-    const wayfindingAt = detailPage.indexOf("<BackToApps");
-    expect(wayfindingAt).toBeGreaterThan(-1);
-    expect(detailPage).toContain('apiBase()}/apps`');
-    const h1At = detailPage.indexOf("{slug}</h1>");
-    expect(h1At).toBeGreaterThan(wayfindingAt);
-    // The shell's returned fragment carries the link before both faces:
-    // error face (ErrorState) and ok face (AppDetailView).
-    const returnAt = detailPage.indexOf('state === "error" ? <ErrorState');
-    expect(returnAt).toBeGreaterThan(-1);
-    expect(detailPage.lastIndexOf("{wayfinding}", returnAt)).toBeGreaterThan(detailPage.lastIndexOf("const wayfinding"));
+    // The back link lives in the shell's own fragment (AppDetailShell), which
+    // wraps BOTH faces — error (ErrorState) and ok (AppDetailView) — for
+    // managers and non-managers alike. The rendered link target and its
+    // ArrowLeft/aria-hidden contract are asserted in settings-layout.test.ts;
+    // here the ORDER is the point: link first, face second.
+    expect(detailPage).toContain("export function AppDetailShell(");
+    const shellAt = detailPage.indexOf("export function AppDetailShell(");
+    const linkAt = detailPage.indexOf("<BackToApps", shellAt);
+    const faceAt = detailPage.indexOf("{children}", linkAt);
+    expect(linkAt).toBeGreaterThan(shellAt);
+    expect(faceAt).toBeGreaterThan(linkAt);
+    // The stateful page mounts that fragment around both faces and derives no
+    // second link of its own.
+    expect(detailPage).toContain("<AppDetailShell locale={locale}>");
+    expect(detailPage.indexOf('state === "error" ? <ErrorState')).toBeGreaterThan(
+      detailPage.indexOf("<AppDetailShell locale={locale}>"),
+    );
+    expect(detailPage.match(/<BackToApps/g)?.length).toBe(1);
     // The pure view gained nothing: no back link inside AppDetailView.
     const viewAt = detailPage.indexOf("export function AppDetailView");
     expect(detailPage.indexOf("<BackToApps", viewAt)).toBe(-1);

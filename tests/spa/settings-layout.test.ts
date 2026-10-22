@@ -23,8 +23,7 @@ import {
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
 import { AppInfoCard, DraftChainPanel, ProviderConfigForm, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
-import { BackToApps } from "../../src/spa/pages/AppDetailPage";
-import { apiBase } from "../../src/spa/workspace-base";
+import { AppDetailShell } from "../../src/spa/pages/AppDetailPage";
 
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
@@ -1307,25 +1306,43 @@ describe("operational action hierarchy", () => {
 
 describe("App workflow boundaries", () => {
   test("App settings reads as one workflow with the Apps list: a visible path back", () => {
-    // Rendered, not source-pinned: the link target is whatever the page
-    // actually emits, so a wrong base/slug fails here.
-    const html = renderToStaticMarkup(
-      createElement(BackToApps, { locale: "en", href: `${apiBase("/dashboard/acme/apps")}/apps` }),
-    );
-    expect(html).toContain('href="/dashboard/acme/apps"');
-    expect(html).toContain("Back to Apps");
+    // The real shell fragment renders the link from ITS OWN page base, so both
+    // pathnames (legacy and workspace-scoped) are exercised end to end: a
+    // wrong base or a link that stops being the shell's first element fails.
+    const render = (pathname: string): string => {
+      // Bun's test runtime has no document; the shell reads `location.pathname`
+      // through a narrow structural type — the same stub `workspace-base` does.
+      const scope = globalThis as { location?: { pathname: string } };
+      scope.location = { pathname };
+      try {
+        return renderToStaticMarkup(
+          createElement(AppDetailShell, { locale: "en", children: "face" }),
+        );
+      } finally {
+        delete scope.location;
+      }
+    };
+
+    const legacy = render("/dashboard/apps/acme-app");
+    expect(legacy).toContain('href="/dashboard/apps"');
+    expect(legacy).toContain("Back to Apps");
+    // The link is the shell's first element — it precedes the page face.
+    expect(legacy.indexOf('href="/dashboard/apps"')).toBeLessThan(legacy.indexOf(">face<"));
+
+    // A workspace App page keeps the wayfinding inside its workspace: the
+    // legacy App family answers 404 under strict.
+    const scoped = render("/dashboard/acme/apps/acme-app");
+    expect(scoped).toContain('href="/dashboard/acme/apps"');
+    expect(scoped).not.toContain('href="/dashboard/apps"');
+
     expect(t("en", "appDetail.backToApps")).toBe("Back to Apps");
     expect(t("zh_CN", "appDetail.backToApps")).toBe("返回应用");
     // The decorative ArrowLeft rides the link — aria-hidden keeps the
     // accessible name at the backToApps text alone; inline-flex aligns
     // icon + label.
-    expect(html).toContain("<svg");
-    expect(html).toContain('aria-hidden="true"');
-    expect(html).toContain("inline-flex items-center gap-1.5");
-    // Legacy pages keep the historical target.
-    expect(renderToStaticMarkup(createElement(BackToApps, { locale: "en", href: `${apiBase("/dashboard/apps")}/apps` }))).toContain(
-      'href="/dashboard/apps"',
-    );
+    expect(scoped).toContain("<svg");
+    expect(scoped).toContain('aria-hidden="true"');
+    expect(scoped).toContain("inline-flex items-center gap-1.5");
   });
 
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {

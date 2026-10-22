@@ -15,8 +15,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { REVIEW_TRIGGER_MODES as STORE_REVIEW_TRIGGER_MODES } from "../../src/dashboard/apps-store";
 import { REVIEW_TRIGGER_MODES, isReviewTriggerMode, type ReviewTriggerMode } from "../../src/spa/pages/data";
-import { ReviewTriggerControl, botMention, reviewTriggerModePath } from "../../src/spa/pages/SettingsPage";
-import { apiBase } from "../../src/spa/workspace-base";
+import {
+  ReviewTriggerControl,
+  botMention,
+  reviewTriggerModeRequest,
+} from "../../src/spa/pages/SettingsPage";
+import { postForm } from "../../src/spa/api";
 
 const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
 
@@ -132,21 +136,33 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
 });
 
 describe("save flow + 400 fallback contract (source pins)", () => {
-  test("the control posts the verbatim mode to the pinned T1 route through the shared pinned-ops family", () => {
-    // SettingsView wires the save through runPinnedWithBody — the family
-    // whose 400 face resolves through settingsErrorMessage (key-first,
-    // never-blank fallback; count pinned at 2 by settings-error-keys.test.ts
-    // and unchanged here). The target is EXECUTED, not source-pinned: the
-    // page's own base derivation plus the shared path helper name the route.
-    expect(reviewTriggerModePath("/dashboard/apps/acme")).toBe(
-      "/dashboard/apps/acme/review-trigger-mode",
-    );
-    // Workspace-scoped pages post to the workspace copy — the legacy App
-    // family answers 404 under strict.
-    expect(reviewTriggerModePath(`${apiBase("/dashboard/acme/apps/acme")}/apps/acme`)).toBe(
-      "/dashboard/acme/apps/acme/review-trigger-mode",
-    );
-    expect(settingsPage).toContain("runPinnedWithBody(reviewTriggerModePath(appPath), { mode })");
+  test("the control posts the verbatim mode to the pinned T1 route through the shared pinned-ops family", async () => {
+    // The save is EXECUTED: the production request derivation runs through the
+    // production transport (`postForm`), so the observed URL + body are what the
+    // operator's click actually puts on the wire.
+    const calls: Array<{ url: string; body: string }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      calls.push({ url: String(input), body: String(init?.body ?? "") });
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      for (const pagePath of ["/dashboard/apps/acme", "/dashboard/acme/apps/acme"]) {
+        calls.length = 0;
+        const request = reviewTriggerModeRequest(pagePath, "manual");
+        await postForm(request.path, request.fields);
+        // ONE wire call per save, to the page's own (legacy or workspace) App
+        // family — the legacy family 404s under strict.
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.url).toBe(`${pagePath}/review-trigger-mode`);
+        expect(calls[0]!.body).toBe("mode=manual");
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    // The 400 face of that family resolves through settingsErrorMessage
+    // (key-first, never-blank fallback; count pinned at 2 by
+    // settings-error-keys.test.ts and unchanged here).
     // OpsCard receives the saver and renders the control (beside the review
     // toggle, inside the ops card — before the pause/resume actions row).
     const opsBody = settingsPage.slice(
