@@ -3,9 +3,10 @@
  *
  * The workflows only wire these scripts in; the decisions live here and are
  * executed, not string-matched:
- *   - `scripts/resolve-tenant-mode.sh`: dispatch input → steady-state variable
- *     → off, so a routine release/push cannot silently demote a `strict`
- *     installation.
+ *   - `scripts/resolve-tenant-mode.sh`: an explicit dispatch input → the
+ *     steady-state variable → off (`steady`, the dispatch default, and an empty
+ *     non-dispatch value both mean "take the variable"), so a routine
+ *     release/push cannot silently demote a `strict` installation.
  *   - `scripts/deploy-replay-guard.sh`: a `strict` replay must bind Deploy A's
  *     SHA (expected == run == resolved ref, all non-empty); anything else exits 1.
  *   - `scripts/deploy-status.sh`: prints exactly one mutually exclusive status
@@ -100,12 +101,12 @@ describe("resolve-tenant-mode.sh", () => {
     }
   }
 
-  test("a dispatch input wins over the steady-state variable", () => {
+  test("an EXPLICIT dispatch input wins over the steady-state variable", () => {
     for (const [input, steady, expected] of [
       ["strict", "off", "strict"],
       ["off", "strict", "off"],
     ] as const) {
-      const result = resolveWithFiles(input, steady, "false");
+      const result = resolveWithFiles(input, steady);
       expect(result.code, `${input}|${steady}`).toBe(0);
       expect(result.output, `${input}|${steady}`).toBe(
         `mode=${expected}\nreplay=${expected === "strict" ? "required" : "none"}\n`,
@@ -116,38 +117,34 @@ describe("resolve-tenant-mode.sh", () => {
     }
   });
 
-  test("a routine release/push arm deploys the steady-state mode — strict stays strict", () => {
-    const result = resolveWithFiles("", "strict", "true");
-    expect(result.code).toBe(0);
-    expect(result.output).toBe("mode=strict\nreplay=none\n");
-    expect(result.summary).toBe("tenant_mode_change=none\n");
-    expect(result.out).not.toContain("::warning::");
-  });
-
-  test("a routine arm resolving to off cannot prove the live mode: warns and records the change key", () => {
-    for (const steady of ["off", ""]) {
-      const result = resolveWithFiles("", steady, "true");
-      expect(result.code, steady).toBe(0);
-      expect(result.output, steady).toBe("mode=off\nreplay=none\n");
-      expect(result.out, steady).toContain("::warning::");
-      expect(result.out, steady).toContain("not observed");
-      expect(result.summary, steady).toBe("tenant_mode_change=unproven->off\n");
+  test("steady (the default) takes the steady-state variable — strict stays strict, no warning", () => {
+    for (const input of ["steady", ""]) {
+      const result = resolveWithFiles(input, "strict");
+      expect(result.code, input).toBe(0);
+      expect(result.output, input).toBe("mode=strict\nreplay=none\n");
+      expect(result.summary, input).toBe("tenant_mode_change=none\n");
+      expect(result.out, input).not.toContain("::warning::");
     }
   });
 
-  test("no input, no steady-state variable, no routine arm (manual local run) is plain off", () => {
-    const result = resolveWithFiles("", "", "false");
-    expect(result.code).toBe(0);
-    expect(result.output).toBe("mode=off\nreplay=none\n");
-    expect(result.summary).toBe("tenant_mode_change=none\n");
-    expect(result.out).not.toContain("::warning::");
+  test("steady resolving to off cannot prove the live mode: warns and records the change key", () => {
+    for (const input of ["steady", ""]) {
+      for (const steady of ["off", ""]) {
+        const result = resolveWithFiles(input, steady);
+        expect(result.code, `${input}|${steady}`).toBe(0);
+        expect(result.output, `${input}|${steady}`).toBe("mode=off\nreplay=none\n");
+        expect(result.out, `${input}|${steady}`).toContain("::warning::");
+        expect(result.out, `${input}|${steady}`).toContain("not observed");
+        expect(result.summary, `${input}|${steady}`).toBe("tenant_mode_change=unproven->off\n");
+      }
+    }
   });
 
   test("an illegal value fails the run before any deploy-capable step", () => {
     for (const args of [
-      ["on", "", "false"],
-      ["STRICT", "", "false"],
-      ["", "  ", "true"],
+      ["on", ""],
+      ["STRICT", ""],
+      ["steady", "  "],
     ] as const) {
       const result = resolveWithFiles(...args);
       expect(result.code, args.join("|")).toBe(1);
@@ -162,62 +159,61 @@ describe("resolve-tenant-mode.sh", () => {
     const decide = (
       input: string,
       steady: string,
-      routine: string,
       expectedSha: string,
       runSha: string,
       refSha: string,
     ): { mode: string; replay: string; code: number; err: string } => {
-      const resolved = resolveWithFiles(input, steady, routine);
+      const resolved = resolveWithFiles(input, steady);
       const replay = /^replay=(.*)$/m.exec(resolved.output)?.[1] ?? "";
       const mode = /^mode=(.*)$/m.exec(resolved.output)?.[1] ?? "";
       const guarded = runBash(join(SCRIPTS, "deploy-replay-guard.sh"), [replay, expectedSha, runSha, refSha]);
       return { mode, replay, code: guarded.code, err: guarded.err };
     };
 
-    // 1. ROUTINE arm + steady-state strict, no dispatch input, no Deploy-A SHA:
-    //    deploys strict and is NOT refused (the L2 regression).
-    const routine = decide("", "strict", "true", "", SHA_A, SHA_A);
-    expect(routine.mode).toBe("strict");
-    expect(routine.replay).toBe("none");
-    expect(routine.code).toBe(0);
+    // 1. steady + variable strict, no Deploy-A SHA: deploys strict and is NOT
+    //    refused (the L2 regression).
+    const steady = decide("steady", "strict", "", SHA_A, SHA_A);
+    expect(steady.mode).toBe("strict");
+    expect(steady.replay).toBe("none");
+    expect(steady.code).toBe(0);
 
     // 2. DISPATCH strict without the expected SHA: refused, never fabricated.
-    const noBinding = decide("strict", "", "false", "", SHA_A, SHA_A);
+    const noBinding = decide("strict", "", "", SHA_A, SHA_A);
     expect(noBinding.mode).toBe("strict");
     expect(noBinding.replay).toBe("required");
     expect(noBinding.code).toBe(1);
     expect(noBinding.err).toContain("expected_deploy_sha is empty");
 
     // 3. DISPATCH strict with the matching SHA: the real Deploy B replay.
-    const replayRun = decide("strict", "", "false", SHA_A, SHA_A, SHA_A);
+    const replayRun = decide("strict", "", SHA_A, SHA_A, SHA_A);
     expect(replayRun.replay).toBe("required");
     expect(replayRun.code).toBe(0);
 
     // 4. A dispatch `off` is no replay at all (the rollback door).
-    const rollback = decide("off", "strict", "false", "", SHA_A, SHA_A);
+    const rollback = decide("off", "strict", "", SHA_A, SHA_A);
     expect(rollback.mode).toBe("off");
     expect(rollback.replay).toBe("none");
     expect(rollback.code).toBe(0);
 
-    // 5. A routine arm with the variable OFF stays a plain non-replay deploy.
-    const routineOff = decide("", "", "true", "", SHA_A, SHA_A);
-    expect(routineOff.mode).toBe("off");
-    expect(routineOff.replay).toBe("none");
-    expect(routineOff.code).toBe(0);
+    // 5. steady with the variable unset stays a plain non-replay deploy.
+    const steadyOff = decide("steady", "", "", SHA_A, SHA_A);
+    expect(steadyOff.mode).toBe("off");
+    expect(steadyOff.replay).toBe("none");
+    expect(steadyOff.code).toBe(0);
 
     // 6. A MOVED ref still reds on the replay path: expected == run, but the ref
     //    resolves to a different commit (the tag/branch moved between A and B).
-    const movedReplay = decide("strict", "", "false", SHA_A, SHA_A, SHA_B);
+    const movedReplay = decide("strict", "", SHA_A, SHA_A, SHA_B);
     expect(movedReplay.replay).toBe("required");
     expect(movedReplay.code).toBe(1);
     expect(movedReplay.err).toContain("the ref moved");
 
-    // 7. …and a moved ref reds on the ROUTINE path too: replay=none skips the
-    //    expected-SHA binding, never the ref identity assertion.
-    const movedRoutine = decide("", "strict", "true", "", SHA_A, SHA_B);
-    expect(movedRoutine.replay).toBe("none");
-    expect(movedRoutine.code).toBe(1);
-    expect(movedRoutine.err).toContain("the ref moved");
+    // 7. …and a moved ref reds on the steady-state path too: replay=none skips
+    //    the expected-SHA binding, never the ref identity assertion.
+    const movedSteady = decide("steady", "strict", "", SHA_A, SHA_B);
+    expect(movedSteady.replay).toBe("none");
+    expect(movedSteady.code).toBe(1);
+    expect(movedSteady.err).toContain("the ref moved");
   });
 });
 

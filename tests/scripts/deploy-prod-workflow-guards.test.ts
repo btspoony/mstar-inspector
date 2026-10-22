@@ -5,9 +5,11 @@
  * prod deploy surface:
  *
  * - triggers: `release: types: [published]` + `workflow_dispatch` with NO
- *   inputs — the run's own ref IS the deploy ref (`gh workflow run
+ *   `ref` input — the run's own ref IS the deploy ref (`gh workflow run
  *   deploy-prod.yml --ref <tag>`), so bring-up / rollback on the current
- *   prerelease tag needs no separate input;
+ *   tag needs no separate ref; its only inputs are the tenant mode (`steady`
+ *   default, i.e. "take vars.WORKSPACE_TENANT_MODE") and the two replay audit
+ *   values;
  * - the prerelease guard: one job-level `if` that dispatches always and lets a
  *   release through only when the Release's own `prerelease` flag is `false`
  *   AND its tag carries no `-` (the two are independent release properties, so
@@ -243,9 +245,12 @@ describe("deploy-prod.yml guards", () => {
     ]);
     expect(dispatch.inputs.tenant_mode).toMatchObject({
       required: false,
-      default: "off",
+      // NOT `off`: the Release workflow dispatches this workflow with no
+      // fields, so the declared default decides an ordinary release. `steady`
+      // is the only non-deciding choice (PR #87 I-000070).
+      default: "steady",
       type: "choice",
-      options: ["off", "strict"],
+      options: ["steady", "off", "strict"],
     });
     expect(dispatch.inputs.expected_container_digest).toMatchObject({ required: false, default: "" });
     // a `push:` trigger would deploy production on every main push — this
