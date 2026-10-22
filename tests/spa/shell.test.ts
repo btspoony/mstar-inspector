@@ -116,7 +116,7 @@ describe("shell models", () => {
   });
 
   test("a workspace-active Members page names its own workspace from the pathname", () => {
-    // Members is workspace-routed after plan 97, so the pathname itself names
+    // Members is workspace-routed, so the pathname itself names
     // the workspace; every nav target stays inside it.
     const sidebar = buildSidebarModel({ ...admin, workspaceSlug: "other" }, "/dashboard/acme/members");
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");

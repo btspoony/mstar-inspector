@@ -125,7 +125,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // same target the OAuth callback and the login bounce use). The boot extras
   // are resolved FIRST so a login with NO workspace keeps today's shell instead
   // of being sent to a page that answers the outsider 404: that shell is where
-  // workspace creation lives (plan 97 AC1). `/index.html` and the login page
+  // workspace creation lives. `/index.html` and the login page
   // never take the redirect branch.
   const route = matchSpaRoute(c.req.path);
   const routeSlug = route !== null && "workspaceSlug" in route ? route.workspaceSlug : undefined;

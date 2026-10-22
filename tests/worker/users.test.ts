@@ -1,5 +1,5 @@
 /**
- * Sign-in decision (`src/dashboard/users.ts`) — plan 97 Task 3.
+ * Sign-in decision (`src/dashboard/users.ts`).
  *
  * Sign-in is the only thing a `users` row depends on: there is no deployment
  * allowlist, so any GitHub login is admitted, and admission joins nobody to a

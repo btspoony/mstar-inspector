@@ -9,7 +9,7 @@
  * satisfy it; the store's multi-write path — operator removal (tombstone +
  * membership delete + row delete) — is ONE `batch`.
  *
- * Sign-in is NOT operator-gated (plan 97 AC1): a `users` row is the only
+ * Sign-in is NOT operator-gated: a `users` row is the only
  * requirement, so any GitHub login completes the OAuth callback. There is no
  * deployment allowlist and no first-login promotion — a new row carries
  * `role = 'member'` (the legacy column is never read for a workspace
@@ -429,7 +429,7 @@ async function signInCreateUser(db: DashboardD1, login: string): Promise<SignInD
  * Decide access for a GitHub-verified login at the OAuth callback. Precedence
  * (exact order): row exists → allow, zero writes; recorded removal → deny; any
  * other login → create a `member` row, allow. Sign-in never consults a
- * deployment allowlist and never joins a workspace (plan 97 AC1/AC3). The deny
+ * deployment allowlist and never joins a workspace. The deny
  * branch performs ZERO writes — the caller must render the 403 page with zero
  * Set-Cookie.
  *

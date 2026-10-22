@@ -10,7 +10,7 @@ import { WorkspaceSetupPage } from "./pages/WorkspaceSetupPage";
 
 export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBoot }) {
   // A login with no workspace sees creation, not the workspace pages: its API
-  // reads would 404 (plan 97 AC1 — sign-in joins nobody).
+  // reads would 404 (sign-in joins nobody).
   if (boot.needsWorkspace === true && route.page !== "login") {
     return <WorkspaceSetupPage boot={boot} />;
   }

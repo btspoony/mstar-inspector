@@ -2462,7 +2462,7 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0023_removed_logins.sql",
   // 0026: createApp also writes the App's workspace mapping.
   "0026_workspaces.sql",
-  // 0028: the SPA boot's pending-invite discovery read (plan 97).
+  // 0028: the SPA boot's pending-invite discovery read.
   "0028_workspace_invites.sql",
 ] as const;
 
@@ -2896,7 +2896,7 @@ describe("dashboard users store (users.ts)", () => {
     return id;
   }
 
-  test("createUser writes the users row and NO membership (plan 97: admission is invite-accept or creation)", async () => {
+  test("createUser writes the users row and NO membership (admission is invite-accept or creation)", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     await createUser(db, { login: "hubot", role: "member" });
@@ -3077,7 +3077,7 @@ describe("dashboard users store (users.ts)", () => {
   });
 });
 
-describe("signInDashboardUser precedence (plan 97 AC1: login is member)", () => {
+describe("signInDashboardUser precedence (login is member)", () => {
   test("empty users table + any login → the row is created, role is member, no membership", async () => {
     const db = createDashboardTestD1();
     const decision = await signInDashboardUser(db, "octocat");
@@ -3089,7 +3089,7 @@ describe("signInDashboardUser precedence (plan 97 AC1: login is member)", () => 
     }
     expect(userCount(db)).toBe(1);
     // Sign-in joins nobody to a workspace — creation or an accepted invite are
-    // the only membership producers (plan Global Constraints).
+    // the only membership producers (Global Constraints).
     const membership = db.raw.query("SELECT * FROM workspace_members").all();
     expect(membership).toEqual([]);
   });
@@ -3569,7 +3569,7 @@ describe("per-request allowlist guard (spec § AuthZ + lock L5)", () => {
 
 // --- members page: workspace-scoped SPA shell ---------------------
 //
-// Plan 97 retired the deployment-level members face: the member list and the
+// The deployment-level members face is retired: the member list and the
 // invite/member mutations live under a workspace ref only (the full API matrix
 // is `tests/worker/membership.test.ts`). What is left here is the page shell —
 // the SPA document is served for a workspace members route — plus the
@@ -3615,7 +3615,7 @@ describe("members page (workspace-scoped shell)", () => {
 // insights-ui.test.ts ("the cross-App global endpoint is removed") —
 // kept there, once, to avoid a duplicate assertion here.
 
-describe("POST /dashboard/api/workspaces — workspace creation (plan 97 T3)", () => {
+describe("POST /dashboard/api/workspaces — workspace creation", () => {
   /** The plan's id contract: `ws_` + 22 chars of lowercase base32. */
   const WORKSPACE_ID = /^ws_[a-z2-7]{22}$/;
 

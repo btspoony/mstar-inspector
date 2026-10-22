@@ -602,7 +602,7 @@ export function manifestErrorPage(message: string, resumable = false, locale: Lo
 
 /**
  * Removed-member denial — the per-request guard's face, and the OAuth
- * callback's only deny branch (a recorded removal; plan 97 AC1 makes sign-in
+ * callback's only deny branch (a recorded removal; membership rules make sign-in
  * otherwise unconditional). Removal = row delete, no status column. Red-700
  * banner, no login link back — signing in again lands on this same page until
  * the login is re-admitted.

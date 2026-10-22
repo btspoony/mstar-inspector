@@ -29,7 +29,7 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0023_removed_logins.sql",
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
-    // 0028: the SPA boot reads pending invites (plan 97).
+    // 0028: the SPA boot reads pending invites.
     "0028_workspace_invites.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));

@@ -155,7 +155,7 @@ export async function getSoleWorkspaceAccess(
 
 /**
  * How many live workspaces this login belongs to — `0` is the "no workspace
- * yet" state that offers creation (plan 97 T3). Soft-deleted workspaces do not
+ * yet" state that offers creation. Soft-deleted workspaces do not
  * count: a retired tenant is not a home.
  */
 export async function countMembershipsForLogin(
@@ -186,7 +186,7 @@ type WorkspaceStoreWriteD1 = {
 /**
  * Create one workspace and its creator's `owner` membership as ONE `batch` — a
  * workspace without an owner, or an owner without a workspace, must never be
- * observable. `slug` equals `id` by contract (plan 97 T3: the id is already
+ * observable. `slug` equals `id` by contract (the id is already
  * lowercase, so the two can never disagree on case).
  *
  * Returns false when the slug is already taken (the UNIQUE index is the final

@@ -130,7 +130,7 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
   // every fixture that seeds an App needs the workspace data plane. Applied
   // after 0004 (its FK parent); the file only creates new tables.
   applyMigration(db, "0026_workspaces.sql");
-  // 0028: the SPA boot reads pending invites (plan 97).
+  // 0028: the SPA boot reads pending invites.
   applyMigration(db, "0028_workspace_invites.sql");
   return db;
 }

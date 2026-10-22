@@ -46,7 +46,7 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
  *
  * On a workspace-scoped page BOTH entries follow that workspace: Apps becomes
  * `/dashboard/<ref>/apps` and Members `/dashboard/<ref>/members`, because both
- * route families are workspace-scoped after plan 97. The workspace comes from
+ * route families are workspace-scoped. The workspace comes from
  * the pathname, else from the boot (`SpaBoot.workspaceSlug`, the server-resolved
  * sole workspace under `strict`). The generic prefix rule then also marks the
  * scoped Apps entry current on its own detail pages.
@@ -73,7 +73,7 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
   // names no workspace. Both absent → the legacy targets.
   const workspaceSlug = workspaceSlugOf(pathname) ?? boot.workspaceSlug ?? null;
   // No workspace yet → every nav target would 404; the shell keeps its
-  // wordmark and drops the entries (plan 97 T3 creation surface).
+  // wordmark and drops the entries (creation surface).
   const items = boot.needsWorkspace === true ? [] : visibleNavItems(boot.role);
   return {
     brand: t(boot.locale, "nav.brand"),

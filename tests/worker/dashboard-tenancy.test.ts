@@ -49,7 +49,7 @@ function bootOf(html: string): SpaBoot {
 
 /**
  * Renders the REAL Members page (chrome included) at `<pathname>` from one boot
- * and returns every href it emits. Members is workspace-scoped after plan 97,
+ * and returns every href it emits. Members is workspace-scoped,
  * so the pathname names the workspace ref. The SPA tree is imported through a
  * computed specifier: the root tsconfig keeps `src/spa` out of this program
  * (it targets the Workers lib, not the DOM), so a static import would drag the
@@ -129,6 +129,15 @@ function seedUser(db: TestD1, login: string, role: "admin" | "member"): string {
     new Date().toISOString(),
   );
   return id;
+}
+
+/** The `users.id` of an already-seeded login (membership fixtures). */
+function seedUserId(db: TestD1, login: string): string {
+  const row = db.raw.prepare("SELECT id FROM users WHERE github_login = ?").get(login) as
+    | { id: string }
+    | null;
+  if (row === null) throw new Error(`no users row for ${login}`);
+  return row.id;
 }
 
 function seedWorkspace(db: TestD1, id: string, slug: string): void {
@@ -430,7 +439,7 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
     const env = envFor(db, "strict");
     const locale = await worker.fetch(await authedRequest("/dashboard/login", "octocat"), env);
     expect(locale.status).toBe(302);
-    // Plan 97 deleted the deployment-level member face: it answers 404 on both
+    // The deployment-level member face is retired: it answers 404 on both
     // faces (the workspace one below is the only member surface left).
     for (const path of ["/dashboard/api/members", "/dashboard/members/invite"]) {
       const gone = await worker.fetch(await authedRequest(path, "octocat"), env);
@@ -699,7 +708,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
   });
 
   test("strict: the workspace Members shell serves and keeps its nav inside the workspace", async () => {
-    // Members is workspace-routed after plan 97: the pathname names the
+    // Members is workspace-routed: the pathname names the
     // workspace, so every nav target stays inside it.
     // 0026 seeds `default`; this fixture adds the membership on top of it.
     const db = createMigratedTestD1();
@@ -728,7 +737,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
   });
 
   test("off: the root Members page is not a route either (no legacy copy)", async () => {
-    // Plan 97 removed the root members faces: with no workspace plane there is
+    // The root members faces are retired: with no workspace plane there is
     // no member list to serve, so the legacy path is a plain 404.
     const db = createMigratedTestD1();
     seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
@@ -894,7 +903,7 @@ describe("strict: the post-authentication landing is the workspace Apps page", (
   });
 });
 
-describe("strict: a login with no workspace gets the creation surface (plan 97 AC1)", () => {
+describe("strict: a login with no workspace gets the creation surface", () => {
   /** A signed-in users row with no membership anywhere. */
   function newcomer() {
     const db = createMigratedTestD1();
@@ -953,7 +962,11 @@ describe("strict: a login with no workspace gets the creation surface (plan 97 A
       envFor(db, "strict"),
     );
     expect(res.status).toBe(201);
-    const created = (await res.json()) as { slug: string };
+    // The 201 names the landing: with 0026's `default` workspace already
+    // present, sole-workspace resolution cannot pick the new one out, so
+    // `/dashboard` would strand the creator on a slug-less shell.
+    const created = (await res.json()) as { slug: string; appsPath: string };
+    expect(created.appsPath).toBe(`/dashboard/${created.slug}/apps`);
 
     // The new membership is real: the login now reaches that workspace's own
     // pages (the outsider 404 is gone) and the boot no longer offers creation.
@@ -976,13 +989,44 @@ describe("strict: a login with no workspace gets the creation surface (plan 97 A
     expect(members.viewer).toEqual({ login: "newcomer", role: "owner" });
   });
 
-  test("off: the boot never claims a missing workspace (the legacy face is unchanged)", async () => {
+  test("off: a login with no workspace gets the same creation surface", async () => {
+    // Creation is the ONLY way into a first workspace and its route is outside
+    // the workspace gate, so the offer cannot be a `strict`-only affordance —
+    // `off` is the documented default mode.
     const { db } = newcomer();
     const res = await worker.fetch(
       await authedRequest("/dashboard/apps", "newcomer", { accept: "text/html" }),
       withSpaAssets(envFor(db, "off")),
     );
     expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.needsWorkspace).toBe(true);
+    // The workspace plane is invisible under `off`: nothing to name, and the
+    // legacy creator rule keeps the App flow open.
+    expect(boot.workspaceSlug).toBeUndefined();
+    expect(boot.canCreateApp).toBeUndefined();
+    const spa = "../../src/spa";
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    type Component = (props: Record<string, unknown>) => ReactElement;
+    const { DashboardPage } = (await import(`${spa}/pages`)) as { DashboardPage: Component };
+    const { matchRoute } = (await import(`${spa}/router`)) as {
+      matchRoute: (pathname: string) => unknown;
+    };
+    const html = renderToStaticMarkup(
+      createElement(DashboardPage, { route: matchRoute("/dashboard"), boot }),
+    );
+    expect(html).toContain(t(boot.locale, "workspace.setupHeading"));
+    expect(html).toContain(t(boot.locale, "workspace.create"));
+  });
+
+  test("off: a login that already belongs to a workspace sees no creation form", async () => {
+    const { db } = newcomer();
+    seedMembership(db, "default", seedUserId(db, "newcomer"), "member");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/apps", "newcomer", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "off")),
+    );
     expect(bootOf(await res.text()).needsWorkspace).toBeUndefined();
   });
 });

@@ -76,7 +76,7 @@ export const en = {
     heading: "Sign in",
     description: "Use your GitHub account to access the console.",
     signIn: "Sign in with GitHub",
-    /** Plan 97: sign-in is open — no access list stands between here and a workspace. */
+    /** Sign-in is open — no access list stands between here and a workspace. */
     openAccess: "Any GitHub account can sign in — create a workspace, or accept an invitation.",
   },
   notice: {
@@ -218,7 +218,7 @@ export const en = {
   },
   /**
    * Workspace creation — the signed-in landing for a login that belongs to no
-   * workspace yet (plan 97 T3). Sign-in joins nobody, so this is the only path
+   * workspace yet. Sign-in joins nobody, so this is the only path
    * into a first workspace besides accepting an invitation.
    */
   workspace: {

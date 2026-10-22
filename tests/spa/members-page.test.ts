@@ -1,19 +1,36 @@
 /**
  * Members page rebuilt on shadcn Table + invite toolbox bar +
- * confirm dialogs. No DOM runner — same source-scan contract as
- * settings-layout.test.ts — plus dictionary interpolation in both locales.
+ * confirm dialogs. Mixed contract: static source pins for the presentational
+ * shape (no DOM runner, the settings-layout.test.ts precedent) plus executed
+ * assertions over the page's own read/refusal seams, so a wiring regression
+ * fails here without pinning the code's spelling.
  * F-07: the Joined column renders through the shared
  * relative-time helper, with the absolute stamp kept as a native tooltip.
  *
- * Plan 97: every read/write hangs off the page's workspace base, and the page
+ * Every read and write hangs off the page's workspace base, and the page
  * carries pending invitations with revoke.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
+import {
+  inviteFailureNotice,
+  loadMembersPage,
+  postMemberWrite,
+  showsPendingInvites,
+} from "../../src/spa/pages/MembersPage";
+import type { InviteRow } from "../../src/spa/pages/data";
 
 const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/MembersPage.tsx"), "utf8");
+
+const invite = (): InviteRow => ({
+  id: "i1",
+  github_login: "hubot",
+  role: "member",
+  created_at: "2026-01-01T00:00:00Z",
+  expires_at: "2026-01-08T00:00:00Z",
+});
 
 describe("members page shadcn rebuild", () => {
   test("table, dropdown, dialog, select, input, button come from the ui kit — zero native controls", () => {
@@ -47,33 +64,125 @@ describe("members page shadcn rebuild", () => {
     expect(source).toContain("title={member.created_at}");
   });
 
-  test("every read and write hangs off the workspace base (plan 97)", () => {
-    expect(source).toContain('import { apiBase } from "../workspace-base"');
-    expect(source).toContain("const base = apiBase()");
-    expect(source).toContain("fetchJson(`${base}/api/members`)");
-    expect(source).toContain("fetchJson(`${base}/api/members/invites`)");
-    expect(source).toContain("postForm(`${base}/api/members/invites`");
-    expect(source).toContain("postForm(`${base}/api/members/invites/${invite.id}/revoke`");
-    expect(source).toContain("postForm(`${base}/members/role`");
-    expect(source).toContain("postForm(`${base}/members/remove`");
-    // The retired deployment-level paths must not come back.
-    expect(source).not.toContain('"/dashboard/api/members"');
-    expect(source).not.toContain('"/dashboard/members/');
+  test("every read hangs off the workspace base", async () => {
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/api/members")) {
+        return new Response(
+          JSON.stringify({
+            viewer: { role: "member" },
+            members: [{ id: "u1", github_login: "octocat", role: "member", created_at: "2026-01-01T00:00:00Z" }],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ invites: [] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      // A plain member costs ONE request: the manager-only pending list is
+      // never asked for, so no 403 reaches the page.
+      const member = await loadMembersPage("/dashboard/acme");
+      expect(member).toEqual({
+        members: [{ id: "u1", github_login: "octocat", role: "member", created_at: "2026-01-01T00:00:00Z" }],
+        role: "member",
+        invites: [],
+      });
+      expect(calls).toEqual(["/dashboard/acme/api/members"]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
-  test("pending invitations render with revoke, manager-only", () => {
-    expect(source).toContain("members.pendingHeading");
-    expect(source).toContain("members.tableExpires");
-    expect(source).toContain("members.revoke");
-    expect(source).toContain("members.confirmRevokeTitle");
-    // The pending table exists only for owner/admin.
-    expect(source).toContain("canInvite && invites.length > 0");
-    expect(source).toContain("canInviteMembers(memberRole)");
+  test("every member write posts under the workspace base, never a retired root path", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      calls.push({ url: String(input), method: init?.method ?? "GET" });
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await postMemberWrite("/dashboard/acme", { kind: "invite", login: "hubot", role: "admin" });
+      await postMemberWrite("/dashboard/acme", { kind: "revoke", inviteId: "i1" });
+      await postMemberWrite("/dashboard/acme", { kind: "role", userId: "u1", nextRole: "admin" });
+      await postMemberWrite("/dashboard/acme", { kind: "remove", userId: "u1" });
+      expect(calls).toEqual([
+        { url: "/dashboard/acme/api/members/invites", method: "POST" },
+        { url: "/dashboard/acme/api/members/invites/i1/revoke", method: "POST" },
+        { url: "/dashboard/acme/members/role", method: "POST" },
+        { url: "/dashboard/acme/members/remove", method: "POST" },
+      ]);
+      // The workspace-only route family dropped the deployment-level copies;
+      // posting there would answer 404.
+      for (const { url } of calls) {
+        expect(url.startsWith("/dashboard/acme/")).toBe(true);
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("a manager's load adds the pending list on the same base", async () => {
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/api/members/invites")) {
+        return new Response(
+          JSON.stringify({
+            invites: [
+              {
+                id: "i1",
+                github_login: "hubot",
+                role: "admin",
+                created_at: "2026-01-01T00:00:00Z",
+                expires_at: "2026-01-08T00:00:00Z",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({ viewer: { role: "owner" }, members: [] }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      const loaded = await loadMembersPage("/dashboard/acme");
+      expect(loaded?.invites.map((invite) => invite.github_login)).toEqual(["hubot"]);
+      expect(calls).toEqual(["/dashboard/acme/api/members", "/dashboard/acme/api/members/invites"]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("the pending table is a manager-only, non-empty affordance", () => {
+    // Behaviour, not the render expression: only owner/admin see the section,
+    // and never an empty one.
+    expect(showsPendingInvites("owner", [invite()])).toBe(true);
+    expect(showsPendingInvites("admin", [invite()])).toBe(true);
+    expect(showsPendingInvites("member", [invite()])).toBe(false);
+    expect(showsPendingInvites(null, [invite()])).toBe(false);
+    expect(showsPendingInvites("owner", [])).toBe(false);
   });
 
   test("the pending invite 409 surfaces as a warning, not a retryable error", () => {
-    expect(source).toContain('body.includes("invite.pending_exists")');
-    expect(source).toContain('"notice.warn.invitePending"');
+    // The server's refusal grammar decides the notice, not the code spelling.
+    expect(inviteFailureNotice(409, "invite.pending_exists", false)).toEqual({
+      kind: "warn",
+      key: "notice.warn.invitePending",
+    });
+    expect(inviteFailureNotice(409, "invite.pending_exists", true).kind).toBe("warn");
+    // An already-member target warns; anything else is a real failure.
+    expect(inviteFailureNotice(409, "already a member", true).kind).toBe("warn");
+    expect(inviteFailureNotice(500, "", false)).toEqual({
+      kind: "error",
+      key: "notice.error.inviteFailed",
+    });
   });
 
   test("self row renders no actions; the sole owner's demote/remove items are disabled client-side", () => {

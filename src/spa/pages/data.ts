@@ -737,6 +737,25 @@ export function parseApps(data: unknown): AppsPayload | null {
 }
 
 /**
+ * `POST /api/workspaces` 201 body — the new workspace's ref plus the Apps page
+ * the creator lands on. The landing is server-chosen: only the Worker knows the
+ * deployment's tenant read mode, and `strict`'s sole-workspace resolver cannot
+ * name a workspace once a second one exists.
+ */
+export function parseCreatedWorkspace(data: string): { id: string; appsPath: string } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || typeof parsed.id !== "string" || typeof parsed.appsPath !== "string") {
+    return null;
+  }
+  return { id: parsed.id, appsPath: parsed.appsPath };
+}
+
+/**
  * Row-level guard for the configured list: every row must carry the
  * `kind` discriminator, so a catalog-shaped entry (no `kind`) can never be
  * parsed as configured state. A key row also carries its pool identity plus
