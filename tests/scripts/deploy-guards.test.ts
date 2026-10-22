@@ -156,7 +156,7 @@ describe("resolve-tenant-mode.sh", () => {
     }
   });
 
-  test("COMPOSED: the resolver's replay output into the guard decides the three real cases", () => {
+  test("COMPOSED: the resolver's replay output into the guard decides every real case", () => {
     // The wiring both workflows use: resolve the mode, then feed `replay` into
     // deploy-replay-guard.sh. Nothing here restates either decision.
     const decide = (
@@ -165,44 +165,59 @@ describe("resolve-tenant-mode.sh", () => {
       routine: string,
       expectedSha: string,
       runSha: string,
+      refSha: string,
     ): { mode: string; replay: string; code: number; err: string } => {
       const resolved = resolveWithFiles(input, steady, routine);
       const replay = /^replay=(.*)$/m.exec(resolved.output)?.[1] ?? "";
       const mode = /^mode=(.*)$/m.exec(resolved.output)?.[1] ?? "";
-      const guarded = runBash(join(SCRIPTS, "deploy-replay-guard.sh"), [replay, expectedSha, runSha, runSha]);
+      const guarded = runBash(join(SCRIPTS, "deploy-replay-guard.sh"), [replay, expectedSha, runSha, refSha]);
       return { mode, replay, code: guarded.code, err: guarded.err };
     };
 
     // 1. ROUTINE arm + steady-state strict, no dispatch input, no Deploy-A SHA:
     //    deploys strict and is NOT refused (the L2 regression).
-    const routine = decide("", "strict", "true", "", SHA_A);
+    const routine = decide("", "strict", "true", "", SHA_A, SHA_A);
     expect(routine.mode).toBe("strict");
     expect(routine.replay).toBe("none");
     expect(routine.code).toBe(0);
 
     // 2. DISPATCH strict without the expected SHA: refused, never fabricated.
-    const noBinding = decide("strict", "", "false", "", SHA_A);
+    const noBinding = decide("strict", "", "false", "", SHA_A, SHA_A);
     expect(noBinding.mode).toBe("strict");
     expect(noBinding.replay).toBe("required");
     expect(noBinding.code).toBe(1);
     expect(noBinding.err).toContain("expected_deploy_sha is empty");
 
     // 3. DISPATCH strict with the matching SHA: the real Deploy B replay.
-    const replayRun = decide("strict", "", "false", SHA_A, SHA_A);
+    const replayRun = decide("strict", "", "false", SHA_A, SHA_A, SHA_A);
     expect(replayRun.replay).toBe("required");
     expect(replayRun.code).toBe(0);
 
     // 4. A dispatch `off` is no replay at all (the rollback door).
-    const rollback = decide("off", "strict", "false", "", SHA_A);
+    const rollback = decide("off", "strict", "false", "", SHA_A, SHA_A);
     expect(rollback.mode).toBe("off");
     expect(rollback.replay).toBe("none");
     expect(rollback.code).toBe(0);
 
     // 5. A routine arm with the variable OFF stays a plain non-replay deploy.
-    const routineOff = decide("", "", "true", "", SHA_A);
+    const routineOff = decide("", "", "true", "", SHA_A, SHA_A);
     expect(routineOff.mode).toBe("off");
     expect(routineOff.replay).toBe("none");
     expect(routineOff.code).toBe(0);
+
+    // 6. A MOVED ref still reds on the replay path: expected == run, but the ref
+    //    resolves to a different commit (the tag/branch moved between A and B).
+    const movedReplay = decide("strict", "", "false", SHA_A, SHA_A, SHA_B);
+    expect(movedReplay.replay).toBe("required");
+    expect(movedReplay.code).toBe(1);
+    expect(movedReplay.err).toContain("the ref moved");
+
+    // 7. …and a moved ref reds on the ROUTINE path too: replay=none skips the
+    //    expected-SHA binding, never the ref identity assertion.
+    const movedRoutine = decide("", "strict", "true", "", SHA_A, SHA_B);
+    expect(movedRoutine.replay).toBe("none");
+    expect(movedRoutine.code).toBe(1);
+    expect(movedRoutine.err).toContain("the ref moved");
   });
 });
 

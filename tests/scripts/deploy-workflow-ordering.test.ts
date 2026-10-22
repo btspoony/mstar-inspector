@@ -248,31 +248,49 @@ for (const { file, migrations, replayNeedles, serving } of WORKFLOWS) {
     });
 
     test("a routine arm may serve strict without an expected SHA; only a strict dispatch is a replay", () => {
-      // Composed end to end: the resolver's outputs into the real guard, in a
-      // repository whose HEAD/tag the step can resolve.
+      // Composed end to end: the resolver STEP runs, its real `replay` output is
+      // fed to the guard STEP (exactly as `steps.tenant.outputs.replay` would
+      // resolve), in a repository whose HEAD/tag the step can resolve.
       const tenant = steps.find((s) => s.name === "Resolve tenant mode")!;
       const guardStep = steps.find((s) => s.name === REPLAY)!;
+      /** Run the resolver, then the guard with the resolver's own output. */
+      const resolveThenGuard = (
+        tenantEnv: Record<string, string>,
+        guardEnv: Record<string, string>,
+      ): { replay: string; code: number; out: string } => {
+        const resolved = runStep(tenant, tenantEnv);
+        const replay = /^replay=(.*)$/m.exec(resolved.output)?.[1];
+        expect(replay, `${file}: the resolver emitted no replay output\n${resolved.out}`).toBeDefined();
+        const guarded = runStep(guardStep, { REPLAY: replay!, ...guardEnv }, {}, { withGit: true });
+        return { replay: replay!, code: guarded.code, out: guarded.out };
+      };
 
-      // routine release/push, steady-state strict, no dispatch input
-      const resolved = runStep(tenant, { TENANT_MODE: "", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "true" });
-      expect(resolved.output).toBe("mode=strict\nreplay=none\n");
-
-      const routine = runStep(
-        guardStep,
-        { REPLAY: "none", EXPECTED_DEPLOY_SHA: "", RUN_SHA: "@head", TAG: "@tag" },
-        {},
-        { withGit: true },
+      // routine release/push, steady-state strict, no dispatch input, no Deploy-A SHA
+      const routine = resolveThenGuard(
+        { TENANT_MODE: "", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "true" },
+        { EXPECTED_DEPLOY_SHA: "", RUN_SHA: "@head", TAG: "@tag" },
       );
-      expect(routine.code, `${file}: a routine strict deploy must not abort on a missing expected SHA\n${routine.out}`).toBe(0);
+      expect(routine.replay, `${file}: a routine strict arm is not a replay`).toBe("none");
+      expect(
+        routine.code,
+        `${file}: a routine strict deploy must not abort on a missing expected SHA\n${routine.out}`,
+      ).toBe(0);
       expect(routine.out).not.toContain("::error::");
 
-      // the same routine run with a MOVED tag still reds (identity is kept)
-      const moved = runStep(
-        guardStep,
-        { REPLAY: "none", EXPECTED_DEPLOY_SHA: "", RUN_SHA: "f".repeat(40), TAG: "@tag" },
-        {},
-        { withGit: true },
+      // a dispatch explicitly asking for strict IS a replay and must bind
+      const dispatch = resolveThenGuard(
+        { TENANT_MODE: "strict", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "false" },
+        { EXPECTED_DEPLOY_SHA: "", RUN_SHA: "@head", TAG: "@tag" },
       );
+      expect(dispatch.replay).toBe("required");
+      expect(dispatch.code, `${file}: a strict dispatch without the Deploy-A SHA must abort`).toBe(1);
+
+      // the same routine run with a MOVED tag still reds (identity is kept)
+      const moved = resolveThenGuard(
+        { TENANT_MODE: "", STEADY_TENANT_MODE: "strict", ROUTINE_ARM: "true" },
+        { EXPECTED_DEPLOY_SHA: "", RUN_SHA: "f".repeat(40), TAG: "@tag" },
+      );
+      expect(moved.replay).toBe("none");
       expect(moved.code, `${file}: the tag/HEAD identity assertion must survive the replay split`).toBe(1);
     });
 
