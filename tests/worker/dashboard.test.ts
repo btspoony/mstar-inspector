@@ -73,7 +73,7 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
-import { LOCALE_COOKIE } from "../../src/i18n";
+import { LOCALE_COOKIE, t } from "../../src/i18n";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { gh, OAUTH_CLIENT_SECRET, fakePem, pemBanner } from "../helpers/fake-secrets";
 
@@ -1552,6 +1552,45 @@ describe("/dashboard manifest routes", () => {
     expect(resumedBody).toContain('action="/dashboard/manifest/commit"');
     expect(resumedBody).not.toContain(FAKE_PEM);
     expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("STRICT + unbound D1: the creation gate does not 403 the callback into burning the hold (I-000090)", async () => {
+    // The same resumable path, on a strict deployment whose D1 binding is lost
+    // between start and callback. Storage is a configuration failure, not a
+    // permission answer: a `canCreateApp: false` here would 403 before the
+    // state/commit and expire the hold, and the App credentials exist ONLY in
+    // that hold — recovery would mean creating a second GitHub App.
+    const env = baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, WORKSPACE_TENANT_MODE: "strict" });
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(500);
+    const body = await res.text();
+    expect(body).not.toContain(t("en", "common.error.forbiddenTitle"));
+    expect(body).toContain("Dashboard storage is not configured");
+    expect(body).toContain('href="/dashboard/manifest/confirm"');
+    const holdValue = (res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "")
+      .split(";")[0]!
+      .slice(MANIFEST_HOLD_COOKIE.length + 1);
+    expect(holdValue.length).toBeGreaterThan(0);
+    expect((await readHoldValue(holdValue, SESSION_SECRET))?.id).toBe(CONVERSION.id);
+    // Confirm resumes on the parked hold instead of expiring it.
+    const resumed = await worker.fetch(
+      dashboardRequest(
+        "/dashboard/manifest/confirm",
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}`,
+      ),
+      env,
+    );
+    expect(resumed.status).toBe(200);
+    expect(await resumed.text()).toContain('action="/dashboard/manifest/commit"');
+    expect(
+      resumed.headers.getSetCookie().some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+      "confirm must not expire the hold on an unbound store",
+    ).toBe(false);
   });
 
   test("callback retryable 500 (github_apps missing) → hold parked, confirm gate reachable", async () => {

@@ -215,11 +215,19 @@ export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> 
  * workspace slug (the shell's nav targets) and whether this login may run the
  * App-creation flow there. ONE workspace read answers both.
  *
- * Under `strict` the answer is always a decision: an unbound store or a
- * deployment that does not carry exactly one live workspace cannot attribute
- * the App the flow would create, so creation is refused (`canCreateApp: false`)
- * rather than falling through to `createApp`'s guard after the slug is minted.
- * `off` returns `{}` — nothing is read and nothing is gated.
+ * Under `strict` an unbound store answers NO creation decision (the key is
+ * absent, like `off`): storage is a configuration failure, not a permission
+ * answer, and every caller already has its own honest `db_unbound` outcome —
+ * `/manifest/start` 500s before minting a slug or cookie, the callback parks
+ * the hold and serves the resumable confirm link (QC F-005), and confirm keeps
+ * the hold. Reporting `false` here would 403 a storage outage and burn the
+ * only copy of the App credentials. An unbound store cannot be attributed, so
+ * nothing is gated and nothing is granted: the write path still fails closed.
+ *
+ * A deployment that does not carry exactly one live workspace cannot attribute
+ * the App the flow would create, so creation is refused (`canCreateApp:
+ * false`) rather than falling through to `createApp`'s guard after the slug is
+ * minted. `off` returns `{}` — nothing is read and nothing is gated.
  */
 export async function strictWorkspaceBoot(
   env: Env,
@@ -227,7 +235,7 @@ export async function strictWorkspaceBoot(
 ): Promise<{ workspaceSlug?: string; canCreateApp?: boolean }> {
   if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return {};
   const db = dashboardD1(env);
-  if (db === null) return { canCreateApp: false };
+  if (db === null) return {};
   const access = await getSoleWorkspaceAccess(db, login);
   if (access === null) return { canCreateApp: false };
   return {
@@ -240,9 +248,11 @@ export async function strictWorkspaceBoot(
 
 /**
  * Whether `login` may run the App-creation flow — the gate every manifest route
- * consults, because each one can write the row. `strict` always resolves a
- * decision; `off` never resolves extras, so its creator rule keeps the flow
- * open (the caller can manage what it creates there).
+ * consults, because each one can write the row. `strict` resolves a decision
+ * from the workspace role, except on an unbound store where no decision is
+ * possible (see `strictWorkspaceBoot` — the routes' own `db_unbound` outcomes
+ * answer there); `off` never resolves extras, so its creator rule keeps the
+ * flow open (the caller can manage what it creates there).
  */
 export async function canCreateApp(env: Env, login: string): Promise<boolean> {
   return (await strictWorkspaceBoot(env, login)).canCreateApp ?? true;
@@ -506,8 +516,11 @@ dashboardApp.use("*", async (c, next) => {
   // Logged in → the only new check: an active user row (spec § AuthZ).
   // Fail closed on an unbound store, like every missing dashboard dependency.
   // Callback/confirm must still run so a retryable db_unbound can park the
-  // hold and serve the resumable confirm link (QC F-005). Confirm
-  // itself is hold-cookie-only and does not read D1.
+  // hold and serve the resumable confirm link (QC F-005). Neither route needs
+  // the membership row for that outcome: the callback reaches its own
+  // `db_unbound` outcome, and confirm reads the hold cookie plus the creation
+  // gate, which answers no decision on an unbound store (`strictWorkspaceBoot`)
+  // so the hold survives instead of being burned on a configuration failure.
   const db = dashboardD1(c.env);
   if (!db) {
     if (c.req.path === "/dashboard/manifest/callback" || c.req.path === "/dashboard/manifest/confirm") {
