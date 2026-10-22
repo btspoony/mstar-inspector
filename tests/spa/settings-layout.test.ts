@@ -1391,14 +1391,11 @@ describe("notice channel (reviewer handoffs)", () => {
       source.indexOf("const confirmCopy"),
     );
     expect(deleteBranch).toContain('t(locale, "settings.deleteSuccess")');
-    expect(deleteBranch).toContain("reload: false");
-    // Source pin (qc2 F-001): the property-form `reload: false` call site is
+    expect(deleteBranch).toContain("refetch: false");
+    // Source pin (qc2 F-001): the property-form `refetch: false` call site is
     // the delete branch's alone — any other op copied onto it would silently
-    // lose its background reload and fail this count. (Two prose mentions of
-    // the flag — the runPinnedWithBody JSDoc and the branch comment — have
-    // prose tails, so only a real `reload: false }`/`reload: false,` object
-    // property matches.)
-    expect(source.match(/reload: false\s*[},]/g)?.length).toBe(1);
+    // lose its background reload and fail this count.
+    expect(source.match(/refetch: false\s*[},]/g)?.length).toBe(1);
     expect(t("en", "settings.deleteSuccess")).toContain("deleted");
     expect(t("zh_CN", "settings.deleteSuccess")).toContain("已删除");
     // Configuration saves keep the generic saved notice.

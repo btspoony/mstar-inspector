@@ -3,7 +3,7 @@
  * operator's locale with a fail-visible fallback. Pins the shared key
  * validator, both-locale dictionary faces for the `settings.error.*`
  * family, and the source contract on both SettingsPage render paths
- * (settingsErrorMessage key-first branch; runPinnedWithBody routed through
+ * (settingsErrorMessage key-first branch; postPinnedOutcome routed through
  * the same resolver; the verify path preferring the mapped key).
  */
 import { describe, expect, test } from "bun:test";
@@ -64,7 +64,7 @@ describe("SPA 400-body resolution contract", () => {
   });
 
   test("both op channels route through the one shared outcome resolver (settings POST + pinned ops)", () => {
-    // submitSettings AND runPinnedWithBody resolve through settingsOpOutcome —
+    // submitSettings AND postPinnedOutcome resolve through settingsOpOutcome —
     // a mapped 4xx, the remove routes' no-change 2xx face and the saved notice
     // all take the same path (the second used to be the raw body.trim() path
     // the audit called out).
