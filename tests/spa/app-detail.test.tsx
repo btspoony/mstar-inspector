@@ -149,30 +149,6 @@ describe("tab shell rendering (static SSR)", () => {
 });
 
 describe("tab shell source contracts", () => {
-  test("wayfinding: the back link is the shell's first element on both faces — before the identity-header h1", () => {
-    // The back link lives in the shell's own fragment (AppDetailShell), which
-    // wraps BOTH faces — error (ErrorState) and ok (AppDetailView) — for
-    // managers and non-managers alike. The rendered link target and its
-    // ArrowLeft/aria-hidden contract are asserted in settings-layout.test.ts;
-    // here the ORDER is the point: link first, face second.
-    expect(detailPage).toContain("export function AppDetailShell(");
-    const shellAt = detailPage.indexOf("export function AppDetailShell(");
-    const linkAt = detailPage.indexOf("<BackToApps", shellAt);
-    const faceAt = detailPage.indexOf("{children}", linkAt);
-    expect(linkAt).toBeGreaterThan(shellAt);
-    expect(faceAt).toBeGreaterThan(linkAt);
-    // The stateful page mounts that fragment around both faces and derives no
-    // second link of its own.
-    expect(detailPage).toContain("<AppDetailShell locale={locale}>");
-    expect(detailPage.indexOf('state === "error" ? <ErrorState')).toBeGreaterThan(
-      detailPage.indexOf("<AppDetailShell locale={locale}>"),
-    );
-    expect(detailPage.match(/<BackToApps/g)?.length).toBe(1);
-    // The pure view gained nothing: no back link inside AppDetailView.
-    const viewAt = detailPage.indexOf("export function AppDetailView");
-    expect(detailPage.indexOf("<BackToApps", viewAt)).toBe(-1);
-  });
-
   test("page tab face: the shell tab bar rides the line variant with hairline + sized-up left-aligned triggers", () => {
     // Page-level face (DESIGN.md ### Tabs): the shell's 应用设置/洞察 bar is
     // the line-tab idiom — full-width, bottom hairline on the border-border

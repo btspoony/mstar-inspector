@@ -1321,6 +1321,9 @@ describe("App workflow boundaries", () => {
     const legacy = render("/dashboard/apps/acme-app");
     expect(legacy).toContain('href="/dashboard/apps"');
     expect(legacy).toContain("Back to Apps");
+    // These renders ARE the loading face (the loader never resolved), so the
+    // link above is proven present before the payload lands.
+    expect(legacy).toContain('data-slot="page-skeleton"');
 
     // A workspace App page keeps the wayfinding inside its workspace: the
     // legacy App family answers 404 under strict.
