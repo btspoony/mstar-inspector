@@ -371,13 +371,16 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
     expect(page.status).toBe(404);
     expect(page.headers.get("Content-Type")).toContain("text/html");
     expect(await page.text()).toContain(t("en", "common.error.notFoundTitle"));
-    // A fetch keeps the bare 404 body — the SPA's API reads parse status only.
+    // A fetch gets no HTML page: the SPA's API reads parse the status only, so
+    // the contract is a plain response — the status and its content type, not
+    // Hono's exact body text (which is not ours to pin).
     const api = await worker.fetch(
       await authedRequest("/dashboard/ghost/api/apps", "octocat", { accept: "application/json" }),
       env,
     );
     expect(api.status).toBe(404);
-    expect(await api.text()).toBe("404 Not Found");
+    expect(api.headers.get("Content-Type")).toStartWith("text/plain");
+    expect(await api.text()).not.toContain(t("en", "common.error.notFoundTitle"));
   });
 
   test("non-App routes keep serving under strict", async () => {
