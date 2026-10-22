@@ -23,7 +23,6 @@ import { APP_VERSION } from "../../src/version";
 import { exchangeCodeForToken, fetchGitHubUser } from "../../src/dashboard/oauth";
 import type { Env } from "../../src/worker/env";
 import {
-  bootstrapDashboardAccess,
   countAdmins,
   countUsers,
   createUser,
@@ -34,7 +33,8 @@ import {
   getUserByLogin,
   isLoginRemoved,
   listUsers,
-  parseAdminLogins,
+  parseLoginList,
+  signInDashboardUser,
   updateUserRoleUnlessLastAdmin,
   updateWorkspaceMemberRole,
   type DashboardD1,
@@ -62,7 +62,6 @@ import {
   readHoldValue,
 } from "../../src/dashboard/manifest";
 import {
-  deniedPage,
   errorPage,
   forbiddenPage,
   manifestConfirmPage,
@@ -77,6 +76,7 @@ import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
 import { LOCALE_COOKIE, t } from "../../src/i18n";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
+import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../../src/spa/post-form-headers";
 import { gh, OAUTH_CLIENT_SECRET, fakePem, pemBanner } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -2384,7 +2384,6 @@ describe("SSR views honor the stored theme (F-13)", () => {
       ["onboarding", manifestOnboardingPage(user, app)],
       ["manifest-error", manifestErrorPage("boom")],
       ["manifest-error-resumable", manifestErrorPage("boom", true)],
-      ["denied", deniedPage("octocat")],
       ["removed", removedPage("octocat")],
       ["forbidden", forbiddenPage("octocat")],
       ["error", errorPage("boom")],
@@ -2624,9 +2623,8 @@ function envDb(env: Env) {
 
 /**
  * The D1 binding is runtime-real (wrangler.jsonc `d1_databases` binding DB)
- * but the fetch-face Env deliberately does not declare it (the callback keeps
- * src/worker/env.ts changes to ADMIN_LOGINS only) — the callback reads it
- * through a local intersection type, and the test env carries it the same
+ * but the fetch-face Env deliberately does not declare it — the dashboard reads
+ * it through a local intersection type, and the test env carries it the same
  * way.
  */
 function makeDbEnv(db: DashboardD1, overrides: Partial<Env> = {}): Env {
@@ -3134,181 +3132,129 @@ describe("dashboard users store (users.ts)", () => {
     expect((await listUsers(db)).map((u) => u.github_login)).toEqual(["Alpha", "midway", "zeta"]);
   });
 
-  test("parseAdminLogins trims entries, drops empties, treats unset/blank as not configured", () => {
-    expect(parseAdminLogins(undefined)).toEqual([]);
-    expect(parseAdminLogins("")).toEqual([]);
-    expect(parseAdminLogins("   ")).toEqual([]);
-    expect(parseAdminLogins(" octocat , Hubot ,, ada ")).toEqual(["octocat", "Hubot", "ada"]);
+  test("parseLoginList trims entries, drops empties, treats unset/blank as empty", () => {
+    expect(parseLoginList(undefined)).toEqual([]);
+    expect(parseLoginList("")).toEqual([]);
+    expect(parseLoginList("   ")).toEqual([]);
+    expect(parseLoginList(" octocat , Hubot ,, ada ")).toEqual(["octocat", "Hubot", "ada"]);
   });
 });
 
-describe("bootstrapDashboardAccess precedence matrix (spec § AuthZ)", () => {
-  test("1. row exists → allow, zero writes, no promotion (ADMIN_LOGINS does not outrank the row)", async () => {
+describe("signInDashboardUser precedence (plan 97 AC1: login is member)", () => {
+  test("empty users table + any login → the row is created, role is member, no membership", async () => {
     const db = createDashboardTestD1();
-    const existing = await createUser(db, { login: "octocat", role: "member" });
-    const decision = await bootstrapDashboardAccess(db, "octocat", "octocat");
-    expect(decision).toEqual({ outcome: "allow", user: existing, created: false });
-    expect(userCount(db)).toBe(1);
-  });
-
-  test("1b. row lookup is case-insensitive", async () => {
-    const db = createDashboardTestD1();
-    const existing = await createUser(db, { login: "octocat", role: "member" });
-    const decision = await bootstrapDashboardAccess(db, "OCTOCAT", undefined);
-    expect(decision).toEqual({ outcome: "allow", user: existing, created: false });
-  });
-
-  test("2. ADMIN_LOGINS hit (no row) → creates an invited_by=NULL admin", async () => {
-    const db = createDashboardTestD1();
-    const decision = await bootstrapDashboardAccess(db, "octocat", "  Ada , octocat ");
+    const decision = await signInDashboardUser(db, "octocat");
     expect(decision.outcome).toBe("allow");
     if (decision.outcome === "allow") {
       expect(decision.created).toBe(true);
-      expect(decision.user.role).toBe("admin");
+      expect(decision.user.role).toBe("member");
       expect(decision.user.invited_by).toBeNull();
     }
     expect(userCount(db)).toBe(1);
-    // The bootstrapped admin owns the sole workspace in the SAME batch —
-    // otherwise every strict-mode workspace route would 404 the operator.
-    const membership = db.raw
-      .query("SELECT workspace_id, role FROM workspace_members")
-      .all() as Array<{ workspace_id: string; role: string }>;
-    expect(membership).toEqual([{ workspace_id: "default", role: "owner" }]);
+    // Sign-in joins nobody to a workspace — creation or an accepted invite are
+    // the only membership producers (plan Global Constraints).
+    const membership = db.raw.query("SELECT * FROM workspace_members").all();
+    expect(membership).toEqual([]);
   });
 
-  test("2b. ADMIN_LOGINS comparison is case-insensitive (GitHub logins are)", async () => {
+  test("a populated users table does not gate an unknown login (no allowlist)", async () => {
     const db = createDashboardTestD1();
-    const decision = await bootstrapDashboardAccess(db, "OCTOCAT", "octocat");
+    await createUser(db, { login: "octocat", role: "admin" });
+    const decision = await signInDashboardUser(db, "mallory");
     expect(decision.outcome).toBe("allow");
+    if (decision.outcome === "allow") expect(decision.created).toBe(true);
+    expect(userCount(db)).toBe(2);
   });
 
-  test("2c. recorded removal → deny even when the login is still on ADMIN_LOGINS", async () => {
+  test("an existing row wins: allow, zero writes, no promotion", async () => {
     const db = createDashboardTestD1();
-    const removed = await createUser(db, { login: "octocat", role: "admin" });
-    await createUser(db, { login: "ada", role: "admin" });
-    expect(await deleteUserUnlessLastAdmin(db, removed.id, "ada")).toBe(true);
-    // Denied case-insensitively — the tombstone keys the login like
-    // users.github_login (NOCASE), so a case variant cannot slip past it.
-    expect(await bootstrapDashboardAccess(db, "octocat", "octocat")).toEqual({ outcome: "deny" });
-    expect(await bootstrapDashboardAccess(db, "OCTOCAT", "ada, octocat")).toEqual({ outcome: "deny" });
-    expect(userCount(db)).toBe(1); // deny path: ZERO writes (no resurrected row)
+    const existing = await createUser(db, { login: "octocat", role: "member" });
+    expect(await signInDashboardUser(db, "octocat")).toEqual({
+      outcome: "allow",
+      user: existing,
+      created: false,
+    });
+    expect(userCount(db)).toBe(1);
   });
 
-  test("2d. re-invited removed login is allowed normally afterwards (createUser clears the record)", async () => {
+  test("row lookup is case-insensitive", async () => {
     const db = createDashboardTestD1();
-    const removed = await createUser(db, { login: "octocat", role: "admin" });
-    await createUser(db, { login: "ada", role: "admin" });
-    expect(await deleteUserUnlessLastAdmin(db, removed.id, "ada")).toBe(true);
-    expect(await bootstrapDashboardAccess(db, "octocat", "octocat")).toEqual({ outcome: "deny" });
-    // Deliberate re-invite: the insert clears the removal record in the same
-    // transaction, so the login bootstraps normally again — as the role the
-    // admin chose, NOT re-promoted to admin by the allowlist.
-    const reinvited = await createUser(db, { login: "octocat", role: "member", invitedBy: "ada" });
+    const existing = await createUser(db, { login: "octocat", role: "member" });
+    expect(await signInDashboardUser(db, "OCTOCAT")).toEqual({
+      outcome: "allow",
+      user: existing,
+      created: false,
+    });
+  });
+
+  test("a recorded removal still denies — case-insensitively, with zero writes", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const removed = await createUser(db, { login: "hubot", role: "member" });
+    await deleteUser(db, removed.id, "octocat");
+    expect(await signInDashboardUser(db, "hubot")).toEqual({ outcome: "deny" });
+    expect(await signInDashboardUser(db, "HUBOT")).toEqual({ outcome: "deny" });
+    expect(await getUserByLogin(db, "hubot")).toBeNull(); // no resurrected row
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("a deliberate re-admission (createUser) clears the removal record and lets the login back in", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const removed = await createUser(db, { login: "hubot", role: "member" });
+    expect(await deleteUser(db, removed.id, "octocat")).toBe(true);
+    expect(await signInDashboardUser(db, "hubot")).toEqual({ outcome: "deny" });
+    const reinvited = await createUser(db, { login: "hubot", role: "member", invitedBy: "octocat" });
     expect(removedRows(db)).toEqual([]);
-    expect(await bootstrapDashboardAccess(db, "octocat", "octocat")).toEqual({
+    expect(await signInDashboardUser(db, "hubot")).toEqual({
       outcome: "allow",
       user: reinvited,
       created: false,
     });
-    expect((await getUserByLogin(db, "octocat"))?.role).toBe("member");
   });
 
-  test("2e. an existing row still wins over the list and over a stale tombstone", async () => {
+  test("a live row outranks a stale tombstone", async () => {
     const db = createDashboardTestD1();
     const existing = await createUser(db, { login: "octocat", role: "member" });
-    // A tombstone left next to a live row (crash between nothing — the
-    // removal batch cannot produce it; a manual D1 write can) is inert: the
-    // row check runs first, so membership wins.
     db.raw
       .prepare("INSERT INTO removed_logins (github_login, removed_at, removed_by) VALUES (?, ?, NULL)")
       .run("octocat", new Date().toISOString());
-    expect(await bootstrapDashboardAccess(db, "octocat", "octocat")).toEqual({
-      outcome: "allow",
-      user: existing,
-      created: false,
-    });
-    expect(await bootstrapDashboardAccess(db, "octocat", undefined)).toEqual({
+    expect(await signInDashboardUser(db, "octocat")).toEqual({
       outcome: "allow",
       user: existing,
       created: false,
     });
   });
 
-  test("2f. SEC-01: a bootstrap paused after its reads cannot resurrect a login removed in between", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "root-admin", role: "admin" });
-    const racy = bootstrapRaceD1(db, async () => {
-      // The reviewer's interleaving: the login is created, then an admin
-      // removes it — both landing AFTER bootstrap's reads returned.
-      const created = await createUser(db, { login: "octocat", role: "member" });
-      expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
-    });
-    // Denied by the INSERT's own guard, not by the read the interleaving
-    // raced past (with a fresh fixture the read answered "no record").
-    expect(await bootstrapDashboardAccess(racy, "octocat", "octocat")).toEqual({ outcome: "deny" });
-    expect(await getUserByLogin(db, "octocat")).toBeNull(); // no resurrected row
-    expect(await isLoginRemoved(db, "octocat")).toBe(true); // record survives
-    expect(removedRows(db).map((r) => r.github_login)).toEqual(["octocat"]);
-    expect(userCount(db)).toBe(1); // the acting admin only
-  });
-
-  test("2g. SEC-01: the write-boundary refusal is case-insensitive (OCTOCAT login, octocat removal)", async () => {
-    // A fresh fixture per casing: a shared DB would leave 2f's tombstone in
-    // place, so this casing would deny at the removal-read fast path and never
-    // reach the guarded insert.
+  test("SEC-01: a sign-in paused after its reads cannot resurrect a login removed in between", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "root-admin", role: "admin" });
     const racy = bootstrapRaceD1(db, async () => {
       const created = await createUser(db, { login: "octocat", role: "member" });
       expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
     });
-    // The bootstrap login differs from the recorded removal in casing only:
-    // the insert's NOT EXISTS must match NOCASE, like every other login lookup.
-    expect(await bootstrapDashboardAccess(racy, "OCTOCAT", "OCTOCAT")).toEqual({ outcome: "deny" });
-    expect(await getUserByLogin(db, "OCTOCAT")).toBeNull();
+    expect(await signInDashboardUser(racy, "octocat")).toEqual({ outcome: "deny" });
+    expect(await getUserByLogin(db, "octocat")).toBeNull();
     expect(await isLoginRemoved(db, "octocat")).toBe(true);
     expect(removedRows(db).map((r) => r.github_login)).toEqual(["octocat"]);
     expect(userCount(db)).toBe(1);
   });
 
-  test("3. empty table && ADMIN_LOGINS unset → first login bootstraps as admin", async () => {
+  test("SEC-01: the write-boundary refusal is case-insensitive (OCTOCAT login, octocat removal)", async () => {
     const db = createDashboardTestD1();
-    const decision = await bootstrapDashboardAccess(db, "deployer", undefined);
-    expect(decision.outcome).toBe("allow");
-    if (decision.outcome === "allow") expect(decision.user.role).toBe("admin");
-    // Whitespace-only counts as unset for the fallback.
-    const blank = createDashboardTestD1();
-    expect((await bootstrapDashboardAccess(blank, "deployer", "   ")).outcome).toBe("allow");
-  });
-
-  test("3b. a removal record does not disturb the empty-table fallback for other logins", async () => {
-    const db = createDashboardTestD1();
-    const member = await createUser(db, { login: "octocat", role: "member" });
-    expect(await deleteUser(db, member.id)).toBe(true);
-    // Table empty + list unset: a login with no removal record still
-    // bootstraps as the first admin (the fallback is unchanged) …
-    const decision = await bootstrapDashboardAccess(db, "deployer", undefined);
-    expect(decision.outcome).toBe("allow");
-    // … while the removed login stays denied, even on an empty table.
-    expect(await bootstrapDashboardAccess(db, "octocat", undefined)).toEqual({ outcome: "deny" });
-    expect(removedRows(db).map((r) => r.github_login)).toEqual(["octocat"]);
-  });
-
-  test("4. deny: populated table, unknown login → deny with ZERO writes", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    expect(await bootstrapDashboardAccess(db, "mallory", undefined)).toEqual({ outcome: "deny" });
-    expect(userCount(db)).toBe(1); // no user row created
-  });
-
-  test("4b. deny: empty table but ADMIN_LOGINS configured without the login", async () => {
-    const db = createDashboardTestD1();
-    expect(await bootstrapDashboardAccess(db, "mallory", "octocat")).toEqual({ outcome: "deny" });
-    expect(userCount(db)).toBe(0);
+    await createUser(db, { login: "root-admin", role: "admin" });
+    const racy = bootstrapRaceD1(db, async () => {
+      const created = await createUser(db, { login: "octocat", role: "member" });
+      expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
+    });
+    expect(await signInDashboardUser(racy, "OCTOCAT")).toEqual({ outcome: "deny" });
+    expect(await getUserByLogin(db, "OCTOCAT")).toBeNull();
+    expect(await isLoginRemoved(db, "octocat")).toBe(true);
+    expect(userCount(db)).toBe(1);
   });
 });
 
-describe("/dashboard/oauth/callback bootstrap + deny", () => {
+describe("/dashboard/oauth/callback sign-in", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
@@ -3342,19 +3288,28 @@ describe("/dashboard/oauth/callback bootstrap + deny", () => {
     );
   }
 
-  test("unknown login, populated table, ADMIN_LOGINS unset → 403 invite-only page, ZERO Set-Cookie, zero user writes", async () => {
+  test("empty users table + any login → 302, session cookie, a member row, no membership (AC1)", async () => {
+    // The plan's acceptance fixture: a fresh deployment with no allowlist var
+    // and no users row, signing in for the first time.
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    stubGitHubIdentity("deployer");
+    const res = await oauthCallback("deployer", makeDbEnv(db));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(true);
+    expect((await getUserByLogin(db, "deployer"))?.role).toBe("member");
+    expect(db.raw.query("SELECT * FROM workspace_members").all()).toEqual([]);
+  });
+
+  test("a populated table does not gate an unknown login (no allowlist to miss)", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     stubGitHubIdentity("mallory");
     const res = await oauthCallback("mallory", makeDbEnv(db));
-    expect(res.status).toBe(403);
-    const body = await res.text();
-    // Locked deny copy (spec § User-visible behavior 1).
-    expect(body).toContain("This deployment is invite-only. Ask an admin to add mallory.");
-    // Zero cookies — not even the single-use state expiry (spec: 零 cookie、零写入).
-    expect(res.headers.getSetCookie()).toHaveLength(0);
-    // Zero D1 writes on deny.
-    expect(userCount(db)).toBe(1);
+    expect(res.status).toBe(302);
+    expect((await getUserByLogin(db, "mallory"))?.role).toBe("member");
+    expect(userCount(db)).toBe(2);
   });
 
   test("SEC-01: a removal landing inside the callback's read→insert window → 403, ZERO Set-Cookie, no resurrected row", async () => {
@@ -3365,7 +3320,7 @@ describe("/dashboard/oauth/callback bootstrap + deny", () => {
       const created = await createUser(db, { login: "octocat", role: "member" });
       expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
     });
-    const res = await oauthCallback("octocat", makeDbEnv(racy, { ADMIN_LOGINS: "octocat" }));
+    const res = await oauthCallback("octocat", makeDbEnv(racy));
     // The ordinary deny shape (spec: 零 cookie、零写入): no session is minted
     // for a login whose removal landed after the callback's reads.
     expect(res.status).toBe(403);
@@ -3375,36 +3330,41 @@ describe("/dashboard/oauth/callback bootstrap + deny", () => {
     expect(userCount(db)).toBe(1);
   });
 
-  test("ADMIN_LOGINS hit → 302 /dashboard, session cookie minted, admin row created", async () => {
+  test("a recorded removal → 403 deny page with ZERO Set-Cookie and zero writes", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const removed = await createUser(db, { login: "mallory", role: "member" });
+    await deleteUser(db, removed.id, "octocat");
+    stubGitHubIdentity("mallory");
+    const res = await oauthCallback("mallory", makeDbEnv(db));
+    expect(res.status).toBe(403);
+    expect(await res.text()).toContain("Access removed");
+    // Zero cookies — not even the single-use state expiry (spec: 零 cookie、零写入).
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("strict: a login with no workspace lands on the shell, not a workspace page it cannot open", async () => {
+    // 0026 seeds exactly one workspace (`default`), but sign-in joins nobody:
+    // the outsider 404 would be the first thing this login saw.
     const db = createDashboardTestD1();
     stubGitHubIdentity("octocat");
-    const res = await oauthCallback("octocat", makeDbEnv(db, { ADMIN_LOGINS: "octocat" }));
+    const res = await oauthCallback("octocat", makeDbEnv(db, { WORKSPACE_TENANT_MODE: "strict" }));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard");
     expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(true);
-    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
   });
 
-  test("strict: the callback lands on the sole workspace's Apps page, not the dead-end root", async () => {
-    // 0026 seeds exactly one workspace (`default`) — the landing the root
-    // redirect and the login bounce also name.
+  test("strict: a workspace MEMBER lands on that workspace's Apps page", async () => {
     const db = createDashboardTestD1();
+    const user = await createUser(db, { login: "octocat", role: "member" });
+    db.raw
+      .prepare("INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, 'owner', ?)")
+      .run(user.id, new Date().toISOString());
     stubGitHubIdentity("octocat");
-    const res = await oauthCallback(
-      "octocat",
-      makeDbEnv(db, { ADMIN_LOGINS: "octocat", WORKSPACE_TENANT_MODE: "strict" }),
-    );
+    const res = await oauthCallback("octocat", makeDbEnv(db, { WORKSPACE_TENANT_MODE: "strict" }));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
-    expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(true);
-  });
-
-  test("empty-table fallback (ADMIN_LOGINS unset) → first login becomes admin", async () => {
-    const db = createDashboardTestD1();
-    stubGitHubIdentity("deployer");
-    const res = await oauthCallback("deployer", makeDbEnv(db));
-    expect(res.status).toBe(302);
-    expect((await getUserByLogin(db, "deployer"))?.role).toBe("admin");
   });
 
   test("existing member row → 302 with no second row (row-hit precedence)", async () => {
@@ -3419,7 +3379,7 @@ describe("/dashboard/oauth/callback bootstrap + deny", () => {
   test("session payload unchanged on allow (login/iat/exp — no new claims)", async () => {
     const db = createDashboardTestD1();
     stubGitHubIdentity("octocat");
-    const res = await oauthCallback("octocat", makeDbEnv(db, { ADMIN_LOGINS: "octocat" }));
+    const res = await oauthCallback("octocat", makeDbEnv(db));
     const cookie = res.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`)) ?? "";
     const value = cookie.split(";")[0]?.slice(SESSION_COOKIE.length + 1) ?? "";
     const payload = await readSessionValue(value, SESSION_SECRET);
@@ -3431,15 +3391,9 @@ describe("/dashboard/oauth/callback bootstrap + deny", () => {
     stubGitHubIdentity("octocat");
     // baseEnv (no D1): makeEnv ships the default seeded store for the guarded
     // routes — the callback's unbound-D1 premise needs the bare env.
-    const res = await oauthCallback("octocat", baseEnv({ ADMIN_LOGINS: "octocat" }));
+    const res = await oauthCallback("octocat", baseEnv());
     expect(res.status).toBe(500);
     expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(false);
-  });
-
-  test(".env.example documents ADMIN_LOGINS (a var, not a secret)", async () => {
-    const example = await Bun.file(new URL("../../.env.example", import.meta.url)).text();
-    expect(example).toContain("ADMIN_LOGINS");
-    expect(example).toContain("not a secret");
   });
 });
 
@@ -3712,14 +3666,6 @@ describe("members page (workspace-scoped shell)", () => {
     expect(res.status).toBe(404);
   });
 
-  test("T1 pin (Minor 1): ADMIN_LOGINS docs name the real var mechanism, not the nonexistent `wrangler vars put`", async () => {
-    const example = await Bun.file(new URL("../../.env.example", import.meta.url)).text();
-    expect(example).toContain("ADMIN_LOGINS");
-    expect(example).not.toContain("wrangler vars put");
-    const envTs = await Bun.file(new URL("../../src/worker/env.ts", import.meta.url)).text();
-    expect(envTs).toContain("ADMIN_LOGINS");
-    expect(envTs).not.toContain("wrangler vars put");
-  });
 });
 
 // --- Review Health insights summary API --------------------------
@@ -3731,3 +3677,114 @@ describe("members page (workspace-scoped shell)", () => {
 // member-GET → 404 no-compat-shim removal pin lives in
 // insights-ui.test.ts ("the cross-App global endpoint is removed") —
 // kept there, once, to avoid a duplicate assertion here.
+
+describe("POST /dashboard/api/workspaces — workspace creation (plan 97 T3)", () => {
+  /** The plan's id contract: `ws_` + 22 chars of lowercase base32. */
+  const WORKSPACE_ID = /^ws_[a-z2-7]{22}$/;
+
+  /** A signed-in login POSTing the creation form through the real mount. */
+  async function createWorkspaceRequest(
+    db: DashboardD1 & { raw: Database },
+    login: string,
+    form: Record<string, string>,
+  ): Promise<Response> {
+    const session = await createSessionValue(login, null, SESSION_SECRET);
+    return worker.fetch(
+      new Request("https://worker.local/dashboard/api/workspaces", {
+        method: "POST",
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${session}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+          [SPA_POST_FORM_HEADER]: SPA_POST_FORM_VALUE,
+        },
+        body: new URLSearchParams(form),
+      }),
+      makeDbEnv(db),
+    );
+  }
+
+  /** Row shapes the raw bun:sqlite reads below are asserted against. */
+  type WorkspaceRow = { id: string; slug: string; name: string; created_by: string };
+  type MemberRow = { workspace_id: string; user_id: string; role: string };
+  type CountRow = { n: number };
+
+  function workspaceCount(db: DashboardD1 & { raw: Database }): number {
+    return (db.raw.query("SELECT COUNT(*) AS n FROM workspaces").get() as CountRow).n;
+  }
+
+  test("creates the workspace and its owner membership, returning the ref", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    const user = await createUser(db, { login: "deployer", role: "member" });
+
+    const res = await createWorkspaceRequest(db, "deployer", { name: "  Acme  " });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string; slug: string; name: string; role: string };
+    expect(body.id).toMatch(WORKSPACE_ID);
+    expect(body.slug).toBe(body.id); // slug = id by contract
+    expect(body.name).toBe("Acme"); // trimmed
+    expect(body.role).toBe("owner");
+
+    const rows = db.raw
+      .query("SELECT id, slug, name, created_by FROM workspaces WHERE id = ?")
+      .all(body.id) as WorkspaceRow[];
+    expect(rows).toEqual([{ id: body.id, slug: body.id, name: "Acme", created_by: user.id }]);
+    const members = db.raw
+      .query("SELECT workspace_id, user_id, role FROM workspace_members WHERE workspace_id = ?")
+      .all(body.id) as MemberRow[];
+    expect(members).toEqual([{ workspace_id: body.id, user_id: user.id, role: "owner" }]);
+    // No auto-join anywhere else: 0026's seeded `default` workspace keeps its
+    // empty membership table — there is no "first user owns the only
+    // workspace" fallback.
+    const defaults = db.raw
+      .query("SELECT * FROM workspace_members WHERE workspace_id = 'default'")
+      .all();
+    expect(defaults).toEqual([]);
+  });
+
+  test("an empty or whitespace-only name is 400 and writes nothing", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "deployer", role: "member" });
+    const before = workspaceCount(db);
+    for (const name of ["", "   "]) {
+      const res = await createWorkspaceRequest(db, "deployer", { name });
+      expect(res.status, JSON.stringify(name)).toBe(400);
+    }
+    expect(workspaceCount(db)).toBe(before);
+  });
+
+  test("a name over 80 characters is 400 and writes nothing", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "deployer", role: "member" });
+    const before = workspaceCount(db);
+    const res = await createWorkspaceRequest(db, "deployer", { name: "a".repeat(81) });
+    expect(res.status).toBe(400);
+    expect(workspaceCount(db)).toBe(before);
+  });
+
+  test("an 80-character name is accepted (the boundary)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "deployer", role: "member" });
+    const name = "a".repeat(80);
+    const res = await createWorkspaceRequest(db, "deployer", { name });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { name: string }).name).toBe(name);
+  });
+
+  test("anonymous → 302 to login, zero writes", async () => {
+    const db = createDashboardTestD1();
+    const before = workspaceCount(db);
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/api/workspaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ name: "Acme" }),
+      }),
+      makeDbEnv(db),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(workspaceCount(db)).toBe(before);
+  });
+});

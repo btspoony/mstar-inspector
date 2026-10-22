@@ -601,26 +601,11 @@ export function manifestErrorPage(message: string, resumable = false, locale: Lo
 }
 
 /**
- * Invite-only denial (spec § User-visible behavior 1) —
- * locked English copy with the GitHub-verified login interpolated
- * (escaped). The callback deny path renders this at 403 with ZERO
- * Set-Cookie: no session, no state expiry, nothing. Red-700 banner, no
- * login link back (an unknown user has nothing to return to).
- */
-export function deniedPage(login: string, locale: Locale = "en"): string {
-  return authFace(
-    t(locale, "common.error.deniedTitle"),
-    t(locale, "common.error.deniedBody", { login: escapeHtml(login) }),
-    locale,
-  );
-}
-
-/**
- * Removed-member denial (per-request guard) — distinct from
- * deniedPage: this visitor's cookie verified but has no users row (access
- * removed after the session was minted; removal = row delete, no status
- * column). Red-700 banner, no login link back — re-authenticating lands on
- * the OAuth callback bootstrap deny until an admin re-invites the login.
+ * Removed-member denial — the per-request guard's face, and the OAuth
+ * callback's only deny branch (a recorded removal; plan 97 AC1 makes sign-in
+ * otherwise unconditional). Removal = row delete, no status column. Red-700
+ * banner, no login link back — signing in again lands on this same page until
+ * the login is re-admitted.
  */
 export function removedPage(login: string, locale: Locale = "en"): string {
   return authFace(
@@ -633,7 +618,7 @@ export function removedPage(login: string, locale: Locale = "en"): string {
 /**
  * Non-admin denial for admin-only surfaces: the visitor IS a
  * member — the per-request guard passed — but has no `admin` row. Distinct
- * from deniedPage / removedPage: access exists, this page does not. Red-700
+ * from removedPage: access exists, this page does not. Red-700
  * banner with a way back to the shell.
  */
 export function forbiddenPage(login: string, locale: Locale = "en"): string {

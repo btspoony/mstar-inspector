@@ -65,6 +65,8 @@ import {
   type ReviewTriggerMode,
 } from "./apps-store";
 import {
+  countMembershipsForLogin,
+  createWorkspace,
   getMembership,
   getSoleWorkspace,
   getSoleWorkspaceAccess,
@@ -119,15 +121,14 @@ import { isCommandConfigKey } from "../contracts/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
-  bootstrapDashboardAccess,
   deleteWorkspaceMember,
   getUserByLogin,
+  signInDashboardUser,
   updateWorkspaceMemberRole,
   type DashboardD1,
   type DashboardUserRow,
 } from "./users";
 import {
-  deniedPage,
   errorPage,
   forbiddenPage,
   manifestConfirmPage,
@@ -257,11 +258,17 @@ export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> 
 export async function strictWorkspaceBoot(
   env: Env,
   login: string,
-): Promise<{ workspaceSlug?: string; canCreateApp?: boolean }> {
+): Promise<{ workspaceSlug?: string; canCreateApp?: boolean; needsWorkspace?: boolean }> {
   if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return {};
   const db = dashboardD1(env);
   if (db === null) return {};
-  const access = await getSoleWorkspaceAccess(db, login);
+  const [access, memberships] = await Promise.all([
+    getSoleWorkspaceAccess(db, login),
+    countMembershipsForLogin(db, login),
+  ]);
+  // No live membership → no workspace to name: every workspace path 404s this
+  // login, so the shell must offer creation instead (plan 97 AC1).
+  if (memberships === 0) return { canCreateApp: false, needsWorkspace: true };
   if (access === null) return { canCreateApp: false };
   return {
     workspaceSlug: access.slug,
@@ -307,10 +314,19 @@ export async function canCreateApp(env: Env, login: string): Promise<boolean> {
  * pathname — the retired legacy App family — so under `strict` it is a dead
  * end with no click path into the workspace UI. Every signed-in producer
  * (OAuth callback, the login bounce) names the workspace Apps page instead.
- * Unresolvable → today's target (already warned by the resolver).
+ *
+ * A login with NO live membership never lands there: the workspace Apps page
+ * would answer the outsider 404, so sign-in ends on `/dashboard`, whose shell
+ * offers workspace creation (plan 97 AC1 — sign-in joins nobody to a
+ * workspace, so a newcomer's first stop is making one). Unresolvable → today's
+ * target (already warned by the resolver).
  */
-export async function signedInLanding(env: Env): Promise<string> {
-  return (await strictWorkspaceAppsBase(env)) ?? DASHBOARD_MOUNT;
+export async function signedInLanding(env: Env, login: string): Promise<string> {
+  const base = await strictWorkspaceAppsBase(env);
+  if (base === null) return DASHBOARD_MOUNT;
+  const db = dashboardD1(env);
+  if (db !== null && (await countMembershipsForLogin(db, login)) === 0) return DASHBOARD_MOUNT;
+  return base;
 }
 
 /**
@@ -382,9 +398,8 @@ type DashboardDb = DashboardD1 & AppConfigBatchFace;
 /**
  * D1 membership store binding. Runtime-real via wrangler.jsonc
  * `d1_databases` (binding DB), but the fetch-face Env deliberately does not
- * declare it (src/worker/env.ts stays ADMIN_LOGINS-only for now) — read
- * through this local intersection and fail closed when unbound, like every
- * missing dashboard dependency.
+ * declare it — read through this local intersection and fail closed when
+ * unbound, like every missing dashboard dependency.
  */
 function dashboardD1(env: Env): DashboardDb | null {
   const db = (env as Env & { DB?: DashboardDb }).DB;
@@ -659,9 +674,8 @@ async function startOAuthLogin(c: DashboardContext): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   // Already signed in → bounce back to the shell (IA routing table).
-  if (await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret)) {
-    return c.redirect(await signedInLanding(c.env), 302);
-  }
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (session) return c.redirect(await signedInLanding(c.env, session.login), 302);
   const state = await createStateValue(secrets.sessionSecret);
   c.header("Set-Cookie", serializeCookie(OAUTH_STATE_COOKIE, state, OAUTH_STATE_MAX_AGE_SEC));
   const callbackUri = `${new URL(c.req.url).origin}/dashboard/oauth/callback`;
@@ -709,29 +723,29 @@ dashboardApp.get("/oauth/callback", async (c) => {
   if (!user) {
     return c.html(errorPage(t(requestLocale(c), "common.oauth.profileFailed"), requestLocale(c)), 502);
   }
-  // Invite-only bootstrap decision (spec § AuthZ precedence:
-  // row → recorded removal → ADMIN_LOGINS → empty-table fallback → deny)
-  // BEFORE any session is minted. A recorded removal denies (migration 0023 —
-  // an operator's removal is authoritative) and is cleared only by a
-  // deliberate re-admission. The invite path is NOT consulted here: sign-in
-  // never joins a workspace (plan 97 AC3 — acceptance is the explicit POST),
-  // and plan 97 T3 replaces this allowlist decision with an unconditional
-  // upsert. Deny = 403 page with ZERO Set-Cookie (spec: 零 cookie、零写入) —
-  // the single-use state-expiry header set above is withdrawn here — and zero
-  // D1 writes (the deny branch never inserts).
+  // Sign-in decision BEFORE any session is minted. A recorded removal denies
+  // (migration 0023 — an operator's removal is authoritative) and is cleared
+  // only by a deliberate re-admission; every other GitHub-verified login gets
+  // a `users` row (plan 97 T3 — there is no deployment allowlist). The invite
+  // path is NOT consulted here: sign-in never joins a workspace (plan 97 AC3 —
+  // acceptance is the explicit POST). Deny = 403 page with ZERO Set-Cookie
+  // (spec: 零 cookie、零写入) — the single-use state-expiry header set above is
+  // withdrawn here — and zero D1 writes (the deny branch never inserts).
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
-  const decision = await bootstrapDashboardAccess(db, user.login, c.env.ADMIN_LOGINS);
+  const decision = await signInDashboardUser(db, user.login);
   if (decision.outcome === "deny") {
-    logOAuthFailure("bootstrap", "not_invited", { login: user.login });
+    // The only deny is a recorded removal, so the deny face is the removal
+    // face: sign-in no longer denies for any other reason (plan 97 AC1).
+    logOAuthFailure("sign_in", "removed", { login: user.login });
     c.header("Set-Cookie", undefined);
-    return c.html(deniedPage(user.login, requestLocale(c)), 403);
+    return c.html(removedPage(user.login, requestLocale(c)), 403);
   }
   const session = await createSessionValue(user.login, user.name, secrets.sessionSecret);
   c.header("Set-Cookie", serializeCookie(SESSION_COOKIE, session, SESSION_MAX_AGE_SEC), {
     append: true,
   });
-  return c.redirect(await signedInLanding(c.env), 302);
+  return c.redirect(await signedInLanding(c.env, user.login), 302);
 });
 
 dashboardApp.get("/logout", (c) => {
@@ -740,6 +754,54 @@ dashboardApp.get("/logout", (c) => {
   c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE), { append: true });
   return c.redirect("/dashboard/login", 302);
+});
+
+// --- Workspace creation (plan 97 T3) ---
+//
+// The ONLY membership write outside the invite path (Global Constraints): a
+// signed-in login with no workspace creates one and becomes its `owner`.
+// Deliberately OUTSIDE the workspace gate — the caller has no workspace yet, so
+// there is no `:workspaceRef` to scope it to. The session guard already
+// requires a `users` row; nothing here reads a role.
+//
+// The id is `ws_` + 22 chars of lowercase base32 (`a-z2-7`, all inside the
+// `[a-z0-9]` alphabet) drawn from `crypto.getRandomValues`. Lowercase-only is
+// load-bearing: `slug = id` then keeps the BINARY `workspaces.slug` UNIQUE
+// equivalent to case-insensitive uniqueness (plan 98's routing depends on it).
+const WORKSPACE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
+/** Bounded retries for the (astronomically unlikely) slug collision. */
+const WORKSPACE_ID_ATTEMPTS = 6;
+export const WORKSPACE_NAME_MAX_LENGTH = 80;
+
+/** A fresh workspace id; 256 is divisible by 32, so the sampling is unbiased. */
+function createWorkspaceId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(22));
+  const suffix = Array.from(
+    bytes,
+    (b) => WORKSPACE_ID_ALPHABET[b % WORKSPACE_ID_ALPHABET.length]!,
+  ).join("");
+  return `ws_${suffix}`;
+}
+
+dashboardApp.post("/api/workspaces", async (c) => {
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+  const user = c.get("authUser");
+  if (!user) return c.redirect("/dashboard/login", 302);
+  const form = await c.req.parseBody();
+  const name = typeof form.name === "string" ? form.name.trim() : "";
+  if (name.length === 0) return c.text("Enter a workspace name.", 400);
+  if (name.length > WORKSPACE_NAME_MAX_LENGTH) {
+    return c.text(`Workspace name must be at most ${WORKSPACE_NAME_MAX_LENGTH} characters.`, 400);
+  }
+  const createdAt = new Date().toISOString();
+  for (let attempt = 0; attempt < WORKSPACE_ID_ATTEMPTS; attempt++) {
+    const id = createWorkspaceId();
+    if (await createWorkspace(db, { id, name, userId: user.id, createdAt })) {
+      return c.json({ id, slug: id, name, role: "owner" as const }, 201);
+    }
+  }
+  return c.text("Could not allocate a workspace id — try again.", 500);
 });
 
 // --- Locale preference (i18n) ---

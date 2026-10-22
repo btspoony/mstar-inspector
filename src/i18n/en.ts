@@ -48,8 +48,6 @@ export const en = {
       unknown: "unknown",
     },
     error: {
-      deniedTitle: "Access denied",
-      deniedBody: "This deployment is invite-only. Ask an admin to add {login}.",
       removedTitle: "Access removed",
       removedBody: "Your dashboard access was removed. Ask an admin to re-invite {login}.",
       forbiddenTitle: "Forbidden",
@@ -78,7 +76,8 @@ export const en = {
     heading: "Sign in",
     description: "Use your GitHub account to access the console.",
     signIn: "Sign in with GitHub",
-    inviteOnly: "This deployment is invite-only — ask an admin to add your GitHub login.",
+    /** Plan 97: sign-in is open — no access list stands between here and a workspace. */
+    openAccess: "Any GitHub account can sign in — create a workspace, or accept an invitation.",
   },
   notice: {
     success: {
@@ -216,6 +215,22 @@ export const en = {
     emptyTitle: "No members yet",
     emptyDescription: "Invite the first member with the form above.",
     emptyDescriptionMember: "This workspace has no other members yet.",
+  },
+  /**
+   * Workspace creation — the signed-in landing for a login that belongs to no
+   * workspace yet (plan 97 T3). Sign-in joins nobody, so this is the only path
+   * into a first workspace besides accepting an invitation.
+   */
+  workspace: {
+    setupHeading: "Create a workspace",
+    setupDescription:
+      "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",
+    nameLabel: "Workspace name",
+    namePlaceholder: "e.g. Acme",
+    create: "Create workspace",
+    nameRequired: "Enter a workspace name.",
+    nameTooLong: "Use at most {max} characters.",
+    createFailed: "Could not create the workspace — try again.",
   },
   settings: {
     /**

@@ -1,5 +1,5 @@
 /**
- * Dashboard membership store + OAuth-callback bootstrap decision
+ * Dashboard users store + OAuth-callback sign-in decision
  * (spec dashboard-multi-app-platform.md § AuthZ + § Data model).
  *
  * Self-contained on purpose (route isolation, architect decision Q2 — the
@@ -7,41 +7,35 @@
  * The narrow D1 face below mirrors src/store/types.ts `D1Like`
  * structurally, so a real `D1Database` and the bun:sqlite test double both
  * satisfy it; the store's multi-write paths — removal (tombstone + membership
- * delete + row delete), (re-)invite (insert + tombstone clear + workspace
- * membership), role change (users update + membership mirror) and bootstrap
- * (insert + membership) — are each ONE `batch`. A user and their
- * `workspace_members` row (migration 0026) therefore always move together:
- * `users.role` maps to the workspace role exactly like 0027's backfill
- * (admin → owner, member → member).
+ * delete + row delete) and role change (users update + membership mirror) —
+ * are each ONE `batch`.
  *
- * Bootstrap precedence is EXACT (spec § AuthZ), evaluated in order:
- *   1. user row exists          → allow, zero writes
- *   2. login was removed        → deny (an operator's removal outranks the
- *                                  allowlist — migration 0023; enforced both
- *                                  by a read and by the bootstrap insert
- *                                  itself, and cleared only by a deliberate
- *                                  re-invite)
- *   3. ADMIN_LOGINS contains it → create admin row, allow
- *   4. table empty AND
- *      ADMIN_LOGINS unset       → create admin row, allow (first-login
- *                                  fallback for the deploying operator)
- *   5. otherwise                → deny (caller renders the 403 page with
- *                                  zero Set-Cookie; this module wrote
- *                                  nothing)
+ * Sign-in is NOT operator-gated (plan 97 AC1): a `users` row is the only
+ * requirement, so any GitHub login completes the OAuth callback. There is no
+ * deployment allowlist and no first-login promotion — a new row carries
+ * `role = 'member'` (the legacy column is never read for a workspace
+ * authorization decision) and NO workspace membership: admission into a
+ * workspace is its creation (creator becomes `owner`) or an accepted invite.
+ *
+ * Sign-in precedence is EXACT, evaluated in order:
+ *   1. user row exists   → allow, zero writes
+ *   2. login was removed → deny (migration 0023; enforced both by a read and
+ *                          by the insert itself, and cleared only by a
+ *                          deliberate re-admission)
+ *   3. otherwise         → create a `member` row, allow
  *
  * There is NO status column: removal = row delete (migration 0003), and that
- * delete records a tombstone in the SAME transaction (migration 0023) so the
- * allowlist cannot resurrect a login an operator removed. Removal state has
- * exactly two writers — the removal batch (records it) and createUser (clears
- * it, deliberate re-admission); the automatic bootstrap path touches neither,
- * so an in-flight OAuth callback cannot undo a removal. The delete is what
- * makes removed members' stateless cookies fail the per-request guard — never
- * soften this into a flag.
+ * delete records a tombstone in the SAME transaction (migration 0023) so a
+ * later sign-in cannot resurrect a login an operator removed. Removal state
+ * has exactly two writers — the removal batch (records it) and createUser
+ * (clears it, deliberate re-admission); the automatic sign-in path touches
+ * neither, so an in-flight OAuth callback cannot undo a removal. The delete is
+ * what makes removed members' stateless cookies fail the per-request guard —
+ * never soften this into a flag.
  *
  * Case handling: GitHub logins are case-insensitive upstream, so row
- * lookups, ADMIN_LOGINS comparison and the removal record are
- * case-insensitive; the UNIQUE index on github_login backstops exact-case
- * duplicates at the DDL layer.
+ * lookups and the removal record are case-insensitive; the UNIQUE index on
+ * github_login backstops exact-case duplicates at the DDL layer.
  */
 
 /** A row of the `users` table (D1 column names, snake_case; migration 0003). */
@@ -50,7 +44,7 @@ export type DashboardUserRow = {
   github_login: string;
   role: "admin" | "member";
   created_at: string;
-  /** NULL = bootstrapped (ADMIN_LOGINS / first-login fallback), not invited. */
+  /** NULL = created at sign-in, not invited. */
   invited_by: string | null;
 };
 
@@ -85,32 +79,20 @@ export type DashboardD1 = {
   batch(statements: DashboardD1Statement[]): Promise<DashboardD1BatchResult[]>;
 };
 
-// --- ADMIN_LOGINS parsing ---
+// --- login-list parsing (comma-separated configuration values) ---
 
 /**
- * Parse the ADMIN_LOGINS var: comma-separated GitHub logins, trimmed;
- * empty entries dropped. Unset / empty / whitespace-only → [] (the var is
- * then "not configured" for bootstrap rule 3). Entries keep their original
- * case — matching lowercases both sides instead (GitHub logins are
- * case-insensitive).
- *
- * Twin rule: the `.github/workflows/deploy.yml` pre-deploy required-input
- * check and the deployed-Worker assertion both import and call THIS function
- * (via `bun -e`), so they apply the runtime rule itself rather than a shell
- * approximation of it — a rule change here reaches all three sites.
- * `docs/deploy.md` § 6 documents the same contract.
+ * Parse a comma-separated login list: entries trimmed, empties dropped.
+ * Unset / empty / whitespace-only → []. Entries keep their original case —
+ * matching lowercases both sides instead (GitHub logins are case-insensitive;
+ * the caller owns the comparison).
  */
-export function parseAdminLogins(value: string | undefined): string[] {
+export function parseLoginList(value: string | undefined): string[] {
   if (!value) return [];
   return value
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
-}
-
-function isAdminLogin(entries: string[], login: string): boolean {
-  const needle = login.toLowerCase();
-  return entries.some((entry) => entry.toLowerCase() === needle);
 }
 
 // --- users store ---
@@ -149,10 +131,10 @@ function isUniqueConstraintError(err: unknown): boolean {
 
 /**
  * Insert one users row (caller-supplied UUID, like 0001 reviews.id).
- * DELIBERATE creation — a workspace-creation flow, a fixture — so it also
+ * DELIBERATE creation — a fixture, an operator's re-admission — so it also
  * clears any removal record for that login in the same batch: an explicit
  * (re-)admission is the only thing allowed to undo a removal. The automatic
- * OAuth bootstrap does NOT call this function; it uses bootstrapCreateAdmin,
+ * sign-in path does NOT call this function; it uses {@link signInDashboardUser},
  * which never clears removal state.
  *
  * It deliberately writes NO `workspace_members` row: admission into a
@@ -303,8 +285,8 @@ async function removeUser(
 
 /**
  * Remove by row id (row id avoids login case ambiguity). The removal is
- * recorded, so a later `bootstrapDashboardAccess` denies the login even when
- * the ADMIN_LOGINS allowlist still lists it.
+ * recorded, so a later sign-in ({@link signInDashboardUser}) denies the login
+ * until a deliberate re-admission clears the record.
  */
 export async function deleteUser(
   db: DashboardD1,
@@ -474,7 +456,7 @@ export async function updateWorkspaceMemberRole(
   return result.meta.changes > 0;
 }
 
-/** Total membership — bootstrap rule 3 keys on the EMPTY table (any role). */
+/** Total users rows on the deployment (any role) — fixtures and tests. */
 export async function countUsers(db: DashboardD1): Promise<number> {
   const row = await db.prepare("SELECT COUNT(*) AS n FROM users").first<{ n: number }>();
   return row?.n ?? 0;
@@ -488,40 +470,38 @@ export async function countAdmins(db: DashboardD1): Promise<number> {
   return row?.n ?? 0;
 }
 
-// --- bootstrap decision (OAuth callback hook, spec § AuthZ precedence) ---
+// --- sign-in decision (OAuth callback hook) ---
 
-export type BootstrapDecision =
+export type SignInDecision =
   | { outcome: "allow"; user: DashboardUserRow; created: boolean }
   | { outcome: "deny" };
 
 /**
- * Bootstrap's OWN membership creation — deliberately not `createUser`: the
- * automatic OAuth path must never clear removal state, and its insert must be
- * refused at the WRITE boundary. ONE statement both tests the removal record
- * and inserts (there is no read-check-then-insert window to lose):
+ * Sign-in's OWN row creation — deliberately not `createUser`: the automatic
+ * OAuth path must never clear removal state, and its insert must be refused at
+ * the WRITE boundary. ONE statement both tests the removal record and inserts
+ * (there is no read-check-then-insert window to lose):
  *
  *   INSERT INTO users … SELECT … WHERE NOT EXISTS (removal record for login)
  *
  * so a removal that lands *after* the caller's earlier reads is still refused
  * by the database. A refused insert resolves to the ordinary deny decision
  * having written nothing; `changes === 0` is classified by a re-read — an
- * existing row (exact-case or case-variant race) is a member and is allowed,
+ * existing row (exact-case or case-variant race) is signed in and is allowed,
  * no row at all means the insert was refused. The removal record is compared
  * NOCASE, like every other login lookup (migration 0023).
  *
- * The workspace membership rides the SAME batch (createUser's shape): its
- * SELECT joins the users row the first statement just inserted, so a refused
- * insert leaves the deny branch with zero rows written on either side. Without
- * it a bootstrapped admin has no membership and every strict-mode workspace
- * route 404s them.
+ * The row carries `role = 'member'` (the column is NOT NULL; its value is
+ * never read for a workspace authorization decision) and writes NO
+ * `workspace_members` row — sign-in joins nobody to a workspace.
  */
-async function bootstrapCreateAdmin(db: DashboardD1, login: string): Promise<BootstrapDecision> {
+async function signInCreateUser(db: DashboardD1, login: string): Promise<SignInDecision> {
   const row: DashboardUserRow = {
     id: crypto.randomUUID(),
     github_login: login,
-    role: "admin",
+    role: "member",
     created_at: new Date().toISOString(),
-    invited_by: null, // bootstrapped, not invited
+    invited_by: null, // signed in, not invited
   };
   let changes: number;
   try {
@@ -529,20 +509,11 @@ async function bootstrapCreateAdmin(db: DashboardD1, login: string): Promise<Boo
       db
         .prepare(
           `INSERT INTO users (id, github_login, role, created_at, invited_by)
-           SELECT ?, ?, 'admin', ?, NULL
+           SELECT ?, ?, 'member', ?, NULL
            WHERE NOT EXISTS (SELECT 1 FROM removed_logins WHERE github_login = ? COLLATE NOCASE)
            ON CONFLICT (github_login) DO NOTHING`,
         )
         .bind(row.id, row.github_login, row.created_at, row.github_login),
-      db
-        .prepare(
-          `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
-           SELECT w.id, u.id, 'owner', ?
-           FROM workspaces w JOIN users u ON u.id = ?
-           LIMIT 1
-           ON CONFLICT DO NOTHING`,
-        )
-        .bind(row.created_at, row.id),
     ]);
     changes = results[0]!.meta.changes;
   } catch (err) {
@@ -559,32 +530,26 @@ async function bootstrapCreateAdmin(db: DashboardD1, login: string): Promise<Boo
 }
 
 /**
- * Decide membership for a GitHub-verified login at the OAuth callback.
- * Precedence (exact order, spec § AuthZ): row exists → allow; recorded
- * removal → deny (an operator's removal outranks the allowlist); ADMIN_LOGINS
- * contains login → create admin; table empty && ADMIN_LOGINS unset →
- * create admin; else deny. The deny branch performs ZERO writes — the caller
- * must render the 403 page with zero Set-Cookie.
+ * Decide access for a GitHub-verified login at the OAuth callback. Precedence
+ * (exact order): row exists → allow, zero writes; recorded removal → deny; any
+ * other login → create a `member` row, allow. Sign-in never consults a
+ * deployment allowlist and never joins a workspace (plan 97 AC1/AC3). The deny
+ * branch performs ZERO writes — the caller must render the 403 page with zero
+ * Set-Cookie.
  *
  * The removal rule is enforced twice on purpose: the read below is the fast
- * path for the common case, and bootstrapCreateAdmin's insert refuses AT THE
- * WRITE BOUNDARY — so a removal landing after the reads still denies instead
- * of resurrecting the login (and never clears the removal record).
+ * path for the common case, and signInCreateUser's insert refuses AT THE WRITE
+ * BOUNDARY — so a removal landing after the reads still denies instead of
+ * resurrecting the login (and never clears the removal record).
  */
-export async function bootstrapDashboardAccess(
+export async function signInDashboardUser(
   db: DashboardD1,
   login: string,
-  adminLogins: string | undefined,
-): Promise<BootstrapDecision> {
+): Promise<SignInDecision> {
   const existing = await getUserByLogin(db, login);
   if (existing) return { outcome: "allow", user: existing, created: false };
-  // A recorded removal denies even when the login is still on ADMIN_LOGINS
-  // (migration 0023): without this the allowlist resurrected a removed admin
-  // on its next OAuth login. Only a deliberate admin (re-)invite — createUser,
-  // which clears the record — makes the login bootstrappable again.
+  // A recorded removal denies (migration 0023): only a deliberate re-admission
+  // — createUser, which clears the record — lets the login back in.
   if (await isLoginRemoved(db, login)) return { outcome: "deny" };
-  const admins = parseAdminLogins(adminLogins);
-  if (isAdminLogin(admins, login)) return bootstrapCreateAdmin(db, login);
-  if (admins.length === 0 && (await countUsers(db)) === 0) return bootstrapCreateAdmin(db, login);
-  return { outcome: "deny" };
+  return signInCreateUser(db, login);
 }

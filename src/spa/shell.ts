@@ -72,13 +72,16 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
   // against); the boot slug covers the mode-independent pages, whose pathname
   // names no workspace. Both absent → the legacy targets.
   const workspaceSlug = workspaceSlugOf(pathname) ?? boot.workspaceSlug ?? null;
+  // No workspace yet → every nav target would 404; the shell keeps its
+  // wordmark and drops the entries (plan 97 T3 creation surface).
+  const items = boot.needsWorkspace === true ? [] : visibleNavItems(boot.role);
   return {
     brand: t(boot.locale, "nav.brand"),
     // The root workbench 404s its data reads under `strict`, so the wordmark
     // follows the same workspace Apps target as the nav entry there.
     brandHref: workspaceSlug === null ? "/dashboard" : `/dashboard/${workspaceSlug}/apps`,
     navLabel: t(boot.locale, "nav.primary"),
-    items: visibleNavItems(boot.role).map((item) => {
+    items: items.map((item) => {
       const href = navHref(item.href, workspaceSlug);
       return {
         href,

@@ -894,6 +894,99 @@ describe("strict: the post-authentication landing is the workspace Apps page", (
   });
 });
 
+describe("strict: a login with no workspace gets the creation surface (plan 97 AC1)", () => {
+  /** A signed-in users row with no membership anywhere. */
+  function newcomer() {
+    const db = createMigratedTestD1();
+    seedUser(db, "newcomer", "member");
+    return { db };
+  }
+
+  test("the /dashboard shell keeps rendering and carries needsWorkspace (not a redirect into a 404)", async () => {
+    const { db } = newcomer();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", "newcomer", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.needsWorkspace).toBe(true);
+    // No workspace to name: no nav target may point at a workspace path.
+    expect(boot.workspaceSlug).toBeUndefined();
+    expect(boot.canCreateApp).toBe(false);
+  });
+
+  test("the shell renders the creation form and no workspace nav entries", async () => {
+    const { db } = newcomer();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", "newcomer", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    const boot = bootOf(await res.text());
+    const hrefs = await renderMembersHrefs(boot, "/dashboard");
+    // The sidebar drops Apps/Members — both would 404 for this login — and the
+    // page offers the one action that changes that.
+    expect(hrefs).not.toContain("/dashboard/apps");
+    expect(hrefs).not.toContain("/dashboard/default/apps");
+    const spa = "../../src/spa";
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    type Component = (props: Record<string, unknown>) => ReactElement;
+    const { DashboardPage } = (await import(`${spa}/pages`)) as { DashboardPage: Component };
+    const { matchRoute } = (await import(`${spa}/router`)) as {
+      matchRoute: (pathname: string) => unknown;
+    };
+    const html = renderToStaticMarkup(
+      createElement(DashboardPage, { route: matchRoute("/dashboard"), boot }),
+    );
+    expect(html).toContain(t(boot.locale, "workspace.setupHeading"));
+    expect(html).toContain(t(boot.locale, "workspace.create"));
+  });
+
+  test("after creating a workspace the same login lands on that workspace's Apps page", async () => {
+    const { db } = newcomer();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/api/workspaces", "newcomer", {
+        method: "POST",
+        body: new URLSearchParams({ name: "Acme" }).toString(),
+      }),
+      envFor(db, "strict"),
+    );
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as { slug: string };
+
+    // The new membership is real: the login now reaches that workspace's own
+    // pages (the outsider 404 is gone) and the boot no longer offers creation.
+    const shell = await worker.fetch(
+      await authedRequest(`/dashboard/${created.slug}/apps`, "newcomer", {
+        accept: "text/html",
+      }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(shell.status).toBe(200);
+    const boot = bootOf(await shell.text());
+    expect(boot.needsWorkspace).toBeUndefined();
+    expect(boot.workspaceSlug).toBe(created.slug);
+    const api = await worker.fetch(
+      await authedRequest(`/dashboard/${created.slug}/api/members`, "newcomer"),
+      envFor(db, "strict"),
+    );
+    expect(api.status).toBe(200);
+    const members = (await api.json()) as { viewer: { login: string; role: string } };
+    expect(members.viewer).toEqual({ login: "newcomer", role: "owner" });
+  });
+
+  test("off: the boot never claims a missing workspace (the legacy face is unchanged)", async () => {
+    const { db } = newcomer();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/apps", "newcomer", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "off")),
+    );
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).needsWorkspace).toBeUndefined();
+  });
+});
+
 describe("strict: the onboarding CTA stays inside the workspace", () => {
   test("the Open Settings CTA targets the workspace settings page", async () => {
     const { db } = tenancyFixture();

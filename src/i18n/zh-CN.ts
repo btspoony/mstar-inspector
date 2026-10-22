@@ -38,8 +38,6 @@ export const zhCN: Dictionary = {
       unknown: "未知",
     },
     error: {
-      deniedTitle: "访问被拒绝",
-      deniedBody: "此部署仅限受邀成员。请让管理员添加 {login}。",
       removedTitle: "访问已移除",
       removedBody: "你的控制台访问已被移除。请让管理员重新邀请 {login}。",
       forbiddenTitle: "禁止访问",
@@ -65,7 +63,8 @@ export const zhCN: Dictionary = {
     heading: "登录",
     description: "使用你的 GitHub 账号访问控制台。",
     signIn: "使用 GitHub 登录",
-    inviteOnly: "此部署仅限受邀成员 — 请让管理员添加你的 GitHub 登录名。",
+    /** plan 97：登录开放 —— 没有访问名单挡在工作区之前。 */
+    openAccess: "任意 GitHub 账号均可登录 —— 创建工作区，或接受邀请。",
   },
   notice: {
     success: {
@@ -199,6 +198,20 @@ export const zhCN: Dictionary = {
     emptyTitle: "还没有成员",
     emptyDescription: "使用上方表单邀请第一位成员。",
     emptyDescriptionMember: "本工作区目前没有其他成员。",
+  },
+  /**
+   * 工作区创建 —— 尚未加入任何工作区的登录用户的落地页（plan 97 T3）：
+   * 登录不会自动加入工作区，除了接受邀请，这里是进入首个工作区的唯一路径。
+   */
+  workspace: {
+    setupHeading: "创建工作区",
+    setupDescription: "你还不属于任何工作区。创建后你将成为它的所有者，之后可以邀请队友。",
+    nameLabel: "工作区名称",
+    namePlaceholder: "例如 Acme",
+    create: "创建工作区",
+    nameRequired: "请输入工作区名称。",
+    nameTooLong: "最多 {max} 个字符。",
+    createFailed: "创建工作区失败，请重试。",
   },
   settings: {
     /** (AD-591) 分组 eyebrow 标签——应用信息/状态区与配置区（双语原子）。 */

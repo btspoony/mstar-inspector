@@ -29,11 +29,15 @@ export type WorkspaceMemberRow = {
   created_at: string;
 };
 
-/** Narrow D1 face: single-row and bounded multi-row reads through one chain. */
+/** Narrow D1 face: reads plus the workspace-creation batch's statements. */
 type WorkspaceStoreStatement = {
   bind(...values: unknown[]): WorkspaceStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
   all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+  run<T = Record<string, unknown>>(): Promise<{
+    results: T[];
+    meta: { changes: number; last_row_id: number };
+  }>;
 };
 
 type WorkspaceStoreD1 = {
@@ -147,4 +151,72 @@ export async function getSoleWorkspaceAccess(
     .all<{ slug: string; role: WorkspaceRole | null }>();
   const row = rows.results.length === 1 ? rows.results[0]! : null;
   return row === null ? null : { slug: row.slug, role: row.role };
+}
+
+/**
+ * How many live workspaces this login belongs to — `0` is the "no workspace
+ * yet" state that offers creation (plan 97 T3). Soft-deleted workspaces do not
+ * count: a retired tenant is not a home.
+ */
+export async function countMembershipsForLogin(
+  db: WorkspaceStoreD1,
+  login: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM workspace_members wm
+         JOIN users u ON u.id = wm.user_id
+         JOIN workspaces w ON w.id = wm.workspace_id
+        WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL`,
+    )
+    .bind(login)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/** The creation write face: prepared statements run as ONE `batch`. */
+type WorkspaceStoreWriteD1 = {
+  prepare(query: string): WorkspaceStoreStatement;
+  batch(statements: WorkspaceStoreStatement[]): Promise<
+    { results: unknown[]; meta: { changes: number; last_row_id: number } }[]
+  >;
+};
+
+/**
+ * Create one workspace and its creator's `owner` membership as ONE `batch` — a
+ * workspace without an owner, or an owner without a workspace, must never be
+ * observable. `slug` equals `id` by contract (plan 97 T3: the id is already
+ * lowercase, so the two can never disagree on case).
+ *
+ * Returns false when the slug is already taken (the UNIQUE index is the final
+ * word), so the caller can mint another id instead of 500ing.
+ */
+export async function createWorkspace(
+  db: WorkspaceStoreWriteD1,
+  input: { id: string; name: string; userId: string; createdAt: string },
+): Promise<boolean> {
+  let inserted: { meta: { changes: number; last_row_id: number } };
+  try {
+    const results = await db.batch([
+      db
+        .prepare(
+          `INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+           VALUES (?, ?, ?, ?, ?, NULL)`,
+        )
+        .bind(input.id, input.id, input.name, input.userId, input.createdAt),
+      db
+        .prepare(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+           VALUES (?, ?, 'owner', ?)`,
+        )
+        .bind(input.id, input.userId, input.createdAt),
+    ]);
+    inserted = results[0]!;
+  } catch (err) {
+    // The batch aborts as a unit, so a taken slug leaves no orphan membership.
+    if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) return false;
+    throw err;
+  }
+  return inserted.meta.changes > 0;
 }

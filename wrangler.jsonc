@@ -8,9 +8,6 @@
   "compatibility_flags": ["nodejs_compat"],
   // Bugbot #14: keep dashboard-managed plaintext vars (REVIEW_ENABLED)
   // across automated `wrangler deploy` — without keep_vars, deploy wipes them.
-  // (ADMIN_LOGINS is no longer dashboard-managed: the Deploy workflow requires
-  // the GitHub Actions variable and injects it with `wrangler deploy --var`;
-  // the documented manual deploys pass the same `--var`.)
   "keep_vars": true,
   "kv_namespaces": [
     {
@@ -165,9 +162,9 @@
   // queue pair and container application; nothing shared with staging).
   // `keep_vars` is rejected inside an env block (wrangler 4.147.0:
   // "Unexpected fields found in env.production field"), so this Worker must
-  // not depend on dashboard-managed plaintext vars: ADMIN_LOGINS is declared
-  // below, and REVIEW_ENABLED stays unset (per-App Pause/Resume is the real
-  // control). Any future binding added above MUST be duplicated here.
+  // not depend on dashboard-managed plaintext vars: REVIEW_ENABLED stays
+  // unset (per-App Pause/Resume is the real control). Any future binding
+  // added above MUST be duplicated here.
   "env": {
     "production": {
       "name": "mstar-inspector-production",
@@ -275,14 +272,11 @@
           "custom_domain": true
         }
       ],
-      // Prod D1 starts empty, so without this the first OAuth login would
-      // self-promote to admin. WORKSPACE_TENANT_MODE is the migration 0026
-      // tenant read mode: `off` is the safe default for a manual deploy —
-      // both deploy workflows override it with `--var
-      // WORKSPACE_TENANT_MODE:$TENANT_MODE`, which is how the same artifact
-      // is replayed as `strict` (Deploy B).
+      // WORKSPACE_TENANT_MODE is the migration 0026 tenant read mode: `off`
+      // is the safe default for a manual deploy — both deploy workflows
+      // override it with `--var WORKSPACE_TENANT_MODE:$TENANT_MODE`, which is
+      // how the same artifact is replayed as `strict` (Deploy B).
       "vars": {
-        "ADMIN_LOGINS": "btspoony",
         "WORKSPACE_TENANT_MODE": "off"
       }
     }

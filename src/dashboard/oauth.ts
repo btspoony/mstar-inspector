@@ -35,7 +35,7 @@ const GITHUB_FETCH_TIMEOUT_MS = 10_000;
  * stages, reasons, and upstream statuses are not secrets.
  */
 export function logOAuthFailure(
-  stage: "state_verify" | "callback" | "token_exchange" | "user_fetch" | "bootstrap",
+  stage: "state_verify" | "callback" | "token_exchange" | "user_fetch" | "sign_in",
   reason: string,
   extra: Record<string, unknown> = {},
 ): void {
