@@ -12,10 +12,8 @@ import {
 import type { SidebarModel } from "../shell";
 import { spaClick } from "../spa-click";
 
-const NAV_ICONS = {
-  "/dashboard/apps": LayoutGrid,
-  "/dashboard/members": Users,
-} as const;
+/** Keyed by the nav page segment — a workspace-scoped href carries a slug prefix. */
+const NAV_ICONS = { apps: LayoutGrid, members: Users } as const;
 
 /**
  * Brand mark: the sidebar wordmark mark is the single source —
@@ -41,8 +39,8 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
       <SidebarHeader className="border-b border-sidebar-border p-3">
         <a
           className="flex items-center gap-2 rounded-sm px-2 py-1 text-sidebar-foreground no-underline outline-none transition-[color,background-color] duration-(--duration-base) ease-(--ease-in-out) hover:bg-sidebar-accent/40 hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring"
-          href="/dashboard"
-          onClick={(event) => spaClick("/dashboard", event)}
+          href={model.brandHref}
+          onClick={(event) => spaClick(model.brandHref, event)}
         >
           <Logo />
           <span className="truncate text-sm font-semibold tracking-tight">{model.brand}</span>
@@ -53,7 +51,7 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
           <SidebarGroupContent>
             <SidebarMenu>
               {model.items.map((item) => {
-                const Icon = NAV_ICONS[item.href as keyof typeof NAV_ICONS];
+                const Icon = NAV_ICONS[item.href.split("/").pop() as keyof typeof NAV_ICONS];
                 return (
                   <SidebarMenuItem key={item.href}>
                     {/* Active face (AD-641): low-alpha brand tint +

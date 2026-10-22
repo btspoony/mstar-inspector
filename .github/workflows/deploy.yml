@@ -4,7 +4,25 @@ on:
   push:
     branches: [main]
     paths-ignore: ['docs/**', '.mstar/**', '*.md', 'LICENSE', '.env.example']
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tenant_mode:
+        description: 'Workspace tenant read mode — steady: use vars.WORKSPACE_TENANT_MODE (routine); off: Deploy A; strict: Deploy B replay'
+        required: false
+        default: 'steady'
+        type: choice
+        options:
+          - 'steady'
+          - 'off'
+          - 'strict'
+      expected_deploy_sha:
+        description: "Deploy B (strict) only: the SHA Deploy A shipped — required for, and only accepted on, a strict dispatch (empty on a steady/off run); Deploy A's run summary prints deployed_sha=<sha>"
+        required: false
+        default: ''
+      expected_container_digest:
+        description: "Deploy B only: Deploy A's sandbox image digest (sha256:…) — compared and reported, never assumed identical"
+        required: false
+        default: ''
 
 concurrency:
   group: deploy-mstar-inspector
@@ -53,6 +71,43 @@ jobs:
         with:
           fetch-depth: 0   # Bugbot #14: digest write-back merges origin/main — shallow clone has no merge base
 
+      # The mode is a dispatch input, never a code edit: the SAME build is
+      # deployed twice on the tenant rollout (off, then strict). The input's
+      # default is `steady`, NOT `off`: a `push` to main carries no input, and a
+      # declared `off` would win over `vars.WORKSPACE_TENANT_MODE` and demote a
+      # `strict` installation on the next ordinary push without saying so.
+      # `steady` means "take the variable"; a `steady` run that still resolves
+      # to `off` warns and records `tenant_mode_change` instead. An illegal
+      # value fails HERE, before any step that can create or deploy a Worker
+      # version.
+      - name: Resolve tenant mode
+        id: tenant
+        env:
+          TENANT_MODE: ${{ inputs.tenant_mode }}
+          STEADY_TENANT_MODE: ${{ vars.WORKSPACE_TENANT_MODE }}
+        run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE"
+
+      # Replay identity (before anything is deployed). The strict replay binding
+      # lives in scripts/deploy-replay-guard.sh (executed by the behaviour
+      # tests); the checkout assertion below stays here because it is about the
+      # tree on disk, not about which SHA was requested. `replay=required` only
+      # for a dispatch that asked for `strict` — a `steady` push serving
+      # `strict` from the variable has no Deploy A to bind, and a SHA supplied
+      # on such a run is refused rather than ignored (I-000089).
+      - name: Assert replay identity
+        env:
+          REPLAY: ${{ steps.tenant.outputs.replay }}
+          RUN_SHA: ${{ github.sha }}
+          EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$HEAD_SHA" != "$RUN_SHA" ]; then
+            echo "::error::checked-out HEAD $HEAD_SHA != run SHA $RUN_SHA — the replay must execute the SHA it names"
+            exit 1
+          fi
+          bash scripts/deploy-replay-guard.sh "$REPLAY" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA" "$HEAD_SHA"
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -90,6 +145,26 @@ jobs:
           test -n "$CLOUDFLARE_ACCOUNT_ID"   # account id is a variable — must be configured
           bunx wrangler whoami    # token/账户名佐证，输出进 run log（人工核对账户）
 
+      # D1 work runs BEFORE the first `wrangler secret bulk`: that command
+      # creates and deploys a Worker version, so the migration + the abort gate
+      # must already be satisfied (they need only the API token, not the
+      # dashboard secrets).
+      - name: Apply D1 migrations (remote)
+        run: bunx wrangler d1 migrations apply mstar-inspector-db --remote
+
+      # 0027 is idempotent (INSERT…SELECT … WHERE NOT EXISTS): re-running it is
+      # the repair step for a partially-applied deploy. The gate below proves
+      # the repair actually closed every gap.
+      - name: Re-run workspace backfill (0027, idempotent)
+        run: bunx wrangler d1 execute mstar-inspector-db --remote --file migrations/0027_workspace_backfill.sql
+
+      # ABORT GATE (both modes): `strict` App reads INNER JOIN app_workspaces,
+      # so an unmapped App silently vanishes from the pipeline. Ordered before
+      # EVERY deploy-capable step — `wrangler secret bulk` publishes a version
+      # just as `wrangler deploy` does.
+      - name: Assert zero orphan Apps (pre-deploy gate)
+        run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-db
+
       - name: Write required secrets
         run: |
           : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \
@@ -108,20 +183,36 @@ jobs:
         if: env.ALERT_WEBHOOK_URL == ''
         run: "jq -n '{ALERT_WEBHOOK_URL: null}' | bunx wrangler secret bulk"
 
-      - name: Apply D1 migrations (remote)
-        run: bunx wrangler d1 migrations apply mstar-inspector-db --remote
-
       - name: Deploy Worker
+        id: deploy
         shell: bash
+        env:
+          TENANT_MODE: ${{ steps.tenant.outputs.mode }}
         run: |
           # ADMIN_LOGINS comes from the GitHub Actions variable and is injected
           # here as a plain Worker var (`--var NAME:VALUE`, wrangler 4.147.0
           # splits on the FIRST colon only, so a comma-separated login list
           # survives intact). keep_vars: true in wrangler.jsonc still preserves
           # the other dashboard-managed var (REVIEW_ENABLED).
-          bunx wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS" 2>&1 | tee deploy.log
-          grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 > version_id.txt
-          test -s version_id.txt
+          # WORKSPACE_TENANT_MODE is the dispatch input resolved above — the
+          # same SHA can be replayed with the other mode.
+          bunx wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS" --var "WORKSPACE_TENANT_MODE:$TENANT_MODE" 2>&1 | tee deploy.log
+          # The deploy command succeeded: this run's SHA is what it shipped.
+          # The summary key is derived from this step's outcome in the
+          # always-run summary step, never from the version-id capture below.
+          echo "deployed_sha=$GITHUB_SHA"
+
+      # Capture only. `wrangler deploy` already returned success, so a log-shape
+      # problem must not flip the run to "not deployed": the marker is recorded
+      # and the step is allowed to fail.
+      - name: Capture Worker version id
+        continue-on-error: true
+        run: |
+          grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 > version_id.txt || true
+          if ! test -s version_id.txt; then
+            echo "unreported" > version_id.txt
+            echo "::warning::wrangler deploy reported no Worker version id in deploy.log — recorded version_id=unreported"
+          fi
 
       - name: "Smoke: healthz"
         run: |
@@ -181,6 +272,11 @@ jobs:
           mv digest_candidates.txt image_digest.txt
           test -s image_digest.txt
 
+      # Post-deploy re-check: the artifact now serving traffic is the one the
+      # pre-deploy gate approved; the same question is asked against it.
+      - name: Assert zero orphan Apps (post-deploy)
+        run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-db
+
       # ADMIN_LOGINS is a plain Worker var injected by this workflow's
       # `wrangler deploy --var ADMIN_LOGINS:…` (login names are public
       # identity, hence a variable, not a secret). `wrangler secret list`
@@ -230,14 +326,48 @@ jobs:
         if: always()   # keep per-run evidence even when a later step fails
 
       - name: Record image digest (DOCS-01 baseline)
+        env:
+          TENANT_MODE: ${{ steps.tenant.outputs.mode }}
+          EXPECTED_DIGEST: ${{ inputs.expected_container_digest }}
         run: |
           set -euo pipefail
-          DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt)
+          DIGEST=$(cat image_digest.txt)
+          # The capture step always leaves a marker (`unreported` on a log-shape
+          # problem), so this evidence step never fails on it.
+          VERSION=$(cat version_id.txt 2>/dev/null || echo unreported)
           {
             echo "## Deploy evidence (DOCS-01 baseline)"
             echo "- Image digest: \`$DIGEST\`"
             echo "- Worker version: \`$VERSION\`"
+            echo "- Tenant mode: \`$TENANT_MODE\`"
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "- Source: \`registry.cloudflare.com\` container reference printed by this run's \`wrangler deploy\` — \`wrangler containers list --json\` reports an empty \`image\` for the 1.0 durable_object application"
           } >> "$GITHUB_STEP_SUMMARY"
+          # Replay audit, never a silent pass: the sandbox image rebuilds from a
+          # rolling apt base, so byte-identical output is not provable. A
+          # different digest is reported (and warned) with that reason.
+          if [ -z "$EXPECTED_DIGEST" ]; then
+            MATCH="unreported (no expected_container_digest input)"
+          elif [ "$DIGEST" = "$EXPECTED_DIGEST" ]; then
+            MATCH=true
+          else
+            MATCH=false
+            echo "::warning::container digest $DIGEST differs from Deploy A's $EXPECTED_DIGEST — the sandbox image rebuilds from a rolling base, so a byte-identical rebuild is not provable; the Worker code is the same SHA"
+          fi
+          echo "container_digest_match=$MATCH" >> "$GITHUB_STEP_SUMMARY"
+          echo "container_digest_match=$MATCH"
           echo "::notice::DOCS-01 baseline: digest=$DIGEST version=$VERSION (run summary + deploy-evidence artifact)"
+
+      # The ONE place the summary decides status, and the decision is made by
+      # scripts/deploy-status.sh (behaviour-tested): success emits
+      # deploy_status=deployed + deployed_sha, anything else emits
+      # deploy_status=not-deployed + requested_sha, never both. The version-id
+      # capture is deliberately not consulted for that decision.
+      - name: Record deploy status
+        if: always()
+        env:
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          bash scripts/deploy-status.sh "$DEPLOY_OUTCOME" "$RUN_SHA" "$RUN_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "version_id=$(cat version_id.txt 2>/dev/null || echo unreported)" >> "$GITHUB_STEP_SUMMARY"

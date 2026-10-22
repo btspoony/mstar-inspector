@@ -73,7 +73,7 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
-import { LOCALE_COOKIE } from "../../src/i18n";
+import { LOCALE_COOKIE, t } from "../../src/i18n";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { gh, OAUTH_CLIENT_SECRET, fakePem, pemBanner } from "../helpers/fake-secrets";
 
@@ -128,8 +128,24 @@ function seededDashboardD1(
   const insert = db.raw.prepare(
     "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, ?, ?, NULL)",
   );
+  // 0027's mapping, for the same reason: the seed writes users rows AFTER the
+  // migrations, so it must attribute them to the sole workspace itself or every
+  // strict-mode workspace route (and the manifest creation gate) would deny
+  // them as non-members. Truncated (`through`) fixtures stop before 0026 and
+  // have no such table.
+  const hasWorkspaces = db.raw
+    .query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'workspace_members'")
+    .get() as { n: number };
+  const insertMembership = hasWorkspaces.n
+    ? db.raw.prepare(
+        "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, ?, ?)",
+      )
+    : null;
   for (const [login, role] of DEFAULT_SEEDED_MEMBERS) {
-    insert.run(crypto.randomUUID(), login, role, new Date().toISOString());
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    insert.run(id, login, role, createdAt);
+    insertMembership?.run(id, role === "admin" ? "owner" : "member", createdAt);
   }
   return db;
 }
@@ -1538,6 +1554,45 @@ describe("/dashboard manifest routes", () => {
     expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
+  test("STRICT + unbound D1: the creation gate does not 403 the callback into burning the hold (I-000090)", async () => {
+    // The same resumable path, on a strict deployment whose D1 binding is lost
+    // between start and callback. Storage is a configuration failure, not a
+    // permission answer: a `canCreateApp: false` here would 403 before the
+    // state/commit and expire the hold, and the App credentials exist ONLY in
+    // that hold — recovery would mean creating a second GitHub App.
+    const env = baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, WORKSPACE_TENANT_MODE: "strict" });
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(500);
+    const body = await res.text();
+    expect(body).not.toContain(t("en", "common.error.forbiddenTitle"));
+    expect(body).toContain("Dashboard storage is not configured");
+    expect(body).toContain('href="/dashboard/manifest/confirm"');
+    const holdValue = (res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "")
+      .split(";")[0]!
+      .slice(MANIFEST_HOLD_COOKIE.length + 1);
+    expect(holdValue.length).toBeGreaterThan(0);
+    expect((await readHoldValue(holdValue, SESSION_SECRET))?.id).toBe(CONVERSION.id);
+    // Confirm resumes on the parked hold instead of expiring it.
+    const resumed = await worker.fetch(
+      dashboardRequest(
+        "/dashboard/manifest/confirm",
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}`,
+      ),
+      env,
+    );
+    expect(resumed.status).toBe(200);
+    expect(await resumed.text()).toContain('action="/dashboard/manifest/commit"');
+    expect(
+      resumed.headers.getSetCookie().some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+      "confirm must not expire the hold on an unbound store",
+    ).toBe(false);
+  });
+
   test("callback retryable 500 (github_apps missing) → hold parked, confirm gate reachable", async () => {
     // through=3: a pre-apps DB (users only — no github_apps table). The
     // guard passes (membership reads users), the inline commit fails on the
@@ -1978,6 +2033,19 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
+  test("strict: a successful commit lands on the workspace onboarding URL (the legacy App path is retired there)", async () => {
+    // 0026 seeds exactly one workspace (`default`), and the commit's createApp
+    // maps the new App into it — the same workspace the landing page names.
+    const env = commitEnv({ WORKSPACE_TENANT_MODE: "strict" });
+    const res = await doCommit({ env, holdValue: await freshHold() });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe(
+      "/dashboard/default/apps/mstar-inspector-octocat/onboarding",
+    );
+    expectHoldExpired(res);
+    expect(appRowCount(env)).toBe(1);
+  });
+
   test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row", async () => {
     // 1. Callback with a key-less env: the auto-commit fails at encryption and
     // parks the hold cookie (500, zero rows). The signed state carries the
@@ -2394,6 +2462,8 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0005_reviews_app_id.sql",
   "0016_users_login_nocase_unique.sql",
   "0023_removed_logins.sql",
+  // 0026: createApp also writes the App's workspace mapping.
+  "0026_workspaces.sql",
 ] as const;
 
 function createDashboardTestD1(
@@ -2412,6 +2482,9 @@ function createDashboardTestD1(
     }
     applyMigrationFile(db, name);
   }
+  // Tail of the batch queue: each `batch()` call chains onto it, so two
+  // concurrent batches run one after the other (D1 single-writer model).
+  let batchQueue: Promise<void> = Promise.resolve();
   return {
     raw: db,
     prepare(query: string): DashboardD1Statement {
@@ -2446,18 +2519,31 @@ function createDashboardTestD1(
      * bun:sqlite's async `db.transaction()` does not roll back (probed), so
      * the transaction is bracketed manually — the same double as
      * tests/store/helpers.ts.
+     *
+     * Batches are QUEUED, not interleaved: D1 has a single-writer model, so a
+     * second concurrent batch waits for the first transaction to commit. Two
+     * overlapping BEGIN/COMMIT brackets would instead throw "cannot start a
+     * transaction within a transaction" — a double artifact, not a
+     * production behavior (the concurrent-demotions test depends on this).
      */
     async batch(statements: DashboardD1Statement[]): Promise<DashboardD1BatchResult[]> {
-      db.exec("BEGIN");
-      try {
-        const results: DashboardD1BatchResult[] = [];
-        for (const stmt of statements) results.push(await stmt.run());
-        db.exec("COMMIT");
-        return results;
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
+      const run = batchQueue.then(async () => {
+        db.exec("BEGIN");
+        try {
+          const results: DashboardD1BatchResult[] = [];
+          for (const stmt of statements) results.push(await stmt.run());
+          db.exec("COMMIT");
+          return results;
+        } catch (error) {
+          db.exec("ROLLBACK");
+          throw error;
+        }
+      });
+      batchQueue = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
     },
   };
 }
@@ -2651,6 +2737,40 @@ describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
   });
 });
 
+describe("workspace (tenant) paths under off — T5 routing gate", () => {
+  test("workspace-shaped App paths 404 without reaching a handler", async () => {
+    const env = makeEnv();
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+    for (const path of [
+      "/dashboard/default/apps/mstar-inspector-octocat/onboarding",
+      "/dashboard/default/api/apps",
+    ]) {
+      const res = await worker.fetch(dashboardRequest(path, cookie), env);
+      expect(res.status, path).toBe(404);
+    }
+  });
+
+  test("the legacy App face keeps today's payload under off", async () => {
+    const env = makeEnv();
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-octocat",
+      githubAppId: CONVERSION.id,
+      name: CONVERSION.name,
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "octocat",
+    });
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+    const onboarding = await worker.fetch(
+      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding", cookie),
+      env,
+    );
+    expect(onboarding.status).toBe(200);
+    expect(await onboarding.text()).toContain("mstar-inspector-octocat");
+  });
+});
+
 describe("migrations/0003_dashboard_users.sql", () => {
   test("creates the users table per spec § Data model — no status column (removal = delete row)", () => {
     const db = createDashboardTestD1();
@@ -2749,6 +2869,111 @@ describe("migrations/0023_removed_logins.sql", () => {
 });
 
 describe("dashboard users store (users.ts)", () => {
+  /** `workspace_members` roles keyed by login, for order-independent asserts. */
+  function membershipRoles(db: DashboardD1 & { raw: Database }): Record<string, string> {
+    const rows = db.raw
+      .query(
+        `SELECT u.github_login AS login, wm.role AS role
+         FROM workspace_members wm JOIN users u ON u.id = wm.user_id
+         ORDER BY u.github_login`,
+      )
+      .all() as Array<{ login: string; role: string }>;
+    return Object.fromEntries(rows.map((row) => [row.login, row.role]));
+  }
+
+  /** Raw seed in the pre-0027 shape: a users row the backfill gave a membership. */
+  function seedBackfilledUser(
+    db: DashboardD1 & { raw: Database },
+    login: string,
+    role: "admin" | "member",
+  ): string {
+    const id = crypto.randomUUID();
+    db.raw
+      .prepare("INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, ?, ?, NULL)")
+      .run(id, login, role, new Date().toISOString());
+    db.raw
+      .prepare("INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, ?, ?)")
+      .run(id, role === "admin" ? "owner" : "member", new Date().toISOString());
+    return id;
+  }
+
+  test("createUser admits the new user into the sole workspace with the 0027 role mapping", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "hubot", role: "member" });
+    expect(membershipRoles(db)).toEqual({ hubot: "member", octocat: "owner" });
+  });
+
+  test("createUser with no workspace row still succeeds (zero membership rows, no error)", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM workspaces"); // no tenant root: the insert affects 0 rows
+    const user = await createUser(db, { login: "hubot", role: "member" });
+    expect((await getUserByLogin(db, "hubot"))?.id).toBe(user.id);
+    expect(membershipRoles(db)).toEqual({});
+  });
+
+  test("removing a backfilled user drops the membership row too (0026 FK no longer blocks the delete)", async () => {
+    const db = createDashboardTestD1();
+    // Two admins so the last-admin guard is not what decides this removal.
+    await createUser(db, { login: "octocat", role: "admin" });
+    expect(await deleteUserUnlessLastAdmin(db, seedBackfilledUser(db, "hubot", "member"), "octocat")).toBe(true);
+    expect(await getUserByLogin(db, "hubot")).toBeNull();
+    expect(membershipRoles(db)).toEqual({ octocat: "owner" });
+    expect(await isLoginRemoved(db, "hubot")).toBe(true);
+  });
+
+  test("the last-admin refusal leaves the membership row and writes no tombstone", async () => {
+    const db = createDashboardTestD1();
+    seedBackfilledUser(db, "octocat", "admin");
+    const soleAdmin = (await getUserByLogin(db, "octocat"))!;
+    expect(await deleteUserUnlessLastAdmin(db, soleAdmin.id, "octocat")).toBe(false);
+    expect(await getUserByLogin(db, "octocat")).not.toBeNull();
+    expect(membershipRoles(db)).toEqual({ octocat: "owner" });
+    expect(removedRows(db)).toEqual([]);
+  });
+
+  test("a role change mirrors the workspace role (admin → owner, member → member)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const member = await createUser(db, { login: "hubot", role: "member" });
+    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "admin")).toBe(true);
+    expect(membershipRoles(db)).toEqual({ hubot: "owner", octocat: "owner" });
+    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "member")).toBe(true);
+    expect(membershipRoles(db)).toEqual({ hubot: "member", octocat: "owner" });
+  });
+
+  test("a refused demotion of the sole admin mirrors nothing into the membership", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    expect(await updateUserRoleUnlessLastAdmin(db, admin.id, "member")).toBe(false);
+    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
+    expect(membershipRoles(db)).toEqual({ octocat: "owner" });
+  });
+
+  test("an invited user reads the workspace App list under strict (membership written by createUser)", async () => {
+    const env = makeEnv({ WORKSPACE_TENANT_MODE: "strict" });
+    const db = dbOf(env);
+    applyMigrationFile(db.raw, "0011_webhook_deliveries.sql"); // the list's health face
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-octocat",
+      githubAppId: CONVERSION.id,
+      name: CONVERSION.name,
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "octocat",
+    });
+    // The invite path: createUser writes the users row AND the membership.
+    await createUser(db, { login: "invitee", role: "member" });
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("invitee", null, SESSION_SECRET)}`;
+
+    const res = await worker.fetch(dashboardRequest("/dashboard/default/api/apps", cookie), env);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { apps: Array<{ slug: string }> };
+    expect(body.apps.map((app) => app.slug)).toEqual(["mstar-inspector-octocat"]);
+  });
+
   test("createUser + getUserByLogin round trip (bootstrapped admin shape)", async () => {
     const db = createDashboardTestD1();
     const created = await createUser(db, { login: "octocat", role: "admin" });
@@ -2931,6 +3156,12 @@ describe("bootstrapDashboardAccess precedence matrix (spec § AuthZ)", () => {
       expect(decision.user.invited_by).toBeNull();
     }
     expect(userCount(db)).toBe(1);
+    // The bootstrapped admin owns the sole workspace in the SAME batch —
+    // otherwise every strict-mode workspace route would 404 the operator.
+    const membership = db.raw
+      .query("SELECT workspace_id, role FROM workspace_members")
+      .all() as Array<{ workspace_id: string; role: string }>;
+    expect(membership).toEqual([{ workspace_id: "default", role: "owner" }]);
   });
 
   test("2b. ADMIN_LOGINS comparison is case-insensitive (GitHub logins are)", async () => {
@@ -3140,6 +3371,20 @@ describe("/dashboard/oauth/callback bootstrap + deny", () => {
     expect(res.headers.get("Location")).toBe("/dashboard");
     expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(true);
     expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
+  });
+
+  test("strict: the callback lands on the sole workspace's Apps page, not the dead-end root", async () => {
+    // 0026 seeds exactly one workspace (`default`) — the landing the root
+    // redirect and the login bounce also name.
+    const db = createDashboardTestD1();
+    stubGitHubIdentity("octocat");
+    const res = await oauthCallback(
+      "octocat",
+      makeDbEnv(db, { ADMIN_LOGINS: "octocat", WORKSPACE_TENANT_MODE: "strict" }),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(true);
   });
 
   test("empty-table fallback (ADMIN_LOGINS unset) → first login becomes admin", async () => {

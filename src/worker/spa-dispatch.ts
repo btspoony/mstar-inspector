@@ -20,6 +20,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
+import { strictWorkspaceAppsBase, strictWorkspaceBoot } from "../dashboard/index";
 import { SESSION_COOKIE, expireCookie, readSessionValue } from "../dashboard/session";
 import { removedPage } from "../dashboard/views";
 import { injectSpaBoot, type SpaBoot } from "../spa/boot";
@@ -114,6 +115,45 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   const auth = await readShellAuth(c);
   if (auth.kind === "deny") return auth.response;
   if (auth.kind === "redirect") return c.redirect(auth.location, 302);
+  // `/dashboard` (the root workbench) is mode-independent, but its first data
+  // read derives the base from the pathname — the retired legacy App family —
+  // so under `strict` it is a dead end. Send it to the sole workspace's Apps
+  // page (the same target the OAuth callback and the login bounce use);
+  // unresolvable keeps today's shell. `/index.html` and the login page never
+  // take this branch.
+  if (c.req.path === "/dashboard") {
+    const workspaceBase = await strictWorkspaceAppsBase(c.env);
+    if (workspaceBase !== null) return c.redirect(workspaceBase, 302);
+  }
+  // The shell's Apps/brand links need the active workspace, and the shell
+  // outlives the URL: a client-side navigation (spaClick → pushState) to the
+  // mode-independent Members page changes the pathname but not the boot, so a
+  // boot without the slug would strand that page on the legacy
+  // `/dashboard/apps` dead end under `strict`. Name the workspace in every
+  // sidebar-bearing boot — a workspace-scoped pathname already carries the slug
+  // in the URL and the boot copies that, but the boot ALSO carries the caller's
+  // workspace role as `canCreateApp` (I-000082: a plain member cannot manage the
+  // App the manifest flow creates, so the SPA offers no Create action), and one
+  // sole-workspace read answers both — so the read runs on every strict
+  // sidebar-bearing boot either way. `/index.html` is the same shell document
+  // addressed directly (the SPA router then reads the real pathname), so it
+  // takes the same boot. The login page renders no sidebar, and `/dashboard`
+  // either redirected above or has no sole workspace to name.
+  const route = matchSpaRoute(c.req.path);
+  const routeSlug = route !== null && "workspaceSlug" in route ? route.workspaceSlug : undefined;
+  const extras =
+    auth.boot.login === null || route?.page === "login"
+      ? {}
+      : await strictWorkspaceBoot(c.env, auth.boot.login);
+  // Absent fields add nothing, so `off` and a slug-less deployment keep the
+  // pre-existing boot (and its JSON key order) byte-identical.
+  const boot: SpaBoot = {
+    ...auth.boot,
+    ...(routeSlug ?? extras.workspaceSlug) === undefined
+      ? {}
+      : { workspaceSlug: routeSlug ?? extras.workspaceSlug },
+    ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
+  };
   const assetResponse = await assets.fetch(new URL("/index.html", c.req.url));
   if (c.req.method === "HEAD") {
     return new Response(null, { status: assetResponse.status });
@@ -127,7 +167,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     "cache-control": "private, no-store",
   };
   if (auth.setCookie) headers["set-cookie"] = auth.setCookie;
-  return new Response(injectSpaBoot(html, auth.boot), {
+  return new Response(injectSpaBoot(html, boot), {
     status: assetResponse.status,
     headers,
   });

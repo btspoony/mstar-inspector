@@ -4,11 +4,14 @@
  */
 import { NAV_ITEMS, t, type Locale } from "../i18n";
 import type { SpaBoot } from "./boot";
+import { workspaceSlugOf } from "./routes";
 
 export type ShellNavItem = { href: string; label: string; current: boolean };
 
 export type SidebarModel = {
   brand: string;
+  /** Same target as the Apps entry: the root is a dead end under `strict`. */
+  brandHref: string;
   navLabel: string;
   items: ShellNavItem[];
 };
@@ -40,6 +43,13 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
  * `/dashboard/apps/:slug`) — the root lands on Apps, so the brand href and
  * `/dashboard/apps` highlight the same entry. Remaining entries follow the
  * generic rule below.
+ *
+ * On a workspace-scoped page the Apps entry follows that workspace
+ * (`/dashboard/<slug>/apps`); Members is not workspace-routed, so its own href
+ * stays and the workspace comes from the boot (`SpaBoot.workspaceSlug`, the
+ * server-resolved sole workspace under `strict`) instead of the pathname. The
+ * generic prefix rule then also marks the scoped Apps entry current on its own
+ * detail pages.
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
   if (href === "/dashboard/apps") {
@@ -53,14 +63,27 @@ export function isNavCurrent(href: string, pathname: string): boolean {
 }
 
 export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel {
+  // The page's own prefix wins (it is the route the request was matched
+  // against); the boot slug covers the mode-independent pages (Members), whose
+  // pathname names no workspace. Both absent → the legacy targets.
+  const workspaceSlug = workspaceSlugOf(pathname) ?? boot.workspaceSlug ?? null;
   return {
     brand: t(boot.locale, "nav.brand"),
+    // The root workbench 404s its data reads under `strict`, so the wordmark
+    // follows the same workspace Apps target as the nav entry there.
+    brandHref: workspaceSlug === null ? "/dashboard" : `/dashboard/${workspaceSlug}/apps`,
     navLabel: t(boot.locale, "nav.primary"),
-    items: visibleNavItems(boot.role).map((item) => ({
-      href: item.href,
-      label: t(boot.locale, item.labelKey),
-      current: isNavCurrent(item.href, pathname),
-    })),
+    items: visibleNavItems(boot.role).map((item) => {
+      const href =
+        workspaceSlug !== null && item.href === "/dashboard/apps"
+          ? `/dashboard/${workspaceSlug}/apps`
+          : item.href;
+      return {
+        href,
+        label: t(boot.locale, item.labelKey),
+        current: isNavCurrent(href, pathname),
+      };
+    }),
   };
 }
 

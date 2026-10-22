@@ -16,7 +16,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
+import { AppsList, AppsView } from "../../src/spa/pages/AppsPage";
+import { withLocation } from "./browser-stub";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const appsPage = readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8");
@@ -31,14 +35,44 @@ describe("AppsPage table reinforcement (AD-581)", () => {
   });
 
   test("whole-row click and the visible detail anchor keep their channels", () => {
-    // Row-level and identity-link spaClick handlers (behavior).
-    expect(appsPage.split("onClick={(event) => spaClick(href, event)}").length - 1).toBe(3);
-    // Every row navigation targets the detail route (no /settings deep link).
-    expect(appsPage).toContain("const href = `/dashboard/apps/${app.slug}`;");
-    expect(appsPage).not.toContain("/settings`");
-    expect(appsPage).toContain('className="text-primary underline-offset-4 hover:underline"');
+    // Rendered from the real row component under the two ACTUAL pathnames: the
+    // emitted links are the page's own base, so a wrong base, a legacy target
+    // under a workspace page, or a /settings deep link fails here.
+    const render = (pathname: string): string =>
+      withLocation(pathname, () =>
+        renderToStaticMarkup(
+          createElement(AppsList, {
+            locale: "en",
+            payload: {
+              viewer: { login: "mallory", role: "member" },
+              apps: [
+                {
+                  slug: "demo",
+                  github_app_id: 1,
+                  status: "active",
+                  review_enabled: 1,
+                  created_by: "mallory",
+                  health: { latest: null, rejected24h: 0 },
+                },
+              ],
+            },
+          }),
+        ),
+      );
+    // Legacy Apps page: the historical detail path, identity link + anchor.
+    expect(
+      [...render("/dashboard/apps").matchAll(/href="([^"]+)"/g)].map((match) => match[1]),
+    ).toEqual(["/dashboard/apps/demo", "/dashboard/apps/demo"]);
+    // Workspace Apps page: the workspace copy of the same route — the legacy
+    // App family answers 404 under strict.
+    expect(
+      [...render("/dashboard/acme/apps").matchAll(/href="([^"]+)"/g)].map((match) => match[1]),
+    ).toEqual(["/dashboard/acme/apps/demo", "/dashboard/acme/apps/demo"]);
+    const scoped = render("/dashboard/acme/apps");
+    expect(scoped).toContain('class="text-primary underline-offset-4 hover:underline"');
+    expect(scoped).not.toContain("/settings");
     // Row action copy is detail semantics in both locales.
-    expect(appsPage).toContain('{t(locale, "apps.detail")}');
+    expect(scoped).toContain(">Detail<");
     expect(t("en", "apps.detail")).toBe("Detail");
     expect(t("zh_CN", "apps.detail")).toBe("详情");
   });
@@ -163,5 +197,52 @@ describe("empty-state copy (A6)", () => {
     // t() fails visible (returns the key) — the dictionary really dropped them.
     expect(isDictionaryKey("apps.empty")).toBe(false);
     expect(isDictionaryKey("members.empty")).toBe(false);
+  });
+});
+
+describe("Create action is a boot capability (I-000082)", () => {
+  const APPS = [
+    {
+      slug: "demo",
+      github_app_id: 1,
+      status: "active" as const,
+      review_enabled: 1,
+      created_by: "mallory",
+      health: { latest: null, rejected24h: 0 },
+    },
+  ];
+
+  /** The loaded Apps face, rendered from the real component. */
+  function renderFace(canCreate: boolean, apps: number): string {
+    return renderToStaticMarkup(
+      createElement(AppsView, {
+        locale: "en",
+        state: "ok",
+        payload: { viewer: { login: "mallory", role: "member" }, apps: APPS.slice(0, apps) },
+        canCreate,
+        onRetry: () => {},
+      }),
+    );
+  }
+
+  test("a manager sees the Create form in the header and, when empty, in the guidance", () => {
+    // Header slot (a non-empty list) and the empty-state action are ONE form
+    // component — never both at once.
+    expect(renderFace(true, 1)).toContain('action="/dashboard/manifest/start"');
+    const empty = renderFace(true, 0);
+    expect(empty).toContain('action="/dashboard/manifest/start"');
+    expect(empty.match(/action="\/dashboard\/manifest\/start"/g)?.length).toBe(1);
+  });
+
+  test("a member gets no Create action on either face — the flow would 403 (I-000082)", () => {
+    for (const apps of [0, 1]) {
+      const html = renderFace(false, apps);
+      expect(html, `apps=${apps}`).not.toContain("/dashboard/manifest/start");
+      expect(html, `apps=${apps}`).not.toContain(t("en", "apps.create"));
+      // The guidance itself stays: the page is not blank, just actionless.
+      expect(html, `apps=${apps}`).toContain(t("en", "apps.heading"));
+    }
+    // The empty face still explains the state without offering a dead end.
+    expect(renderFace(false, 0)).toContain(t("en", "apps.emptyTitle"));
   });
 });

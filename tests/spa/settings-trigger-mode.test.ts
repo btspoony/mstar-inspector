@@ -15,7 +15,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { REVIEW_TRIGGER_MODES as STORE_REVIEW_TRIGGER_MODES } from "../../src/dashboard/apps-store";
 import { REVIEW_TRIGGER_MODES, isReviewTriggerMode, type ReviewTriggerMode } from "../../src/spa/pages/data";
-import { ReviewTriggerControl, botMention } from "../../src/spa/pages/SettingsPage";
+import {
+  ReviewTriggerControl,
+  botMention,
+  submitTriggerMode,
+} from "../../src/spa/pages/SettingsPage";
 
 const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
 
@@ -130,27 +134,69 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
   });
 });
 
-describe("save flow + 400 fallback contract (source pins)", () => {
-  test("the control posts the verbatim mode to the pinned T1 route through the shared pinned-ops family", () => {
-    // SettingsView wires the save through runPinnedWithBody — the family
-    // whose 400 face resolves through settingsErrorMessage (key-first,
-    // never-blank fallback; count pinned at 2 by settings-error-keys.test.ts
-    // and unchanged here).
-    expect(settingsPage).toContain(
-      "runPinnedWithBody(`/dashboard/apps/${app.slug}/review-trigger-mode`, { mode })",
-    );
-    // OpsCard receives the saver and renders the control (beside the review
-    // toggle, inside the ops card — before the pause/resume actions row).
-    const opsBody = settingsPage.slice(
-      settingsPage.indexOf("function OpsCard"),
-      settingsPage.indexOf("The App's exact bot-mention string"),
-    );
-    expect(opsBody).toContain("onTriggerMode={onTriggerMode}");
-    expect(opsBody).toContain("<ReviewTriggerControl");
-    expect(opsBody).toContain("mode={app.review_trigger_mode}");
-    const controlPos = opsBody.indexOf("<ReviewTriggerControl");
-    expect(controlPos).toBeGreaterThan(-1);
-    expect(opsBody.indexOf('onPending({ kind: "resume" })')).toBeGreaterThan(controlPos);
+describe("save flow + 400 fallback contract", () => {
+  test("the save handler POSTs the verbatim mode to the page's own App family", async () => {
+    // The production save path is EXECUTED end to end — request derivation,
+    // transport, and outcome resolution — with only the page's location
+    // supplied. The test never names an App path: `submitTriggerMode` derives
+    // it from the page base, exactly as the operator's click does.
+    const calls: Array<{ url: string; body: string }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      calls.push({ url: String(input), body: String(init?.body ?? "") });
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    const scope = globalThis as { location?: { pathname: string } };
+    let reloads = 0;
+    const reload = async (): Promise<boolean> => {
+      reloads += 1;
+      return true;
+    };
+    try {
+      for (const [pathname, expected] of [
+        ["/dashboard/apps/acme-app", "/dashboard/apps/acme-app/review-trigger-mode"],
+        ["/dashboard/acme/apps/acme-app", "/dashboard/acme/apps/acme-app/review-trigger-mode"],
+      ] as const) {
+        calls.length = 0;
+        reloads = 0;
+        scope.location = { pathname };
+        const outcome = await submitTriggerMode("acme-app", "manual", "en", reload);
+        // ONE wire call to the page's own App family — the legacy family 404s
+        // under a workspace page — carrying the verbatim mode.
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.url).toBe(expected);
+        expect(calls[0]!.body).toBe("mode=manual");
+        // Success resolves through the shared resolver and lands the reload.
+        expect(outcome).toEqual({ kind: "success", message: t("en", "settings.changesSaved") });
+        expect(reloads).toBe(1);
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+      delete scope.location;
+    }
+  });
+
+  test("a failed save reports the save-failed copy and skips the reload", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError("network down");
+    }) as unknown as typeof fetch;
+    const scope = globalThis as { location?: { pathname: string } };
+    scope.location = { pathname: "/dashboard/apps/acme-app" };
+    let reloads = 0;
+    try {
+      const outcome = await submitTriggerMode("acme-app", "manual", "en", async () => {
+        reloads += 1;
+        return true;
+      });
+      // A transport failure is the save-failed copy, never a blank notice —
+      // and there is nothing new to read, so the reload is skipped.
+      expect(outcome).toEqual({ kind: "error", message: t("en", "common.saveFailed") });
+      expect(reloads).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete scope.location;
+    }
   });
 
   test("the deselect emit and a same-value click never reach the wire; the selection mirrors the payload", () => {

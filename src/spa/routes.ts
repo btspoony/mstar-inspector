@@ -1,33 +1,73 @@
 /**
  * Enumerated SPA pages (the `SPA_PAGES` interface; apps route,
- * apps-default root, app-detail two-tab detail page).
+ * apps-default root, app-detail two-tab detail page, and their
+ * workspace-scoped twins).
  *
  * `/dashboard` and `/dashboard/apps` are one root-routing rule: both render
  * the Apps workbench (the insights home at the root is retired, as is the
- * Worker 301 alias). History fallback is this matcher, not
- * wrangler `not_found_handling`.
+ * Worker 301 alias). Under `strict` the same pages live under the workspace
+ * prefix (`/dashboard/<workspaceSlug>/apps…`) — the Worker's tenant gate
+ * admits those paths and this matcher serves their shell. History fallback is
+ * this matcher, not wrangler `not_found_handling`.
  */
 export const SPA_PAGES = ["apps", "members", "login", "app-detail"] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
 
+/**
+ * `workspaceSlug` is present exactly on a workspace-scoped route: the legacy
+ * App paths carry no prefix and therefore no field.
+ */
 export type SpaRoute =
-  | { page: "apps"; pathname: "/dashboard" | "/dashboard/apps" }
+  | { page: "apps"; pathname: string; workspaceSlug?: string }
   | { page: "members"; pathname: "/dashboard/members" }
   | { page: "login"; pathname: "/dashboard/login" }
-  | { page: "app-detail"; pathname: string; slug: string };
+  | { page: "app-detail"; pathname: string; slug: string; workspaceSlug?: string };
+
+/**
+ * First path segments that can never name a workspace (today's routes). ONE
+ * set for the SPA matcher and the Worker's route-family gate
+ * (`src/dashboard/index.ts`), so a reserved word can never be captured as a
+ * workspace on either side of the bundle boundary.
+ */
+export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
+  "apps",
+  "api",
+  "oauth",
+  "members",
+  "login",
+  "logout",
+  "manifest",
+  "locale",
+  "healthz",
+]);
+
+/**
+ * The non-reserved workspace slug a `/dashboard/<slug>/apps…` path is scoped
+ * to, otherwise null. The ONE workspace-path grammar: the route matcher, the
+ * API-base derivation (`workspace-base.ts`) and the sidebar links all read it,
+ * so a page's prefix cannot disagree with its matched route.
+ */
+export function workspaceSlugOf(pathname: string): string | null {
+  const slug = /^\/dashboard\/([^/]+)\/apps(?:\/|$)/.exec(pathname)?.[1];
+  return slug !== undefined && !RESERVED_WORKSPACE_SLUGS.has(slug) ? slug : null;
+}
+
+const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/settings)?$/;
+const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
+const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/settings)?$/;
 
 /**
  * ONE matcher entry / page id serves both detail paths: the bare
  * `/dashboard/apps/:slug` (default tab 应用设置) and the legacy
  * `/dashboard/apps/:slug/settings` — a PERMANENT settings-tab deep link
  * (the settings POST family's HTML-nav 302 targets are pinned to it,
- * spec § IA), not a compat shim. The active tab is query-derived
- * (`?tab=insights`), so both paths land on the same page and the default
+ * spec § IA), not a compat shim. The workspace twin
+ * (`/dashboard/<workspaceSlug>/apps/:slug`, `/settings` likewise) is the same
+ * page under that workspace's route family. The active tab is query-derived
+ * (`?tab=insights`), so every path lands on the same page and the default
  * settings tab.
  */
-const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/settings)?$/;
-
 export function matchSpaRoute(pathname: string): SpaRoute | null {
   switch (pathname) {
     case "/dashboard":
@@ -37,12 +77,17 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
       return { page: "members", pathname };
     case "/dashboard/login":
       return { page: "login", pathname };
-    default: {
-      const slug = APP_DETAIL_PATH.exec(pathname)?.[1];
-      if (!slug) return null;
-      return { page: "app-detail", pathname, slug };
-    }
   }
+  const workspaceSlug = workspaceSlugOf(pathname);
+  if (workspaceSlug !== null) {
+    if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceSlug };
+    const appSlug = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
+    if (appSlug) return { page: "app-detail", pathname, slug: appSlug, workspaceSlug };
+    return null;
+  }
+  const slug = APP_DETAIL_PATH.exec(pathname)?.[1];
+  if (!slug) return null;
+  return { page: "app-detail", pathname, slug };
 }
 
 /**

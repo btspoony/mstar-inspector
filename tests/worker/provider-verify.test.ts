@@ -89,6 +89,8 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
     "0009_app_model_roles.sql",
     "0011_webhook_deliveries.sql",
     "0012_custom_providers_and_key_updated_at.sql",
+    // 0026: createApp's atomic app_workspaces mapping.
+    "0026_workspaces.sql",
   ]) {
     applyMigration(db, name);
   }

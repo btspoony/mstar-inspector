@@ -157,6 +157,7 @@
  *     app_id is a caller bug, never a silent no-op.
  */
 import { createSecretbox } from "./secretbox";
+import { createAppsStore } from "./apps-store";
 import { sandboxImageHostIds } from "../contracts/sandbox-images";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
 
@@ -1265,20 +1266,6 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * The App's stored sandbox image id (migration 0018) — the
-   * custom-provider collision gate resolves the SELECTED image's capability
-   * hosts through it. Unknown app → null (no host ids to refuse with; the
-   * write itself fails the FK, the fail-loud convention).
-   */
-  async function readSandboxImageId(appId: string): Promise<string | null> {
-    const row = await db
-      .prepare(`SELECT sandbox_image_id FROM github_apps WHERE id = ?`)
-      .bind(appId)
-      .first<{ sandbox_image_id: string }>();
-    return row?.sandbox_image_id ?? null;
-  }
-
-  /**
    * The App's default chain value (spec §4.4): the 'default' row of
    * app_model_chains, or null when no default row exists (absent = unset =
    * that App's reviews fail closed — AL-24-5).
@@ -1831,7 +1818,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       // capability host ids (omp: ark-plan) — resolved here so the backstop
       // stays self-contained for direct callers (one read per declaration
       // write, the same posture as the cap-count SELECT below).
-      const imageId = await readSandboxImageId(appId);
+      const imageId = await createAppsStore(db).getSandboxImageId(appId);
       assertCustomProvider(decl, plainKey, sandboxImageHostIds(imageId ?? ""));
       // The declaration AS STORED plus its pool, read before the write decides
       // anything: the stored endpoint is what every retained credential was

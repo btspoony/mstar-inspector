@@ -44,6 +44,8 @@ export const zhCN: Dictionary = {
       removedBody: "你的控制台访问已被移除。请让管理员重新邀请 {login}。",
       forbiddenTitle: "禁止访问",
       forbiddenBody: "此页面仅限控制台管理员访问。你当前以 {login} 登录 — 返回 /dashboard。",
+      notFoundTitle: "页面不存在",
+      notFoundBody: "此页面不存在，或当前工作空间无权访问。返回 /dashboard。",
       signInErrorTitle: "登录错误",
       signInErrorBody: "登录失败。{message} 未创建会话。请返回 /dashboard/login 重试。",
     },

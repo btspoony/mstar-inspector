@@ -117,11 +117,12 @@ production path itself, both ahead of its first mutating command:
 `GITHUB_TOKEN` does **not** create a `release: published` run — GitHub
 suppresses workflow events caused by `GITHUB_TOKEN` (`workflow_dispatch` and
 `repository_dispatch` are the exempt trigger types) — so the Release workflow
-runs `gh workflow run deploy-prod.yml --ref <tag>` itself, and the dispatched
-run's head SHA is the tag's commit. That step is fail-fast **after** the tag and
-Release are created, and it needs `actions: write` on the release job; the
-dispatched run is then approved like any other production run
-(§ Production approval gate and the tag gate). The
+runs `gh workflow run deploy-prod.yml --ref <tag>` itself (no `-f` fields: an
+ordinary release takes the workflow's non-deciding `steady` tenant mode, §
+Rollout), and the dispatched run's head SHA is the tag's commit. That step is
+fail-fast **after** the tag and Release are created, and it needs `actions:
+write` on the release job; the dispatched run is then approved like any other
+production run (§ Production approval gate and the tag gate). The
 `release: published` trigger stays declared and **does** deploy when a human
 publishes a non-prerelease Release in the UI (its job-level guard requires the
 Release to be non-prerelease **and** its tag to carry no `-`). The release chain,
@@ -372,7 +373,12 @@ plan, and both rejected for now in favour of the applied approval gate.
    and validate it against the checked-out version surfaces (pre-mutation,
    § Production environment) → apply the prod D1
    migrations → `wrangler deploy --env production` → write the `production`
-   secrets → re-read the live Worker version → smoke.** Deploying *before* the
+   secrets → **`wrangler deploy --env production --var
+   WORKSPACE_TENANT_MODE:<mode>`** (the version that actually serves: a
+   `secret bulk` republishes the config default, so the LAST version-creating
+   command must be this one) → re-read the live Worker version → smoke.** The
+   run summary reports the mode that final deploy bound, not the dispatch
+   input. Deploying *before* the
    secrets is deliberate: the
    earlier order wrote them first, and on a first bring-up that made wrangler
    materialise a **bound-less draft Worker** (`mstar-inspector-production`
@@ -496,6 +502,165 @@ restores by hand.
   (previous bullet). Rotate explicitly when the rollback is
   security-motivated.
 
+## Workspace tenant mode (`WORKSPACE_TENANT_MODE`)
+
+One Worker var switches both the dashboard route family and the App read face
+(migrations `0026` + `0027`):
+
+| Value | Dashboard routes | App reads |
+|---|---|---|
+| `off` (default) | legacy App paths (`/dashboard/apps…`, `/dashboard/api/apps…`) serve; workspace paths (`/dashboard/<slug>/apps…`) answer 404 | `github_apps` only — the pre-workspace behavior, byte-identical |
+| `strict` | legacy App paths answer 404; `/dashboard/<slug>/apps…` serves that workspace | every execution-facing App read INNER JOINs `app_workspaces`, so an unmapped App is invisible to the pipeline |
+
+Unset / empty reads as `off`. **Any other value fails loud**: the dashboard
+answers `500` without serving a route, and the queue consumer throws before it
+reads a message — a typo can never silently pick a face. The runtime reader is
+`tenantModeOf` in [`src/worker/tenant-mode.ts`](../src/worker/tenant-mode.ts),
+and both workflows reject an illegal `tenant_mode` input before any
+deploy-capable step.
+
+### Route move
+
+| Before (`off`) | After (`strict`) |
+|---|---|
+| `/dashboard/apps` | `/dashboard/<slug>/apps` |
+| `/dashboard/apps/<app>/settings` | `/dashboard/<slug>/apps/<app>/settings` |
+| `/dashboard/api/apps` | `/dashboard/<slug>/api/apps` |
+| `/dashboard/api/apps/<app>/…` | `/dashboard/<slug>/api/apps/<app>/…` |
+
+The reserved first segments (`apps`, `api`, `oauth`, `members`, `login`,
+`logout`, `manifest`, `locale`, `healthz`) never name a workspace, and the
+mode-independent routes (login, logout, OAuth callback, members, manifest,
+locale, healthz) answer in both modes.
+
+### Rollout: two deploys of the same tag/SHA
+
+**Steady state is a repository/environment variable, not the event.** Both
+workflows resolve the mode with `scripts/resolve-tenant-mode.sh`, in this
+precedence:
+
+1. an **explicit** `tenant_mode` dispatch input — `off` or `strict` (an operator
+   deciding a specific run),
+2. else `vars.WORKSPACE_TENANT_MODE` — the steady-state value for routine runs,
+   which is what a `steady` input (and no input at all) means,
+3. else `off` — the variable is unset or empty on a routine run.
+
+The input's default is **`steady`**, meaning exactly that second rule: *take the
+variable*. A dispatch nobody filled in therefore still follows the installation
+instead of deciding for it. This is the release path — the Release workflow runs
+`gh workflow run deploy-prod.yml --ref <tag>` with **no fields**, so an
+ordinary release carries the `steady` default — and staging's `push` to `main`
+carries no dispatch input at all. Before this rule a declared `off` default won
+over the variable on every such run: the first ordinary push/release after
+Deploy B silently redeployed a `strict` installation as `off` (legacy routes
+back, workspace routes 404). **A strict installation MUST set
+`WORKSPACE_TENANT_MODE=strict`** as a repository (or `staging` /`production`
+environment) variable *in the same change that runs Deploy B* — that variable,
+not the Deploy B dispatch, is what keeps the installation strict. A `steady`
+run that resolves to `off` never observed the live mode, so it cannot claim a
+strict→off change: it emits a `::warning::` and records
+`tenant_mode_change=unproven->off` in the run summary. `tenant_mode_change=none`
+means no demotion is being reported (an explicit dispatch input, or a non-`off`
+resolution).
+
+The same resolver separates **steady state** from a **replay**: it reports
+`replay=required` only for a dispatch whose `tenant_mode` input is explicitly
+`strict`, and `replay=none` otherwise (including `steady` resolving to `strict`).
+Only a replay binds `expected_deploy_sha`, and the guard **refuses** a run that
+supplies it without that binding; see *Replay identity* below.
+
+Both workflows take a `tenant_mode` dispatch input (`steady` default — use the
+variable; `off` / `strict` explicit) and pass the resolved mode as `wrangler
+deploy --var WORKSPACE_TENANT_MODE:<mode>` — production gained that `--var` for
+this rollout, and `env.production` declares `off` as the manual-deploy default.
+In both workflows that deploy is the LAST version-creating command: a
+`wrangler secret bulk` republishes the config default and cannot carry `--var`
+(a named environment rejects `keep_vars`), so the mode that serves is the one
+that last deploy bound, and the run summary reports that value.
+
+1. **Deploy A — `off`.** The normal deploy of the new build: Apps keep serving
+   on their legacy paths, workspace paths 404.
+2. **Deploy B — `strict` on the same tag/SHA.** Replay the SAME ref:
+   `gh workflow run deploy-prod.yml --ref <tag> -f tenant_mode=strict
+   -f expected_deploy_sha=<deploy A sha>`
+   (staging: dispatch `deploy.yml` on `main` for the same commit, same flags).
+   The workspace pages and the INNER-JOIN reads go live; **the Worker code is
+   the same SHA in both runs**. Set `vars.WORKSPACE_TENANT_MODE=strict` in the
+   same window: the dispatch only decides THIS run, the variable decides every
+   routine run after it.
+3. **Rollback** is Deploy A again — the same tag with `tenant_mode=off`, and
+   `vars.WORKSPACE_TENANT_MODE` back to `off` (otherwise the next routine
+   release redeploys `strict`); the read face and the routes revert together.
+
+**Replay identity is asserted, not assumed — for the replay, and only for it.**
+A *strict replay* is a `workflow_dispatch` whose `tenant_mode` input is
+`strict`: that run IS Deploy B and must name the SHA Deploy A shipped. The
+resolver reports `replay=required` for exactly that case, and the run aborts
+with `strict replay requires the SHA deployed by Deploy A` when
+`expected_deploy_sha` is empty. Deploy A's run summary is the source of that
+value — it prints `deployed_sha=<sha>`. The run aborts unless `github.sha`
+equals the input **and** the run's ref resolves to the same SHA (staging
+asserts the checked-out `HEAD`; production asserts the release tag through
+`git rev-parse refs/tags/<tag>^{commit}`), so a tag or branch that moved
+between A and B cannot pass by agreeing with itself.
+
+A **steady-state** run — a `push` to `main`, a `release: published` event, or
+the Release workflow's no-field `deploy-prod.yml` dispatch (all of which carry
+`steady` or no input) — resolving `strict` from `vars.WORKSPACE_TENANT_MODE` is
+*not* a replay: there is no Deploy A to bind, so it reports `replay=none`,
+deploys `strict`, and still passes every ref identity assertion above. It never
+fabricates an `expected_deploy_sha` — the binding it would claim was never
+proven. A rollback dispatch names `tenant_mode=off` explicitly; `steady` with
+the variable back at `off` is the same deploy.
+
+**A supplied `expected_deploy_sha` on a non-replay run aborts the run.** The
+input means "bind Deploy A", so a run that carries it without enforcing the
+binding would deploy looking exactly like a completed Deploy B while the
+moved-tag binding was skipped — and a `steady` dispatch can still *serve*
+`strict` from the variable, which is how the two become indistinguishable. The
+guard exits 1 with `expected_deploy_sha <sha> was supplied but this run is not a
+strict replay` and names the fix: re-dispatch with `-f tenant_mode=strict -f
+expected_deploy_sha=<sha>`. Leaving the SHA empty is the only way to ask for a
+plain steady-state deploy.
+
+**The container image is rebuilt, not byte-identical.** Both images are built
+from a rolling apt base, so a byte-identical rebuild is not provable. Pass
+Deploy A's digest as `-f expected_container_digest=sha256:…` and the run
+records `container_digest_match=true|false` in its summary; a mismatch is a
+**warning** naming the rolling-base reason, never a silent pass. With the
+input omitted, the summary says `unreported`.
+
+Every run records `deployed_sha=<sha>` **only when every step that creates a
+Worker version succeeded**; a failed or skipped deploy records
+`deploy_status=not-deployed` plus the `requested_sha` instead, so the summary
+never claims a deploy that did not happen. Production has two such steps — the
+bindings deploy (`steps.deploy`) and the mode-bearing serving deploy
+(`steps.serving`) — so a run whose first deploy went green but whose serving
+deploy failed reports `not-deployed`: the SHA is not offered as a replay
+source. The Worker version id is captured in a separate, non-fatal step
+(`version_id=unreported` on a log-shape problem), so a capture failure can never
+contradict a successful deploy.
+
+### Gate ordering (zero-orphan abort gate)
+
+Each deploy run performs, in order:
+
+1. `wrangler d1 migrations apply` — forward-only; applies `0026`/`0027` on a
+   fresh database.
+2. **Re-run** [`migrations/0027_workspace_backfill.sql`](../migrations/0027_workspace_backfill.sql)
+   — both statements are `INSERT … SELECT … WHERE NOT EXISTS`, so a re-run
+   repairs a partially applied deploy and inserts nothing that exists.
+3. `bun scripts/assert-tenant-attribution.ts` —
+   `SELECT COUNT(*) … WHERE w.app_id IS NULL` through
+   `wrangler d1 execute --remote --json`. **A non-zero count exits the run
+   before every deploy-capable step** (both modes: the gap is latent under
+   `off` and invisible under `strict`).
+4. Every step that publishes a Worker version — `wrangler secret bulk` (it
+   creates and deploys a version on its own) and `wrangler deploy`. On staging
+   the D1 work therefore sits **before** the secret writes, not after them.
+5. Healthz / cron / digest smokes, then the same attribution gate again, against
+   the artifact now serving.
+
 ## Prerequisites
 
 ### Cloudflare resources (one-time)
@@ -537,7 +702,7 @@ exist before the first deploy:
     chain and re-verifying BOTH an existing worker and a fresh one — explicitly out of scope for this
     change, not a casual follow-up.
 
-### D1 migrations (0001–0025, forward-only)
+### D1 migrations (forward-only)
 
 The apply is **preceded by a pre-apply snapshot** — the restore point
 every `0024`/`0025` rollback refers to (§ Rollback). `0024` rebuilds
@@ -665,6 +830,16 @@ variable / secret per the CI-credentials note below). Repository-level
 secrets keep working as the fallback for any name not set at the environment
 level.
 
+`WORKSPACE_TENANT_MODE` is a **GitHub Actions variable, not a Worker secret**:
+it is the steady-state tenant mode both workflows read on every run that does
+not pass an explicit `tenant_mode` input — a `push` to `main`, a
+`release: published` event, and an ordinary release's no-field
+`deploy-prod.yml` dispatch (§ Rollout). Set it to `strict` for a strict
+installation, `off` (or leave unset) otherwise. It is read as
+`vars.WORKSPACE_TENANT_MODE`, never injected by `secret bulk` — the deployed
+value still rides `wrangler deploy --var` so the same SHA can be replayed with
+the other mode.
+
 The four required secrets are asserted non-empty in the workflow **before the
 first mutating command** (a pure preflight beside the environment-marker
 assertion — a missing value reds the run before production is migrated or
@@ -682,7 +857,8 @@ version, so the `Current Version ID` line `wrangler deploy` prints names a
 **predecessor** of the version actually serving traffic, and a `version_id.txt`
 taken from that log alone would misreport the live version in the
 `deploy-evidence` artifact and the Release notes. After the **last** mutating
-step (the optional `ALERT_WEBHOOK_URL` write / delete) the workflow therefore
+step (the mode-binding `wrangler deploy` that follows the optional
+`ALERT_WEBHOOK_URL` write / delete) the workflow therefore
 re-reads the live deployment with
 `bunx wrangler deployments list --env production --json`, selects the **newest**
 deployment by `created_on` — the CLI lists deployments **ascending**, so index 0

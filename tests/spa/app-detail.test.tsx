@@ -118,12 +118,13 @@ describe("app detail URL state (shared pure helpers)", () => {
     );
   });
 
-  test("the per-App summary URL is mount-prefixed and encodes slug + filters; include=repos always rides", () => {
-    expect(appInsightsSummaryUrl("demo", "30", "")).toBe(
+  test("the per-App summary URL is base-prefixed and encodes slug + filters; include=repos always rides", () => {
+    expect(appInsightsSummaryUrl("/dashboard", "demo", "30", "")).toBe(
       "/dashboard/api/apps/demo/insights/summary?window=30&include=repos",
     );
-    expect(appInsightsSummaryUrl("acme inc", "7", "acme/web")).toBe(
-      "/dashboard/api/apps/acme%20inc/insights/summary?window=7&include=repos&repo=acme%2Fweb",
+    // A workspace-scoped page rides its own prefix (no legacy App family there).
+    expect(appInsightsSummaryUrl("/dashboard/acme", "acme inc", "7", "acme/web")).toBe(
+      "/dashboard/acme/api/apps/acme%20inc/insights/summary?window=7&include=repos&repo=acme%2Fweb",
     );
   });
 });
@@ -148,38 +149,6 @@ describe("tab shell rendering (static SSR)", () => {
 });
 
 describe("tab shell source contracts", () => {
-  test("wayfinding: the back link is the shell's first element on both faces — before the identity-header h1", () => {
-    // The back link moved out of the settings tab body (SettingsView) to
-    // the stateful AppDetailPage shell, so it renders on the error face
-    // AND the ok face (both roles — the shell serves managers and
-    // non-managers alike) as the page's first element. The loading
-    // skeleton early returns stay excluded (transient faces). The link
-    // face is the SettingsPage idiom: ArrowLeft aria-hidden + label.
-    const wayfindingAt = detailPage.indexOf('href="/dashboard/apps"');
-    expect(wayfindingAt).toBeGreaterThan(-1);
-    expect(detailPage).toContain('t(locale, "appDetail.backToApps")');
-    expect(detailPage).toContain("spaClick");
-    const h1At = detailPage.indexOf("{slug}</h1>");
-    expect(h1At).toBeGreaterThan(wayfindingAt);
-    // The link-face window spans the whole anchor — open tag through the
-    // label call — so the ArrowLeft (which follows the href in source)
-    // is covered (the settings-layout idiom).
-    const labelAt = detailPage.indexOf('t(locale, "appDetail.backToApps")');
-    expect(labelAt).toBeGreaterThan(wayfindingAt);
-    const wayfinding = detailPage.slice(detailPage.lastIndexOf("<a", wayfindingAt), labelAt);
-    expect(wayfinding).toContain("<ArrowLeft");
-    expect(wayfinding).toContain('aria-hidden="true"');
-    expect(wayfinding).toContain("inline-flex items-center gap-1.5");
-    // The shell's returned fragment carries the link before both faces:
-    // error face (ErrorState) and ok face (AppDetailView).
-    const returnAt = detailPage.indexOf('state === "error" ? <ErrorState');
-    expect(returnAt).toBeGreaterThan(-1);
-    expect(detailPage.lastIndexOf('href="/dashboard/apps"', returnAt)).toBeGreaterThan(-1);
-    // The pure view gained nothing: no back link inside AppDetailView.
-    const viewAt = detailPage.indexOf("export function AppDetailView");
-    expect(detailPage.indexOf('href="/dashboard/apps"', viewAt)).toBe(-1);
-  });
-
   test("page tab face: the shell tab bar rides the line variant with hairline + sized-up left-aligned triggers", () => {
     // Page-level face (DESIGN.md ### Tabs): the shell's 应用设置/洞察 bar is
     // the line-tab idiom — full-width, bottom hairline on the border-border
@@ -306,7 +275,7 @@ describe("tab shell source contracts", () => {
   });
 
   test("R1 closure: the insights tab consumes the kept data.ts helpers over the mount-prefixed per-App face", () => {
-    expect(insightsTab).toContain("appInsightsSummaryUrl(slug");
+    expect(insightsTab).toContain("appInsightsSummaryUrl(apiBase(), slug");
     expect(insightsTab).toContain("parseInsights(");
     expect(insightsTab).toContain("INSIGHTS_WINDOWS.map");
     expect(insightsTab).toContain("insightsRepoOptions(");

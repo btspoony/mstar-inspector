@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
 import { matchSpaRoute } from "../../src/spa/routes";
+import { apiBase } from "../../src/spa/workspace-base";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
@@ -66,6 +67,8 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0012_custom_providers_and_key_updated_at.sql",
     "0022_app_trigger_mode.sql",
     "0023_removed_logins.sql",
+    // 0026: createApp also writes the App's workspace mapping.
+    "0026_workspaces.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -572,7 +575,11 @@ describe("Apps list → App settings wayfinding", () => {
   test("each App row carries the /dashboard/apps/:slug detail link, and that route resolves as App detail", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
     // The link target is the detail route (App detail IA).
-    expect(source).toContain("const href = `/dashboard/apps/${app.slug}`;");
+    expect(source).toContain("const href = `${apiBase()}/apps/${app.slug}`;");
+    // Legacy navigation keeps the historical detail path: the base is empty
+    // of a workspace segment when the current page is not workspace-scoped.
+    expect(apiBase("/dashboard/apps")).toBe("/dashboard");
+    expect(apiBase("/dashboard/acme/apps")).toBe("/dashboard/acme");
     expect(source).not.toContain("/dashboard/apps/${app.slug}/settings");
     // The visible per-row destination label comes from the dictionary —
     // detail semantics, and the settings key is retired.
@@ -615,15 +622,17 @@ describe("Apps list → App settings wayfinding", () => {
     // component is reused as the empty-state action while the header yields
     // its slot (one form instance on the page, never duplicated).
     expect(source).toContain('action="/dashboard/manifest/start"');
-    expect(source).toContain("{!appsEmpty ? <CreateAppButton locale={locale} /> : null}");
-    expect(source).toContain('action={<CreateAppButton locale={locale} />}');
+    expect(source).toContain("{!appsEmpty ? createAction : null}");
+    expect(source).toContain("action={createAction}");
   });
 
   test("loading and load-failure feedback ride the state trio", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
     expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
-    // Retry is wired to the page's own load function.
-    expect(source).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
+    // Retry is wired to the page's own load function (the loaded face takes it
+    // as a callback so its markup is renderable in tests).
+    expect(source).toContain("onRetry={() => void load()}");
+    expect(source).toContain("<ErrorState locale={locale} onRetry={onRetry} />");
     // The old text-notice faces are retired from this page.
     expect(source).not.toContain("LoadingNotice");
     expect(source).not.toContain("LoadFailedNotice");

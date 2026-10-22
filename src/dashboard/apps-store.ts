@@ -87,6 +87,7 @@
  *     references are caller-visible errors, never swallowed.
  */
 import { getSandboxImage } from "../contracts/sandbox-images";
+import type { TenantMode } from "../worker/tenant-mode";
 
 /** A row of `github_apps` (D1 column names, snake_case; migration 0004). */
 export type GithubAppRow = {
@@ -139,6 +140,8 @@ export type GithubAppRow = {
   sandbox_image_id: string;
   created_at: string;
   updated_at: string;
+  /** Owning workspace (migration 0026); present only under `mode: "strict"`. */
+  workspace_id?: string;
 };
 
 export type GithubAppStatus = "active" | "disabled";
@@ -280,7 +283,8 @@ export type DeliverySummary = {
 
 /**
  * Narrow D1 face, declared locally so this leaf module imports nothing
- * (prepare/bind/first/all/run; no batch — this store never batches).
+ * (prepare/bind/first/all/run plus batch — App creation writes the App row
+ * and its workspace mapping in ONE transaction).
  */
 type AppsStoreStatement = {
   bind(...values: unknown[]): AppsStoreStatement;
@@ -292,12 +296,47 @@ type AppsStoreStatement = {
   }>;
 };
 
-type AppsStoreD1 = {
-  prepare(query: string): AppsStoreStatement;
+/** One statement's result inside a `batch()` (order matches the input). */
+type AppsStoreBatchResult = {
+  results: unknown[];
+  meta: { changes: number; last_row_id: number };
 };
 
+type AppsStoreD1 = {
+  prepare(query: string): AppsStoreStatement;
+  batch(statements: AppsStoreStatement[]): Promise<AppsStoreBatchResult[]>;
+};
+
+/**
+ * Tenant read face (migration 0026). `off` = today's single-table reads,
+ * byte-identical; `strict` = every execution-facing App read INNER JOINs
+ * `app_workspaces`, so an App with no workspace mapping is invisible. The
+ * mode TYPE and the runtime resolver live together in
+ * src/worker/tenant-mode.ts — evaluate a deploy var through `tenantModeOf`,
+ * never by hand.
+ */
+
+/**
+ * The three execution-facing App reads, per mode. `off` is FROZEN — do not
+ * reword it; call sites and tests assert these exact strings.
+ */
+export const APP_READ_SQL = {
+  getAppById: {
+    off: `SELECT * FROM github_apps WHERE id = ?`,
+    strict: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.id = ?`,
+  },
+  getAppBySlug: {
+    off: `SELECT * FROM github_apps WHERE slug = ?`,
+    strict: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.slug = ?`,
+  },
+  listApps: {
+    off: `SELECT * FROM github_apps WHERE deleted_at IS NULL ORDER BY created_at DESC, id`,
+    strict: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
+  },
+} as const;
+
 /** Create the github_apps / app_installations store over one D1 handle. */
-export function createAppsStore(db: AppsStoreD1) {
+export function createAppsStore(db: AppsStoreD1, mode: TenantMode = "off") {
   /**
    * BATCHED health-read face (QC wave 1, W-1): the Apps list
    * renders every row's health on each POST re-render, so the per-App
@@ -353,7 +392,9 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (review pin — the caller's
-     * secretbox AAD rowKey is this id). sandbox_image_id is omitted: the
+     * secretbox AAD rowKey is this id), plus its `app_workspaces` mapping to
+     * the single workspace. The two inserts are ONE batch transaction, so an
+     * App never exists without an owner. sandbox_image_id is omitted: the
      * migration 0018 DDL default materializes every new row onto the
      * registry's default image ('omp') — the store face for changing it is
      * setSandboxImage. UNIQUE violations on slug
@@ -363,23 +404,42 @@ export function createAppsStore(db: AppsStoreD1) {
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
-      await db
-        .prepare(
-          `INSERT INTO github_apps
-             (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-              created_by, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
-        )
-        .bind(
-          id,
-          input.slug,
-          input.githubAppId,
-          input.name,
-          input.privateKeyEnc,
-          input.webhookSecretEnc,
-          input.createdBy,
-        )
-        .run();
+      // Sole-workspace guard (separate read, BEFORE the batch): Deploy A ships
+      // one workspace, and a mapping write cannot guess which of several to
+      // pick. A clean throw here leaves no half-written App. Same live-row
+      // predicate as getSoleWorkspace: a soft-deleted tenant is not a candidate
+      // for ownership, so `strict` reads (which resolve the one live workspace)
+      // and this write can never disagree on the count.
+      const workspaces = await db
+        .prepare(`SELECT id FROM workspaces WHERE deleted_at IS NULL LIMIT 2`)
+        .all<{ id: string }>();
+      if (workspaces.results.length !== 1) {
+        throw new Error(
+          `apps-store: createApp requires exactly one workspace, found ${workspaces.results.length}`,
+        );
+      }
+      const workspaceId = workspaces.results[0]!.id;
+      await db.batch([
+        db
+          .prepare(
+            `INSERT INTO github_apps
+               (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+                created_by, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+          )
+          .bind(
+            id,
+            input.slug,
+            input.githubAppId,
+            input.name,
+            input.privateKeyEnc,
+            input.webhookSecretEnc,
+            input.createdBy,
+          ),
+        db
+          .prepare(`INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)`)
+          .bind(id, workspaceId),
+      ]);
       const row = await db.prepare(`SELECT * FROM github_apps WHERE id = ?`).bind(id).first<GithubAppRow>();
       if (!row) {
         throw new Error("apps-store: createApp row vanished on read-back");
@@ -389,20 +449,33 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /** By slug; resolves soft-deleted and disabled rows too (callers filter). */
     async getAppBySlug(slug: string): Promise<GithubAppRow | null> {
-      return db.prepare(`SELECT * FROM github_apps WHERE slug = ?`).bind(slug).first<GithubAppRow>();
+      return db
+        .prepare(APP_READ_SQL.getAppBySlug[mode])
+        .bind(slug)
+        .first<GithubAppRow>();
     },
 
     /** By id; resolves soft-deleted and disabled rows too (callers filter). */
     async getAppById(id: string): Promise<GithubAppRow | null> {
-      return db.prepare(`SELECT * FROM github_apps WHERE id = ?`).bind(id).first<GithubAppRow>();
+      return db.prepare(APP_READ_SQL.getAppById[mode]).bind(id).first<GithubAppRow>();
     },
 
     /** Dashboard list: non-deleted rows, newest first (stable id tiebreak). */
     async listApps(): Promise<GithubAppRow[]> {
-      const res = await db
-        .prepare(`SELECT * FROM github_apps WHERE deleted_at IS NULL ORDER BY created_at DESC, id`)
-        .all<GithubAppRow>();
+      const res = await db.prepare(APP_READ_SQL.listApps[mode]).all<GithubAppRow>();
       return res.results;
+    },
+
+    /**
+     * The App's stored sandbox image id (migration 0018). No tenant join: it
+     * returns a configuration value, never a tenant-facing field.
+     */
+    async getSandboxImageId(appId: string): Promise<string | null> {
+      const row = await db
+        .prepare(`SELECT sandbox_image_id FROM github_apps WHERE id = ?`)
+        .bind(appId)
+        .first<{ sandbox_image_id: string }>();
+      return row?.sandbox_image_id ?? null;
     },
 
     /**

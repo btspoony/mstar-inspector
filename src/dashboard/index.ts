@@ -20,9 +20,10 @@
  * DASHBOARD_ENCRYPTION_KEY → the encryption-dependent commit and settings
  * routes 5xx with the hold kept / nothing stored (spec § Crypto envelope).
  */
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type Handler } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Env } from "../worker/env";
+import { tenantModeOf, type TenantMode } from "../worker/tenant-mode";
 import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
 import {
   OAUTH_STATE_COOKIE,
@@ -63,6 +64,13 @@ import {
   type GithubAppRow,
   type ReviewTriggerMode,
 } from "./apps-store";
+import {
+  getMembership,
+  getSoleWorkspace,
+  getSoleWorkspaceAccess,
+  getWorkspaceBySlug,
+  type WorkspaceRole,
+} from "./workspace-store";
 import { fetchAppMetadata, isGithubMetadataStale } from "./github-app-metadata";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
@@ -117,41 +125,196 @@ import {
   manifestErrorPage,
   manifestOnboardingPage,
   manifestStartPage,
+  notFoundPage,
   removedPage,
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
 import { isLocale, resolveLocale, serializeLocaleCookie, t, type DictionaryKey, type Locale } from "../i18n";
-import { wantsHtml } from "../spa/routes";
+import { RESERVED_WORKSPACE_SLUGS, wantsHtml } from "../spa/routes";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
 
-export const dashboardApp = new Hono<{ Bindings: Env }>();
+/**
+ * Per-request values the workspace tenancy middleware and the member gate
+ * attach: `tenant` exists only on a strict-mode workspace path (the workspace
+ * slug was classified from the first path segment), so its absence IS the
+ * legacy `off` request shape. The routing gate classifies WITHOUT a database
+ * read (an anonymous request must not learn whether a workspace exists or pay
+ * a D1 round trip): `workspaceId`/`role` stay null until `requireMember`
+ * resolves them after the session and user row are known.
+ */
+type DashboardVariables = {
+  tenant?: {
+    slug: string;
+    /** null until the member gate resolves the live workspace row. */
+    workspaceId: string | null;
+    /** null until the member gate resolves the signed-in user's membership. */
+    role: WorkspaceRole | null;
+  };
+};
+
+type DashboardContext = Context<{ Bindings: Env; Variables: DashboardVariables }>;
+
+/** The resolved workspace scope of one workspace path (strict mode only). */
+type WorkspaceScope = { workspaceId: string; role: WorkspaceRole };
+
+export const dashboardApp = new Hono<{ Bindings: Env; Variables: DashboardVariables }>();
 
 /** SPA shell entry for members/apps list mutations (QC W-2, apps route). */
 const DASHBOARD_SHELL_REDIRECT = "/dashboard";
 const APPS_LIST_REDIRECT = "/dashboard/apps";
 
-function isSpaFetchPost(c: Context<{ Bindings: Env }>): boolean {
+/**
+ * A legacy App path on a workspace-scoped request (`/dashboard/apps…`) belongs
+ * to that workspace's route family: under `strict` the legacy family answers
+ * 404, so a response that redirected there would land on a dead URL. Legacy
+ * requests and non-App paths are returned unchanged.
+ */
+function scopedAppPath(c: DashboardContext, path: string): string {
+  const tenant = c.get("tenant");
+  if (!tenant) return path;
+  if (path === APPS_LIST_REDIRECT) return `/dashboard/${tenant.slug}/apps`;
+  if (path.startsWith(`${APPS_LIST_REDIRECT}/`)) {
+    return `/dashboard/${tenant.slug}${path.slice(DASHBOARD_MOUNT.length)}`;
+  }
+  return path;
+}
+
+/**
+ * The deployment's sole live workspace slug under `strict`, otherwise null.
+ * M1 is single-workspace; a deployment that does not carry exactly one live
+ * workspace has no unambiguous workspace to name, so callers keep their own
+ * legacy target instead of guessing a slug.
+ */
+export async function strictWorkspaceSlug(env: Env): Promise<string | null> {
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return null;
+  const db = dashboardD1(env);
+  return db === null ? null : ((await getSoleWorkspace(db))?.slug ?? null);
+}
+
+/**
+ * `/dashboard/<sole-workspace-slug>/apps` under `strict`, otherwise null, with
+ * the operator warning for an unresolvable landing (the redirect owner).
+ */
+export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> {
+  const slug = await strictWorkspaceSlug(env);
+  if (slug !== null) return `/dashboard/${slug}/apps`;
+  // Null is also `off`'s normal answer; only a strict deployment that cannot
+  // name its workspace reaches the operator warning (a dead-end landing).
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return null;
+  console.warn(
+    JSON.stringify({
+      event: "dashboard_landing",
+      reason: dashboardD1(env) === null ? "db_unbound" : "no_sole_workspace",
+    }),
+  );
+  return null;
+}
+
+/**
+ * The `strict` boot extras for one signed-in login: the deployment's sole
+ * workspace slug (the shell's nav targets) and whether this login may run the
+ * App-creation flow there. ONE workspace read answers both.
+ *
+ * Under `strict` an unbound store answers NO creation decision (the key is
+ * absent, like `off`): storage is a configuration failure, not a permission
+ * answer, and every caller already has its own honest `db_unbound` outcome —
+ * `/manifest/start` 500s before minting a slug or cookie, the callback parks
+ * the hold and serves the resumable confirm link (QC F-005), and confirm keeps
+ * the hold. Reporting `false` here would 403 a storage outage and burn the
+ * only copy of the App credentials. An unbound store cannot be attributed, so
+ * nothing is gated and nothing is granted: the write path still fails closed.
+ *
+ * A deployment that does not carry exactly one live workspace cannot attribute
+ * the App the flow would create, so creation is refused (`canCreateApp:
+ * false`) rather than falling through to `createApp`'s guard after the slug is
+ * minted. `off` returns `{}` — nothing is read and nothing is gated.
+ */
+export async function strictWorkspaceBoot(
+  env: Env,
+  login: string,
+): Promise<{ workspaceSlug?: string; canCreateApp?: boolean }> {
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return {};
+  const db = dashboardD1(env);
+  if (db === null) return {};
+  const access = await getSoleWorkspaceAccess(db, login);
+  if (access === null) return { canCreateApp: false };
+  return {
+    workspaceSlug: access.slug,
+    // A new App lands in the sole workspace, where the scoped `canManageApp`
+    // gives a plain member no rights — so creation is owner/admin there.
+    canCreateApp: access.role === "owner" || access.role === "admin",
+  };
+}
+
+/**
+ * Whether `login` may run the App-creation flow — the gate every manifest route
+ * consults, because each one can write the row. `strict` resolves a decision
+ * from the workspace role, except on an unbound store where no decision is
+ * possible (see `strictWorkspaceBoot` — the routes' own `db_unbound` outcomes
+ * answer there); `off` never resolves extras, so its creator rule keeps the
+ * flow open (the caller can manage what it creates there).
+ */
+export async function canCreateApp(env: Env, login: string): Promise<boolean> {
+  return (await strictWorkspaceBoot(env, login)).canCreateApp ?? true;
+}
+
+/**
+ * The post-authentication landing page. `/dashboard` (the root workbench) is
+ * mode-independent, but its first data read derives the base from the
+ * pathname — the retired legacy App family — so under `strict` it is a dead
+ * end with no click path into the workspace UI. Every signed-in producer
+ * (OAuth callback, the login bounce) names the workspace Apps page instead.
+ * Unresolvable → today's target (already warned by the resolver).
+ */
+export async function signedInLanding(env: Env): Promise<string> {
+  return (await strictWorkspaceAppsBase(env)) ?? DASHBOARD_MOUNT;
+}
+
+/**
+ * The post-commit landing page. The manifest flow's own request carries no
+ * tenant scope (its routes are mode-independent), so `scopedAppPath` cannot
+ * rewrite this target: under `strict` the legacy App family answers 404, and
+ * the App's onboarding page is named by the sole workspace the commit just
+ * mapped it into. `off` keeps today's target. A commit that succeeded always
+ * minted an `app_workspaces` row, which `createApp` only does when exactly one
+ * workspace exists, so the strict read always resolves.
+ */
+async function manifestSuccessTarget(c: DashboardContext, appSlug: string): Promise<string> {
+  const legacy = `/dashboard/apps/${appSlug}/onboarding`;
+  const base = await strictWorkspaceAppsBase(c.env);
+  return base === null ? legacy : `${base}/${appSlug}/onboarding`;
+}
+
+function isSpaFetchPost(c: DashboardContext): boolean {
   return c.req.header(SPA_POST_FORM_HEADER) === SPA_POST_FORM_VALUE;
 }
 
 /** Native `<form method="post">` navigation — not the SPA's fetch `postForm`. */
-function wantsHtmlFormNavigation(c: Context<{ Bindings: Env }>): boolean {
+function wantsHtmlFormNavigation(c: DashboardContext): boolean {
   return wantsHtml(c.req.header("Accept") ?? null) && !isSpaFetchPost(c);
 }
 
 function pinnedPostMutationResponse(
-  c: Context<{ Bindings: Env }>,
+  c: DashboardContext,
   redirectTo: string,
   message: string,
   status: 200 | 400 | 404 | 409 | 500 = 200,
 ): Response {
-  if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(redirectTo, 302);
+  const htmlNavigation = wantsHtmlFormNavigation(c);
+  // Tenant invisibility is final on a workspace-scoped request: an unknown or
+  // cross-workspace App answers a real 404 (rendered page on navigation),
+  // never the legacy redirect — a redirect would confirm nothing but still
+  // move the operator into a surface the request cannot see.
+  if (status === 404 && c.get("tenant")) {
+    return htmlNavigation ? c.html(notFoundPage(requestLocale(c)), 404) : c.text(message, status);
+  }
+  if (htmlNavigation) {
+    return c.redirect(scopedAppPath(c, redirectTo), 302);
   }
   return c.text(message, status);
 }
 
-function requestLocale(c: Context<{ Bindings: Env }>): Locale {
+function requestLocale(c: DashboardContext): Locale {
   return resolveLocale(c.req.raw);
 }
 
@@ -217,6 +380,100 @@ async function resolveAvailableSlug(db: DashboardD1, base: string): Promise<stri
   return slug;
 }
 
+// --- Workspace (tenant) routing gate (migration 0026, Deploy B) ---
+//
+// ONE middleware, mounted before the membership guard and every route, decides
+// which route family a /dashboard path may address. `off` keeps the legacy App
+// paths exactly as today and hides the workspace paths (404); `strict` hides
+// the legacy App paths (404) and resolves the workspace named by the first path
+// segment. Non-App paths (login, logout, oauth/callback, locale, members,
+// manifest, healthz) are mode-independent and pass through in both modes.
+// Both App route blocks register from ONE handler table (APP_ROUTES below), so
+// no handler body exists twice.
+const DASHBOARD_MOUNT = "/dashboard";
+
+type DashboardPathClass =
+  | { kind: "workspace"; slug: string }
+  | { kind: "legacy-app" }
+  | { kind: "other" };
+
+/**
+ * Classify a mount-pinned /dashboard path into the route family it addresses.
+ * A workspace path is `/<slug>/apps…` or `/<slug>/api/apps…` with a non-reserved
+ * slug; the legacy App paths are today's `/apps…` and `/api/apps…`. A reserved
+ * first segment is never a workspace, so `:workspaceSlug` cannot capture a real
+ * route (`/apps`, `/api/apps`, `/login`, `/members`, …).
+ */
+function classifyDashboardPath(pathname: string): DashboardPathClass {
+  const relative =
+    pathname === DASHBOARD_MOUNT || pathname.startsWith(`${DASHBOARD_MOUNT}/`)
+      ? pathname.slice(DASHBOARD_MOUNT.length)
+      : pathname;
+  const [, first, second, third] = relative.split("/");
+  if (first === "apps" || (first === "api" && second === "apps")) return { kind: "legacy-app" };
+  if (
+    first !== undefined &&
+    !RESERVED_WORKSPACE_SLUGS.has(first) &&
+    (second === "apps" || (second === "api" && third === "apps"))
+  ) {
+    return { kind: "workspace", slug: first };
+  }
+  return { kind: "other" };
+}
+
+/**
+ * Tenant invisibility 404, the ONE surface for every hidden path: HTML
+ * navigation renders the console's styled page (the same surface the
+ * pinned-POST 404 uses), a fetch keeps the bare status — the SPA's API reads
+ * parse status only.
+ */
+async function tenantNotFound(c: DashboardContext): Promise<Response> {
+  return wantsHtml(c.req.header("Accept") ?? null)
+    ? c.html(notFoundPage(requestLocale(c)), 404)
+    : await c.notFound();
+}
+
+/**
+ * The tenant route-family gate. Mounted twice: by `src/worker/index.ts` on
+ * `/dashboard/*` BEFORE SPA dispatch (so a strict legacy-App HTML request
+ * cannot be served by the SPA shell before the 404 decision) and by
+ * `dashboardApp` ahead of its routes. It only CLASSIFIES: it issues no D1 read,
+ * and the workspace row plus the caller's membership are resolved by
+ * `requireMember` after the session and user read. The first run wins — the
+ * second returns on the `tenant` it already set.
+ */
+export const dashboardTenantGate: Handler<{
+  Bindings: Env;
+  Variables: DashboardVariables;
+}> = async (c, next) => {
+  if (c.get("tenant")) return next();
+  let mode: TenantMode;
+  try {
+    mode = tenantModeOf(c.env.WORKSPACE_TENANT_MODE);
+  } catch (error) {
+    // A typo'd deploy var fails the whole face: no route is served from a
+    // guessed `off`/`strict`. The message names the value, never a secret.
+    return c.text((error as Error).message, 500);
+  }
+  const target = classifyDashboardPath(c.req.path);
+  if (target.kind === "legacy-app") {
+    // Deploy B retires the pre-workspace App face: the same 404 an unmatched
+    // path answered with before the switch.
+    return mode === "strict" ? tenantNotFound(c) : next();
+  }
+  if (target.kind !== "workspace") return next();
+  // Deploy A: the workspace face does not exist yet.
+  if (mode !== "strict") return tenantNotFound(c);
+  // CLASSIFY ONLY — no D1 read. The workspace row and the caller's membership
+  // are resolved by the member gate AFTER the session and user row are known,
+  // so an anonymous request neither pays a pre-auth round trip nor learns from
+  // the response whether the slug exists (both cases 302 to login).
+  c.set("tenant", { slug: target.slug, workspaceId: null, role: null });
+  return next();
+};
+
+dashboardApp.use("*", dashboardTenantGate);
+
 // --- Per-request allowlist guard (spec § AuthZ, lock L5) ---
 //
 // ONE middleware mount before every route definition auto-covers all
@@ -259,8 +516,11 @@ dashboardApp.use("*", async (c, next) => {
   // Logged in → the only new check: an active user row (spec § AuthZ).
   // Fail closed on an unbound store, like every missing dashboard dependency.
   // Callback/confirm must still run so a retryable db_unbound can park the
-  // hold and serve the resumable confirm link (QC F-005). Confirm
-  // itself is hold-cookie-only and does not read D1.
+  // hold and serve the resumable confirm link (QC F-005). Neither route needs
+  // the membership row for that outcome: the callback reaches its own
+  // `db_unbound` outcome, and confirm reads the hold cookie plus the creation
+  // gate, which answers no decision on an unbound store (`strictWorkspaceBoot`)
+  // so the hold survives instead of being burned on a configuration failure.
   const db = dashboardD1(c.env);
   if (!db) {
     if (c.req.path === "/dashboard/manifest/callback" || c.req.path === "/dashboard/manifest/confirm") {
@@ -292,12 +552,12 @@ dashboardApp.use("*", async (c, next) => {
   return next();
 });
 
-async function startOAuthLogin(c: Context<{ Bindings: Env }>): Promise<Response> {
+async function startOAuthLogin(c: DashboardContext): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   // Already signed in → bounce back to the shell (IA routing table).
   if (await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret)) {
-    return c.redirect("/dashboard", 302);
+    return c.redirect(await signedInLanding(c.env), 302);
   }
   const state = await createStateValue(secrets.sessionSecret);
   c.header("Set-Cookie", serializeCookie(OAUTH_STATE_COOKIE, state, OAUTH_STATE_MAX_AGE_SEC));
@@ -366,7 +626,7 @@ dashboardApp.get("/oauth/callback", async (c) => {
   c.header("Set-Cookie", serializeCookie(SESSION_COOKIE, session, SESSION_MAX_AGE_SEC), {
     append: true,
   });
-  return c.redirect("/dashboard", 302);
+  return c.redirect(await signedInLanding(c.env), 302);
 });
 
 dashboardApp.get("/logout", (c) => {
@@ -418,7 +678,7 @@ function safeLocaleRedirect(referer: string | null | undefined, origin: string):
 }
 
 /** JSON or form body `{ locale }` → valid Locale, or null (invalid/malformed). */
-async function readLocaleFromBody(c: Context<{ Bindings: Env }>): Promise<Locale | null> {
+async function readLocaleFromBody(c: DashboardContext): Promise<Locale | null> {
   const contentType = c.req.header("Content-Type") ?? "";
   try {
     if (contentType.includes("application/json")) {
@@ -455,6 +715,12 @@ dashboardApp.post("/manifest/start", async (c) => {
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // I-000082: the App this flow creates belongs to the sole workspace, where a
+  // plain member has no manage rights — offering the flow would end in a 403 on
+  // the App it just created. Checked BEFORE the slug mint / state cookie.
+  if (!(await canCreateApp(c.env, session.login))) {
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
   const slug = await resolveAvailableSlug(db, buildAppSlug(session.login));
@@ -483,6 +749,14 @@ dashboardApp.get("/manifest/callback", async (c) => {
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE));
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // Creation capability is re-checked HERE, not only at start: a flow that
+  // began as owner/admin must not complete after a mid-flight demotion, and the
+  // callback writes the row itself (same rule as the start/commit routes). The
+  // state cookie is already expired above, so the flow is burned either way.
+  if (!(await canCreateApp(c.env, session.login))) {
+    logManifestFailure("callback", "not_a_creator");
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   const state = await readManifestStateValue(
     getCookie(c, MANIFEST_STATE_COOKIE),
     c.req.query("state"),
@@ -535,7 +809,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   switch (outcome.kind) {
     case "success": {
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
-      return c.redirect(`/dashboard/apps/${outcome.row.slug}/onboarding`, 302);
+      return c.redirect(await manifestSuccessTarget(c, outcome.row.slug), 302);
     }
     case "login_mismatch": {
       // Unreachable here (the hold is minted for this session) — same burn
@@ -579,6 +853,12 @@ dashboardApp.post("/manifest/commit", async (c) => {
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // Same creation capability as the start route (I-000082): the recovery
+  // resubmit must not become the bypass. The hold is left untouched — the op
+  // never ran, and demoting the operator mid-flow is the only way in.
+  if (!(await canCreateApp(c.env, session.login))) {
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold) {
     logManifestFailure("commit", "hold_missing_or_expired");
@@ -598,7 +878,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       // Success: the hold is single-success — burned now that the row exists;
       // the operator lands on the App's onboarding page.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      return c.redirect(`/dashboard/apps/${outcome.row.slug}/onboarding`, 302);
+      return c.redirect(await manifestSuccessTarget(c, outcome.row.slug), 302);
     }
     case "login_mismatch": {
       // The hold is bound to the login that ran the callback: a different
@@ -730,6 +1010,14 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   if (!session) return c.redirect("/dashboard/login", 302);
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
+  // This page is the resume gate for the commit that /manifest/commit performs,
+  // so it applies the same creation capability (see the callback): a member
+  // demoted mid-flight must not be handed the commit affordance.
+  if (!(await canCreateApp(c.env, session.login))) {
+    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+    logManifestFailure("confirm", "not_a_creator");
+    return c.html(forbiddenPage(session.login, requestLocale(c)), 403);
+  }
   return c.html(
     manifestConfirmPage(
       session,
@@ -754,14 +1042,18 @@ dashboardApp.get("/manifest/confirm", async (c) => {
 // this page reads plaintext columns only. Unknown / soft-deleted App =
 // the settings-family 404 shape. Rendered by the SSR manifest page family
 // (no chrome beyond shellHeader), so no SPA shell is served.
-dashboardApp.get("/apps/:slug/onboarding", async (c) => {
+const appOnboardingRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
-  const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
-  if (!app || app.deleted_at !== null) {
+  const app = await resolveScopedApp(
+    requestAppsStore(member.db, member.scope),
+    c.req.param("slug") ?? "",
+    member.scope,
+  );
+  if (!app) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   }
-  if (!canManageApp(member.user, app)) {
+  if (!canManageApp(member.user, app, member.scope)) {
     return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
   }
   const origin = new URL(c.req.url).origin;
@@ -775,9 +1067,11 @@ dashboardApp.get("/apps/:slug/onboarding", async (c) => {
         webhookUrl: `${origin}/webhook/${app.slug}`,
       },
       requestLocale(c),
+      // Set only on a workspace-scoped request; the view never reads env.
+      c.get("tenant")?.slug ?? null,
     ),
   );
-});
+};
 
 // --- Admin-only members management (spec § AuthZ) ---
 //
@@ -798,7 +1092,7 @@ type AdminGate =
 const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9-]{1,39}$/;
 
 /** Route-local admin gate shared by the three /dashboard/members routes. */
-async function requireAdmin(c: Context<{ Bindings: Env }>): Promise<AdminGate> {
+async function requireAdmin(c: DashboardContext): Promise<AdminGate> {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return { ok: false, response: c.text("dashboard OAuth is not configured", 500) };
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
@@ -964,8 +1258,15 @@ dashboardApp.post("/members/role", async (c) => {
 // the zero-JS `<form method="post">` convention cannot emit a DELETE verb.
 
 /** Route-local member gate shared by the /dashboard/apps routes. */
-async function requireMember(c: Context<{ Bindings: Env }>): Promise<
-  | { ok: true; session: SessionPayload; db: DashboardDb; user: DashboardUserRow }
+async function requireMember(c: DashboardContext): Promise<
+  | {
+      ok: true;
+      session: SessionPayload;
+      db: DashboardDb;
+      user: DashboardUserRow;
+      /** Workspace scope on a strict workspace path; null on the legacy face. */
+      scope: WorkspaceScope | null;
+    }
   | { ok: false; response: Response }
 > {
   const secrets = dashboardSecrets(c.env);
@@ -978,12 +1279,64 @@ async function requireMember(c: Context<{ Bindings: Env }>): Promise<
   // Fail closed: no row (removed between guard and here) → 403, the 403 view
   // carries zero membership data.
   if (!user) return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
-  return { ok: true, session, db, user };
+  // Workspace path: the routing gate only classified the slug. Resolve the
+  // live workspace and the membership row HERE, after the session and user
+  // read, so an anonymous request cannot distinguish an existing workspace
+  // from a missing one (both never reach this line: the guard 302s to login)
+  // and pays no workspace D1 read. Not a member → the same 404 an unknown
+  // workspace answers (no tenant-existence oracle).
+  const tenant = c.get("tenant");
+  if (tenant) {
+    // Tenant invisibility is final on a workspace-scoped request — the same
+    // surface the routing gate answers with.
+    const workspace = await getWorkspaceBySlug(db, tenant.slug);
+    if (!workspace) return { ok: false, response: await tenantNotFound(c) };
+    const role = await getMembership(db, workspace.id, user.id);
+    if (!role) return { ok: false, response: await tenantNotFound(c) };
+    c.set("tenant", { slug: workspace.slug, workspaceId: workspace.id, role });
+    return { ok: true, session, db, user, scope: { workspaceId: workspace.id, role } };
+  }
+  return { ok: true, session, db, user, scope: null };
 }
 
-/** Clarify #6: manage = any admin, or the App's creator (case-insensitive). */
-function canManageApp(user: DashboardUserRow, app: GithubAppRow): boolean {
+/**
+ * Manage = workspace owner/admin on a scoped request; without a scope the
+ * pre-workspace rule stands (any admin, or the App's creator, case-insensitive)
+ * so the `off` face keeps today's decision exactly.
+ */
+function canManageApp(
+  user: DashboardUserRow,
+  app: GithubAppRow,
+  scope: WorkspaceScope | null = null,
+): boolean {
+  if (scope) return scope.role === "owner" || scope.role === "admin";
   return user.role === "admin" || app.created_by.toLowerCase() === user.github_login.toLowerCase();
+}
+
+/**
+ * The App store for one request: a workspace path reads through the strict
+ * tenant face (an orphan App is invisible), the legacy path keeps `off`
+ * byte-identical.
+ */
+function requestAppsStore(db: DashboardDb, scope: WorkspaceScope | null) {
+  return createAppsStore(db, scope === null ? "off" : "strict");
+}
+
+/**
+ * Resolve the App addressed by an App route. A workspace path requires the
+ * App's own workspace to match the request's: an App from another workspace is
+ * exactly as invisible as an unknown slug (404), and a soft-deleted row stays
+ * invisible on both faces.
+ */
+async function resolveScopedApp(
+  apps: ReturnType<typeof createAppsStore>,
+  slug: string,
+  scope: WorkspaceScope | null,
+): Promise<GithubAppRow | null> {
+  const app = await apps.getAppBySlug(slug);
+  if (!app || app.deleted_at !== null) return null;
+  if (scope && app.workspace_id !== scope.workspaceId) return null;
+  return app;
 }
 
 /**
@@ -997,21 +1350,27 @@ function canManageApp(user: DashboardUserRow, app: GithubAppRow): boolean {
  * (QC wave 1, W-1): exactly TWO D1 statements for any N instead
  * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
  * JSON face), so the statement count must not scale with the App count.
+ * A workspace path lists only its own workspace's Apps.
+ * shortcut: tenant filter runs over the strict list in memory (single-tenant
+ * scale today); upgrade to a workspace-filtered store query when a workspace
+ * can hold enough Apps for the scan to matter.
  */
 async function appsListWithHealth(
-  db: DashboardDb,
+  apps: ReturnType<typeof createAppsStore>,
+  scope: WorkspaceScope | null,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
-  const apps = createAppsStore(db);
-  const rows = await apps.listApps();
+  const rows = (await apps.listApps()).filter(
+    (app) => scope === null || app.workspace_id === scope.workspaceId,
+  );
   const summaries = await apps.deliverySummaries(rows.map((app) => app.id));
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 
 /** SPA JSON face — same requireMember gate and appsListWithHealth assembly as the retired GET /apps. Encrypted columns and row PKs stay off the payload. */
-dashboardApp.get("/api/apps", async (c) => {
+const appListRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const rows = await appsListWithHealth(gate.db);
+  const rows = await appsListWithHealth(requestAppsStore(gate.db, gate.scope), gate.scope);
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
     apps: rows.map((app) => ({
@@ -1033,7 +1392,7 @@ dashboardApp.get("/api/apps", async (c) => {
       },
     })),
   });
-});
+};
 
 /**
  * One handler for the three pinned action routes. Unknown and soft-deleted
@@ -1044,15 +1403,15 @@ dashboardApp.get("/api/apps", async (c) => {
  * once; the `changed` result only shaped the retired notice copy.
  */
 async function appStatusAction(
-  c: Context<{ Bindings: Env }>,
+  c: DashboardContext,
   action: "disable" | "enable" | "delete",
 ): Promise<Response> {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
-  const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
-  if (!app || app.deleted_at !== null) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
+  const apps = requestAppsStore(gate.db, gate.scope);
+  const app = await resolveScopedApp(apps, c.req.param("slug") ?? "", gate.scope);
+  if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  if (!canManageApp(gate.user, app, gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   if (action === "delete") {
     await apps.softDeleteApp(app.id);
   } else {
@@ -1060,10 +1419,6 @@ async function appStatusAction(
   }
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 }
-
-dashboardApp.post("/apps/:slug/disable", (c) => appStatusAction(c, "disable"));
-dashboardApp.post("/apps/:slug/enable", (c) => appStatusAction(c, "enable"));
-dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 
 // --- Per-App review pause/resume (spec § IA, pinned action
 // paths) ---
@@ -1083,14 +1438,17 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
  * caller (`<form method="post">` on the Review card); Apps-list uses fetch
  * `postForm`. Origin is a sanitized Referer pathname — never echoed as
  * Location. Settings-origin → `/dashboard/apps/:slug/settings` (DB slug);
- * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`.
+ * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`. On a
+ * workspace-scoped request both App targets carry that workspace's prefix
+ * (`scopedAppPath`), because the legacy App family 404s under `strict`.
  */
-function reviewActionRedirect(c: Context<{ Bindings: Env }>, slug: string): string {
-  const settingsPath = `/dashboard/apps/${slug}/settings`;
+function reviewActionRedirect(c: DashboardContext, slug: string): string {
+  const settingsPath = scopedAppPath(c, `/dashboard/apps/${slug}/settings`);
+  const listPath = scopedAppPath(c, APPS_LIST_REDIRECT);
   const origin = new URL(c.req.raw.url).origin;
   const refererPath = new URL(safeLocaleRedirect(c.req.header("Referer"), origin), origin).pathname;
   if (refererPath === settingsPath) return settingsPath;
-  if (refererPath === APPS_LIST_REDIRECT) return APPS_LIST_REDIRECT;
+  if (refererPath === listPath) return listPath;
   return DASHBOARD_SHELL_REDIRECT;
 }
 
@@ -1105,15 +1463,15 @@ function reviewActionRedirect(c: Context<{ Bindings: Env }>, slug: string): stri
  * depends on origin (settings vs apps list); fetch is unchanged.
  */
 async function appReviewAction(
-  c: Context<{ Bindings: Env }>,
+  c: DashboardContext,
   action: "pause" | "resume",
 ): Promise<Response> {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
-  const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
-  if (!app || app.deleted_at !== null) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
+  const apps = requestAppsStore(gate.db, gate.scope);
+  const app = await resolveScopedApp(apps, c.req.param("slug") ?? "", gate.scope);
+  if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  if (!canManageApp(gate.user, app, gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   const htmlRedirect = reviewActionRedirect(c, app.slug);
   const paused = app.review_enabled === 0;
   if (action === "pause" ? paused : !paused) return pinnedPostMutationResponse(c, htmlRedirect, "ok"); // idempotent no-op — never touch the row
@@ -1121,8 +1479,6 @@ async function appReviewAction(
   return pinnedPostMutationResponse(c, htmlRedirect, "ok");
 }
 
-dashboardApp.post("/apps/:slug/pause", (c) => appReviewAction(c, "pause"));
-dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 
 // --- Per-App review trigger mode (spec review-trigger-policy §2, pinned
 // action path beside pause/resume) ---
@@ -1155,13 +1511,13 @@ function isReviewTriggerMode(value: string): value is ReviewTriggerMode {
  * churn updated_at, the operator-mutation timestamp — the appReviewAction
  * discipline).
  */
-async function appReviewTriggerModeAction(c: Context<{ Bindings: Env }>): Promise<Response> {
+async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response> {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
-  const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
-  if (!app || app.deleted_at !== null) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
-  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
+  const apps = requestAppsStore(gate.db, gate.scope);
+  const app = await resolveScopedApp(apps, c.req.param("slug") ?? "", gate.scope);
+  if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  if (!canManageApp(gate.user, app, gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   const form = await c.req.parseBody();
   const mode = typeof form["mode"] === "string" ? form["mode"] : "";
   if (!isReviewTriggerMode(mode)) {
@@ -1172,8 +1528,6 @@ async function appReviewTriggerModeAction(c: Context<{ Bindings: Env }>): Promis
   }
   return settingsPostResponse(c, app.slug, "ok");
 }
-
-dashboardApp.post("/apps/:slug/review-trigger-mode", (c) => appReviewTriggerModeAction(c));
 
 // --- Per-App AI configuration settings (spec § Per-App BYOK) ---
 //
@@ -1196,7 +1550,14 @@ dashboardApp.post("/apps/:slug/review-trigger-mode", (c) => appReviewTriggerMode
 // src/dashboard/views.ts is retired.
 
 type AppSettingsGate =
-  | { ok: true; session: SessionPayload; db: DashboardDb; app: GithubAppRow; user: DashboardUserRow }
+  | {
+      ok: true;
+      session: SessionPayload;
+      db: DashboardDb;
+      app: GithubAppRow;
+      user: DashboardUserRow;
+      scope: WorkspaceScope | null;
+    }
   | { ok: false; response: Response };
 
 /**
@@ -1206,12 +1567,16 @@ type AppSettingsGate =
  * via the GET handler's canManageApp branch below; writes go through
  * requireAppSettings.
  */
-async function requireAppVisible(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
+async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> {
   const member = await requireMember(c);
   if (!member.ok) return member;
-  const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
-  if (!app || app.deleted_at !== null) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  return { ok: true, session: member.session, db: member.db, app, user: member.user };
+  const app = await resolveScopedApp(
+    requestAppsStore(member.db, member.scope),
+    c.req.param("slug") ?? "",
+    member.scope,
+  );
+  if (!app) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
+  return { ok: true, session: member.session, db: member.db, app, user: member.user, scope: member.scope };
 }
 
 /**
@@ -1219,10 +1584,10 @@ async function requireAppVisible(c: Context<{ Bindings: Env }>): Promise<AppSett
  * Encryption-dependent because masking needs plaintext — a missing master key
  * still fails closed with 5xx (spec § Crypto envelope).
  */
-async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
+async function requireAppSettings(c: DashboardContext): Promise<AppSettingsGate> {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate;
-  if (!canManageApp(gate.user, gate.app)) {
+  if (!canManageApp(gate.user, gate.app, gate.scope)) {
     return { ok: false, response: c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403) };
   }
   if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
@@ -1277,7 +1642,7 @@ function isOmpRuntimeImage(sandboxImageId: string): boolean {
  * settingsFailureNotice 500s.
  */
 function settingsPostResponse(
-  c: Context<{ Bindings: Env }>,
+  c: DashboardContext,
   slug: string,
   message: string,
   status: 200 | 500 = 200,
@@ -1293,13 +1658,13 @@ function settingsPostResponse(
  * `message` keeps the English face the plain-text assertions pin.
  */
 function settingsRemoveResponse(
-  c: Context<{ Bindings: Env }>,
+  c: DashboardContext,
   slug: string,
   changed: boolean,
   message: string,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
   }
   return c.json({ changed, message }, 200);
 }
@@ -1372,13 +1737,13 @@ const SETTINGS_400_KEYS = {
  * keep passing; `params` = the interpolation data for the SPA's t()).
  */
 function settings400Response(
-  c: Context<{ Bindings: Env }>,
+  c: DashboardContext,
   slug: string,
   key: DictionaryKey,
   params?: Record<string, string | number>,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
   }
   return c.json({ key, message: t("en", key, params), ...(params ? { params } : {}) }, 400);
 }
@@ -1390,7 +1755,7 @@ function settings400Response(
  * that stores a key, so the cap can never surface as a generic 500.
  */
 function settingsKeyLimitResponse(
-  c: Context<{ Bindings: Env }>,
+  c: DashboardContext,
   slug: string,
   provider: string,
 ): Response {
@@ -1417,14 +1782,14 @@ function verifyFailCopy(reason: ReturnType<typeof mapVerifyReason>): string {
 
 /** 400 for a verify miss: JSON `{ ok, reason, message }` so the SPA maps `reason` via t(); `message` keeps the English face for native posts. */
 function settingsVerifyFailResponse(
-  c: Context<{ Bindings: Env }>,
+  c: DashboardContext,
   slug: string,
   reason: VerifyFailureReason,
 ): Response {
   const mapped = mapVerifyReason(reason);
   const message = verifyFailCopy(mapped);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
   }
   return c.json({ ok: false, reason: mapped, message }, 400);
 }
@@ -1437,13 +1802,13 @@ const MEMBERSHIP_FAIL_CODE = "not_in_verified_models" as const;
 
 /** 400 for a membership miss: JSON `{ code, message, selector }` so the SPA maps `code` via t(); `message` keeps the English face for native posts. */
 function settingsMembershipFailResponse(
-  c: Context<{ Bindings: Env }>,
+  c: DashboardContext,
   slug: string,
   selector: string,
 ): Response {
   const message = membershipFailCopy(selector);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
   }
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }
@@ -1512,17 +1877,17 @@ async function refreshGithubMetadataForRead(
  * (app meta, installations, deliveries) plus the settings payload (masked
  * keys, chains, providers). Writes stay behind requireAppSettings. Both
  * faces are served from D1 after the lazy 24h-TTL refresh above. */
-dashboardApp.get("/api/apps/:slug/settings", async (c) => {
+const appSettingsRoute = async (c: DashboardContext) => {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
-  const apps = createAppsStore(gate.db);
+  const apps = requestAppsStore(gate.db, gate.scope);
   // Outside the render try on purpose: the refresh leg carries its own
   // catch-all, so no metadata failure can reach this route's 500 face
   // (AD-531 fail-open by structure).
   const app = await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
     c.header("Cache-Control", "private, no-store");
-    if (!canManageApp(gate.user, gate.app)) {
+    if (!canManageApp(gate.user, gate.app, gate.scope)) {
       // Identity-only non-manager face: the D4 identity set — the fields the
       // GET /api/apps list rows already expose (slug, github_app_id, status,
       // review_enabled, created_by) plus created_at and the cached public
@@ -1720,9 +2085,9 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     logSettingsFailure("api_render", gate.app.id, err);
     return c.text("the app settings could not be read from encrypted storage", 500);
   }
-});
+};
 
-dashboardApp.get("/api/apps/:slug/models", async (c) => {
+const appModelsRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
@@ -1735,7 +2100,7 @@ dashboardApp.get("/api/apps/:slug/models", async (c) => {
     logSettingsFailure("api_models", gate.app.id, err);
     return c.text("the app models could not be read", 500);
   }
-});
+};
 
 /**
  * SPA add-key path: verify the as-typed key, then store. Failure
@@ -1745,7 +2110,7 @@ dashboardApp.get("/api/apps/:slug/models", async (c) => {
  * included — fail-closed) is refused with unsupported_provider before any
  * probe, mirroring the display face's eligibility gate.
  */
-dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
+const appKeyVerifyRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
@@ -1820,7 +2185,7 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
     }
     return c.json({ ok: false, reason: "unexpected" as const }, 500);
   }
-});
+};
 
 /**
  * The settings POST: the operations on the pinned action path, discriminated
@@ -1859,7 +2224,7 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
  * (400s are keyed JSON via settings400Response — native form
  * posts keep the 302); the re-rendered HTML page is retired.
  */
-dashboardApp.post("/apps/:slug/settings", async (c) => {
+const appSettingsSaveRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   // AL-23-2 (save-roles duplicate fields): parseBody({ all: true }) makes
@@ -2432,9 +2797,9 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
   // Review fold-in: an unknown op is a validation failure like any
   // other — 400 with the reason.
   return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.unknownOperation);
-});
+};
 
-dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
+const appKeyDeleteRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
@@ -2471,7 +2836,7 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
       ? `Removed the stored ${provider} key for ${gate.app.slug}.`
       : `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,
   );
-});
+};
 
 // The legacy SSR home (`dashboardApp.get("/")` →
 // dashboardPage) is retired. GET /dashboard — every Accept variant — is the
@@ -2559,16 +2924,20 @@ function parseInsightsParams(query: { window?: string; repo?: string; include?: 
   return { ok: true, windowDays, repoFilter, rawRepo, includeRepos };
 }
 
-dashboardApp.get("/api/apps/:slug/insights/summary", async (c) => {
+const appInsightsRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
 
-  // Same slug-resolution rule as requireAppVisible: unknown and soft-deleted
-  // apps are equally invisible → 404. JSON body — this face never renders
-  // HTML (no forbiddenPage on either deny path).
-  const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
-  if (!app || app.deleted_at !== null) return c.json({ error: "unknown app" }, 404);
-  if (!canManageApp(member.user, app)) return c.json({ error: "forbidden" }, 403);
+  // Same slug-resolution rule as requireAppVisible: unknown, soft-deleted and
+  // cross-workspace apps are equally invisible → 404. JSON body — this face
+  // never renders HTML (no forbiddenPage on either deny path).
+  const app = await resolveScopedApp(
+    requestAppsStore(member.db, member.scope),
+    c.req.param("slug") ?? "",
+    member.scope,
+  );
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(member.user, app, member.scope)) return c.json({ error: "forbidden" }, 403);
 
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
@@ -2606,12 +2975,69 @@ dashboardApp.get("/api/apps/:slug/insights/summary", async (c) => {
     recurring_top: insights.recurringTop,
     repos: insights.repos,
   });
-});
+};
 
 // The insights HTML panel and the cross-App global JSON endpoint are both
 // retired — /dashboard/insights is SPA-owned (spa-dispatch serves the shell;
 // the SPA reads the per-App JSON face above). The legacy GET handlers are
 // gone; the global URL answers 404.
+
+// --- App route table (Deploy B dual registration) --------------------------
+//
+// ONE table, ONE registration loop: every App-scoped route is reachable on the
+// legacy prefix (today's paths, live under `off`) and on the workspace prefix
+// (live under `strict`). Handlers read the workspace from the request context,
+// so no handler body exists twice. The workspace copy is gated by
+// `workspaceOnly`: the routing middleware attaches a scope only for a
+// resolvable, non-reserved slug, so a request that matched `:workspaceSlug`
+// without one (`/login/apps…`, `/members/api/apps…`) is a 404 and never falls
+// back to the legacy face.
+type AppRouteHandler = (c: DashboardContext) => Response | Promise<Response>;
+
+const APP_ROUTES: ReadonlyArray<{
+  method: "get" | "post";
+  path: string;
+  handler: AppRouteHandler;
+}> = [
+  { method: "get", path: "/apps/:slug/onboarding", handler: appOnboardingRoute },
+  { method: "get", path: "/api/apps", handler: appListRoute },
+  { method: "post", path: "/apps/:slug/disable", handler: (c) => appStatusAction(c, "disable") },
+  { method: "post", path: "/apps/:slug/enable", handler: (c) => appStatusAction(c, "enable") },
+  { method: "post", path: "/apps/:slug/delete", handler: (c) => appStatusAction(c, "delete") },
+  { method: "post", path: "/apps/:slug/pause", handler: (c) => appReviewAction(c, "pause") },
+  { method: "post", path: "/apps/:slug/resume", handler: (c) => appReviewAction(c, "resume") },
+  { method: "post", path: "/apps/:slug/review-trigger-mode", handler: appReviewTriggerModeAction },
+  { method: "get", path: "/api/apps/:slug/settings", handler: appSettingsRoute },
+  { method: "get", path: "/api/apps/:slug/models", handler: appModelsRoute },
+  { method: "post", path: "/api/apps/:slug/keys/verify", handler: appKeyVerifyRoute },
+  { method: "post", path: "/apps/:slug/settings", handler: appSettingsSaveRoute },
+  { method: "post", path: "/apps/:slug/settings/key/delete", handler: appKeyDeleteRoute },
+  { method: "get", path: "/api/apps/:slug/insights/summary", handler: appInsightsRoute },
+];
+
+/**
+ * Registration wrapper for the workspace copy of a route. Hono matches
+ * `:workspaceSlug` without knowing the reserved set, so a request that reached
+ * this registration without a tenant scope (`/login/apps/...`, or any path the
+ * gate classified `other`) falls through to the ORIGINAL handling — the legacy
+ * route or the placeholder catch-all — exactly as before the workspace block
+ * existed. A real workspace route always carries a scope.
+ */
+function workspaceOnly(
+  handler: AppRouteHandler,
+): Handler<{ Bindings: Env; Variables: DashboardVariables }> {
+  return (c, next) => (c.get("tenant") ? handler(c) : next());
+}
+
+for (const route of APP_ROUTES) {
+  if (route.method === "get") {
+    dashboardApp.get(route.path, route.handler);
+    dashboardApp.get(`/:workspaceSlug${route.path}`, workspaceOnly(route.handler));
+  } else {
+    dashboardApp.post(route.path, route.handler);
+    dashboardApp.post(`/:workspaceSlug${route.path}`, workspaceOnly(route.handler));
+  }
+}
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
 // not a wired route above is a placeholder submit and must never succeed —

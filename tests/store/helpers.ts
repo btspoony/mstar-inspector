@@ -10,67 +10,33 @@
  * i.e. production before the github_apps work. Kept for fixtures that exercise the
  *   append-only ALTER sequence itself (tests/worker/apps-store.test.ts
  *   seeds rows, THEN applies 0004/0005).
- * - `createMigratedTestD1()` — the full current shape (0001 → 0024 in
- *   filename order: 0003 dashboard users, 0004 github_apps +
- *   app_installations, 0005 reviews.app_id, 0006 app_provider_keys +
- *   app_model_config, 0007 idx_reviews_app_id, 0008 github_apps
- *   review_enabled + last_webhook_at, 0009 app_model_roles, 0010
- * review_failures, 0011 webhook_deliveries, 0012 app_provider_keys
- * updated_at + app_custom_providers, 0013 idx_findings_review_id,
- * 0014 idx_reviews_reviewed_at, 0015 provider verification
- * columns + app_provider_models, 0016 users.login_nocase UNIQUE
- *, 0017 app_model_chains + seats, 0018
- * github_apps.sandbox_image_id, 0019 github_apps GitHub-profile
- * columns, 0020 finding lifecycle + publication journal +
- * resolution queue, 0021 review Check attempt registry, 0022
- * github_apps review trigger mode, 0024 per-key provider
- * pools
- * ), i.e. what
+ * - `createMigratedTestD1()` — the full current shape: every `*.sql` in
+ *   `migrations/` applied in filename order, i.e. what
  *   `wrangler d1 migrations apply` produces today. The store adapter's INSERT
- * binds `reviews.app_id` (QC fix wave 1 F-001), so every test
- *   exercising the REAL store.put against production-shaped data runs on this
- * one — and fixtures get the per-App config tables without
- *   re-applying migrations by hand.
+ *   binds `reviews.app_id` (QC fix wave 1 F-001), so every test exercising the
+ *   REAL store.put against production-shaped data runs on this one — and
+ *   fixtures get the per-App config tables without re-applying migrations by
+ *   hand.
  *
  * bun:sqlite and D1 are both SQLite, so UNIQUE/ON CONFLICT semantics match;
  * if a divergence ever shows up against real D1, the remote apply is
  * authoritative and this helper must be updated.
  */
 import { Database, type Statement } from "bun:sqlite";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** Earliest review-store schema (production before the github_apps work). */
 const BASE_MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
-/** Full current migration list, filename order = wrangler apply order. */
-const ALL_MIGRATIONS = [
-  ...BASE_MIGRATIONS,
-  "0003_dashboard_users.sql",
-  "0004_github_apps.sql",
-  "0005_reviews_app_id.sql",
-  "0006_app_provider_config.sql",
-  "0007_reviews_app_id_index.sql",
-  "0008_github_apps_ops.sql",
-  "0009_app_model_roles.sql",
-  "0010_review_failures.sql",
-  "0011_webhook_deliveries.sql",
-  "0012_custom_providers_and_key_updated_at.sql",
-  "0013_findings_review_id_index.sql",
-  "0014_idx_reviews_reviewed_at.sql",
-  "0015_provider_verification.sql",
-  "0016_users_login_nocase_unique.sql",
-  "0017_app_model_chains.sql",
-  "0018_app_sandbox_images.sql",
-  "0019_github_apps_metadata.sql",
-  "0020_finding_lifecycle.sql",
-  "0021_review_checks.sql",
-  "0022_app_trigger_mode.sql",
-  "0023_removed_logins.sql",
-  "0024_provider_multi_key.sql",
-  "0025_provider_model_evidence.sql",
-];
+/**
+ * Full migration list, read from disk: filename order = wrangler apply order.
+ * Reading the directory keeps this list correct as migrations are added.
+ */
+const ALL_MIGRATIONS = readdirSync(MIGRATIONS_DIR)
+  .filter((name) => name.endsWith(".sql"))
+  .sort();
 
 /** Execute the migration DDL on a fresh in-memory database. */
 function applyMigration(db: Database, migrations: readonly string[]): void {

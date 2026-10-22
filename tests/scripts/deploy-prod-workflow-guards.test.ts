@@ -5,9 +5,11 @@
  * prod deploy surface:
  *
  * - triggers: `release: types: [published]` + `workflow_dispatch` with NO
- *   inputs — the run's own ref IS the deploy ref (`gh workflow run
+ *   `ref` input — the run's own ref IS the deploy ref (`gh workflow run
  *   deploy-prod.yml --ref <tag>`), so bring-up / rollback on the current
- *   prerelease tag needs no separate input;
+ *   tag needs no separate ref; its only inputs are the tenant mode (`steady`
+ *   default, i.e. "take vars.WORKSPACE_TENANT_MODE") and the two replay audit
+ *   values;
  * - the prerelease guard: one job-level `if` that dispatches always and lets a
  *   release through only when the Release's own `prerelease` flag is `false`
  *   AND its tag carries no `-` (the two are independent release properties, so
@@ -228,12 +230,29 @@ describe("deploy-prod.yml guards", () => {
     }
   });
 
-  test("triggers: release published + workflow_dispatch with NO inputs (run ref is the deploy ref)", () => {
+  test("triggers: release published + workflow_dispatch whose only inputs are the replay knobs", () => {
     expect(triggers(wf).release).toEqual({ types: ["published"] });
     const dispatch = triggers(wf).workflow_dispatch;
-    // no `inputs:` block at all — T3-3: a `ref` input would let a run deploy a
-    // tag other than the one it runs on. `null` is YAML's empty-mapping form.
-    expect(dispatch).toBeNull();
+    // T3-3: still no `ref` input — a run can never deploy a tag other than the
+    // one it runs on. The inputs only carry the tenant read mode and the
+    // replay audit value, so the same tag/SHA is deployed `off` (Deploy A) and
+    // replayed `strict` (Deploy B).
+    expect(Object.keys(dispatch)).toEqual(["inputs"]);
+    expect(Object.keys(dispatch.inputs).sort()).toEqual([
+      "expected_container_digest",
+      "expected_deploy_sha",
+      "tenant_mode",
+    ]);
+    expect(dispatch.inputs.tenant_mode).toMatchObject({
+      required: false,
+      // NOT `off`: the Release workflow dispatches this workflow with no
+      // fields, so the declared default decides an ordinary release. `steady`
+      // is the only non-deciding choice (PR #87 I-000070).
+      default: "steady",
+      type: "choice",
+      options: ["steady", "off", "strict"],
+    });
+    expect(dispatch.inputs.expected_container_digest).toMatchObject({ required: false, default: "" });
     // a `push:` trigger would deploy production on every main push — this
     // workflow is release/dispatch only.
     expect(triggers(wf).push).toBeUndefined();
@@ -376,8 +395,12 @@ describe("deploy-prod.yml guards", () => {
     for (const n of [
       "Verify Cloudflare account",
       "Apply prod D1 migrations (remote)",
+      "Re-run workspace backfill (0027, idempotent)",
+      "Assert zero orphan Apps (pre-deploy gate)",
       "Deploy Worker (prod)",
+      "Deploy serving version (prod, mode var)",
       "Re-capture live Worker version",
+      "Assert zero orphan Apps (post-deploy)",
     ]) {
       expectSecrets(n, [TOKEN]);
     }
@@ -389,7 +412,7 @@ describe("deploy-prod.yml guards", () => {
     expect(actionSteps.length).toBe(3);
     for (const s of actionSteps) expect([s.uses, secretsOf(s)]).toEqual([s.uses, []]);
 
-    // and no OTHER step smuggles one in: the seven above are the full carrier set
+    // and no OTHER step smuggles one in: the eleven above are the full carrier set
     expect(
       steps
         .filter((s) => secretsOf(s).length > 0)
@@ -399,8 +422,12 @@ describe("deploy-prod.yml guards", () => {
       [
         "Apply prod D1 migrations (remote)",
         "Assert required secrets are set",
+        "Assert zero orphan Apps (post-deploy)",
+        "Assert zero orphan Apps (pre-deploy gate)",
+        "Deploy serving version (prod, mode var)",
         "Deploy Worker (prod)",
         "Re-capture live Worker version",
+        "Re-run workspace backfill (0027, idempotent)",
         "Verify Cloudflare account",
         "Write ALERT_WEBHOOK_URL secret (bind, or null-delete when unset)",
         "Write required secrets",
@@ -516,8 +543,29 @@ describe("deploy-prod.yml guards", () => {
     // draft Worker holding production secrets.
     expect(idx("Write required secrets")).toBeGreaterThan(idx("Deploy Worker"));
     expect(idx("Write ALERT_WEBHOOK_URL secret")).toBeGreaterThan(idx("Write required secrets"));
+    // the serving version is created AFTER the last bulk: the bulk version is
+    // built from the config default, so only this deploy binds the mode.
+    expect(idx("Deploy serving version")).toBeGreaterThan(idx("Write ALERT_WEBHOOK_URL secret"));
+    expect(idx("Re-capture live Worker version")).toBeGreaterThan(idx("Deploy serving version"));
     expect(idx("healthz")).toBeGreaterThan(idx("Write ALERT_WEBHOOK_URL secret"));
     expect(idx("Upload deploy evidence")).toBeGreaterThan(idx("healthz"));
+  });
+
+  test("the serving deploy binds the resolved mode and the summary reports THAT mode, not the dispatch input", () => {
+    const serving = steps.find((s) => s.name === "Deploy serving version (prod, mode var)")!;
+    expect(serving).toBeDefined();
+    expect(serving.env?.TENANT_MODE).toBe("${{ steps.tenant.outputs.mode }}");
+    expect(serving.run).toContain(
+      'bunx wrangler deploy --env production --var "WORKSPACE_TENANT_MODE:$TENANT_MODE"',
+    );
+    expect(serving.run).toContain('echo "mode=$TENANT_MODE" >> "$GITHUB_OUTPUT"');
+    expect(serving.if).toBeUndefined();   // a skip leaves a bulk version serving
+
+    const summary = steps.find((s) => s.name === "Record prod deploy evidence")!;
+    expect(summary.env?.SERVING_MODE).toBe("${{ steps.serving.outputs.mode }}");
+    // the dispatch input must not be printed as the live mode
+    expect(Object.values(summary.env ?? {})).not.toContain("${{ steps.tenant.outputs.mode }}");
+    expect(summary.run).toContain("Tenant mode (serving version)");
   });
 
   test("the tag↔version validation runs after tag resolution and before the FIRST mutating command", () => {
@@ -539,7 +587,7 @@ describe("deploy-prod.yml guards", () => {
     const mutatingIdx = steps
       .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
       .filter((i) => i >= 0);
-    expect(mutatingIdx.length).toBe(4);
+    expect(mutatingIdx.length).toBe(5);
     for (const i of mutatingIdx) expect(validateIdx).toBeLessThan(i);
   });
 
@@ -674,7 +722,7 @@ describe("deploy-prod.yml guards", () => {
     const mutatingIdx = steps
       .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
       .filter((i) => i >= 0);
-    expect(mutatingIdx.length).toBe(4);
+    expect(mutatingIdx.length).toBe(5);
     for (const i of mutatingIdx) expect(preflightIdx).toBeLessThan(i);
     // and the writer no longer carries the assertion itself.
     const writer = steps.find((s) => s.name === "Write required secrets")!;
@@ -940,7 +988,7 @@ describe("deploy-prod.yml guards", () => {
     // webhook — both carry `--env production` on the SAME line as the write.
     // every mutating Wrangler invocation in this workflow carries the flag.
     const mutating = stepRuns.filter((r) => /bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(r));
-    expect(mutating.length).toBe(4);
+    expect(mutating.length).toBe(5);
     for (const r of mutating) expect(r).toMatch(/--env production/);
   });
 
@@ -968,7 +1016,7 @@ describe("deploy-prod.yml guards", () => {
     const mutatingIdx = steps
       .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
       .filter((i) => i >= 0);
-    expect(mutatingIdx.length).toBe(4);
+    expect(mutatingIdx.length).toBe(5);
     for (const i of mutatingIdx) expect(verIdx).toBeLessThan(i);
   });
 
@@ -1014,7 +1062,9 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("deploy runs `wrangler deploy --env production`, tees deploy.log, records the Version ID", () => {
-    expect(runsText).toContain("bunx wrangler deploy --env production 2>&1 | tee deploy.log");
+    expect(runsText).toContain(
+      'bunx wrangler deploy --env production --var "WORKSPACE_TENANT_MODE:$TENANT_MODE" 2>&1 | tee deploy.log',
+    );
     expect(runsText).toContain("Current Version ID:");
     expect(runsText).toContain("version_id.txt");
   });
@@ -1040,7 +1090,13 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
       Bun.spawnSync(["chmod", "+x", join(dir, "bunx")]);
       const proc = Bun.spawnSync(["bash", "-eo", "pipefail", "-c", body], {
         cwd: dir,
-        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, WRANGLER_VERSION_ID: payload },
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          WRANGLER_VERSION_ID: payload,
+          TENANT_MODE: "off",
+          GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
+        },
       });
       const file = join(dir, "version_id.txt");
       return {
