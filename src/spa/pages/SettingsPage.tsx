@@ -297,13 +297,13 @@ export function SettingsView({
 
   /**
    * The review trigger mode save (spec review-trigger-policy §2): the
-   * same pinned-ops POST family as pause/resume — `runPinnedWithBody`
+   * same pinned-ops POST family as pause/resume — `submitTriggerMode`
    * resolves the keyed 400 (`settings.error.triggerModeUnknown`) through
    * the shared settingsErrorMessage resolver and lands the stored value
    * via the awaited background reload.
    */
   async function runTriggerMode(mode: ReviewTriggerMode): Promise<OpNotice> {
-    return runPinnedWithBody(`${appPath}/review-trigger-mode`, { mode });
+    return submitTriggerMode(app.slug, mode, locale, () => onReload({ background: true }));
   }
 
   /**
@@ -319,22 +319,10 @@ export function SettingsView({
     fields: Record<string, string>,
     { successMessage, reload = true }: { successMessage?: string; reload?: boolean } = {},
   ): Promise<OpNotice> {
-    let status: number;
-    let body: string;
-    // The catch guards only the POST — a background reload never rejects:
-    // load() catches its own failures into the page notice.
-    try {
-      ({ status, body } = await postForm(path, fields));
-    } catch {
-      return { kind: "error", message: t(locale, "common.saveFailed") };
-    }
-    // The pinned path resolves through the same resolver as the settings POST
-    // family — keyed JSON renders localized, the remove routes' no-change face
-    // becomes its warn notice, and raw text still displays (fail-visible,
-    // never blank).
-    const outcome: OpNotice = settingsOpOutcome(locale, status, body, successMessage);
-    if (reload) await onReload({ background: true });
-    return outcome;
+    return postPinnedOutcome(path, fields, locale, () => onReload({ background: true }), {
+      successMessage,
+      refetch: reload,
+    });
   }
 
   async function onConfirm(): Promise<void> {
@@ -894,6 +882,54 @@ function OpsCard({
         <HealthBody locale={locale} payload={payload} />
       </CardContent>
     </SectionCard>
+  );
+}
+
+/**
+ * POST one pinned ops path and resolve the outcome — the ONE save pipeline for
+ * every pinned-ops caller (the trigger-mode save included). Keyed JSON renders
+ * localized through the shared resolver, the remove routes' no-change face
+ * becomes its warn notice, raw text still displays (fail-visible, never blank),
+ * and a transport failure reports the save-failed copy instead of leaving the
+ * op silent. `reload` lands the stored value via the awaited background
+ * refresh; the delete path skips it (its settings GET is a guaranteed 404).
+ */
+export async function postPinnedOutcome(
+  path: string,
+  fields: Record<string, string>,
+  locale: SpaBoot["locale"],
+  reload: () => Promise<unknown>,
+  { successMessage, refetch = true }: { successMessage?: string; refetch?: boolean } = {},
+): Promise<OpNotice> {
+  let status: number;
+  let body: string;
+  try {
+    ({ status, body } = await postForm(path, fields));
+  } catch {
+    return { kind: "error", message: t(locale, "common.saveFailed") };
+  }
+  const outcome = settingsOpOutcome(locale, status, body, successMessage);
+  if (refetch) await reload();
+  return outcome;
+}
+
+/**
+ * The review-trigger-mode save: the pinned path and the verbatim mode body,
+ * both derived from the App's own page base. The one derivation the control
+ * posts, so a test can execute the real save for the real page context
+ * instead of supplying an App path of its own.
+ */
+export function submitTriggerMode(
+  slug: string,
+  mode: ReviewTriggerMode,
+  locale: SpaBoot["locale"],
+  reload: () => Promise<unknown>,
+): Promise<OpNotice> {
+  return postPinnedOutcome(
+    `${apiBase()}/apps/${encodeURIComponent(slug)}/review-trigger-mode`,
+    { mode },
+    locale,
+    reload,
   );
 }
 

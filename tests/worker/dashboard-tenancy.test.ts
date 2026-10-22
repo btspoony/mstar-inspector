@@ -17,29 +17,57 @@
  * workspace here is explicit, which keeps the role matrix readable.
  */
 import { describe, expect, test } from "bun:test";
+import type { ReactElement } from "react";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
 import { apiBase } from "../../src/spa/workspace-base";
+import type { SpaBoot } from "../../src/spa/boot";
+import { RESERVED_WORKSPACE_SLUGS } from "../../src/spa/routes";
+import { t } from "../../src/i18n";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
-/** The routing gate's reserved-word set, restated as the test contract. */
-const RESERVED_WORKSPACE_SLUGS = [
-  "apps",
-  "api",
-  "oauth",
-  "members",
-  "login",
-  "logout",
-  "manifest",
-  "locale",
-  "healthz",
-] as const;
+/** The boot the served shell injected (the client's only identity channel). */
+function bootOf(html: string): SpaBoot {
+  const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
+  if (json === undefined) throw new Error("no injected SPA boot");
+  return JSON.parse(json) as SpaBoot;
+}
+
+/**
+ * Renders the REAL Members page (chrome included) at `/dashboard/members` from
+ * one boot and returns every href it emits. The SPA tree is imported through a
+ * computed specifier: the root tsconfig keeps `src/spa` out of this program
+ * (it targets the Workers lib, not the DOM), so a static import would drag the
+ * browser sources into a typecheck that has no `document`.
+ */
+async function renderMembersHrefs(boot: SpaBoot): Promise<string[]> {
+  // Specifiers stay relative to THIS file so Bun resolves them exactly as a
+  // static import would; `tsc` never sees them.
+  const spa = "../../src/spa";
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  type Component = (props: Record<string, unknown>) => ReactElement;
+  const { Layout } = (await import(`${spa}/Layout`)) as { Layout: Component };
+  const { DashboardPage } = (await import(`${spa}/pages`)) as { DashboardPage: Component };
+  const { matchRoute } = (await import(`${spa}/router`)) as {
+    matchRoute: (pathname: string) => unknown;
+  };
+  const pathname = "/dashboard/members";
+  const html = renderToStaticMarkup(
+    createElement(Layout, {
+      boot,
+      pathname,
+      children: createElement(DashboardPage, { route: matchRoute(pathname), boot }),
+    }),
+  );
+  return [...html.matchAll(/href="([^"]+)"/g)].map((match) => match[1] ?? "");
+}
 
 function envFor(db: TestD1, mode?: "off" | "strict"): Env {
   return {
@@ -331,6 +359,27 @@ describe("WORKSPACE_TENANT_MODE=strict — workspace paths serve", () => {
     expect(res.status).toBe(404);
   });
 
+  test("the workspace 404 is the styled page on HTML navigation and a bare status on fetch", async () => {
+    const { db } = tenancyFixture();
+    const env = envFor(db, "strict");
+    // HTML navigation renders the console's own 404 surface (the same page the
+    // pinned-POST 404 uses) instead of Hono's bare text.
+    const page = await worker.fetch(
+      await authedRequest("/dashboard/ghost/api/apps", "octocat", { accept: "text/html" }),
+      env,
+    );
+    expect(page.status).toBe(404);
+    expect(page.headers.get("Content-Type")).toContain("text/html");
+    expect(await page.text()).toContain(t("en", "common.error.notFoundTitle"));
+    // A fetch keeps the bare 404 body — the SPA's API reads parse status only.
+    const api = await worker.fetch(
+      await authedRequest("/dashboard/ghost/api/apps", "octocat", { accept: "application/json" }),
+      env,
+    );
+    expect(api.status).toBe(404);
+    expect(await api.text()).toBe("404 Not Found");
+  });
+
   test("non-App routes keep serving under strict", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db, "strict");
@@ -594,6 +643,74 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
       // on the page hangs off /dashboard/acme (the legacy App family 404s here).
       expect(apiBase(path), path).toBe("/dashboard/acme");
     }
+  });
+
+  test("strict: the workspace-active Members shell names the sole workspace in the boot, so its nav stays inside it", async () => {
+    // Members is not workspace-routed; only the server-resolved sole workspace
+    // can keep its Apps/brand links off the legacy `/dashboard/apps` dead end.
+    // 0026 seeds `default`; this fixture adds the membership on top of it.
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/members", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceSlug).toBe("default");
+    const hrefs = await renderMembersHrefs(boot);
+    expect(hrefs).toContain("/dashboard/default/apps");
+    expect(hrefs).toContain("/dashboard/members");
+    expect(hrefs).not.toContain("/dashboard/apps");
+  });
+
+  test("off: the Members shell keeps the legacy targets (no workspace in the boot)", async () => {
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/members", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "off")),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceSlug).toBeUndefined();
+    // `off` keeps today's output exactly: the legacy targets, no workspace.
+    const hrefs = await renderMembersHrefs(boot);
+    expect(hrefs).toContain("/dashboard/apps");
+    expect(hrefs).not.toContain("/dashboard/default/apps");
+  });
+
+  test("strict: the workspace Apps boot keeps its workspace after a client-side navigation to Members", async () => {
+    // spaClick → pushState changes the pathname but NOT `window.__BOOT__`, so a
+    // boot that omitted the slug on workspace pages would strand Members on the
+    // legacy targets the moment the admin clicked through (I-000072).
+    // A deployment ADMIN carries the Members entry; 0026 seeds `default` as
+    // the sole live workspace, so it is also what the server resolves.
+    const db = createMigratedTestD1();
+    seedMembership(db, "default", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/default/apps", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "strict")),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceSlug).toBe("default");
+    // The Members PAGE the click lands on, rendered from THAT boot: the
+    // sidebar hrefs are read off the markup, not off the model behind it.
+    const hrefs = await renderMembersHrefs(boot);
+    expect(hrefs).toContain("/dashboard/default/apps");
+    expect(hrefs).toContain("/dashboard/members");
+    expect(hrefs).not.toContain("/dashboard/apps");
+  });
+
+  test("off: a workspace-shaped shell never exists, so no boot carries a slug", async () => {
+    const { db } = tenancyFixture();
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/apps", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db, "off")),
+    );
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).workspaceSlug).toBeUndefined();
   });
 
   test("off: a workspace Apps page answers 404 even with ASSETS bound (gate before dispatch)", async () => {

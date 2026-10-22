@@ -23,9 +23,14 @@ import {
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
 import { AppInfoCard, DraftChainPanel, ProviderConfigForm, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
+import { AppDetailPage } from "../../src/spa/pages/AppDetailPage";
+import { withLocation } from "./browser-stub";
 
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
+
+/** The detail page reads only locale/role from the boot for this face. */
+const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat", role: "admin" as const };
 
 describe("settings layout", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -1305,24 +1310,35 @@ describe("operational action hierarchy", () => {
 
 describe("App workflow boundaries", () => {
   test("App settings reads as one workflow with the Apps list: a visible path back", () => {
-    // The wayfinding lives on the AppDetailPage shell (both faces), not
-    // the settings tab body — the source pin re-pointed with the move.
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
-    // The back link targets the enumerated Apps route (the /dashboard surface).
-    expect(source).toContain('href={appsHref}');
-    expect(source).toContain('t(locale, "appDetail.backToApps")');
+    // The REAL page is rendered under each pathname; the loader has not
+    // resolved, so this is the loading face — which must still carry the
+    // wayfinding link, derived from the page's own base.
+    const render = (pathname: string): string =>
+      withLocation(pathname, () =>
+        renderToStaticMarkup(createElement(AppDetailPage, { boot: adminBoot, slug: "acme-app" })),
+      );
+
+    const legacy = render("/dashboard/apps/acme-app");
+    expect(legacy).toContain('href="/dashboard/apps"');
+    expect(legacy).toContain("Back to Apps");
+    // These renders ARE the loading face (the loader never resolved), so the
+    // link above is proven present before the payload lands.
+    expect(legacy).toContain('data-slot="page-skeleton"');
+
+    // A workspace App page keeps the wayfinding inside its workspace: the
+    // legacy App family answers 404 under strict.
+    const scoped = render("/dashboard/acme/apps/acme-app");
+    expect(scoped).toContain('href="/dashboard/acme/apps"');
+    expect(scoped).not.toContain('href="/dashboard/apps"');
+
     expect(t("en", "appDetail.backToApps")).toBe("Back to Apps");
     expect(t("zh_CN", "appDetail.backToApps")).toBe("返回应用");
-    // A decorative ArrowLeft rides the link — aria-hidden keeps
-    // the accessible name at the backToApps text alone; inline-flex aligns
-    // icon + label. Copy and target unchanged (AC3).
-    const wayfinding = source.slice(
-      source.lastIndexOf("<a", source.indexOf('href={appsHref}')),
-      source.indexOf('t(locale, "appDetail.backToApps")'),
-    );
-    expect(wayfinding).toContain("<ArrowLeft");
-    expect(wayfinding).toContain('aria-hidden="true"');
-    expect(wayfinding).toContain("inline-flex items-center gap-1.5");
+    // The decorative ArrowLeft rides the link — aria-hidden keeps the
+    // accessible name at the backToApps text alone; inline-flex aligns
+    // icon + label.
+    expect(scoped).toContain("<svg");
+    expect(scoped).toContain('aria-hidden="true"');
+    expect(scoped).toContain("inline-flex items-center gap-1.5");
   });
 
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
 import { StatusBadge } from "./AppsPage";
@@ -21,6 +21,45 @@ import {
   type ModelOptionGroup,
   type SettingsPayload,
 } from "./data";
+
+/**
+ * Page wayfinding link back to the Apps list. The href is the page's own API
+ * base, derived here so the rendered link is the real target on both the
+ * legacy and the workspace-scoped path.
+ */
+export function BackToApps({ locale }: { locale: SpaBoot["locale"] }) {
+  const href = `${apiBase()}/apps`;
+  return (
+    <a
+      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+      href={href}
+      onClick={(event) => spaClick(href, event)}
+    >
+      <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
+      {t(locale, "appDetail.backToApps")}
+    </a>
+  );
+}
+
+/**
+ * The shell's own fragment: the page wayfinding link plus the face below it.
+ * A separate component (rather than inline JSX in the stateful page) so the
+ * rendered shell — link target included — is assertable without a DOM runner.
+ */
+export function AppDetailShell({
+  locale,
+  children,
+}: {
+  locale: SpaBoot["locale"];
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-6">
+      <BackToApps locale={locale} />
+      {children}
+    </div>
+  );
+}
 
 /**
  * The App detail page (App detail IA): `/dashboard/apps/:slug` —
@@ -181,12 +220,14 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
     setSearch(next);
   }
 
-  // Loading rides the shared skeleton as the page's full loading face —
-  // the skeleton's heading placeholder stands in for the real h1 (AD-582),
-  // matching the Apps/Members idiom. Foreground only, so op-triggered
-  // background reloads never flash it (the background-reload contract).
+  // Every face keeps the wayfinding link — loading included, so a slow read
+  // never strands the operator on a page with no exit.
   if (state === "loading") {
-    return <PageSkeleton locale={locale} kind="forms" />;
+    return (
+      <AppDetailShell locale={locale}>
+        <PageSkeleton locale={locale} kind="forms" />
+      </AppDetailShell>
+    );
   }
 
   // Deep-link withhold (bugbot fix): once the payload lands, `state` is
@@ -197,28 +238,15 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   // shell withholds it behind the loading skeleton for exactly that one
   // paint. Background reloads are unaffected: searchReady stays true.
   if (state === "ok" && payload && !searchReady) {
-    return <PageSkeleton locale={locale} kind="forms" />;
+    return (
+      <AppDetailShell locale={locale}>
+        <PageSkeleton locale={locale} kind="forms" />
+      </AppDetailShell>
+    );
   }
 
-  // Page wayfinding: the back link is the shell's first element on both
-  // faces (error + ok — it serves both roles), moved here from the
-  // settings tab body. The decorative ArrowLeft rides the link
-  // aria-hidden, so the accessible name stays the backToApps text alone.
-  const appsHref = `${apiBase()}/apps`;
-  const wayfinding = (
-    <a
-      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-      href={appsHref}
-      onClick={(event) => spaClick(appsHref, event)}
-    >
-      <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
-      {t(locale, "appDetail.backToApps")}
-    </a>
-  );
-
   return (
-    <div className="flex flex-col gap-6">
-      {wayfinding}
+    <AppDetailShell locale={locale}>
       {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
       {state === "ok" && payload ? (
         <AppDetailView
@@ -232,7 +260,7 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
           onSearch={commitSearch}
         />
       ) : null}
-    </div>
+    </AppDetailShell>
   );
 }
 

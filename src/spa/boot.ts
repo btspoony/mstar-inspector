@@ -6,10 +6,10 @@
  * the document. The session cookie is HttpOnly, so the client cannot read
  * login/role itself — this injection is the only bootstrap path.
  *
- * Shape is intentionally small (locale + identity). Page data comes from the
- * dashboard API under the page's own workspace prefix (`workspace-base.ts`),
- * so no workspace identity is duplicated here — a boot-injected base would go
- * stale on the first client-side navigation.
+ * Shape is intentionally small (locale + identity + the deployment's sole
+ * workspace slug). Page data comes from the dashboard API under the page's own
+ * workspace prefix (`workspace-base.ts`) — the injected slug is navigation
+ * only, for the pages whose pathname names no workspace (Members).
  */
 import type { Locale } from "../i18n";
 
@@ -18,6 +18,13 @@ export type SpaBoot = {
   login: string | null;
   name: string | null;
   role: "admin" | "member" | null;
+  /**
+   * The deployment's sole live workspace under `strict`, resolved server-side
+   * through the sign-in landing's resolver. Absent under `off` and whenever the
+   * deployment cannot name exactly one — the shell then keeps its legacy
+   * targets. A workspace-scoped pathname always wins over this value.
+   */
+  workspaceSlug?: string;
 };
 
 export const EMPTY_BOOT: SpaBoot = { locale: "en", login: null, name: null, role: null };

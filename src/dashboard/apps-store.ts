@@ -406,9 +406,12 @@ export function createAppsStore(db: AppsStoreD1, mode: TenantMode = "off") {
       const id = input.id;
       // Sole-workspace guard (separate read, BEFORE the batch): Deploy A ships
       // one workspace, and a mapping write cannot guess which of several to
-      // pick. A clean throw here leaves no half-written App.
+      // pick. A clean throw here leaves no half-written App. Same live-row
+      // predicate as getSoleWorkspace: a soft-deleted tenant is not a candidate
+      // for ownership, so `strict` reads (which resolve the one live workspace)
+      // and this write can never disagree on the count.
       const workspaces = await db
-        .prepare(`SELECT id FROM workspaces LIMIT 2`)
+        .prepare(`SELECT id FROM workspaces WHERE deleted_at IS NULL LIMIT 2`)
         .all<{ id: string }>();
       if (workspaces.results.length !== 1) {
         throw new Error(

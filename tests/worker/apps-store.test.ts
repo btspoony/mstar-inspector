@@ -516,6 +516,27 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect(mappingRows(db)).toEqual([]);
   });
 
+  test("a soft-deleted workspace row is not the sole workspace: the live one stays the only candidate", async () => {
+    // The same live-row predicate as getSoleWorkspace — a retired tenant must
+    // neither make the count ambiguous nor receive a new App's mapping.
+    const db = createMigratedD1();
+    rawRun(
+      db,
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+       VALUES ('retired', 'retired', 'Retired', NULL, '2026-10-21T00:00:00.000Z', '2026-10-21T01:00:00.000Z')`,
+    );
+    const app = await seedApp(db);
+    expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "default" }]);
+  });
+
+  test("no live workspace (the only row is soft-deleted) → createApp refuses and writes nothing", async () => {
+    const db = createMigratedD1();
+    rawRun(db, "UPDATE workspaces SET deleted_at = '2026-10-21T01:00:00.000Z'");
+    await expect(seedApp(db)).rejects.toThrow(/exactly one workspace, found 0/);
+    expect(appCount(db)).toBe(0);
+    expect(mappingRows(db)).toEqual([]);
+  });
+
   test("repeated createApp never creates a workspace: the seeded row is the only one", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "one", githubAppId: 1 });

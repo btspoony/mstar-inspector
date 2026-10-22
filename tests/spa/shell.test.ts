@@ -114,6 +114,38 @@ describe("shell models", () => {
     expect(detail.items.find((item) => item.href === "/dashboard/acme/apps")?.current).toBe(true);
     expect(detail.items.find((item) => item.href === "/dashboard/members")?.current).toBe(false);
   });
+
+  test("a workspace-active Members page keeps its Apps/brand targets inside the workspace", () => {
+    // Members is not workspace-routed, so the pathname names no workspace: the
+    // boot's server-resolved slug carries it (I-000072). Every Apps target on
+    // the page must stay inside the workspace — the legacy `/dashboard/apps`
+    // is a 404 dead end under `strict`.
+    const sidebar = buildSidebarModel({ ...admin, workspaceSlug: "acme" }, "/dashboard/members");
+    expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
+    const hrefs = sidebar.items.map((item) => item.href);
+    expect(hrefs).toContain("/dashboard/acme/apps");
+    expect(hrefs).not.toContain("/dashboard/apps");
+    // Members itself stays the mode-independent route and is the current entry.
+    expect(sidebar.items.find((item) => item.href === "/dashboard/members")?.current).toBe(true);
+  });
+
+  test("the page's own workspace wins over the boot slug (one workspace identity per page)", () => {
+    const sidebar = buildSidebarModel({ ...admin, workspaceSlug: "other" }, "/dashboard/acme/apps");
+    expect(sidebar.items.map((item) => item.href)).toEqual([
+      "/dashboard/acme/apps",
+      "/dashboard/members",
+    ]);
+    expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
+  });
+
+  test("no boot slug → the legacy targets are unchanged", () => {
+    const sidebar = buildSidebarModel(admin, "/dashboard/members");
+    expect(sidebar.brandHref).toBe("/dashboard");
+    expect(sidebar.items.map((item) => item.href)).toEqual([
+      "/dashboard/apps",
+      "/dashboard/members",
+    ]);
+  });
 });
 
 describe("navbar theme toggle", () => {

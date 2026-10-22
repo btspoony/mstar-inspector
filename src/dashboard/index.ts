@@ -179,20 +179,31 @@ function scopedAppPath(c: DashboardContext, path: string): string {
 }
 
 /**
- * `/dashboard/<sole-workspace-slug>/apps` under `strict`, otherwise null. M1 is
- * single-workspace; a deployment that does not carry exactly one live
- * workspace has no unambiguous apps list to name, so callers keep their own
- * legacy target and this warns instead of guessing a slug.
+ * The deployment's sole live workspace slug under `strict`, otherwise null.
+ * M1 is single-workspace; a deployment that does not carry exactly one live
+ * workspace has no unambiguous workspace to name, so callers keep their own
+ * legacy target instead of guessing a slug.
  */
-export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> {
+export async function strictWorkspaceSlug(env: Env): Promise<string | null> {
   if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return null;
   const db = dashboardD1(env);
-  const workspace = db ? await getSoleWorkspace(db) : null;
-  if (workspace !== null) return `/dashboard/${workspace.slug}/apps`;
+  return db === null ? null : ((await getSoleWorkspace(db))?.slug ?? null);
+}
+
+/**
+ * `/dashboard/<sole-workspace-slug>/apps` under `strict`, otherwise null, with
+ * the operator warning for an unresolvable landing (the redirect owner).
+ */
+export async function strictWorkspaceAppsBase(env: Env): Promise<string | null> {
+  const slug = await strictWorkspaceSlug(env);
+  if (slug !== null) return `/dashboard/${slug}/apps`;
+  // Null is also `off`'s normal answer; only a strict deployment that cannot
+  // name its workspace reaches the operator warning (a dead-end landing).
+  if (tenantModeOf(env.WORKSPACE_TENANT_MODE) !== "strict") return null;
   console.warn(
     JSON.stringify({
       event: "dashboard_landing",
-      reason: db === null ? "db_unbound" : "no_sole_workspace",
+      reason: dashboardD1(env) === null ? "db_unbound" : "no_sole_workspace",
     }),
   );
   return null;
@@ -1184,10 +1195,17 @@ async function requireMember(c: DashboardContext): Promise<
   // workspace answers (no tenant-existence oracle).
   const tenant = c.get("tenant");
   if (tenant) {
+    // Tenant invisibility is final on a workspace-scoped request: HTML
+    // navigation renders the styled 404 page (the same surface the pinned-POST
+    // 404 uses), a fetch keeps the bare status.
+    const invisible = async (): Promise<Response> =>
+      wantsHtml(c.req.header("Accept") ?? null)
+        ? c.html(notFoundPage(requestLocale(c)), 404)
+        : await c.notFound();
     const workspace = await getWorkspaceBySlug(db, tenant.slug);
-    if (!workspace) return { ok: false, response: await c.notFound() };
+    if (!workspace) return { ok: false, response: await invisible() };
     const role = await getMembership(db, workspace.id, user.id);
-    if (!role) return { ok: false, response: await c.notFound() };
+    if (!role) return { ok: false, response: await invisible() };
     c.set("tenant", { slug: workspace.slug, workspaceId: workspace.id, role });
     return { ok: true, session, db, user, scope: { workspaceId: workspace.id, role } };
   }
