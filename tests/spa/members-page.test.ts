@@ -279,6 +279,9 @@ describe("members table (rendered)", () => {
   };
 
   test("the Joined cell shows the relative stamp and keeps the absolute one as its tooltip", () => {
+    // Day granularity: the bucket cannot roll over inside one test run.
+    const relative = formatRelativeTime(ROW.created_at, "en");
+    expect(relative).toMatch(/\d+ days ago$/);
     const html = renderToStaticMarkup(
       createElement(MembersTable, {
         locale: "en",
@@ -293,7 +296,7 @@ describe("members table (rendered)", () => {
     // stamp the tooltip must still expose (losing the title is the silent
     // regression this covers).
     expect(html).toContain(`title="${ROW.created_at}"`);
-    expect(html).toContain(formatRelativeTime(ROW.created_at, "en"));
+    expect(html).toContain(`>${relative}<`);
     expect(html).toContain(t("en", "members.tableJoined"));
   });
 });
