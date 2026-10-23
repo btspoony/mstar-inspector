@@ -43,7 +43,7 @@
 #   packages/runner/{package.json,bun.lock}
 #   packages/{shared,runner}/src
 #   packages/runner/verify-synthesis.sh
-#   sandbox-image/verify-cli-shim.sh
+#   sandbox-image/{verify-cli-shim.sh,cli-global/{package.json,bun.lock}}
 # A repo-root .dockerignore keeps the context lean (node_modules and tests excluded).
 
 # Sandbox SDK 1.0: the 0.12 `FROM docker.io/cloudflare/sandbox:<ver>` base is
@@ -123,8 +123,17 @@ RUN sh /opt/verify-seat-supervision.sh
 # toolcall path is a tracked follow-up — no such mechanism
 # exists in this image. Exact CLI pin: image pinning
 # discipline — the repo manifest `^` range exception does NOT extend to the
-# image; the version itself lives only in `CLI_VERSION` below. The CLI dist
-# ships `#!/usr/bin/env node` (observed) and this image
+# image; the version lives only in the committed global-install manifest
+# `sandbox-image/cli-global/package.json`, whose exact pin equals
+# `HARNESS_VERSION` (asserted by tests/review/pin.test.ts). The CLI's OWN
+# dependency tree is pinned by the committed `bun.lock` beside it: `bun add
+# --global` re-resolved those caret ranges on every build (I-000009), while
+# `bun install --frozen-lockfile` replays the recorded, integrity-hashed set
+# and FAILS on any lock-external change instead of installing something new.
+# There is no `bun install --global` in bun 1.4.0, so the replay targets the
+# global install dir directly and the bins are linked onto PATH by hand.
+#
+# The CLI dist ships `#!/usr/bin/env node` (observed) and this image
 # ships no node, so the build rewrites the installed shim to
 # `#!/usr/bin/env bun` — the Bun 1.4.0 installed above executes it directly,
 # no node is added. The global bin dir is put on PATH so sandbox exec
@@ -132,18 +141,21 @@ RUN sh /opt/verify-seat-supervision.sh
 #
 # The build PROVES both facts instead of expecting them: `verify-cli-shim.sh`
 # (sandbox-image/verify-cli-shim.sh) reads the resolved shim's first line and
-# runs it, failing the build on a shebang regression or a version drift.
-# `CLI_VERSION` is the ONE pin declaration: the install and the assertion both
-# consume it, so the two cannot drift. The expected version is passed
-# explicitly — the script ships alone in the image (no Dockerfile beside it).
-ARG CLI_VERSION=4.0.7
-RUN bun add --global @mstar-harness/cli@${CLI_VERSION} \
+# runs it, failing the build on a shebang regression or a version drift. Its
+# expected version is read from the manifest the install just consumed, so the
+# assertion cannot drift from the pin.
+COPY sandbox-image/cli-global/package.json sandbox-image/cli-global/bun.lock /root/.bun/install/global/
+RUN cd /root/.bun/install/global \
+    && bun install --frozen-lockfile --production \
+    && mkdir -p /root/.bun/bin \
+    && ln -sf ../install/global/node_modules/.bin/mstar /root/.bun/bin/mstar \
+    && ln -sf ../install/global/node_modules/.bin/mstar-harness /root/.bun/bin/mstar-harness \
     && sed -i --follow-symlinks '1s|.*|#!/usr/bin/env bun|' /root/.bun/bin/mstar
 ENV PATH="/root/.bun/bin:${PATH}"
 # The assertion script is COPYed below the install/PATH layer so editing it
 # never invalidates the network install layer; the check stays adjacent to it.
 COPY sandbox-image/verify-cli-shim.sh /opt/verify-cli-shim.sh
-RUN sh /opt/verify-cli-shim.sh "${CLI_VERSION}"
+RUN sh /opt/verify-cli-shim.sh
 
 # omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (no baked
 # models.yml is an App-configuration artifact). The in-image runner
