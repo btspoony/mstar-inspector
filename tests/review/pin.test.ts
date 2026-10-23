@@ -41,6 +41,10 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
 /** The runtime-specific Dockerfile location (sandbox-image/). */
 const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "Dockerfile");
 const DOCKERFILE = readFileSync(OMP_DOCKERFILE, "utf8");
+/** Comment lines dropped: a commented-out instruction is not a live one. */
+const INSTRUCTIONS = DOCKERFILE.split("\n")
+  .filter((line) => !/^\s*#/.test(line))
+  .join("\n");
 
 describe("sandbox image harness pin", () => {
   test("both declared harness versions are the single HARNESS_VERSION constant", () => {
@@ -152,13 +156,10 @@ describe("sandbox image CLI pin", () => {
     // The manifest owns the version now; a version restated on an instruction
     // line is the drift this guards. Comments excluded: the harness-tag
     // comment legitimately names the plugin tag v<version>.
-    const instructions = DOCKERFILE.split("\n")
-      .filter((line) => !/^\s*#/.test(line))
-      .join("\n");
     const version = OMP_SANDBOX_IMAGE_PINS.harnessCliVersion.replace(/\./g, "\\.");
-    expect(instructions.match(new RegExp(`(?<![\\d.])${version}(?![\\d.])`, "g"))).toBeNull();
-    expect(instructions).not.toContain("@latest");
-    expect(instructions).not.toContain("@mstar-harness/cli");
+    expect(INSTRUCTIONS.match(new RegExp(`(?<![\\d.])${version}(?![\\d.])`, "g"))).toBeNull();
+    expect(INSTRUCTIONS).not.toContain("@latest");
+    expect(INSTRUCTIONS).not.toContain("@mstar-harness/cli");
   });
 
   test("Dockerfile puts the bun global bin on PATH for sandbox exec", () => {
@@ -169,7 +170,8 @@ describe("sandbox image CLI pin", () => {
 describe("sandbox image build assertions", () => {
   // Each capability the image claims is proven by a script the build COPYs and
   // runs. CI never builds the image, so a dropped COPY or RUN would otherwise
-  // revert the claim to a comment without failing anything.
+  // revert the claim to a comment without failing anything. Instructing on
+  // INSTRUCTIONS (not the raw file) keeps a commented-out line from counting.
   for (const script of [
     "verify-seat-supervision.sh",
     "verify-cli-lock.sh",
@@ -178,9 +180,9 @@ describe("sandbox image build assertions", () => {
     test(`Dockerfile runs ${script}`, () => {
       const copy = `COPY sandbox-image/${script} /opt/${script}`;
       const run = `RUN sh /opt/${script}`;
-      expect(DOCKERFILE).toContain(copy);
-      expect(DOCKERFILE).toContain(run);
-      expect(DOCKERFILE.indexOf(copy)).toBeLessThan(DOCKERFILE.indexOf(run));
+      expect(INSTRUCTIONS).toContain(copy);
+      expect(INSTRUCTIONS).toContain(run);
+      expect(INSTRUCTIONS.indexOf(copy)).toBeLessThan(INSTRUCTIONS.indexOf(run));
     });
   }
 });
