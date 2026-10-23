@@ -794,10 +794,10 @@ removed with it, so rollback is a `git revert` of the commit that deleted it
 face served the pre-workspace route family, which already answered 404 under
 the workspace routes.
 
-The removal is recorded in `.changes/unreleased/deployment-mode.md`. Outside
-that entry and the deploy-guard tests under `tests/scripts/` (which assert no
-workflow re-introduces it), the retired name appears nowhere in this
-repository.
+The removal is recorded in `.changes/unreleased/deployment-mode.md`, which is
+the only place the retired name appears literally. The deploy-guard tests under
+`tests/scripts/` assemble it from fragments to assert no workflow brings it
+back, and are the reason a search may still surface those files.
 
 ## Deployment mode (`DEPLOYMENT_MODE`)
 
