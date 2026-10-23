@@ -1,5 +1,5 @@
 /**
- * `packages/shared` dependency boundary (plan 103, compass D11).
+ * `packages/shared` dependency boundary.
  *
  * The package is the dependency-free owner of the dual-surface wire
  * contracts: a runtime engine/omp import, any `zod` import, or a relative

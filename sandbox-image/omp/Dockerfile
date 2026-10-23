@@ -144,18 +144,13 @@ RUN bun install --frozen-lockfile --production \
           node_modules/onnxruntime-web node_modules/sharp node_modules/@img \
     && rm -rf /root/.bun/install/cache
 COPY src/review /opt/runner/src/review
-# Zero-runtime-dependency wire contract (PM amendment
-# 2026-09-13; narrowed in QC wave B): the recheck seat runtime-imports the §7.3
-# wire module and NOTHING else, so exactly that ONE file is copied — not the
-# directory. src/pipeline, src/store and every other workerd face stay out, and
-# a future file under src/contracts cannot join the image graph silently
-# (tests/review/runtime-boundary.test.ts derives the admitted set from these
-# COPY lines and re-asserts dependency freedom per admitted file).
-COPY src/contracts/recheck.ts /opt/runner/src/contracts/recheck.ts
-# Same admission rule, same reason: the `!`-prefixed-key refusal is ONE
-# predicate shared by the runner's payload decoder and the dashboard's key
-# routes, so the zero-dependency contract file that holds it rides the image.
-COPY src/contracts/credential-key.ts /opt/runner/src/contracts/credential-key.ts
+# Zero-runtime-dependency wire contracts shared by the Worker and the runner:
+# src/review/*.ts imports `../../packages/shared/src/*`, which resolves to
+# /opt/runner/packages/shared/src/* in this layout. src/pipeline, src/store and
+# every other workerd face stay out, and every admitted file must stay
+# dependency-free (tests/review/runtime-boundary.test.ts derives the admitted
+# set from these COPY lines and re-asserts that per file).
+COPY packages/shared/src /opt/runner/packages/shared/src
 
 # The runner resolves the harness root from this env (plan Clarify #5). Provider
 # keys arrive as the runner's STDIN payload — never baked in, never in the env.
