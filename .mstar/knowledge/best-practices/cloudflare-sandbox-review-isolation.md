@@ -9,7 +9,6 @@ status: active
 created_at: 2026-08-26
 last_updated: 2026-10-14
 source: sandbox review pipeline
-iteration: v0.2
 verified: true
 ---
 
@@ -17,7 +16,7 @@ verified: true
 
 ## Context
 
-mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Queue consumer 在 Sandbox 容器内 clone + `gh pr diff` + 跑 omp（Bun）审查。本迭代（v0.2）把 solution §5.6 的全部 ASSUMPTION 证伪为已核实。
+mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Queue consumer 在 Sandbox 容器内 clone + `gh pr diff` + 跑 omp（Bun）审查。下方结论均为仓内实测核实，不再是待验证假设。
 
 ## Guidance
 
@@ -35,7 +34,7 @@ mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Q
 - clone / `gh pr view` / `gh pr diff` 是 **Worker→`runCommand` 的受信任编排**，不是 agent 工具。
 - `gh` 认证：`GH_TOKEN` 经 `runCommand` 的 `opts.env` 注入（实测 `gh pr diff` 对真实 PR 返回非空 diff）；**密钥不进镜像**（含 build args）。**该命令用的就是 `sandbox-read` 授权**，所以该授权必须含 `pull_requests: read`（其余仍只读、仅限单仓）——否则 diff 步会 403，review 直接失败。
 - 每消息一个 sandbox，id 用 `randomUUID()`（per-attempt 唯一），`finally` 中 `destroy()`；禁止跨消息复用。
-- 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 仅来自 per-App BYOK：`resolveAppConfig` 产出的 keys 按 provider 编成 **stdin 凭据载荷**（`packages/shared/src/credential-payload.ts`，经 `container.exec` 的 `stdin: "pipe"` 送入 runner 并由其关闭管道送 EOF），runner 在会话创建前装入本次运行的**内存**凭据存储（`AuthStorage.create(":memory:")`，per-run 目录只保留非密 `models.yml`）；`key_source` ∈ `app|custom`（`buildRunnerCredentials` 装配，无 env 参数）。key 永不进容器进程环境、argv 或落盘文件。注册表里的 env 名（`ark → ARK_API_KEY`）已退为白名单元数据，不再是注入变量——全局 `OMP_MODEL_KEY` 单一映射点已随 v0.9 / AL-24-5 退役（零全局回退，见 `perapp-zero-global-fallback.md`）。
+- 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 仅来自 per-App BYOK：`resolveAppConfig` 产出的 keys 按 provider 编成 **stdin 凭据载荷**（`packages/shared/src/credential-payload.ts`，经 `container.exec` 的 `stdin: "pipe"` 送入 runner 并由其关闭管道送 EOF），runner 在会话创建前装入本次运行的**内存**凭据存储（`AuthStorage.create(":memory:")`，per-run 目录只保留非密 `models.yml`）；`key_source` ∈ `app|custom`（`buildRunnerCredentials` 装配，无 env 参数）。key 永不进容器进程环境、argv 或落盘文件。注册表里的 env 名（`ark → ARK_API_KEY`）已退为白名单元数据，不再是注入变量——全局 `OMP_MODEL_KEY` 单一映射点已退役（零全局回退，见 `perapp-zero-global-fallback.md`）。
 
 ### 网络出站控制面（v0.7 核实；2026-10 修订到 1.0 面）
 
@@ -57,9 +56,9 @@ Sandbox 是 M1 审查隔离的耐久指针；适配层（`src/pipeline/sandbox.t
 
 - 任何在 Workers 上编排容器内长任务的实现。
 - 改 `wrangler.jsonc` 的 `containers` / `durable_objects` / `migrations`（三处 class_name 与迁移 tag 必须一起动）。
-- 升级 `@cloudflare/sandbox`（本仓只作 shim 版本锚）前先跑 T1 冒烟（`scripts/sandbox-smoke.ts`）。
+- 升级 `@cloudflare/sandbox`（本仓只作 shim 版本锚）前先跑冒烟（`scripts/sandbox-smoke.ts`）。
 
 ## Examples
 
-- 证伪冒烟（`src/pipeline/smoke-entry.ts` T1）：`getSandbox(env.SANDBOX, "smoke-<uuid>")` → `sandbox.runCommand(shellCommand("gh pr diff …"), { env: { GH_TOKEN } })` → 判定成功 = `exitCode === 0 && stdout.trim().length > 0`（只打印前 40 字符，不断言 `diff --git`；git 失败腿同判据）→ `sandbox.destroy()`；`destroyEvidence.ok=true`。
+- 证伪冒烟（`src/pipeline/smoke-entry.ts`）：`getSandbox(env.SANDBOX, "smoke-<uuid>")` → `sandbox.runCommand(shellCommand("gh pr diff …"), { env: { GH_TOKEN } })` → 判定成功 = `exitCode === 0 && stdout.trim().length > 0`（只打印前 40 字符，不断言 `diff --git`；git 失败腿同判据）→ `sandbox.destroy()`；`destroyEvidence.ok=true`。
 - 失败路径：4 次坏 payload 演练 → 4 个 sandbox 全部 destroy（日志逐条含 idempotency_key + sandbox_id）。
