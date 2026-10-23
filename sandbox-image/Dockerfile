@@ -105,7 +105,15 @@ RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
     && git -C /opt/mstar-harness fetch --depth 1 origin 37c0d5fc238d8c13486ed4c316e5cd3636e77228 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
+    && { echo "ref=$(git -C /opt/mstar-harness rev-parse FETCH_HEAD)"; \
+         echo "commit=$(git -C /opt/mstar-harness rev-parse HEAD)"; } > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
+# The build proves the pinned tree serves the review flow it is pinned for:
+# `verify-seat-supervision.sh` asserts the cloned pr-review reference carries
+# `## Seat supervision`, naming the pinned ref + commit on failure.
+# COPYed below the clone layer so editing the script never invalidates it.
+COPY sandbox-image/verify-seat-supervision.sh /opt/verify-seat-supervision.sh
+RUN sh /opt/verify-seat-supervision.sh
 
 # mstar-harness CLI preinstall: CONTAINER-level availability
 # per user instruction (2026-09-06) — NOT a review-session mechanism. Review
