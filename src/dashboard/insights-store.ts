@@ -204,8 +204,9 @@ const WEEK_BUCKET_SQL = "date(r.reviewed_at, '-' || ((strftime('%w', r.reviewed_
 
 /**
  * Fixed per-bucket severity key set of the distribution (AD-652):
- * the v1 merge-class vocab the era gate guarantees. Declared locally — the
- * dashboard leaf boundary (AL-22-1) forbids importing it from src/review.
+ * the v1 merge-class vocab the era gate guarantees. The vocab itself is the
+ * harness `MERGE_CLASSES`; it is declared locally because the dashboard leaf
+ * boundary (AL-22-1) forbids importing the store/pipeline/review layers.
  */
 const DISTRIBUTION_SEVERITY_KEYS = ["must-fix", "should-fix", "nit"] as const;
 

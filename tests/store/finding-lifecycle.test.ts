@@ -66,7 +66,7 @@ import {
   type PublicationPayload,
   type PublicationProof,
 } from "../../src/store/finding-lifecycle";
-import type { Scope } from "../../src/contracts/recheck";
+import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 import { createArtifactStore, type ReviewArtifactDoc } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";

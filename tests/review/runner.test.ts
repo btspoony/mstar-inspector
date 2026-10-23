@@ -3,7 +3,7 @@
  * (required capabilityHosts, always synthesize).
  *
  * The AgentRuntime is INJECTED (main(argv, runtime)) so the tests are
- * deterministic. mock.module on the shared "../../src/review/runtime-omp"
+ * deterministic. mock.module on the shared "../../packages/runner/src/runtime-omp"
  * specifier is deliberately avoided: bun's module-mock registry is
  * process-global and leaks across test files in one `bun test` run, with a
  * filesystem-dependent execution order — on Linux CI (bun 1.4.0) this stub
@@ -55,11 +55,11 @@ import { join } from "node:path";
 
 import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { MstarReviewV1 } from "@mstar-harness/engine";
-import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../src/review/runtime";
+import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../packages/shared/src/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
-import { capabilityHostsYaml } from "../../src/review/models-synthesis";
-import { encodeCredentialPayload } from "../../src/review/credential-payload";
-import { createInMemoryAuthStorage, main } from "../../src/review/runner";
+import { capabilityHostsYaml } from "../../packages/runner/src/models-synthesis";
+import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
+import { createInMemoryAuthStorage, main } from "../../packages/runner/src/runner";
 import { sk } from "../helpers/fake-secrets";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
@@ -136,7 +136,7 @@ const OMP_BASE_YAML = capabilityHostsYaml(OMP_HOSTS);
  * substituted at the call site.
  */
 const HELPER_STORE_PROBE = `
-import { createInMemoryAuthStorage } from "./src/review/runner";
+import { createInMemoryAuthStorage } from "./packages/runner/src/runner";
 const storage = await createInMemoryAuthStorage();
 await storage.credentials.set("openai", [{ type: "api_key", key: "__KEY__", source: "login" }]);
 console.log("KEY=" + (await storage.getApiKey("openai")));
@@ -209,7 +209,7 @@ function parseFixtureResult(value: unknown): Omit<PtyRun, "ended" | "output"> | 
 /**
  * Drive the REAL runner entry (the default stdin reader) inside a real pty, so
  * the child genuinely sees `process.stdin.isTTY === true` — the documented
- * local `bun run src/review/runner.ts …` path, which has no pipe and therefore
+ * local `bun run packages/runner/src/runner.ts …` path, which has no pipe and therefore
  * no EOF. The fixture reports the resulting exit code, that the stdin really
  * was a terminal, and what the per-run credential directory held while the
  * runtime ran versus after main() returned. A run that never ends (the pre-fix
@@ -222,7 +222,7 @@ async function runRealStdinInPty(inputPath: string): Promise<PtyRun> {
   const fixture = [
     `import { existsSync } from "node:fs";`,
     `import { join } from "node:path";`,
-    `const { main } = await import(${JSON.stringify(join(import.meta.dir, "..", "..", "src", "review", "runner.ts"))});`,
+    `const { main } = await import(${JSON.stringify(join(import.meta.dir, "..", "..", "packages", "runner", "src", "runner.ts"))});`,
     `const seen = { dir: null, hadStore: false };`,
     `const runtime = { runReview: async (input) => {`,
     `  seen.dir = input.agentDir;`,
@@ -325,7 +325,7 @@ const RECHECK_RESULT_DOC = {
   results: [],
 };
 
-describe("runner entry (src/review/runner.ts)", () => {
+describe("runner entry (packages/runner/src/runner.ts)", () => {
   test("valid invocation → exit 0, stdout is ONLY the envelope JSON", async () => {
     fakeEnvelope = ENVELOPE;
     const inputPath = writeInput({
@@ -972,7 +972,7 @@ describe("runner entry — transported credential pool", () => {
     // exercised end to end. The payload fails closed BEFORE the runtime, so
     // there is no session and no network.
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const proc = Bun.spawnSync(["bun", "run", "src/review/runner.ts", "--level", "quick", "--input", inputPath], {
+    const proc = Bun.spawnSync(["bun", "run", "packages/runner/src/runner.ts", "--level", "quick", "--input", inputPath], {
       stdin: new Blob([`{"version":1,"pools":{"ark":["${sk("leaky")}"}`]),
       stdout: "pipe",
       stderr: "pipe",
@@ -989,7 +989,7 @@ describe("runner entry — transported credential pool", () => {
   });
 
   test("an INTERACTIVE stdin (no pipe) resolves to the keyless run instead of blocking on EOF", async () => {
-    // The documented local path — `bun run src/review/runner.ts --level …
+    // The documented local path — `bun run packages/runner/src/runner.ts --level …
     // --input …` from a terminal — has no pipe: the pre-fix `Bun.stdin.text()`
     // waited for an EOF a TTY never sends, so even a keyless run hung until
     // Ctrl-D. The real entry runs here inside a real pty, with the runtime

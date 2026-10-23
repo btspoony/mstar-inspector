@@ -16,7 +16,7 @@ import type {
   TokenInput,
   UpsertPlan,
 } from "../../src/pipeline/comment";
-import type { Discussion } from "../../src/contracts/recheck";
+import type { Discussion } from "../../packages/shared/src/recheck-wire";
 import type { LineIntent } from "../../src/store/finding-lifecycle";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 

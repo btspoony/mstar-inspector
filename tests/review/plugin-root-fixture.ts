@@ -4,19 +4,18 @@
  * Creates a minimal temp mstar-harness layout — a `skills/mstar-audit/SKILL.md`
  * marker mirroring the real plugin root just far enough for the runtime unit
  * tests — and injects it through $HARNESS_PLUGIN_ROOT. resolveHarnessRoot()
- * reads the env lazily per call (import this module first anyway), so the
- * plugin-root assertions stay environment-independent: they never depend on
- * the machine-absolute default root existing (it does not on GitHub Actions
- * runners).
+ * reads the env lazily per call, so the plugin-root assertions stay
+ * environment-independent: they never depend on the machine-absolute default
+ * root existing (it does not on GitHub Actions runners).
  *
- * The env var name must match `HARNESS_ROOT_ENV` in src/review/runtime-omp.ts.
+ * The env var name must match `HARNESS_ROOT_ENV` in packages/runner/src/runtime-omp.ts.
  */
 
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** Must match `HARNESS_ROOT_ENV` in src/review/runtime-omp.ts. */
+/** Must match `HARNESS_ROOT_ENV` in packages/runner/src/runtime-omp.ts. */
 const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 
 /** Absolute path of the temp fixture plugin root. */
@@ -59,5 +58,6 @@ writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "code-reviewer.md"), "# fixtur
 writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "frontend-dev.md"), "# fixture agent: frontend-dev\n");
 writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "fullstack-dev.md"), "# fixture agent: fullstack-dev\n");
 
-// Inject before src/review/session.ts evaluates HARNESS_PLUGIN_ROOT.
+// Set before any resolveHarnessRoot() call: the runner reads the env per call,
+// not at module load, so import order does not matter.
 process.env[HARNESS_ROOT_ENV] = PLUGIN_ROOT_FIXTURE;

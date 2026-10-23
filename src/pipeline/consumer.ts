@@ -67,7 +67,7 @@
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
- * (payload + idempotency key), review/schema (pure zod) + review/runtime
+ * (payload + idempotency key), review/schema (pure zod) + packages/shared/src/runtime
  * (pure port types/constants — dual-face, zero omp SDK),
  * store/artifact-store (07 D1 ArtifactStore) + store/failure-store (the
  * review_failures leaf), and the pipeline modules —
@@ -79,9 +79,9 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
-import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../review/runtime";
+import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { providerEnvName } from "./provider-catalog";
-import { encodeCredentialPayload, type CredentialPools } from "../review/credential-payload";
+import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
@@ -114,7 +114,7 @@ import {
   type RecheckInput,
   type RecheckTarget,
   type Scope,
-} from "../contracts/recheck";
+} from "../../packages/shared/src/recheck-wire";
 import { boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
@@ -189,7 +189,7 @@ export type PipelineEnv = {
 const CLONE_DIR = "/workspace/repo";
 const DIFF_PATH = "/workspace/pr.diff";
 const RUNNER_INPUT_PATH = "/workspace/review-input.json";
-const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
+const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
@@ -1736,7 +1736,7 @@ export function buildRunnerEnv(appCfg: RunnerAppConfig): Record<string, string> 
 
 /**
  * Build the runner's credential transport: the versioned stdin payload
- * (./../review/credential-payload) plus the exact key VALUES it carries — the
+ * (packages/shared/src/credential-payload) plus the exact key VALUES it carries — the
  * SEC-01 exact-redaction list. ONE resolution serves both, so the recorded
  * secret list can never drift from the keys the session actually saw.
  *
@@ -2412,8 +2412,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // synthesis ride alongside).
     // The resolved image's capability hosts ride ALWAYS (keyless
     // registry data) — the in-image synthesizer's base (it cannot import the
-    // contract: the runner module graph stays inside src/review,
-    // tests/review/runtime-boundary).
+    // contract: the runner module graph stays inside packages/runner/src +
+    // packages/shared/src, tests/review/runtime-boundary).
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,

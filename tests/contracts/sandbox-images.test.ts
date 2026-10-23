@@ -6,9 +6,9 @@
  *   - qc1 F-001: the omp build definition (Dockerfile path) must exist and be
  *     referenced verbatim by BOTH wrangler configs' `containers[].images.sandbox`;
  *   - qc1 F-003 / qc2 S1 / qc3 S-3: the in-image verify-synthesis.sh
- *     ARK_PLAN_HOST literal (the image COPYs only src/review, so the script
+ *     ARK_PLAN_HOST literal (the image COPYs only the package sources, so the script
  *     cannot import the registry) must mirror the omp entry's scalars;
- *   - qc1 F-002: the in-image CapabilityHost mirror (src/review/runtime.ts)
+ *   - qc1 F-002: the in-image CapabilityHost mirror (packages/shared/src/runtime.ts)
  *     must stay mutually assignable with the registry's SandboxImageHost —
  *     enforced at TYPECHECK time by the type assertions inside the test.
  */
@@ -19,7 +19,7 @@ import { join } from "node:path";
 
 import { enabledSandboxImages, getSandboxImage } from "../../src/contracts/sandbox-images";
 import type { SandboxImageHost, SandboxImageHostModel } from "../../src/contracts/sandbox-images";
-import type { CapabilityHost, CapabilityHostModel } from "../../src/review/runtime";
+import type { CapabilityHost, CapabilityHostModel } from "../../packages/shared/src/runtime";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const OMP_IMAGE = getSandboxImage("omp")!;
@@ -33,7 +33,7 @@ describe("registry build-definition parity (qc1 F-001)", () => {
     expect(OMP_IMAGE.wranglerImagePath).toBe(`./${OMP_IMAGE.dockerfilePath}`);
     // Both wrangler configs' `containers[].images.sandbox.dockerfile` point at
     // THAT path, with the repo-root build context unchanged (the Dockerfile
-    // COPYs package.json + src/review from the repo root). Collecting EVERY
+    // COPYs the runner package sources from the repo root). Collecting EVERY
     // match (not just the
     // first) pins the full set: a second, unregistered image entry fails the
     // lock instead of hiding behind the first match.
@@ -42,7 +42,7 @@ describe("registry build-definition parity (qc1 F-001)", () => {
       const text = readFileSync(join(REPO_ROOT, config), "utf8");
       // Sandbox SDK 1.0 shape: the image rides the DO scheduling policy's
       // named-images map (`images.sandbox.dockerfile`, built from the repo
-      // root `build_context` the Dockerfile COPYs package.json + src/review
+      // root `build_context` the Dockerfile COPYs the runner package sources
       // from). Collecting EVERY match (not just the first) pins the full set:
       // a second, unregistered image entry fails the lock instead of hiding
       // behind the first match. "dockerfile"/"build_context" are distinct
@@ -58,7 +58,7 @@ describe("registry build-definition parity (qc1 F-001)", () => {
 });
 
 describe("in-image verify-synthesis.sh ARK_PLAN_HOST literal mirrors the registry (qc1 F-003, qc2 S1, qc3 S-3)", () => {
-  const script = readFileSync(join(REPO_ROOT, "sandbox-image", "verify-synthesis.sh"), "utf8");
+  const script = readFileSync(join(REPO_ROOT, "packages", "runner", "verify-synthesis.sh"), "utf8");
 
   test("the ARK_PLAN_HOST block carries the omp registry host's scalars verbatim", () => {
     // Slice the inline literal block (from its const declaration to the next
@@ -94,7 +94,7 @@ describe("CapabilityHost structural-mirror type-lock (qc1 F-002)", () => {
   test("the in-image mirror stays mutually assignable with the registry types", () => {
     // The lock IS the type assertion: a field added to one type family
     // without the other fails `bun run typecheck` (tsc checks this test file)
-    // before any test runs. Test-side only — src/review keeps its zero
+    // before any test runs. Test-side only — packages/shared keeps its zero
     // outside-import module-graph boundary (tests/review/runtime-boundary).
     const hostMirror: SandboxImageHost = {} as CapabilityHost;
     const hostRegistry: CapabilityHost = {} as SandboxImageHost;

@@ -59,7 +59,7 @@ import { composeModelOptions, findFailingSelector } from "../../src/dashboard/mo
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { PROVIDERS } from "../../src/pipeline/provider-catalog";
-import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../src/review/runtime-omp";
+import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../packages/runner/src/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
@@ -2443,9 +2443,9 @@ describe("duplication locks", () => {
 
   test("MODEL_ROLE_IDS mirrors the review-side seat vocabulary exactly (parity lock)", () => {
     // quick/default seat: the frontmatter `name:` of the agent definition the
-    // runtime installs for Bun fan-out (src/review/seat-agent.md — the real
+    // runtime installs for Bun fan-out (packages/runner/src/seat-agent.md — the real
     // seat-name SSOT on the review side).
-    const seatAgent = readFileSync(join(import.meta.dir, "../../src/review/seat-agent.md"), "utf8");
+    const seatAgent = readFileSync(join(import.meta.dir, "../../packages/runner/src/seat-agent.md"), "utf8");
     const quickSeat = /^name:\s*(\S+)\s*$/m.exec(seatAgent)?.[1];
     expect(quickSeat).toBe("mstar-review-seat");
     // Deep seats: DEEP_SEAT_ROLES is exported from runtime-omp for

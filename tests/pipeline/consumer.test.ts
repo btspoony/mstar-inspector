@@ -80,8 +80,8 @@ import {
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
-import { encodeCredentialPayload } from "../../src/review/credential-payload";
-import type { Assessment, RecheckDoc, RecheckTarget } from "../../src/contracts/recheck";
+import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
+import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
 import { sk, gh, AWS_CANARY_KEY, fakePem } from "../helpers/fake-secrets";
 
 const VALID_OUTPUT: ReviewOutput = {
@@ -498,7 +498,7 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git apply --numstat '/workspace/pr.diff'"),
       expect.stringContaining("base64 -d > '/workspace/review-input.json'"),
       expect.stringContaining(
-        "bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'",
+        "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'",
       ),
     ]);
     // The runner input JSON carries the reconFacts the runtime folds into

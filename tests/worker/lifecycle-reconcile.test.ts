@@ -32,7 +32,7 @@
 import { describe, expect, test } from "bun:test";
 import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import { idemKey } from "../../src/contracts/idem";
-import type { Scope } from "../../src/contracts/recheck";
+import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
   applyPublishedLifecycle,
   claimPublication,

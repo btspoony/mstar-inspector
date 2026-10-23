@@ -11,7 +11,7 @@
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent";
-import type { RecheckDoc, RecheckInput } from "../contracts/recheck";
+import type { RecheckDoc, RecheckInput } from "./recheck-wire";
 
 /**
  * Full review-tier universe. `deep` is a first-class tier
@@ -75,9 +75,10 @@ export type CapabilityHostModel = {
  * Structurally mirrors the registry's `SandboxImageHost` (src/contracts/
  * sandbox-images.ts): the consumer passes the resolved registry entry's hosts
  * verbatim into the runner input. The mirror lives HERE (not an import)
- * because the in-image runner module graph must stay inside src/review (the
- * sandbox image COPYs only this directory — tests/review/runtime-boundary
- * enforces it); the consumer-side contract import keeps the data single-sourced.
+ * because the in-image runner graph is only `packages/runner/src` plus this
+ * package's src (the sandbox image COPYs exactly those two trees —
+ * tests/review/runtime-boundary derives the admitted set from the Dockerfile);
+ * the consumer-side contract import keeps the data single-sourced.
  */
 export type CapabilityHost = {
   /** Host id — the selector prefix (e.g. `ark-plan/deepseek-v4-flash`). */

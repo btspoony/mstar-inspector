@@ -1,13 +1,20 @@
 # Keep the sandbox-image Docker build context (repo root) lean.
-# The Dockerfile (sandbox-image/omp/Dockerfile) only needs: package.json,
-# bun.lock, src/review/, and sandbox-image/verify-synthesis.sh. There is no
-# baked models.yml. Everything heavy is excluded.
+# The Dockerfile (sandbox-image/Dockerfile) only needs:
+#   packages/runner/{package.json,bun.lock}
+#   packages/{shared,runner}/src
+#   packages/runner/verify-synthesis.sh
+# There is no baked models.yml. Everything heavy is excluded.
+#
+# `*.md` is deliberately root-anchored (no slash = root only) so
+# packages/runner/src/seat-agent.md still reaches the image; do NOT use `**/*.md`.
 
 node_modules
+**/node_modules
 .git
 .wrangler
 .mstar
 tests
+packages/**/tests
 scripts
 *.md
 .env*

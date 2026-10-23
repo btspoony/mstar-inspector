@@ -10,8 +10,8 @@
  * lands in src/contracts/ (not src/pipeline/) because the dashboard imports
  * it directly and dashboard modules must not import pipeline code (Q2 — the
  * pipeline face at src/pipeline/provider-catalog.ts re-exports the contract
- * for pipeline consumers; src/review is untouched and stays the only
- * directory the sandbox image copies).
+ * for pipeline consumers; the sandbox image copies only
+ * packages/{shared,runner}/src).
  *
  * Inputs (both pinned):
  *   1. `scripts/provider-catalog/models.dev-2026-09-04.json` — a trimmed
@@ -316,8 +316,8 @@ async function main(): Promise<void> {
  * Credential transport: an \`envName\` is RETAINED mapping metadata, never the
  * variable the key rides. A configured pool reaches the review container as the
  * runner's STDIN credential payload (consumer.ts buildRunnerCredentials,
- * src/review/credential-payload.ts), and the in-image runner loads it into the
- * run's IN-MEMORY credential store as \`source:"login"\` api_key rows — the
+ * packages/shared/src/credential-payload.ts), and the in-image runner loads it
+ * into the run's IN-MEMORY credential store as \`source:"login"\` api_key rows — the
  * per-run agent directory holds only the non-secret models.yml. \`envName\`
  * only marks allowlist membership (providerEnvName).
  *

@@ -50,11 +50,11 @@ describe("gitops command builders", () => {
     expect(writeJsonCommand("/workspace/review-input.json", "eyJhIjoxfQ==")).toBe(
       shellCommand("printf '%s' 'eyJhIjoxfQ==' | base64 -d > '/workspace/review-input.json'"),
     );
-    expect(runnerCommand("/opt/runner/src/review/runner.ts", "default", "/workspace/review-input.json")).toBe(
-      shellCommand("bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'"),
+    expect(runnerCommand("/opt/runner/packages/runner/src/runner.ts", "default", "/workspace/review-input.json")).toBe(
+      shellCommand("bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'"),
     );
-    expect(runnerCommand("/opt/runner/src/review/runner.ts", "quick", "/workspace/review-input.json")).toBe(
-      shellCommand("bun run '/opt/runner/src/review/runner.ts' --level 'quick' --input '/workspace/review-input.json'"),
+    expect(runnerCommand("/opt/runner/packages/runner/src/runner.ts", "quick", "/workspace/review-input.json")).toBe(
+      shellCommand("bun run '/opt/runner/packages/runner/src/runner.ts' --level 'quick' --input '/workspace/review-input.json'"),
     );
   });
 
@@ -125,10 +125,10 @@ describe("gitops command builders", () => {
 
   test("runnerCommand appends the optional --recheck-out flag quoted", () => {
     expect(
-      runnerCommand("/opt/runner/src/review/runner.ts", "quick", "/workspace/review-input.json", "/tmp/mstar-recheck.json"),
+      runnerCommand("/opt/runner/packages/runner/src/runner.ts", "quick", "/workspace/review-input.json", "/tmp/mstar-recheck.json"),
     ).toBe(
       shellCommand(
-        "bun run '/opt/runner/src/review/runner.ts' --level 'quick' --input '/workspace/review-input.json' " +
+        "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'quick' --input '/workspace/review-input.json' " +
           "--recheck-out '/tmp/mstar-recheck.json'",
       ),
     );
@@ -141,7 +141,7 @@ describe("gitops command builders", () => {
       prNumber: 7,
       cloneDir: "/workspace/repo",
       diffPath: "/workspace/pr.diff",
-      runnerPath: "/opt/runner/src/review/runner.ts",
+      runnerPath: "/opt/runner/packages/runner/src/runner.ts",
       level: "default",
       inputPath: "/workspace/review-input.json",
     });
@@ -151,7 +151,7 @@ describe("gitops command builders", () => {
     expect(cmds.diff).toBe(shellCommand("gh pr diff '7' --repo 'my-org.example/repo_name-2' > '/workspace/pr.diff'"));
     expect(cmds.numstat).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
     expect(cmds.runner).toBe(
-      shellCommand("bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'"),
+      shellCommand("bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'"),
     );
   });
 
@@ -198,7 +198,7 @@ describe("gitops command builders", () => {
           prNumber: 42,
           cloneDir: "/workspace/repo",
           diffPath: "/workspace/pr.diff",
-          runnerPath: "/opt/runner/src/review/runner.ts",
+          runnerPath: "/opt/runner/packages/runner/src/runner.ts",
           level: "quick",
           inputPath: "/workspace/review-input.json",
         }),
@@ -213,7 +213,7 @@ describe("gitops command builders", () => {
           prNumber: -1,
           cloneDir: "/workspace/repo",
           diffPath: "/workspace/pr.diff",
-          runnerPath: "/opt/runner/src/review/runner.ts",
+          runnerPath: "/opt/runner/packages/runner/src/runner.ts",
           level: "quick",
           inputPath: "/workspace/review-input.json",
         }),

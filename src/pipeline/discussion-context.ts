@@ -26,7 +26,7 @@
  * snapshot hashing (review-threads.ts) — never logged, never handed to a seat.
  */
 
-import type { Coverage, Discussion, ThreadSnapshot } from "../contracts/recheck";
+import type { Coverage, Discussion, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
 import {
   fetchIssueComments,
   fetchThreadConversation,

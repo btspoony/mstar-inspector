@@ -33,8 +33,8 @@
  * a publication replay never increments `reopen_count` twice.
  */
 
-import type { Assessment, Coverage, OriginalFinding, RecheckTarget, ThreadSnapshot } from "../contracts/recheck";
-import { ASSESSMENT_TARGET_CAP } from "../contracts/recheck";
+import type { Assessment, Coverage, OriginalFinding, RecheckTarget, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
+import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import { createArtifactStore, type ReviewArtifactDoc } from "./artifact-store";
 import type {
   D1BatchResult,
@@ -47,13 +47,13 @@ import type {
 
 /** The authenticated routing scope (spec §7.0) — wire copy lives in the
  *  recheck contract; re-exported here as the store's scope vocabulary. */
-export type { Scope } from "../contracts/recheck";
-import type { Scope } from "../contracts/recheck";
+export type { Scope } from "../../packages/shared/src/recheck-wire";
+import type { Scope } from "../../packages/shared/src/recheck-wire";
 
 // ---------------------------------------------------------------------------
 // §7.7 journal types — single normative copy lives in spec §7.7; this is the
 // single CODE copy (the wire subset of §7.3 is exported from
-// src/contracts/recheck.ts instead — do not restate either).
+// packages/shared/src/recheck-wire.ts instead — do not restate either).
 // ---------------------------------------------------------------------------
 
 /** Epoch-fenced lease (spec §7.7). A live lease requires holder + epoch +
