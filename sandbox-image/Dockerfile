@@ -38,10 +38,12 @@
 #
 # Build context: repo root (wrangler containers `images.sandbox.build_context`), so
 # the Dockerfile COPYs the runner package (manifest + frozen lockfile), the two
-# in-image package source trees, and the runner's verify script:
+# in-image package source trees, the runner's verify script, and this directory's
+# CLI-shim assertion:
 #   packages/runner/{package.json,bun.lock}
 #   packages/{shared,runner}/src
 #   packages/runner/verify-synthesis.sh
+#   sandbox-image/verify-cli-shim.sh
 # A repo-root .dockerignore keeps the context lean (node_modules and tests excluded).
 
 # Sandbox SDK 1.0: the 0.12 `FROM docker.io/cloudflare/sandbox:<ver>` base is
@@ -119,9 +121,18 @@ RUN git init /opt/mstar-harness \
 # `#!/usr/bin/env bun` — the Bun 1.4.0 installed above executes it directly,
 # no node is added. The global bin dir is put on PATH so sandbox exec
 # resolves the `mstar` shim.
+#
+# The build PROVES both facts instead of expecting them: `verify-cli-shim.sh`
+# (sandbox-image/verify-cli-shim.sh) reads the resolved shim's first line and
+# runs it, failing the build on a shebang regression or a version drift. The
+# expected version is passed explicitly — this image ships the script alone
+# (no Dockerfile beside it) and the literal below is the pin the install line
+# consumes.
+COPY sandbox-image/verify-cli-shim.sh /opt/verify-cli-shim.sh
 RUN bun add --global @mstar-harness/cli@4.0.4 \
     && sed -i --follow-symlinks '1s|.*|#!/usr/bin/env bun|' /root/.bun/bin/mstar
 ENV PATH="/root/.bun/bin:${PATH}"
+RUN sh /opt/verify-cli-shim.sh 4.0.4
 
 # omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (no baked
 # models.yml is an App-configuration artifact). The in-image runner
