@@ -22,7 +22,8 @@
  * manifest range or the lockfile resolution drifts, if the two surfaces'
  * shared dependencies (engine, omp SDK) resolve to different versions, if the
  * image CLI install drifts off the exact pin, loses its PATH exposure, or
- * desyncs from the `REVIEW_SKILL_VERSION` prefix — or if the fixture plugin
+ * desyncs from the `REVIEW_SKILL_VERSION` prefix, if a build-assertion script
+ * loses its COPY/RUN wiring — or if the fixture plugin
  * root stops mirroring the pinned layout (`commands/amazing-pr-review.md` +
  * `skills/mstar-audit`). Transitive drift between the two lockfiles is a
  * separate, allowlisted check: tests/review/lock-drift.test.ts.
@@ -56,14 +57,10 @@ describe("sandbox image harness pin", () => {
 
   test("Dockerfile comment pairs the declared ref with the declared tag", () => {
     // One line carries both: a bump that moves the commit or the version
-    // alone leaves the other half stale and fails here and on the tag below.
+    // alone leaves the other half stale and fails here.
     const pinned = DOCKERFILE.match(/^#\s*mstar-harness plugin, pinned ref (\w+) \(tag v(\S+),/m);
     expect(pinned).not.toBeNull();
     expect(pinned!.slice(1)).toEqual([OMP_SANDBOX_IMAGE_PINS.harnessRef, HARNESS_VERSION]);
-  });
-
-  test("Dockerfile comment records the declared tag", () => {
-    expect(DOCKERFILE).toContain(`tag v${OMP_SANDBOX_IMAGE_PINS.harnessVersion}`);
   });
 });
 
@@ -167,6 +164,25 @@ describe("sandbox image CLI pin", () => {
   test("Dockerfile puts the bun global bin on PATH for sandbox exec", () => {
     expect(DOCKERFILE).toContain('ENV PATH="/root/.bun/bin:${PATH}"');
   });
+});
+
+describe("sandbox image build assertions", () => {
+  // Each capability the image claims is proven by a script the build COPYs and
+  // runs. CI never builds the image, so a dropped COPY or RUN would otherwise
+  // revert the claim to a comment without failing anything.
+  for (const script of [
+    "verify-seat-supervision.sh",
+    "verify-cli-lock.sh",
+    "verify-cli-shim.sh",
+  ]) {
+    test(`Dockerfile runs ${script}`, () => {
+      const copy = `COPY sandbox-image/${script} /opt/${script}`;
+      const run = `RUN sh /opt/${script}`;
+      expect(DOCKERFILE).toContain(copy);
+      expect(DOCKERFILE).toContain(run);
+      expect(DOCKERFILE.indexOf(copy)).toBeLessThan(DOCKERFILE.indexOf(run));
+    });
+  }
 });
 
 describe("engine dependency pin", () => {

@@ -17,11 +17,13 @@
  * critical|warning|suggestion|info) is rejected on the write path: an M1
  * document fails the required `schema: "mstar.review/v1"` literal and the
  * verdict/mergeClass enums. A stray M1 `severity` KEY is REJECTED (never
- * silently stripped) before zod: `validateMstarReviewV1` runs on the parsed
- * JSON first (it fails findings[].severity with `review.inspector-vocab`),
- * and the top-level stray key is banned here with the same
- * `review.inspector-vocab` code, ahead of the engine's generic unknown-key
- * report (mapping spec §4.2: parse/validate failure → no post, no insert).
+ * silently stripped) before zod. The two inspector checks straddle the engine
+ * gate: the top-level `severity` ban runs BEFORE `validateMstarReviewV1`, so
+ * it keeps `review.inspector-vocab` instead of the engine's generic
+ * unknown-key report; the engine gate itself fails findings[].severity with
+ * `review.inspector-vocab`; and the unknown finding-key check
+ * (`findUnknownFindingKey`) runs AFTER the gate, so it cannot mask that code
+ * (mapping spec §4.2: parse/validate failure → no post, no insert).
  *
  * The engine 4.0.7 envelope is CLOSED: `validateMstarReviewV1` refuses every
  * top-level key outside the envelope with `review.unknown-key`. Its findings
