@@ -10,7 +10,7 @@ category: Changed
   route family, so the pre-workspace root paths (`/dashboard/apps…`,
   `/dashboard/api/apps…`) answer 404. **Upgrade note:** delete the now-unused
   `WORKSPACE_TENANT_MODE` GitHub Actions variable and any `tenant_mode=…`
-  dispatch habit; a leftover value is inert text that nothing reads.
+  dispatch habit; nothing reads either, so no leftover value is worth keeping.
 - **New `DEPLOYMENT_MODE` Worker var (`self-hosted` | `saas`)** — the axis this
   replaces is the *product shape*, not the read path. It decides one question:
   whether an instance whose `users` table is empty tells its first signer-in
@@ -52,7 +52,7 @@ category: Changed
   是唯一的 App 路由族，因此工作区之前的前缀路径（`/dashboard/apps…`、
   `/dashboard/api/apps…`）返回 404。**升级提示：** 请删除已无用的
   `WORKSPACE_TENANT_MODE` GitHub Actions 变量以及任何 `tenant_mode=…` 的 dispatch
-  习惯；残留值只是无人读取的惰性文本。
+  习惯；两者都无人读取，不要保留残留值。
 - **新增 `DEPLOYMENT_MODE` Worker 变量（`self-hosted` | `saas`）**——它替代的是
   *产品形态*这条轴，而不是读取路径。它只决定一个问题：`users` 表为空的实例，是否向
   其第一个登录者讲述「空实例」故事（本次登录已成为该实例上的账号，下一步是创建工作区）。
