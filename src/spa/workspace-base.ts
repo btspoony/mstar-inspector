@@ -1,8 +1,8 @@
-import { workspaceSlugOf } from "./routes";
+import { workspaceRefOf } from "./routes";
 
 /**
  * The URL prefix a page's data reads and in-page links hang off:
- * `/dashboard/<workspaceSlug>` on a workspace-scoped page, otherwise the
+ * `/dashboard/<workspaceRef>` on a workspace-scoped page, otherwise the
  * legacy `/dashboard` mount. Reads `location.pathname` (the same path the
  * Worker's tenant gate classified), so the SPA keeps no second workspace
  * identity in boot state — a boot-injected base would go stale on the first
@@ -13,8 +13,8 @@ import { workspaceSlugOf } from "./routes";
  * always available.
  */
 export function apiBase(pathname: string = currentPathname()): string {
-  const slug = workspaceSlugOf(pathname);
-  return slug === null ? "/dashboard" : `/dashboard/${slug}`;
+  const ref = workspaceRefOf(pathname);
+  return ref === null ? "/dashboard" : `/dashboard/${ref}`;
 }
 
 /** No `location` outside a document (static render, tests) → the legacy base. */

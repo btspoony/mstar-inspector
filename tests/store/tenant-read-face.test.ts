@@ -1,10 +1,10 @@
 /**
- * Task 3 — the App read face under tenant mode.
+ * Task 3 — the App read face.
  *
  * Pins three things:
- *   - `strict` INNER JOINs `app_workspaces`, so an unmapped App is INVISIBLE
+ *   - every read INNER JOINs `app_workspaces`, so an unmapped App is INVISIBLE
  *     and every returned row carries `workspace_id`;
- *   - `off` prepares byte-identical SQL (`APP_READ_SQL.*.off`, frozen);
+ *   - the prepared SQL is the frozen `APP_READ_SQL` text, byte-for-byte;
  *   - no `src/**` file outside the allowlist reads `github_apps` directly.
  */
 import { readdirSync, readFileSync } from "node:fs";
@@ -44,33 +44,26 @@ async function seedMappedAndOrphan() {
   return { db, mapped, orphan };
 }
 
-describe("apps-store tenant read face (mode: strict)", () => {
+describe("apps-store tenant read face", () => {
   test("listApps returns only mapped Apps, each carrying workspace_id", async () => {
     const { db, mapped } = await seedMappedAndOrphan();
-    const rows = await createAppsStore(db, "strict").listApps();
+    const rows = await createAppsStore(db).listApps();
     expect(rows.map((r) => r.id)).toEqual([mapped.id]);
     expect(rows[0]!.workspace_id).toBe("default");
   });
 
   test("an orphan App is null from getAppById and getAppBySlug", async () => {
     const { db, mapped, orphan } = await seedMappedAndOrphan();
-    const store = createAppsStore(db, "strict");
+    const store = createAppsStore(db);
     expect((await store.getAppById(mapped.id))?.workspace_id).toBe("default");
     expect(await store.getAppById(orphan.id)).toBeNull();
     expect((await store.getAppBySlug("mapped"))?.workspace_id).toBe("default");
     expect(await store.getAppBySlug("orphan")).toBeNull();
   });
-
-  test("mode: off still sees the orphan and omits workspace_id", async () => {
-    const { db, orphan } = await seedMappedAndOrphan();
-    const row = await createAppsStore(db).getAppById(orphan.id);
-    expect(row?.slug).toBe("orphan");
-    expect(row?.workspace_id).toBeUndefined();
-  });
 });
 
-describe("apps-store off SQL is frozen", () => {
-  test("the three read methods prepare the frozen off SQL byte-for-byte", async () => {
+describe("apps-store read SQL is frozen", () => {
+  test("the three read methods prepare the frozen join SQL byte-for-byte", async () => {
     const queries: string[] = [];
     const statement = {
       bind: () => statement,
@@ -91,17 +84,16 @@ describe("apps-store off SQL is frozen", () => {
     await store.listApps();
     // Literals, NOT APP_READ_SQL: a mutated production constant must fail here.
     expect(queries).toEqual([
-      `SELECT * FROM github_apps WHERE slug = ?`,
-      `SELECT * FROM github_apps WHERE id = ?`,
-      `SELECT * FROM github_apps WHERE deleted_at IS NULL ORDER BY created_at DESC, id`,
+      `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.slug = ?`,
+      `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.id = ?`,
+      `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
     ]);
-    for (const sql of queries) expect(sql).not.toContain("app_workspaces");
   });
 
-  test("strict SQL joins app_workspaces and selects workspace_id", () => {
-    for (const pair of Object.values(APP_READ_SQL)) {
-      expect(pair.strict).toContain("INNER JOIN app_workspaces");
-      expect(pair.strict).toContain("w.workspace_id");
+  test("APP_READ_SQL joins app_workspaces and selects workspace_id", () => {
+    for (const sql of Object.values(APP_READ_SQL)) {
+      expect(sql).toContain("INNER JOIN app_workspaces");
+      expect(sql).toContain("w.workspace_id");
     }
   });
 });

@@ -6,21 +6,8 @@ on:
     paths-ignore: ['docs/**', '.mstar/**', '*.md', 'LICENSE', '.env.example']
   workflow_dispatch:
     inputs:
-      tenant_mode:
-        description: 'Workspace tenant read mode — steady: use vars.WORKSPACE_TENANT_MODE (routine); off: Deploy A; strict: Deploy B replay'
-        required: false
-        default: 'steady'
-        type: choice
-        options:
-          - 'steady'
-          - 'off'
-          - 'strict'
-      expected_deploy_sha:
-        description: "Deploy B (strict) only: the SHA Deploy A shipped — required for, and only accepted on, a strict dispatch (empty on a steady/off run); Deploy A's run summary prints deployed_sha=<sha>"
-        required: false
-        default: ''
       expected_container_digest:
-        description: "Deploy B only: Deploy A's sandbox image digest (sha256:…) — compared and reported, never assumed identical"
+        description: "Optional: a previously recorded sandbox image digest (sha256:…) — compared and reported, never assumed identical"
         required: false
         default: ''
 
@@ -59,7 +46,6 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}   # account id is public — configured as a variable
-      ADMIN_LOGINS: ${{ vars.ADMIN_LOGINS }}   # login names are public identity — configured as a variable, not a secret
       OAUTH_CLIENT_ID: ${{ vars.OAUTH_CLIENT_ID }}   # client id is not sensitive — configured as a variable
       OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
       DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
@@ -71,42 +57,20 @@ jobs:
         with:
           fetch-depth: 0   # Bugbot #14: digest write-back merges origin/main — shallow clone has no merge base
 
-      # The mode is a dispatch input, never a code edit: the SAME build is
-      # deployed twice on the tenant rollout (off, then strict). The input's
-      # default is `steady`, NOT `off`: a `push` to main carries no input, and a
-      # declared `off` would win over `vars.WORKSPACE_TENANT_MODE` and demote a
-      # `strict` installation on the next ordinary push without saying so.
-      # `steady` means "take the variable"; a `steady` run that still resolves
-      # to `off` warns and records `tenant_mode_change` instead. An illegal
-      # value fails HERE, before any step that can create or deploy a Worker
-      # version.
-      - name: Resolve tenant mode
-        id: tenant
+      # Ref identity, before anything is deployed: the tree on disk must be the
+      # SHA this run executes. The mode machinery that used to follow it (a
+      # dispatch input, a replay binding against a previous deploy's SHA) is
+      # gone with the tenant read switch — one artifact is one deploy now.
+      - name: Assert checkout identity
         env:
-          TENANT_MODE: ${{ inputs.tenant_mode }}
-          STEADY_TENANT_MODE: ${{ vars.WORKSPACE_TENANT_MODE }}
-        run: bash scripts/resolve-tenant-mode.sh "$TENANT_MODE" "$STEADY_TENANT_MODE"
-
-      # Replay identity (before anything is deployed). The strict replay binding
-      # lives in scripts/deploy-replay-guard.sh (executed by the behaviour
-      # tests); the checkout assertion below stays here because it is about the
-      # tree on disk, not about which SHA was requested. `replay=required` only
-      # for a dispatch that asked for `strict` — a `steady` push serving
-      # `strict` from the variable has no Deploy A to bind, and a SHA supplied
-      # on such a run is refused rather than ignored (I-000089).
-      - name: Assert replay identity
-        env:
-          REPLAY: ${{ steps.tenant.outputs.replay }}
           RUN_SHA: ${{ github.sha }}
-          EXPECTED_DEPLOY_SHA: ${{ inputs.expected_deploy_sha }}
         run: |
           set -euo pipefail
           HEAD_SHA=$(git rev-parse HEAD)
           if [ "$HEAD_SHA" != "$RUN_SHA" ]; then
-            echo "::error::checked-out HEAD $HEAD_SHA != run SHA $RUN_SHA — the replay must execute the SHA it names"
+            echo "::error::checked-out HEAD $HEAD_SHA != run SHA $RUN_SHA — the deploy must execute the SHA it names"
             exit 1
           fi
-          bash scripts/deploy-replay-guard.sh "$REPLAY" "$EXPECTED_DEPLOY_SHA" "$RUN_SHA" "$HEAD_SHA"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -118,27 +82,6 @@ jobs:
 
       - name: Build SPA
         run: bun run build:spa
-
-      # Runs before the FIRST wrangler invocation of any kind (`whoami` below,
-      # then every `wrangler secret bulk` and the final `wrangler deploy`): the
-      # secret write creates and deploys a Worker version, so a gate placed
-      # after it would already have published a version without the required
-      # binding — "fail before deploy" has to mean before the first one.
-      - name: Verify required ADMIN_LOGINS variable
-        run: |
-          # The RUNTIME rule itself, imported (src/dashboard/users.ts
-          # parseAdminLogins) — not a shell approximation of it: split on
-          # commas, JS String.trim() each entry, drop empties. Unset / blank /
-          # whitespace-only / comma-only / U+FEFF+"," all parse to zero logins
-          # and must fail closed BEFORE any deploy-capable step.
-          : "${ADMIN_LOGINS:?required — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (login names are public identity, so a variable, not a secret)}"
-          bun -e '
-            import { parseAdminLogins } from "./src/dashboard/users.ts";
-            if (parseAdminLogins(process.env.ADMIN_LOGINS).length === 0) {
-              console.error("::error::ADMIN_LOGINS is blank, whitespace-only or comma-only — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (e.g. alice,bob)");
-              process.exit(1);
-            }
-          '
 
       - name: Verify Cloudflare account
         run: |
@@ -152,16 +95,19 @@ jobs:
       - name: Apply D1 migrations (remote)
         run: bunx wrangler d1 migrations apply mstar-inspector-db --remote
 
-      # 0027 is idempotent (INSERT…SELECT … WHERE NOT EXISTS): re-running it is
-      # the repair step for a partially-applied deploy. The gate below proves
-      # the repair actually closed every gap.
-      - name: Re-run workspace backfill (0027, idempotent)
+      # 0027 now carries ONLY the App-attribution repair (INSERT…SELECT … WHERE
+      # NOT EXISTS over app_workspaces), so replaying it heals a partially
+      # applied deploy and writes nothing else. The membership half moved to
+      # the forward-only 0030_workspace_membership_cutover.sql, applied once by
+      # the step above: replaying a per-person write here made every routine
+      # deploy re-add every login (removed members included) to 'default'.
+      - name: Re-run App attribution repair (0027, idempotent)
         run: bunx wrangler d1 execute mstar-inspector-db --remote --file migrations/0027_workspace_backfill.sql
 
-      # ABORT GATE (both modes): `strict` App reads INNER JOIN app_workspaces,
-      # so an unmapped App silently vanishes from the pipeline. Ordered before
-      # EVERY deploy-capable step — `wrangler secret bulk` publishes a version
-      # just as `wrangler deploy` does.
+      # ABORT GATE: every execution-facing App read INNER JOINs
+      # `app_workspaces`, so an unmapped App silently vanishes from the
+      # pipeline. Ordered before EVERY deploy-capable step — `wrangler secret
+      # bulk` publishes a version just as `wrangler deploy` does.
       - name: Assert zero orphan Apps (pre-deploy gate)
         run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-db
 
@@ -186,17 +132,13 @@ jobs:
       - name: Deploy Worker
         id: deploy
         shell: bash
-        env:
-          TENANT_MODE: ${{ steps.tenant.outputs.mode }}
         run: |
-          # ADMIN_LOGINS comes from the GitHub Actions variable and is injected
-          # here as a plain Worker var (`--var NAME:VALUE`, wrangler 4.147.0
-          # splits on the FIRST colon only, so a comma-separated login list
-          # survives intact). keep_vars: true in wrangler.jsonc still preserves
-          # the other dashboard-managed var (REVIEW_ENABLED).
-          # WORKSPACE_TENANT_MODE is the dispatch input resolved above — the
-          # same SHA can be replayed with the other mode.
-          bunx wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS" --var "WORKSPACE_TENANT_MODE:$TENANT_MODE" 2>&1 | tee deploy.log
+          # keep_vars: true in wrangler.jsonc preserves the dashboard-managed
+          # plaintext var (REVIEW_ENABLED).
+          # DEPLOYMENT_MODE is the deployment shape, not a rollout switch: the
+          # staging instance is a SaaS deployment (`saas`), so the empty-instance
+          # first-login story never shows here. See docs/deploy.md § Deployment mode.
+          bunx wrangler deploy --var "DEPLOYMENT_MODE:saas" 2>&1 | tee deploy.log
           # The deploy command succeeded: this run's SHA is what it shipped.
           # The summary key is derived from this step's outcome in the
           # always-run summary step, never from the version-id capture below.
@@ -277,43 +219,6 @@ jobs:
       - name: Assert zero orphan Apps (post-deploy)
         run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-db
 
-      # ADMIN_LOGINS is a plain Worker var injected by this workflow's
-      # `wrangler deploy --var ADMIN_LOGINS:…` (login names are public
-      # identity, hence a variable, not a secret). `wrangler secret list`
-      # cannot observe it, so read the Worker settings instead; the observed
-      # value is fed through the RUNTIME parser itself (parseAdminLogins in
-      # src/dashboard/users.ts) rather than a shell approximation of it. This
-      # is an ASSERTION: the deploy is already live (containers/versions have
-      # no pre-flight dry run), so a missing/blank value must fail the run red
-      # rather than warn.
-      - name: "Assert ADMIN_LOGINS is set on the deployed Worker (first-login admin fallback)"
-        run: |
-          # Transport failure (no payload at all) FAILS the job: we cannot
-          # positively confirm the value, and a silent pass here would turn a
-          # flaky API read into a false green for exactly the check that guards
-          # the first-login-becomes-admin fallback.
-          settings=$(curl -sf --max-time 30 --connect-timeout 5 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/mstar-inspector/settings") || {
-            echo "::error::could not read the deployed Worker settings (transport failure) — cannot confirm ADMIN_LOGINS; re-run the workflow"
-            exit 1
-          }
-          # A 200 with a malformed / non-success body is NOT a positively
-          # observed set: never read a parse failure as a configured value.
-          if ! printf '%s' "$settings" | jq -e '.success == true' >/dev/null 2>&1; then
-            echo "::error::deployed Worker settings payload failed the jq success check (malformed JSON or success != true) — cannot confirm ADMIN_LOGINS"
-            exit 1
-          fi
-          value=$(printf '%s' "$settings" \
-            | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")')
-          ADMIN_LOGINS_DEPLOYED="$value" bun -e '
-            import { parseAdminLogins } from "./src/dashboard/users.ts";
-            if (parseAdminLogins(process.env.ADMIN_LOGINS_DEPLOYED).length === 0) {
-              console.error("::error::ADMIN_LOGINS is unset or blank/whitespace-only/comma-only on the deployed Worker — set the GitHub Actions variable ADMIN_LOGINS (comma-separated GitHub logins) and re-run the deploy; with an empty dashboard_users table the first OAuth login would become admin (self-disarming once any user row exists). See docs/deploy.md § 6.");
-              process.exit(1);
-            }
-          '
-          echo "ADMIN_LOGINS is set on the deployed Worker — the first-login admin fallback is disarmed"
-
       - name: Upload deploy evidence artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -327,7 +232,6 @@ jobs:
 
       - name: Record image digest (DOCS-01 baseline)
         env:
-          TENANT_MODE: ${{ steps.tenant.outputs.mode }}
           EXPECTED_DIGEST: ${{ inputs.expected_container_digest }}
         run: |
           set -euo pipefail
@@ -339,11 +243,10 @@ jobs:
             echo "## Deploy evidence (DOCS-01 baseline)"
             echo "- Image digest: \`$DIGEST\`"
             echo "- Worker version: \`$VERSION\`"
-            echo "- Tenant mode: \`$TENANT_MODE\`"
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "- Source: \`registry.cloudflare.com\` container reference printed by this run's \`wrangler deploy\` — \`wrangler containers list --json\` reports an empty \`image\` for the 1.0 durable_object application"
           } >> "$GITHUB_STEP_SUMMARY"
-          # Replay audit, never a silent pass: the sandbox image rebuilds from a
+          # Digest audit, never a silent pass: the sandbox image rebuilds from a
           # rolling apt base, so byte-identical output is not provable. A
           # different digest is reported (and warned) with that reason.
           if [ -z "$EXPECTED_DIGEST" ]; then
@@ -352,7 +255,7 @@ jobs:
             MATCH=true
           else
             MATCH=false
-            echo "::warning::container digest $DIGEST differs from Deploy A's $EXPECTED_DIGEST — the sandbox image rebuilds from a rolling base, so a byte-identical rebuild is not provable; the Worker code is the same SHA"
+            echo "::warning::container digest $DIGEST differs from the supplied expected_container_digest $EXPECTED_DIGEST — the sandbox image rebuilds from a rolling base, so a byte-identical rebuild is not provable; the Worker code is the same SHA"
           fi
           echo "container_digest_match=$MATCH" >> "$GITHUB_STEP_SUMMARY"
           echo "container_digest_match=$MATCH"

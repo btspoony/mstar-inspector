@@ -6,11 +6,10 @@
  * Usage:
  *   bun scripts/assert-tenant-attribution.ts [--db <name>] [--env <environment>]
  *
- * Every App must own exactly one `app_workspaces` row. Under
- * `WORKSPACE_TENANT_MODE=strict` the App reads INNER JOIN that table, so an
- * unmapped App silently disappears from the pipeline — the failure is
- * invisible, which is why an orphan count aborts the deploy instead of
- * warning.
+ * Every App must own exactly one `app_workspaces` row: every execution-facing
+ * App read INNER JOINs that table, so an unmapped App silently disappears from
+ * the pipeline — the failure is invisible, which is why an orphan count aborts
+ * the deploy instead of warning.
  *
  * The query runs through the same `wrangler d1 execute` path the deploy
  * uses, against the remote database, and against the environment's config
@@ -87,8 +86,8 @@ export function attributionVerdict(stdout: string): AttributionVerdict {
     ok: false,
     count,
     message:
-      `tenant attribution: ${count} App(s) have no app_workspaces row — they are invisible to ` +
-      `WORKSPACE_TENANT_MODE=strict. Run migrations/0027_workspace_backfill.sql, then re-run this gate.`,
+      `tenant attribution: ${count} App(s) have no app_workspaces row — every App read joins ` +
+      `that table, so they are invisible to the pipeline. Run migrations/0027_workspace_backfill.sql, then re-run this gate.`,
   };
 }
 

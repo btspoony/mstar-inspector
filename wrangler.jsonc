@@ -8,9 +8,6 @@
   "compatibility_flags": ["nodejs_compat"],
   // Bugbot #14: keep dashboard-managed plaintext vars (REVIEW_ENABLED)
   // across automated `wrangler deploy` — without keep_vars, deploy wipes them.
-  // (ADMIN_LOGINS is no longer dashboard-managed: the Deploy workflow requires
-  // the GitHub Actions variable and injects it with `wrangler deploy --var`;
-  // the documented manual deploys pass the same `--var`.)
   "keep_vars": true,
   "kv_namespaces": [
     {
@@ -157,6 +154,15 @@
     "binding": "ASSETS",
     "run_worker_first": true
   },
+  // The deployment-shape switch (2026-10): the value for local dev
+  // (`wrangler dev`) and a manual staging deploy. Both deploy workflows
+  // re-supply `saas` with `--var`, so this top-level value never decides what
+  // staging/production run — it only keeps a local instance from failing loud
+  // on an unset var. There is no default in code: `deploymentModeOf` throws on
+  // unset/empty/invalid.
+  "vars": {
+    "DEPLOYMENT_MODE": "self-hosted"
+  },
   // Production: one release-gated Worker served at inspector.mstar.page, built
   // only by the non-prerelease release workflow; the top-level Worker above
   // stays the staging instance on every main push. A named environment does
@@ -165,9 +171,9 @@
   // queue pair and container application; nothing shared with staging).
   // `keep_vars` is rejected inside an env block (wrangler 4.147.0:
   // "Unexpected fields found in env.production field"), so this Worker must
-  // not depend on dashboard-managed plaintext vars: ADMIN_LOGINS is declared
-  // below, and REVIEW_ENABLED stays unset (per-App Pause/Resume is the real
-  // control). Any future binding added above MUST be duplicated here.
+  // not depend on dashboard-managed plaintext vars: REVIEW_ENABLED stays
+  // unset (per-App Pause/Resume is the real control). Any future binding
+  // added above MUST be duplicated here.
   "env": {
     "production": {
       "name": "mstar-inspector-production",
@@ -275,15 +281,12 @@
           "custom_domain": true
         }
       ],
-      // Prod D1 starts empty, so without this the first OAuth login would
-      // self-promote to admin. WORKSPACE_TENANT_MODE is the migration 0026
-      // tenant read mode: `off` is the safe default for a manual deploy —
-      // both deploy workflows override it with `--var
-      // WORKSPACE_TENANT_MODE:$TENANT_MODE`, which is how the same artifact
-      // is replayed as `strict` (Deploy B).
+      // DEPLOYMENT_MODE is the deployment shape: `self-hosted` or `saas`, with
+      // no default — an unset/empty/typo value fails loud at startup. Both
+      // deploy workflows pass `--var DEPLOYMENT_MODE:saas`; this block is the
+      // manual-deploy value for the SaaS production instance.
       "vars": {
-        "ADMIN_LOGINS": "btspoony",
-        "WORKSPACE_TENANT_MODE": "off"
+        "DEPLOYMENT_MODE": "saas"
       }
     }
   }

@@ -86,11 +86,13 @@ Two deployment paths — pick the one that matches who you are:
 
    ```bash
    bun run build:spa        # required — the SPA assets are not committed
-   wrangler deploy --var "ADMIN_LOGINS:alice,bob"   # also builds/pushes the sandbox container image
+   wrangler deploy           # also builds/pushes the sandbox container image
    curl https://<your-worker>/healthz   # {"ok":true,"version":"vX.Y.Z"}
    ```
 
-   `ADMIN_LOGINS` (comma-separated GitHub logins, same value the Deploy workflow passes through `--var`) is required on every deploy: it is what lets the listed logins reach the dashboard as admin, and a deploy that omits it leaves the first OAuth login on an empty `users` table as admin — see [`docs/deploy.md`](docs/deploy.md) § 6.
+   No allowlist is needed: sign-in is open to any GitHub login, and the first
+   person in creates a workspace and becomes its owner — see
+   [`docs/deploy.md`](docs/deploy.md) § 6.
 
 6. Continue with **step 3 below** (sign in and register your GitHub App).
 
@@ -113,10 +115,12 @@ Cloudflare resources, GitHub `production` environment, OAuth callback) is in
    ```bash
    bun install
    bun run build:spa
-   wrangler deploy --var "ADMIN_LOGINS:alice,bob"
+   wrangler deploy
    ```
 
-   The manual deploy must carry `ADMIN_LOGINS` explicitly, exactly like the workflow (`--var "ADMIN_LOGINS:$ADMIN_LOGINS"`): without it the first OAuth login on an empty `users` table becomes admin — see [`docs/deploy.md`](docs/deploy.md) § 6.
+   No dashboard access list is required: sign-in is open to any GitHub login,
+   and a new account creates its own workspace (becoming its owner) or accepts
+   an invitation — see [`docs/deploy.md`](docs/deploy.md) § 6.
 
 2. **Set the dashboard secrets** (four; no review credentials live at Worker level) — as **GitHub Secrets** (Settings → Environments → `staging` → Secrets), which the Deploy workflow injects into the Worker on every deploy. This staging-environment mapping is this repo's automation only — a self-hosted copy (Path A) sets the same four values directly on the Worker:
 

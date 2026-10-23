@@ -9,8 +9,10 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { t } from "../i18n";
 import type { SpaBoot } from "./boot";
 import { AppSidebar } from "./components/AppSidebar";
+import { SupportNotice } from "./components/SupportNotice";
 import { matchSpaRoute } from "./routes";
-import { buildNavbarModel, buildSidebarModel } from "./shell";
+import { buildNavbarModel, buildSidebarModel, buildWorkspaceSwitcherModel } from "./shell";
+import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-memberships";
 
 type LayoutProps = {
   boot: SpaBoot;
@@ -45,6 +47,10 @@ function LoginChrome({ children }: { children: ReactNode }) {
 
 function DashboardChrome({ boot, pathname, children }: LayoutProps) {
   const sidebar = buildSidebarModel(boot, pathname);
+  // The LIVE list, not the boot's snapshot: an in-page rename patches it, and
+  // a switcher built from the frozen boot would keep offering the retired slug.
+  const memberships = useLiveMemberships(boot);
+  const switcher = buildWorkspaceSwitcherModel({ ...boot, memberships }, pathname);
   const navbar = buildNavbarModel(boot);
   const [theme, setTheme] = useState<Theme>(effectiveTheme);
 
@@ -61,7 +67,7 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
 
   return (
     <SidebarProvider defaultOpen>
-      <AppSidebar model={sidebar} />
+      <AppSidebar model={sidebar} switcher={switcher} />
       <SidebarInset>
         {/* v0.3 (DESIGN.md): navbar sits on background-200, one step above the
             page canvas, matching the sidebar chrome layer. Control states
@@ -86,7 +92,13 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
             </Button>
           ) : null}
         </header>
-        <div className="flex flex-1 flex-col p-4 md:p-6">{children}</div>
+        <div className="flex flex-1 flex-col p-4 md:p-6">
+          {/* The undismissable support notice sits above every workspace page:
+              the tenant must see an active operator grant on any screen, and it
+              carries no control (AC4). */}
+          <SupportNotice boot={boot} pathname={pathname} />
+          {children}
+        </div>
       </SidebarInset>
     </SidebarProvider>
   );
@@ -97,9 +109,13 @@ export function Layout({ boot, pathname, children }: LayoutProps) {
   if (route?.page === "login") {
     return <LoginChrome>{children}</LoginChrome>;
   }
+  // Provider above the chrome: the switcher reads the live list here, and the
+  // page's rename card (rendered as `children`) writes it.
   return (
-    <DashboardChrome boot={boot} pathname={pathname}>
-      {children}
-    </DashboardChrome>
+    <WorkspaceMembershipsProvider boot={boot}>
+      <DashboardChrome boot={boot} pathname={pathname}>
+        {children}
+      </DashboardChrome>
+    </WorkspaceMembershipsProvider>
   );
 }

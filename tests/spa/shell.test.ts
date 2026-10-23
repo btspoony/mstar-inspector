@@ -10,13 +10,12 @@ import {
   buildSidebarModel,
   isNavCurrent,
   otherLocale,
-  visibleNavItems,
 } from "../../src/spa/shell";
 import { NAV_ITEMS, t } from "../../src/i18n";
 import { injectSpaBoot, SPA_BOOT_MARKER, type SpaBoot } from "../../src/spa/boot";
 
-const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory", role: "member" };
-const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat", role: "admin" };
+const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory" };
+const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat" };
 
 describe("shell models", () => {
   test("nav order is Apps → Members (insights retired)", () => {
@@ -26,20 +25,25 @@ describe("shell models", () => {
     ]);
   });
 
-  test("member does not see Members in the sidebar", () => {
-    expect(visibleNavItems("member").map((item) => item.href)).toEqual(["/dashboard/apps"]);
+  test("a plain member sees Members too (nav is not role-gated)", () => {
+    // The Members page is readable by every workspace member; its in-page
+    // actions carry the role gate. Nav visibility must not hide the entry.
     const sidebar = buildSidebarModel(member, "/dashboard/apps");
-    expect(sidebar.items.map((item) => item.label)).toEqual(["Apps"]);
-    expect(sidebar.items.some((item) => item.href === "/dashboard/members")).toBe(false);
+    expect(sidebar.items.map((item) => item.label)).toEqual(["Apps", "Members"]);
+    const scoped = buildSidebarModel(member, "/dashboard/acme/apps");
+    expect(scoped.items.map((item) => item.href)).toEqual([
+      "/dashboard/acme/apps",
+      "/dashboard/acme/members",
+    ]);
     // The global insights page is retired: no sidebar entry renders for it.
     expect(sidebar.items.some((item) => item.href === "/dashboard/insights")).toBe(false);
   });
 
-  test("admin sees Members in the sidebar", () => {
-    const sidebar = buildSidebarModel(admin, "/dashboard/members");
+  test("the admin sees the same entries", () => {
+    const sidebar = buildSidebarModel(admin, "/dashboard/acme/members");
     expect(sidebar.items.map((item) => item.href)).toEqual([
-      "/dashboard/apps",
-      "/dashboard/members",
+      "/dashboard/acme/apps",
+      "/dashboard/acme/members",
     ]);
     expect(sidebar.items.map((item) => item.label)).toEqual(["应用", "成员"]);
   });
@@ -57,7 +61,7 @@ describe("shell models", () => {
 
   test("brand lives in the sidebar model", () => {
     expect(buildSidebarModel(member, "/dashboard/apps").brand).toBe(t("en", "nav.brand"));
-    expect(buildSidebarModel(admin, "/dashboard/members").brand).toBe(t("zh_CN", "nav.brand"));
+    expect(buildSidebarModel(admin, "/dashboard/acme/members").brand).toBe(t("zh_CN", "nav.brand"));
   });
 
   test("the wordmark follows the workspace, like the Apps entry", () => {
@@ -85,7 +89,7 @@ describe("shell models", () => {
   });
 
   test("logged-out navbar has no account label", () => {
-    const navbar = buildNavbarModel({ locale: "en", login: null, name: null, role: null });
+    const navbar = buildNavbarModel({ locale: "en", login: null, name: null });
     expect(navbar.accountLabel).toBeNull();
   });
 
@@ -102,44 +106,53 @@ describe("shell models", () => {
     expect(root.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(true);
   });
 
-  test("a workspace page keeps the Apps entry in its workspace; Members stays legacy", () => {
+  test("a workspace page keeps BOTH nav entries inside its workspace", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
-      "/dashboard/members",
+      "/dashboard/acme/members",
     ]);
     expect(sidebar.items.find((item) => item.href === "/dashboard/acme/apps")?.current).toBe(true);
     // The App detail page under the same workspace keeps the entry current.
     const detail = buildSidebarModel(admin, "/dashboard/acme/apps/acme-app/settings");
     expect(detail.items.find((item) => item.href === "/dashboard/acme/apps")?.current).toBe(true);
-    expect(detail.items.find((item) => item.href === "/dashboard/members")?.current).toBe(false);
+    expect(detail.items.find((item) => item.href === "/dashboard/acme/members")?.current).toBe(false);
   });
 
-  test("a workspace-active Members page keeps its Apps/brand targets inside the workspace", () => {
-    // Members is not workspace-routed, so the pathname names no workspace: the
-    // boot's server-resolved slug carries it (I-000072). Every Apps target on
-    // the page must stay inside the workspace — the legacy `/dashboard/apps`
-    // is a 404 dead end under `strict`.
-    const sidebar = buildSidebarModel({ ...admin, workspaceSlug: "acme" }, "/dashboard/members");
+  test("a workspace-active Members page names its own workspace from the pathname", () => {
+    // Members is workspace-routed, so the pathname itself names
+    // the workspace; every nav target stays inside it.
+    const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/members");
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
-    const hrefs = sidebar.items.map((item) => item.href);
-    expect(hrefs).toContain("/dashboard/acme/apps");
-    expect(hrefs).not.toContain("/dashboard/apps");
-    // Members itself stays the mode-independent route and is the current entry.
-    expect(sidebar.items.find((item) => item.href === "/dashboard/members")?.current).toBe(true);
-  });
-
-  test("the page's own workspace wins over the boot slug (one workspace identity per page)", () => {
-    const sidebar = buildSidebarModel({ ...admin, workspaceSlug: "other" }, "/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
-      "/dashboard/members",
+      "/dashboard/acme/members",
+    ]);
+    expect(sidebar.items.find((item) => item.href === "/dashboard/acme/members")?.current).toBe(true);
+  });
+
+  test("the page's own workspace wins over the boot ref (one workspace identity per page)", () => {
+    const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/apps");
+    expect(sidebar.items.map((item) => item.href)).toEqual([
+      "/dashboard/acme/apps",
+      "/dashboard/acme/members",
     ]);
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
   });
 
-  test("no boot slug → the legacy targets are unchanged", () => {
-    const sidebar = buildSidebarModel(admin, "/dashboard/members");
+  test("the boot ref still scopes a pathname that names no workspace", () => {
+    // `/dashboard/apps` is the legacy page; on a strict deployment the boot's
+    // server-resolved slug carries the workspace into both nav targets.
+    const sidebar = buildSidebarModel({ ...admin, workspaceRef: "acme" }, "/dashboard/apps");
+    expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
+    expect(sidebar.items.map((item) => item.href)).toEqual([
+      "/dashboard/acme/apps",
+      "/dashboard/acme/members",
+    ]);
+  });
+
+  test("no boot ref → the legacy targets are unchanged", () => {
+    const sidebar = buildSidebarModel(admin, "/dashboard/apps");
     expect(sidebar.brandHref).toBe("/dashboard");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/apps",

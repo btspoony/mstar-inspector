@@ -23,6 +23,7 @@ export const zhCN: Dictionary = {
     themeLight: "浅色",
     logout: "退出登录",
     signedInAs: "已登录：{name}",
+    workspaceSwitcher: "工作区",
   },
   common: {
     pageTitle: "{page} — {brand}",
@@ -38,8 +39,6 @@ export const zhCN: Dictionary = {
       unknown: "未知",
     },
     error: {
-      deniedTitle: "访问被拒绝",
-      deniedBody: "此部署仅限受邀成员。请让管理员添加 {login}。",
       removedTitle: "访问已移除",
       removedBody: "你的控制台访问已被移除。请让管理员重新邀请 {login}。",
       forbiddenTitle: "禁止访问",
@@ -65,16 +64,19 @@ export const zhCN: Dictionary = {
     heading: "登录",
     description: "使用你的 GitHub 账号访问控制台。",
     signIn: "使用 GitHub 登录",
-    inviteOnly: "此部署仅限受邀成员 — 请让管理员添加你的 GitHub 登录名。",
+    /** 登录开放 —— 没有访问名单挡在工作区之前。 */
+    openAccess: "任意 GitHub 账号均可登录 —— 创建工作区，或接受邀请。",
   },
   notice: {
     success: {
-      invited: "已邀请 {login} — 现在可以使用 GitHub 登录了。",
+      invited: "已邀请 {login} — 对方现在可以在本工作区接受邀请。",
       removedMember: "已移除 {login}。",
       roleChanged: "{login} 现在是{role}。",
+      revoked: "已撤销给 {login} 的邀请。",
     },
     warn: {
       alreadyMember: "{login} 已是成员 — 未做更改。",
+      invitePending: "{login} 已有待接受的邀请 — 未做更改。",
     },
     error: {
       enterLogin: "请输入要邀请的 GitHub 登录名。",
@@ -82,6 +84,7 @@ export const zhCN: Dictionary = {
       inviteFailed: "无法邀请 {login} — 请重试。",
       roleChangeFailed: "无法更改 {login} 的角色 — 成员列表刚刚发生变化，请重试。",
       removeFailed: "无法移除 {login} — 成员列表刚刚发生变化，请重试。",
+      revokeFailed: "无法撤销给 {login} 的邀请 — 请重试。",
     },
   },
   /** App 详情页（App detail IA）：双标签页外壳。 */
@@ -125,6 +128,11 @@ export const zhCN: Dictionary = {
   apps: {
     heading: "应用",
     create: "创建 GitHub App",
+    /** Create 控件不可用的原因（见 en.ts 同名字段）。 */
+    createUnavailable: {
+      role: "只有工作区所有者或管理员可以在此创建 App。",
+      workspace: "请先进入某个工作区 — 此部署有多个工作区，App 需要归属其中一个。",
+    },
     /** 组合式空态（EmptyState 标题 + 描述）。 */
     emptyTitle: "还没有 App",
     emptyDescription: "使用「创建 GitHub App」连接第一个。",
@@ -162,17 +170,18 @@ export const zhCN: Dictionary = {
   },
   members: {
     heading: "成员",
-    inviteOnlyNotice: "仅列表中的 GitHub 用户可登录本平台。",
+    visibleToMembers: "本工作区的所有成员都能看到成员名单。",
     inviteLabel: "按 GitHub 登录名邀请",
     invitePlaceholder: "例如 octocat",
     inviteButton: "邀请成员",
     roleLabel: "角色",
     tableLogin: "GitHub 登录名",
     tableJoined: "加入时间",
+    tableExpires: "过期时间",
     tableActions: "操作",
     actionsMenuLabel: "打开 {login} 的操作菜单",
     makeAdmin: "改为管理员",
-    makeMember: "改为成员",
+    makeMember: "改为普通成员",
     confirmRoleTitle: "更改 {login} 的角色？",
     confirmRoleBody: "{login} 将成为{role}。更改立即生效。",
     confirmRoleButton: "更改角色",
@@ -180,13 +189,78 @@ export const zhCN: Dictionary = {
     confirmRemoveBody:
       "{login} 将无法再登录 — 其会话立即失效。他们创建的 App 保留，管理员仍可管理。",
     remove: "移除",
+    pendingHeading: "待接受的邀请",
+    confirmRevokeTitle: "撤销对 {login} 的邀请？",
+    confirmRevokeBody: "{login} 将无法接受此邀请。之后可以重新邀请。",
+    revoke: "撤销",
     you: "你",
-    adminOnly: "此页面仅限控制台管理员访问。",
-    roleAdmin: "管理员",
-    roleMember: "成员",
+    /** 工作区角色词表（`workspace_members.role`），含 owner。 */
+    role: {
+      owner: "所有者",
+      admin: "管理员",
+      member: "成员",
+    },
     /** 组合式空态——无动作变体（上方邀请表单即路径）。 */
     emptyTitle: "还没有成员",
     emptyDescription: "使用上方表单邀请第一位成员。",
+    emptyDescriptionMember: "本工作区目前没有其他成员。",
+  },
+  /**
+   * 工作区创建 —— 尚未加入任何工作区的登录用户的落地页：
+   * 登录不会自动加入工作区，除了接受邀请，这里是进入首个工作区的唯一路径。
+   */
+  workspace: {
+    setupHeading: "创建工作区",
+    setupDescription: "你还不属于任何工作区。创建后你将成为它的所有者，之后可以邀请队友。",
+    /** `self-hosted` 空实例提示：本次登录创建了部署的第一个账号。 */
+    emptyInstance: "本实例还没有任何账号。你的登录现在已是本实例的第一个账号——创建一个工作区即可开始。",
+    nameLabel: "工作区名称",
+    namePlaceholder: "例如 Acme",
+    create: "创建工作区",
+    nameRequired: "请输入工作区名称。",
+    nameTooLong: "最多 {max} 个字符。",
+    createFailed: "创建工作区失败，请重试。",
+    /** 创建界面上的待处理邀请——受邀者的接受入口（MF-2）。 */
+    invitesHeading: "你收到了邀请",
+    invitesDescription: "接受邀请即可加入对应工作区，也可以在下方创建自己的工作区。",
+    inviteAccept: "接受",
+    /** {role} = 受邀的工作区角色；{expires} = 相对的到期时间。 */
+    inviteMeta: "以 {role} 身份被邀请——{expires} 到期",
+    inviteExpired: "该邀请已过期。",
+    inviteGone: "该邀请已失效——可能已被撤回。",
+    inviteAcceptFailed: "接受邀请失败，请重试。",
+    /** 工作区 URL（slug）改名——设置表单与拒绝文案。 */
+    slugHeading: "工作区 URL",
+    slugDescription:
+      "该工作区控制台 URL 中的可读片段。仅小写字母、数字与连字符——不能是保留字，也不能是其他工作区的 id。",
+    slugLabel: "Slug",
+    slugSave: "保存 slug",
+    slugSaved: "工作区 URL 已更新——旧 slug 不再可用。",
+    slugInvalid: "请使用 2–39 位小写字母、数字或连字符，并以字母或数字开头。",
+    slugReserved: "该词是控制台保留字，请换一个 slug。",
+    slugTaken: "其他工作区已使用该 slug，请换一个。",
+    slugIsWorkspaceId: "该值已是另一个工作区的 id，请换一个 slug。",
+    slugForbidden: "只有工作区所有者可以修改它的 URL。",
+    slugFailed: "修改工作区 URL 失败，请重试。",
+  },
+  /**
+   * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
+   * 通知说明谁在查看、原因与到期时间——不提供任何操作，因为租户既不能结束
+   * 也不能修改一份授权。
+   */
+  support: {
+    heading: "支持访问",
+    readOnly: "你正在限时支持授权下查看此工作区。此处全部内容为只读。",
+    workspaceId: "工作区 id",
+    createdAt: "创建时间",
+    grantsHeading: "生效中的支持授权",
+    grantLine: "{login} 拥有支持访问权限，到期时间 {expires} —— {reason}",
+    tableLogin: "GitHub 登录名",
+    tableRole: "角色",
+    /** 租户口径的常驻通知；不可关闭，不带任何操作。 */
+    noticeHeading: "支持访问已生效",
+    noticeLine: "{login} 可查看此工作区的成员，直至 {expires} —— {reason}",
+    noGrant: "当前没有生效的支持访问。",
   },
   settings: {
     /** (AD-591) 分组 eyebrow 标签——应用信息/状态区与配置区（双语原子）。 */
@@ -431,6 +505,8 @@ export const zhCN: Dictionary = {
       alreadyConnected: "此 GitHub App 已在此部署上连接 — 未做任何更改。",
       dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",
+      workspaceRequired:
+        "此部署有多个工作区，App 需要归属其中一个 — 请先进入某个工作区，再从那里创建 App。",
     },
   },
 };

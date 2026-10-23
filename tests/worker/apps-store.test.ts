@@ -496,24 +496,28 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect(appCount(db)).toBe(1);
   });
 
-  test("no workspace → createApp throws the found-count error and writes nothing", async () => {
+  test("no workspace → an unnamed createApp refuses and writes nothing", async () => {
     const db = createMigratedD1();
     rawRun(db, "DELETE FROM workspaces");
-    await expect(seedApp(db)).rejects.toThrow(/exactly one workspace, found 0/);
+    await expect(seedApp(db)).rejects.toThrow(/names no workspace and the deployment has none or several/);
     expect(appCount(db)).toBe(0);
     expect(mappingRows(db)).toEqual([]);
   });
 
-  test("two workspaces → createApp throws the found-count error and writes nothing", async () => {
+  test("two workspaces → an unnamed createApp refuses; a NAMED one writes into that workspace", async () => {
     const db = createMigratedD1();
     rawRun(
       db,
       `INSERT INTO workspaces (id, slug, name, created_by, created_at)
        VALUES ('second', 'second', 'Second', NULL, '2026-10-21T00:00:00.000Z')`,
     );
-    await expect(seedApp(db)).rejects.toThrow(/exactly one workspace, found 2/);
+    await expect(seedApp(db)).rejects.toThrow(/names no workspace and the deployment has none or several/);
     expect(appCount(db)).toBe(0);
     expect(mappingRows(db)).toEqual([]);
+    // The named path is the multi-workspace answer: the App lands exactly where
+    // the caller said, whichever workspace that is.
+    const app = await seedApp(db, { workspaceId: "second" });
+    expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "second" }]);
   });
 
   test("a soft-deleted workspace row is not the sole workspace: the live one stays the only candidate", async () => {
@@ -532,7 +536,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
   test("no live workspace (the only row is soft-deleted) → createApp refuses and writes nothing", async () => {
     const db = createMigratedD1();
     rawRun(db, "UPDATE workspaces SET deleted_at = '2026-10-21T01:00:00.000Z'");
-    await expect(seedApp(db)).rejects.toThrow(/exactly one workspace, found 0/);
+    await expect(seedApp(db)).rejects.toThrow(/names no workspace and the deployment has none or several/);
     expect(appCount(db)).toBe(0);
     expect(mappingRows(db)).toEqual([]);
   });
@@ -546,7 +550,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect(mappingRows(db)).toHaveLength(2);
   });
 
-  test("read faces stay single-statement github_apps selects (no tenant join, no extra query)", async () => {
+  test("every execution-facing read joins app_workspaces in ONE statement", async () => {
     const queries: string[] = [];
     const statement: RecordingStatement = {
       bind: () => statement,
@@ -567,9 +571,8 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     await s.listApps();
     expect(queries).toHaveLength(3);
     for (const query of queries) {
-      expect(query).toMatch(/^SELECT \* FROM github_apps/);
-      expect(query).not.toContain("app_workspaces");
-      expect(query).not.toContain("workspaces");
+      expect(query).toContain("INNER JOIN app_workspaces");
+      expect(query).toContain("w.workspace_id");
     }
   });
 

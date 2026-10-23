@@ -117,9 +117,9 @@ production path itself, both ahead of its first mutating command:
 `GITHUB_TOKEN` does **not** create a `release: published` run — GitHub
 suppresses workflow events caused by `GITHUB_TOKEN` (`workflow_dispatch` and
 `repository_dispatch` are the exempt trigger types) — so the Release workflow
-runs `gh workflow run deploy-prod.yml --ref <tag>` itself (no `-f` fields: an
-ordinary release takes the workflow's non-deciding `steady` tenant mode, §
-Rollout), and the dispatched run's head SHA is the tag's commit. That step is
+runs `gh workflow run deploy-prod.yml --ref <tag>` itself (no `-f` fields: the
+dispatch carries nothing that decides the deploy — the shape comes from the
+config and `--var`), and the dispatched run's head SHA is the tag's commit. That step is
 fail-fast **after** the tag and Release are created, and it needs `actions:
 write` on the release job; the dispatched run is then approved like any other
 production run (§ Production approval gate and the tag gate). The
@@ -372,13 +372,11 @@ plan, and both rejected for now in favour of the applied approval gate.
    `production` secrets (pure preflight, no mutation) → resolve the deploy tag
    and validate it against the checked-out version surfaces (pre-mutation,
    § Production environment) → apply the prod D1
-   migrations → `wrangler deploy --env production` → write the `production`
-   secrets → **`wrangler deploy --env production --var
-   WORKSPACE_TENANT_MODE:<mode>`** (the version that actually serves: a
-   `secret bulk` republishes the config default, so the LAST version-creating
-   command must be this one) → re-read the live Worker version → smoke.** The
-   run summary reports the mode that final deploy bound, not the dispatch
-   input. Deploying *before* the
+   migrations → `wrangler deploy --env production --var DEPLOYMENT_MODE:saas` →
+   write the `production` secrets → **`wrangler deploy --env production --var
+   DEPLOYMENT_MODE:saas`** (the version that actually serves: a `secret bulk`
+   republishes the config value, so the LAST version-creating command must be
+   this one) → re-read the live Worker version → smoke.** Deploying *before* the
    secrets is deliberate: the
    earlier order wrote them first, and on a first bring-up that made wrangler
    materialise a **bound-less draft Worker** (`mstar-inspector-production`
@@ -422,17 +420,17 @@ plan, and both rejected for now in favour of the applied approval gate.
    no-op against the already-migrated database and the secrets are re-injected
    idempotently, and the smoke then sees the provisioned domain.
 
-### `ADMIN_LOGINS` lives in the config, not the dashboard
+### `env.production.vars` is the plain-var roster for production
 
-`ADMIN_LOGINS` is declared in `wrangler.jsonc` `env.production.vars`; it
-cannot be a dashboard-managed plain var. wrangler accepts `keep_vars` only at
-the top level and **rejects it inside an environment block**
+`wrangler.jsonc` `env.production.vars` holds the only production plain var,
+`DEPLOYMENT_MODE` (§ Deployment mode — `saas`, re-supplied on every deploy by
+both workflows). A value declared there cannot be a
+dashboard-managed plain var: wrangler accepts `keep_vars` only at the top level
+and **rejects it inside an environment block**
 (`Unexpected fields found in env.production field: "keep_vars"`), so an
 automated `wrangler deploy --env production` wipes dashboard-set plain vars.
-Production D1 starts empty, and with `ADMIN_LOGINS` unset the first OAuth
-login against that empty `dashboard_users` table self-promotes to admin
-(§ Multi-App go-live, step 6). The value is therefore part of the config:
-changing it means editing `env.production.vars` and redeploying.
+The value is therefore part of the config: changing it means editing
+`env.production.vars` and redeploying.
 `REVIEW_ENABLED` stays unset — per-App Pause/Resume is the review control — and
 `REVIEW_LEVEL` (the review tier — `quick`/`default`/`deep`) is likewise unset and
 configured nowhere. The same `keep_vars` limitation applies to both: a
@@ -441,6 +439,8 @@ dashboard is wiped by the next `wrangler deploy --env production`, so neither
 can be relied on until it is declared in `env.production.vars` and redeployed.
 Per-App Pause/Resume is the primary review control and is unaffected
 (`.env.example`).
+
+Sign-in itself needs no plain var: it is open to any GitHub login (§ 6).
 
 ### Maintenance: `env.production` duplicates the resource keys
 
@@ -487,8 +487,8 @@ restores by hand.
   applies the D1 migrations (`--remote --env production`, forward-only),
   deploys the older tag's code, container image and
   `wrangler.jsonc` `env.production` **vars** — which overwrite every plain var
-  set in the dashboard (§ `ADMIN_LOGINS` lives in the config, not the
-  dashboard) — and then
+  set in the dashboard (§ `env.production.vars` is the plain-var roster) — and
+  then
   re-injects the **current `production` environment secrets** (all four
   required ones, plus
   `ALERT_WEBHOOK_URL` written when that secret is set and **deleted** when it is
@@ -502,142 +502,348 @@ restores by hand.
   (previous bullet). Rotate explicitly when the rollback is
   security-motivated.
 
-## Workspace tenant mode (`WORKSPACE_TENANT_MODE`)
+## Platform operators (`PLATFORM_OPERATORS`)
 
-One Worker var switches both the dashboard route family and the App read face
-(migrations `0026` + `0027`):
+Deploying the product does not grant sight of any tenant. `PLATFORM_OPERATORS`
+is a comma-separated, case-insensitive list of GitHub logins (a **Worker var**,
+never a secret — logins are public identity) and holds **no business rights**:
 
-| Value | Dashboard routes | App reads |
-|---|---|---|
-| `off` (default) | legacy App paths (`/dashboard/apps…`, `/dashboard/api/apps…`) serve; workspace paths (`/dashboard/<slug>/apps…`) answer 404 | `github_apps` only — the pre-workspace behavior, byte-identical |
-| `strict` | legacy App paths answer 404; `/dashboard/<slug>/apps…` serves that workspace | every execution-facing App read INNER JOINs `app_workspaces`, so an unmapped App is invisible to the pipeline |
-
-Unset / empty reads as `off`. **Any other value fails loud**: the dashboard
-answers `500` without serving a route, and the queue consumer throws before it
-reads a message — a typo can never silently pick a face. The runtime reader is
-`tenantModeOf` in [`src/worker/tenant-mode.ts`](../src/worker/tenant-mode.ts),
-and both workflows reject an illegal `tenant_mode` input before any
-deploy-capable step.
-
-### Route move
-
-| Before (`off`) | After (`strict`) |
+| Caller | What they get |
 |---|---|
-| `/dashboard/apps` | `/dashboard/<slug>/apps` |
-| `/dashboard/apps/<app>/settings` | `/dashboard/<slug>/apps/<app>/settings` |
-| `/dashboard/api/apps` | `/dashboard/<slug>/api/apps` |
-| `/dashboard/api/apps/<app>/…` | `/dashboard/<slug>/api/apps/<app>/…` |
+| workspace member that is also listed | ordinary membership rights — the ceiling never applies |
+| listed, not a member, no live `support_grants` row | the outsider 404 on every workspace path |
+| listed, not a member, live grant | `read`-declared routes only: the workspace view, the member list (login + role); every other path is 403 |
+
+Expiry is read from `support_grants.expires_at` on every request — there is no
+scheduled job and no status column, so an expired grant answers exactly like no
+grant. Every operator decision the workspace gate makes appends one
+`audit_events` row **before dispatch** (`support.read` / `support.forbidden` /
+`support.denied`), so a route added later cannot skip the record. HTML shell
+loads (`/dashboard`, `/dashboard/<ref>/apps`) are served by `spa-dispatch`
+rather than the workspace gate, so they are classified by the same function but
+append no row.
+
+A membership-less operator's landing is `/dashboard/<ref>/apps`: the shell
+redirects the bare `/dashboard` there whenever the gate would classify that
+login `operator-granted`, because the support view derives its API base from
+the pathname's workspace segment.
+
+`PLATFORM_OPERATORS` is not declared in `wrangler.jsonc`; set it with
+`wrangler deploy --var "PLATFORM_OPERATORS:<login>[,<login>]"` or as a plain
+var on the Worker. An empty/unset value means "no operators", which is the
+default and is safe: nobody gains access.
+
+### Opening a support window (no UI this iteration)
+
+Grant creation is an explicit operator action against the store, never an HTTP
+route — there is no self-grant. Pick the window, then insert one row
+(`migrations/0029_operator_support.sql` owns the DDL):
+
+```sql
+-- `id` is any UUID; `granted_by` is the creating operator's login (not a FK).
+INSERT INTO support_grants
+  (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at)
+VALUES
+  ('<uuid>', '<workspace_id>', '<operator login>', '<why support is needed>',
+   '<your login>', '<ISO now>', '<ISO now + window>');
+```
+
+```sh
+wrangler d1 execute mstar-inspector --remote \
+  --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','<reason>','<you>','$(date -u +%FT%TZ)','<ISO expiry>')"
+```
+
+While the row is live the workspace members see an undismissable notice (who,
+why, until when) and the operator sees only the read-only support face. Ending
+the window early is the same explicit store action — there is no tenant-facing
+control at all, and **revocation is an append-only write, not a delete**:
+
+```sh
+# Close the window now: append a superseding row whose window is already over.
+# The old row is untouched history, so "revoked" stays distinguishable from
+# "lapsed" and the audit trail keeps both.
+wrangler d1 execute mstar-inspector --remote \
+  --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','revoked: <why>','<you>','$(date -u +%FT%TZ)','$(date -u +%FT%TZ)')"
+```
+
+Access is decided per request by **the newest append for that (workspace,
+operator) — the highest `rowid`** (`hasValidGrant`), which tests only that one
+row's `expires_at > now`. The members' notice read
+(`listActiveSupportGrants`) applies the same one-row-per-operator rule, so both
+reads agree. A `now`-stamped row therefore ends the window on the next request
+even though the row it supersedes is still stored and still unexpired: that
+older row remains readable as history (and is why "revoked" stays
+distinguishable from "lapsed"). Reading every row instead and keeping any live
+one would leave the revoked grant granting. There is deliberately no store
+export for update or delete — `src/dashboard/operator-store.ts` exports the two
+appends and the reads only.
+
+The bare `DELETE FROM support_grants WHERE workspace_id = … AND operator_login
+= …` a previous version of this runbook showed is **outside the audited path**:
+it destroys the grant row, so the members' notice vanishes with no record that
+a window ever existed and revoked becomes indistinguishable from lapsed. Use it
+only as break-glass when a row must physically go (e.g. it holds a secret in
+`reason`), and record the action in the workspace's incident log yourself.
+
+`audit_events` is append-only: no code path updates or deletes a row, and the
+migration declares no cascade. `owner`/`admin` read them through
+`GET /dashboard/<ref>/api/audit?limit=`, which a plain `member` and a granted
+operator both get 403 from.
+
+## Repairing a replayed 0027 membership backfill
+
+Before the split, both workflows replayed `0027` (which then also inserted a
+`workspace_members` row per `users` row) on every deploy, so a live deployment
+may hold memberships nobody granted. Those rows are identifiable by their
+`created_at`, but the stamp alone is **not** enough to identify them: the old
+`0027` wrote the fixed stamp `2026-10-21T00:00:00.000Z` for EVERY row it
+backfilled, including the legitimate pre-cutover members it was supposed to
+create. What distinguishes a wrong row is the stamp **plus** who it points at.
+
+The populations, after `migrations/0030_workspace_membership_cutover.sql` has
+applied through the ledger:
+
+| `workspace_members.created_at` | `users.created_at` | Origin |
+|---|---|---|
+| `2026-10-21T00:00:00.000Z` | before the cutover | legitimate: `0027`'s original backfill |
+| `2026-10-21T00:00:00.000Z` | at/after the cutover | **wrong**: a `0027` replay added a login that signed up after open sign-in |
+| `2026-10-22T11:13:45.000Z` | before the cutover | legitimate: `0030` applied by the ledger |
+| the real clock | either | legitimate: invite accept or workspace creation |
+
+That is the whole discriminator: a login that signed up **after** open sign-in
+could only have got a `default` membership from the replay, so the join on
+`users.created_at` selects exactly those rows and nothing else.
+
+1. **List what the replay wrongly added.** A login that signed up at or after
+   the cutover (`2026-10-22T11:13:45.000Z`) was never a member of `default` —
+   open sign-in joins nobody — so a membership it holds under the legacy stamp
+   came from a replay. This is the same predicate step 2 deletes on, so the
+   list is exactly the damage:
+
+   ```sh
+   wrangler d1 execute mstar-inspector-db --remote \
+     --command "SELECT u.github_login, wm.role, wm.created_at, u.created_at AS signed_up_at FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = 'default' AND wm.created_at = '2026-10-21T00:00:00.000Z' AND u.created_at >= '2026-10-22T11:13:45.000Z'"
+   ```
+
+   Check the list against the member list the owners expect. A login that
+   signed up after the cutover but was properly invited has the **clock** as
+   its stamp, so it does not appear here and is never deleted. A name that
+   should be a pre-cutover member but appears here means the deployment's
+   cutover instant differs from the one `0030` assumes (see that migration's
+   header) — stop and reconcile before deleting.
+
+2. **Delete those rows.** The `user_id IN (…)` half is not optional: dropping
+   it would delete the legitimate pre-cutover members `0027` wrote, because
+   they carry the same fixed stamp. The `users` rows themselves stay.
+
+   ```sh
+   wrangler d1 execute mstar-inspector-db --remote \
+     --command "DELETE FROM workspace_members WHERE workspace_id = 'default' AND created_at = '2026-10-21T00:00:00.000Z' AND user_id IN (SELECT id FROM users WHERE created_at >= '2026-10-22T11:13:45.000Z')"
+   ```
+
+   The `created_at` half keeps the delete off real joins (invite accept and
+   workspace creation stamp the clock) and off `0030`'s own output (stamped at
+   the cutover); the `user_id` half keeps it off the legitimate pre-cutover
+   backfill. Both are needed.
+
+3. **Nothing to restore.** Pre-cutover members are never touched by step 2, so
+   there is no repair to apply — do not re-run `0030` for this. Its `NOT EXISTS`
+   guards only skip members whose row still exists; it cannot tell "never was a
+   member" from "an owner removed them from the members page", and a workspace
+   removal writes no `removed_logins` record. A hand re-run would therefore
+   re-add people an owner deliberately removed.
+
+   Re-admission is the invite: an owner invites the login and it accepts. That
+   is the only supported path back into a workspace, and it is the same path
+   the members page offers.
+
+Ordering note: run (1), then (2). There is no third step to order against. If
+the deployment has **not** yet applied `0030`, apply it first (`wrangler d1
+migrations apply`): until it has, the legitimate pre-cutover rows it would
+write are missing, and step (2) is still correct on its own predicate.
+
+### The FIRST application has the same blind spot
+
+The hand re-run above is not the only way `0030` can restore somebody. Its
+`NOT EXISTS` guard looks at live memberships only, so the **first** ledger
+application — the normal, once-per-database one — re-grants `default` to any
+pre-cutover user whose membership no longer exists and who has no
+`removed_logins` row.
+
+That is unreachable on the production upgrade path: there every removal went
+through the operator `removeUser` path, which writes the `removed_logins`
+tombstone in the same batch, so the guard excludes it. The reachable case is a
+database that already ran this branch's code **before `0030` existed** — a
+staging copy, or a self-hosted deployment tracking the branch. On that
+database the members page's own removal (`/members/remove` →
+`deleteWorkspaceMember`) deletes the membership row and writes no tombstone, so
+a pre-cutover user removed there is indistinguishable from a user who was
+never a member, and the first apply re-adds them to `default` with no invite.
+
+An operator of such a database should, **before** applying `0030`:
+
+```sh
+wrangler d1 execute mstar-inspector-db --remote \
+  --command "SELECT u.id, u.github_login, u.created_at FROM users u WHERE u.created_at < '2026-10-22T11:13:45.000Z' AND u.role IN ('admin', 'member') AND NOT EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = 'default' AND wm.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM removed_logins r WHERE r.github_login = u.github_login COLLATE NOCASE)"
+```
+
+That is `0030`'s own `SELECT`: the same cutover stamp, the same `role` filter
+and the same two `NOT EXISTS` guards, so it returns exactly the rows
+the migration would consider inserting. They fall into two groups, and **only
+the second one needs action**:
+
+- **Backfill targets — nothing to do.** A pre-cutover login that never reached
+  `default`: an interrupted earlier backfill, or a database where the
+  membership half never ran. `0030` inserts it, which is the intended outcome.
+- **Members-page removals — tombstone first.** A login an owner removed from
+  the members page on this database. That removal deleted the membership row
+  and wrote no `removed_logins` record, so it is indistinguishable from the
+  group above and the migration would re-add it.
+
+Nothing in the database separates the two groups — that absence *is* the blind
+spot. Decide from your own history instead: ask the owners which logins they
+removed from the members page on this database. The members page is the only
+path that drops a membership without writing a tombstone, so a pre-cutover
+login they remember removing is the row to tombstone. Do it for **only** those
+logins:
+
+```sh
+wrangler d1 execute mstar-inspector-db --remote \
+  --command "INSERT INTO removed_logins (github_login, removed_at) VALUES ('<login>', '<ISO-8601 UTC>')"
+```
+
+Know the blast radius before you write one: `removed_logins` has **no
+workspace column** and matches `github_login` case-insensitively, so a row
+blocks **every** workspace's invite of that login on this deployment, not just
+`default`'s, and it blocks the login's next sign-in if its `users` row is
+already gone. An existing `users` row and existing memberships keep working,
+but no owner can undo the record in-product — the invite form refuses with
+`invite.login_removed` and points at a deployment operator, and the only code
+path that clears a tombstone (`createUser`) has no production caller. For a
+login whose row was already deleted, that removal is effectively permanent.
+
+Then apply. Nothing needs removing afterwards: anything the migration restores
+was a login you deliberately left un-tombstoned in the step above.
+
+This is a one-time effect, not a standing hole: the ledger applies `0030` once
+per database. A database that has already applied it is unaffected, and a
+future deploy never re-derives membership — that is the whole point of the
+split from `0027`.
+
+## Tenant read path (single)
+
+Tenant isolation has no switch: there is one read face, and it always resolves
+the workspace. Three invariants carry that guarantee:
+
+1. **One SQL face.** Every execution-facing App read (`APP_READ_SQL` in
+   [`src/dashboard/apps-store.ts`](../src/dashboard/apps-store.ts)) INNER JOINs
+   `app_workspaces`, so an App with no workspace mapping is invisible to the
+   pipeline instead of silently global.
+2. **The zero-orphan gate.** Both deploy workflows assert zero unmapped Apps
+   before any deploy-capable step, and again against the version serving traffic
+   (§ Gate ordering) — a gap can neither reach nor survive a deploy.
+3. **One App route family.** `/dashboard/<workspace-slug>/apps…` is the only
+   App route family. The pre-workspace root paths are unknown paths now, so they
+   answer 404.
+
+| Path | Answers |
+|---|---|
+| `/dashboard/<slug>/apps` | that workspace's Apps |
+| `/dashboard/<slug>/apps/<app>/settings` | that App's settings |
+| `/dashboard/<slug>/api/apps` | that workspace's Apps API |
+| `/dashboard/<slug>/api/apps/<app>/…` | that App's API |
+| `/dashboard/apps…`, `/dashboard/api/apps…` | 404 |
 
 The reserved first segments (`apps`, `api`, `oauth`, `members`, `login`,
-`logout`, `manifest`, `locale`, `healthz`) never name a workspace, and the
-mode-independent routes (login, logout, OAuth callback, members, manifest,
-locale, healthz) answer in both modes.
+`logout`, `manifest`, `locale`, `healthz`) never name a workspace.
 
-### Rollout: two deploys of the same tag/SHA
+### App creation is workspace-scoped
 
-**Steady state is a repository/environment variable, not the event.** Both
-workflows resolve the mode with `scripts/resolve-tenant-mode.sh`, in this
-precedence:
+An App belongs to exactly one workspace, so the creation flow needs a target.
+The SPA's Create form posts to `/dashboard/<slug>/manifest/start`, which judges
+the caller's `owner`/`admin` role **in that workspace** and carries the
+workspace's stable **id** through the signed state and the encrypted hold, so
+the callback and the recovery resubmit write the App into the same workspace
+they started in — a mid-flow rename (or a later workspace taking the old slug)
+cannot redirect the App to another tenant. The current slug is resolved from
+that id only when a URL is built, after the write.
 
-1. an **explicit** `tenant_mode` dispatch input — `off` or `strict` (an operator
-   deciding a specific run),
-2. else `vars.WORKSPACE_TENANT_MODE` — the steady-state value for routine runs,
-   which is what a `steady` input (and no input at all) means,
-3. else `off` — the variable is unset or empty on a routine run.
+The deployment-level `POST /dashboard/manifest/start` still exists for a
+single-workspace deployment (there the sole workspace is unambiguous). On a
+deployment with more than one live workspace it answers `409` with
+`{"code": "workspace_required", "message": …}` — or the styled error page for a
+browser navigation — instead of a bare `403`: nothing about the caller's rights
+is wrong, the request is simply missing its target.
 
-The input's default is **`steady`**, meaning exactly that second rule: *take the
-variable*. A dispatch nobody filled in therefore still follows the installation
-instead of deciding for it. This is the release path — the Release workflow runs
-`gh workflow run deploy-prod.yml --ref <tag>` with **no fields**, so an
-ordinary release carries the `steady` default — and staging's `push` to `main`
-carries no dispatch input at all. Before this rule a declared `off` default won
-over the variable on every such run: the first ordinary push/release after
-Deploy B silently redeployed a `strict` installation as `off` (legacy routes
-back, workspace routes 404). **A strict installation MUST set
-`WORKSPACE_TENANT_MODE=strict`** as a repository (or `staging` /`production`
-environment) variable *in the same change that runs Deploy B* — that variable,
-not the Deploy B dispatch, is what keeps the installation strict. A `steady`
-run that resolves to `off` never observed the live mode, so it cannot claim a
-strict→off change: it emits a `::warning::` and records
-`tenant_mode_change=unproven->off` in the run summary. `tenant_mode_change=none`
-means no demotion is being reported (an explicit dispatch input, or a non-`off`
-resolution).
+`GET /dashboard` follows the same rule: one membership redirects to that
+workspace's Apps page, several memberships redirect to the login's first one
+(ordered by name, then id) and the switcher offers the rest.
 
-The same resolver separates **steady state** from a **replay**: it reports
-`replay=required` only for a dispatch whose `tenant_mode` input is explicitly
-`strict`, and `replay=none` otherwise (including `steady` resolving to `strict`).
-Only a replay binds `expected_deploy_sha`, and the guard **refuses** a run that
-supplies it without that binding; see *Replay identity* below.
+### The v1.2 tenant mode switch is removed
 
-Both workflows take a `tenant_mode` dispatch input (`steady` default — use the
-variable; `off` / `strict` explicit) and pass the resolved mode as `wrangler
-deploy --var WORKSPACE_TENANT_MODE:<mode>` — production gained that `--var` for
-this rollout, and `env.production` declares `off` as the manual-deploy default.
-In both workflows that deploy is the LAST version-creating command: a
-`wrangler secret bulk` republishes the config default and cannot carry `--var`
-(a named environment rejects `keep_vars`), so the mode that serves is the one
-that last deploy bound, and the run summary reports that value.
+The mode var that chose between the two read faces (migration `0026`) is gone
+end to end: no reader, no validator, no workflow var, no dispatch input, no
+`env.production.vars` entry. A deployment that still sets it carries inert
+text — nothing reads it. The config-level rollback lever (re-deploy the same
+tag with the other mode) is removed with it, so rollback is a `git revert` of
+the commit that deleted it (§ Rollback). Nothing a running installation relied
+on is lost: the retired face served the pre-workspace route family, which
+already answered 404 under the workspace routes.
 
-1. **Deploy A — `off`.** The normal deploy of the new build: Apps keep serving
-   on their legacy paths, workspace paths 404.
-2. **Deploy B — `strict` on the same tag/SHA.** Replay the SAME ref:
-   `gh workflow run deploy-prod.yml --ref <tag> -f tenant_mode=strict
-   -f expected_deploy_sha=<deploy A sha>`
-   (staging: dispatch `deploy.yml` on `main` for the same commit, same flags).
-   The workspace pages and the INNER-JOIN reads go live; **the Worker code is
-   the same SHA in both runs**. Set `vars.WORKSPACE_TENANT_MODE=strict` in the
-   same window: the dispatch only decides THIS run, the variable decides every
-   routine run after it.
-3. **Rollback** is Deploy A again — the same tag with `tenant_mode=off`, and
-   `vars.WORKSPACE_TENANT_MODE` back to `off` (otherwise the next routine
-   release redeploys `strict`); the read face and the routes revert together.
+The removal itself is recorded in `.changes/unreleased/deployment-mode.md`
+(including the old var's name, which no longer appears anywhere in this
+repository outside release history).
 
-**Replay identity is asserted, not assumed — for the replay, and only for it.**
-A *strict replay* is a `workflow_dispatch` whose `tenant_mode` input is
-`strict`: that run IS Deploy B and must name the SHA Deploy A shipped. The
-resolver reports `replay=required` for exactly that case, and the run aborts
-with `strict replay requires the SHA deployed by Deploy A` when
-`expected_deploy_sha` is empty. Deploy A's run summary is the source of that
-value — it prints `deployed_sha=<sha>`. The run aborts unless `github.sha`
-equals the input **and** the run's ref resolves to the same SHA (staging
-asserts the checked-out `HEAD`; production asserts the release tag through
-`git rev-parse refs/tags/<tag>^{commit}`), so a tag or branch that moved
-between A and B cannot pass by agreeing with itself.
+## Deployment mode (`DEPLOYMENT_MODE`)
 
-A **steady-state** run — a `push` to `main`, a `release: published` event, or
-the Release workflow's no-field `deploy-prod.yml` dispatch (all of which carry
-`steady` or no input) — resolving `strict` from `vars.WORKSPACE_TENANT_MODE` is
-*not* a replay: there is no Deploy A to bind, so it reports `replay=none`,
-deploys `strict`, and still passes every ref identity assertion above. It never
-fabricates an `expected_deploy_sha` — the binding it would claim was never
-proven. A rollback dispatch names `tenant_mode=off` explicitly; `steady` with
-the variable back at `off` is the same deploy.
+One Worker var selects the **product shape**. It decides exactly one question:
+whether an instance whose `users` table is empty tells its first signer-in the
+empty-instance story.
 
-**A supplied `expected_deploy_sha` on a non-replay run aborts the run.** The
-input means "bind Deploy A", so a run that carries it without enforcing the
-binding would deploy looking exactly like a completed Deploy B while the
-moved-tag binding was skipped — and a `steady` dispatch can still *serve*
-`strict` from the variable, which is how the two become indistinguishable. The
-guard exits 1 with `expected_deploy_sha <sha> was supplied but this run is not a
-strict replay` and names the fix: re-dispatch with `-f tenant_mode=strict -f
-expected_deploy_sha=<sha>`. Leaving the SHA empty is the only way to ask for a
-plain steady-state deploy.
+| Value | Empty `users`, first successful GitHub login | Set by |
+|---|---|---|
+| `self-hosted` | one screen saying this instance has no accounts yet and that this login is now an account on it, with workspace creation as the next step | local dev — set `DEPLOYMENT_MODE: "self-hosted"` in `wrangler.jsonc` `vars` |
+| `saas` | no instance story: workspace creation only (or the login's workspaces once `users` is not empty) | staging (`deploy.yml`) and production (`deploy-prod.yml`), both `--var DEPLOYMENT_MODE:saas` |
+
+Once `users` is not empty, neither shape shows the guidance. **There is no
+default.** Unset, empty and every other value fail loud: `deploymentModeOf` in
+[`src/worker/env.ts`](../src/worker/env.ts) throws
+`DEPLOYMENT_MODE must be "self-hosted" or "saas", received <value>`, and both
+read faces answer `500` with that text — never a guidance page, never a
+fallback.
+
+**Two read faces, both named.**
+[`src/worker/spa-dispatch.ts`](../src/worker/spa-dispatch.ts) (the boot payload
+for the login/landing face) and the OAuth callback in
+[`src/dashboard/index.ts`](../src/dashboard/index.ts) (the post-login landing
+decision, where the empty-`users` check composes with the shape). The webhook
+face and the queue consumer never read it — a bad value must not 404 webhooks
+or kill reviews.
+
+**It rides `--var`, and the shape is deploy wiring, not a rehearsal.** Both
+workflows pass `--var DEPLOYMENT_MODE:saas`; the parity lock in
+`tests/contracts/wrangler-env-parity.test.ts` pins that against
+`env.production.vars`, because a deploy that lost the flag would silently fall
+back to the config value. The **top-level `vars`** declares
+`DEPLOYMENT_MODE: "self-hosted"` instead — that block is what `wrangler dev` and
+a manual staging deploy resolve, so a local instance starts self-hosted without
+any `--var`. The two values disagree on purpose; the parity lock pins each to
+its block.
 
 **The container image is rebuilt, not byte-identical.** Both images are built
-from a rolling apt base, so a byte-identical rebuild is not provable. Pass
-Deploy A's digest as `-f expected_container_digest=sha256:…` and the run
-records `container_digest_match=true|false` in its summary; a mismatch is a
-**warning** naming the rolling-base reason, never a silent pass. With the
-input omitted, the summary says `unreported`.
+from a rolling apt base, so a byte-identical rebuild is not provable. Pass a
+previously recorded digest as `-f expected_container_digest=sha256:…` and the
+run records `container_digest_match=true|false` in its summary; a mismatch is a
+**warning** naming the rolling-base reason, never a silent pass. With the input
+omitted, the summary says `unreported`.
 
 Every run records `deployed_sha=<sha>` **only when every step that creates a
 Worker version succeeded**; a failed or skipped deploy records
 `deploy_status=not-deployed` plus the `requested_sha` instead, so the summary
 never claims a deploy that did not happen. Production has two such steps — the
-bindings deploy (`steps.deploy`) and the mode-bearing serving deploy
-(`steps.serving`) — so a run whose first deploy went green but whose serving
-deploy failed reports `not-deployed`: the SHA is not offered as a replay
-source. The Worker version id is captured in a separate, non-fatal step
+bindings deploy (`steps.deploy`) and the serving deploy (`steps.serving`) — so
+a run whose first deploy went green but whose serving deploy failed reports
+`not-deployed`. The Worker version id is captured in a separate, non-fatal step
 (`version_id=unreported` on a log-shape problem), so a capture failure can never
 contradict a successful deploy.
 
@@ -645,16 +851,20 @@ contradict a successful deploy.
 
 Each deploy run performs, in order:
 
-1. `wrangler d1 migrations apply` — forward-only; applies `0026`/`0027` on a
-   fresh database.
+1. `wrangler d1 migrations apply` — forward-only; applies `0026`/`0027`/`0030`
+   on a fresh database. `0027` is the only replayable half (step 2); `0030` is
+   the one-time, cutover-scoped membership backfill and runs here exactly once.
 2. **Re-run** [`migrations/0027_workspace_backfill.sql`](../migrations/0027_workspace_backfill.sql)
-   — both statements are `INSERT … SELECT … WHERE NOT EXISTS`, so a re-run
-   repairs a partially applied deploy and inserts nothing that exists.
+   — the remaining statement is `INSERT … SELECT … WHERE NOT EXISTS` over
+   `app_workspaces`, so a re-run repairs a partially applied deploy and inserts
+   nothing that exists. It writes **no** `workspace_members` row: replaying a
+   per-person write is what made a routine deploy re-add every login (removed
+   members included) to `default`. Never add one back.
 3. `bun scripts/assert-tenant-attribution.ts` —
    `SELECT COUNT(*) … WHERE w.app_id IS NULL` through
    `wrangler d1 execute --remote --json`. **A non-zero count exits the run
-   before every deploy-capable step** (both modes: the gap is latent under
-   `off` and invisible under `strict`).
+   before every deploy-capable step** (an unmapped App vanishes from every
+   execution-facing read, silently).
 4. Every step that publishes a Worker version — `wrangler secret bulk` (it
    creates and deploys a version on its own) and `wrangler deploy`. On staging
    the D1 work therefore sits **before** the secret writes, not after them.
@@ -779,7 +989,7 @@ take the snapshot **before pushing the merge** that carries `0024`/`0025`
 | `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (spec §7.1) |
 | `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (spec §7.1/§7.9) |
 | `0022_app_trigger_mode` | `github_apps.review_trigger_mode` TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual')) — the per-App review trigger mode (spec `review-trigger-policy.md` §2); metadata-only ADD COLUMN, existing rows (live and soft-deleted) materialize to the `every_push` default, no manager visit needed |
-| `0023_removed_logins` | `removed_logins` — removal tombstones: the key is `github_login` with the same NOCASE comparison as `users.github_login` (0016 parity), `removed_at` is required, `removed_by` is the acting admin's login (NULL when no actor was in scope). Written in the SAME transaction as the membership row delete, so `bootstrapDashboardAccess` can deny a removed login even when the `ADMIN_LOGINS` allowlist still lists it — an operator's removal is authoritative — while `createUser` clears the record on a deliberate re-invite |
+| `0023_removed_logins` | `removed_logins` — removal tombstones: the key is `github_login` with the same NOCASE comparison as `users.github_login` (0016 parity), `removed_at` is required, `removed_by` is the acting operator's login (NULL when no actor was in scope). Written in the SAME transaction as the `users` row delete by the deployment-operator removal path, so `signInDashboardUser` denies a removed login on every later sign-in — the removal outranks the open sign-in — while `createUser` clears the record on a deliberate re-admission. A workspace membership removal never writes it |
 | `0024_provider_multi_key` | `app_provider_keys` moves to the per-key pool primary key `(app_id, provider, key_id)`, and the new `app_custom_provider_keys` table takes over the custom-provider key material `app_custom_providers` no longer holds. SQLite cannot change a primary key in place, so both tables are rebuilt (create → copy → drop → rename); existing rows are carried across verbatim under the empty-string `key_id` sentinel and the store promotes each row on its first touch. Forward-only: a rollback means reverting the deploy AND restoring the pre-apply snapshot taken before the apply (§ Rollback). Must apply after `0004`/`0006`/`0012`/`0015` |
 | `0025_provider_model_evidence` | `app_provider_models` moves to the per-key primary key `(app_id, provider, key_id)` — one EVIDENCE row per key instead of one aggregate row per provider, and the store recomputes the models the settings faces offer as the intersection over the current pool's keys on every read. Rebuilt (create → copy → drop → rename) with a deliberately EMPTY copy: the pre-`0025` rows are un-attributable aggregates, and this is a rebuildable derived cache, so an affected provider shows the probe-only face until EVERY current key of that provider has been re-verified: the offered set is recomputed on read as the intersection over the current pool's per-key reports, so re-verifying only ONE key of a multi-key pool still leaves it empty — each key needs its own report, and those reports must share at least one model, because that shared model is what becomes offerable. Key material, envelopes and chains are untouched. Forward-only: a rollback means reverting the deploy AND restoring the same pre-apply snapshot `0024` needs (§ Rollback). Must apply after `0004` and `0015` |
 
@@ -830,15 +1040,11 @@ variable / secret per the CI-credentials note below). Repository-level
 secrets keep working as the fallback for any name not set at the environment
 level.
 
-`WORKSPACE_TENANT_MODE` is a **GitHub Actions variable, not a Worker secret**:
-it is the steady-state tenant mode both workflows read on every run that does
-not pass an explicit `tenant_mode` input — a `push` to `main`, a
-`release: published` event, and an ordinary release's no-field
-`deploy-prod.yml` dispatch (§ Rollout). Set it to `strict` for a strict
-installation, `off` (or leave unset) otherwise. It is read as
-`vars.WORKSPACE_TENANT_MODE`, never injected by `secret bulk` — the deployed
-value still rides `wrangler deploy --var` so the same SHA can be replayed with
-the other mode.
+`DEPLOYMENT_MODE` is a **Worker var, not a GitHub Actions variable**: both
+workflows pass it as `wrangler deploy --var DEPLOYMENT_MODE:saas` on every
+deploy-capable step, and `env.production.vars` carries the same value for a
+manual deploy (§ Deployment mode). There is nothing to configure in the
+repository settings, and no dispatch input decides it.
 
 The four required secrets are asserted non-empty in the workflow **before the
 first mutating command** (a pure preflight beside the environment-marker
@@ -922,13 +1128,12 @@ was retired with the global fallback — an App missing its chain or a chain
 provider's key fails its reviews closed).
 
 Plain vars — `wrangler.jsonc` `vars` or the dashboard's Worker variable
-settings; redeploy to change (except `ADMIN_LOGINS`, which the Deploy workflow
-sources from a GitHub Actions variable — see below):
+settings; redeploy to change:
 
 | Name | Default | Purpose |
 |---|---|---|
+| `DEPLOYMENT_MODE` | `self-hosted` locally, `saas` in `env.production` | deployment shape (`self-hosted` \| `saas`); no default — unset/invalid fails loud. Both deploy workflows pass `saas` through `--var` |
 | `REVIEW_ENABLED` | unset | **emergency brake only**: per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
-| `ADMIN_LOGINS` | **required** | comma-separated GitHub logins **bootstrapped** as dashboard admin — the "at least one" list that lets the first admin reach the dashboard; sourced from the GitHub Actions **variable** `ADMIN_LOGINS` (`staging` env or repo-level), injected by the Deploy workflow with `wrangler deploy --var`, and passed explicitly by the documented manual deploys. It is **not** the membership SSOT and is not consumed once: after the first admin exists, membership lives in the dashboard's `users` table / Members page. It bootstraps a listed login that has **no `users` row and was never removed** — an existing row always wins (no promotion), and a login an operator removed stays denied even while the list still spells it; only an explicit re-invite on the Members page clears that record. Missing/blank/comma-only fails the deploy **before** it ships — see § 6 |
 
 > **REVIEW_ENABLED cutover checklist (上线即生效 — run BEFORE the deploy that
 > flips the semantics; the semantic inversion takes effect the moment the Worker lands):**
@@ -1139,16 +1344,14 @@ smoke → record the digest.
    branch, fetches `main`, and diffs against it. `/smoke` only reaches the
    clone in its **fallback** path; its primary path runs
    `gh pr diff 1 --repo <repo>` on the same PR.
-4. `bun run build:spa && wrangler deploy --var "ADMIN_LOGINS:alice,bob"` —
+4. `bun run build:spa && wrangler deploy` —
    build the SPA assets first
    (`dist/spa` is gitignored — a fresh clone has none, and `wrangler.jsonc`
    serves them via `assets`), then deploy the Worker (webhook face + queue
    consumer + cron trigger). The step also rebuilds/pushes the container
    image when the build context changed. **Copy the image digest from the
-   deploy output.** The `--var` is required and carries the same value the
-   Deploy workflow injects (`--var "ADMIN_LOGINS:$ADMIN_LOGINS"`): a manual
-   `wrangler deploy` that omits it leaves the first OAuth login on an empty
-   `users` table as admin (§ 6).
+   deploy output.** No access list is needed: sign-in is open to any GitHub
+   login (§ 6).
 5. Record the digest baseline — on the automated path the workflow greps it
    out of the deploy log (`Smoke: image digest`), then writes it to the run
    summary (`$GITHUB_STEP_SUMMARY`) and uploads `deploy-evidence` artifacts;
@@ -1300,16 +1503,14 @@ either key for the other duty (rotation stays decoupled).
 ### 2. Register an App from the dashboard
 
 Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
-`OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login — a login
-on the required `ADMIN_LOGINS` bootstrap list that has **no removal record**
-(the empty-table fallback cannot
-arm: the Deploy gate requires the list to parse to at least one login),
+`OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, a GitHub login (any login —
+sign-in is open, and the login that creates the workspace owns it),
 `DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations applied **through
-`0025`** — the full forward-only chain above, not a historical prefix.
+`0028`** — the full forward-only chain above, not a historical prefix.
 `0020` supplies the finding-lifecycle/publication journal, `0021` the
 Check registry, `0022` the per-App trigger-mode column the webhook
-face reads on every delivery, `0023` the removal tombstones the
-OAuth bootstrap reads before the allowlist, and `0024` the per-key provider
+face reads on every delivery, `0023` the removal tombstones sign-in reads
+before admitting a login, and `0024` the per-key provider
 pool (`app_provider_keys` + `app_custom_provider_keys`) every App's provider
 keys are stored in, with `0025` the per-key verified-model evidence the
 settings dropdowns read. A missing `0022` does NOT stop reviews:
@@ -1318,28 +1519,23 @@ reads as `undefined`, which the classifier treats as every_push). What
 fails closed instead is the dashboard: the Settings page
 (`parseSettings` rejects the payload without the mode field) and the
 trigger-mode POST (its D1 UPDATE errors on the missing column). A missing
-`0023` also fails the dashboard closed, not open: the bootstrap's tombstone
-read and the members-remove batch both error out (500) instead of quietly
+`0023` also fails the dashboard closed, not open: the sign-in tombstone read
+and the operator-removal batch both error out (500) instead of quietly
 dropping the removal record. A missing `0024` fails the provider faces
 closed instead: the per-key pool tables it creates are the only shape the
 store writes to. A missing `0025` likewise fails the provider faces closed:
 the per-key model-evidence table it creates is the only shape `saveVerifiedKey`
 and the settings model faces write and read.
 
-1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
-   flow. Precedence (`bootstrapDashboardAccess`, `src/dashboard/users.ts`):
-   an existing `dashboard_users` row wins (allow, no promotion); a login
-   whose removal is on record is denied — the allowlist never resurrects it;
-   otherwise a
-   login on the `ADMIN_LOGINS` list gets an admin row; the empty-table
-   first-login fallback applies **only** when the parsed list is empty — which
-   the required deploy gate prevents — so any other login is denied
-   (invite-only, zero cookies). `ADMIN_LOGINS` exists so this first admin can
-   reach the dashboard at all — that is its purpose, not its only effect: the
-   Members page is the membership SSOT, a listed login with no `users`
-   row remains eligible for admin bootstrap, and a removal there is
-   authoritative (the record survives every later deploy until an admin
-   re-invites the login).
+1. **Sign in and create a workspace** — open `/dashboard/login` and complete
+   the GitHub OAuth flow. Any GitHub login is admitted
+   (`signInDashboardUser`, `src/dashboard/users.ts`): an existing
+   `dashboard_users` row wins (allow, no promotion); a login whose removal is
+   on record is denied; anything else gets a `member` row. Sign-in joins
+   nobody to a workspace — a login with no membership lands on the shell's
+   **Create a workspace** form, and the creator becomes that workspace's
+   `owner`. Authority is workspace-scoped from then on: invite people from the
+   workspace Members page, and the last owner cannot be removed or demoted.
 2. **Create GitHub App** — on the dashboard workbench (`/dashboard`, the
    Apps-first home) click **Create GitHub App**. The dashboard mints the webhook slug
    (`mstar-inspector-<login>`-derived, DB pre-resolved) and POSTs the App
@@ -1476,79 +1672,45 @@ Worker rollback.
   security-motivated. A registered App's encrypted credentials stay valid
   across a Worker rollback (the key is unchanged).
 
-### 6. ADMIN_LOGINS is required (deploy-time gate + assertion)
+### 6. Sign-in is open; a removal record is the only deny
 
-`ADMIN_LOGINS` is **required**. It is a GitHub Actions **variable** (login
-names are public identity, so never a secret), configured for the `staging`
-environment or repo-wide (Settings → Environments → `staging` → **Variables**,
-or Settings → Secrets and variables → Actions → Variables).
+There is **no deployment allowlist** and no deploy-time variable to configure.
+Any GitHub login that completes the OAuth callback gets a `dashboard_users` row
+with `role = 'member'` (`signInDashboardUser`, `src/dashboard/users.ts`), and
+sign-in **joins nobody to a workspace**: a login with no membership lands on
+the shell's **Create a workspace** form, which mints
+`POST /dashboard/api/workspaces` — the creator becomes that workspace's `owner`
+in one transaction. From then on authority is workspace-scoped: an `owner` or
+`admin` invites people from the workspace Members page, and the last `owner`
+can be neither removed nor demoted.
 
-**What it is:** an **"at least one" bootstrap list** — its job is to let the
-first admin reach the dashboard at all. It is **not** a second
-membership-management surface, and it is **not** consumed once: the runtime
-still bootstraps any listed login that has **no `users` row** (an existing row
-always wins, without promotion). Once any user row exists, the dashboard's
-`users` table — the Members page — is the authorization SSOT.
+The one refusal is a **recorded removal**. A deployment-operator removal
+deletes the `users` row and writes a tombstone into `removed_logins` (migration
+`0023`) in the same transaction; sign-in consults that record and denies with
+the 403 removal page and **zero** Set-Cookie. Only a deliberate re-admission
+(`createUser`, which clears the record) lets the login back in — the record
+survives every later deploy. The admission `INSERT` carries the same check at
+the write boundary (`WHERE NOT EXISTS (removal record)`), so a sign-in already
+in flight when the removal lands is denied instead of resurrecting the login.
 
-The Deploy workflow:
+**Leaving a workspace is not that.** Removing someone from a workspace deletes
+only their `workspace_members` row: the `users` row, the invites they created
+and their GitHub login all survive, so they can still sign in, be invited into
+another workspace, or create their own. Workspace membership is a container
+relationship, not the identity itself.
 
-1. **Fails closed before any deploy-capable step** when the variable is missing, blank,
-   whitespace-only, or comma-only — the `Verify required ADMIN_LOGINS variable`
-   step runs before the **first** `wrangler` invocation of any kind
-   (`wrangler whoami`, the secret writes, and the final `wrangler deploy`):
-   `wrangler secret bulk` publishes a Worker version of its own, so a gate
-   placed after it would already have shipped a version without the required
-   binding. A misconfigured operator therefore never ships a Worker with the
-   first-login-becomes-admin fallback silently armed. The
-   step imports and calls the runtime parser itself
-   (`parseAdminLogins`, `src/dashboard/users.ts`) and fails when it yields zero
-   logins, so the deploy gate cannot drift from the Worker's own rule.
-2. **Is passed explicitly on every manual deploy too** — the documented
-   manual paths ([`README.md`](../README.md) Path A step 5 / Path B step 1 and
-   § Deploy steps step 4 above) deploy with
-   `wrangler deploy --var "ADMIN_LOGINS:<comma-separated logins>"`, the same
-   value this workflow injects. `wrangler.jsonc` defines no `ADMIN_LOGINS`, so
-   a bare `wrangler deploy` is **not** a supported deploy path: it would ship
-   with the fallback armed. There is no second deployment path — the manual
-   commands are the workflow's equivalent, not an alternative to it.
-3. **Injects it into the Worker** at deploy time via
-   `wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS"`, so the value no longer
-   depends on the Cloudflare dashboard (a comma-separated multi-login value
-   survives intact: wrangler splits `--var` on the first colon only).
-4. **Asserts it on the deployed Worker** after the deploy: the step reads the
-   Worker's live settings via the Cloudflare API (NOT `wrangler secret list` —
-   `ADMIN_LOGINS` is a plain var, so a secret listing never shows it), feeds the
-   observed value through the same `parseAdminLogins` runtime rule, and fails
-   the job (`::error::` + non-zero exit) when it yields zero logins. The curl is
-   bounded (`--max-time 30 --connect-timeout 5`)
-   and a `jq -e '.success == true'` guard ensures a malformed payload is never
-   read as a positive observation. A **transport failure fails the job** —
-   failing to read the settings means the value cannot be confirmed, and a
-   silent pass there would turn a flaky API read into a false green.
+Operationally that means:
 
-Why it matters: `ADMIN_LOGINS` is the **"at least one" bootstrap list** — its
-purpose is to ensure the first admin can access the dashboard. It is not
-ongoing membership management: the `users` table / Members page is the
-membership SSOT, and the list is not consumed once — it bootstraps a listed
-login that has no `users` row **and was never removed**, while an existing row
-always wins without promotion. A login an operator removed is denied even
-while the list still spells it: the removal is recorded in `removed_logins`
-(migration `0023`, written in the same transaction as the row delete) and the
-bootstrap consults it before the allowlist, so the record survives every later
-deploy until an admin deliberately re-invites the login on the Members page.
-The bootstrap insert itself refuses while the record exists — a write-boundary
-check inside the `INSERT` (`WHERE NOT EXISTS (removal record)`), not a
-read-then-write window — so a sign-in already in flight when the removal lands
-is denied instead of resurrecting the login.
-The empty-table first-login fallback needs a
-genuinely empty parsed list, which this required gate prevents — so the
-fallback can no longer be silently armed by a blank value. Logins that are
-neither on the list nor in the table are denied (403, zero cookies) until an
-admin invites them on the Members page.
-
-To change the value, update the GitHub Actions variable and re-run the deploy
-(the workflow injects it again); `keep_vars: true` in `wrangler.jsonc` only
-preserves the other dashboard-managed var (`REVIEW_ENABLED`) across deploys.
+- **No Actions variable, no `--var`, no pre-deploy gate, no post-deploy
+  assertion.** `env.production.vars` carries only `DEPLOYMENT_MODE`
+  (§ `env.production.vars` is the plain-var roster), and a bare
+  `wrangler deploy` is the supported manual path — see
+  [`README.md`](../README.md) Path A step 5 / Path B step 1.
+- **Production D1 starts empty and that is fine**: the first person to sign in
+  creates the first workspace. There is no self-promotion to admin and no
+  first-login fallback arming to protect against.
+- **`keep_vars: true` in `wrangler.jsonc`** still preserves
+  `REVIEW_ENABLED` across deploys.
 
 ## Rollback
 

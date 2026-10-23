@@ -19,7 +19,8 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
-import { AppsList, AppsView } from "../../src/spa/pages/AppsPage";
+import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
+import { matchSpaRoute } from "../../src/spa/routes";
 import { withLocation } from "./browser-stub";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
@@ -213,13 +214,14 @@ describe("Create action is a boot capability (I-000082)", () => {
   ];
 
   /** The loaded Apps face, rendered from the real component. */
-  function renderFace(canCreate: boolean, apps: number): string {
+  function renderFace(canCreate: boolean, apps: number, unavailableReason = "role"): string {
     return renderToStaticMarkup(
       createElement(AppsView, {
         locale: "en",
         state: "ok",
         payload: { viewer: { login: "mallory", role: "member" }, apps: APPS.slice(0, apps) },
         canCreate,
+        unavailableReason,
         onRetry: () => {},
       }),
     );
@@ -234,15 +236,121 @@ describe("Create action is a boot capability (I-000082)", () => {
     expect(empty.match(/action="\/dashboard\/manifest\/start"/g)?.length).toBe(1);
   });
 
-  test("a member gets no Create action on either face — the flow would 403 (I-000082)", () => {
+  test("a caller who cannot create sees the control DISABLED with the reason, never a silent gap", () => {
     for (const apps of [0, 1]) {
-      const html = renderFace(false, apps);
-      expect(html, `apps=${apps}`).not.toContain("/dashboard/manifest/start");
-      expect(html, `apps=${apps}`).not.toContain(t("en", "apps.create"));
-      // The guidance itself stays: the page is not blank, just actionless.
+      const html = renderFace(false, apps, t("en", "apps.createUnavailable.role"));
+      expect(html, `apps=${apps}`).toContain(t("en", "apps.create"));
+      expect(html, `apps=${apps}`).toMatch(/<button[^>]*disabled/);
+      // The reason rides beside the control, so the page explains itself.
+      expect(html, `apps=${apps}`).toContain(t("en", "apps.createUnavailable.role"));
       expect(html, `apps=${apps}`).toContain(t("en", "apps.heading"));
     }
     // The empty face still explains the state without offering a dead end.
     expect(renderFace(false, 0)).toContain(t("en", "apps.emptyTitle"));
+  });
+});
+
+describe("Apps list → App detail wayfinding (rendered)", () => {
+  const ROW = {
+    slug: "demo",
+    github_app_id: 1,
+    status: "active" as const,
+    review_enabled: 1,
+    created_by: "mallory",
+    health: { latest: null, rejected24h: 0 },
+  };
+  const PAYLOAD = { viewer: { login: "mallory", role: "admin" as const }, apps: [ROW] };
+
+  /** The real row component under the page's actual pathname. */
+  function renderList(pathname: string): string {
+    return withLocation(pathname, () =>
+      renderToStaticMarkup(createElement(AppsList, { locale: "en", payload: PAYLOAD })),
+    );
+  }
+
+  /** Every href the list emits, with the route it resolves to. */
+  function destinations(pathname: string): Array<[string, string | undefined]> {
+    return [...renderList(pathname).matchAll(/href="([^"]+)"/g)].map(([, href]) => {
+      const route = matchSpaRoute(href ?? "");
+      return [href ?? "", route?.page];
+    });
+  }
+
+  test("each row links to the App detail route the matcher owns, under the page's own base", () => {
+    // What the link emits must resolve as an app-detail route, not a 404 stub.
+    // The legacy mount keeps the historical path; the workspace page rides its
+    // workspace prefix.
+    expect(destinations("/dashboard/apps")).toEqual([
+      ["/dashboard/apps/demo", "app-detail"],
+      ["/dashboard/apps/demo", "app-detail"],
+    ]);
+    expect(destinations("/dashboard/acme/apps")).toEqual([
+      ["/dashboard/acme/apps/demo", "app-detail"],
+      ["/dashboard/acme/apps/demo", "app-detail"],
+    ]);
+  });
+
+  test("the row anchor names its destination for assistive tech and says Detail, never Settings", () => {
+    const html = renderList("/dashboard/acme/apps");
+    expect(html).toContain(`aria-label="${t("en", "apps.openAria", { slug: "demo" })}"`);
+    expect(t("en", "apps.openAria", { slug: "demo" })).toBe("Open demo detail");
+    expect(t("zh_CN", "apps.openAria", { slug: "demo" })).toBe("打开 demo 详情");
+    expect(html).toContain(`>${t("en", "apps.detail")}<`);
+    expect(t("zh_CN", "apps.detail")).toBe("详情");
+  });
+
+  test("the empty Apps face keeps one Create form — creation is the only path", () => {
+    const renderFace = (apps: number): string =>
+      renderToStaticMarkup(
+        createElement(AppsView, {
+          locale: "en",
+          state: "ok",
+          payload: { ...PAYLOAD, apps: PAYLOAD.apps.slice(0, apps) },
+          canCreate: true,
+          unavailableReason: "",
+          onRetry: () => {},
+        }),
+      );
+    for (const apps of [0, 1]) {
+      const html = renderFace(apps);
+      expect(html.match(/<form/g)?.length, `apps=${apps}`).toBe(1);
+      expect(html, `apps=${apps}`).toContain("manifest/start");
+    }
+    expect(renderFace(0)).toContain(t("en", "apps.emptyTitle"));
+    // The guidance sentence rides the rendered face, not just the dictionary:
+    // a create-capable viewer is told what the first App unlocks.
+    expect(renderFace(0)).toContain(t("en", "apps.emptyDescription"));
+  });
+
+  test("the Apps list loading face is the shared table skeleton", () => {
+    // The page's own first face: `state` starts at "loading" and the effect
+    // never runs under SSR, so this renders exactly the gate a real first
+    // paint shows. The table idiom (not cards/forms) is the page's shape.
+    const html = withLocation("/dashboard/acme/apps", () =>
+      renderToStaticMarkup(
+        createElement(AppsPage, { boot: { locale: "en", login: "mallory", name: "Mallory" } }),
+      ),
+    );
+    expect(html).toContain('data-slot="skeleton-table"');
+    expect(html).not.toContain('data-slot="skeleton-cards"');
+    expect(html).not.toContain('data-slot="skeleton-forms"');
+  });
+
+  test("load failure renders the composed error with the retry affordance", () => {
+    const html = renderToStaticMarkup(
+      createElement(AppsView, {
+        locale: "en",
+        state: "error",
+        payload: null,
+        canCreate: true,
+        unavailableReason: "",
+        onRetry: () => {},
+      }),
+    );
+    expect(html).toContain('role="alert"');
+    expect(html).toContain(t("en", "common.loadFailed"));
+    // The retry control is present; AppsPage binds it to its own reload
+    // (`onRetry={() => void load()}`), which this SSR face cannot click.
+    expect(html).toContain(t("en", "common.retry"));
   });
 });

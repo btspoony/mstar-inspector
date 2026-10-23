@@ -26,7 +26,8 @@ import {
   parseAppDetailSearch,
   type InsightsSummary,
 } from "../../src/spa/pages/data";
-import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
+import { AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
+import { apiBase } from "../../src/spa/workspace-base";
 import { AppInsightsTab, InsightsRecordsView } from "../../src/spa/pages/AppInsightsTab";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
@@ -81,6 +82,7 @@ function renderDetail(payload: typeof identityPayload | typeof managePayload, ca
     createElement(AppDetailView, {
       locale: "en",
       slug: "demo",
+      storedSlug: "acme",
       payload,
       groups: [],
       notice: null,
@@ -342,5 +344,59 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     // data !== null, and the retained-data busy hint keeps its own face.
     expect(insightsTab).toContain('{state === "loading" && data === null ?');
     expect(insightsTab).toContain('{state === "loading" && data !== null ?');
+  });
+});
+
+describe("workspace switch on the App detail page (SF-1)", () => {
+  /** Record every URL the page's read fetches, and answer it. */
+  async function readUnder(pathname: string): Promise<string[]> {
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      calls.push(String(input));
+      // A non-manager: one request, no model round trip.
+      return new Response(JSON.stringify(identityPayload), { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const loaded = await loadAppDetail(apiBase(pathname), "demo");
+      expect(loaded?.payload.can_manage).toBe(false);
+      return calls;
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  test("two workspaces sharing an app slug issue two reads, the second under the new base", async () => {
+    // The switcher rewrites only the workspace segment, so `slug` stays
+    // "demo": the base must be derived per render (AppsPage precedent) or
+    // the page keeps the previous workspace's settings on screen.
+    expect(await readUnder("/dashboard/acme/apps/demo")).toEqual([
+      "/dashboard/acme/api/apps/demo/settings",
+    ]);
+    expect(await readUnder("/dashboard/beta/apps/demo")).toEqual([
+      "/dashboard/beta/api/apps/demo/settings",
+    ]);
+  });
+
+  test("the manage face reads the model options off the SAME base", async () => {
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      calls.push(url);
+      return new Response(
+        JSON.stringify(url.endsWith("/models") ? { groups: [] } : managePayload),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      await loadAppDetail("/dashboard/beta", "demo");
+      expect(calls).toEqual([
+        "/dashboard/beta/api/apps/demo/settings",
+        "/dashboard/beta/api/apps/demo/models",
+      ]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

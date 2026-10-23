@@ -3,7 +3,32 @@
  * Tested without a DOM runner.
  */
 
+import type { DictionaryKey } from "../../i18n";
+
 export type Role = "admin" | "member";
+
+/** A workspace member's role (migration 0026 CHECK domain). */
+export type WorkspaceRole = "owner" | "admin" | "member";
+
+/** One row of the workspace member list (`GET /:ref/api/members`). */
+export type MemberRow = {
+  id: string;
+  github_login: string;
+  role: WorkspaceRole;
+  created_at: string;
+};
+
+/** The member-list payload: the caller's own role + every workspace member. */
+export type MembersPayload = { viewer: { role: WorkspaceRole }; members: MemberRow[] };
+
+/** One live pending invite (`GET /:ref/api/members/invites`). */
+export type InviteRow = {
+  id: string;
+  github_login: string;
+  role: Role;
+  created_at: string;
+  expires_at: string;
+};
 
 export type InsightsSearch = { window: string; repo: string };
 
@@ -81,13 +106,6 @@ export function insightsRepoOptions(repos: readonly string[], current: string): 
   if (current !== "") set.add(current);
   return [...set].sort();
 }
-
-export type MemberRow = {
-  id: string;
-  github_login: string;
-  role: Role;
-  created_at: string;
-};
 
 export type AppsPayload = {
   viewer: { login: string; role: Role };
@@ -412,8 +430,9 @@ export type ModelOptionGroup = {
 
 export type ModelsPayload = { groups: ModelOptionGroup[] };
 
-export function canViewMembers(role: Role | null): boolean {
-  return role === "admin";
+/** The member list is visible to every member; the manager actions are not. */
+export function canInviteMembers(role: WorkspaceRole | null): boolean {
+  return role === "owner" || role === "admin";
 }
 
 /**
@@ -651,15 +670,27 @@ export function appDetailSearchQuery(search: AppDetailSearch): string {
   return query === "" ? "" : `?${query}`;
 }
 
-export function parseMembers(data: unknown): MemberRow[] | null {
-  if (!isRecord(data) || !Array.isArray(data.members)) return null;
+/** The role vocabulary of `workspace_members.role` (migration 0026 CHECK). */
+function isWorkspaceRole(value: unknown): value is WorkspaceRole {
+  return value === "owner" || value === "admin" || value === "member";
+}
+
+/**
+ * `GET /:ref/api/members` — the caller's own workspace role plus the member
+ * list. A drifted row (unknown role) fails the parse instead of rendering a
+ * role the server never grants.
+ */
+export function parseMembers(data: unknown): MembersPayload | null {
+  if (!isRecord(data) || !isRecord(data.viewer) || !Array.isArray(data.members)) return null;
+  const viewerRole = data.viewer.role;
+  if (!isWorkspaceRole(viewerRole)) return null;
   const members: MemberRow[] = [];
   for (const row of data.members) {
     if (!isRecord(row)) return null;
     if (typeof row.id !== "string" || typeof row.github_login !== "string" || typeof row.created_at !== "string") {
       return null;
     }
-    if (row.role !== "admin" && row.role !== "member") return null;
+    if (!isWorkspaceRole(row.role)) return null;
     members.push({
       id: row.id,
       github_login: row.github_login,
@@ -667,7 +698,111 @@ export function parseMembers(data: unknown): MemberRow[] | null {
       created_at: row.created_at,
     });
   }
-  return members;
+  return { viewer: { role: viewerRole }, members };
+}
+
+/**
+ * `GET /:ref/api/members/invites` — the live pending invites. An invite role is
+ * `admin` or `member` only (`owner` is never invitable, migration 0028).
+ */
+export function parseInvites(data: unknown): InviteRow[] | null {
+  if (!isRecord(data) || !Array.isArray(data.invites)) return null;
+  const invites: InviteRow[] = [];
+  for (const row of data.invites) {
+    if (!isRecord(row)) return null;
+    if (
+      typeof row.id !== "string" ||
+      typeof row.github_login !== "string" ||
+      typeof row.created_at !== "string" ||
+      typeof row.expires_at !== "string"
+    ) {
+      return null;
+    }
+    if (row.role !== "admin" && row.role !== "member") return null;
+    invites.push({
+      id: row.id,
+      github_login: row.github_login,
+      role: row.role,
+      created_at: row.created_at,
+      expires_at: row.expires_at,
+    });
+  }
+  return invites;
+}
+
+/**
+ * One active support grant — the members' undismissable notice row
+ * (`GET /:ref/api/support/grants`): who, why, and until when. Nothing here is
+ * actionable by the tenant: the server has no route that ends or edits a grant.
+ */
+export type SupportGrantRow = {
+  operator_login: string;
+  reason: string;
+  expires_at: string;
+};
+
+/** `GET /:ref/api/support/grants` — the workspace's live grants. */
+export function parseSupportGrants(data: unknown): SupportGrantRow[] | null {
+  if (!isRecord(data) || !Array.isArray(data.grants)) return null;
+  const grants: SupportGrantRow[] = [];
+  for (const row of data.grants) {
+    if (!isRecord(row)) return null;
+    if (
+      typeof row.operator_login !== "string" ||
+      typeof row.reason !== "string" ||
+      typeof row.expires_at !== "string"
+    ) {
+      return null;
+    }
+    grants.push({
+      operator_login: row.operator_login,
+      reason: row.reason,
+      expires_at: row.expires_at,
+    });
+  }
+  return grants;
+}
+
+/**
+ * The granted operator's read-only view (`GET /:ref/api/support/workspace`) —
+ * exactly the AC2 field set: the workspace's four identity fields, members as
+ * login + role, and the active grants. A drifted payload fails the parse rather
+ * than rendering a field the server never grants.
+ */
+export type SupportWorkspaceView = {
+  workspace: { id: string; name: string; slug: string; created_at: string };
+  members: Array<{ github_login: string; role: WorkspaceRole }>;
+  grants: SupportGrantRow[];
+};
+
+export function parseSupportView(data: unknown): SupportWorkspaceView | null {
+  if (!isRecord(data) || !isRecord(data.workspace) || !Array.isArray(data.members)) return null;
+  const workspace = data.workspace;
+  if (
+    typeof workspace.id !== "string" ||
+    typeof workspace.name !== "string" ||
+    typeof workspace.slug !== "string" ||
+    typeof workspace.created_at !== "string"
+  ) {
+    return null;
+  }
+  const members: SupportWorkspaceView["members"] = [];
+  for (const row of data.members) {
+    if (!isRecord(row) || typeof row.github_login !== "string" || !isWorkspaceRole(row.role)) return null;
+    members.push({ github_login: row.github_login, role: row.role });
+  }
+  const grants = parseSupportGrants({ grants: data.grants });
+  if (grants === null) return null;
+  return {
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+      slug: workspace.slug,
+      created_at: workspace.created_at,
+    },
+    members,
+    grants,
+  };
 }
 
 export function parseApps(data: unknown): AppsPayload | null {
@@ -676,6 +811,25 @@ export function parseApps(data: unknown): AppsPayload | null {
   const role = data.viewer.role;
   if (typeof login !== "string" || (role !== "admin" && role !== "member")) return null;
   return data as AppsPayload;
+}
+
+/**
+ * `POST /api/workspaces` 201 body — the new workspace's ref plus the Apps page
+ * the creator lands on. The landing is server-chosen: only the Worker knows the
+ * deployment's tenant read mode, and `strict`'s sole-workspace resolver cannot
+ * name a workspace once a second one exists.
+ */
+export function parseCreatedWorkspace(data: string): { id: string; appsPath: string } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || typeof parsed.id !== "string" || typeof parsed.appsPath !== "string") {
+    return null;
+  }
+  return { id: parsed.id, appsPath: parsed.appsPath };
 }
 
 /**
@@ -881,4 +1035,29 @@ export function inviteLoginNoticeKey(login: string): "notice.error.enterLogin" |
   if (trimmed.length === 0) return "notice.error.enterLogin";
   if (!GITHUB_LOGIN_PATTERN.test(trimmed)) return "notice.error.invalidLogin";
   return null;
+}
+
+/** The server's workspace slug grammar — mirrored so the input can refuse before the round trip. */
+export const WORKSPACE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{1,38}$/;
+
+/**
+ * How a `PUT …/api/settings/slug` refusal reads in the operator's locale.
+ * Every refusal the route emits is keyed on `code` (the three 409s) or `key`
+ * (the 400 shape gate), so the copy follows the machine-readable value — a
+ * body without one means the request never reached the route (403/5xx).
+ */
+export function slugFailureKey(status: number, body: string): DictionaryKey {
+  if (status === 403) return "workspace.slugForbidden";
+  try {
+    const parsed = JSON.parse(body) as { code?: unknown; key?: unknown };
+    if (typeof parsed.code === "string") {
+      if (parsed.code === "slug_reserved") return "workspace.slugReserved";
+      if (parsed.code === "slug_taken") return "workspace.slugTaken";
+      if (parsed.code === "slug_is_workspace_id") return "workspace.slugIsWorkspaceId";
+    }
+    if (parsed.key === "workspace.slugInvalid") return "workspace.slugInvalid";
+  } catch {
+    /* non-JSON body → the generic failure face */
+  }
+  return "workspace.slugFailed";
 }

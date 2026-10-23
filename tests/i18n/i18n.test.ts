@@ -74,10 +74,10 @@ describe("t() interpolation", () => {
 
   test("{placeholder} params are substituted", () => {
     expect(t("en", "notice.success.invited", { login: "octocat" })).toBe(
-      "Invited octocat — they can sign in with GitHub now.",
+      "Invited octocat — they can accept from this workspace now.",
     );
     expect(t("zh_CN", "notice.success.invited", { login: "octocat" })).toBe(
-      "已邀请 octocat — 现在可以使用 GitHub 登录了。",
+      "已邀请 octocat — 对方现在可以在本工作区接受邀请。",
     );
   });
 
@@ -102,7 +102,7 @@ describe("t() interpolation", () => {
   });
 
   test("a missing param leaves the {placeholder} literal in place", () => {
-    expect(t("en", "notice.success.invited")).toBe("Invited {login} — they can sign in with GitHub now.");
+    expect(t("en", "notice.success.invited")).toBe("Invited {login} — they can accept from this workspace now.");
   });
 
   test("language toggle label pair: en shows 中文, zh_CN shows EN", () => {
@@ -192,10 +192,6 @@ describe("mstar_locale cookie serialization", () => {
 describe("shared navbar contract", () => {
   test("order is locked: Apps → Members (insights retired)", () => {
     expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual(["nav.apps", "nav.members"]);
-  });
-
-  test("Members is the only admin-only item", () => {
-    expect(NAV_ITEMS.map((item) => item.adminOnly ?? false)).toEqual([false, true]);
   });
 
   test("every labelKey resolves to a real dictionary string in both locales", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
 import { StatusBadge } from "./AppsPage";
@@ -9,6 +9,10 @@ import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
 import { apiBase } from "../workspace-base";
+import { usePathname } from "../router";
+import { workspaceRefOf } from "../routes";
+import { storedSlugForRef } from "../shell";
+import { useLiveMemberships } from "../workspace-memberships";
 import { PageNotice, type NoticeKind } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -62,6 +66,32 @@ export function AppDetailShell({
 }
 
 /**
+ * One App detail read: the settings payload (the manage face carries the
+ * model options) under the page's own base. `base` is a parameter, not
+ * `apiBase()` inside, so the caller decides which workspace is being read —
+ * and a test can drive the same read under two pathnames.
+ * `can_manage` gates the second request: a non-manager sees no model editor.
+ */
+export async function loadAppDetail(
+  base: string,
+  slug: string,
+): Promise<{ payload: SettingsPayload; groups: ModelOptionGroup[] } | null> {
+  const parsed = parseSettings(
+    await fetchJson(`${base}/api/apps/${encodeURIComponent(slug)}/settings`),
+  );
+  if (!parsed) return null;
+  let groups: ModelOptionGroup[] = [];
+  if (parsed.can_manage) {
+    try {
+      groups = parseModels(await fetchJson(`${base}/api/apps/${encodeURIComponent(slug)}/models`))?.groups ?? [];
+    } catch {
+      groups = [];
+    }
+  }
+  return { payload: parsed, groups };
+}
+
+/**
  * The App detail page (App detail IA): `/dashboard/apps/:slug` —
  * and the legacy `/dashboard/apps/:slug/settings` deep link (a permanent
  * settings-tab target: the settings POST family's HTML-nav 302s pin it) —
@@ -86,6 +116,18 @@ export function AppDetailShell({
  */
 export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const locale = boot.locale;
+  // Read per render (the AppsPage precedent): the switcher navigates with
+  // pushState + popstate, so no new document re-injects the boot — the page
+  // base must track the URL it is actually on. `/dashboard/acme/apps/demo` →
+  // `/dashboard/beta/apps/demo` keeps the slug, so a base pinned at mount
+  // would leave the previous workspace's settings and model chain on screen.
+  const base = apiBase();
+  // The workspace's STORED slug for the rename control. Read from the CURRENT
+  // path (the router re-renders on the rename's synthetic popstate), resolved
+  // through the LIVE membership list so an id- or old-slug-addressed page still
+  // shows the real stored value after this document renamed it.
+  const memberships = useLiveMemberships(boot);
+  const storedSlug = storedSlugForRef({ ...boot, memberships }, workspaceRefOf(usePathname()));
   const [payload, setPayload] = useState<SettingsPayload | null>(null);
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
@@ -126,59 +168,47 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   // error through the notice channel instead of the page-level error state.
   // Resolves whether a fresh payload landed, so callers can tell a completed
   // refresh from a failed one (the draft create must not close on failure).
-  async function load({ background = false }: { background?: boolean } = {}): Promise<boolean> {
-    if (!background) setState("loading");
-    try {
-      const settingsRaw = await fetchJson(
-        `${apiBase()}/api/apps/${encodeURIComponent(slug)}/settings`,
-      );
-      if (cancelledRef.current) return false;
-      const parsed = parseSettings(settingsRaw);
-      if (!parsed) {
-        if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
-        else setState("error");
+  const load = useCallback(
+    async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
+      if (!background) setState("loading");
+      try {
+        const loaded = await loadAppDetail(base, slug);
+        if (cancelledRef.current) return false;
+        if (!loaded) {
+          if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
+          else setState("error");
+          return false;
+        }
+        setPayload(loaded.payload);
+        setGroups(loaded.groups);
+        setState("ok");
+        // A healthy page has no page-level failure: any successful load —
+        // foreground or background — clears the banner a failed background
+        // reload left behind (the bugbot fix).
+        setNotice(null);
+        return true;
+      } catch {
+        if (!cancelledRef.current) {
+          if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
+          else setState("error");
+        }
         return false;
       }
-      let nextGroups: ModelOptionGroup[] = [];
-      if (parsed.can_manage) {
-        try {
-          const modelsRaw = await fetchJson(
-            `${apiBase()}/api/apps/${encodeURIComponent(slug)}/models`,
-          );
-          nextGroups = parseModels(modelsRaw)?.groups ?? [];
-        } catch {
-          nextGroups = [];
-        }
-      }
-      if (cancelledRef.current) return false;
-      setPayload(parsed);
-      setGroups(nextGroups);
-      setState("ok");
-      // A healthy page has no page-level failure: any successful load —
-      // foreground or background — clears the banner a failed background
-      // reload left behind (the bugbot fix).
-      setNotice(null);
-      return true;
-    } catch {
-      if (!cancelledRef.current) {
-        if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
-        else setState("error");
-      }
-      return false;
-    }
-  }
+    },
+    [base, slug, locale],
+  );
 
   useEffect(() => {
     cancelledRef.current = false;
     void load();
-    // A slug push re-derives the URL state too (the address bar moved);
-    // the gate comes from the ref mirror, never a stale payload closure.
+    // A slug or workspace push re-derives the URL state too (the address bar
+    // moved); the gate comes from the ref mirror, never a stale payload
+    // closure.
     setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
     return () => {
       cancelledRef.current = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug]);
+  }, [load]);
 
   // When the payload lands (can_manage becomes known), mirror the gate and
   // re-derive the URL state once: a manager's `?tab=insights` deep link —
@@ -252,6 +282,7 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
         <AppDetailView
           locale={locale}
           slug={slug}
+          storedSlug={storedSlug}
           payload={payload}
           groups={groups}
           notice={notice}
@@ -274,6 +305,7 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
 export function AppDetailView({
   locale,
   slug,
+  storedSlug,
   payload,
   groups,
   notice,
@@ -283,6 +315,8 @@ export function AppDetailView({
 }: {
   locale: SpaBoot["locale"];
   slug: string;
+  /** The workspace's stored slug — the rename control's current value. */
+  storedSlug: string;
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
   notice: { kind: NoticeKind; message: string } | null;
@@ -345,7 +379,13 @@ export function AppDetailView({
             `data-[state=inactive]:hidden` carries the one-visible-panel
             invariant (ui-bugs knowledge pin, source-tested below). */}
         <TabsContent value="settings" forceMount>
-          <SettingsView locale={locale} payload={payload} groups={groups} onReload={onReload} />
+          <SettingsView
+            locale={locale}
+            payload={payload}
+            groups={groups}
+            storedSlug={storedSlug}
+            onReload={onReload}
+          />
         </TabsContent>
         {canManage ? (
           <TabsContent value="insights" forceMount>

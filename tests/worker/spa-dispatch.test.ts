@@ -21,6 +21,9 @@ type AssetCall = { method: string; pathname: string };
 function memberDbStub(): Env["DB"] {
   return {
     prepare: () => ({
+      // Unbound reads (the sole-workspace / landing resolver) answer "none".
+      all: async () => ({ results: [] }),
+      first: async () => null,
       bind: () => ({
         first: async () => ({
           id: "u-test",
@@ -29,6 +32,8 @@ function memberDbStub(): Env["DB"] {
           created_at: new Date().toISOString(),
           invited_by: null,
         }),
+        // The boot's invite discovery read: this login has no invitations.
+        all: async () => ({ results: [] }),
       }),
     }),
   } as unknown as Env["DB"];
@@ -41,8 +46,11 @@ function memberDbStub(): Env["DB"] {
 function removedMemberDbStub(): Env["DB"] {
   return {
     prepare: () => ({
+      all: async () => ({ results: [] }),
+      first: async () => null,
       bind: () => ({
         first: async () => null,
+        all: async () => ({ results: [] }),
       }),
     }),
   } as unknown as Env["DB"];
@@ -73,6 +81,7 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
       put: async () => {},
     } as unknown as Env["IDEMPOTENCY_KV"],
     ASSETS: stubAssets({ "/index.html": SPA_INDEX_HTML, "/assets/app.js": "js" }, calls),
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
   };
@@ -80,12 +89,56 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
 }
 
 
+/**
+ * D1 double whose two BOOT LIST reads (pending invites, memberships) each wait
+ * for the other to be in flight. A sequential boot deadlocks into the barrier's
+ * timeout → 500; only a boot that issues both reads together returns the shell.
+ * Everything else the boot resolves (users row, sole workspace, membership
+ * count) answers inline.
+ */
+function concurrentBootDbStub(): Env["DB"] {
+  const arrived = new Set<string>();
+  let release: (() => void) | null = null;
+  const bothInFlight = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const arrive = async (kind: string): Promise<void> => {
+    arrived.add(kind);
+    if (arrived.size === 2) release?.();
+    // A sequential boot never reaches the second read: fail loudly instead of
+    // hanging the suite.
+    await Promise.race([
+      bothInFlight,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`boot list reads ran sequentially (${kind} first)`)), 1000),
+      ),
+    ]);
+  };
+  const respond = (query: string) => {
+    if (query.includes("workspace_invites i JOIN workspaces w")) return { all: async () => { await arrive("invites"); return { results: [] }; } };
+    // The switcher's list carries `w.name`; the boot's workspace-access read does not.
+    if (query.includes("w.name AS name")) return { all: async () => { await arrive("memberships"); return { results: [] }; } };
+    if (query.includes("SELECT * FROM users WHERE github_login")) {
+      return { first: async () => ({ id: "u-test", github_login: "octocat", role: "admin", created_at: new Date().toISOString(), invited_by: null }) };
+    }
+    if (query.includes("COUNT(*) AS n")) return { first: async () => ({ n: 1 }) };
+    return { all: async () => ({ results: [] }), first: async () => null };
+  };
+  return {
+    prepare: (query: string) => ({
+      ...respond(query),
+      bind: () => ({ ...respond(query), run: async () => ({ meta: { changes: 0 } }) }),
+    }),
+  } as unknown as Env["DB"];
+}
+
 describe("SPA dispatch", () => {
   test("SPA page GET with Accept: text/html fetches /index.html", async () => {
+    // Members is workspace-scoped, so the tenant gate must admit the ref.
     const { env, calls } = makeEnv({ DB: memberDbStub() });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
-      htmlGetRequest("/dashboard/members", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      htmlGetRequest("/dashboard/acme/members", { Cookie: `${SESSION_COOKIE}=${session}` }),
       env,
     );
     expect(res.status).toBe(200);
@@ -96,12 +149,15 @@ describe("SPA dispatch", () => {
   });
 
   test("each enumerated page GET hits ASSETS (with a session)", async () => {
-    const pages = [
+    // App pages are workspace-scoped; the root App path and the login page are
+    // the deployment-level shell entries.
+    const pages: string[] = [
       "/dashboard",
-      "/dashboard/apps",
-      "/dashboard/members",
+      "/dashboard/acme/apps",
+      "/dashboard/acme/apps/acme/settings",
+      // Members is workspace-scoped: the root path is retired.
+      "/dashboard/acme/members",
       "/dashboard/login",
-      "/dashboard/apps/acme/settings",
     ];
     for (const path of pages) {
       const { env, calls } = makeEnv({ DB: memberDbStub() });
@@ -118,7 +174,7 @@ describe("SPA dispatch", () => {
   test("POST to an SPA path does not call ASSETS (legacy)", async () => {
     const { env, calls } = makeEnv();
     await worker.fetch(
-      new Request("https://worker.local/dashboard/members", {
+      new Request("https://worker.local/dashboard/acme/members", {
         method: "POST",
         headers: { Accept: "text/html" },
       }),
@@ -164,7 +220,7 @@ describe("SPA dispatch", () => {
   test("Accept: application/json stays on legacy", async () => {
     const { env, calls } = makeEnv();
     await worker.fetch(
-      new Request("https://worker.local/dashboard/members", {
+      new Request("https://worker.local/dashboard/acme/members", {
         headers: { Accept: "application/json" },
       }),
       env,
@@ -174,7 +230,7 @@ describe("SPA dispatch", () => {
 
   test("default Accept */* stays on legacy (existing tests)", async () => {
     const { env, calls } = makeEnv();
-    await worker.fetch(new Request("https://worker.local/dashboard/members"), env);
+    await worker.fetch(new Request("https://worker.local/dashboard/apps"), env);
     expect(calls).toEqual([]);
   });
 
@@ -268,7 +324,9 @@ describe("SPA dispatch", () => {
     const body = await res.text();
     expect(body).toContain('"login":"octocat"');
     expect(body).toContain('"name":"The Octocat"');
-    expect(body).toContain('"role":"admin"');
+    // `users.role` left the boot contract (the workspace-role change,
+    // 2026-10): nav visibility reads the workspace role in `memberships[]`.
+    expect(body).not.toContain('"role":"admin"');
   });
 
   test("session on the shell path fails closed when D1 is unbound (500, W-001)", async () => {
@@ -287,10 +345,12 @@ describe("SPA dispatch", () => {
   // --- auth redirect 全覆盖 (spec §1.3) ---
 
   test("unauthenticated deep link HTML GET → 302 login, no ASSETS call", async () => {
+    // Workspace-scoped deep links only: the retired deployment-level App
+    // family answers 404 before any session read.
     const deepLinks = [
-      "/dashboard/apps",
-      "/dashboard/members",
-      "/dashboard/apps/acme/settings",
+      "/dashboard/acme/apps",
+      "/dashboard/acme/members",
+      "/dashboard/acme/apps/acme/settings",
     ];
     for (const path of deepLinks) {
       const { env, calls } = makeEnv();
@@ -373,6 +433,19 @@ describe("SPA dispatch", () => {
     expect(setCookie).toHaveLength(1);
     expect(setCookie[0]).toContain(`${SESSION_COOKIE}=;`);
     expect(setCookie[0]).toContain("Max-Age=0");
+    expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
+  });
+  test("the two boot list reads share one round trip (neither waits for the other)", async () => {
+    // L2: the pending-invite and membership lists both key on the login alone,
+    // so they overlap. The stub only answers once BOTH are in flight.
+    const { env, calls } = makeEnv({ DB: concurrentBootDbStub() });
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard/acme/apps", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("window.__BOOT__=");
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
   });
 });

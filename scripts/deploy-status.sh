@@ -7,10 +7,9 @@
 # `serving_outcome` is the outcome of the step that creates the version actually
 # serving traffic, when that is a DIFFERENT step from the first deploy
 # (production: `steps.deploy` publishes the bindings, `steps.serving` re-deploys
-# the mode-bearing version last). `deployed_sha` is a replay source for the next
-# rollout only if BOTH succeeded, so a failed serving deploy is never certified
-# as deployed (PR #87 I-000071). Omitted = the first deploy is the serving one
-# (staging).
+# with the deployment-shape var last). `deployed_sha` is certified only when
+# BOTH succeeded, so a failed serving deploy is never reported as deployed
+# (PR #87 I-000071). Omitted = the first deploy is the serving one (staging).
 #
 # Prints exactly one mutually exclusive block on stdout (the workflow appends it
 # to $GITHUB_STEP_SUMMARY):
@@ -29,8 +28,8 @@ deployed="${3:-}"
 serving="${4:-}"
 
 # Two version-creating steps: the first deploy can succeed while the version
-# that actually serves never lands (a secret write or the mode var deploy
-# fails). That SHA must not be offered as Deploy A's `expected_deploy_sha`.
+# that actually serves never lands (a secret write or the serving deploy
+# fails). That SHA must not be reported as what this run shipped.
 # The fourth argument is the caller declaring "a separate serving step exists",
 # so an EMPTY outcome (the step never ran or was skipped) also refuses.
 if [ "$outcome" = "success" ] && [ "$#" -ge 4 ] && [ "$serving" != "success" ]; then

@@ -9,8 +9,9 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import type { SidebarModel } from "../shell";
+import type { SidebarModel, WorkspaceSwitcherModel } from "../shell";
 import { spaClick } from "../spa-click";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 /** Keyed by the nav page segment — a workspace-scoped href carries a slug prefix. */
 const NAV_ICONS = { apps: LayoutGrid, members: Users } as const;
@@ -33,7 +34,14 @@ export function Logo() {
   );
 }
 
-export function AppSidebar({ model }: { model: SidebarModel }) {
+export function AppSidebar({
+  model,
+  switcher,
+}: {
+  model: SidebarModel;
+  /** Null when the login has no workspace choice (one membership or none). */
+  switcher?: WorkspaceSwitcherModel | null;
+}) {
   return (
     <Sidebar collapsible="none" aria-label={model.navLabel}>
       <SidebarHeader className="border-b border-sidebar-border p-3">
@@ -45,6 +53,13 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
           <Logo />
           <span className="truncate text-sm font-semibold tracking-tight">{model.brand}</span>
         </a>
+        {/* The switcher sits under the wordmark: it names the workspace the
+            whole shell (and every nav target) is scoped to. */}
+        {switcher ? (
+          <div className="mt-2">
+            <WorkspaceSwitcher model={switcher} />
+          </div>
+        ) : null}
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup className="p-3">

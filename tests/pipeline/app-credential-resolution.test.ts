@@ -29,7 +29,7 @@ import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
-import { createTestD1 } from "../store/helpers";
+import { createTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -129,6 +129,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
        VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, opts.slug, opts.githubAppId, opts.slug, privateKeyEnc, webhookSecretEnc);
+  await mapAppToDefaultWorkspace(db, id);
   // AL-24-5: every seeded App gets its AI-config health
   // baseline — a model chain + the `ark` BYOK key its chain needs — so the
   // fail-closed gate in the consumer passes on the success-path tests (this
@@ -744,6 +745,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     db.raw.prepare("DELETE FROM review_checks WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM review_findings WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM review_publications WHERE app_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM github_apps WHERE id = ?").run(appX.id);
     await expect(
       consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } }))),
@@ -760,6 +762,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(row.id, row.slug, row.github_app_id, row.name, row.private_key_enc, row.webhook_secret_enc, row.created_by, row.status, row.deleted_at, row.created_at, row.updated_at);
+    await mapAppToDefaultWorkspace(db, row.id);
     // Re-seed the per-App AI config so the fail-closed gate passes again.
     const configStore = createAppConfigStore(db, TEST_KEY);
     await configStore.setModelChain(row.id, "ark-plan/deepseek-v4-flash");

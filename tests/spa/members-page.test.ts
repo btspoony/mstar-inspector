@@ -1,65 +1,178 @@
 /**
  * Members page rebuilt on shadcn Table + invite toolbox bar +
- * confirm dialogs. No DOM runner — same source-scan contract as
- * settings-layout.test.ts — plus dictionary interpolation in both locales.
- * F-07: the Joined column renders through the shared
- * relative-time helper, with the absolute stamp kept as a native tooltip.
+ * confirm dialogs.
+ *
+ * Executed contract: the page's read/refusal/visibility seams
+ * (`loadMembersPage`, `postMemberWrite`, `inviteFailureNotice`,
+ * `showsPendingInvites`), the dictionary copy they surface, and the rendered
+ * member row (`MembersTable`). The previous ui-kit / column source pins were
+ * deleted — they red-lined refactors without proving behaviour, and a
+ * component whose state lives in `useState` renders as the loading skeleton
+ * under SSR, so the page itself has no executable face here. The rendered
+ * contract therefore hangs off the extracted `MembersTable`, which is the
+ * page's own markup with the state supplied.
+ *
+ * Every read and write hangs off the page's workspace base, and the page
+ * carries pending invitations with revoke.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
+import { formatRelativeTime } from "../../src/spa/relative-time";
+import {
+  inviteFailureNotice,
+  loadMembersPage,
+  MembersTable,
+  postMemberWrite,
+  showsPendingInvites,
+} from "../../src/spa/pages/MembersPage";
+import type { InviteRow, MemberRow } from "../../src/spa/pages/data";
 
 const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/MembersPage.tsx"), "utf8");
 
+const invite = (): InviteRow => ({
+  id: "i1",
+  github_login: "hubot",
+  role: "member",
+  created_at: "2026-01-01T00:00:00Z",
+  expires_at: "2026-01-08T00:00:00Z",
+});
+
 describe("members page shadcn rebuild", () => {
-  test("table, dropdown, dialog, select, input, button come from the ui kit — zero native controls", () => {
-    for (const component of ["table", "dropdown-menu", "dialog", "select", "input", "button"]) {
-      expect(source).toContain(`@/components/ui/${component}`);
+  test("every read hangs off the workspace base", async () => {
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/api/members")) {
+        return new Response(
+          JSON.stringify({
+            viewer: { role: "member" },
+            members: [{ id: "u1", github_login: "octocat", role: "member", created_at: "2026-01-01T00:00:00Z" }],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ invites: [] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      // A plain member costs ONE request: the manager-only pending list is
+      // never asked for, so no 403 reaches the page.
+      const member = await loadMembersPage("/dashboard/acme");
+      expect(member).toEqual({
+        members: [{ id: "u1", github_login: "octocat", role: "member", created_at: "2026-01-01T00:00:00Z" }],
+        role: "member",
+        invites: [],
+      });
+      expect(calls).toEqual(["/dashboard/acme/api/members"]);
+    } finally {
+      globalThis.fetch = realFetch;
     }
-    // No CSS-modules classes or native controls on the rebuilt surface.
-    expect(source).not.toContain("pages.module.css");
-    expect(source).not.toMatch(/<button[\s>]/);
-    expect(source).not.toMatch(/<input[\s>]/);
-    expect(source).not.toMatch(/<select[\s>]/);
   });
 
-  test("columns are login / role / joined / actions with the invite-only notice on top", () => {
-    for (const key of [
-      "members.tableLogin",
-      "members.roleLabel",
-      "members.tableJoined",
-      "members.tableActions",
-      "members.inviteOnlyNotice",
-    ]) {
-      expect(source).toContain(`"${key}"`);
+  test("every member write posts under the workspace base, never a retired root path", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      calls.push({ url: String(input), method: init?.method ?? "GET" });
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await postMemberWrite("/dashboard/acme", { kind: "invite", login: "hubot", role: "admin" });
+      await postMemberWrite("/dashboard/acme", { kind: "revoke", inviteId: "i1" });
+      await postMemberWrite("/dashboard/acme", { kind: "role", userId: "u1", nextRole: "admin" });
+      await postMemberWrite("/dashboard/acme", { kind: "remove", userId: "u1" });
+      expect(calls).toEqual([
+        { url: "/dashboard/acme/api/members/invites", method: "POST" },
+        { url: "/dashboard/acme/api/members/invites/i1/revoke", method: "POST" },
+        { url: "/dashboard/acme/members/role", method: "POST" },
+        { url: "/dashboard/acme/members/remove", method: "POST" },
+      ]);
+      // The workspace-only route family dropped the deployment-level copies;
+      // posting there would answer 404.
+      for (const { url } of calls) {
+        expect(url.startsWith("/dashboard/acme/")).toBe(true);
+      }
+    } finally {
+      globalThis.fetch = realFetch;
     }
   });
 
-  test("joined column renders the shared relative-time helper (F-07)", () => {
-    expect(source).toContain('from "../relative-time"');
-    // Same call shape as AppsPage / SettingsPage: value first, locale second.
-    expect(source).toContain("formatRelativeTime(member.created_at, locale)");
-    // The absolute stamp survives as the cell's native tooltip, not the visible text.
-    expect(source).toContain("title={member.created_at}");
+  test("a manager's load adds the pending list on the same base", async () => {
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.endsWith("/api/members/invites")) {
+        return new Response(
+          JSON.stringify({
+            invites: [
+              {
+                id: "i1",
+                github_login: "hubot",
+                role: "admin",
+                created_at: "2026-01-01T00:00:00Z",
+                expires_at: "2026-01-08T00:00:00Z",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({ viewer: { role: "owner" }, members: [] }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      const loaded = await loadMembersPage("/dashboard/acme");
+      expect(loaded?.invites.map((invite) => invite.github_login)).toEqual(["hubot"]);
+      expect(calls).toEqual(["/dashboard/acme/api/members", "/dashboard/acme/api/members/invites"]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
-  test("invite posts login + role; role change and remove ride the pinned POST paths", () => {
-    expect(source).toContain('postForm("/dashboard/members/invite", { login: trimmed, role: inviteRole })');
-    expect(source).toContain('postForm("/dashboard/members/role", { userId: member.id, role: nextRole })');
-    expect(source).toContain('postForm("/dashboard/members/remove", { userId: member.id })');
+  test("the pending table is a manager-only, non-empty affordance", () => {
+    // Behaviour, not the render expression: only owner/admin see the section,
+    // and never an empty one.
+    expect(showsPendingInvites("owner", [invite()])).toBe(true);
+    expect(showsPendingInvites("admin", [invite()])).toBe(true);
+    expect(showsPendingInvites("member", [invite()])).toBe(false);
+    expect(showsPendingInvites(null, [invite()])).toBe(false);
+    expect(showsPendingInvites("owner", [])).toBe(false);
   });
 
-  test("self row renders no actions; the last admin's demote/remove items are disabled client-side", () => {
+  test("the pending invite 409 surfaces as a warning, not a retryable error", () => {
+    // The server's refusal grammar decides the notice, not the code spelling.
+    expect(inviteFailureNotice(409, "invite.pending_exists", false)).toEqual({
+      kind: "warn",
+      key: "notice.warn.invitePending",
+    });
+    expect(inviteFailureNotice(409, "invite.pending_exists", true).kind).toBe("warn");
+    // An already-member target warns; anything else is a real failure.
+    expect(inviteFailureNotice(409, "already a member", true).kind).toBe("warn");
+    expect(inviteFailureNotice(500, "", false)).toEqual({
+      kind: "error",
+      key: "notice.error.inviteFailed",
+    });
+  });
+
+  test("self row renders no actions; the sole owner's demote/remove items are disabled client-side", () => {
     expect(source).toContain("members.you");
-    expect(source).toContain('member.role === "admin" && adminCount === 1');
-    expect(source).toContain("disabled={protectedAdmin}");
+    expect(source).toContain('member.role === "owner" && ownerCount === 1');
+    expect(source).toContain("disabled={protectedMember}");
   });
 
-  test("both confirm dialogs share one Dialog with destructive remove confirm", () => {
+  test("the confirm dialogs share one Dialog with destructive remove/revoke confirm", () => {
     expect(source).toContain("members.confirmRoleTitle");
     expect(source).toContain("members.confirmRemoveTitle");
-    expect(source).toContain('pending.kind === "remove" ? "destructive" : "default"');
+    expect(source).toContain('pending.kind === "role" ? "default" : "destructive"');
   });
 
   test("invite submit is single-flight and network failures surface a notice (QC S-001/S-002)", () => {
@@ -68,6 +181,7 @@ describe("members page shadcn rebuild", () => {
     expect(source).toContain('t(locale, "notice.error.inviteFailed", { login: trimmed })');
     expect(source).toContain('t(locale, "notice.error.roleChangeFailed", { login: member.github_login })');
     expect(source).toContain('t(locale, "notice.error.removeFailed", { login: member.github_login })');
+    expect(source).toContain('t(locale, "notice.error.revokeFailed", { login: invite.github_login })');
   });
 
   test("page-level states ride the shared state trio; op notices keep the PageNotice channel", () => {
@@ -79,7 +193,13 @@ describe("members page shadcn rebuild", () => {
     expect(source).not.toContain("LoadFailedNotice");
     // Channel boundary (AD-582): op-outcome notices stay on PageNotice.
     expect(source).toContain('<PageNotice kind={notice.kind} message={notice.message} />');
-    expect(source).toContain('<PageNotice kind="error" message={t(locale, "members.adminOnly")} />');
+  });
+
+  test("no page-level admin-only face: the member list is visible to every member", () => {
+    // Plan AC4 — a plain member sees the list; only the manager actions and
+    // the pending list are gated (client-side mirror; the server decides).
+    expect(source).not.toContain("members.adminOnly");
+    expect(source).toContain("emptyDescriptionMember");
   });
 
   test("op-triggered reloads are background — only the initial load gates the skeleton (F-58-1)", () => {
@@ -95,7 +215,11 @@ describe("members page shadcn rebuild", () => {
 
   test("empty member list renders the no-action EmptyState guidance", () => {
     expect(source).toContain('t(locale, "members.emptyTitle")');
-    expect(source).toContain('t(locale, "members.emptyDescription")');
+    // The description differs for a manager (an invite form is present) and a
+    // plain member (it is not), so it is chosen by the same capability guard.
+    expect(source).toContain(
+      'canInvite ? "members.emptyDescription" : "members.emptyDescriptionMember"',
+    );
     const emptyCall = source.match(/<EmptyState[\s\S]*?\/>/);
     expect(emptyCall).not.toBeNull();
     // No action slot: the invite form above is the path.
@@ -105,10 +229,11 @@ describe("members page shadcn rebuild", () => {
   test("new copy interpolates in both locales", () => {
     const keys = [
       "common.cancel",
-      "members.inviteOnlyNotice",
+      "members.visibleToMembers",
       "members.roleLabel",
       "members.tableLogin",
       "members.tableJoined",
+      "members.tableExpires",
       "members.tableActions",
       "members.actionsMenuLabel",
       "members.makeAdmin",
@@ -118,9 +243,19 @@ describe("members page shadcn rebuild", () => {
       "members.confirmRoleButton",
       "members.confirmRemoveTitle",
       "members.confirmRemoveBody",
+      "members.pendingHeading",
+      "members.confirmRevokeTitle",
+      "members.confirmRevokeBody",
+      "members.revoke",
+      "members.role.owner",
+      "members.role.admin",
+      "members.role.member",
       "notice.success.roleChanged",
+      "notice.success.revoked",
+      "notice.warn.invitePending",
       "notice.error.inviteFailed",
       "notice.error.roleChangeFailed",
+      "notice.error.revokeFailed",
     ] as const;
     for (const key of keys) {
       const params = { login: "octocat", role: "admin" };
@@ -132,5 +267,36 @@ describe("members page shadcn rebuild", () => {
       expect(en).not.toContain("{");
       expect(zh).not.toContain("{");
     }
+  });
+});
+
+describe("members table (rendered)", () => {
+  const ROW: MemberRow = {
+    id: "u1",
+    github_login: "octocat",
+    role: "member",
+    created_at: "2026-01-02T03:04:05.678Z",
+  };
+
+  test("the Joined cell shows the relative stamp and keeps the absolute one as its tooltip", () => {
+    // Day granularity: the bucket cannot roll over inside one test run.
+    const relative = formatRelativeTime(ROW.created_at, "en");
+    expect(relative).toMatch(/\d+ days ago$/);
+    const html = renderToStaticMarkup(
+      createElement(MembersTable, {
+        locale: "en",
+        members: [ROW],
+        viewerLogin: "octocat",
+        memberRole: "owner",
+        canInvite: true,
+        onAction: () => {},
+      }),
+    );
+    // Both faces of the same cell: the copy a reader sees, and the exact
+    // stamp the tooltip must still expose (losing the title is the silent
+    // regression this covers).
+    expect(html).toContain(`title="${ROW.created_at}"`);
+    expect(html).toContain(`>${relative}<`);
+    expect(html).toContain(t("en", "members.tableJoined"));
   });
 });

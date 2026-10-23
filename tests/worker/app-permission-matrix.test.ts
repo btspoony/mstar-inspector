@@ -33,13 +33,13 @@ const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].j
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-matrix-9988");
 
-const SETTINGS = "/dashboard/apps/mallorys-app/settings";
-const VERIFY = "/dashboard/api/apps/mallorys-app/keys/verify";
+const SETTINGS = "/dashboard/default/apps/mallorys-app/settings";
+const VERIFY = "/dashboard/default/api/apps/mallorys-app/keys/verify";
 
 /**
- * Seeded world (spec §2 actors): octocat = admin; mallory owns
- * "mallorys-app" (creator); ada owns a DIFFERENT app (other-creator);
- * hubot owns none (other member).
+ * Seeded world (spec §2 actors): octocat = workspace `owner`; mallory created
+ * "mallorys-app" but is a plain member; ada created a DIFFERENT app; hubot is
+ * a plain member. Manage is the workspace role, so only octocat may write.
  */
 async function seededWorld(): Promise<TestD1> {
   const db = createMigratedTestD1();
@@ -47,6 +47,16 @@ async function seededWorld(): Promise<TestD1> {
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "ada", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
+  // Manage is the workspace role: `octocat` is the workspace owner, mallory a
+  // plain member — so `creator` and `admin` no longer mean the same thing.
+  db.raw
+    .prepare(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       SELECT 'default', id, CASE WHEN github_login = 'octocat' THEN 'owner' ELSE 'member' END,
+              '2026-01-01T00:00:00.000Z'
+       FROM users`,
+    )
+    .run();
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
   await createAppsStore(db).createApp({
@@ -67,6 +77,7 @@ function makeEnv(db: unknown): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
     DB: db,
@@ -169,17 +180,18 @@ const MATRIX_ROUTES: MatrixRoute[] = [
   { name: "settings key/delete", path: `${SETTINGS}/key/delete`, fields: { provider: "anthropic" } },
   { name: "keys/verify", path: VERIFY, fields: { provider: "anthropic", key: PLAIN_KEY }, verifies: true },
   // --- ops family: pinned action paths ---
-  { name: "pause", path: "/dashboard/apps/mallorys-app/pause" },
-  { name: "resume", path: "/dashboard/apps/mallorys-app/resume" },
-  { name: "disable", path: "/dashboard/apps/mallorys-app/disable" },
-  { name: "enable", path: "/dashboard/apps/mallorys-app/enable" },
-  { name: "delete", path: "/dashboard/apps/mallorys-app/delete" },
+  { name: "pause", path: "/dashboard/default/apps/mallorys-app/pause" },
+  { name: "resume", path: "/dashboard/default/apps/mallorys-app/resume" },
+  { name: "disable", path: "/dashboard/default/apps/mallorys-app/disable" },
+  { name: "enable", path: "/dashboard/default/apps/mallorys-app/enable" },
+  { name: "delete", path: "/dashboard/default/apps/mallorys-app/delete" },
 ];
 
 const ACTORS = [
-  { name: "creator", login: "mallory", expected: 200 },
-  { name: "admin (non-creator)", login: "octocat", expected: 200 },
-  { name: "other member", login: "hubot", expected: 403 },
+  { name: "workspace owner", login: "octocat", expected: 200 },
+  { name: "plain member", login: "hubot", expected: 403 },
+  // The App's creator is a plain workspace member: creation grants nothing.
+  { name: "creator of the App", login: "mallory", expected: 403 },
   { name: "creator of a different app", login: "ada", expected: 403 },
 ] as const;
 
@@ -268,7 +280,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
   }
 });
 
-// --- Read-face matrix: GET /dashboard/api/apps/:slug/settings ---
+// --- Read-face matrix: GET /dashboard/default/api/apps/:slug/settings ---
 // Identity-only non-manager detail face: a member who is neither creator nor
 // admin gets the D4 identity set (the GET /api/apps list fields + created_at
 // + the cached public GitHub profile) and can_manage:false — NO health or
@@ -277,7 +289,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
 // full base+health payload unchanged. Read-only, so the status/shape
 // assertions are the matrix itself.
 describe("App detail read-face permission matrix (settings JSON)", () => {
-  const FACE = "/dashboard/api/apps/mallorys-app/settings";
+  const FACE = "/dashboard/default/api/apps/mallorys-app/settings";
 
   async function getFace(login: string, env: Env): Promise<Response> {
     return worker.fetch(
@@ -321,7 +333,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
     expect(JSON.stringify(body)).not.toContain("private_key_enc");
   });
 
-  for (const actor of [ACTORS[0], ACTORS[1]] as const) {
+  for (const actor of [ACTORS[0]] as const) {
     test(`manager (${actor.name}) → unchanged base+health shape`, async () => {
       const res = await getFace(actor.login, makeEnv(await seededWorld()));
       expect(res.status).toBe(200);
@@ -346,7 +358,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
 
   test("unknown slug → 404", async () => {
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/api/apps/no-such-app/settings", {
+      new Request("https://worker.local/dashboard/default/api/apps/no-such-app/settings", {
         headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("hubot", null, SESSION_SECRET)}` },
       }),
       makeEnv(await seededWorld()),
@@ -355,13 +367,13 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
   });
 });
 
-// --- Read-face matrix: GET /dashboard/api/apps/:slug/insights/summary ---
+// --- Read-face matrix: GET /dashboard/default/api/apps/:slug/insights/summary ---
 // The per-App insights data face rides the SAME creator-or-admin rule
 // (canManageApp) as every write route above, plus the slug lookup
 // (unknown/soft-deleted → 404). Read-only, so no zero-mutation sweep is
 // needed — the assertions are the status matrix itself.
 describe("App insights read-face permission matrix", () => {
-  const FACE = "/dashboard/api/apps/mallorys-app/insights/summary";
+  const FACE = "/dashboard/default/api/apps/mallorys-app/insights/summary";
 
   async function getFace(login: string, env: Env): Promise<Response> {
     return worker.fetch(
@@ -395,8 +407,8 @@ describe("App insights read-face permission matrix", () => {
   test("read face: unknown slug → 404 for a manager", async () => {
     const db = await seededWorld();
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/api/apps/no-such-app/insights/summary", {
-        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}` },
+      new Request("https://worker.local/dashboard/default/api/apps/no-such-app/insights/summary", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}` },
       }),
       makeEnv(db),
     );

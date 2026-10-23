@@ -33,6 +33,8 @@ export const en = {
     themeLight: "light",
     logout: "Logout",
     signedInAs: "Signed in as {name}",
+    /** Label of the shell's workspace switcher (the select itself shows names). */
+    workspaceSwitcher: "Workspace",
   },
   common: {
     pageTitle: "{page} — {brand}",
@@ -48,8 +50,6 @@ export const en = {
       unknown: "unknown",
     },
     error: {
-      deniedTitle: "Access denied",
-      deniedBody: "This deployment is invite-only. Ask an admin to add {login}.",
       removedTitle: "Access removed",
       removedBody: "Your dashboard access was removed. Ask an admin to re-invite {login}.",
       forbiddenTitle: "Forbidden",
@@ -78,16 +78,19 @@ export const en = {
     heading: "Sign in",
     description: "Use your GitHub account to access the console.",
     signIn: "Sign in with GitHub",
-    inviteOnly: "This deployment is invite-only — ask an admin to add your GitHub login.",
+    /** Sign-in is open — no access list stands between here and a workspace. */
+    openAccess: "Any GitHub account can sign in — create a workspace, or accept an invitation.",
   },
   notice: {
     success: {
-      invited: "Invited {login} — they can sign in with GitHub now.",
+      invited: "Invited {login} — they can accept from this workspace now.",
       removedMember: "Removed {login}.",
       roleChanged: "{login} is now {role}.",
+      revoked: "Revoked the invitation for {login}.",
     },
     warn: {
       alreadyMember: "{login} is already a member — nothing changed.",
+      invitePending: "{login} already has a pending invitation — nothing changed.",
     },
     error: {
       enterLogin: "Enter a GitHub login to invite.",
@@ -95,6 +98,7 @@ export const en = {
       inviteFailed: "Could not invite {login} — try again.",
       roleChangeFailed: "Could not change {login}'s role — the member list just changed, try again.",
       removeFailed: "Could not remove {login} — the member list just changed, try again.",
+      revokeFailed: "Could not revoke {login}'s invitation — try again.",
     },
   },
   /** App detail page (App detail IA): the two-tab shell. */
@@ -142,6 +146,15 @@ export const en = {
   apps: {
     heading: "Apps",
     create: "Create GitHub App",
+    /**
+     * Why the Create control is disabled. `role`: the caller is not
+     * owner/admin of the workspace the page addresses. `workspace`: this
+     * deployment carries several workspaces and the page names none.
+     */
+    createUnavailable: {
+      role: "Only a workspace owner or admin can create an App here.",
+      workspace: "Open a workspace first — this deployment has more than one, so an App needs to know which it belongs to.",
+    },
     /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No Apps yet",
     emptyDescription: "Create GitHub App connects your first one.",
@@ -179,13 +192,14 @@ export const en = {
   },
   members: {
     heading: "Members",
-    inviteOnlyNotice: "Only the GitHub users listed here can sign in to this deployment.",
+    visibleToMembers: "Everyone in this workspace can see who is a member.",
     inviteLabel: "Invite by GitHub login",
     invitePlaceholder: "e.g. octocat",
     inviteButton: "Invite member",
     roleLabel: "Role",
     tableLogin: "GitHub login",
     tableJoined: "Joined",
+    tableExpires: "Expires",
     tableActions: "Actions",
     actionsMenuLabel: "Open actions for {login}",
     makeAdmin: "Change to admin",
@@ -197,13 +211,86 @@ export const en = {
     confirmRemoveBody:
       "{login} will no longer be able to sign in — their session stops working right away. Apps they created stay in place and remain manageable by admins.",
     remove: "Remove",
+    pendingHeading: "Pending invitations",
+    confirmRevokeTitle: "Revoke {login}'s invitation?",
+    confirmRevokeBody: "{login} will not be able to accept this invitation. They can be invited again later.",
+    revoke: "Revoke",
     you: "you",
-    adminOnly: "This page is restricted to dashboard admins.",
-    roleAdmin: "admin",
-    roleMember: "member",
+    /** Workspace role vocabulary (`workspace_members.role`), including owner. */
+    role: {
+      owner: "owner",
+      admin: "admin",
+      member: "member",
+    },
     /** Composed empty state — no-action variant (the invite form is the path). */
     emptyTitle: "No members yet",
     emptyDescription: "Invite the first member with the form above.",
+    emptyDescriptionMember: "This workspace has no other members yet.",
+  },
+  /**
+   * Workspace creation — the signed-in landing for a login that belongs to no
+   * workspace yet. Sign-in joins nobody, so this is the only path
+   * into a first workspace besides accepting an invitation.
+   */
+  workspace: {
+    setupHeading: "Create a workspace",
+    setupDescription:
+      "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",
+    /**
+     * The `self-hosted` empty-instance line: this sign-in created the
+     * deployment's first account. Absent on `saas` and once `users` is
+     * non-empty.
+     */
+    emptyInstance:
+      "This instance has no accounts yet. Your login is now this instance's first account — create a workspace to start.",
+    nameLabel: "Workspace name",
+    namePlaceholder: "e.g. Acme",
+    create: "Create workspace",
+    nameRequired: "Enter a workspace name.",
+    nameTooLong: "Use at most {max} characters.",
+    createFailed: "Could not create the workspace — try again.",
+    /** Pending invitations on the creation surface — the invitee's accept path (MF-2). */
+    invitesHeading: "Workspace invitations",
+    invitesDescription: "Accept an invitation to join that workspace, or create your own below.",
+    inviteAccept: "Accept",
+    /** {role} = the invited workspace role; {expires} = the relative expiry stamp. */
+    inviteMeta: "Invited as {role} — expires {expires}",
+    inviteExpired: "This invitation has expired.",
+    inviteGone: "This invitation is no longer pending — it may have been revoked.",
+    inviteAcceptFailed: "Could not accept the invitation — try again.",
+    /** Workspace URL (slug) rename — the settings control and its refusal faces. */
+    slugHeading: "Workspace URL",
+    slugDescription:
+      "The readable part of this workspace's dashboard URL. Lowercase letters, digits and hyphens — not a reserved word, not another workspace's id.",
+    slugLabel: "Slug",
+    slugSave: "Save slug",
+    slugSaved: "Workspace URL updated — the old slug no longer works.",
+    slugInvalid: "Use 2–39 lowercase letters, digits or hyphens, starting with a letter or digit.",
+    slugReserved: "That word is reserved by the dashboard — pick another slug.",
+    slugTaken: "Another workspace already uses that slug — pick another one.",
+    slugIsWorkspaceId: "That value is another workspace's id — pick another slug.",
+    slugForbidden: "Only the workspace owner can change its URL.",
+    slugFailed: "Could not change the workspace URL — try again.",
+  },
+  /**
+   * Platform-operator support (2026-10): the operator's read-only face and the
+   * tenant's undismissable grant notice. The notice states who is looking, why,
+   * and until when — and offers no action, because the tenant can neither end
+   * nor edit a grant.
+   */
+  support: {
+    heading: "Support access",
+    readOnly: "You are viewing this workspace under a time-boxed support grant. Everything here is read-only.",
+    workspaceId: "Workspace id",
+    createdAt: "Created",
+    grantsHeading: "Active support grants",
+    grantLine: "{login} has support access until {expires} — {reason}",
+    tableLogin: "GitHub login",
+    tableRole: "Role",
+    /** The tenant's always-on notice; not dismissible, carries no action. */
+    noticeHeading: "Support access is active",
+    noticeLine: "{login} can read this workspace's members until {expires} — {reason}",
+    noGrant: "No support access is active.",
   },
   settings: {
     /**
@@ -490,6 +577,8 @@ export const en = {
       alreadyConnected: "This GitHub App is already connected on this deployment — no changes were made.",
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
+      workspaceRequired:
+        "This deployment has more than one workspace, so an App needs to know which it belongs to — open a workspace and create the App from there.",
     },
   },
 };

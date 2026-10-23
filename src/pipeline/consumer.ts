@@ -139,7 +139,6 @@ import {
 // github_apps row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
 import { createAppsStore } from "../dashboard/apps-store";
-import { tenantModeOf, type TenantMode } from "../worker/tenant-mode";
 import { createSecretbox } from "../dashboard/secretbox";
 // Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads app_provider_keys / app_model_config and
@@ -175,13 +174,6 @@ export type PipelineEnv = {
    * quotes), so this doc cannot drift when the universe widens again.
    */
   REVIEW_LEVEL?: string;
-  /**
-   * Tenant read mode (migration 0026). Only the exact `"strict"` turns on the
-   * workspace-mapped App read face; unset/empty = `"off"`. Resolved once at
-   * consumer creation through `tenantModeOf` (src/worker/tenant-mode.ts),
-   * which throws on any other value before a message is read.
-   */
-  WORKSPACE_TENANT_MODE?: "off" | "strict";
   /**
    * AL-24-5 (zero global fallback): provider keys and the model chain NEVER
    * come from the Worker env — OMP_MODEL_KEY / OMP_REVIEW_MODEL / the 18
@@ -1202,13 +1194,6 @@ async function publishDegradedPublication(input: {
 
 type ProcessDeps = {
   env: PipelineEnv;
-  /**
-   * App read mode for this deployment, resolved ONCE at consumer creation
-   * through src/worker/tenant-mode.ts. An illegal `WORKSPACE_TENANT_MODE`
-   * throws there — before any message is read — so no review ever runs
-   * against a guessed face.
-   */
-  tenantMode: TenantMode;
   store: D1ArtifactStore;
   /**
    * review_failures leaf (AL-1 + AL-6): the parse-fail
@@ -1325,18 +1310,14 @@ type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter; githubAppId
  */
 async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<CommenterResolution> {
   const appRef = payload.appRef;
-  const tenantMode = deps.tenantMode;
-  const row = await createAppsStore(deps.env.DB, tenantMode).getAppById(appRef.appId);
+  const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
   if (row === null) {
     deps.appCommenters.delete(appRef.appId);
-    // Under `strict` an unmapped App is indistinguishable from a missing one
-    // (the INNER JOIN yields null for both) — the message names both causes.
-    if (tenantMode === "strict") {
-      throw new Error(
-        `per-App credential resolution failed: app ${appRef.appId} not found or has no workspace mapping`,
-      );
-    }
-    throw new Error(`per-App credential resolution failed: app ${appRef.appId} not found`);
+    // An unmapped App is indistinguishable from a missing one (the INNER JOIN
+    // yields null for both) — the message names both causes.
+    throw new Error(
+      `per-App credential resolution failed: app ${appRef.appId} not found or has no workspace mapping`,
+    );
   }
   if (row.deleted_at !== null) {
     deps.appCommenters.delete(appRef.appId);
@@ -1552,7 +1533,7 @@ async function resolveCustomProviders(
 async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<SandboxImageDefinition> {
   const appRef = payload.appRef;
   try {
-    const row = await createAppsStore(deps.env.DB, deps.tenantMode).getAppById(appRef.appId);
+    const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
     if (row === null) {
       throw new Error("app not found");
     }
@@ -1907,7 +1888,6 @@ export function createReviewConsumer(
   const appCommenters = new Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>();
   const deps: ProcessDeps = {
     env,
-    tenantMode: tenantModeOf(env.WORKSPACE_TENANT_MODE),
     store: overrides.store ?? createArtifactStore(env.DB),
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
     appCommenters,

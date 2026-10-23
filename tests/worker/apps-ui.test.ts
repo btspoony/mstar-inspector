@@ -3,7 +3,7 @@
  *
  * `GET /dashboard/apps` is member-visible (slug, numeric App id, status,
  * creator — never the encrypted columns or row ids); the pinned POST action
- * paths `/dashboard/apps/:slug/disable|enable|delete` (architect: zero-JS
+ * paths `/dashboard/default/apps/:slug/disable|enable|delete` (architect: zero-JS
  * `<form method="post">` cannot emit a DELETE verb) are creator-or-admin
  * (Clarify #6). Disable/enable/soft-delete flows are bridged END-TO-END to
  * the T2 webhook face: a disabled or soft-deleted App's webhook route 404s,
@@ -21,8 +21,6 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
-import { matchSpaRoute } from "../../src/spa/routes";
-import { apiBase } from "../../src/spa/workspace-base";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
@@ -69,6 +67,8 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0023_removed_logins.sql",
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
+    // 0028: the SPA boot reads pending invites.
+    "0028_workspace_invites.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -106,6 +106,16 @@ async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
   await seedMember(db, "mallory", "member");
   await seedMember(db, "ada", "member");
   await seedMember(db, "hubot", "member");
+  // Manage is the workspace role: `octocat` and `mallory` are owners, the
+  // others plain members. The App creator column grants nothing.
+  db.raw
+    .prepare(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       SELECT 'default', id, CASE WHEN github_login IN ('octocat','mallory') THEN 'owner' ELSE 'member' END,
+              '2026-01-01T00:00:00.000Z'
+       FROM users`,
+    )
+    .run();
   await seedApp(db, { slug: "mstar-inspector-mallory", githubAppId: 1001, createdBy: "mallory" });
   await seedApp(db, { slug: "mstar-inspector-ada", githubAppId: 1002, createdBy: "ada" });
   return db;
@@ -120,6 +130,7 @@ function makeEnv(db: unknown, overrides: Partial<Env> = {}): Env {
     } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
+    DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
     REVIEW_ENABLED: "true", // webhook-face bridge tests need the slug lookup to run
@@ -184,39 +195,36 @@ function reviewTriggerMode(db: ReturnType<typeof createAppsUiD1>, slug: string):
   return row?.review_trigger_mode ?? null;
 }
 
-describe("GET /dashboard/apps (enumerated SPA route)", () => {
+describe("the Apps page shell (workspace-scoped SPA route)", () => {
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const db = await seededWorld();
-    const res = await htmlGet("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, withSpaAssets(makeEnv(db)));
+    const res = await htmlGet("/dashboard/default/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("window.__BOOT__=");
     expect(body).toContain('"login":"hubot"');
-    expect(body).toContain('"role":"member"');
+    // The boot carries the workspace memberships (id + role), never users.role.
+    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member"}]');
   });
 
-  test("a non-HTML GET without session is not a 301 alias", async () => {
+  test("the retired deployment-level /dashboard/apps answers 404", async () => {
     const db = await seededWorld();
     const res = await get("/dashboard/apps", "", makeEnv(db));
-    expect(res.status).not.toBe(301);
+    expect(res.status).toBe(404);
   });
 
-  test("GET /dashboard with a member session → SPA boot role member (no admin)", async () => {
+  test("GET /dashboard with a member session → the sole workspace's Apps page", async () => {
     const db = await seededWorld();
     const shell = await get("/dashboard", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, withSpaAssets(makeEnv(db)));
-    expect(shell.status).toBe(200);
-    const body = await shell.text();
-    expect(body).toContain("window.__BOOT__=");
-    expect(body).toContain('"login":"hubot"');
-    expect(body).toContain('"role":"member"');
-    expect(body).not.toContain('"role":"admin"');
+    expect(shell.status).toBe(302);
+    expect(shell.headers.get("Location")).toBe("/dashboard/default/apps");
   });
 });
 
-describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)", () => {
+describe("POST /dashboard/default/apps/:slug/disable|enable|delete (pinned action paths)", () => {
   test("no session → 302 to login, zero mutation", async () => {
     const db = await seededWorld();
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/disable", "", makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/disable", "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
     expect(appStatus(db, "mstar-inspector-mallory")).toBe("active");
@@ -225,7 +233,7 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
   test("creator disables their app → 200, row disabled, the App's webhook route 404s (UI flow → T2 face)", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/disable", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/disable", cookie, makeEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(appStatus(db, "mstar-inspector-mallory")).toBe("disabled");
@@ -243,7 +251,7 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
       "disabled",
     );
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/enable", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/enable", cookie, makeEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(appStatus(db, "mstar-inspector-mallory")).toBe("active");
@@ -256,11 +264,11 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
   test("admin manages another creator's app", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
-    const res = await post("/dashboard/apps/mstar-inspector-ada/disable", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-ada/disable", cookie, makeEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(appStatus(db, "mstar-inspector-ada")).toBe("disabled");
-    const enable = await post("/dashboard/apps/mstar-inspector-ada/enable", cookie, makeEnv(db));
+    const enable = await post("/dashboard/default/apps/mstar-inspector-ada/enable", cookie, makeEnv(db));
     expect(enable.status).toBe(200);
     expect(appStatus(db, "mstar-inspector-ada")).toBe("active");
   });
@@ -268,7 +276,7 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
   test("non-creator member POST → 403, zero mutation", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("hubot")}`;
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/disable", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/disable", cookie, makeEnv(db));
     expect(res.status).toBe(403);
     const body = await res.text();
     expect(body).toContain("restricted to dashboard admins");
@@ -278,7 +286,7 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
   test("creator of a DIFFERENT app POST → 403, zero mutation (creator scope is per-App)", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("ada")}`;
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/disable", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/disable", cookie, makeEnv(db));
     expect(res.status).toBe(403);
     expect(appStatus(db, "mstar-inspector-mallory")).toBe("active");
   });
@@ -287,9 +295,9 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
     for (const path of [
-      "/dashboard/apps/no-such-app/disable",
-      "/dashboard/apps/no-such-app/enable",
-      "/dashboard/apps/no-such-app/delete",
+      "/dashboard/default/apps/no-such-app/disable",
+      "/dashboard/default/apps/no-such-app/enable",
+      "/dashboard/default/apps/no-such-app/delete",
     ]) {
       const res = await post(path, cookie, makeEnv(db));
       expect(res.status).toBe(404);
@@ -299,7 +307,7 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
   test("delete → soft delete: row stamped, webhook route 404s, further manage POSTs 404", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/delete", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/delete", cookie, makeEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     // Soft delete (Clarify #4): the row remains in D1 with deleted_at stamped.
@@ -311,16 +319,16 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
     const webhook = await post("/webhook/mstar-inspector-mallory", "", makeEnv(db));
     expect(webhook.status).toBe(404);
     // Managing a deleted app is 404 — it no longer exists for the UI.
-    const manage = await post("/dashboard/apps/mstar-inspector-mallory/disable", cookie, makeEnv(db));
+    const manage = await post("/dashboard/default/apps/mstar-inspector-mallory/disable", cookie, makeEnv(db));
     expect(manage.status).toBe(404);
   });
 });
 
-describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () => {
+describe("POST /dashboard/default/apps/:slug/pause|resume (per-App review pause)", () => {
   test("guard covers the pinned routes: no session → 302 to login, zero mutation", async () => {
     const db = await seededWorld();
     for (const path of ["pause", "resume"]) {
-      const res = await post(`/dashboard/apps/mstar-inspector-mallory/${path}`, "", makeEnv(db));
+      const res = await post(`/dashboard/default/apps/mstar-inspector-mallory/${path}`, "", makeEnv(db));
       expect(res.status).toBe(302);
       expect(res.headers.get("Location")).toBe("/dashboard/login");
     }
@@ -330,7 +338,7 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
   test("creator pauses → 200, review_enabled=0 (the SPA refetches the JSON face for the paused badge)", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(0);
@@ -339,7 +347,7 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
   test("pausing leaves the webhook CONNECTED (pause ≠ disable): the route still resolves and verifies — 401 on a bad signature, not 404", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    await post("/dashboard/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
+    await post("/dashboard/default/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
     const webhook = await post("/webhook/mstar-inspector-mallory", "", makeEnv(db));
     expect(webhook.status).toBe(401);
     expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(0);
@@ -353,7 +361,7 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
       false,
     );
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/resume", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/resume", cookie, makeEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(1);
@@ -362,8 +370,8 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
   test("pausing an already-paused app is an idempotent no-op — 200, zero mutation", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    await post("/dashboard/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
+    await post("/dashboard/default/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(0);
@@ -372,7 +380,7 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
   test("resuming an active app is an idempotent no-op — 200, zero mutation", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    const res = await post("/dashboard/apps/mstar-inspector-mallory/resume", cookie, makeEnv(db));
+    const res = await post("/dashboard/default/apps/mstar-inspector-mallory/resume", cookie, makeEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(1);
@@ -382,7 +390,7 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
     const db = await seededWorld();
     for (const login of ["hubot", "ada"]) {
       const res = await post(
-        "/dashboard/apps/mstar-inspector-mallory/pause",
+        "/dashboard/default/apps/mstar-inspector-mallory/pause",
         `${SESSION_COOKIE}=${await sessionCookie(login)}`,
         makeEnv(db),
       );
@@ -395,11 +403,11 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
   test("admin (non-creator) may pause and resume another creator's app", async () => {
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
-    const pause = await post("/dashboard/apps/mstar-inspector-ada/pause", cookie, makeEnv(db));
+    const pause = await post("/dashboard/default/apps/mstar-inspector-ada/pause", cookie, makeEnv(db));
     expect(pause.status).toBe(200);
     expect(await pause.text()).toBe("ok");
     expect(reviewEnabled(db, "mstar-inspector-ada")).toBe(0);
-    const resume = await post("/dashboard/apps/mstar-inspector-ada/resume", cookie, makeEnv(db));
+    const resume = await post("/dashboard/default/apps/mstar-inspector-ada/resume", cookie, makeEnv(db));
     expect(resume.status).toBe(200);
     expect(reviewEnabled(db, "mstar-inspector-ada")).toBe(1);
   });
@@ -408,14 +416,14 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
     const db = await seededWorld();
     const apps = createAppsStore(db);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
-    for (const path of ["/dashboard/apps/no-such-app/pause", "/dashboard/apps/no-such-app/resume"]) {
+    for (const path of ["/dashboard/default/apps/no-such-app/pause", "/dashboard/default/apps/no-such-app/resume"]) {
       const res = await post(path, cookie, makeEnv(db));
       expect(res.status).toBe(404);
     }
     await apps.softDeleteApp((await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!.id);
     for (const path of [
-      "/dashboard/apps/mstar-inspector-mallory/pause",
-      "/dashboard/apps/mstar-inspector-mallory/resume",
+      "/dashboard/default/apps/mstar-inspector-mallory/pause",
+      "/dashboard/default/apps/mstar-inspector-mallory/resume",
     ]) {
       const res = await post(path, cookie, makeEnv(db));
       expect(res.status).toBe(404);
@@ -424,11 +432,11 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
 
 });
 
-describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger mode)", () => {
+describe("POST /dashboard/default/apps/:slug/review-trigger-mode (per-App review trigger mode)", () => {
   test("guard covers the pinned route: no session → 302 to login, zero mutation", async () => {
     const db = await seededWorld();
     const res = await postForm(
-      "/dashboard/apps/mstar-inspector-mallory/review-trigger-mode",
+      "/dashboard/default/apps/mstar-inspector-mallory/review-trigger-mode",
       "",
       makeEnv(db),
       { mode: "manual" },
@@ -442,7 +450,7 @@ describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     for (const mode of ["open", "every_push", "manual"]) {
-      const res = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
+      const res = await postForm("/dashboard/default/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
         mode,
       });
       expect(res.status).toBe(200);
@@ -455,7 +463,7 @@ describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     for (const mode of ["bogus", "EVERY_PUSH", ""]) {
-      const res = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
+      const res = await postForm("/dashboard/default/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
         mode,
       });
       expect(res.status).toBe(400);
@@ -467,7 +475,7 @@ describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger
       expect(reviewTriggerMode(db, "mstar-inspector-mallory")).toBe("every_push");
     }
     // A missing mode field fails closed the same way.
-    const missing = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {});
+    const missing = await postForm("/dashboard/default/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {});
     expect(missing.status).toBe(400);
     expect(reviewTriggerMode(db, "mstar-inspector-mallory")).toBe("every_push");
   });
@@ -478,7 +486,7 @@ describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger
     db.raw
       .prepare("UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE slug = ?")
       .run("mstar-inspector-mallory");
-    const res = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
+    const res = await postForm("/dashboard/default/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
       mode: "every_push",
     });
     expect(res.status).toBe(200);
@@ -494,7 +502,7 @@ describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger
     const db = await seededWorld();
     for (const login of ["hubot", "ada"]) {
       const res = await postForm(
-        "/dashboard/apps/mstar-inspector-mallory/review-trigger-mode",
+        "/dashboard/default/apps/mstar-inspector-mallory/review-trigger-mode",
         `${SESSION_COOKIE}=${await sessionCookie(login)}`,
         makeEnv(db),
         { mode: "manual" },
@@ -508,7 +516,7 @@ describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger
   test("admin (non-creator) may set another creator's app", async () => {
     const db = await seededWorld();
     const res = await postForm(
-      "/dashboard/apps/mstar-inspector-ada/review-trigger-mode",
+      "/dashboard/default/apps/mstar-inspector-ada/review-trigger-mode",
       `${SESSION_COOKIE}=${await sessionCookie("octocat")}`,
       makeEnv(db),
       { mode: "open" },
@@ -522,12 +530,12 @@ describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger
     const db = await seededWorld();
     const apps = createAppsStore(db);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
-    const unknown = await postForm("/dashboard/apps/no-such-app/review-trigger-mode", cookie, makeEnv(db), {
+    const unknown = await postForm("/dashboard/default/apps/no-such-app/review-trigger-mode", cookie, makeEnv(db), {
       mode: "manual",
     });
     expect(unknown.status).toBe(404);
     await apps.softDeleteApp((await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!.id);
-    const deleted = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
+    const deleted = await postForm("/dashboard/default/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
       mode: "manual",
     });
     expect(deleted.status).toBe(404);
@@ -536,20 +544,20 @@ describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger
   test("native HTML form post keeps the pinned 302 to the App settings page", async () => {
     const db = await seededWorld();
     const res = await postForm(
-      "/dashboard/apps/mstar-inspector-mallory/review-trigger-mode",
+      "/dashboard/default/apps/mstar-inspector-mallory/review-trigger-mode",
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
       { mode: "manual" },
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-mallory/settings");
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps/mstar-inspector-mallory/settings");
     expect(reviewTriggerMode(db, "mstar-inspector-mallory")).toBe("manual");
   });
 });
 
-describe("GET /dashboard/apps/:slug/settings (SPA-owned)", () => {
-  const SETTINGS = "/dashboard/apps/mstar-inspector-mallory/settings";
+describe("GET /dashboard/default/apps/:slug/settings (SPA-owned)", () => {
+  const SETTINGS = "/dashboard/default/apps/mstar-inspector-mallory/settings";
   const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
@@ -566,75 +574,5 @@ describe("GET /dashboard/apps/:slug/settings (SPA-owned)", () => {
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
-  });
-});
-
-describe("Apps list → App settings wayfinding", () => {
-  const APPS_SOURCE = join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx");
-
-  test("each App row carries the /dashboard/apps/:slug detail link, and that route resolves as App detail", () => {
-    const source = readFileSync(APPS_SOURCE, "utf8");
-    // The link target is the detail route (App detail IA).
-    expect(source).toContain("const href = `${apiBase()}/apps/${app.slug}`;");
-    // Legacy navigation keeps the historical detail path: the base is empty
-    // of a workspace segment when the current page is not workspace-scoped.
-    expect(apiBase("/dashboard/apps")).toBe("/dashboard");
-    expect(apiBase("/dashboard/acme/apps")).toBe("/dashboard/acme");
-    expect(source).not.toContain("/dashboard/apps/${app.slug}/settings");
-    // The visible per-row destination label comes from the dictionary —
-    // detail semantics, and the settings key is retired.
-    expect(source).toContain('{t(locale, "apps.detail")}');
-    expect(t("en", "apps.detail")).toBe("Detail");
-    expect(t("zh_CN", "apps.detail")).toBe("详情");
-    expect(source).not.toContain('{t(locale, "apps.settings")}');
-    // User-visible route semantics: what the link emits is the detail
-    // surface the SPA matcher owns (slug captured, not a 404 stub). The
-    // legacy settings path is a permanent deep link onto the detail
-    // page's settings tab — one page id serves both detail paths.
-    expect(matchSpaRoute("/dashboard/apps/acme")).toEqual({
-      page: "app-detail",
-      pathname: "/dashboard/apps/acme",
-      slug: "acme",
-    });
-    expect(matchSpaRoute("/dashboard/apps/acme/settings")).toEqual({
-      page: "app-detail",
-      pathname: "/dashboard/apps/acme/settings",
-      slug: "acme",
-    });
-  });
-
-  test("the row link names its destination for assistive tech", () => {
-    const source = readFileSync(APPS_SOURCE, "utf8");
-    expect(source).toContain('aria-label={t(locale, "apps.openAria", { slug: app.slug })}');
-    expect(t("en", "apps.openAria", { slug: "acme" })).toBe("Open acme detail");
-    expect(t("zh_CN", "apps.openAria", { slug: "acme" })).toBe("打开 acme 详情");
-  });
-
-  test("the empty Apps state stays honest: composed create guidance, creation is the only path", () => {
-    const source = readFileSync(APPS_SOURCE, "utf8");
-    // EmptyState title + description copy (keys).
-    expect(source).toContain('t(locale, "apps.emptyTitle")');
-    expect(source).toContain('t(locale, "apps.emptyDescription")');
-    expect(t("en", "apps.emptyTitle")).toContain("No Apps yet");
-    expect(t("en", "apps.emptyDescription")).toContain("Create GitHub App");
-    expect(t("zh_CN", "apps.emptyTitle")).toContain("还没有 App");
-    // Creation remains the manifest-flow POST form — the same CreateAppButton
-    // component is reused as the empty-state action while the header yields
-    // its slot (one form instance on the page, never duplicated).
-    expect(source).toContain('action="/dashboard/manifest/start"');
-    expect(source).toContain("{!appsEmpty ? createAction : null}");
-    expect(source).toContain("action={createAction}");
-  });
-
-  test("loading and load-failure feedback ride the state trio", () => {
-    const source = readFileSync(APPS_SOURCE, "utf8");
-    expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
-    // Retry is wired to the page's own load function (the loaded face takes it
-    // as a callback so its markup is renderable in tests).
-    expect(source).toContain("onRetry={() => void load()}");
-    expect(source).toContain("<ErrorState locale={locale} onRetry={onRetry} />");
-    // The old text-notice faces are retired from this page.
-    expect(source).not.toContain("LoadingNotice");
-    expect(source).not.toContain("LoadFailedNotice");
   });
 });

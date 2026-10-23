@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { t } from "../../i18n";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -19,20 +19,50 @@ import { apiBase } from "../workspace-base";
 const TABLE_HEADER = "bg-(--background-200)";
 const TABLE_HEAD_LABEL = "text-xs tracking-(--typo-label-12-tracking)";
 
+/**
+ * Create eligibility for the workspace the PATH addresses, recomputed per
+ * render — the once-injected `boot.canCreateApp` snapshot goes stale on the
+ * first switcher navigation (pushState, no new document). The addressed ref
+ * matches a membership on either identifier (id or slug); a page with no
+ * ref (the legacy single-workspace mount) keeps trusting the snapshot, as
+ * does a ref no membership names (nothing better is known client-side).
+ * `workspaceRequired` (multi-workspace, no target) disables creation
+ * regardless — the deployment cannot say which workspace an App would join.
+ */
+export function canCreateAppFor(boot: SpaBoot, addressedRef: string | null): boolean {
+  if (boot.workspaceRequired === true) return false;
+  if (addressedRef === null) return boot.canCreateApp !== false;
+  const membership = boot.memberships?.find((m) => m.id === addressedRef || m.slug === addressedRef);
+  return membership === undefined ? boot.canCreateApp !== false : membership.role !== "member";
+}
+
+/**
+ * One Apps list read under the given base. The base is a parameter, not
+ * `apiBase()` inside, so the caller decides which workspace is read — the
+ * page derives it per render and a test can drive both pathnames.
+ */
+export async function loadApps(base: string): Promise<AppsPayload | null> {
+  return parseApps(await fetchJson(`${base}/api/apps`));
+}
+
 export function AppsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [payload, setPayload] = useState<AppsPayload | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  const cancelledRef = useRef(false);
-  // Boot-injected capability (I-000082): a workspace member cannot manage the
-  // App the manifest flow would create, so the action is not offered at all.
-  const canCreate = boot.canCreateApp !== false;
+  // Read per render (the MembersPage precedent): the switcher navigates with
+  // pushState + popstate, so no new document re-injects the boot — the page
+  // base must track the URL it is actually on.
+  const base = apiBase();
+  const canCreate = canCreateAppFor(boot, base === "/dashboard" ? null : base.slice("/dashboard/".length));
+  const unavailableReason =
+    boot.workspaceRequired === true
+      ? t(locale, "apps.createUnavailable.workspace")
+      : t(locale, "apps.createUnavailable.role");
 
-  async function load(): Promise<void> {
+  const load = useCallback(async (): Promise<void> => {
     setState("loading");
     try {
-      const parsed = parseApps(await fetchJson(`${apiBase()}/api/apps`));
-      if (cancelledRef.current) return;
+      const parsed = await loadApps(base);
       if (!parsed) {
         setState("error");
         return;
@@ -40,17 +70,13 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       setPayload(parsed);
       setState("ok");
     } catch {
-      if (!cancelledRef.current) setState("error");
+      setState("error");
     }
-  }
+  }, [base]);
 
   useEffect(() => {
-    cancelledRef.current = false;
     void load();
-    return () => {
-      cancelledRef.current = true;
-    };
-  }, []);
+  }, [load]);
 
   // Loading rides the shared skeleton as the page's full loading face —
   // the component's heading placeholder stands in for the real h1 (AD-582).
@@ -64,6 +90,7 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       state={state}
       payload={payload}
       canCreate={canCreate}
+      unavailableReason={unavailableReason}
       onRetry={() => void load()}
     />
   );
@@ -79,16 +106,18 @@ export function AppsView({
   state,
   payload,
   canCreate,
+  unavailableReason,
   onRetry,
 }: {
   locale: SpaBoot["locale"];
   state: "ok" | "error";
   payload: AppsPayload | null;
   canCreate: boolean;
+  unavailableReason: string;
   onRetry: () => void;
 }) {
   const appsEmpty = state === "ok" && payload !== null && payload.apps.length === 0;
-  const createAction = canCreate ? <CreateAppButton locale={locale} /> : null;
+  const createAction = <CreateAppButton locale={locale} canCreate={canCreate} reason={unavailableReason} />;
 
   return (
     <div className="flex flex-col gap-6">
@@ -104,9 +133,9 @@ export function AppsView({
       {state === "ok" && payload ? (
         appsEmpty ? (
           // Composed first-App guidance: the action reuses the exact
-          // CreateAppButton form — creation is still the only path. A member
-          // cannot run that flow (I-000082), so the card keeps the honest
-          // "no Apps yet" line and drops the instruction to create one.
+          // CreateAppButton form — creation is still the only path. The card
+          // keeps the honest "no Apps yet" line and lets the button carry the
+          // unavailable reason when this caller cannot run the flow.
           <EmptyState
             icon={<GitHubMark />}
             title={t(locale, "apps.emptyTitle")}
@@ -121,11 +150,32 @@ export function AppsView({
   );
 }
 
-function CreateAppButton({ locale }: { locale: SpaBoot["locale"] }) {
+/**
+ * The Create control. It posts under the page's own workspace prefix
+ * (`apiBase()`), so the flow lands the App in the workspace the user is
+ * looking at — the deployment-level path is only for a single-workspace
+ * deployment whose page has no ref. Unavailable creation keeps the button
+ * visible but disabled, with the reason beside it: hiding the action left the
+ * user with no explanation at all (QC high).
+ */
+function CreateAppButton({
+  locale,
+  canCreate,
+  reason,
+}: {
+  locale: SpaBoot["locale"];
+  canCreate: boolean;
+  reason: string;
+}) {
   return (
-    <form method="post" action="/dashboard/manifest/start">
-      <Button type="submit">{t(locale, "apps.create")}</Button>
-    </form>
+    <div className="flex flex-wrap items-center gap-2">
+      <form method="post" action={`${apiBase()}/manifest/start`}>
+        <Button type="submit" disabled={!canCreate}>
+          {t(locale, "apps.create")}
+        </Button>
+      </form>
+      {canCreate ? null : <p className="text-sm text-muted-foreground">{reason}</p>}
+    </div>
   );
 }
 
