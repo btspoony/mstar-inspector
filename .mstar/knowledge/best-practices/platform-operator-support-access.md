@@ -42,9 +42,12 @@ to separate the two while still allowing bounded support work, and to make every
 5. **Filter a grant list to the caller's own grant.** A read-classified endpoint that returns "the active
    grants of the workspace" hands one operator another operator's login and free-text reason. The tenant-facing
    notice keeps the full set; operator-facing reads return at most their own row.
-6. **Audit in the gate, before dispatch.** One append-only row per operator request (`support.read`,
-   `support.forbidden`, `support.denied`), written by the classification step. A handler cannot forget it
-   because it runs before the handler exists in the call path.
+6. **Audit in the gate, before dispatch.** Every request that reaches the workspace gate appends one
+   append-only row on each operator decision (`support.read`, `support.forbidden`, `support.denied`), written by
+   the classification step, so a handler added later cannot forget it. Coverage is the gate's, not the
+   deployment's: HTML shell loads (`/dashboard`, `/dashboard/<ref>/apps`) are served by `spa-dispatch` rather
+   than the gate — they are classified by the same function but write **no** row. Read "one row per operator
+   request" as "one row per operator request the gate dispatches"; shell loads are the documented gap.
 7. **Denial looks like non-existence.** An operator without a valid grant gets the same 404 as any outsider —
    no oracle that a workspace exists.
 
