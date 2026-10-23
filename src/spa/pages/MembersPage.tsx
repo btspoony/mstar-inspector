@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { MoreHorizontal } from "lucide-react";
-import { t } from "../../i18n";
+import { t, type Locale } from "../../i18n";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -132,6 +132,107 @@ export function postMemberWrite(
     case "remove":
       return postForm(`${base}/members/remove`, { userId: write.userId });
   }
+}
+
+/**
+ * The member list table, split out of the stateful page so a real row — the
+ * "Joined" cell's relative text and its absolute-stamp tooltip included —
+ * is assertable under static render (the `AppsView` precedent; the page's
+ * own state lives in `useState`, so it renders as the skeleton under SSR).
+ */
+export function MembersTable({
+  locale,
+  members,
+  viewerLogin,
+  memberRole,
+  canInvite,
+  onAction,
+}: {
+  locale: Locale;
+  members: MemberRow[];
+  viewerLogin: string | null;
+  memberRole: WorkspaceRole | null;
+  canInvite: boolean;
+  onAction: (action: PendingAction) => void;
+}) {
+  const ownerCount = members.filter((m) => m.role === "owner").length;
+  return (
+    <div className="overflow-hidden rounded-md border">
+      <Table>
+        <TableHeader className={TABLE_HEADER}>
+          <TableRow className="hover:bg-inherit">
+            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableLogin")}</TableHead>
+            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.roleLabel")}</TableHead>
+            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableJoined")}</TableHead>
+            <TableHead className={`text-right ${TABLE_HEAD_LABEL}`}>{t(locale, "members.tableActions")}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {members.map((member) => {
+            const self =
+              viewerLogin !== null && member.github_login.toLowerCase() === viewerLogin.toLowerCase();
+            // Client-side mirror of the server guards: the sole owner
+            // cannot be demoted or removed; an `admin` may only remove
+            // plain members and may not change any role.
+            // The routes remain the SSOT (conditional UPDATE/DELETE
+            // close the race); this only greys out the actions the
+            // server would refuse anyway.
+            const soleOwner = member.role === "owner" && ownerCount === 1;
+            const roleBlocked = memberRole !== "owner";
+            const protectedMember = soleOwner || (memberRole === "admin" && member.role !== "member");
+            const nextRole: "admin" | "member" = member.role === "member" ? "admin" : "member";
+            return (
+              <TableRow key={member.id}>
+                <TableCell className="font-medium">
+                  {member.github_login}
+                  {self ? (
+                    <span className="ml-2 text-muted-foreground">({t(locale, "members.you")})</span>
+                  ) : null}
+                </TableCell>
+                <TableCell>{t(locale, `members.role.${member.role}`)}</TableCell>
+                {/* Shared relative-time copy (F-07); the raw SQLite
+                    UTC stamp stays reachable as the native tooltip. */}
+                <TableCell className="text-muted-foreground tabular-nums" title={member.created_at}>
+                  {formatRelativeTime(member.created_at, locale)}
+                </TableCell>
+                <TableCell className="text-right">
+                  {self || !canInvite ? null : (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={t(locale, "members.actionsMenuLabel", { login: member.github_login })}
+                        >
+                          <MoreHorizontal />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          disabled={protectedMember || roleBlocked}
+                          onSelect={() => onAction({ kind: "role", member, nextRole })}
+                        >
+                          {t(locale, member.role === "member" ? "members.makeAdmin" : "members.makeMember")}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          disabled={protectedMember}
+                          onSelect={() => onAction({ kind: "remove", member })}
+                        >
+                          {t(locale, "members.remove")}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
 }
 
 export function MembersPage({ boot }: { boot: SpaBoot }) {
@@ -281,8 +382,6 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
     }
   }
 
-  const ownerCount = members?.filter((m) => m.role === "owner").length ?? 0;
-
   // Loading rides the shared skeleton as the page's full loading face —
   // the component's heading placeholder stands in for the real h1 (AD-582).
   // Foreground only: `load` flips to "loading" solely on the initial/retry
@@ -347,87 +446,14 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
               description={t(locale, canInvite ? "members.emptyDescription" : "members.emptyDescriptionMember")}
             />
           ) : (
-            <div className="overflow-hidden rounded-md border">
-              <Table>
-                <TableHeader className={TABLE_HEADER}>
-                  <TableRow className="hover:bg-inherit">
-                    <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableLogin")}</TableHead>
-                    <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.roleLabel")}</TableHead>
-                    <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableJoined")}</TableHead>
-                    <TableHead className={`text-right ${TABLE_HEAD_LABEL}`}>{t(locale, "members.tableActions")}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {members.map((member) => {
-                    const self =
-                      boot.login !== null && member.github_login.toLowerCase() === boot.login.toLowerCase();
-                    // Client-side mirror of the server guards: the sole owner
-                    // cannot be demoted or removed; an `admin` may only remove
-                    // plain members and may not change any role.
-                    // The routes remain the SSOT (conditional UPDATE/DELETE
-                    // close the race); this only greys out the actions the
-                    // server would refuse anyway.
-                    const soleOwner = member.role === "owner" && ownerCount === 1;
-                    const roleBlocked = memberRole !== "owner";
-                    const protectedMember = soleOwner || (memberRole === "admin" && member.role !== "member");
-                    const nextRole: "admin" | "member" = member.role === "member" ? "admin" : "member";
-                    return (
-                      <TableRow key={member.id}>
-                        <TableCell className="font-medium">
-                          {member.github_login}
-                          {self ? (
-                            <span className="ml-2 text-muted-foreground">({t(locale, "members.you")})</span>
-                          ) : null}
-                        </TableCell>
-                        <TableCell>{roleLabel(member.role)}</TableCell>
-                        {/* Shared relative-time copy (F-07); the raw SQLite
-                            UTC stamp stays reachable as the native tooltip. */}
-                        <TableCell
-                          className="text-muted-foreground tabular-nums"
-                          title={member.created_at}
-                        >
-                          {formatRelativeTime(member.created_at, locale)}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {self || !canInvite ? null : (
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button
-                                  variant="ghost"
-                                  size="icon-sm"
-                                  aria-label={t(locale, "members.actionsMenuLabel", { login: member.github_login })}
-                                >
-                                  <MoreHorizontal />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuItem
-                                  disabled={protectedMember || roleBlocked}
-                                  onSelect={() => setPending({ kind: "role", member, nextRole })}
-                                >
-                                  {t(
-                                    locale,
-                                    member.role === "member" ? "members.makeAdmin" : "members.makeMember",
-                                  )}
-                                </DropdownMenuItem>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem
-                                  variant="destructive"
-                                  disabled={protectedMember}
-                                  onSelect={() => setPending({ kind: "remove", member })}
-                                >
-                                  {t(locale, "members.remove")}
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </div>
+            <MembersTable
+              locale={locale}
+              members={members}
+              viewerLogin={boot.login}
+              memberRole={memberRole}
+              canInvite={canInvite}
+              onAction={setPending}
+            />
           )}
           {showsPendingInvites(memberRole, invites) ? (
             <section className="flex flex-col gap-2">

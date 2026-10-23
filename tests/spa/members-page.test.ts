@@ -2,14 +2,15 @@
  * Members page rebuilt on shadcn Table + invite toolbox bar +
  * confirm dialogs.
  *
- * Executed contract only: the page's read/refusal/visibility seams
+ * Executed contract: the page's read/refusal/visibility seams
  * (`loadMembersPage`, `postMemberWrite`, `inviteFailureNotice`,
- * `showsPendingInvites`) and the dictionary copy they surface. The previous
- * ui-kit / column / relative-time source pins were deleted — they red-lined
- * refactors without proving behaviour, and a component whose state lives in
- * `useState` renders as the loading skeleton under SSR, so its markup has no
- * executable face here. `tests/spa/relative-time.test.ts` keeps the Joined
- * column's helper contract.
+ * `showsPendingInvites`), the dictionary copy they surface, and the rendered
+ * member row (`MembersTable`). The previous ui-kit / column source pins were
+ * deleted — they red-lined refactors without proving behaviour, and a
+ * component whose state lives in `useState` renders as the loading skeleton
+ * under SSR, so the page itself has no executable face here. The rendered
+ * contract therefore hangs off the extracted `MembersTable`, which is the
+ * page's own markup with the state supplied.
  *
  * Every read and write hangs off the page's workspace base, and the page
  * carries pending invitations with revoke.
@@ -17,14 +18,18 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
+import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   inviteFailureNotice,
   loadMembersPage,
+  MembersTable,
   postMemberWrite,
   showsPendingInvites,
 } from "../../src/spa/pages/MembersPage";
-import type { InviteRow } from "../../src/spa/pages/data";
+import type { InviteRow, MemberRow } from "../../src/spa/pages/data";
 
 const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/MembersPage.tsx"), "utf8");
 
@@ -262,5 +267,33 @@ describe("members page shadcn rebuild", () => {
       expect(en).not.toContain("{");
       expect(zh).not.toContain("{");
     }
+  });
+});
+
+describe("members table (rendered)", () => {
+  const ROW: MemberRow = {
+    id: "u1",
+    github_login: "octocat",
+    role: "member",
+    created_at: "2026-01-02T03:04:05.678Z",
+  };
+
+  test("the Joined cell shows the relative stamp and keeps the absolute one as its tooltip", () => {
+    const html = renderToStaticMarkup(
+      createElement(MembersTable, {
+        locale: "en",
+        members: [ROW],
+        viewerLogin: "octocat",
+        memberRole: "owner",
+        canInvite: true,
+        onAction: () => {},
+      }),
+    );
+    // Both faces of the same cell: the copy a reader sees, and the exact
+    // stamp the tooltip must still expose (losing the title is the silent
+    // regression this covers).
+    expect(html).toContain(`title="${ROW.created_at}"`);
+    expect(html).toContain(formatRelativeTime(ROW.created_at, "en"));
+    expect(html).toContain(t("en", "members.tableJoined"));
   });
 });
