@@ -1846,7 +1846,10 @@ the Dockerfile cannot read the module) and derives `REVIEW_SKILL_VERSION` from
 the same source.
 
 Historical bumps, superseding chain, and digest provenance (records, not live
-values): mstar-harness **4.0.4** (2026-10-20, superseding the 4.0.2 pin, which
+values): mstar-harness **4.0.7** (2026-10-24, ref
+`db013c73255f3af1e166d15ae7c3514dc200da6b`, superseding the 4.0.4 pin;
+omp SDK 18.12.3 unchanged, engine `^4.0.7` resolved to 4.0.7);
+mstar-harness **4.0.4** (2026-10-20, ref `d58005df`, superseding the 4.0.2 pin, which
 superseded the 4.0.0 pin; omp SDK 18.12.3, engine `^4.0.4` resolved to 4.0.4);
 mstar-harness **4.0.0** (2026-10-15, superseding the 3.11.2 pin,
 which superseded the 3.10.2 pin);

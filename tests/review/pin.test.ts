@@ -31,7 +31,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
-import { OMP_SANDBOX_IMAGE_PINS } from "../../src/contracts/sandbox-images";
+import { HARNESS_VERSION, OMP_SANDBOX_IMAGE_PINS } from "../../src/contracts/sandbox-images";
 import { REVIEW_SKILL_VERSION } from "../../src/store/artifact-store";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -40,8 +40,24 @@ const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "Dockerfile");
 const DOCKERFILE = readFileSync(OMP_DOCKERFILE, "utf8");
 
 describe("sandbox image harness pin", () => {
+  test("both declared harness versions are the single HARNESS_VERSION constant", () => {
+    // The constant is the only place a bump edits; the pin fields and every
+    // downstream anchor (Dockerfile ARG, engine manifest, lock rows) read it,
+    // so one of them left behind fails a comparison below.
+    expect(OMP_SANDBOX_IMAGE_PINS.harnessVersion).toBe(HARNESS_VERSION);
+    expect(OMP_SANDBOX_IMAGE_PINS.harnessCliVersion).toBe(HARNESS_VERSION);
+  });
+
   test("Dockerfile fetches the declared harness commit", () => {
     expect(DOCKERFILE).toContain(`fetch --depth 1 origin ${OMP_SANDBOX_IMAGE_PINS.harnessRef}`);
+  });
+
+  test("Dockerfile comment pairs the declared ref with the declared tag", () => {
+    // One line carries both: a bump that moves the commit or the version
+    // alone leaves the other half stale and fails here and on the tag below.
+    const pinned = DOCKERFILE.match(/^#\s*mstar-harness plugin, pinned ref (\w+) \(tag v(\S+),/m);
+    expect(pinned).not.toBeNull();
+    expect(pinned!.slice(1)).toEqual([OMP_SANDBOX_IMAGE_PINS.harnessRef, HARNESS_VERSION]);
   });
 
   test("Dockerfile comment records the declared tag", () => {
@@ -178,6 +194,24 @@ describe("cross-side dependency parity", () => {
       expect(LOCKS.map((path) => resolvedDependency(path, dep))).toEqual([pinned, pinned]);
     });
   }
+
+  /** The `workspaces` dependency DECLARATION for `dep` — not its packages row. */
+  function declaredDependency(path: string, dep: string): string | undefined {
+    const escaped = dep.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const text = readFileSync(path, "utf8");
+    const packages = text.indexOf('\n  "packages": {');
+    if (packages < 0) throw new Error(`no packages section in ${path}`);
+    return text.slice(0, packages).match(new RegExp(`"${escaped}": "([^"]+)"`))?.[1];
+  }
+
+  test("the runner lock's engine declaration is the harness pin", () => {
+    // The resolution row above can agree while the declaration it was resolved
+    // from still names the old version — a hand-edited or stale lock then
+    // installs the old engine on the next `bun install` and the row follows,
+    // out of the pin. Both rows are declared surfaces of the same pin.
+    const runnerLock = join(REPO_ROOT, "packages", "runner", "bun.lock");
+    expect(declaredDependency(runnerLock, "@mstar-harness/engine")).toBe(HARNESS_VERSION);
+  });
 
   test("the harness engine pin also equals the declared image harness pin", () => {
     expect(runnerPkg.dependencies["@mstar-harness/engine"]).toBe(
