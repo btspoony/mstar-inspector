@@ -20,7 +20,7 @@
  * encoding stays free of provider-identity knowledge.
  *
  * Shim-free by construction: this module must stay importable from the in-image
- * runner graph (src/review only + the admitted src/contracts files) and from the
+ * runner graph (`packages/runner/src` + `packages/shared/src`) and from the
  * Worker, so it imports nothing but the zero-dependency shared credential-key
  * contract (itself admitted to the image).
  */
@@ -89,7 +89,7 @@ export function decodeCredentialPayload(raw: string): CredentialPools {
       }
       // The stored `login` api_key is handed to the SDK's config-value
       // resolver verbatim, and THAT runs any `!`-prefixed value as a shell
-      // command (src/contracts/credential-key.ts) — a transported key of this
+      // command (packages/shared/src/credential-key.ts) — a transported key of this
       // shape would be remote code execution inside the review container when
       // the runtime selects that credential (selection-dependent: the
       // resolver caches a success and backs off after a failure). Refused
