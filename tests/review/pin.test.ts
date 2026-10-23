@@ -82,12 +82,29 @@ describe("sandbox image base / tool pins", () => {
 });
 
 describe("sandbox image CLI pin", () => {
-  test("Dockerfile preinstalls @mstar-harness/cli at the declared exact pin (bun global)", () => {
+  test("Dockerfile declares the CLI pin once and installs it (bun global)", () => {
     // bun global install of the exact pin — image pinning discipline; the
-    // repo manifest range exception does NOT extend to the image.
-    expect(DOCKERFILE).toContain(
-      `bun add --global @mstar-harness/cli@${OMP_SANDBOX_IMAGE_PINS.harnessCliVersion}`,
+    // repo manifest range exception does NOT extend to the image. The ARG is
+    // the single declaration; the install line consumes it instead of
+    // restating the version, so the two cannot drift.
+    const arg = `ARG CLI_VERSION=${OMP_SANDBOX_IMAGE_PINS.harnessCliVersion}`;
+    expect(DOCKERFILE).toContain(`${arg}\n`);
+    expect(DOCKERFILE).toContain("bun add --global @mstar-harness/cli@${CLI_VERSION} ");
+    // Declaration before the layer that consumes it (docker ARG scoping).
+    expect(DOCKERFILE.indexOf(arg)).toBeLessThan(
+      DOCKERFILE.indexOf("bun add --global @mstar-harness/cli@"),
     );
+  });
+
+  test("Dockerfile carries exactly one CLI version literal", () => {
+    // Comments excluded: the harness-tag comment legitimately names the plugin
+    // tag v<version>. A second copy on an instruction line is the drift this
+    // guards — the assertion step reads the same ARG, never its own literal.
+    const instructions = DOCKERFILE.split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    const version = OMP_SANDBOX_IMAGE_PINS.harnessCliVersion.replace(/\./g, "\\.");
+    expect(instructions.match(new RegExp(`(?<![\\d.])${version}(?![\\d.])`, "g"))).toHaveLength(1);
   });
 
   test("Dockerfile puts the bun global bin on PATH for sandbox exec", () => {
@@ -208,7 +225,9 @@ describe("review skill version pin", () => {
     // component: a future bump that updates one but not the other (e.g. a
     // fetch-sha + REVIEW_SKILL_VERSION bump leaving the image CLI at the old
     // version) fails here — same drift net as the fetch-sha binding above.
-    expect(DOCKERFILE).toContain(`@mstar-harness/cli@${versionPrefix!}`);
+    // The pin's single declaration is the ARG; the install and the assertion
+    // RUN both consume `${CLI_VERSION}`.
+    expect(DOCKERFILE).toContain(`ARG CLI_VERSION=${versionPrefix!}\n`);
   });
 });
 
