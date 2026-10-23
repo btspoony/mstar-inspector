@@ -783,16 +783,21 @@ workspace's Apps page, several memberships redirect to the login's first one
 
 The mode var that chose between the two read faces (migration `0026`) is gone
 end to end: no reader, no validator, no workflow var, no dispatch input, no
-`env.production.vars` entry. A deployment that still sets it carries inert
-text — nothing reads it. The config-level rollback lever (re-deploy the same
-tag with the other mode) is removed with it, so rollback is a `git revert` of
-the commit that deleted it (§ Rollback). Nothing a running installation relied
-on is lost: the retired face served the pre-workspace route family, which
-already answered 404 under the workspace routes.
+`env.production.vars` entry. **Delete it wherever a deployment still carries
+it** — a GitHub Actions repository variable, a `.dev.vars` line, a worker
+secret — so configuration matches code. Nothing reads it, so a leftover value
+is not a supported state; the upgrade step is removal, not tolerance.
 
-The removal itself is recorded in `.changes/unreleased/deployment-mode.md`
-(including the old var's name, which no longer appears anywhere in this
-repository outside release history).
+The config-level rollback lever (re-deploy the same tag with the other mode) is
+removed with it, so rollback is a `git revert` of the commit that deleted it
+(§ Rollback). Nothing a running installation relied on is lost: the retired
+face served the pre-workspace route family, which already answered 404 under
+the workspace routes.
+
+The removal is recorded in `.changes/unreleased/deployment-mode.md`, which is
+the only place the retired name appears literally. The deploy-guard tests under
+`tests/scripts/` assemble it from fragments to assert no workflow brings it
+back, and are the reason a search may still surface those files.
 
 ## Deployment mode (`DEPLOYMENT_MODE`)
 
@@ -826,9 +831,11 @@ workflows pass `--var DEPLOYMENT_MODE:saas`; the parity lock in
 `env.production.vars`, because a deploy that lost the flag would silently fall
 back to the config value. The **top-level `vars`** declares
 `DEPLOYMENT_MODE: "self-hosted"` instead — that block is what `wrangler dev` and
-a manual staging deploy resolve, so a local instance starts self-hosted without
-any `--var`. The two values disagree on purpose; the parity lock pins each to
-its block.
+a manual **self-hosted** deploy resolve, so a local instance starts self-hosted
+without any `--var`. A manual deploy to this repo's staging must pass the flag
+too (`wrangler deploy --var "DEPLOYMENT_MODE:saas"`): without it the run takes
+the top-level `self-hosted` and serves the wrong shape. The two values disagree
+on purpose; the parity lock pins each to its block.
 
 **The container image is rebuilt, not byte-identical.** Both images are built
 from a rolling apt base, so a byte-identical rebuild is not provable. Pass a
@@ -1132,7 +1139,7 @@ settings; redeploy to change:
 
 | Name | Default | Purpose |
 |---|---|---|
-| `DEPLOYMENT_MODE` | `self-hosted` locally, `saas` in `env.production` | deployment shape (`self-hosted` \| `saas`); no default — unset/invalid fails loud. Both deploy workflows pass `saas` through `--var` |
+| `DEPLOYMENT_MODE` | `self-hosted` at top level, `saas` in `env.production` | deployment shape (`self-hosted` \| `saas`); no default — unset/invalid fails loud. Both deploy workflows pass `saas` through `--var`, which also overrides the top-level value on a manual staging deploy |
 | `REVIEW_ENABLED` | unset | **emergency brake only**: per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
 
 > **REVIEW_ENABLED cutover checklist (上线即生效 — run BEFORE the deploy that
@@ -1701,11 +1708,12 @@ relationship, not the identity itself.
 
 Operationally that means:
 
-- **No Actions variable, no `--var`, no pre-deploy gate, no post-deploy
-  assertion.** `env.production.vars` carries only `DEPLOYMENT_MODE`
-  (§ `env.production.vars` is the plain-var roster), and a bare
-  `wrangler deploy` is the supported manual path — see
-  [`README.md`](../README.md) Path A step 5 / Path B step 1.
+- **No Actions variable, no `--var` beyond the shape, no pre-deploy gate, no
+  post-deploy assertion.** `env.production.vars` carries only `DEPLOYMENT_MODE`
+  (§ `env.production.vars` is the plain-var roster). A bare `wrangler deploy`
+  is the supported manual path for a self-hosted copy (README Path A step 5);
+  this repo's staging manual path passes `wrangler deploy --var
+  "DEPLOYMENT_MODE:saas"` (README Path B step 1).
 - **Production D1 starts empty and that is fine**: the first person to sign in
   creates the first workspace. There is no self-promotion to admin and no
   first-login fallback arming to protect against.

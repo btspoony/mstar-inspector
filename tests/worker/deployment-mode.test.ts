@@ -245,8 +245,14 @@ describe("SPA boot face — the marker drives the guidance", () => {
     const db = populatedInstance();
     const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);
     const [body, sig] = marker.split(".");
-    const flipped = sig!.slice(0, -1) + (sig!.at(-1) === "A" ? "B" : "A");
-    const res = await signedInShell(db, "self-hosted", `${body}.${flipped}`);
+    // Same reasoning as tests/worker/dashboard.test.ts: the final base64url
+    // char of a 32-byte HMAC carries padding bits, so a last-char flip can
+    // decode to the identical bytes. Replace the whole signature.
+    const res = await signedInShell(
+      db,
+      "self-hosted",
+      `${body}.${"A".repeat(sig!.length)}`,
+    );
     expect(res.status).toBe(200);
     expect(bootOf(await res.text()).emptyInstance).toBeUndefined();
   });

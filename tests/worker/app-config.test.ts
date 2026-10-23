@@ -2363,12 +2363,14 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     await expect(store.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY] },
     ]);
-    // Tamper: flip the last base64 char of the stored envelope — the GCM
-    // tag fails and the consumer face throws (never swallowed).
     const row = db.raw
       .query("SELECT key_enc FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?")
       .get(app.id, CUSTOM.provider_id) as { key_enc: string };
-    const tampered = row.key_enc.slice(0, -1) + (row.key_enc.endsWith("A") ? "B" : "A");
+    // Tamper: replace the whole envelope. A last-char flip can land in the
+    // base64 padding bits and decode to the same bytes, so the GCM tag would
+    // still verify (~1/16 flake); same reasoning as
+    // tests/worker/dashboard.test.ts.
+    const tampered = "A".repeat(row.key_enc.length);
     db.raw
       .prepare("UPDATE app_custom_provider_keys SET key_enc = ? WHERE app_id = ? AND provider = ?")
       .run(tampered, app.id, CUSTOM.provider_id);

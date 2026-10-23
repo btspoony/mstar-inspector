@@ -89,6 +89,8 @@ flowchart LR
    curl https://<your-worker>/healthz   # {"ok":true,"version":"vX.Y.Z"}
    ```
 
+   `wrangler deploy` 从顶层 `vars` 取 `DEPLOYMENT_MODE`（`self-hosted`）——对单实例自托管副本是正确取值。要部署多租户副本，请显式传 `--var "DEPLOYMENT_MODE:saas"`；该变量没有默认值，未设置或拼错会在启动时明确失败。
+
    无需任何登录名名单：登录对任意 GitHub 账号开放，第一个进来的人创建工作区并成为其所有者——见 [`docs/deploy.md`](docs/deploy.md) § 6.
 
 6. 继续**下方第 3 步**（登录并注册你的 GitHub App）。
@@ -100,8 +102,10 @@ flowchart LR
    ```bash
    bun install
    bun run build:spa
-   wrangler deploy
+   wrangler deploy --var "DEPLOYMENT_MODE:saas"
    ```
+
+   `--var` 在这里不能省：workflow 每次部署都传 `saas`，而裸 `wrangler deploy` 会取 `wrangler.jsonc` 顶层的 `self-hosted`——对 staging 是错误的形态。
 
    无需 dashboard 访问名单：登录对任意 GitHub 账号开放，新账号可自行创建工作区（成为其所有者）或接受邀请——见 [`docs/deploy.md`](docs/deploy.md) § 6.
 

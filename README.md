@@ -90,6 +90,11 @@ Two deployment paths — pick the one that matches who you are:
    curl https://<your-worker>/healthz   # {"ok":true,"version":"vX.Y.Z"}
    ```
 
+   `wrangler deploy` takes `DEPLOYMENT_MODE` from the top-level `vars`
+   (`self-hosted`) — correct for a single self-hosted copy. Deploying a
+   multi-tenant copy instead? Pass `--var "DEPLOYMENT_MODE:saas"`; there is no
+   default, so an unset or misspelled value fails loud at startup.
+
    No allowlist is needed: sign-in is open to any GitHub login, and the first
    person in creates a workspace and becomes its owner — see
    [`docs/deploy.md`](docs/deploy.md) § 6.
@@ -115,8 +120,12 @@ Cloudflare resources, GitHub `production` environment, OAuth callback) is in
    ```bash
    bun install
    bun run build:spa
-   wrangler deploy
+   wrangler deploy --var "DEPLOYMENT_MODE:saas"
    ```
+
+   The `--var` is not optional here: the workflow passes `saas` on every
+   deploy, while a bare `wrangler deploy` resolves the top-level
+   `self-hosted` from `wrangler.jsonc` — the wrong shape for staging.
 
    No dashboard access list is required: sign-in is open to any GitHub login,
    and a new account creates its own workspace (becoming its owner) or accepts
