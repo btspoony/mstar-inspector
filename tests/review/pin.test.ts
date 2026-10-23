@@ -166,7 +166,13 @@ describe("runner package face", () => {
   });
 
   test("Dockerfile runner package version label mirrors packages/runner/package.json", () => {
-    expect(DOCKERFILE).toContain(`LABEL io.mstar.runner-package-version=${runnerPkg.version}`);
+    // Exact line, not a substring: `…=0.1.0-rc1` must not satisfy a `0.1.0`
+    // expectation, and the label must appear exactly once.
+    const labels = Array.from(
+      DOCKERFILE.matchAll(/^LABEL\s+io\.mstar\.runner-package-version=(\S+)\s*$/gim),
+      (match) => match[1],
+    );
+    expect(labels).toEqual([runnerPkg.version]);
   });
 });
 
