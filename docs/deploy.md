@@ -684,14 +684,46 @@ An operator of such a database should, **before** applying `0030`:
 
 ```sh
 wrangler d1 execute mstar-inspector-db --remote \
-  --command "SELECT u.id, u.github_login, u.created_at FROM users u WHERE u.created_at < '2026-10-22T11:13:45.000Z' AND NOT EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = 'default' AND wm.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM removed_logins r WHERE r.github_login = u.github_login COLLATE NOCASE)"
+  --command "SELECT u.id, u.github_login, u.created_at FROM users u WHERE u.created_at < '2026-10-22T11:13:45.000Z' AND u.role IN ('admin', 'member') AND NOT EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = 'default' AND wm.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM removed_logins r WHERE r.github_login = u.github_login COLLATE NOCASE)"
 ```
 
-Every row that should **not** be a member is a login this branch removed from
-the members page; write its tombstone first (`INSERT INTO removed_logins
-(github_login, removed_at) VALUES (?, ?)`) so the cutover skips it. Then apply,
-and afterwards remove any member the migration still restored on purpose
-(the audited members-page removal, which does not write a tombstone).
+That is `0030`'s own `SELECT`: the same cutover stamp, the same `role` filter
+and the same two `NOT EXISTS` guards, so it returns exactly the rows
+the migration would consider inserting. They fall into two groups, and **only
+the second one needs action**:
+
+- **Backfill targets — nothing to do.** A pre-cutover login that never reached
+  `default`: an interrupted earlier backfill, or a database where the
+  membership half never ran. `0030` inserts it, which is the intended outcome.
+- **Members-page removals — tombstone first.** A login an owner removed from
+  the members page on this database. That removal deleted the membership row
+  and wrote no `removed_logins` record, so it is indistinguishable from the
+  group above and the migration would re-add it.
+
+Nothing in the database separates the two groups — that absence *is* the blind
+spot. Decide from your own history instead: ask the owners which logins they
+removed from the members page on this database. The members page is the only
+path that drops a membership without writing a tombstone, so a pre-cutover
+login they remember removing is the row to tombstone. Do it for **only** those
+logins:
+
+```sh
+wrangler d1 execute mstar-inspector-db --remote \
+  --command "INSERT INTO removed_logins (github_login, removed_at) VALUES ('<login>', '<ISO-8601 UTC>')"
+```
+
+Know the blast radius before you write one: `removed_logins` has **no
+workspace column** and matches `github_login` case-insensitively, so a row
+blocks **every** workspace's invite of that login on this deployment, not just
+`default`'s, and it blocks the login's next sign-in if its `users` row is
+already gone. An existing `users` row and existing memberships keep working,
+but no owner can undo the record in-product — the invite form refuses with
+`invite.login_removed` and points at a deployment operator, and the only code
+path that clears a tombstone (`createUser`) has no production caller. For a
+login whose row was already deleted, that removal is effectively permanent.
+
+Then apply. Nothing needs removing afterwards: anything the migration restores
+was a login you deliberately left un-tombstoned in the step above.
 
 This is a one-time effect, not a standing hole: the ledger applies `0030` once
 per database. A database that has already applied it is unaffected, and a

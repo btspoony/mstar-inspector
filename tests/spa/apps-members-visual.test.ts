@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
-import { AppsList, AppsView } from "../../src/spa/pages/AppsPage";
+import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
 import { matchSpaRoute } from "../../src/spa/routes";
 import { withLocation } from "./browser-stub";
 
@@ -317,6 +317,23 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
       expect(html, `apps=${apps}`).toContain("manifest/start");
     }
     expect(renderFace(0)).toContain(t("en", "apps.emptyTitle"));
+    // The guidance sentence rides the rendered face, not just the dictionary:
+    // a create-capable viewer is told what the first App unlocks.
+    expect(renderFace(0)).toContain(t("en", "apps.emptyDescription"));
+  });
+
+  test("the Apps list loading face is the shared table skeleton", () => {
+    // The page's own first face: `state` starts at "loading" and the effect
+    // never runs under SSR, so this renders exactly the gate a real first
+    // paint shows. The table idiom (not cards/forms) is the page's shape.
+    const html = withLocation("/dashboard/acme/apps", () =>
+      renderToStaticMarkup(
+        createElement(AppsPage, { boot: { locale: "en", login: "mallory", name: "Mallory" } }),
+      ),
+    );
+    expect(html).toContain('data-slot="skeleton-table"');
+    expect(html).not.toContain('data-slot="skeleton-cards"');
+    expect(html).not.toContain('data-slot="skeleton-forms"');
   });
 
   test("load failure renders the composed error with the retry affordance", () => {
