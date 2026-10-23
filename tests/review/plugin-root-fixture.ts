@@ -59,5 +59,5 @@ writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "code-reviewer.md"), "# fixtur
 writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "frontend-dev.md"), "# fixture agent: frontend-dev\n");
 writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "fullstack-dev.md"), "# fixture agent: fullstack-dev\n");
 
-// Inject before src/review/session.ts evaluates HARNESS_PLUGIN_ROOT.
+// Inject before packages/runner/src/runtime-omp.ts evaluates HARNESS_PLUGIN_ROOT.
 process.env[HARNESS_ROOT_ENV] = PLUGIN_ROOT_FIXTURE;

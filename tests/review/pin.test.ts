@@ -17,11 +17,13 @@
  * `bun install --frozen-lockfile` in the image build.
  *
  * These tests fail if any Dockerfile pin drifts off the declared value, if the
- * manifest range or the lockfile resolution drifts, if the image CLI install
- * drifts off the exact pin, loses its PATH exposure, or desyncs from the
- * `REVIEW_SKILL_VERSION` prefix — or if the fixture plugin root stops
- * mirroring the pinned layout (`commands/amazing-pr-review.md` +
- * `skills/mstar-audit`).
+ * manifest range or the lockfile resolution drifts, if the two surfaces'
+ * shared dependencies (engine, omp SDK) resolve to different versions, if the
+ * image CLI install drifts off the exact pin, loses its PATH exposure, or
+ * desyncs from the `REVIEW_SKILL_VERSION` prefix — or if the fixture plugin
+ * root stops mirroring the pinned layout (`commands/amazing-pr-review.md` +
+ * `skills/mstar-audit`). Transitive drift between the two lockfiles is a
+ * separate, allowlisted check: tests/review/lock-drift.test.ts.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -131,25 +133,39 @@ describe("engine dependency pin", () => {
   });
 });
 
-describe("cross-side engine parity", () => {
+describe("cross-side dependency parity", () => {
   // The root workspace (Worker) and the runner package install their own
-  // lockfiles; the image installs the CLI at the same version. All three must
-  // resolve the SAME engine — otherwise the in-image runner runs against a
-  // different harness than the repo's tests and the image pin.
-  test("root bun.lock, runner bun.lock and harnessVersion agree", () => {
-    const resolved = [
-      join(REPO_ROOT, "bun.lock"),
-      join(REPO_ROOT, "packages", "runner", "bun.lock"),
-    ].map(
-      (path) =>
-        readFileSync(path, "utf8").match(
-          /"@mstar-harness\/engine": \["@mstar-harness\/engine@([^"]+)"/,
-        )?.[1],
+  // lockfiles; the image ships the runner's resolution. Both dependencies that
+  // exist on BOTH surfaces must resolve to the same version — otherwise the
+  // in-image runner runs against a different harness/omp SDK than the repo's
+  // tests, and a bump that updates one side's manifest + lock passes CI green.
+  // The runner manifest pin is the expected value: the image installs from it
+  // (`bun install --frozen-lockfile`), and the root side must not drift off it.
+  const runnerPkg = JSON.parse(
+    readFileSync(join(REPO_ROOT, "packages", "runner", "package.json"), "utf8"),
+  ) as { dependencies: Record<string, string> };
+  const LOCKS = [join(REPO_ROOT, "bun.lock"), join(REPO_ROOT, "packages", "runner", "bun.lock")];
+
+  /** Resolve version of a DEPENDENCY (not a nested `parent/dep` packages row). */
+  function resolvedDependency(path: string, dep: string): string | undefined {
+    const escaped = dep.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return readFileSync(path, "utf8").match(new RegExp(`"${escaped}": \\["${escaped}@([^"]+)"`))?.[1];
+  }
+
+  const PARITY_DEPS = ["@mstar-harness/engine", "@oh-my-pi/pi-coding-agent"] as const;
+
+  for (const dep of PARITY_DEPS) {
+    test(`${dep} resolves to the runner manifest pin in both lockfiles`, () => {
+      const pinned = runnerPkg.dependencies[dep];
+      expect(pinned).toBeDefined();
+      expect(LOCKS.map((path) => resolvedDependency(path, dep))).toEqual([pinned, pinned]);
+    });
+  }
+
+  test("the harness engine pin also equals the declared image harness pin", () => {
+    expect(runnerPkg.dependencies["@mstar-harness/engine"]).toBe(
+      OMP_SANDBOX_IMAGE_PINS.harnessVersion,
     );
-    expect(resolved).toEqual([
-      OMP_SANDBOX_IMAGE_PINS.harnessVersion,
-      OMP_SANDBOX_IMAGE_PINS.harnessVersion,
-    ]);
   });
 });
 
