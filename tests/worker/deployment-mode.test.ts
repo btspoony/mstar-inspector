@@ -245,7 +245,10 @@ describe("SPA boot face — the marker drives the guidance", () => {
     const db = populatedInstance();
     const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);
     const [body, sig] = marker.split(".");
-    const flipped = sig!.slice(0, -1) + (sig!.at(-1) === "A" ? "B" : "A");
+    // Mutate the FIRST character: the last base64url char carries spare low
+    // bits that a decoder may discard, so flipping it can decode to the same
+    // signature and the tamper would go unnoticed.
+    const flipped = (sig!.at(0) === "A" ? "B" : "A") + sig!.slice(1);
     const res = await signedInShell(db, "self-hosted", `${body}.${flipped}`);
     expect(res.status).toBe(200);
     expect(bootOf(await res.text()).emptyInstance).toBeUndefined();
