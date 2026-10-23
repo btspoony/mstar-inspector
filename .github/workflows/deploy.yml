@@ -133,8 +133,8 @@ jobs:
         id: deploy
         shell: bash
         run: |
-          # keep_vars: true in wrangler.jsonc preserves the dashboard-managed
-          # plaintext var (REVIEW_ENABLED).
+          # keep_vars: true in wrangler.jsonc preserves dashboard-managed
+          # plaintext vars (e.g. REVIEW_LEVEL) across this deploy.
           # DEPLOYMENT_MODE is the deployment shape, not a rollout switch: the
           # staging instance is a SaaS deployment (`saas`), so the empty-instance
           # first-login story never shows here. See docs/deploy.md § Deployment mode.

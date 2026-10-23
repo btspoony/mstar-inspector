@@ -25,7 +25,7 @@ later analysis.
 - **Structured results** — reviews emit a `mstar.review/v1` envelope (verdict + classified findings) stored in D1, so dedup, recurrence, and health analytics are possible later
 - **Retained finding lifecycle** — unresolved findings survive across rounds: each round re-verifies them against the current code and discussion, reports the outcome in the same overall comment, and automatically resolves only the Inspector-owned review threads it can prove are its own and positively fixed (a finding's *addressed* disposition is never equated with a *resolved* GitHub thread)
 - **Per-App trigger modes** — each App picks when reviews auto-start on its settings page: `open` (first open only), `every_push` (default — open, push, reopen) or `manual` (never auto); in every mode a PR comment that @mentions the App's bot (`@your-app-slug[bot]`) from the PR author or the repo owner (re-)starts a review
-- **Fail-closed by design** — the global kill-switch blocks new reviews (including their model runs), publications and line-comment creation; only the bounded [recovery exceptions](docs/deploy.md#lifecycle-recovery-7111) may still finish already-authorized work, and only for an otherwise active App. Every App must bring its own provider keys and model chain: a misconfigured App's reviews fail loudly, never on someone else's credentials
+- **Fail-closed by design** — a paused App blocks new reviews (including their model runs), publications and line-comment creation; only the bounded [recovery exceptions](docs/deploy.md#lifecycle-recovery-7111) may still finish already-authorized work, and only for an otherwise active App. Every App must bring its own provider keys and model chain: a misconfigured App's reviews fail loudly, never on someone else's credentials
 
 ## Architecture
 
@@ -152,7 +152,7 @@ Cloudflare resources, GitHub `production` environment, OAuth callback) is in
 
 4. **Configure the App** — on the dashboard Settings page for the App, add the provider API key(s) the review model needs (BYOK, encrypted in D1) and a model chain. An App without these fails its reviews closed — see [Per-App configuration](#per-app-configuration).
 
-5. **Enable reviews and open a PR** — reviews are on per App by default (the dashboard Pause/Resume switch is the control; the Worker var `REVIEW_ENABLED` is an emergency brake that stops ALL reviews only when set to exactly `"false"`), then open or update a PR in a repo where the App is installed.
+5. **Enable reviews and open a PR** — reviews are on per App by default (the dashboard Pause/Resume switch is the only review control), then open or update a PR in a repo where the App is installed.
 
    The review runs in a sandbox container and its result appears as one comment on the PR (upserted — no comment spam across force-pushes).
 
@@ -192,7 +192,7 @@ Everything a review needs is configured **per App** on the dashboard Settings pa
 
 ## Operations
 
-- **Emergency brake**: per-App `review_enabled` (dashboard Pause/Resume) is the primary review control. The Worker var `REVIEW_ENABLED` stops ALL reviews platform-wide only when set to exactly `"false"` (case-sensitive, untrimmed); unset / `""` / `"true"` / other → per-App governs. Leave it unset.
+- **Review control**: per-App `review_enabled` (dashboard Pause/Resume) is the only review switch — there is no deployment-wide brake. Pausing an App answers 2xx with zero enqueue while the webhook stays healthy.
 - **Deploys are automated on this repo**: merging to `main` runs the [Deploy workflow](.github/workflows/deploy.yml) — secrets injection, D1 migrations, `wrangler deploy`, post-deploy smoke, and the image-digest record. A failed run stops red (no auto-rollback); see [`docs/deploy.md`](docs/deploy.md) for failure semantics and the manual rollback path. Self-hosting your own copy? You deploy manually (or wire your own pipeline) — see [Path A](#path-a--deploy-your-own-copy-pinned-release).
 - **Releases are versioned**: a release is cut by merging a `release vX.Y.Z` PR, which tags the release and publishes a GitHub Release with bilingual changelog and deploy evidence — and for a non-prerelease tag the Release workflow **dispatches** the production deploy to `https://inspector.mstar.page` (explicitly: a Release created with the workflow's `GITHUB_TOKEN` triggers no `release: published` run, so the dispatch is the normal path — a Release published by hand deploys through that retained trigger, whose job-level tag guard skips a prerelease tag; the release chain never dispatches a prerelease, while a manual dispatch on a tag ref — the bring-up/rollback door — may deploy one) — see [`docs/release.md`](docs/release.md) and the [Releases page](https://github.com/btspoony/mstar-inspector/releases).
 - **Secrets inventory, deploy steps, rollback, and the full Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md).

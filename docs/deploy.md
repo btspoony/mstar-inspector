@@ -431,13 +431,13 @@ and **rejects it inside an environment block**
 automated `wrangler deploy --env production` wipes dashboard-set plain vars.
 The value is therefore part of the config: changing it means editing
 `env.production.vars` and redeploying.
-`REVIEW_ENABLED` stays unset — per-App Pause/Resume is the review control — and
-`REVIEW_LEVEL` (the review tier — `quick`/`default`/`deep`) is likewise unset and
-configured nowhere. The same `keep_vars` limitation applies to both: a
-`REVIEW_ENABLED=false` or a `REVIEW_LEVEL` set on the production Worker from the
-dashboard is wiped by the next `wrangler deploy --env production`, so neither
-can be relied on until it is declared in `env.production.vars` and redeployed.
-Per-App Pause/Resume is the primary review control and is unaffected
+The review tier `REVIEW_LEVEL` (`quick`/`default`/`deep`) is unset and
+configured nowhere, and the same `keep_vars` limitation applies to it: a
+`REVIEW_LEVEL` set on the production Worker from the dashboard is wiped by the
+next `wrangler deploy --env production`, so it cannot be relied on until it is
+declared in `env.production.vars` and redeployed. Review control is not a plain
+var at all — per-App `github_apps.review_enabled` (dashboard Pause/Resume) is
+the only switch and lives in D1, unaffected by that limitation
 (`.env.example`).
 
 Sign-in itself needs no plain var: it is open to any GitHub login (§ 6).
@@ -1134,30 +1134,17 @@ review container from the App's config only (AL-24-5: the
 was retired with the global fallback — an App missing its chain or a chain
 provider's key fails its reviews closed).
 
-Plain vars — `wrangler.jsonc` `vars` or the dashboard's Worker variable
-settings; redeploy to change:
+Plain vars — `wrangler.jsonc` `vars` / `env.production.vars`; redeploy to change:
 
 | Name | Default | Purpose |
 |---|---|---|
 | `DEPLOYMENT_MODE` | `self-hosted` at top level, `saas` in `env.production` | deployment shape (`self-hosted` \| `saas`); no default — unset/invalid fails loud. Both deploy workflows pass `saas` through `--var`, which also overrides the top-level value on a manual staging deploy |
-| `REVIEW_ENABLED` | unset | **emergency brake only**: per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
 
-> **REVIEW_ENABLED cutover checklist (上线即生效 — run BEFORE the deploy that
-> flips the semantics; the semantic inversion takes effect the moment the Worker lands):**
->
-> 1. `wrangler d1 execute mstar-inspector-db --remote --command "SELECT slug, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"`
-> 2. Confirm each App's state matches operational intent: a `review_enabled=1`
->    App will **immediately review for real** on a live Worker with unset
->    `REVIEW_ENABLED`; any App that must not review yet must be paused
->    (`review_enabled=0`) or disabled first.
-> 3. Confirm the live Worker env: set `REVIEW_ENABLED=false` only for an
->    emergency all-stop; otherwise leave it unset. The old `.env.example`
->    empty value no longer means "everything off" after this deploy.
-> 4. Post-deploy spot check: an installed App with `review_enabled=1` opening /
->    updating a PR should enqueue; a paused App still answers 2xx with zero
->    enqueue.
-> 5. Spot-check the dashboard: no `REVIEW_ENABLED` copy on any page; the
->    Pause/Resume switch is the only review control.
+Review control is per App, not a plain var: `github_apps.review_enabled`
+(dashboard Pause/Resume) is the only switch. An App with `review_enabled=1`
+reviews for real on a live Worker, so pause any App that must not review yet
+(`review_enabled=0`) before deploying; a paused App still answers 2xx with zero
+enqueue.
 
 #### GitHub App permissions (fresh-App contract)
 
@@ -1437,9 +1424,9 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
      "SELECT COUNT(*) AS n FROM review_failures"
    ```
    `review_failures` must be present and the count queryable.
-3. **End-to-end review (v0.6 `modelOverrides` pin)** — with
-   `REVIEW_ENABLED` unset (or any value except the exact `"false"` — the
-   emergency brake), open or update a test PR on an installed repo and
+3. **End-to-end review (v0.6 `modelOverrides` pin)** — with the App's
+   `review_enabled` on (the only review control; a paused App ignores every
+   webhook), open or update a test PR on an installed repo and
    confirm the review comment lands (the App's trigger mode must cover the
    event — the default `every_push` auto-triggers on open/update; from any
    mode, a PR comment @mentioning the App's bot forces a run —
@@ -1594,7 +1581,7 @@ or when deliveries look dead):
 
 | Check | Where | Healthy state |
 |---|---|---|
-| Emergency brake | Worker env var `REVIEW_ENABLED` | unset — only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews; check per-App `review_enabled` first, brake second, but note the brake return precedes classification and delivery recording, so a zero-rows state can mean brake rather than GitHub-side delivery death |
+| Review switch | Dashboard App settings / `github_apps.review_enabled` | On (`1`) for an App that should review. A paused App (`0`) ignores every verified delivery with 2xx and records `paused`/`ignored` rather than `ok` — this is the ONLY review control |
 | Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<slug>` — the per-App route |
 | Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
 | Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
@@ -1608,10 +1595,9 @@ mismatch (secret drift); 400 = malformed payload; 500 = the App's stored
 secret is missing/empty/default. Pre-classify failures (unknown/disabled
 slug, decrypt failure) record NO row — they surface in the Worker logs, not
 the panel. No rows at all = GitHub is not posting (URL wrong, App suspended,
-the event never fired, or the emergency brake is pulled — the exact
-`REVIEW_ENABLED=false`). Confirm the per-App row first (`review_enabled`
-matches operational intent and the App is active), the brake second, per
-the checklist above.
+or the event never fired). Confirm the per-App row (`review_enabled`
+matches operational intent and the App is active); a paused App records rows,
+so zero rows is never a pause.
 
 ### 4. R1 pin: reviews.model vs configured chain head
 
@@ -1635,8 +1621,8 @@ runner evidence, not the column.
 1. **Configure the chain** — on the App's settings page, set **Model chain**
    to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
    and save. The head (the first selector) is what the column must show.
-2. **Real PR** — with `REVIEW_ENABLED` unset (any value except the exact
-   `"false"` — the emergency brake), open or update a PR on an installed
+2. **Real PR** — with that App's `review_enabled` on (the only review
+   control), open or update a PR on an installed
    repo of that App (default `every_push` mode auto-triggers; from any
    mode, a PR comment @mentioning the App's bot works too —
    § Review triggers (per App)).
@@ -1717,8 +1703,9 @@ Operationally that means:
 - **Production D1 starts empty and that is fine**: the first person to sign in
   creates the first workspace. There is no self-promotion to admin and no
   first-login fallback arming to protect against.
-- **`keep_vars: true` in `wrangler.jsonc`** still preserves
-  `REVIEW_ENABLED` across deploys.
+- **`keep_vars: true` in `wrangler.jsonc`** still preserves dashboard-managed
+  plaintext vars such as `REVIEW_LEVEL` across deploys. Review control is not
+  one of them: per-App `review_enabled` lives in D1.
 
 ## Rollback
 
@@ -1911,8 +1898,8 @@ In every mode, a PR comment that @mentions the App's bot — `@<slug>` or
 the canonical `@<slug>[bot]`, matched as a standalone token —
 (re-)starts a review when the commenter is the PR author or the
 repository owner (bot-sender comments are ignored; anyone else gets a
-structured warn). The per-App pause (`review_enabled`) and the
-`REVIEW_ENABLED` emergency brake still govern every trigger path.
+structured warn). The per-App pause (`review_enabled`) governs every trigger
+path — it is the only review control.
 Operator note: the structured-log `event` label for comment-triggered
 reviews retires `review_command` → `issue_comment`; operator-saved log
 filters keyed on the old label stop matching after deploy.
@@ -1991,7 +1978,8 @@ per exact `(app_id, installation_id)` pair; recovery distinguishes the reasons:
   proceeds once the operator restores the mapping or corrects the App's
   credentials.
 
-Pause/kill-switch stops new reviews, publications and line-comment creation.
+Pause (per-App `review_enabled = 0`) stops new reviews, publications and
+line-comment creation.
 The bounded exceptions — local apply of already-confirmed publications,
 read-only proof discovery, and previously-authorized resolution retries —
 continue only for an **otherwise active** exact App; a disabled, deleted,
