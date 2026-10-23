@@ -38,10 +38,12 @@
 #
 # Build context: repo root (wrangler containers `images.sandbox.build_context`), so
 # the Dockerfile COPYs the runner package (manifest + frozen lockfile), the two
-# in-image package source trees, and the runner's verify script:
+# in-image package source trees, the runner's verify script, and this directory's
+# CLI-shim assertion:
 #   packages/runner/{package.json,bun.lock}
 #   packages/{shared,runner}/src
 #   packages/runner/verify-synthesis.sh
+#   sandbox-image/{verify-cli-shim.sh,verify-cli-lock.sh,cli-global/{package.json,bun.lock}}
 # A repo-root .dockerignore keeps the context lean (node_modules and tests excluded).
 
 # Sandbox SDK 1.0: the 0.12 `FROM docker.io/cloudflare/sandbox:<ver>` base is
@@ -90,7 +92,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref d58005dff66d2edca420624fc6ba5ee4d4d38e32 (tag v4.0.4, bumped 2026-10-20).
+# mstar-harness plugin, pinned ref db013c73255f3af1e166d15ae7c3514dc200da6b (tag v4.0.7, bumped 2026-10-24).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -101,9 +103,16 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin d58005dff66d2edca420624fc6ba5ee4d4d38e32 \
+    && git -C /opt/mstar-harness fetch --depth 1 origin db013c73255f3af1e166d15ae7c3514dc200da6b \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
+    && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
+# The build proves the pinned tree serves the review flow it is pinned for:
+# `verify-seat-supervision.sh` asserts the cloned pr-review reference carries
+# `## Seat supervision`, naming the checked-out commit on failure.
+# COPYed below the clone layer so editing the script never invalidates it.
+COPY sandbox-image/verify-seat-supervision.sh /opt/verify-seat-supervision.sh
+RUN sh /opt/verify-seat-supervision.sh
 
 # mstar-harness CLI preinstall: CONTAINER-level availability
 # per user instruction (2026-09-06) — NOT a review-session mechanism. Review
@@ -112,16 +121,47 @@ RUN git init /opt/mstar-harness \
 # canNOT invoke the `mstar` CLI today; absent a wired invocation path, review
 # behavior is unchanged (legacy, non-CLI). Wiring a sanctioned session
 # toolcall path is a tracked follow-up — no such mechanism
-# exists in this image. Exact pin `@mstar-harness/cli@4.0.4`: image pinning
-# discipline — the repo manifest `^4.0.4` exception does NOT extend to the
-# image. The CLI dist ships `#!/usr/bin/env node` (observed) and this image
+# exists in this image. Exact CLI pin: image pinning
+# discipline — the repo manifest `^` range exception does NOT extend to the
+# image; the version lives only in the committed global-install manifest
+# `sandbox-image/cli-global/package.json`, whose exact pin equals
+# `HARNESS_VERSION` (asserted by tests/review/pin.test.ts). The CLI's OWN
+# dependency tree is pinned by the committed `bun.lock` beside it: `bun add
+# --global` re-resolved those caret ranges on every build (I-000009), while
+# `bun install --frozen-lockfile` replays the recorded, integrity-hashed set
+# and FAILS on any lock-external change instead of installing something new.
+# There is no `bun install --global` in bun 1.4.0, so the replay targets the
+# global install dir directly and the bins are linked onto PATH by hand.
+#
+# The CLI dist ships `#!/usr/bin/env node` (observed) and this image
 # ships no node, so the build rewrites the installed shim to
 # `#!/usr/bin/env bun` — the Bun 1.4.0 installed above executes it directly,
 # no node is added. The global bin dir is put on PATH so sandbox exec
 # resolves the `mstar` shim.
-RUN bun add --global @mstar-harness/cli@4.0.4 \
+#
+# The build PROVES both facts instead of expecting them: `verify-cli-shim.sh`
+# (sandbox-image/verify-cli-shim.sh) reads the resolved shim's first line and
+# runs it, failing the build on a shebang regression or a version drift. Its
+# expected version is read from the manifest the install just consumed, so the
+# assertion cannot drift from the pin.
+COPY sandbox-image/cli-global/package.json sandbox-image/cli-global/bun.lock /root/.bun/install/global/
+RUN cd /root/.bun/install/global \
+    && bun install --frozen-lockfile --production \
+    && mkdir -p /root/.bun/bin \
+    && ln -sf ../install/global/node_modules/.bin/mstar /root/.bun/bin/mstar \
+    && ln -sf ../install/global/node_modules/.bin/mstar-harness /root/.bun/bin/mstar-harness \
     && sed -i --follow-symlinks '1s|.*|#!/usr/bin/env bun|' /root/.bun/bin/mstar
+# The installed tree must BE the locked set: a stale/partial layer or a lock
+# edited after resolution would install "cleanly" while shipping versions the
+# lock never named. COPYed below the install layer so editing the script never
+# re-resolves anything; the check itself runs against the tree just installed.
+COPY sandbox-image/verify-cli-lock.sh /opt/verify-cli-lock.sh
+RUN sh /opt/verify-cli-lock.sh
 ENV PATH="/root/.bun/bin:${PATH}"
+# The assertion script is COPYed below the install/PATH layer so editing it
+# never invalidates the network install layer; the check stays adjacent to it.
+COPY sandbox-image/verify-cli-shim.sh /opt/verify-cli-shim.sh
+RUN sh /opt/verify-cli-shim.sh
 
 # omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (no baked
 # models.yml is an App-configuration artifact). The in-image runner

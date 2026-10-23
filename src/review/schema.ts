@@ -17,16 +17,21 @@
  * critical|warning|suggestion|info) is rejected on the write path: an M1
  * document fails the required `schema: "mstar.review/v1"` literal and the
  * verdict/mergeClass enums. A stray M1 `severity` KEY is REJECTED (never
- * silently stripped) before zod: `validateMstarReviewV1` runs on the parsed
- * JSON first (it fails findings[].severity with `review.inspector-vocab`),
- * and the top-level stray key — the one position the engine does not check —
- * is banned here with the same `review.inspector-vocab` code (mapping spec
- * §4.2: parse/validate failure → no post, no insert).
+ * silently stripped) before zod. The two inspector checks straddle the engine
+ * gate: the top-level `severity` ban runs BEFORE `validateMstarReviewV1`, so
+ * it keeps `review.inspector-vocab` instead of the engine's generic
+ * unknown-key report; the engine gate itself fails findings[].severity with
+ * `review.inspector-vocab`; and the unknown finding-key check
+ * (`findUnknownFindingKey`) runs AFTER the gate, so it cannot mask that code
+ * (mapping spec §4.2: parse/validate failure → no post, no insert).
  *
- * Unknown keys are stripped (zod default), required keys stay required, and
- * file_path / line_start / line_end are OPTIONAL and nullable (envelope
- * contract: a finding's location is optional). title and body are required
- * non-empty strings.
+ * The engine 4.0.7 envelope is CLOSED: `validateMstarReviewV1` refuses every
+ * top-level key outside the envelope with `review.unknown-key`. Its findings
+ * are not key-checked by the engine, so unknown finding keys are refused here
+ * with the same code (`findUnknownFindingKey`) instead of being dropped
+ * silently. Required keys stay required, and file_path / line_start /
+ * line_end are OPTIONAL and nullable (envelope contract: a finding's location
+ * is optional). title and body are required non-empty strings.
  */
 
 import {
@@ -72,6 +77,25 @@ const findingSchema = z.object({
   body: z.string().refine((body) => body.trim() !== "", "body must be a non-empty string"),
   fingerprint_hint: z.string().optional(),
 });
+
+const FINDING_KEYS = new Set(Object.keys(findingSchema.shape));
+
+/**
+ * First `findings[i].<key>` outside the finding schema, or null. The engine
+ * 4.0.7 unknown-key gate covers the envelope and the tally but not findings;
+ * this keeps an unknown finding key from being dropped silently.
+ */
+function findUnknownFindingKey(doc: unknown): string | null {
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return null;
+  const findings = (doc as Record<string, unknown>).findings;
+  if (!Array.isArray(findings)) return null;
+  for (const [index, finding] of findings.entries()) {
+    if (typeof finding !== "object" || finding === null || Array.isArray(finding)) continue;
+    const key = Object.keys(finding).find((candidate) => !FINDING_KEYS.has(candidate));
+    if (key !== undefined) return `findings[${index}].${key}`;
+  }
+  return null;
+}
 
 /** Mirror of the engine `PrTallyResult` shape (what `computePrTally` produces). */
 const tallySchema = z.object({
@@ -285,12 +309,16 @@ function extractBraces(text: string): string | null {
  * → validate. Fallback extraction only runs when JSON.parse throws; the
  * FIRST successful parse is validated once and that result is returned — a
  * parsed non-object root (e.g. an array) is rejected without inner-object
- * recovery. Validation is engine-first (mapping spec §4.2): the parsed JSON
- * goes through the engine `validateMstarReviewV1` gate BEFORE zod strips
- * unknown keys, so a residual M1 `severity` key (top-level or per-finding)
- * is rejected with `review.inspector-vocab` instead of being silently
- * dropped; zod then narrows types (int line numbers, tally consistency,
- * incomplete presence/agreement).
+ * recovery. Checks run in this order, and the first failure wins: the
+ * top-level M1 `severity` ban → the engine `validateMstarReviewV1` gate →
+ * `findUnknownFindingKey` → zod (int line numbers, tally consistency,
+ * incomplete presence/agreement). The severity ban runs BEFORE the gate so a
+ * top-level M1 key keeps `review.inspector-vocab` instead of the engine's
+ * generic unknown-key report; the gate itself fails findings[].severity with
+ * that same vocab code and refuses unknown envelope/tally keys with
+ * `review.unknown-key`; the finding-key check runs AFTER the gate so it
+ * cannot mask that code, and refuses unknown finding keys with the same code
+ * instead of dropping them silently.
  * Any failure returns `{ ok: false, error }` and never throws. An
  * M1-shaped document (no `schema` literal, M1 verdict/severity vocab) fails
  * here — it is never posted or persisted.
@@ -315,11 +343,10 @@ export function parseReviewOutput(
     } catch {
       continue;
     }
-    // Reject residual M1 vocab BEFORE zod strips unknown keys: a stray
-    // `severity` key must fail, never be silently dropped. The engine gate
-    // covers findings[].severity; the top-level stray key is the one
-    // position the engine does not check, so it is banned here with the
-    // same `review.inspector-vocab` code.
+    // A stray M1 `severity` key must fail with its specific vocab code, never
+    // fall through to zod or the engine's generic unknown-key report. The
+    // engine gate fails findings[].severity itself; the top-level key is
+    // checked here first so it keeps `review.inspector-vocab` too.
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
       if ((parsed as Record<string, unknown>).severity !== undefined) {
         return {
@@ -335,6 +362,17 @@ export function parseReviewOutput(
       return {
         ok: false,
         error: gate.violations.map((v) => `${v.code}: ${v.message}`).join("; "),
+      };
+    }
+    // Runs after the engine gate so findings[].severity keeps its specific
+    // `review.inspector-vocab` code rather than the generic unknown-key one.
+    const unknownFindingKey = findUnknownFindingKey(parsed);
+    if (unknownFindingKey !== null) {
+      return {
+        ok: false,
+        error:
+          `review.unknown-key: unknown key "${unknownFindingKey}" is not part of a review finding - ` +
+          `accepted keys: ${[...FINDING_KEYS].join(", ")}`,
       };
     }
     const result = outputSchema.safeParse(parsed);
