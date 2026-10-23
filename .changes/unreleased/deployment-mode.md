@@ -30,15 +30,19 @@ category: Changed
   a normal deploy: the run's ref identity is asserted before every
   deploy-capable step (checked-out `HEAD` on staging, `refs/tags/<tag>^{commit}`
   on production, so a moved tag/branch can never deploy), migrations and the
-  idempotent `0027` backfill run before the first version-creating step, and
-  the zero-orphan gate aborts before every deploy and is re-asserted against
-  the version serving traffic. Rollback is `git revert` of the merge commit —
-  the config-level mode lever no longer exists.
-- **New workspace ownership data plane** (migrations `0026`/`0027`): every App
-  and dashboard user belongs to a workspace, and the backfill maps existing
-  rows to the `default` workspace. Both deploy workflows re-run the idempotent
-  backfill and abort before any deploy-capable step when an App is still
-  unmapped.
+  idempotent `0027` App-attribution repair run before the first
+  version-creating step, and the zero-orphan gate aborts before every deploy
+  and is re-asserted against the version serving traffic. Rollback is
+  `git revert` of the merge commit — the config-level mode lever no longer
+  exists.
+- **New workspace ownership data plane** (migrations `0026`/`0027`/`0030`): every
+  App and dashboard user belongs to a workspace. `0027` attributes existing Apps
+  to the `default` workspace and is the only replayable half (both deploy
+  workflows re-run it before any deploy-capable step); `0030` backfills the
+  pre-open-sign-in users' memberships exactly once, cutover-scoped, because
+  replaying a per-person write made every routine deploy re-add every login —
+  removed members included — to `default`. Both workflows abort before any
+  deploy-capable step when an App is still unmapped.
 
 <!-- CN -->
 - **破坏性变更——一个部署形态变量，一条租户读取路径。** v1.2 的租户模式已被彻底删除：
@@ -63,8 +67,11 @@ category: Changed
   绑定以及 `scripts/resolve-tenant-mode.sh` 均已删除。保留下来的是保护普通部署的部分：
   在每个可部署步骤之前断言运行 ref 身份（staging 校验 checkout 的 `HEAD`，production
   校验 `refs/tags/<tag>^{commit}`，因此被移动的 tag/分支永远无法部署）、迁移与幂等的
-  `0027` 回填先于第一个创建版本的步骤、零孤儿门禁在任何部署之前中止并在对外服务版本上
-  再次断言。回滚方式是对 merge commit 执行 `git revert`——配置层的模式开关已不存在。
-- **新增工作区归属数据面**（迁移 `0026`/`0027`）：每个 App 与 dashboard 用户都归属
-  某个工作区，回填把既有数据映射到 `default` 工作区。两个 deploy workflow 都会重跑
-  幂等回填，并在存在未映射 App 时于任何可部署步骤之前中止。
+  `0027` App 归属修复先于第一个创建版本的步骤、零孤儿门禁在任何部署之前中止并在对外服务
+  版本上再次断言。回滚方式是对 merge commit 执行 `git revert`——配置层的模式开关已不存在。
+- **新增工作区归属数据面**（迁移 `0026`/`0027`/`0030`）：每个 App 与 dashboard 用户
+  都归属某个工作区。`0027` 把既有 App 归属到 `default` 工作区，且是唯一可重放的一半
+  （两个 deploy workflow 都会在任何可部署步骤前重跑它）；`0030` 按切点范围、只执行一次地
+  回填开放登录之前用户的成员关系——若把「按人写入」的那一半做成可重放，每次常规部署都会把
+  所有登录（包括已被移除的成员）重新加回 `default`。两个 workflow 都会在存在未映射 App
+  时于任何可部署步骤之前中止。
