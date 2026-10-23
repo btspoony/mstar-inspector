@@ -21,7 +21,7 @@ import { describe, expect, test } from "bun:test";
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
 import { anchorRecheckDeadline, currentRecheckBudget, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, remainingOuterMs, remainingSoftMinutes } from "../../src/review/recheck";
-import { RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type RecheckInput } from "../../src/contracts/recheck";
+import { RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type RecheckInput } from "../../packages/shared/src/recheck-wire";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 

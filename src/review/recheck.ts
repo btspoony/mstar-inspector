@@ -40,8 +40,8 @@ import {
   validateRecheckDoc,
   type RecheckDoc,
   type RecheckInput,
-} from "../contracts/recheck";
-import type { ReviewLevel } from "./runtime";
+} from "../../packages/shared/src/recheck-wire";
+import type { ReviewLevel } from "../../packages/shared/src/runtime";
 
 /**
  * Strict shape schema for the recheck seat's structured yield. The enum

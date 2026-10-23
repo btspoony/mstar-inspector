@@ -11,7 +11,7 @@
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent";
-import type { RecheckDoc, RecheckInput } from "../contracts/recheck";
+import type { RecheckDoc, RecheckInput } from "./recheck-wire";
 
 /**
  * Full review-tier universe. `deep` is a first-class tier

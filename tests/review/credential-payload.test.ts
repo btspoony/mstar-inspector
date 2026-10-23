@@ -22,7 +22,7 @@ import {
   CREDENTIAL_PAYLOAD_VERSION,
   decodeCredentialPayload,
   encodeCredentialPayload,
-} from "../../src/review/credential-payload";
+} from "../../packages/shared/src/credential-payload";
 import { sk } from "../helpers/fake-secrets";
 
 describe("credential payload — encode", () => {

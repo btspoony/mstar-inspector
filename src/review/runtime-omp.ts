@@ -94,9 +94,9 @@ import {
   type MstarReviewFinding,
   type MstarReviewV1,
 } from "@mstar-harness/engine";
-import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "./runtime";
+import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../packages/shared/src/runtime";
 import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat } from "./recheck";
-import type { RecheckDoc } from "../contracts/recheck";
+import type { RecheckDoc } from "../../packages/shared/src/recheck-wire";
 
 /**
  * Environment override for the mstar-harness plugin root — the primary,
