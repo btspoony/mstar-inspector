@@ -92,7 +92,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref d58005dff66d2edca420624fc6ba5ee4d4d38e32 (tag v4.0.4, bumped 2026-10-20).
+# mstar-harness plugin, pinned ref 37c0d5fc238d8c13486ed4c316e5cd3636e77228 (tag v4.0.7, bumped 2026-10-24).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -103,7 +103,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin d58005dff66d2edca420624fc6ba5ee4d4d38e32 \
+    && git -C /opt/mstar-harness fetch --depth 1 origin 37c0d5fc238d8c13486ed4c316e5cd3636e77228 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && rm -rf /opt/mstar-harness/.git
 
@@ -129,7 +129,7 @@ RUN git init /opt/mstar-harness \
 # `CLI_VERSION` is the ONE pin declaration: the install and the assertion both
 # consume it, so the two cannot drift. The expected version is passed
 # explicitly — the script ships alone in the image (no Dockerfile beside it).
-ARG CLI_VERSION=4.0.4
+ARG CLI_VERSION=4.0.7
 RUN bun add --global @mstar-harness/cli@${CLI_VERSION} \
     && sed -i --follow-symlinks '1s|.*|#!/usr/bin/env bun|' /root/.bun/bin/mstar
 ENV PATH="/root/.bun/bin:${PATH}"

@@ -5,7 +5,7 @@
     "": {
       "name": "@mstar-inspector/runner",
       "dependencies": {
-        "@mstar-harness/engine": "4.0.4",
+        "@mstar-harness/engine": "4.0.7",
         "@oh-my-pi/pi-coding-agent": "18.12.3",
       },
     },
@@ -81,7 +81,7 @@
 
     "@img/sharp-win32-x64": ["@img/sharp-win32-x64@0.35.5", "", { "os": "win32", "cpu": "x64" }, "sha512-x76eH0vEiHlcMQu8Y8IenntaACtddpT6W0wmXtWrnKcnKI7ME5DdgqhAD6SEWOEl1v2zDvkZDhFA9KnURwpfqg=="],
 
-    "@mstar-harness/engine": ["@mstar-harness/engine@4.0.4", "", { "dependencies": { "mdast-util-from-markdown": "^2.0.3", "mdast-util-gfm": "^3.1.0", "micromark-extension-gfm": "^3.0.0" } }, "sha512-3tP27xRVosh0/lMiPIee+PcXa2BaXChWcOx03ldR20RYsz3Cir4dA7d5Ksh7UxAv96nMasYt8+D2Ol9DXdww5w=="],
+    "@mstar-harness/engine": ["@mstar-harness/engine@4.0.7", "", { "dependencies": { "mdast-util-from-markdown": "^2.0.3", "mdast-util-gfm": "^3.1.0", "micromark-extension-gfm": "^3.0.0" } }, "sha512-lxgjK9u6vmqjvezBOFWZjq5uIjSUK3vfVnSBmHRi1CqawYu08Axov58wMtkV4ydORJUWdlIGCf3FTPGK6lKHBw=="],
 
     "@oh-my-pi/omp-stats": ["@oh-my-pi/omp-stats@18.12.3", "", { "dependencies": { "@oh-my-pi/pi-ai": "18.12.3", "@oh-my-pi/pi-catalog": "18.12.3", "@oh-my-pi/pi-utils": "18.12.3", "lucide-react": "^1.24.0", "react": "19.2.7", "react-dom": "19.2.7" }, "bin": { "omp-stats": "src/index.ts" } }, "sha512-TJYCuLK5CEkh0ofwiYx5Ejq8KpStJNBrQGknlBcCbqgJB+8Yja0rHRH8C+Bq05pRIPb+5uhXAbtDPrBUGH/pVQ=="],
 
