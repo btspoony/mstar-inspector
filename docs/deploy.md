@@ -1146,6 +1146,20 @@ reviews for real on a live Worker, so pause any App that must not review yet
 (`review_enabled=0`) before deploying; a paused App still answers 2xx with zero
 enqueue.
 
+**Before deploying, list the Apps whose reviews you expect to stay paused** —
+nothing at the deployment level can stop them for you:
+
+```bash
+wrangler d1 execute mstar-inspector-db --remote --command \
+  "SELECT slug, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"
+```
+
+Every row reading `review_enabled = 1` is an App that will review on the next
+webhook after the deploy; pause it in the dashboard (or suspend it at GitHub)
+first if that is not what you want. A paused App still answers 2xx with zero
+enqueue, and its `webhook_deliveries` rows record `paused`/`ignored` rather
+than `ok`.
+
 #### GitHub App permissions (fresh-App contract)
 
 The App is created by the dashboard manifest flow (`src/dashboard/manifest.ts`
@@ -1703,9 +1717,14 @@ Operationally that means:
 - **Production D1 starts empty and that is fine**: the first person to sign in
   creates the first workspace. There is no self-promotion to admin and no
   first-login fallback arming to protect against.
-- **`keep_vars: true` in `wrangler.jsonc`** still preserves dashboard-managed
-  plaintext vars such as `REVIEW_LEVEL` across deploys. Review control is not
-  one of them: per-App `review_enabled` lives in D1.
+- **`keep_vars: true` in `wrangler.jsonc`** preserves dashboard-managed
+  plaintext vars such as `REVIEW_LEVEL` across a deploy of the **default
+  environment** (the staging Worker). Production does not get this: its deploy
+  is `wrangler deploy --env production`, and `env.production` cannot declare
+  `keep_vars` (rejected inside an environment block), so every production
+  deploy wipes dashboard-set plain vars — see § `env.production.vars` is the
+  plain-var roster. Review control is not a plain var at all: per-App
+  `review_enabled` lives in D1.
 
 ## Rollback
 
