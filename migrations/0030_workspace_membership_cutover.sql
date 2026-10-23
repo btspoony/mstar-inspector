@@ -21,6 +21,16 @@
 -- whose open-sign-in cutover differs must NOT edit this file after it applied
 -- — write the next numbered migration instead.
 --
+-- THE STAMP IS THE DISCRIMINATOR, and it is deliberately NOT 0027's legacy
+-- `2026-10-21T00:00:00.000Z`. Rows this file writes carry the cutover instant
+-- as `created_at`, so after both have run the two populations are separable
+-- with one predicate: a `default`-workspace row stamped before the cutover
+-- came from the 0027 replay or from an earlier one-time backfill, while a row
+-- stamped AT the cutover came from THIS migration applied by the ledger. That
+-- is what makes the repair in `docs/deploy.md` § "Repairing a replayed 0027
+-- membership backfill" possible: it deletes only replay rows whose user signed
+-- up after the cutover and must never touch this file's output.
+--
 -- Two more exclusions, both real signals rather than guesses:
 --   * a login with a `removed_logins` record stays out — an operator removed
 --     them, and only a deliberate re-admission (createUser) may undo that;
@@ -28,11 +38,11 @@
 --     invite-accepted membership or an owner's role change is never
 --     overwritten by the legacy `users.role` mapping.
 --
--- Do NOT re-run this file by hand: it cannot tell a legitimate pre-cutover
--- member from one an owner removed afterwards, so a second apply would
--- restore them. `docs/deploy.md` § "Repairing a replayed 0027 membership
--- backfill" is the supported path for a database the old replay already
--- polluted.
+-- Do NOT re-run this file by hand. `wrangler d1 migrations apply` runs it once
+-- and the `NOT EXISTS` guards make a second apply insert nothing NEW, but the
+-- statement cannot tell "never was a member" from "an owner removed them from
+-- the members page" — a workspace removal writes no `removed_logins` record —
+-- so a hand re-run would restore the latter.
 --
 -- Append-only DML against tables created by 0023/0026; no existing row is
 -- updated or deleted. Must apply AFTER 0026 (target tables + the seeded
@@ -41,7 +51,7 @@
 INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
 SELECT 'default', u.id,
        CASE u.role WHEN 'admin' THEN 'owner' ELSE 'member' END,
-       '2026-10-21T00:00:00.000Z'
+       '2026-10-22T11:13:45.000Z'
 FROM users u
 WHERE u.created_at < '2026-10-22T11:13:45.000Z'
   AND u.role IN ('admin', 'member')

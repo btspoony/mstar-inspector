@@ -220,6 +220,24 @@ describe("migrations/0030_workspace_membership_cutover.sql (applied once)", () =
     expect(defaultMembers(db)).toEqual(["hubot", "octocat"]);
   });
 
+  // The stamp is the discriminator the deploy runbook keys on: 0030's own rows
+  // must NOT reuse 0027's legacy stamp, or "written by the one-time migration"
+  // and "written by a replayed 0027" become indistinguishable afterwards.
+  test("inserted rows carry the cutover stamp, never 0027's legacy stamp", () => {
+    const db = dbBeforeCutover();
+    insertUser(db, "user-admin", "octocat", "admin");
+    insertUser(db, "user-member", "hubot", "member");
+
+    runFile(db, MEMBERSHIP_CUTOVER);
+
+    const stamps = db.raw
+      .query("SELECT DISTINCT created_at AS stamp FROM workspace_members ORDER BY stamp")
+      .all() as Array<{ stamp: string }>;
+    expect(stamps).toEqual([{ stamp: CUTOVER }]);
+    // And the legacy value is exactly what the repair predicate excludes.
+    expect(stamps.map((row) => row.stamp)).not.toContain("2026-10-21T00:00:00.000Z");
+  });
+
   test("an existing membership keeps its role — an invited owner is not demoted", () => {
     const db = dbBeforeCutover();
     insertUser(db, "user-legacy", "hubot", "member");

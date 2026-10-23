@@ -589,49 +589,73 @@ operator both get 403 from.
 
 Before the split, both workflows replayed `0027` (which then also inserted a
 `workspace_members` row per `users` row) on every deploy, so a live deployment
-may hold memberships nobody granted. Those rows are exactly identifiable: the
-replay wrote the migration's **fixed** stamp, while a real join (invite accept,
-workspace creation) writes the clock.
+may hold memberships nobody granted. Those rows are identifiable by their
+`created_at`, but the stamp alone is **not** enough to identify them: the old
+`0027` wrote the fixed stamp `2026-10-21T00:00:00.000Z` for EVERY row it
+backfilled, including the legitimate pre-cutover members it was supposed to
+create. What distinguishes a wrong row is the stamp **plus** who it points at.
 
-1. **List what the replay added.** This is the "fixed stamp" predicate — every
-   `workspace_members` row carrying it came from the replay, never from a join:
+The populations, after `migrations/0030_workspace_membership_cutover.sql` has
+applied through the ledger:
 
-   ```sh
-   wrangler d1 execute mstar-inspector-db --remote \
-     --command "SELECT u.github_login, wm.role, wm.created_at FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = 'default' AND wm.created_at = '2026-10-21T00:00:00.000Z'"
-   ```
+| `workspace_members.created_at` | `users.created_at` | Origin |
+|---|---|---|
+| `2026-10-21T00:00:00.000Z` | before the cutover | legitimate: `0027`'s original backfill |
+| `2026-10-21T00:00:00.000Z` | at/after the cutover | **wrong**: a `0027` replay added a login that signed up after open sign-in |
+| `2026-10-22T11:13:45.000Z` | before the cutover | legitimate: `0030` applied by the ledger |
+| the real clock | either | legitimate: invite accept or workspace creation |
 
-   Check it against the member list the owners expect. Note the two roles the
-   replay could also have written: `member` for any signed-in login and
-   `owner` for a legacy `users.role = 'admin'` row.
+That is the whole discriminator: a login that signed up **after** open sign-in
+could only have got a `default` membership from the replay, so the join on
+`users.created_at` selects exactly those rows and nothing else.
 
-2. **Delete those rows** (and only those). `workspace_members` is the only
-   table involved — the `users` rows the replay did not create stay:
-
-   ```sh
-   wrangler d1 execute mstar-inspector-db --remote \
-     --command "DELETE FROM workspace_members WHERE workspace_id = 'default' AND created_at = '2026-10-21T00:00:00.000Z'"
-   ```
-
-3. **Restore the legitimate pre-cutover members** by re-running the one-time
-   migration's statement — it is cutover-scoped (`users.created_at` before
-   open sign-in), skips removed logins, and skips any membership that still
-   exists, so it can only add back the people who were supposed to be there:
+1. **List what the replay wrongly added.** A login that signed up at or after
+   the cutover (`2026-10-22T11:13:45.000Z`) was never a member of `default` —
+   open sign-in joins nobody — so a membership it holds under the legacy stamp
+   came from a replay. This is the same predicate step 2 deletes on, so the
+   list is exactly the damage:
 
    ```sh
    wrangler d1 execute mstar-inspector-db --remote \
-     --file migrations/0030_workspace_membership_cutover.sql
+     --command "SELECT u.github_login, wm.role, wm.created_at, u.created_at AS signed_up_at FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = 'default' AND wm.created_at = '2026-10-21T00:00:00.000Z' AND u.created_at >= '2026-10-22T11:13:45.000Z'"
    ```
 
-   Order matters: run (3) only after (2). Running (3) alone leaves the wrongly
-   added rows in place (they are `NOT EXISTS`-guarded, not corrected), and
-   running (2) without (3) leaves legitimate pre-cutover members without a
-   membership.
+   Check the list against the member list the owners expect. A login that
+   signed up after the cutover but was properly invited has the **clock** as
+   its stamp, so it does not appear here and is never deleted. A name that
+   should be a pre-cutover member but appears here means the deployment's
+   cutover instant differs from the one `0030` assumes (see that migration's
+   header) — stop and reconcile before deleting.
 
-A row an owner deliberately removed through the members page after the deploy
-is also caught by step (2); step (3) will not restore it, because a removal
-through the members page deletes the membership without a `removed_logins`
-record. Re-invite those people — the invite is the supported re-admission path.
+2. **Delete those rows.** The `user_id IN (…)` half is not optional: dropping
+   it would delete the legitimate pre-cutover members `0027` wrote, because
+   they carry the same fixed stamp. The `users` rows themselves stay.
+
+   ```sh
+   wrangler d1 execute mstar-inspector-db --remote \
+     --command "DELETE FROM workspace_members WHERE workspace_id = 'default' AND created_at = '2026-10-21T00:00:00.000Z' AND user_id IN (SELECT id FROM users WHERE created_at >= '2026-10-22T11:13:45.000Z')"
+   ```
+
+   The `created_at` half keeps the delete off real joins (invite accept and
+   workspace creation stamp the clock) and off `0030`'s own output (stamped at
+   the cutover); the `user_id` half keeps it off the legitimate pre-cutover
+   backfill. Both are needed.
+
+3. **Nothing to restore.** Pre-cutover members are never touched by step 2, so
+   there is no repair to apply — do not re-run `0030` for this. Its `NOT EXISTS`
+   guards only skip members whose row still exists; it cannot tell "never was a
+   member" from "an owner removed them from the members page", and a workspace
+   removal writes no `removed_logins` record. A hand re-run would therefore
+   re-add people an owner deliberately removed.
+
+   Re-admission is the invite: an owner invites the login and it accepts. That
+   is the only supported path back into a workspace, and it is the same path
+   the members page offers.
+
+Ordering note: run (1), then (2). There is no third step to order against. If
+the deployment has **not** yet applied `0030`, apply it first (`wrangler d1
+migrations apply`): until it has, the legitimate pre-cutover rows it would
+write are missing, and step (2) is still correct on its own predicate.
 
 ## Tenant read path (single)
 
