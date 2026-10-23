@@ -195,6 +195,24 @@ describe("cross-side dependency parity", () => {
     });
   }
 
+  /** The `workspaces` dependency DECLARATION for `dep` — not its packages row. */
+  function declaredDependency(path: string, dep: string): string | undefined {
+    const escaped = dep.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const text = readFileSync(path, "utf8");
+    const packages = text.indexOf('\n  "packages": {');
+    if (packages < 0) throw new Error(`no packages section in ${path}`);
+    return text.slice(0, packages).match(new RegExp(`"${escaped}": "([^"]+)"`))?.[1];
+  }
+
+  test("the runner lock's engine declaration is the harness pin", () => {
+    // The resolution row above can agree while the declaration it was resolved
+    // from still names the old version — a hand-edited or stale lock then
+    // installs the old engine on the next `bun install` and the row follows,
+    // out of the pin. Both rows are declared surfaces of the same pin.
+    const runnerLock = join(REPO_ROOT, "packages", "runner", "bun.lock");
+    expect(declaredDependency(runnerLock, "@mstar-harness/engine")).toBe(HARNESS_VERSION);
+  });
+
   test("the harness engine pin also equals the declared image harness pin", () => {
     expect(runnerPkg.dependencies["@mstar-harness/engine"]).toBe(
       OMP_SANDBOX_IMAGE_PINS.harnessVersion,

@@ -1847,7 +1847,7 @@ the same source.
 
 Historical bumps, superseding chain, and digest provenance (records, not live
 values): mstar-harness **4.0.7** (2026-10-24, ref
-`37c0d5fc238d8c13486ed4c316e5cd3636e77228`, superseding the 4.0.4 pin;
+`db013c73255f3af1e166d15ae7c3514dc200da6b`, superseding the 4.0.4 pin;
 omp SDK 18.12.3 unchanged, engine `^4.0.7` resolved to 4.0.7);
 mstar-harness **4.0.4** (2026-10-20, ref `d58005df`, superseding the 4.0.2 pin, which
 superseded the 4.0.0 pin; omp SDK 18.12.3, engine `^4.0.4` resolved to 4.0.4);

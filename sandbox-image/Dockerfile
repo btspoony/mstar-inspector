@@ -92,7 +92,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref 37c0d5fc238d8c13486ed4c316e5cd3636e77228 (tag v4.0.7, bumped 2026-10-24).
+# mstar-harness plugin, pinned ref db013c73255f3af1e166d15ae7c3514dc200da6b (tag v4.0.7, bumped 2026-10-24).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -103,14 +103,13 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin 37c0d5fc238d8c13486ed4c316e5cd3636e77228 \
+    && git -C /opt/mstar-harness fetch --depth 1 origin db013c73255f3af1e166d15ae7c3514dc200da6b \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
-    && { echo "ref=$(git -C /opt/mstar-harness rev-parse FETCH_HEAD)"; \
-         echo "commit=$(git -C /opt/mstar-harness rev-parse HEAD)"; } > /opt/mstar-harness-ref \
+    && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
 # The build proves the pinned tree serves the review flow it is pinned for:
 # `verify-seat-supervision.sh` asserts the cloned pr-review reference carries
-# `## Seat supervision`, naming the pinned ref + commit on failure.
+# `## Seat supervision`, naming the checked-out commit on failure.
 # COPYed below the clone layer so editing the script never invalidates it.
 COPY sandbox-image/verify-seat-supervision.sh /opt/verify-seat-supervision.sh
 RUN sh /opt/verify-seat-supervision.sh
