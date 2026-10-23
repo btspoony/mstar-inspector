@@ -450,17 +450,23 @@ describe("no deployment-wide review brake survives", () => {
   /** Assembled from fragments so THIS file does not match its own scan. */
   const RETIRED_VAR = ["REVIEW", "ENABLED"].join("_");
 
-  const SCANNED_ROOTS = ["src", "tests", "docs", ".mstar/specs", ".mstar/knowledge"] as const;
+  const SCANNED_ROOTS = [
+    "src",
+    "scripts",
+    "tests",
+    "docs",
+    ".github",
+    ".mstar/specs",
+    ".mstar/knowledge",
+  ] as const;
   const SCANNED_FILES = [
-    ".github/workflows/deploy.yml",
-    ".github/workflows/deploy-prod.yml",
     "wrangler.jsonc",
     ".env.example",
     "README.md",
     "README_CN.md",
   ] as const;
 
-  test(`${RETIRED_VAR} has zero references in src/, tests/, docs/, the workflows and the deploy config`, () => {
+  test(`${RETIRED_VAR} has zero references in src/, scripts/, tests/, docs/, .github/ and the deploy config`, () => {
     const files = [...SCANNED_ROOTS.flatMap(walk), ...SCANNED_FILES];
     const offenders = files.filter((path) =>
       readFileSync(join(REPO_ROOT, path), "utf8").includes(RETIRED_VAR),
