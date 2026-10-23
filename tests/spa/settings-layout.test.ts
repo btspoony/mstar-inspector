@@ -1451,7 +1451,7 @@ describe("section-scoped op feedback", () => {
     // commit and its success return), not anywhere in the file.
     expect(detail.match(/setNotice\(null\)/g)?.length).toBe(1);
     const loadSuccessPath = detail.slice(
-      detail.indexOf("setPayload(parsed);"),
+      detail.indexOf("setPayload(loaded.payload);"),
       detail.indexOf("return true;"),
     );
     expect(loadSuccessPath).toContain("setNotice(null);");

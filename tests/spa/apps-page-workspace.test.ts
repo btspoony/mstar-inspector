@@ -5,14 +5,19 @@
  * base and its create eligibility from the URL + the boot's membership
  * list, not from the once-injected snapshot.
  *
- * No DOM runner in this suite (repo contract): the eligibility derivation
- * is pinned as an executable helper, and the fetch target is pinned through
- * the same `apiBase` the page reads (`tests/spa/workspace-base.test.ts`
- * owns the pathname→base map).
+ * Executed contract: the eligibility derivation, the pathname→base map and
+ * the page's own list read are all driven here with a mocked `fetch`.
+ *
+ * Residual gap (no DOM runner in this suite, repo contract): the effect that
+ * ties them together — `useEffect(load, [load])` with `load` keyed on
+ * `[base]` — cannot be executed, so a regression that pins the base at mount
+ * while keeping every helper correct would pass here. The same residual
+ * applies to `tests/spa/app-detail.test.tsx`; both pages read their base per
+ * render and the reads asserted below are the ones those effects issue.
  */
 import { describe, expect, test } from "bun:test";
 import type { SpaBoot } from "../../src/spa/boot";
-import { canCreateAppFor } from "../../src/spa/pages/AppsPage";
+import { canCreateAppFor, loadApps } from "../../src/spa/pages/AppsPage";
 import { workspaceRefOf } from "../../src/spa/routes";
 import { apiBase } from "../../src/spa/workspace-base";
 
@@ -27,6 +32,31 @@ const boot: SpaBoot = {
     { id: "ws_b", slug: "beta", name: "Beta", role: "member" },
   ],
 };
+
+/** The page's own read under the base its render derived, recording the URL. */
+async function readUnder(pathname: string): Promise<{ url: string; apps: string[] }> {
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown) => {
+    const url = String(input);
+    calls.push(url);
+    const workspace = url.split("/")[2];
+    return new Response(
+      JSON.stringify({
+        viewer: { login: "octocat", role: "admin" },
+        apps: [{ slug: `${workspace}-app` }],
+      }),
+      { status: 200 },
+    );
+  }) as unknown as typeof fetch;
+  try {
+    const payload = await loadApps(apiBase(pathname));
+    expect(calls).toHaveLength(1);
+    return { url: calls[0]!, apps: (payload?.apps ?? []).map((app) => app.slug) };
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
 
 describe("AppsPage create eligibility — addressed workspace", () => {
   test("navigating from workspace A (owner) to workspace B (member) flips Create off", () => {
@@ -59,11 +89,16 @@ describe("AppsPage create eligibility — addressed workspace", () => {
     expect(canCreateAppFor({ ...boot, workspaceRequired: true }, null)).toBe(false);
   });
 
-  test("the page fetch targets the addressed workspace's base after the switch", () => {
-    // Same `apiBase` the page's `load` reads: on the B path the fetch URL
-    // is B's base — the refetch-on-base-change wiring (`useCallback([base])`)
-    // lives beside it in AppsPage.
-    expect(apiBase("/dashboard/acme/apps")).toBe("/dashboard/acme");
-    expect(apiBase("/dashboard/beta/apps")).toBe("/dashboard/beta");
+  test("the read follows the addressed workspace after the switch", async () => {
+    // The A→B switch: same page, different workspace segment — the read must
+    // land on B's list, never the A data the previous render fetched.
+    expect(await readUnder("/dashboard/acme/apps")).toEqual({
+      url: "/dashboard/acme/api/apps",
+      apps: ["acme-app"],
+    });
+    expect(await readUnder("/dashboard/beta/apps")).toEqual({
+      url: "/dashboard/beta/api/apps",
+      apps: ["beta-app"],
+    });
   });
 });
