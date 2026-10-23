@@ -31,14 +31,6 @@ export type Env = {
    */
   DB?: D1Database;
   /**
-   * Emergency brake (AC4a): the exact `"false"` (case-sensitive,
-   * untrimmed) stops ALL reviews — every webhook is classified as `ignore`
-   * (HTTP 2xx, no queue enqueue). Unset / `""` / `"true"` / any other value
-   * → per-App `github_apps.review_enabled` governs. Leave unset; the env
-   * var is not an enable flag.
-   */
-  REVIEW_ENABLED?: string;
-  /**
    * Dashboard GitHub OAuth App credentials — user-to-server
    * login, DISTINCT from the review GitHub App (whose Worker-env secrets
    * were retired — per-App credentials now live encrypted in D1;

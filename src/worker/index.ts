@@ -140,11 +140,9 @@ app.route("/dashboard", dashboardApp);
 /**
  * Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review
  * entry — the legacy bare `/webhook` face is
- * retired). Pre-order: body-size cap (413) → REVIEW_ENABLED
- * emergency brake (exactly "false" → 2xx ignore, zero side effects;
- * deployment-level brake only — per-App `github_apps.review_enabled` is the
- * primary control, AC4a) → DB-unbound guard (500 fail-closed — the
- * dashboard-dependency convention) → slug lookup → signature verify. The
+ * retired). Pre-order: body-size cap (413) → DB-unbound guard (500
+ * fail-closed — the dashboard-dependency convention) → slug lookup →
+ * signature verify → per-App `review_enabled` pause gate. The
  * slug locates the `github_apps` row (active, not deleted) whose DECRYPTED
  * webhook secret parameterizes the same `classifyWebhook` classifier
  * (secret-parameterized only — the classifier never sees the App
@@ -159,12 +157,11 @@ app.route("/dashboard", dashboardApp);
  * `last_webhook_at` is touched exactly once — after signature verification,
  * regardless of the subsequent enqueue outcome (job / ignore / paused; a
  * queue-send failure below still leaves the touch committed), before the
- * pause check. Reject paths and the pre-verify emergency-brake return never
- * touch, so the column reads "last verified delivery" (NOT "last successful
- * enqueue") and is decoupled from the review switch. Then
- * `review_enabled=0` answers 2xx with ZERO enqueue (the webhook stays
- * healthy while reviews are paused); disabled/deleted keep their 404 above.
- * The in-flight queue face ack-skips paused messages symmetrically
+ * pause check. Reject paths never touch, so the column reads "last verified
+ * delivery" (NOT "last successful enqueue") and is decoupled from the review
+ * switch. Then `review_enabled=0` answers 2xx with ZERO enqueue (the webhook
+ * stays healthy while reviews are paused); disabled/deleted keep their 404
+ * above. The in-flight queue face ack-skips paused messages symmetrically
  * (consumer lock L4).
  *
  * Install bookkeeping: a classified job payload always
@@ -208,24 +205,6 @@ app.post("/webhook/:appSlug", async (c) => {
   }
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
-
-  // Emergency brake BEFORE the slug lookup (spec ordering; zero side effects
-  // — no D1 read when the brake is pulled). AC4a: the env is an
-  // emergency brake ONLY — per-App `github_apps.review_enabled` is the
-  // primary control, so the predicate is inverted to `!== "false"` (unset /
-  // "" / "true" / "TRUE" / anything else → per-App governs; only the exact,
-  // case-sensitive, untrimmed "false" stops all reviews). The flag is still
-  // passed to classifyWebhook below so the handler and classifier share the
-  // same computed REVIEW_ENABLED.
-  const reviewEnabled = c.env.REVIEW_ENABLED !== "false";
-  if (!reviewEnabled) {
-    webhookWarn(
-      "review_disabled_kill_switch",
-      "REVIEW_ENABLED is exactly 'false'",
-      "webhook ignored — reviews stopped by the REVIEW_ENABLED emergency brake",
-    );
-    return c.text("ignored", 200);
-  }
 
   // DB-unbound guard (fold-in): unreachable on the deployed Worker
   // (wrangler.jsonc binds DB globally) — the branch exists because the
@@ -297,7 +276,6 @@ app.post("/webhook/:appSlug", async (c) => {
     signature,
     eventName,
     defaultLog,
-    reviewEnabled,
     row.id,
     { mode: row.review_trigger_mode, appSlug: slug },
   );
@@ -307,7 +285,7 @@ app.post("/webhook/:appSlug", async (c) => {
   // after classification (before the reject return) so EVERY classified
   // outcome lands: reject → rejected (status_code = the classifier's
   // status), ignore → ignored, job + review_enabled=0 → paused, job → ok.
-  // The pre-classify failures (413 / emergency-brake / db-guard / 404 /
+  // The pre-classify failures (413 / db-guard / 404 /
   // decrypt 500) never reach this line and record nothing (the retired
   // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id
   // is NOT NULL FK). Best-effort like the
@@ -333,11 +311,10 @@ app.post("/webhook/:appSlug", async (c) => {
   // non-reject), so this delivery is touched — after signature verification,
   // regardless of the subsequent enqueue outcome (job / ignore / paused; a
   // queue-send failure in handleReviewJob below still leaves this touch
-  // committed). The reject returns above and the pre-verify emergency-brake
-  // return never reach this line, so the column reads "last verified
-  // delivery", NOT "last successful enqueue". Best-effort (same pattern as
-  // the install upsert below): a failure logs a structured warn and never
-  // blocks the response.
+  // committed). The reject returns above never reach this line, so the
+  // column reads "last verified delivery", NOT "last successful enqueue".
+  // Best-effort (same pattern as the install upsert below): a failure logs a
+  // structured warn and never blocks the response.
   try {
     await appsStore.touchLastWebhook(row.id);
   } catch (err) {
