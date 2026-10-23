@@ -289,6 +289,26 @@ describe("invite creation (AC2)", () => {
     ).toEqual(first);
   });
 
+  test("inviting a login with a removal record is 409 invite.login_removed, no row", async () => {
+    const { db } = fixture();
+    use(db);
+    // The removal record denies sign-in at the write boundary (0023), so an
+    // invite minted here could never be accepted. Refusing writes nothing;
+    // clearing the record is the operator's decision, not this route's.
+    db.raw
+      .prepare("INSERT INTO removed_logins (github_login, removed_at) VALUES (?, ?)")
+      .run("HUBOT", "2026-10-22T00:00:00.000Z");
+
+    const res = await request(INVITES, "dana", { method: "POST", body: "login=hubot" });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain("invite.login_removed");
+    expect(pendingInvites(db)).toBe(0);
+    // The record survives: the refusal never re-admits the login.
+    expect(
+      (db.raw.prepare("SELECT COUNT(*) AS n FROM removed_logins").get() as { n: number }).n,
+    ).toBe(1);
+  });
+
   test("inviting an existing member is 409 and creates no row", async () => {
     const { db } = fixture();
     use(db);

@@ -132,6 +132,7 @@ import {
   countUsers,
   deleteWorkspaceMember,
   getUserByLogin,
+  isLoginRemoved,
   parseLoginList,
   signInDashboardUser,
   updateWorkspaceMemberRole,
@@ -1660,6 +1661,18 @@ const inviteCreateRoute = async (c: DashboardContext) => {
       c,
       `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`,
       400,
+    );
+  }
+  // A recorded removal (migration 0023) denies sign-in for that login at the
+  // write boundary, so an invite minted here could never be accepted: it would
+  // sit `pending` and expire into `expired` without ever admitting anyone.
+  // Refusing is the only honest answer; clearing the record is an operator
+  // decision (`createUser`), never a side effect of an invite.
+  if (await isLoginRemoved(gate.db, login)) {
+    return inviteMutationResponse(
+      c,
+      "invite.login_removed — this login was removed on this deployment; a deployment operator must clear the removal record before it can be invited.",
+      409,
     );
   }
   // Already a member → 409, zero writes (AC2). Resolution is on the
