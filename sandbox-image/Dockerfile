@@ -114,9 +114,10 @@ RUN git init /opt/mstar-harness \
 # canNOT invoke the `mstar` CLI today; absent a wired invocation path, review
 # behavior is unchanged (legacy, non-CLI). Wiring a sanctioned session
 # toolcall path is a tracked follow-up — no such mechanism
-# exists in this image. Exact pin `@mstar-harness/cli@4.0.4`: image pinning
-# discipline — the repo manifest `^4.0.4` exception does NOT extend to the
-# image. The CLI dist ships `#!/usr/bin/env node` (observed) and this image
+# exists in this image. Exact CLI pin: image pinning
+# discipline — the repo manifest `^` range exception does NOT extend to the
+# image; the version itself lives only in `CLI_VERSION` below. The CLI dist
+# ships `#!/usr/bin/env node` (observed) and this image
 # ships no node, so the build rewrites the installed shim to
 # `#!/usr/bin/env bun` — the Bun 1.4.0 installed above executes it directly,
 # no node is added. The global bin dir is put on PATH so sandbox exec
@@ -124,15 +125,18 @@ RUN git init /opt/mstar-harness \
 #
 # The build PROVES both facts instead of expecting them: `verify-cli-shim.sh`
 # (sandbox-image/verify-cli-shim.sh) reads the resolved shim's first line and
-# runs it, failing the build on a shebang regression or a version drift. The
-# expected version is passed explicitly — this image ships the script alone
-# (no Dockerfile beside it) and the literal below is the pin the install line
-# consumes.
-COPY sandbox-image/verify-cli-shim.sh /opt/verify-cli-shim.sh
-RUN bun add --global @mstar-harness/cli@4.0.4 \
+# runs it, failing the build on a shebang regression or a version drift.
+# `CLI_VERSION` is the ONE pin declaration: the install and the assertion both
+# consume it, so the two cannot drift. The expected version is passed
+# explicitly — the script ships alone in the image (no Dockerfile beside it).
+ARG CLI_VERSION=4.0.4
+RUN bun add --global @mstar-harness/cli@${CLI_VERSION} \
     && sed -i --follow-symlinks '1s|.*|#!/usr/bin/env bun|' /root/.bun/bin/mstar
 ENV PATH="/root/.bun/bin:${PATH}"
-RUN sh /opt/verify-cli-shim.sh 4.0.4
+# The assertion script is COPYed below the install/PATH layer so editing it
+# never invalidates the network install layer; the check stays adjacent to it.
+COPY sandbox-image/verify-cli-shim.sh /opt/verify-cli-shim.sh
+RUN sh /opt/verify-cli-shim.sh "${CLI_VERSION}"
 
 # omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (no baked
 # models.yml is an App-configuration artifact). The in-image runner
