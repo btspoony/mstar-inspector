@@ -32,9 +32,6 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
       get: async () => null,
       put: async () => {},
     } as unknown as Env["IDEMPOTENCY_KV"],
-    // T4: these tests exercise the ENABLED path (kill-switch off would turn
-    // every webhook into a 200 ignore before signature verification).
-    REVIEW_ENABLED: "true",
     ...overrides,
   };
 }

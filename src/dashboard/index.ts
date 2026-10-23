@@ -3835,7 +3835,7 @@ dashboardApp.put("/:workspaceRef/api/settings/slug", workspaceOnly(workspaceSlug
 // Placeholder actions (IA routing table): every POST under /dashboard that is
 // not a wired route above is a placeholder submit and must never succeed —
 // logged out → 302 to login; logged in → 405 (the shell exists, the method
-// does not). Zero secret writes, zero REVIEW_ENABLED changes on this path.
+// does not). Zero secret writes, zero env writes on this path.
 dashboardApp.post("*", async (c) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);

@@ -6,7 +6,7 @@
   "compatibility_date": "2026-08-20",
   // 06: nodejs_compat required by the Sandbox container binding (T1-verified).
   "compatibility_flags": ["nodejs_compat"],
-  // Bugbot #14: keep dashboard-managed plaintext vars (REVIEW_ENABLED)
+  // Bugbot #14: keep dashboard-managed plaintext vars (e.g. REVIEW_LEVEL)
   // across automated `wrangler deploy` — without keep_vars, deploy wipes them.
   "keep_vars": true,
   "kv_namespaces": [
@@ -171,8 +171,7 @@
   // queue pair and container application; nothing shared with staging).
   // `keep_vars` is rejected inside an env block (wrangler 4.147.0:
   // "Unexpected fields found in env.production field"), so this Worker must
-  // not depend on dashboard-managed plaintext vars: REVIEW_ENABLED stays
-  // unset (per-App Pause/Resume is the real control). Any future binding
+  // not depend on dashboard-managed plaintext vars. Any future binding
   // added above MUST be duplicated here.
   "env": {
     "production": {

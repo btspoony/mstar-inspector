@@ -15,8 +15,8 @@
  *   - The `notice` slot mirrors the `PageNotice` type (kind × message);
  *     after the dead-key purges it carries only the member-flow
  *     messages (the retired SSR settings routes rendered plain text).
- *   - Manifest copy deliberately carries NO REVIEW_ENABLED user-facing
- *     sentence (per-App pause is the only switch).
+ *   - Manifest copy deliberately carries no deployment-level review switch
+ *     copy (per-App pause is the only switch).
  */
 export const en = {
   nav: {

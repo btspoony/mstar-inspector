@@ -253,12 +253,6 @@ const issueCommentSchema = z.object({
  * path emits a structured warning with a machine reason and NO secret
  * material (Phase 5 B6).
  *
- * Emergency brake (AC4a): `reviewEnabled` is the computed
- * REVIEW_ENABLED state (`!== "false"` — the env is an emergency brake only;
- * per-App `github_apps.review_enabled` is the primary control). When the
- * brake is pulled (exact "false"), EVERY webhook is classified as `ignore`
- * (HTTP 2xx, no queue enqueue) BEFORE any signature work.
- *
  * `log` is optional (defaults to no logging) so the pure classifier stays
  * testable without a sink; the fetch entry passes `defaultLog`.
  *
@@ -284,17 +278,9 @@ export async function classifyWebhook(
   signature: string | null,
   eventName: string | null,
   log?: HandlerLog,
-  reviewEnabled = true,
   cacheKey?: string,
   trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
 ): Promise<WebhookOutcome> {
-  if (!reviewEnabled) {
-    log?.warn(
-      { event: eventName ?? "review_disabled_kill_switch", reason: "review_disabled_kill_switch", detail: "REVIEW_ENABLED is exactly 'false'" },
-      "webhook ignored — reviews stopped by the REVIEW_ENABLED emergency brake",
-    );
-    return { kind: "ignore", reason: "reviews stopped by the REVIEW_ENABLED emergency brake" };
-  }
   if (!secret || secret === "development") {
     log?.warn(
       { event: eventName ?? "secret_misconfigured", reason: "secret_misconfigured", detail: "secret missing, empty, or the default 'development'" },
@@ -323,14 +309,11 @@ export async function classifyWebhook(
     );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
-  return classifyEvent(eventName, rawBody, log, reviewEnabled, trigger);
+  return classifyEvent(eventName, rawBody, log, trigger);
 }
 
 /**
  * Event whitelist → ReviewJobPayload. Returns `ignore` for everything else.
- * `reviewEnabled` is the computed REVIEW_ENABLED state (AC4a): when
- * the emergency brake is pulled (exact "false"), every event is ignored
- * (HTTP 2xx, no queue enqueue).
  *
  * `trigger` is the per-App trigger context (spec review-trigger-policy §2):
  * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` keys
@@ -341,16 +324,8 @@ export function classifyEvent(
   eventName: string | null,
   rawBody: string,
   log?: HandlerLog,
-  reviewEnabled = true,
   trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
 ): WebhookOutcome {
-  if (!reviewEnabled) {
-    log?.warn(
-      { event: eventName ?? "review_disabled_kill_switch", reason: "review_disabled_kill_switch", detail: "REVIEW_ENABLED is exactly 'false'" },
-      "event ignored — reviews stopped by the REVIEW_ENABLED emergency brake",
-    );
-    return { kind: "ignore", reason: "reviews stopped by the REVIEW_ENABLED emergency brake" };
-  }
   if (!eventName) {
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }

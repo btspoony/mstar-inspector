@@ -477,11 +477,10 @@ describe("/dashboard routes", () => {
     expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"owner"}]');
     expect(body).toContain('{"locale":"en","login":"octocat","name":"octocat","workspaceRef":"default"');
     // The legacy three-card home is retired: no SSR sections,
-    // no manifest start form, no REVIEW_ENABLED copy.
+    // no manifest start form.
     expect(body).not.toContain("Model keys");
     expect(body).not.toContain("Not in this iteration (B3).");
     expect(body).not.toContain('action="/dashboard/manifest/start"');
-    expect(body).not.toContain("REVIEW_ENABLED");
   });
 
   test("the SPA home document title is the SPA index title", async () => {
@@ -1259,7 +1258,6 @@ describe("/dashboard manifest routes", () => {
     expect(body).toContain('method="post"');
     expect(body).toContain("https://github.com/settings/apps/new");
     expect(body).toContain('name="manifest"');
-    expect(body).not.toContain("REVIEW_ENABLED");
     expect(body).not.toContain("Continue on GitHub");
   });
 
@@ -1410,7 +1408,7 @@ describe("/dashboard manifest routes", () => {
     expect(rows[0]!.github_app_id).toBe(CONVERSION.id);
     expect(rows[0]!.created_by).toBe("octocat");
     // Landing page: name / id / slug / webhook URL + the Settings CTA, never
-    // secrets, never REVIEW_ENABLED.
+    // secrets.
     const landing = await worker.fetch(
       dashboardRequest("/dashboard/default/apps/mstar-inspector-octocat/onboarding", `${SESSION_COOKIE}=${session}`),
       env,
@@ -1425,7 +1423,6 @@ describe("/dashboard manifest routes", () => {
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
-    expect(body).not.toContain("REVIEW_ENABLED");
     // The retired overwrite-confirm semantics stay gone.
     expect(body).not.toContain("overwrite");
     expect(body).not.toContain("APP_ID");
@@ -1791,7 +1788,6 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(body).toContain('lang="zh-CN"');
     expect(body).toContain("创建 App");
     expect(body).not.toContain("Create App");
-    expect(body).not.toContain("REVIEW_ENABLED");
   });
 });
 
@@ -2294,7 +2290,6 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(body).toContain("GitHub App 已连接");
     expect(body).toContain("下一步：打开设置并配置 provider");
     expect(body).not.toContain("GitHub App connected");
-    expect(body).not.toContain("REVIEW_ENABLED");
   });
 
   test("Accept-Language zh renders the retryable commit error in zh_CN", async () => {
@@ -2309,7 +2304,6 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(body).toContain('lang="zh-CN"');
     expect(body).toContain("GitHub App 设置失败");
     expect(body).not.toContain("GitHub App setup failed");
-    expect(body).not.toContain("REVIEW_ENABLED");
   });
 });
 
@@ -2330,14 +2324,14 @@ describe("/dashboard placeholder lock + legacy home retirement", () => {
     expect(index).not.toContain("dashboardPage,");
   });
 
-  test("BYOK / Review placeholder POSTs → 405, zero fetch, zero env writes, no stale B0 copy", async () => {
+  test("BYOK / Review placeholder POSTs → 405, zero fetch, no stale B0 copy", async () => {
     const calls: string[] = [];
     globalThis.fetch = (async (url: unknown) => {
       calls.push(String(url));
       return new Response("{}");
     }) as unknown as typeof fetch;
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
-    const env = makeEnv({ REVIEW_ENABLED: "false" });
+    const env = makeEnv();
     for (const path of ["/dashboard/model-keys", "/dashboard/review"]) {
       const res = await worker.fetch(
         new Request(`https://worker.local${path}`, {
@@ -2351,10 +2345,8 @@ describe("/dashboard placeholder lock + legacy home retirement", () => {
       expect(res.status).toBe(405);
       expect(await res.text()).not.toContain("B0");
     }
-    // Zero outbound requests — no CF secret write, no GitHub call — and the
-    // Worker env is untouched: REVIEW_ENABLED never flips on this path.
+    // Zero outbound requests — no CF secret write, no GitHub call.
     expect(calls).toHaveLength(0);
-    expect(env.REVIEW_ENABLED).toBe("false");
   });
 });
 
@@ -2466,7 +2458,6 @@ describe("existing routes unaffected", () => {
     applyMigrationFile(db.raw, "0011_webhook_deliveries.sql");
     const sent: unknown[] = [];
     const env = makeDbEnv(db, {
-      REVIEW_ENABLED: "true",
       REVIEW_QUEUE: { send: async (msg: unknown) => { sent.push(msg); } } as unknown as Env["REVIEW_QUEUE"],
     });
     const res = await worker.fetch(
@@ -2754,7 +2745,6 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
-    expect(body).not.toContain("REVIEW_ENABLED");
   });
 
   test("admin views any App's onboarding page", async () => {
@@ -2782,7 +2772,6 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
     expect(body).toContain("打开设置");
     expect(body).not.toContain("GitHub App connected");
     expect(body).not.toContain("Open Settings");
-    expect(body).not.toContain("REVIEW_ENABLED");
   });
 });
 

@@ -133,7 +133,6 @@ function makeEnv(db: unknown, overrides: Partial<Env> = {}): Env {
     DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
-    REVIEW_ENABLED: "true", // webhook-face bridge tests need the slug lookup to run
     DB: db,
     ...overrides,
   } as Env;

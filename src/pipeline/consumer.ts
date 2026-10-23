@@ -181,7 +181,7 @@ export type PipelineEnv = {
    * from the App's own per-App config (resolveAppConfig keys map +
    * modelChain, custom declarations); an App missing either fails closed
    * (assertAppConfigComplete → F-001 channel). The only remaining
-   * deployment-level knobs are the fail-closed emergency brake and tier above.
+   * deployment-level knob is the review tier above.
    */
 };
 

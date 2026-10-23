@@ -440,7 +440,45 @@ describe("no deployment allowlist survives", () => {
 });
 
 /**
- * The v1.2 tenant read mode is GONE end to end (the tenant-mode removal,
+ * The deployment-wide review brake is GONE end to end (2026-10): per-App
+ * `github_apps.review_enabled` is the only review control, so a surviving
+ * reader, env declaration or doc row would document a variable nothing reads
+ * — and would imply a deployment can freeze every tenant's reviews.
+ * `.changes/unreleased/*` is release history and deliberately NOT scanned.
+ */
+describe("no deployment-wide review brake survives", () => {
+  /** Assembled from fragments so THIS file does not match its own scan. */
+  const RETIRED_VAR = ["REVIEW", "ENABLED"].join("_");
+
+  const SCANNED_ROOTS = [
+    "src",
+    "scripts",
+    "tests",
+    "docs",
+    ".github",
+    ".mstar/specs",
+    ".mstar/knowledge",
+  ] as const;
+  const SCANNED_FILES = [
+    "wrangler.jsonc",
+    ".env.example",
+    "README.md",
+    "README_CN.md",
+  ] as const;
+
+  test(`${RETIRED_VAR} has zero references in src/, scripts/, tests/, docs/, .github/ and the deploy config`, () => {
+    const files = [...SCANNED_ROOTS.flatMap(walk), ...SCANNED_FILES];
+    const offenders = files.filter((path) =>
+      readFileSync(join(REPO_ROOT, path), "utf8").includes(RETIRED_VAR),
+    );
+    expect(
+      offenders,
+      `${RETIRED_VAR} is retired: per-App review_enabled is the only control, so no code, test or doc may name a deployment-level brake`,
+    ).toEqual([]);
+  });
+});
+
+/** The v1.2 tenant read mode is GONE end to end (the tenant-mode removal,
  * 2026-10): one SQL face, one
  * App route family, no mode var — so a surviving reference in the shipped
  * code, the deploy scripts, the workflows, the tests, the docs or the deploy

@@ -62,4 +62,4 @@ v0.3 发表面允许二者之一（architect 锁实现，产品只锁结果）�
 - 不把 GitHub `APPROVE` 当 `ship it` 的自动化合并许可。
 - 不发 `REQUEST_CHANGES`。
 - Check Run 由 `review-lifecycle.md`（review-lifecycle 交互裁决 D3；产品范围已评审）授权引入：conclusion 只表执行结果（正常发表=success / 确认降级发表=neutral / 执行失败、更新未确认、本地错误=failure），**结论由持久证据判定**而非代码路径（`review-lifecycle.md` §7.9 结论矩阵），永不映射或替代 `APPROVE` / `REQUEST_CHANGES`，checks 失败不阻塞 review 发表；line comments 已交付（见 §3 与 knowledge `github-pr-review-line-comments.md`）。**Check 已于 2026-09-14（M7）交付**：权限集含 `checks`，生产注入 `CheckLifecycleHooks`，跳过路径（paused / guard-held / 幂等 ack）仍完全不建 Check；同 commit 可能合法出现两个同名 run（RL-12），以最新适用 attempt 为准；不设 `details_url`；分支保护由用户决定。
-- 不打开现网 `REVIEW_ENABLED`（2026-08-26 postdeploy 反馈裁决 R2：kill-switch ships OFF）。
+- 现网没有部署级审查总闸：2026-08-26 postdeploy 反馈裁决 R2 的「kill-switch ships OFF」已由 2026-10 的彻底删除取代——审查开关只剩 per-App `review_enabled`。

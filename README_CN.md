@@ -22,7 +22,7 @@ findings 落入 D1 供后续分析。
 - **隔离执行** —— 每次审查运行在一次性 Cloudflare Sandbox 容器中（clone → review → 销毁），镜像内零密钥
 - **结构化结果** —— 审查产出 `mstar.review/v1` envelope（verdict + 分级 findings）持久化到 D1，为后续去重、复现统计和健康分析提供数据层
 - **按 App 的触发模式** —— 每个 App 在 settings 页选择审查何时自动启动：`open`（仅首次打开）、`every_push`（默认——打开、push、重新打开）或 `manual`（从不自动审查）；任何模式下，PR 作者或仓库所有者在 PR 评论中 @提及 App 的 bot（`@your-app-slug[bot]`）即可（重新）启动一次审查
-- **设计上 fail-closed** —— 全局 kill-switch 把总闸，每个 App 必须自带 provider key 与模型链：配置缺失的 App 审查会大声失败，绝不动用别人的凭据
+- **设计上 fail-closed** —— 暂停的 App 不再启动新的审查：每个 App 必须自带 provider key 与模型链，配置缺失的 App 审查会大声失败，绝不动用别人的凭据
 
 ## 架构
 
@@ -133,7 +133,7 @@ flowchart LR
 4. **配置 App** —— 在该 App 的 dashboard Settings 页添加审查模型所需的 provider API key（BYOK，加密落
    D1）和模型链。缺这些的 App 审查会 fail-closed——见 [Per-App 配置](#per-app-配置)。
 
-5. **开启审查并提交 PR** —— 审查默认按 App 开启（dashboard 的 Pause/Resume 是唯一开关；Worker 变量 `REVIEW_ENABLED` 仅作紧急总闸，只有精确设置为 `"false"` 才全平台停审），在安装了该 App 的仓库里开一个（或更新一个）PR：
+5. **开启审查并提交 PR** —— 审查默认按 App 开启（dashboard 的 Pause/Resume 是唯一的审查开关；不存在部署级总闸），在安装了该 App 的仓库里开一个（或更新一个）PR：
 
    审查在 sandbox 容器内运行，结果以单条评论出现在 PR 上（upsert——force-push 不会产生评论刷屏）。
 
@@ -168,8 +168,7 @@ flowchart LR
 
 ## 运维
 
-- **紧急总闸**：per-App `review_enabled`（dashboard 的 Pause/Resume）是审查主控。Worker 变量 `REVIEW_ENABLED`
-  仅当精确为 `"false"`（大小写敏感、不 trim）时才全平台停审；未设置 / `""` / `"true"` / 其它值 → 由 per-App 决定。保持未设置。
+- **审查控制**：per-App `review_enabled`（dashboard 的 Pause/Resume）是唯一的审查开关——不存在部署级总闸。暂停的 App 仍返回 2xx 且零入队，webhook 保持健康。
 - **部署已自动化（本仓库）**：合并到 `main` 即运行 [Deploy workflow](.github/workflows/deploy.yml) —— secrets 注入、D1 迁移、
   `wrangler deploy`、部署后冒烟与 image digest 记录。失败即标红停止（无自动回滚）；失败语义与手工回滚路径见
   [`docs/deploy.md`](docs/deploy.md)。自托管自己的副本？你手动部署（或自建流水线）——见[路径 A](#路径-a--自托管定版副本)。

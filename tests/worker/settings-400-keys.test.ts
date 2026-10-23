@@ -50,7 +50,6 @@ function makeEnv(db: unknown): Env {
     DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
-    REVIEW_ENABLED: "true",
     DB: db,
   } as Env;
 }

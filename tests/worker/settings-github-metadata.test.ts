@@ -123,7 +123,6 @@ function makeEnv(db: unknown, encryptionKey: string | null = TEST_KEY): Env {
     GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
     DEPLOYMENT_MODE: "self-hosted",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
-    REVIEW_ENABLED: "true",
     DB: db,
   };
   if (encryptionKey !== null) (env as Record<string, unknown>).DASHBOARD_ENCRYPTION_KEY = encryptionKey;

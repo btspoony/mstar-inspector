@@ -6,7 +6,7 @@ import type { Env } from "../../src/worker/env";
 /**
  * Worker entry smoke tests. The legacy bare `POST /webhook` face is retired
  * — its end-to-end coverage (valid signature / 401 / 500 /
- * kill-switch / 413) now lives in tests/worker/webhook-routing.test.ts
+ * 413) now lives in tests/worker/webhook-routing.test.ts
  * against the per-App `POST /webhook/:appSlug` route, which shares the same
  * pre-order. This file keeps the non-webhook entry surface.
  */
@@ -17,7 +17,6 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
       get: async () => null,
       put: async () => {},
     } as unknown as Env["IDEMPOTENCY_KV"],
-    REVIEW_ENABLED: "true",
     ...overrides,
   };
 }

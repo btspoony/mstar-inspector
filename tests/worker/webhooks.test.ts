@@ -72,7 +72,7 @@ function issueCommentBody(
 
 /** Classify an issue_comment body as the PR author against APP_SLUG. */
 function classifyMention(body: string, trigger: ReviewTriggerContext = EVERY_PUSH) {
-  return classifyEvent("issue_comment", issueCommentBody({ comment: { body } }), undefined, true, trigger);
+  return classifyEvent("issue_comment", issueCommentBody({ comment: { body } }), undefined, trigger);
 }
 
 describe("classifyWebhook — signature verification (fail-closed)", () => {
@@ -201,25 +201,10 @@ describe("warn event labels (log hygiene 硬化项 3)", () => {
       "issue_comment",
       issueCommentBody({ sender: { type: "User", login: "hacker-123" } }),
       log,
-      true,
       EVERY_PUSH,
     );
     const [fields] = log.warn.mock.calls[0] ?? [];
     expect(fields).toMatchObject({ event: "issue_comment", reason: "actor_not_allowed" });
-  });
-
-  test("emergency brake warn on classifyEvent carries the real event when the header is present", () => {
-    const log = makeLog();
-    classifyEvent("pull_request", pullRequestBody("opened"), log, false);
-    const [fields] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "pull_request", reason: "review_disabled_kill_switch" });
-  });
-
-  test("emergency brake warn with absent event header → event = review_disabled_kill_switch", () => {
-    const log = makeLog();
-    classifyEvent(null, pullRequestBody("opened"), log, false);
-    const [fields] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "review_disabled_kill_switch", reason: "review_disabled_kill_switch" });
   });
 
   test("verifySignature throw warn: real event when threaded, stage label otherwise", async () => {
@@ -282,7 +267,7 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
   for (const mode of MODES) {
     for (const action of PULL_REQUEST_ACTIONS) {
       test(`${mode} × pull_request.${action} → ${MATRIX[mode][action] ? "job" : "ignore"}`, () => {
-        const outcome = classifyEvent("pull_request", pullRequestBody(action), undefined, true, {
+        const outcome = classifyEvent("pull_request", pullRequestBody(action), undefined, {
           mode,
           appSlug: APP_SLUG,
         });
@@ -305,14 +290,14 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
 
   for (const mode of MODES) {
     test(`${mode} × pull_request.closed (never whitelisted) → the action reason, not a mode reason`, () => {
-      const outcome = classifyEvent("pull_request", pullRequestBody("closed"), undefined, true, {
+      const outcome = classifyEvent("pull_request", pullRequestBody("closed"), undefined, {
         mode,
         appSlug: APP_SLUG,
       });
       expect(outcome).toEqual({ kind: "ignore", reason: "pull_request action closed is not whitelisted" });
     });
     test(`${mode} × malformed payload still rejects 400 (reject set is mode-invariant)`, () => {
-      const outcome = classifyEvent("pull_request", pullRequestBody("opened", { installation: null }), undefined, true, {
+      const outcome = classifyEvent("pull_request", pullRequestBody("opened", { installation: null }), undefined, {
         mode,
         appSlug: APP_SLUG,
       });
@@ -338,7 +323,7 @@ describe("classifyEvent — every_push default reproduces current classification
   test("an omitted trigger context and an explicit every_push context classify identically", () => {
     for (const action of PULL_REQUEST_ACTIONS) {
       const omitted = classifyEvent("pull_request", pullRequestBody(action));
-      const explicit = classifyEvent("pull_request", pullRequestBody(action), undefined, true, {
+      const explicit = classifyEvent("pull_request", pullRequestBody(action), undefined, {
         mode: "every_push",
         appSlug: "",
       });
@@ -349,7 +334,7 @@ describe("classifyEvent — every_push default reproduces current classification
 
   test("every_push payload is the exact pre-policy payload shape for all three actions", () => {
     for (const action of PULL_REQUEST_ACTIONS) {
-      const outcome = classifyEvent("pull_request", pullRequestBody(action), undefined, true, {
+      const outcome = classifyEvent("pull_request", pullRequestBody(action), undefined, {
         mode: "every_push",
         appSlug: APP_SLUG,
       });
@@ -371,7 +356,7 @@ describe("classifyEvent — every_push default reproduces current classification
 
 describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
   test("issue_comment.created with a bot mention on a PR by the author yields a job with null head_sha", () => {
-    const outcome = classifyEvent("issue_comment", issueCommentBody(), undefined, true, EVERY_PUSH);
+    const outcome = classifyEvent("issue_comment", issueCommentBody(), undefined, EVERY_PUSH);
     expect(outcome.kind).toBe("job");
     if (outcome.kind === "job") {
       expect(outcome.payload).toEqual({
@@ -401,7 +386,6 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       "issue_comment",
       issueCommentBody({ issue: { number: 7 } }),
       undefined,
-      true,
       EVERY_PUSH,
     );
     expect(outcome).toEqual({ kind: "ignore", reason: "comment is not on a pull request thread" });
@@ -412,14 +396,13 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       "issue_comment",
       issueCommentBody({ sender: { type: "Bot", login: "mstar-inspector[bot]" } }),
       undefined,
-      true,
       EVERY_PUSH,
     );
     expect(outcome).toEqual({ kind: "ignore", reason: "comment sent by a bot (self-comment loop guard)" });
   });
 
   test("issue_comment.edited is ignored", () => {
-    const outcome = classifyEvent("issue_comment", issueCommentBody({ action: "edited" }), undefined, true, EVERY_PUSH);
+    const outcome = classifyEvent("issue_comment", issueCommentBody({ action: "edited" }), undefined, EVERY_PUSH);
     expect(outcome).toEqual({ kind: "ignore", reason: "issue_comment action edited is not whitelisted" });
   });
 });
@@ -553,7 +536,6 @@ describe("classifyEvent — bot mention actor allowlist (B5)", () => {
       "issue_comment",
       issueCommentBody({ sender: { type: "User", login: "test-author" } }),
       undefined,
-      true,
       EVERY_PUSH,
     );
     expect(outcome.kind).toBe("job");
@@ -564,7 +546,6 @@ describe("classifyEvent — bot mention actor allowlist (B5)", () => {
       "issue_comment",
       issueCommentBody({ sender: { type: "User", login: "test-owner" } }),
       undefined,
-      true,
       EVERY_PUSH,
     );
     expect(outcome.kind).toBe("job");
@@ -576,7 +557,6 @@ describe("classifyEvent — bot mention actor allowlist (B5)", () => {
       "issue_comment",
       issueCommentBody({ sender: { type: "User", login: "hacker-123" } }),
       log,
-      true,
       EVERY_PUSH,
     );
     expect(outcome).toEqual({ kind: "ignore", reason: "comment actor is not the PR author or repo owner" });
@@ -591,7 +571,6 @@ describe("classifyEvent — bot mention actor allowlist (B5)", () => {
       "issue_comment",
       issueCommentBody({ sender: { type: "User" } }),
       undefined,
-      true,
       EVERY_PUSH,
     );
     expect(outcome).toEqual({ kind: "ignore", reason: "comment actor is not the PR author or repo owner" });
@@ -614,57 +593,4 @@ describe("classifyEvent — everything else", () => {
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "invalid JSON body" });
   });
 });
-describe("REVIEW_ENABLED emergency brake (AC4a)", () => {
-  test("classifyEvent with reviews disabled ignores even a whitelisted event", () => {
-    const outcome = classifyEvent("pull_request", pullRequestBody("opened"), undefined, false);
-    expect(outcome).toEqual({
-      kind: "ignore",
-      reason: "reviews stopped by the REVIEW_ENABLED emergency brake",
-    });
-  });
 
-  test("classifyEvent with reviews disabled ignores a bot mention", () => {
-    const outcome = classifyEvent("issue_comment", issueCommentBody(), undefined, false, EVERY_PUSH);
-    expect(outcome.kind).toBe("ignore");
-  });
-
-  test("classifyEvent with reviews disabled logs a structured review_disabled_kill_switch warning", () => {
-    const log = makeLog();
-    const outcome = classifyEvent("pull_request", pullRequestBody("opened"), log, false);
-    expect(outcome.kind).toBe("ignore");
-    expect(log.warn).toHaveBeenCalledTimes(1);
-    const [fields, msg] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "pull_request", reason: "review_disabled_kill_switch" });
-    expect(msg).toContain("emergency brake");
-  });
-
-  test("classifyWebhook with reviews disabled ignores before any signature work", async () => {
-    const log = makeLog();
-    // Even a bad signature is ignored (2xx) — the emergency brake short-circuits
-    // before verification, so a disabled worker never rejects/retries.
-    const outcome = await classifyWebhook(SECRET, "{}", "sha256=deadbeef", "pull_request", log, false);
-    expect(outcome).toEqual({
-      kind: "ignore",
-      reason: "reviews stopped by the REVIEW_ENABLED emergency brake",
-    });
-    expect(log.warn).toHaveBeenCalledTimes(1);
-  });
-
-  test("classifyWebhook with reviews enabled keeps the payload unchanged", async () => {
-    const body = pullRequestBody("opened");
-    const signature = await makeWebhooks(SECRET).sign(body);
-    const outcome = await classifyWebhook(SECRET, body, signature, "pull_request", undefined, true);
-    expect(outcome.kind).toBe("job");
-    if (outcome.kind === "job") {
-      expect(outcome.payload).toEqual({
-        installation_id: 123,
-        owner: "test-owner",
-        repo: "test-repo",
-        pr_number: 42,
-        head_sha: HEAD_SHA,
-        action: "opened",
-        triggered_by: "pull_request",
-      });
-    }
-  });
-});
