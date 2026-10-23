@@ -14,9 +14,10 @@
  *   must agree with the top-level verdict (consistency rule)
  * - title/body are required non-empty; category is a free string;
  *   file_path / line_start / line_end are optional and nullable
- * - unknown keys are stripped, not rejected — EXCEPT a residual M1
- *   `severity` key (top-level or per-finding), which is REJECTED with
- *   `review.inspector-vocab` before zod can strip it
+ * - the envelope is CLOSED (engine 4.0.7): an unknown top-level key or an
+ *   unknown finding key is REJECTED with `review.unknown-key` — EXCEPT a
+ *   residual M1 `severity` key (top-level or per-finding), which keeps its
+ *   `review.inspector-vocab` refusal ahead of the generic unknown-key code
  * - fenced ```json / bare ``` blocks and first-{..last-} extraction both parse
  * - any failure returns { ok: false } and never throws
  */
@@ -177,17 +178,23 @@ describe("parseReviewOutput", () => {
     expect(r.ok).toBe(false);
   });
 
-  test("strips unknown keys instead of failing", () => {
-    const withExtra = {
-      ...VALID,
-      extra_root: 1,
-      findings: [{ ...VALID.findings[0]!, extra: "x" }],
-    };
-    const r = parseReviewOutput(JSON.stringify(withExtra));
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect("extra_root" in r.output).toBe(false);
-      expect("extra" in r.output.findings[0]!).toBe(false);
+  test("rejects an unknown top-level key with review.unknown-key", () => {
+    const r = parseReviewOutput(JSON.stringify({ ...VALID, extra_root: 1 }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain("review.unknown-key");
+      expect(r.error).toContain("extra_root");
+    }
+  });
+
+  test("rejects an unknown finding key with review.unknown-key", () => {
+    const r = parseReviewOutput(
+      JSON.stringify({ ...VALID, findings: [{ ...VALID.findings[0]!, extra: "x" }] }),
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain("review.unknown-key");
+      expect(r.error).toContain("findings[0].extra");
     }
   });
 
