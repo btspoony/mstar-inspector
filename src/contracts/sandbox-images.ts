@@ -96,15 +96,24 @@ export type SandboxImagePins = {
   readonly harnessCliVersion: string;
 };
 
+/**
+ * The one mstar-harness release the image pins: both version fields below
+ * carry it, so a bump changes a single literal. `harnessRef` stays a literal
+ * commit — a tag cannot yield the deref sha. `tests/review/pin.test.ts` binds
+ * the Dockerfile's `ref`/`tag` pair, the engine manifest and the lock rows to
+ * this value.
+ */
+export const HARNESS_VERSION = "4.0.4";
+
 /** The `omp` image's build pins — the single declaration of its versioned inputs. */
 export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
   baseImageDigest: "sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483",
   sandboxShimTag: "1.0.0",
   bunVersion: "1.4.0",
   ghVersion: "2.98.0",
-  harnessVersion: "4.0.4",
+  harnessVersion: HARNESS_VERSION,
   harnessRef: "d58005dff66d2edca420624fc6ba5ee4d4d38e32",
-  harnessCliVersion: "4.0.4",
+  harnessCliVersion: HARNESS_VERSION,
 });
 
 /** One selectable sandbox runtime image. */

@@ -31,7 +31,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
-import { OMP_SANDBOX_IMAGE_PINS } from "../../src/contracts/sandbox-images";
+import { HARNESS_VERSION, OMP_SANDBOX_IMAGE_PINS } from "../../src/contracts/sandbox-images";
 import { REVIEW_SKILL_VERSION } from "../../src/store/artifact-store";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -40,8 +40,24 @@ const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "Dockerfile");
 const DOCKERFILE = readFileSync(OMP_DOCKERFILE, "utf8");
 
 describe("sandbox image harness pin", () => {
+  test("both declared harness versions are the single HARNESS_VERSION constant", () => {
+    // The constant is the only place a bump edits; the pin fields and every
+    // downstream anchor (Dockerfile ARG, engine manifest, lock rows) read it,
+    // so one of them left behind fails a comparison below.
+    expect(OMP_SANDBOX_IMAGE_PINS.harnessVersion).toBe(HARNESS_VERSION);
+    expect(OMP_SANDBOX_IMAGE_PINS.harnessCliVersion).toBe(HARNESS_VERSION);
+  });
+
   test("Dockerfile fetches the declared harness commit", () => {
     expect(DOCKERFILE).toContain(`fetch --depth 1 origin ${OMP_SANDBOX_IMAGE_PINS.harnessRef}`);
+  });
+
+  test("Dockerfile comment pairs the declared ref with the declared tag", () => {
+    // One line carries both: a bump that moves the commit or the version
+    // alone leaves the other half stale and fails here and on the tag below.
+    const pinned = DOCKERFILE.match(/^#\s*mstar-harness plugin, pinned ref (\w+) \(tag v(\S+),/m);
+    expect(pinned).not.toBeNull();
+    expect(pinned!.slice(1)).toEqual([OMP_SANDBOX_IMAGE_PINS.harnessRef, HARNESS_VERSION]);
   });
 
   test("Dockerfile comment records the declared tag", () => {
