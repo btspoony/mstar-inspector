@@ -747,9 +747,7 @@ describe("tenant attribution on the webhook read face", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]!.appRef).toEqual({ appId: appRow.id });
   });
-
 });
-
 
 describe("installations upsert wiring", () => {
   test("per-App webhook with installation_id → app_installations row INSERTED (seen_at set, bare login)", async () => {
