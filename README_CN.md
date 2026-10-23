@@ -153,7 +153,7 @@ flowchart LR
 
 | Runtime | 状态 |
 |---------|------|
-| [omp](https://github.com/oh-my-pi/omp) | **已内置** —— 当前适配器（`src/review/runtime-omp.ts`），覆盖全部审查档位（quick / default / deep） |
+| [omp](https://github.com/oh-my-pi/omp) | **已内置** —— 当前适配器（`packages/runner/src/runtime-omp.ts`），覆盖全部审查档位（quick / default / deep） |
 | dsh 及其它 | 尚未接入 —— 端口即扩展点；新适配器无需改动 webhook / queue / store 管线即可插入 |
 
 ## Per-App 配置

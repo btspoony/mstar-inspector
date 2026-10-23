@@ -9,14 +9,14 @@
  * the machine-absolute default root existing (it does not on GitHub Actions
  * runners).
  *
- * The env var name must match `HARNESS_ROOT_ENV` in src/review/runtime-omp.ts.
+ * The env var name must match `HARNESS_ROOT_ENV` in packages/runner/src/runtime-omp.ts.
  */
 
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** Must match `HARNESS_ROOT_ENV` in src/review/runtime-omp.ts. */
+/** Must match `HARNESS_ROOT_ENV` in packages/runner/src/runtime-omp.ts. */
 const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 
 /** Absolute path of the temp fixture plugin root. */

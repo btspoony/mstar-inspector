@@ -189,7 +189,7 @@ export type PipelineEnv = {
 const CLONE_DIR = "/workspace/repo";
 const DIFF_PATH = "/workspace/pr.diff";
 const RUNNER_INPUT_PATH = "/workspace/review-input.json";
-const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
+const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
@@ -2412,8 +2412,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // synthesis ride alongside).
     // The resolved image's capability hosts ride ALWAYS (keyless
     // registry data) — the in-image synthesizer's base (it cannot import the
-    // contract: the runner module graph stays inside src/review,
-    // tests/review/runtime-boundary).
+    // contract: the runner module graph stays inside packages/runner/src +
+    // packages/shared/src, tests/review/runtime-boundary).
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,

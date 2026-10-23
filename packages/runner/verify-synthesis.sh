@@ -7,11 +7,11 @@
 # the omp SDK through the runner's REAL synthesis path — with no baked
 # in-image models.yml (the image ships an EMPTY
 # /opt/omp-agent):
-#   (a) writePerReviewModelsYaml (src/review/models-synthesis.ts) synthesizes
-#       a COMPLETE per-review models.yml from the CAPABILITY HOSTS (the omp
-#       ark-plan host — the runner input `capabilityHosts`; declared inline
-#       below because the in-image module graph cannot import
-#       src/contracts/sandbox-images.ts: the image COPYs only src/review)
+#   (a) writePerReviewModelsYaml (packages/runner/src/models-synthesis.ts)
+#       synthesizes a COMPLETE per-review models.yml from the CAPABILITY HOSTS
+#       (the omp ark-plan host — the runner input `capabilityHosts`; declared
+#       inline below because the in-image module graph cannot import the
+#       sandbox-image registry: the image copies only the package sources)
 #       plus an OPTIONAL keyless custom declaration (provider id u001-verify,
 #       baseUrl https://example.invalid/v1, model id verify-model — reserved
 #       domains; the .invalid TLD structurally excludes egress). Asserted:
@@ -55,15 +55,15 @@ set -euo pipefail
 cd /opt/runner
 
 bun -e '
-import { capabilityHostsYaml, writePerReviewModelsYaml } from "/opt/runner/src/review/models-synthesis.ts";
+import { capabilityHostsYaml, writePerReviewModelsYaml } from "/opt/runner/packages/runner/src/models-synthesis.ts";
 import { ModelRegistry, discoverAuthStorage, createAgentSession } from "@oh-my-pi/pi-coding-agent";
 import { join } from "node:path";
 import { readFileSync, rmSync } from "node:fs";
 
 // The omp capability host — the runner input `capabilityHosts` entry for the
-// deployed image. Declared inline (NOT imported from
-// src/contracts/sandbox-images.ts): the image COPYs only src/review, so the
-// in-image module graph cannot see the registry; this literal mirrors the
+// deployed image. Declared inline (NOT imported from the sandbox-image
+// registry): the image copies only the package sources, so the in-image
+// module graph cannot see the registry; this literal mirrors the
 // source-controlled omp entry (ark-plan). `apiKeyEnv` and `auth` are retained
 // registry metadata — the pool env prefix derives from the provider id
 // (catalogProviderId), not from `apiKeyEnv` — and the synthesized block pins

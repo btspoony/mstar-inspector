@@ -59,4 +59,4 @@ Any `pi-coding-agent` embedding that must be read-only and offline. For multi-te
 
 ## Examples
 
-Working reference: `src/review/session.ts` + `src/review/schema.ts`. Live evidence: raw output 9423 chars → 5 findings (smoke), CLI e2e 4 then 3 findings, verdict `request_changes`, ~136 s per review — budget queue timeouts accordingly.
+Working reference: `packages/runner/src/runtime-omp.ts` + `src/review/schema.ts`. Live evidence: raw output 9423 chars → 5 findings (smoke), CLI e2e 4 then 3 findings, verdict `request_changes`, ~136 s per review — budget queue timeouts accordingly.

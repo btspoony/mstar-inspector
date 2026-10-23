@@ -10,7 +10,7 @@
  * drives the container itself through the workerd-only `cloudflare:workers`
  * builtin (`DurableObject` base + `this.ctx.container`); the package stays
  * pinned at 1.0.0 as the version anchor for the image's `sandbox-shim`
- * (`sandbox-image/omp/Dockerfile` must copy it from the same 1.0 line).
+ * (`sandbox-image/Dockerfile` must copy it from the same 1.0 line).
  *
  * Container model (1.0):
  *   - the DO starts its own container: `container.start({ image:

@@ -34,7 +34,7 @@
  *
  * model_chain is stored VERBATIM (a model selector is configuration, not a
  * secret) and is never parsed here beyond the route's ≥1-token validation —
- * parseModelChain below mirrors src/review/runtime-omp.ts parseModelSelectors
+ * parseModelChain below mirrors packages/runner/src/runtime-omp.ts parseModelSelectors
  * because dashboard modules must not import review/pipeline code (architect
  * decision Q2, src/dashboard/index.ts header); behavioral parity is locked by
  * tests/worker/app-config.test.ts.
@@ -63,7 +63,7 @@
  * selector chains (is_default = 0). `app_model_chain_seats` maps each of
  * the 4 audit-seat agent names to a chain name; ABSENT row = the seat uses
  * the default chain. The role vocabulary lives here as the MODEL_ROLE_IDS
- * mirror (importing the runner side via src/review is forbidden by the
+ * mirror (importing the runner side via packages/runner is forbidden by the
  * dashboard isolation — Q2), and the selector grammar is validated with the
  * parseModelChain mirror above; both copies are parity-locked by
  * tests/worker/app-config.test.ts. Chains are decrypt-free (selectors are
@@ -411,7 +411,7 @@ export const PROVIDER_META: Record<string, ProviderMirrorEntry> = PROVIDER_CATAL
  * The per-role model vocabulary (spec § 语义锁) — EXACTLY the
  * 4 audit-seat agent names the runner dispatches: `mstar-review-seat` is the
  * quick/default seat (the agent definition installed from
- * src/review/seat-agent.md), the three deep seats are the harness roles
+ * packages/runner/src/seat-agent.md), the three deep seats are the harness roles
  * dispatched by name from runtime-omp's DEEP_SEAT_ROLES. Declared locally,
  * NOT imported: dashboard modules must not import review code (architect
  * decision Q2, src/dashboard/index.ts header). The copy is locked in sync by
@@ -427,7 +427,7 @@ export const MODEL_ROLE_IDS: readonly string[] = Object.freeze([
 ]);
 
 /**
- * Mirror of src/review/runtime-omp.ts `parseModelSelectors` (runtime-omp.ts:119):
+ * Mirror of packages/runner/src/runtime-omp.ts `parseModelSelectors` (runtime-omp.ts:119):
  * comma-separated, trimmed, empty segments dropped; `undefined`/empty → `[]`.
  * Selectors pass through verbatim — a `:thinking`-style suffix is legal omp
  * selector syntax and is NOT rejected here; full selector validation stays

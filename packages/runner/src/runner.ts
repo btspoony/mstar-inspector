@@ -4,7 +4,7 @@
  * Runs INSIDE the sandbox image and is invoked by the Worker consumer via
  * `exec` (the consumer wires the runtime in):
  *
- *   bun run /opt/runner/src/review/runner.ts --level <quick|default|deep> --input <json-file>
+ *   bun run /opt/runner/packages/runner/src/runner.ts --level <quick|default|deep> --input <json-file>
  *
  * Contract:
  *   - `--level` is the review tier (quick | default | deep); anything else is a
@@ -68,7 +68,7 @@
  * never a key value, never the payload.
  * An absent payload (empty stdin) is the keyless run shape — and so is an
  * interactive terminal: the documented local
- * `bun run src/review/runner.ts --level <tier> --input <json-file>` has no pipe,
+ * `bun run packages/runner/src/runner.ts --level <tier> --input <json-file>` has no pipe,
  * so its TTY would never send EOF; the read is skipped there instead of
  * blocking.
  * The credential directory is per-run and holds only the non-secret synthesized
@@ -85,12 +85,12 @@ import {
   type AgentRuntimeRunInput,
   type CapabilityHost,
   type CustomProviderDeclaration,
-} from "../../packages/shared/src/runtime";
+} from "../../shared/src/runtime";
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 import { writePerReviewModelsYaml } from "./models-synthesis";
-import { decodeCredentialPayload } from "../../packages/shared/src/credential-payload";
-import type { RecheckInput } from "../../packages/shared/src/recheck-wire";
+import { decodeCredentialPayload } from "../../shared/src/credential-payload";
+import type { RecheckInput } from "../../shared/src/recheck-wire";
 
 const USAGE =
   `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> [--recheck-out <path>] ` +

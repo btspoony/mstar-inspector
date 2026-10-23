@@ -1,8 +1,8 @@
 # mstar-inspector review sandbox image (review-runner containerization).
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
-# the mstar-harness CLI, and the omp SDK (via package.json/bun.lock) are all
-# pinned to exact versions.
+# the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and
+# its committed bun.lock) are all pinned to exact versions.
 #
 # NO SECRETS (HARD): this image is built with no build args, no env values, no
 # credentials. Tokens/keys enter only at runtime — the sandbox-read token via
@@ -37,8 +37,12 @@
 #   - runner + omp SDK deps installed via `bun install --frozen-lockfile`.
 #
 # Build context: repo root (wrangler containers `images.sandbox.build_context`), so
-# the Dockerfile can COPY package.json/bun.lock and src/review from the repo.
-# A repo-root .dockerignore keeps the context lean (node_modules excluded).
+# the Dockerfile COPYs the runner package (manifest + frozen lockfile), the two
+# in-image package source trees, and the runner's verify script:
+#   packages/runner/{package.json,bun.lock}
+#   packages/{shared,runner}/src
+#   packages/runner/verify-synthesis.sh
+# A repo-root .dockerignore keeps the context lean (node_modules and tests excluded).
 
 # Sandbox SDK 1.0: the 0.12 `FROM docker.io/cloudflare/sandbox:<ver>` base is
 # gone (1.0 ships no runtime base image — the 1.0 image is only a BLOCK source
@@ -104,7 +108,7 @@ RUN git init /opt/mstar-harness \
 # mstar-harness CLI preinstall: CONTAINER-level availability
 # per user instruction (2026-09-06) — NOT a review-session mechanism. Review
 # sessions are restricted to read-only read/grep/glob
-# (src/review/runtime-omp.ts REVIEW_TOOL_NAMES), so review-session toolcalls
+# (packages/runner/src/runtime-omp.ts REVIEW_TOOL_NAMES), so review-session toolcalls
 # canNOT invoke the `mstar` CLI today; absent a wired invocation path, review
 # behavior is unchanged (legacy, non-CLI). Wiring a sanctioned session
 # toolcall path is a tracked follow-up — no such mechanism
@@ -118,11 +122,11 @@ ENV PATH="/root/.bun/bin:${PATH}"
 
 # omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (no baked
 # models.yml is an App-configuration artifact). The in-image runner
-# (src/review/runner.ts) synthesizes the COMPLETE per-review models.yml under
+# (packages/runner/src/runner.ts) synthesizes the COMPLETE per-review models.yml under
 # /tmp/omp-agent-<uuid>/ (capability hosts from the App's selected registry
 # entry, src/contracts/sandbox-images.ts, + App custom providers), rides that
 # directory as the session agentDir, and loads the transported credential
-# payload (the runner's STDIN, src/review/credential-payload.ts) into the run's
+# payload (the runner's STDIN, packages/shared/src/credential-payload.ts) into the run's
 # IN-MEMORY credential store as stored `login` api_key rows before the session
 # starts. That directory holds only the non-secret models.yml and is removed
 # after the run (defence in depth). The synthesized provider blocks pin NO
@@ -132,25 +136,26 @@ ENV PATH="/root/.bun/bin:${PATH}"
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
-# lockfile (omp SDK 18.12.3 = package.json). `--omit=optional` is NOT used:
+# lockfile (omp SDK 18.12.3 = packages/runner/package.json). `--omit=optional` is NOT used:
 # pi-natives ships its platform binary as an optional dep, so omitting optionals
 # breaks the runner at load (T4 live smoke). Size control instead prunes the
 # transformers tree (local-embedding models only — the runner uses the remote
 # ark provider; SDK guards the optional-dep imports, verified live in-image).
 WORKDIR /opt/runner
-COPY package.json bun.lock ./
+LABEL io.mstar.runner-package-version=0.1.0
+COPY packages/runner/package.json packages/runner/bun.lock ./
 RUN bun install --frozen-lockfile --production \
     && rm -rf node_modules/@huggingface node_modules/onnxruntime-node \
           node_modules/onnxruntime-web node_modules/sharp node_modules/@img \
     && rm -rf /root/.bun/install/cache
-COPY src/review /opt/runner/src/review
-# Zero-runtime-dependency wire contracts shared by the Worker and the runner:
-# src/review/*.ts imports `../../packages/shared/src/*`, which resolves to
-# /opt/runner/packages/shared/src/* in this layout. src/pipeline, src/store and
-# every other workerd face stay out, and every admitted file must stay
-# dependency-free (tests/review/runtime-boundary.test.ts derives the admitted
-# set from these COPY lines and re-asserts that per file).
+# The image mirrors the repository's `packages/` layout so a runner module's
+# `../../shared/src/*` import resolves to the same file here as it does in
+# the repo. src/pipeline, src/store and every other workerd face stay out, and
+# every admitted shared file must stay dependency-free
+# (tests/review/runtime-boundary.test.ts derives the admitted set from these
+# COPY lines and re-asserts that per file).
 COPY packages/shared/src /opt/runner/packages/shared/src
+COPY packages/runner/src /opt/runner/packages/runner/src
 
 # The runner resolves the harness root from this env (plan Clarify #5). Provider
 # keys arrive as the runner's STDIN payload — never baked in, never in the env.
@@ -159,7 +164,7 @@ ENV HARNESS_PLUGIN_ROOT=/opt/mstar-harness
 # the script ships inside the image so the evidence replays on the exact
 # digest being verified. Not a build gate — run manually in a container:
 #   docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
-COPY sandbox-image/verify-synthesis.sh /opt/verify-synthesis.sh
+COPY packages/runner/verify-synthesis.sh /opt/verify-synthesis.sh
 RUN chmod +x /opt/verify-synthesis.sh
 
 # 1.0 container model: the DO-managed container's MAIN process is the image

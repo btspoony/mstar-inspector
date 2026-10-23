@@ -179,7 +179,7 @@ plugin; which coding agent executes them is pluggable:
 
 | Runtime | Status |
 |---------|--------|
-| [omp](https://github.com/oh-my-pi/omp) | **Shipped** — the current adapter (`src/review/runtime-omp.ts`), all review levels (quick / default / deep) |
+| [omp](https://github.com/oh-my-pi/omp) | **Shipped** — the current adapter (`packages/runner/src/runtime-omp.ts`), all review levels (quick / default / deep) |
 | dsh and others | Not yet — the port is the extension point; a new adapter plugs in without touching the webhook / queue / store pipeline |
 
 ## Per-App configuration

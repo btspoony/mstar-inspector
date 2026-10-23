@@ -25,7 +25,7 @@
  *     the operator typed it, instead of a failed review run later.
  *
  * Zero-dependency by construction: this file is admitted into the in-image
- * runner graph (sandbox-image/omp/Dockerfile COPYs it beside
+ * runner graph (sandbox-image/Dockerfile COPYs it beside
  * packages/shared/src/recheck-wire.ts) and is consumed by the Worker faces, so
  * it must keep importing nothing (tests/review/runtime-boundary.test.ts asserts
  * that for every admitted contract file).

@@ -498,7 +498,7 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git apply --numstat '/workspace/pr.diff'"),
       expect.stringContaining("base64 -d > '/workspace/review-input.json'"),
       expect.stringContaining(
-        "bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'",
+        "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'",
       ),
     ]);
     // The runner input JSON carries the reconFacts the runtime folds into
