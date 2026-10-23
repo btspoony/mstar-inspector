@@ -12,6 +12,11 @@
  *     member list. Expiry is evaluated per request from the stored
  *     `expires_at` (`> now`), never by a timer or a status flip, so a lapsed
  *     grant stops matching exactly like no row at all.
+ *     The tables are append-only, so a window is closed by appending a row
+ *     whose own window is already over — both reads therefore judge ONE row
+ *     per (workspace, operator): the newest by `rowid` (insertion order). A
+ *     superseding row ends the window on the next request and the row it
+ *     supersedes stays readable as history.
  *   * `audit_events` records the operator access attempt in the workspace gate
  *     (`support.read` | `support.forbidden` | `support.denied`), one row per
  *     operator request, and every read of it is owner/admin-only.
@@ -65,11 +70,17 @@ const GRANT_COLUMNS = `id, workspace_id, operator_login, reason, granted_by, cre
 const AUDIT_COLUMNS = `id, workspace_id, actor_login, action, created_at`;
 
 /**
- * Whether `login` holds an unexpired support grant on `workspaceId` — the
+ * Whether `login` holds an open support window on `workspaceId` — the
  * `operator-granted` half of the gate's principal classification. The lookup
  * is workspace-keyed in the WHERE clause, so a grant on another workspace can
  * never answer true here; `operator_login` matches case-insensitively through
  * the column collation.
+ *
+ * Exactly ONE row decides: the newest append for that (workspace, login),
+ * ordered by `rowid` (insertion order — `created_at` is caller-supplied and may
+ * tie). Revocation is an append, so the superseding row must be able to end a
+ * window its predecessor still claims; filtering every row by `expires_at`
+ * would leave the revoked grant live.
  */
 export async function hasValidGrant(
   db: OperatorStoreD1,
@@ -79,13 +90,13 @@ export async function hasValidGrant(
 ): Promise<boolean> {
   const row = await db
     .prepare(
-      `SELECT 1 FROM support_grants
-        WHERE workspace_id = ? AND operator_login = ? AND expires_at > ?
-        ORDER BY expires_at DESC LIMIT 1`,
+      `SELECT expires_at > ? AS live FROM support_grants
+        WHERE workspace_id = ? AND operator_login = ?
+        ORDER BY rowid DESC LIMIT 1`,
     )
-    .bind(workspaceId, login, now)
-    .first<{ 1: number }>();
-  return row !== null;
+    .bind(now, workspaceId, login)
+    .first<{ live: number }>();
+  return row !== null && row.live === 1;
 }
 
 /**
@@ -132,10 +143,11 @@ export async function insertSupportGrant(
 }
 
 /**
- * The workspace's unexpired grants, longest-lived first — the members'
- * undismissable notice read. Lapsed rows are filtered by the same
- * `expires_at > ?` predicate the gate uses, so the notice disappears the
- * request after a grant ends.
+ * The workspace's open support windows, longest-lived first — the members'
+ * undismissable notice read. Same one-row-per-operator rule as
+ * `hasValidGrant`: only the NEWEST append for each operator may raise a
+ * notice, so an append-only revocation removes the notice on the next request
+ * even though the superseded row is still stored and still unexpired.
  */
 export async function listActiveSupportGrants(
   db: OperatorStoreD1,
@@ -144,8 +156,13 @@ export async function listActiveSupportGrants(
 ): Promise<SupportGrantRow[]> {
   const { results } = await db
     .prepare(
-      `SELECT ${GRANT_COLUMNS} FROM support_grants
-        WHERE workspace_id = ? AND expires_at > ?
+      `SELECT ${GRANT_COLUMNS} FROM support_grants g
+        WHERE g.workspace_id = ? AND g.expires_at > ?
+          AND g.rowid = (
+            SELECT MAX(x.rowid) FROM support_grants x
+             WHERE x.workspace_id = g.workspace_id
+               AND x.operator_login = g.operator_login
+          )
         ORDER BY expires_at DESC, id ASC`,
     )
     .bind(workspaceId, now)

@@ -556,17 +556,82 @@ wrangler d1 execute mstar-inspector --remote \
 While the row is live the workspace members see an undismissable notice (who,
 why, until when) and the operator sees only the read-only support face. Ending
 the window early is the same explicit store action — there is no tenant-facing
-control at all:
+control at all, and **revocation is an append-only write, not a delete**:
 
 ```sh
+# Close the window now: append a superseding row whose window is already over.
+# The old row is untouched history, so "revoked" stays distinguishable from
+# "lapsed" and the audit trail keeps both.
 wrangler d1 execute mstar-inspector --remote \
-  --command "DELETE FROM support_grants WHERE workspace_id = '<workspace_id>' AND operator_login = '<operator>'"
+  --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','revoked: <why>','<you>','$(date -u +%FT%TZ)','$(date -u +%FT%TZ)')"
 ```
+
+Access is decided per request by `expires_at > now` over ALL of the operator's
+rows on that workspace (`hasValidGrant`) and by the members' notice read; a
+`now`-stamped row therefore ends the window on the next request, while the
+grant it revokes stays readable as history. There is deliberately no store
+export for update or delete — `src/dashboard/operator-store.ts` exports the two
+appends and the reads only.
+
+The bare `DELETE FROM support_grants WHERE workspace_id = … AND operator_login
+= …` a previous version of this runbook showed is **outside the audited path**:
+it destroys the grant row, so the members' notice vanishes with no record that
+a window ever existed and revoked becomes indistinguishable from lapsed. Use it
+only as break-glass when a row must physically go (e.g. it holds a secret in
+`reason`), and record the action in the workspace's incident log yourself.
 
 `audit_events` is append-only: no code path updates or deletes a row, and the
 migration declares no cascade. `owner`/`admin` read them through
 `GET /dashboard/<ref>/api/audit?limit=`, which a plain `member` and a granted
 operator both get 403 from.
+
+## Repairing a replayed 0027 membership backfill
+
+Before the split, both workflows replayed `0027` (which then also inserted a
+`workspace_members` row per `users` row) on every deploy, so a live deployment
+may hold memberships nobody granted. Those rows are exactly identifiable: the
+replay wrote the migration's **fixed** stamp, while a real join (invite accept,
+workspace creation) writes the clock.
+
+1. **List what the replay added.** This is the "fixed stamp" predicate — every
+   `workspace_members` row carrying it came from the replay, never from a join:
+
+   ```sh
+   wrangler d1 execute mstar-inspector-db --remote \
+     --command "SELECT u.github_login, wm.role, wm.created_at FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = 'default' AND wm.created_at = '2026-10-21T00:00:00.000Z'"
+   ```
+
+   Check it against the member list the owners expect. Note the two roles the
+   replay could also have written: `member` for any signed-in login and
+   `owner` for a legacy `users.role = 'admin'` row.
+
+2. **Delete those rows** (and only those). `workspace_members` is the only
+   table involved — the `users` rows the replay did not create stay:
+
+   ```sh
+   wrangler d1 execute mstar-inspector-db --remote \
+     --command "DELETE FROM workspace_members WHERE workspace_id = 'default' AND created_at = '2026-10-21T00:00:00.000Z'"
+   ```
+
+3. **Restore the legitimate pre-cutover members** by re-running the one-time
+   migration's statement — it is cutover-scoped (`users.created_at` before
+   open sign-in), skips removed logins, and skips any membership that still
+   exists, so it can only add back the people who were supposed to be there:
+
+   ```sh
+   wrangler d1 execute mstar-inspector-db --remote \
+     --file migrations/0030_workspace_membership_cutover.sql
+   ```
+
+   Order matters: run (3) only after (2). Running (3) alone leaves the wrongly
+   added rows in place (they are `NOT EXISTS`-guarded, not corrected), and
+   running (2) without (3) leaves legitimate pre-cutover members without a
+   membership.
+
+A row an owner deliberately removed through the members page after the deploy
+is also caught by step (2); step (3) will not restore it, because a removal
+through the members page deletes the membership without a `removed_logins`
+record. Re-invite those people — the invite is the supported re-admission path.
 
 ## Tenant read path (single)
 
@@ -689,11 +754,15 @@ contradict a successful deploy.
 
 Each deploy run performs, in order:
 
-1. `wrangler d1 migrations apply` — forward-only; applies `0026`/`0027` on a
-   fresh database.
+1. `wrangler d1 migrations apply` — forward-only; applies `0026`/`0027`/`0030`
+   on a fresh database. `0027` is the only replayable half (step 2); `0030` is
+   the one-time, cutover-scoped membership backfill and runs here exactly once.
 2. **Re-run** [`migrations/0027_workspace_backfill.sql`](../migrations/0027_workspace_backfill.sql)
-   — both statements are `INSERT … SELECT … WHERE NOT EXISTS`, so a re-run
-   repairs a partially applied deploy and inserts nothing that exists.
+   — the remaining statement is `INSERT … SELECT … WHERE NOT EXISTS` over
+   `app_workspaces`, so a re-run repairs a partially applied deploy and inserts
+   nothing that exists. It writes **no** `workspace_members` row: replaying a
+   per-person write is what made a routine deploy re-add every login (removed
+   members included) to `default`. Never add one back.
 3. `bun scripts/assert-tenant-attribution.ts` —
    `SELECT COUNT(*) … WHERE w.app_id IS NULL` through
    `wrangler d1 execute --remote --json`. **A non-zero count exits the run
