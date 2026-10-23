@@ -34,7 +34,7 @@
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { type CapabilityHost, type CustomProviderDeclaration } from "./runtime";
+import { type CapabilityHost, type CustomProviderDeclaration } from "../../packages/shared/src/runtime";
 
 /** File name the SDK loads from the agentDir (model-registry single-file). */
 const MODELS_YAML_NAME = "models.yml";

@@ -36,7 +36,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { CustomProviderDeclaration } from "../../src/review/runtime";
+import type { CustomProviderDeclaration } from "../../packages/shared/src/runtime";
 import {
   capabilityHostsYaml,
   synthesizeModelsYaml,

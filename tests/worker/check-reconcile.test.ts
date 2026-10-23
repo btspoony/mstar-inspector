@@ -27,7 +27,7 @@
  *     → `reconcileReviewChecks`, each stage caught independently
  */
 import { describe, expect, test } from "bun:test";
-import type { Scope } from "../../src/contracts/recheck";
+import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
   CHECK_BACKOFF_MS,
   CHECK_MAX_ATTEMPTS,

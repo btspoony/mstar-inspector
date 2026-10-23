@@ -29,8 +29,8 @@
  * rev-parse instead of drifting silently.
  */
 
-import type { ReviewLevel } from "../review/runtime";
-import { RECHECK_FILE_MAX_BYTES } from "../contracts/recheck";
+import type { ReviewLevel } from "../../packages/shared/src/runtime";
+import { RECHECK_FILE_MAX_BYTES } from "../../packages/shared/src/recheck-wire";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 export type GitOpsInput = {

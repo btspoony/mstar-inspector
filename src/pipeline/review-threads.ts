@@ -59,7 +59,7 @@
  *     discussion and never unresolves a human-visible thread.
  */
 
-import type { Coverage, ThreadSnapshot } from "../contracts/recheck";
+import type { Coverage, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
 import type { D1Like } from "../store/types";
 import {
   type Lease,

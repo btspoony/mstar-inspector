@@ -5,7 +5,7 @@
  * envelope, the seat prompts, or the deep parent's yield stream.
  *
  * Wire vocabulary (types, limits, `validateRecheckDoc`) is IMPORTED from the
- * zero-runtime-dependency contract `src/contracts/recheck.ts` — the single
+ * zero-runtime-dependency contract `packages/shared/src/recheck-wire.ts` — the single
  * normative CODE copy of spec §7.3. Nothing here restates it. The sandbox
  * image ships exactly that file alongside src/review for this import
  * (`COPY src/contracts/recheck.ts`, PM amendment 2026-09-13; the admission is
@@ -40,8 +40,8 @@ import {
   validateRecheckDoc,
   type RecheckDoc,
   type RecheckInput,
-} from "../contracts/recheck";
-import type { ReviewLevel } from "./runtime";
+} from "../../packages/shared/src/recheck-wire";
+import type { ReviewLevel } from "../../packages/shared/src/runtime";
 
 /**
  * Strict shape schema for the recheck seat's structured yield. The enum

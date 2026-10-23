@@ -25,7 +25,7 @@
  * contract (itself admitted to the image).
  */
 
-import { COMMAND_CONFIG_KEY_PREFIX, isCommandConfigKey } from "../contracts/credential-key";
+import { COMMAND_CONFIG_KEY_PREFIX, isCommandConfigKey } from "./credential-key";
 
 /** The only payload version this build produces and accepts. */
 export const CREDENTIAL_PAYLOAD_VERSION = 1;

@@ -67,7 +67,7 @@
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
- * (payload + idempotency key), review/schema (pure zod) + review/runtime
+ * (payload + idempotency key), review/schema (pure zod) + packages/shared/src/runtime
  * (pure port types/constants — dual-face, zero omp SDK),
  * store/artifact-store (07 D1 ArtifactStore) + store/failure-store (the
  * review_failures leaf), and the pipeline modules —
@@ -79,9 +79,9 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
-import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../review/runtime";
+import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { providerEnvName } from "./provider-catalog";
-import { encodeCredentialPayload, type CredentialPools } from "../review/credential-payload";
+import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
@@ -114,7 +114,7 @@ import {
   type RecheckInput,
   type RecheckTarget,
   type Scope,
-} from "../contracts/recheck";
+} from "../../packages/shared/src/recheck-wire";
 import { boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
@@ -1736,7 +1736,7 @@ export function buildRunnerEnv(appCfg: RunnerAppConfig): Record<string, string> 
 
 /**
  * Build the runner's credential transport: the versioned stdin payload
- * (./../review/credential-payload) plus the exact key VALUES it carries — the
+ * (packages/shared/src/credential-payload) plus the exact key VALUES it carries — the
  * SEC-01 exact-redaction list. ONE resolution serves both, so the recorded
  * secret list can never drift from the keys the session actually saw.
  *

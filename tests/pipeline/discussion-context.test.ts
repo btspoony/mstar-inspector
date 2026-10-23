@@ -22,7 +22,7 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import type { Discussion, ThreadSnapshot } from "../../src/contracts/recheck";
+import type { Discussion, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
 import { issueDigestOf, threadDigestOf, type GraphqlOctokit } from "../../src/pipeline/review-threads";
 import {
   boundDiscussion,

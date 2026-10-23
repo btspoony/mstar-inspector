@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { isReviewLevel, REVIEW_LEVELS, REVIEW_SEATS } from "../../src/review/runtime";
+import { isReviewLevel, REVIEW_LEVELS, REVIEW_SEATS } from "../../packages/shared/src/runtime";
 import { mergeSeatOutputs, partitionSeats, parseTarget } from "../../src/review/runtime-omp";
 
 const numstat = (added: number | "-", deleted: number | "-", path: string): string =>

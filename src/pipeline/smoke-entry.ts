@@ -36,7 +36,7 @@ import { getSandbox, Sandbox, SandboxV1, shellCommand, type ReviewSandbox, type 
 import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
 import { APP_VERSION } from "../version";
 import { parseReviewOutput } from "../review/schema";
-import { encodeCredentialPayload } from "../review/credential-payload";
+import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 
 // `SandboxV1` is the live implementation; `Sandbox` keeps the legacy `v1`
 // migration replayable on a fresh smoke worker (see src/pipeline/sandbox.ts).

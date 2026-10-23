@@ -8,7 +8,7 @@
  * verbatim (PROVIDER_CATALOG / PROVIDER_IDS_BUILTIN / PROVIDERS /
  * providerEnvName / PROVIDER_ENV_NAMES / TEMPLATE_PROVIDERS — export names
  * stable for consumer.ts). Provider keys ride the stdin credential payload
- * (`src/review/credential-payload.ts`), which the consumer builds and
+ * (`packages/shared/src/credential-payload.ts`), which the consumer builds and
  * the in-image runner consumes; there is no scalar env-name helper here.
  */
 

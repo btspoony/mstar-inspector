@@ -56,7 +56,7 @@
  *   - OMP_REVIEW_MODEL                             (comma-separated selector chain)
  *
  * Credential transport: the consumer streams a versioned JSON payload
- * (`{"version":1,"pools":{"<providerId>":["k1",…]}}` — ./credential-payload.ts)
+ * (`{"version":1,"pools":{"<providerId>":["k1",…]}}` — packages/shared/src/credential-payload.ts)
  * into this process's STDIN and closes the stream. The runner validates it
  * BEFORE any credential is written, resolves each pool key to the models.yml
  * provider id it serves, and loads those keys into an IN-MEMORY credential
@@ -85,12 +85,12 @@ import {
   type AgentRuntimeRunInput,
   type CapabilityHost,
   type CustomProviderDeclaration,
-} from "./runtime";
+} from "../../packages/shared/src/runtime";
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 import { writePerReviewModelsYaml } from "./models-synthesis";
-import { decodeCredentialPayload } from "./credential-payload";
-import type { RecheckInput } from "../contracts/recheck";
+import { decodeCredentialPayload } from "../../packages/shared/src/credential-payload";
+import type { RecheckInput } from "../../packages/shared/src/recheck-wire";
 
 const USAGE =
   `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> [--recheck-out <path>] ` +
@@ -249,7 +249,7 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     // (AL-23-1): shape validation ONLY here — the id
     // pattern/baseUrl/api-enum/model bounds live dashboard-side
     // (assertCustomProvider). The declarations carry NO keys: each key rides
-    // the STDIN credential payload under its provider id (./credential-payload)
+    // the STDIN credential payload under its provider id (packages/shared/src/credential-payload)
     // and the runner loads it into the run's in-memory credential store (zero
     // key literals in any file).
     const list = record.customProviders;
@@ -388,7 +388,7 @@ export function createInMemoryAuthStorage(): Promise<AuthStorage> {
  * no `apiKey` (a tier-2 config override would suppress this pool entirely).
  *
  * Fail-closed, and BEFORE anything is written: the stdin payload is validated
- * (./credential-payload) as the first statement, so an unreadable payload, a
+ * (packages/shared/src/credential-payload) as the first statement, so an unreadable payload, a
  * missing/empty pool array or a non-string/empty entry aborts the run before
  * any credential exists and before the runtime starts — never a partial pool.
  * Diagnostics carry provider id + pool size only; key VALUES are never logged

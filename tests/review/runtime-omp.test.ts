@@ -52,10 +52,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
-import type { AgentRuntime, ReviewLevel } from "../../src/review/runtime";
+import type { AgentRuntime, ReviewLevel } from "../../packages/shared/src/runtime";
 import type { SupervisedSeat } from "../../src/review/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../src/review/recheck";
-import type { RecheckDoc, RecheckInput } from "../../src/contracts/recheck";
+import type { RecheckDoc, RecheckInput } from "../../packages/shared/src/recheck-wire";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
 /**

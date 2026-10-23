@@ -1,6 +1,6 @@
 /**
  * Recheck wire contract tests (spec review-lifecycle §7.3) —
- * `src/contracts/recheck.ts` `validateRecheckDoc` against a trusted input.
+ * `packages/shared/src/recheck-wire.ts` `validateRecheckDoc` against a trusted input.
  *
  * Every rejection rule is exercised as fail-closed behavior:
  *   - valid doc round-trips (typed, results preserved)
@@ -32,7 +32,7 @@ import {
   type EvidenceSlice,
   type RecheckInput,
   type RecheckTarget,
-} from "../../src/contracts/recheck";
+} from "../../packages/shared/src/recheck-wire";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 

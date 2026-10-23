@@ -64,7 +64,7 @@
  */
 
 import type { ScheduledEnv } from "./env";
-import type { Scope } from "../contracts/recheck";
+import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like } from "../store/types";
 import {
   applyPublishedLifecycle,

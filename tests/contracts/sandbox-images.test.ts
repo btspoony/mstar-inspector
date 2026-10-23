@@ -8,7 +8,7 @@
  *   - qc1 F-003 / qc2 S1 / qc3 S-3: the in-image verify-synthesis.sh
  *     ARK_PLAN_HOST literal (the image COPYs only src/review, so the script
  *     cannot import the registry) must mirror the omp entry's scalars;
- *   - qc1 F-002: the in-image CapabilityHost mirror (src/review/runtime.ts)
+ *   - qc1 F-002: the in-image CapabilityHost mirror (packages/shared/src/runtime.ts)
  *     must stay mutually assignable with the registry's SandboxImageHost —
  *     enforced at TYPECHECK time by the type assertions inside the test.
  */
@@ -19,7 +19,7 @@ import { join } from "node:path";
 
 import { enabledSandboxImages, getSandboxImage } from "../../src/contracts/sandbox-images";
 import type { SandboxImageHost, SandboxImageHostModel } from "../../src/contracts/sandbox-images";
-import type { CapabilityHost, CapabilityHostModel } from "../../src/review/runtime";
+import type { CapabilityHost, CapabilityHostModel } from "../../packages/shared/src/runtime";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const OMP_IMAGE = getSandboxImage("omp")!;
