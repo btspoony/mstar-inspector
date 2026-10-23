@@ -35,6 +35,8 @@ import { insertSupportGrant } from "../../src/dashboard/operator-store";
 import { createInvite } from "../../src/dashboard/invite-store";
 import { withSpaAssets } from "../helpers/spa";
 import type { SpaBoot } from "../../src/spa/boot";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -401,9 +403,19 @@ describe("tenant-visible grant notice and member audit reads", () => {
     grant(db, "ws-acme", OPERATOR, DAY);
     const res = await worker.fetch(await authedRequest("/dashboard/acme/api/support/grants", "dana"), envFor(db));
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { grants: Array<{ operator_login: string }> }).grants[0]?.operator_login).toBe(
-      OPERATOR,
-    );
+    const body: unknown = await res.json();
+    if (typeof body !== "object" || body === null || !("grants" in body) || !Array.isArray(body.grants))
+      throw new Error("no grants array");
+    const row = body.grants[0] as Record<string, unknown> | undefined;
+    if (row === undefined) throw new Error("no grant row");
+    expect(Object.keys(row).sort()).toEqual(["expires_at", "operator_login", "reason"]);
+    expect(row.operator_login).toBe(OPERATOR);
+    // AC4a: the whole notice payload — who, why, until when.
+    expect(row.reason).toBe("tenant-reported incident");
+    const expiresAt = row.expires_at;
+    expect(typeof expiresAt).toBe("string");
+    if (typeof expiresAt !== "string") throw new Error("no expires_at");
+    expect(new Date(expiresAt).getTime()).toBeGreaterThan(Date.now());
     expect(auditRows(db)).toEqual([]);
   });
 
@@ -411,9 +423,16 @@ describe("tenant-visible grant notice and member audit reads", () => {
     const { db, owner } = fixture();
     seedUser(db, "mallory");
     seedMembership(db, "ws-acme", userIdOf(db, "mallory"), "member");
+    seedUser(db, "peggy");
+    seedMembership(db, "ws-acme", userIdOf(db, "peggy"), "admin");
     grant(db, "ws-acme", OPERATOR, DAY);
     const env = envFor(db);
     await worker.fetch(await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR), env);
+
+    const asAdmin = await worker.fetch(await authedRequest("/dashboard/acme/api/audit", "peggy"), env);
+    expect(asAdmin.status).toBe(200);
+    const adminEvents = ((await asAdmin.json()) as { events: Array<{ actor_login: string }> }).events;
+    expect(adminEvents.map((event) => event.actor_login)).toEqual([OPERATOR]);
 
     const asOwner = await worker.fetch(await authedRequest("/dashboard/acme/api/audit", "dana"), env);
     expect(asOwner.status).toBe(200);
@@ -426,6 +445,40 @@ describe("tenant-visible grant notice and member audit reads", () => {
 
     const asMember = await worker.fetch(await authedRequest("/dashboard/acme/api/audit", "mallory"), env);
     expect(asMember.status).toBe(403);
+  });
+
+  test("the notice is undismissable server-side: no mutating route, grant survives", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const env = envFor(db);
+    for (const method of ["POST", "DELETE", "PATCH"]) {
+      const res = await worker.fetch(
+        await authedRequest("/dashboard/acme/api/support/grants", "dana", { method, body: "x=1" }),
+        env,
+      );
+      // No mutating handler is mounted at all (405), so there is no dismiss
+      // verb for the tenant to reach whatever the status.
+      expect(res.status >= 400, method).toBe(true);
+    }
+    const still = await worker.fetch(await authedRequest("/dashboard/acme/api/support/grants", "dana"), env);
+    const stillBody = (await still.json()) as { grants: Array<{ operator_login: string }> };
+    expect(stillBody.grants.map((row) => row.operator_login)).toEqual([OPERATOR]);
+    // Tenant refusals are the tenant's own gate — no support audit row.
+    expect(auditRows(db).map((row) => row.action)).toEqual([]);
+  });
+
+  test("a grant on W1 puts no notice on W2", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const env = envFor(db);
+    // `erin` owns W2 and holds no grant there.
+    const res = await worker.fetch(await authedRequest("/dashboard/other/api/support/grants", "erin"), env);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { grants: unknown[] }).grants).toEqual([]);
+    // The live grant on W1 is unaffected by the empty read on W2.
+    const onW1 = await worker.fetch(await authedRequest("/dashboard/acme/api/support/grants", "dana"), env);
+    expect(((await onW1.json()) as { grants: Array<{ operator_login: string }> }).grants).toHaveLength(1);
+    expect(auditRows(db)).toEqual([]);
   });
 });
 
