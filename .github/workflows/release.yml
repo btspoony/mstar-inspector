@@ -65,6 +65,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Temporary copy: a runner install inside the tree would nest a
+      # packages/runner/node_modules that shadows the root resolution.
+      - name: Verify runner lockfile
+        run: |
+          TMP=$(mktemp -d)
+          cp packages/runner/package.json packages/runner/bun.lock "$TMP"
+          (cd "$TMP" && bun install --frozen-lockfile)
+          rm -rf "$TMP"
+
       - name: Resolve version
         id: ver
         run: |

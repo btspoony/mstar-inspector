@@ -48,38 +48,107 @@ describe("module import matrix — omp SDK is container-only", () => {
 // narrowed per P67-QC-015 in QC wave B) ------------------------------------
 
 /**
- * The sandbox image ships packages/runner/src plus the zero-runtime-dependency wire
- * contracts both runtime faces share: `COPY packages/shared/src`. Nothing else
- * enters the image (no src/pipeline, no src/store), so an import escaping
- * the runner tree is admissible ONLY when it resolves to a file this Dockerfile
- * actually copies.
+ * The sandbox image ships exactly two package source trees: `packages/runner/src`
+ * plus the zero-runtime-dependency wire contracts both runtime faces share,
+ * `packages/shared/src`. Nothing from the repository root `src/` tree may enter
+ * again, and an import escaping the runner tree is admissible ONLY when it
+ * resolves to a file this Dockerfile actually copies.
  *
- * The admitted set is DERIVED FROM THE DOCKERFILE rather than restated from a
- * directory name (qc2 F-011 / qc3 QC3-007): admitting another tree, or retiring
- * a COPY line the imports still need, fails here instead of joining the image
- * graph silently — and every admitted file must stay free of runtime imports.
+ * The admitted face is DERIVED FROM THE DOCKERFILE rather than restated from a
+ * directory name (qc2 F-011 / qc3 QC3-007): admitting another source tree — or
+ * re-adding a `COPY src/...` line — fails here instead of joining the image
+ * graph silently, and every admitted shared file must stay free of runtime
+ * imports.
  */
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "Dockerfile");
-const IN_IMAGE_FACE = join(REPO_ROOT, "packages", "runner", "src");
+const RUNNER_SRC = join(REPO_ROOT, "packages", "runner", "src");
 const SHARED_SRC = join(REPO_ROOT, "packages", "shared", "src");
 
-/** Every build-context source a `COPY <src…> <abs dest>` line ships. */
-function dockerfileCopySources(dockerfile: string): string[] {
-  const sources: string[] = [];
-  for (const line of readFileSync(dockerfile, "utf8").split("\n")) {
-    const match = /^COPY\s+(?:--\S+\s+)*(\S+)(?:\s+\S+)*\s+\/\S+\s*$/.exec(line.trim());
-    if (match === null) continue;
-    for (const spec of match[1]!.split(",")) if (spec !== "") sources.push(spec);
+/** The only build-context source trees the image may admit. */
+const ADMITTED_FACE = ["packages/runner/src", "packages/shared/src"] as const;
+
+/** Split one instruction body on whitespace, honouring quoted arguments. */
+function splitArgs(body: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  for (const char of body) {
+    if (quote !== null) {
+      if (char === quote) quote = null;
+      else current += char;
+    } else if (char === '"' || char === "'") quote = char;
+    else if (/\s/.test(char)) {
+      if (current !== "") args.push(current);
+      current = "";
+    } else current += char;
   }
+  if (quote !== null) throw new Error(`unterminated quote in COPY: ${body}`);
+  if (current !== "") args.push(current);
+  return args;
+}
+
+/**
+ * Every build-context source a `COPY [flags] <src…> <dest>` instruction ships.
+ * The destination is the last argument whether absolute or relative, and every
+ * source is recorded — not just the first. A form this guard cannot classify
+ * throws instead of being skipped: a silent skip leaves the face guard blind.
+ */
+function dockerfileCopySources(text: string): string[] {
+  const sources: string[] = [];
+  let pending = "";
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const continued = line.endsWith("\\");
+    const instruction = `${pending}${continued ? line.slice(0, -1) : line}`.trim();
+    if (continued) {
+      pending = `${instruction} `;
+      continue;
+    }
+    pending = "";
+    const match = /^COPY\s+(.*)$/i.exec(instruction);
+    if (match === null) continue;
+    const body = match[1]!.trim();
+    let args: string[];
+    if (body.startsWith("[")) {
+      const parsed: unknown = JSON.parse(body);
+      if (!Array.isArray(parsed) || !parsed.every((arg) => typeof arg === "string")) {
+        throw new Error(`unparseable COPY JSON form: ${instruction}`);
+      }
+      args = parsed as string[];
+    } else args = splitArgs(body);
+    // Flags (`--from=…`, `--chown=…`, `--chmod=…`, `--link`) precede the paths.
+    const paths = args.filter((arg) => !arg.startsWith("--"));
+    if (paths.length < 2) throw new Error(`unparseable COPY instruction: ${instruction}`);
+    sources.push(...paths.slice(0, -1));
+  }
+  if (pending !== "") throw new Error(`unterminated COPY continuation: ${pending}`);
   return sources;
+}
+
+/**
+ * The source trees a `COPY` line ships, repo-relative. A single-file source
+ * (manifest, lockfile, script) is not a face, so anything else — including a
+ * tree that does not exist in the build context — counts as one and must be
+ * one of the two admitted packages.
+ */
+function admittedFaces(sources: string[]): string[] {
+  const faces = sources.filter(
+    // An absolute source belongs to another image (`COPY --from=…`), not the
+    // build context.
+    (spec) =>
+      !spec.startsWith("/") &&
+      !statSync(join(REPO_ROOT, spec), { throwIfNoEntry: false })?.isFile(),
+  );
+  return [...new Set(faces)].sort();
 }
 
 /** Files under packages/shared/src the image admits, resolved from those COPY lines. */
 function admittedSharedFiles(sources: string[]): string[] {
   const admitted: string[] = [];
   for (const spec of sources) {
-    if (!spec.startsWith("packages/shared/src")) continue;
+    if (spec !== "packages/shared/src" && !spec.startsWith("packages/shared/src/")) continue;
     const abs = join(REPO_ROOT, spec);
     // A directory COPY is deliberate here (one coherent package), so the
     // admitted set is enumerated and every member is asserted individually.
@@ -135,7 +204,47 @@ function resolveModuleTarget(specifier: string, fromFile: string): string {
 }
 
 describe("in-image module graph — the image ships packages/runner/src plus the shared package only", () => {
-  const admittedShared = admittedSharedFiles(dockerfileCopySources(OMP_DOCKERFILE));
+  const copySources = dockerfileCopySources(readFileSync(OMP_DOCKERFILE, "utf8"));
+  const admittedShared = admittedSharedFiles(copySources);
+  const rootSrcCopies = copySources.filter(
+    (spec) => spec === "src" || spec.startsWith("src/"),
+  );
+
+  test("the Dockerfile admits exactly the two package source trees", () => {
+    // Derived, not restated: the assertion pins the derivation against the
+    // Dockerfile, so a third admitted tree (or a retired package) fails here.
+    expect(admittedFaces(copySources)).toEqual([...ADMITTED_FACE]);
+  });
+
+  test("no COPY line ships the repository root src/ tree", () => {
+    // The split's regression: the image once shipped src/review + src/contracts.
+    expect(rootSrcCopies).toEqual([]);
+  });
+
+  test("every COPY source is recorded, including relative-destination lines", () => {
+    // `COPY <src…> ./` (the image's own runner manifest line) must contribute
+    // both sources, not just the first, and must not be skipped as relative.
+    expect(copySources).toContain("packages/runner/package.json");
+    expect(copySources).toContain("packages/runner/bun.lock");
+  });
+
+  test("negative controls — every root src/ COPY form fails the guard", () => {
+    const rootSrc = (text: string): string[] =>
+      dockerfileCopySources(text).filter((spec) => spec === "src" || spec.startsWith("src/"));
+    expect(rootSrc("COPY src ./")).toEqual(["src"]);
+    expect(rootSrc("COPY src/a src/b ./")).toEqual(["src/a", "src/b"]);
+    // A non-admitted tree after a legal first source is still a face.
+    const mixed = dockerfileCopySources("COPY packages/runner/package.json packages/extra/src ./");
+    expect(mixed).toEqual(["packages/runner/package.json", "packages/extra/src"]);
+    expect(admittedFaces(mixed)).not.toEqual([...ADMITTED_FACE]);
+  });
+
+  test("negative controls — an unparseable COPY form fails loudly", () => {
+    // Fail loud, never skip: a skipped line leaves the face guard blind.
+    expect(() => dockerfileCopySources("COPY --chown=0:0 src")).toThrow(/unparseable COPY/);
+    expect(() => dockerfileCopySources('COPY ["src", ')).toThrow();
+    expect(() => dockerfileCopySources("COPY src ./ \\")).toThrow(/unterminated COPY/);
+  });
 
   test("the Dockerfile admits exactly the shared package modules", () => {
     expect(admittedShared.map((file) => file.slice(REPO_ROOT.length + 1))).toEqual([
@@ -148,13 +257,12 @@ describe("in-image module graph — the image ships packages/runner/src plus the
 
   test("no packages/runner/src module imports outside that tree and the admitted files", () => {
     const offenders: string[] = [];
-    for (const file of collectFiles(IN_IMAGE_FACE)) {
+    for (const file of collectFiles(RUNNER_SRC)) {
       const source = readFileSync(file, "utf8");
       for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
         const specifier = match[1]!;
         const target = resolveModuleTarget(specifier, file);
-        const admissible =
-          target.startsWith(`${IN_IMAGE_FACE}/`) || admittedShared.includes(target);
+        const admissible = target.startsWith(`${RUNNER_SRC}/`) || admittedShared.includes(target);
         if (!admissible) offenders.push(`${file.slice(REPO_ROOT.length + 1)}: ${specifier}`);
       }
     }
