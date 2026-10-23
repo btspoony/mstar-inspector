@@ -132,8 +132,8 @@ const SANDBOX_IMAGES: readonly SandboxImageDefinition[] = Object.freeze([
   Object.freeze({
     id: "omp",
     enabled: true,
-    dockerfilePath: "sandbox-image/omp/Dockerfile",
-    wranglerImagePath: "./sandbox-image/omp/Dockerfile",
+    dockerfilePath: "sandbox-image/Dockerfile",
+    wranglerImagePath: "./sandbox-image/Dockerfile",
     pins: OMP_SANDBOX_IMAGE_PINS,
     runtime: "omp",
     hosts: [

@@ -898,7 +898,7 @@ exist before the first deploy:
   migrations applied — see below.
 - Containers: no separate setup — the `SandboxV1` DO class (NEW class + namespace +
   `v2` `new_sqlite_classes` tag; a container application cannot change scheduling policy in
-  place or reuse the 0.12 namespace) builds from `sandbox-image/omp/Dockerfile` at deploy time
+  place or reuse the 0.12 namespace) builds from `sandbox-image/Dockerfile` at deploy time
   (`images.sandbox.build_context: "."`, lite instance via `container.start()`,
   `scheduling_policy: "durable_object"`, container app `mstar-inspector-sandbox-v2`). The old
   `mstar-inspector-sandbox` app is orphaned by the cutover — delete it after the switch.
@@ -1393,7 +1393,7 @@ smoke → record the digest.
 
 ### Sandbox image — U-001 synthesis verification
 
-The image ships `/opt/verify-synthesis.sh` (repo `sandbox-image/verify-synthesis.sh`,
+The image ships `/opt/verify-synthesis.sh` (repo `packages/runner/verify-synthesis.sh`,
 COPY'd into the digest — AL-25-3). It replays the U-001 evidence on
 ANY image build: per-review models.yml synthesis through the runner's
 real `writePerReviewModelsYaml` (the omp capability hosts — `ark-plan`
@@ -1455,8 +1455,8 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    `app_model_chain_seats`, 0017) for the test App: the consumer
    materializes it into the runner input JSON
    (`src/pipeline/consumer.ts` `resolveModelOverrides`) and the in-image
-   runner resolves it (`src/review/runner.ts`). Runner code is baked into the
-   image (`COPY src/review`), so this check is what proves the rebuilt image
+   runner resolves it (`packages/runner/src/runner.ts`). Runner code is baked into the
+   image (`COPY packages/runner/src`), so this check is what proves the rebuilt image
    actually carries the v0.6 runner. Note: `reviews.model` records the
    effective BASE chain head only — overrides are deliberately not
    column-reflected (consumer.ts put call), so verification is the completed
@@ -1829,7 +1829,7 @@ controls are installed (the Dockerfile carries the documentation block only).
     models.yml (no baked in-image file).
 - **Runner tool whitelist:** the in-image review session restricts agent
   tools to read-only `read` / `grep` / `glob`
-  (`src/review/runtime-omp.ts` `REVIEW_TOOL_NAMES`) — no write/exec tool
+  (`packages/runner/src/runtime-omp.ts` `REVIEW_TOOL_NAMES`) — no write/exec tool
   inside the review session.
 - **Worker-side egress** (outside the container, for completeness):
   `api.github.com` via Octokit (token mint, comment posting) and the optional
@@ -1871,7 +1871,7 @@ review findings, and the publication journal, leases, recurrence queries, and
 dashboard reads stay in D1. No finding-store migration is planned.
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
-`src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's
+`packages/runner/src/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's
 `ark-plan` capability host in `src/contracts/sandbox-images.ts`, synthesized
 into every per-review models.yml — the baked file was removed). This line
 is the record for architect

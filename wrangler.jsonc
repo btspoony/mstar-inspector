@@ -90,8 +90,9 @@
   // `image_build_context` have no equivalent under this policy — the instance
   // size moves into `container.start()` (lite) and concurrency is bounded by
   // the queue consumer's max_concurrency: 1 above. `build_context` "." lets
-  // the Dockerfile COPY package.json/bun.lock and src/review into the image
-  // (T2 finding). The binding name stays `SANDBOX` so `PipelineEnv` and every
+  // the Dockerfile COPY the runner package manifest, its lockfile and the
+  // packages/{shared,runner}/src trees into the image (T2 finding). The binding
+  // name stays `SANDBOX` so `PipelineEnv` and every
   // consumer call site keep their `env.SANDBOX` usage.
   "containers": [
     {
@@ -100,7 +101,7 @@
       "scheduling_policy": "durable_object",
       "images": {
         "sandbox": {
-          "dockerfile": "./sandbox-image/omp/Dockerfile",
+          "dockerfile": "./sandbox-image/Dockerfile",
           "build_context": "."
         }
       }
@@ -224,7 +225,7 @@
           "scheduling_policy": "durable_object",
           "images": {
             "sandbox": {
-              "dockerfile": "./sandbox-image/omp/Dockerfile",
+              "dockerfile": "./sandbox-image/Dockerfile",
               "build_context": "."
             }
           }

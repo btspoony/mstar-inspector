@@ -33,8 +33,8 @@ import { OMP_SANDBOX_IMAGE_PINS } from "../../src/contracts/sandbox-images";
 import { REVIEW_SKILL_VERSION } from "../../src/store/artifact-store";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
-/** The runtime-specific Dockerfile location (sandbox-image/omp/). */
-const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "omp", "Dockerfile");
+/** The runtime-specific Dockerfile location (sandbox-image/). */
+const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "Dockerfile");
 const DOCKERFILE = readFileSync(OMP_DOCKERFILE, "utf8");
 
 describe("sandbox image harness pin", () => {

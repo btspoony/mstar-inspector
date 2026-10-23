@@ -7,8 +7,9 @@
   // class/namespace (a container application canNOT change scheduling policy
   // in place), so `scheduling_policy: "durable_object"` + named `images`
   // (container.images.sandbox) and a `v2` `new_sqlite_classes` migration tag.
-  // build_context "." = repo root, so the
-  // Dockerfile can COPY package.json/bun.lock and src/review into the image.
+  // build_context "." = repo root, so the Dockerfile can COPY the runner
+  // package manifest, its lockfile and packages/{shared,runner}/src into the
+  // image.
   "name": "mstar-inspector-smoke",
   "main": "src/pipeline/smoke-entry.ts",
   "compatibility_date": "2026-08-20",
@@ -20,7 +21,7 @@
       "scheduling_policy": "durable_object",
       "images": {
         "sandbox": {
-          "dockerfile": "./sandbox-image/omp/Dockerfile",
+          "dockerfile": "./sandbox-image/Dockerfile",
           "build_context": "."
         }
       }

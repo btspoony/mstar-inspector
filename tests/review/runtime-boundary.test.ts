@@ -48,10 +48,10 @@ describe("module import matrix — omp SDK is container-only", () => {
 // narrowed per P67-QC-015 in QC wave B) ------------------------------------
 
 /**
- * The sandbox image ships src/review plus the zero-runtime-dependency wire
+ * The sandbox image ships packages/runner/src plus the zero-runtime-dependency wire
  * contracts both runtime faces share: `COPY packages/shared/src`. Nothing else
  * enters the image (no src/pipeline, no src/store), so an import escaping
- * src/review is admissible ONLY when it resolves to a file this Dockerfile
+ * the runner tree is admissible ONLY when it resolves to a file this Dockerfile
  * actually copies.
  *
  * The admitted set is DERIVED FROM THE DOCKERFILE rather than restated from a
@@ -60,8 +60,8 @@ describe("module import matrix — omp SDK is container-only", () => {
  * graph silently — and every admitted file must stay free of runtime imports.
  */
 const REPO_ROOT = join(import.meta.dir, "..", "..");
-const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "omp", "Dockerfile");
-const IN_IMAGE_FACE = join(REPO_ROOT, "src", "review");
+const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "Dockerfile");
+const IN_IMAGE_FACE = join(REPO_ROOT, "packages", "runner", "src");
 const SHARED_SRC = join(REPO_ROOT, "packages", "shared", "src");
 
 /** Every build-context source a `COPY <src…> <abs dest>` line ships. */
@@ -134,7 +134,7 @@ function resolveModuleTarget(specifier: string, fromFile: string): string {
   return candidates.find((candidate) => existsSync(candidate)) ?? base;
 }
 
-describe("in-image module graph — the image ships src/review plus the shared package only", () => {
+describe("in-image module graph — the image ships packages/runner/src plus the shared package only", () => {
   const admittedShared = admittedSharedFiles(dockerfileCopySources(OMP_DOCKERFILE));
 
   test("the Dockerfile admits exactly the shared package modules", () => {
@@ -146,7 +146,7 @@ describe("in-image module graph — the image ships src/review plus the shared p
     ]);
   });
 
-  test("no src/review module imports outside src/review and the admitted files", () => {
+  test("no packages/runner/src module imports outside that tree and the admitted files", () => {
     const offenders: string[] = [];
     for (const file of collectFiles(IN_IMAGE_FACE)) {
       const source = readFileSync(file, "utf8");
