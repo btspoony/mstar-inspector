@@ -1150,7 +1150,12 @@ enqueue.
 nothing at the deployment level can stop them for you:
 
 ```bash
+# staging (default environment)
 wrangler d1 execute mstar-inspector-db --remote --command \
+  "SELECT slug, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"
+
+# production
+wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
   "SELECT slug, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"
 ```
 
