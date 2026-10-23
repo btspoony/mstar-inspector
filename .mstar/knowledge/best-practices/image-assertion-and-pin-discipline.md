@@ -20,7 +20,7 @@ For each capability the image claims, add a small assertion script plus one `RUN
 ## Pin discipline
 
 - A harness pin is the **deref commit**, not the annotated tag object: `git rev-parse vX.Y.Z^{commit}`. For `v4.0.7` the annotated tag object was `37c0d5fc…` while the tree's commit was `db013c73…`; pinning the tag object produced a `skill_version` suffix that named a sha no checkout ever had.
-- Keep a **single editable semver source** (a `HARNESS_VERSION` constant); the deref-commit `harnessRef` is a separate literal, not derived from it. Let the parity test assert every static copy (Dockerfile fetch line + tag comment, root and runner manifests, both lock rows, derived `REVIEW_SKILL_VERSION`) against the constant. Static files cannot read a TS constant; the test is the link.
+- Keep a **single editable semver source** (a `HARNESS_VERSION` constant); the deref-commit `harnessRef` is a separate literal, not derived from it. Let the parity test bind each static copy to its own declaration: the Dockerfile fetch line to `harnessRef` (its tag comment to both halves), and the root and runner manifests, both lock rows and the derived `REVIEW_SKILL_VERSION` to `HARNESS_VERSION`. Static files cannot read a TS constant; the test is the link.
 
 ## Reproducible global installs
 
