@@ -309,13 +309,16 @@ function extractBraces(text: string): string | null {
  * → validate. Fallback extraction only runs when JSON.parse throws; the
  * FIRST successful parse is validated once and that result is returned — a
  * parsed non-object root (e.g. an array) is rejected without inner-object
- * recovery. Validation is engine-first (mapping spec §4.2): the parsed JSON
- * goes through the engine `validateMstarReviewV1` gate BEFORE zod narrows
- * types (int line numbers, tally consistency, incomplete
- * presence/agreement). The engine refuses unknown envelope/tally keys with
- * `review.unknown-key`; unknown finding keys are refused here with the same
- * code, and a residual M1 `severity` key (top-level or per-finding) keeps its
- * `review.inspector-vocab` refusal instead of being silently dropped.
+ * recovery. Checks run in this order, and the first failure wins: the
+ * top-level M1 `severity` ban → the engine `validateMstarReviewV1` gate →
+ * `findUnknownFindingKey` → zod (int line numbers, tally consistency,
+ * incomplete presence/agreement). The severity ban runs BEFORE the gate so a
+ * top-level M1 key keeps `review.inspector-vocab` instead of the engine's
+ * generic unknown-key report; the gate itself fails findings[].severity with
+ * that same vocab code and refuses unknown envelope/tally keys with
+ * `review.unknown-key`; the finding-key check runs AFTER the gate so it
+ * cannot mask that code, and refuses unknown finding keys with the same code
+ * instead of dropping them silently.
  * Any failure returns `{ ok: false, error }` and never throws. An
  * M1-shaped document (no `schema` literal, M1 verdict/severity vocab) fails
  * here — it is never posted or persisted.
