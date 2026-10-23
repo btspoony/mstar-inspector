@@ -566,10 +566,15 @@ wrangler d1 execute mstar-inspector --remote \
   --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','revoked: <why>','<you>','$(date -u +%FT%TZ)','$(date -u +%FT%TZ)')"
 ```
 
-Access is decided per request by `expires_at > now` over ALL of the operator's
-rows on that workspace (`hasValidGrant`) and by the members' notice read; a
-`now`-stamped row therefore ends the window on the next request, while the
-grant it revokes stays readable as history. There is deliberately no store
+Access is decided per request by **the newest append for that (workspace,
+operator) — the highest `rowid`** (`hasValidGrant`), which tests only that one
+row's `expires_at > now`. The members' notice read
+(`listActiveSupportGrants`) applies the same one-row-per-operator rule, so both
+reads agree. A `now`-stamped row therefore ends the window on the next request
+even though the row it supersedes is still stored and still unexpired: that
+older row remains readable as history (and is why "revoked" stays
+distinguishable from "lapsed"). Reading every row instead and keeping any live
+one would leave the revoked grant granting. There is deliberately no store
 export for update or delete — `src/dashboard/operator-store.ts` exports the two
 appends and the reads only.
 
@@ -656,6 +661,42 @@ Ordering note: run (1), then (2). There is no third step to order against. If
 the deployment has **not** yet applied `0030`, apply it first (`wrangler d1
 migrations apply`): until it has, the legitimate pre-cutover rows it would
 write are missing, and step (2) is still correct on its own predicate.
+
+### The FIRST application has the same blind spot
+
+The hand re-run above is not the only way `0030` can restore somebody. Its
+`NOT EXISTS` guard looks at live memberships only, so the **first** ledger
+application — the normal, once-per-database one — re-grants `default` to any
+pre-cutover user whose membership no longer exists and who has no
+`removed_logins` row.
+
+That is unreachable on the production upgrade path: there every removal went
+through the operator `removeUser` path, which writes the `removed_logins`
+tombstone in the same batch, so the guard excludes it. The reachable case is a
+database that already ran this branch's code **before `0030` existed** — a
+staging copy, or a self-hosted deployment tracking the branch. On that
+database the members page's own removal (`/members/remove` →
+`deleteWorkspaceMember`) deletes the membership row and writes no tombstone, so
+a pre-cutover user removed there is indistinguishable from a user who was
+never a member, and the first apply re-adds them to `default` with no invite.
+
+An operator of such a database should, **before** applying `0030`:
+
+```sh
+wrangler d1 execute mstar-inspector-db --remote \
+  --command "SELECT u.id, u.github_login, u.created_at FROM users u WHERE u.created_at < '2026-10-22T11:13:45.000Z' AND NOT EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = 'default' AND wm.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM removed_logins r WHERE r.github_login = u.github_login COLLATE NOCASE)"
+```
+
+Every row that should **not** be a member is a login this branch removed from
+the members page; write its tombstone first (`INSERT INTO removed_logins
+(github_login, removed_at) VALUES (?, ?)`) so the cutover skips it. Then apply,
+and afterwards remove any member the migration still restored on purpose
+(the audited members-page removal, which does not write a tombstone).
+
+This is a one-time effect, not a standing hole: the ledger applies `0030` once
+per database. A database that has already applied it is unaffected, and a
+future deploy never re-derives membership — that is the whole point of the
+split from `0027`.
 
 ## Tenant read path (single)
 

@@ -36,6 +36,15 @@ export function canCreateAppFor(boot: SpaBoot, addressedRef: string | null): boo
   return membership === undefined ? boot.canCreateApp !== false : membership.role !== "member";
 }
 
+/**
+ * One Apps list read under the given base. The base is a parameter, not
+ * `apiBase()` inside, so the caller decides which workspace is read — the
+ * page derives it per render and a test can drive both pathnames.
+ */
+export async function loadApps(base: string): Promise<AppsPayload | null> {
+  return parseApps(await fetchJson(`${base}/api/apps`));
+}
+
 export function AppsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [payload, setPayload] = useState<AppsPayload | null>(null);
@@ -53,7 +62,7 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
   const load = useCallback(async (): Promise<void> => {
     setState("loading");
     try {
-      const parsed = parseApps(await fetchJson(`${base}/api/apps`));
+      const parsed = await loadApps(base);
       if (!parsed) {
         setState("error");
         return;
