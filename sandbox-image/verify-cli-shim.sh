@@ -10,9 +10,11 @@
 #
 # Usage: verify-cli-shim.sh [expected-version]
 #   expected-version  the pinned @mstar-harness/cli version; defaults to the
-#                     pin on the Dockerfile install line (the Dockerfile is
-#                     searched next to this script), so the build can pass the
-#                     same literal it installs instead of duplicating it.
+#                     pin in the committed global-install manifest
+#                     (`cli-global/package.json` next to this script in the
+#                     repo, else the COPYed copy the install consumed), so the
+#                     assertion reads the very pin the build installed instead
+#                     of restating it.
 #
 # Offline, no node: uses only the POSIX shell, head/sed from the Debian base.
 set -eu
@@ -24,14 +26,17 @@ shim="$(command -v mstar || true)"
 
 expected="${1:-}"
 if [ -z "$expected" ]; then
-  dockerfile="$(dirname "$0")/Dockerfile"
-  if [ -f "$dockerfile" ]; then
-    expected="$(sed -n 's/^RUN bun add --global @mstar-harness\/cli@\([0-9][0-9.]*\).*/\1/p' "$dockerfile" | head -n 1)"
-  fi
+  for manifest in \
+    "$(dirname "$0")/cli-global/package.json" \
+    /root/.bun/install/global/package.json; do
+    [ -f "$manifest" ] || continue
+    expected="$(sed -n 's/.*"@mstar-harness\/cli": *"\([0-9][0-9.]*\)".*/\1/p' "$manifest" | head -n 1)"
+    if [ -n "$expected" ]; then break; fi
+  done
 fi
 if [ -z "$expected" ]; then
   echo "FAIL expected-version: no version argument and no @mstar-harness/cli pin" \
-    "found next to $0; pass the pinned version as \$1" >&2
+    "found in a global-install manifest; pass the pinned version as \$1" >&2
   exit 1
 fi
 

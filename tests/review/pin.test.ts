@@ -5,16 +5,18 @@
  * Expected values come from `OMP_SANDBOX_IMAGE_PINS`
  * (`src/contracts/sandbox-images.ts` — the single declaration of the image's
  * versioned build inputs) and from `package.json` (the dependency authority),
- * never from literals restated here. The Dockerfile cannot read that module
- * (no build args, no env), so it is the one unavoidable second copy: the
- * anchors below lock it to the declaration.
+ * never from literals restated here. The Dockerfile and the committed
+ * global-install manifest (`sandbox-image/cli-global/`) cannot read that module
+ * (no build args, no env), so they are the unavoidable second copies: the
+ * anchors below lock them to the declaration.
  *
  * POLICY CHANGE (user instruction 2026-09-06): the repo manifest
  * `@mstar-harness/engine` range is the only range allowed in package.json.
  * The sandbox image side stays exact: the Dockerfile fetches a pinned deref
- * commit, the image CLI install is exact, and reproducibility is frozen by
- * bun.lock (packages row resolves to the exact version) +
- * `bun install --frozen-lockfile` in the image build.
+ * commit, and the CLI is installed from the committed global-install manifest
+ * (`@mstar-harness/cli` exact) plus its committed `bun.lock`, replayed with
+ * `bun install --frozen-lockfile`. No CLI version literal lives in the
+ * Dockerfile — the manifest owns it.
  *
  * These tests fail if any Dockerfile pin drifts off the declared value, if the
  * manifest range or the lockfile resolution drifts, if the two surfaces'
@@ -42,8 +44,8 @@ const DOCKERFILE = readFileSync(OMP_DOCKERFILE, "utf8");
 describe("sandbox image harness pin", () => {
   test("both declared harness versions are the single HARNESS_VERSION constant", () => {
     // The constant is the only place a bump edits; the pin fields and every
-    // downstream anchor (Dockerfile ARG, engine manifest, lock rows) read it,
-    // so one of them left behind fails a comparison below.
+    // downstream anchor (committed CLI manifest, engine manifest, lock rows)
+    // read it, so one of them left behind fails a comparison below.
     expect(OMP_SANDBOX_IMAGE_PINS.harnessVersion).toBe(HARNESS_VERSION);
     expect(OMP_SANDBOX_IMAGE_PINS.harnessCliVersion).toBe(HARNESS_VERSION);
   });
@@ -98,40 +100,72 @@ describe("sandbox image base / tool pins", () => {
 });
 
 describe("sandbox image CLI pin", () => {
-  test("Dockerfile declares the CLI pin once and installs it (bun global)", () => {
-    // bun global install of the exact pin — image pinning discipline; the
-    // repo manifest range exception does NOT extend to the image. The ARG is
-    // the single declaration; the install line consumes it instead of
-    // restating the version, so the two cannot drift.
-    const arg = `ARG CLI_VERSION=${OMP_SANDBOX_IMAGE_PINS.harnessCliVersion}`;
-    expect(DOCKERFILE).toContain(`${arg}\n`);
-    expect(DOCKERFILE).toContain("bun add --global @mstar-harness/cli@${CLI_VERSION} ");
-    // Declaration before the layer that consumes it (docker ARG scoping).
-    expect(DOCKERFILE.indexOf(arg)).toBeLessThan(
-      DOCKERFILE.indexOf("bun add --global @mstar-harness/cli@"),
+  // The CLI pin's single declaration is the committed global-install manifest
+  // the build COPYs and replays. Its exact version must equal the harness
+  // constant (image pinning discipline — the repo manifest `^` range exception
+  // does NOT extend to the image), and the lock beside it must resolve that
+  // same version, otherwise `bun install --frozen-lockfile` installs a CLI the
+  // pin never named.
+  const CLI_MANIFEST_PATH = join(REPO_ROOT, "sandbox-image", "cli-global", "package.json");
+  const CLI_LOCK_PATH = join(REPO_ROOT, "sandbox-image", "cli-global", "bun.lock");
+  const cliManifest = JSON.parse(readFileSync(CLI_MANIFEST_PATH, "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+  const cliLock = readFileSync(CLI_LOCK_PATH, "utf8");
+
+  test("the committed global-install manifest pins the CLI to HARNESS_VERSION exactly", () => {
+    expect(cliManifest.dependencies["@mstar-harness/cli"]).toBe(
+      OMP_SANDBOX_IMAGE_PINS.harnessCliVersion,
     );
   });
 
-  test("Dockerfile carries exactly one CLI version literal", () => {
-    // Comments excluded: the harness-tag comment legitimately names the plugin
-    // tag v<version>. A second copy on an instruction line is the drift this
-    // guards — the assertion step reads the same ARG, never its own literal.
+  test("the committed lock resolves that exact CLI pin", () => {
+    // Both rows: the workspaces declaration mirrors the manifest, the packages
+    // row is what the frozen install actually resolves.
+    expect(cliLock).toContain(
+      `"@mstar-harness/cli": "${OMP_SANDBOX_IMAGE_PINS.harnessCliVersion}"`,
+    );
+    expect(cliLock).toContain(
+      `"@mstar-harness/cli": ["@mstar-harness/cli@${OMP_SANDBOX_IMAGE_PINS.harnessCliVersion}"`,
+    );
+  });
+
+  test("Dockerfile installs the CLI by replaying the committed manifest + lock", () => {
+    // COPY before the RUN that consumes it, and the install is the frozen
+    // form: a live `bun add --global` re-resolved the CLI's caret ranges on
+    // every build (I-000009), which is exactly what this layer must not do.
+    const copy = "COPY sandbox-image/cli-global/package.json sandbox-image/cli-global/bun.lock";
+    const install = "bun install --frozen-lockfile --production";
+    expect(DOCKERFILE).toContain(copy);
+    expect(DOCKERFILE).toContain(install);
+    expect(DOCKERFILE.indexOf(copy)).toBeLessThan(DOCKERFILE.indexOf(install));
+    expect(DOCKERFILE).not.toContain("bun add --global");
+  });
+
+  test("Dockerfile links the installed bins onto PATH", () => {
+    expect(DOCKERFILE).toContain("ln -sf ../install/global/node_modules/.bin/mstar ");
+    expect(DOCKERFILE).toContain("ln -sf ../install/global/node_modules/.bin/mstar-harness ");
+    // The no-node rewrite still targets the linked shim.
+    expect(DOCKERFILE).toContain(
+      "sed -i --follow-symlinks '1s|.*|#!/usr/bin/env bun|' /root/.bun/bin/mstar",
+    );
+  });
+
+  test("Dockerfile carries no CLI version literal and no CLI install line", () => {
+    // The manifest owns the version now; a version restated on an instruction
+    // line is the drift this guards. Comments excluded: the harness-tag
+    // comment legitimately names the plugin tag v<version>.
     const instructions = DOCKERFILE.split("\n")
       .filter((line) => !/^\s*#/.test(line))
       .join("\n");
     const version = OMP_SANDBOX_IMAGE_PINS.harnessCliVersion.replace(/\./g, "\\.");
-    expect(instructions.match(new RegExp(`(?<![\\d.])${version}(?![\\d.])`, "g"))).toHaveLength(1);
+    expect(instructions.match(new RegExp(`(?<![\\d.])${version}(?![\\d.])`, "g"))).toBeNull();
+    expect(instructions).not.toContain("@latest");
+    expect(instructions).not.toContain("@mstar-harness/cli");
   });
 
   test("Dockerfile puts the bun global bin on PATH for sandbox exec", () => {
     expect(DOCKERFILE).toContain('ENV PATH="/root/.bun/bin:${PATH}"');
-  });
-
-  test("Dockerfile has no unversioned / @latest CLI install", () => {
-    expect(DOCKERFILE).not.toContain("@mstar-harness/cli@latest");
-    // Every `@mstar-harness/cli` occurrence in the file (comment included)
-    // must be version-pinned — a bare, unversioned install reference fails.
-    expect(DOCKERFILE.match(/@mstar-harness\/cli(?!@)/)).toBeNull();
   });
 });
 
@@ -252,16 +286,19 @@ describe("review skill version pin", () => {
     expect(REVIEW_SKILL_VERSION.endsWith(`+${fetchSha!.slice(0, 8)}`)).toBe(true);
   });
 
-  test("REVIEW_SKILL_VERSION version prefix binds to the Dockerfile CLI pin", () => {
+  test("REVIEW_SKILL_VERSION version prefix binds to the committed CLI pin", () => {
     const versionPrefix = REVIEW_SKILL_VERSION.split("+")[0];
     expect(versionPrefix).toBeDefined();
     // The CLI exact pin and the D1 attribution anchor share the version
     // component: a future bump that updates one but not the other (e.g. a
     // fetch-sha + REVIEW_SKILL_VERSION bump leaving the image CLI at the old
     // version) fails here — same drift net as the fetch-sha binding above.
-    // The pin's single declaration is the ARG; the install and the assertion
-    // RUN both consume `${CLI_VERSION}`.
-    expect(DOCKERFILE).toContain(`ARG CLI_VERSION=${versionPrefix!}\n`);
+    // The pin's single declaration is the committed global-install manifest
+    // the build replays (see the "sandbox image CLI pin" block above).
+    const manifest = JSON.parse(
+      readFileSync(join(REPO_ROOT, "sandbox-image", "cli-global", "package.json"), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    expect(manifest.dependencies["@mstar-harness/cli"]).toBe(versionPrefix!);
   });
 });
 

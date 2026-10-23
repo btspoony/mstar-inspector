@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@mstar-harness/cli": "4.0.7"
+  }
+}
