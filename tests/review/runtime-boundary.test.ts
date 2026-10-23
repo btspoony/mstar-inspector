@@ -48,21 +48,25 @@ describe("module import matrix — omp SDK is container-only", () => {
 // narrowed per P67-QC-015 in QC wave B) ------------------------------------
 
 /**
- * The sandbox image ships packages/runner/src plus the zero-runtime-dependency wire
- * contracts both runtime faces share: `COPY packages/shared/src`. Nothing else
- * enters the image (no src/pipeline, no src/store), so an import escaping
- * the runner tree is admissible ONLY when it resolves to a file this Dockerfile
- * actually copies.
+ * The sandbox image ships exactly two package source trees: `packages/runner/src`
+ * plus the zero-runtime-dependency wire contracts both runtime faces share,
+ * `packages/shared/src`. Nothing from the repository root `src/` tree may enter
+ * again, and an import escaping the runner tree is admissible ONLY when it
+ * resolves to a file this Dockerfile actually copies.
  *
- * The admitted set is DERIVED FROM THE DOCKERFILE rather than restated from a
- * directory name (qc2 F-011 / qc3 QC3-007): admitting another tree, or retiring
- * a COPY line the imports still need, fails here instead of joining the image
- * graph silently — and every admitted file must stay free of runtime imports.
+ * The admitted face is DERIVED FROM THE DOCKERFILE rather than restated from a
+ * directory name (qc2 F-011 / qc3 QC3-007): admitting another source tree — or
+ * re-adding a `COPY src/...` line — fails here instead of joining the image
+ * graph silently, and every admitted shared file must stay free of runtime
+ * imports.
  */
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "Dockerfile");
-const IN_IMAGE_FACE = join(REPO_ROOT, "packages", "runner", "src");
+const RUNNER_SRC = join(REPO_ROOT, "packages", "runner", "src");
 const SHARED_SRC = join(REPO_ROOT, "packages", "shared", "src");
+
+/** The only build-context source trees the image may admit. */
+const ADMITTED_FACE = ["packages/runner/src", "packages/shared/src"] as const;
 
 /** Every build-context source a `COPY <src…> <abs dest>` line ships. */
 function dockerfileCopySources(dockerfile: string): string[] {
@@ -75,11 +79,28 @@ function dockerfileCopySources(dockerfile: string): string[] {
   return sources;
 }
 
+/**
+ * The source trees a `COPY` line ships, repo-relative. A single-file source
+ * (manifest, lockfile, script) is not a face, so anything else — including a
+ * tree that does not exist in the build context — counts as one and must be
+ * one of the two admitted packages.
+ */
+function admittedFaces(sources: string[]): string[] {
+  const faces = sources.filter(
+    // An absolute source belongs to another image (`COPY --from=…`), not the
+    // build context.
+    (spec) =>
+      !spec.startsWith("/") &&
+      !statSync(join(REPO_ROOT, spec), { throwIfNoEntry: false })?.isFile(),
+  );
+  return [...new Set(faces)].sort();
+}
+
 /** Files under packages/shared/src the image admits, resolved from those COPY lines. */
 function admittedSharedFiles(sources: string[]): string[] {
   const admitted: string[] = [];
   for (const spec of sources) {
-    if (!spec.startsWith("packages/shared/src")) continue;
+    if (spec !== "packages/shared/src" && !spec.startsWith("packages/shared/src/")) continue;
     const abs = join(REPO_ROOT, spec);
     // A directory COPY is deliberate here (one coherent package), so the
     // admitted set is enumerated and every member is asserted individually.
@@ -135,7 +156,20 @@ function resolveModuleTarget(specifier: string, fromFile: string): string {
 }
 
 describe("in-image module graph — the image ships packages/runner/src plus the shared package only", () => {
-  const admittedShared = admittedSharedFiles(dockerfileCopySources(OMP_DOCKERFILE));
+  const copySources = dockerfileCopySources(OMP_DOCKERFILE);
+  const admittedShared = admittedSharedFiles(copySources);
+
+  test("the Dockerfile admits exactly the two package source trees", () => {
+    // Derived, not restated: the assertion pins the derivation against the
+    // Dockerfile, so a third admitted tree (or a retired package) fails here.
+    expect(admittedFaces(copySources)).toEqual([...ADMITTED_FACE]);
+  });
+
+  test("no COPY line ships the repository root src/ tree", () => {
+    // The split's regression: the image once shipped src/review + src/contracts.
+    const rootSrcCopies = copySources.filter((spec) => spec === "src" || spec.startsWith("src/"));
+    expect(rootSrcCopies).toEqual([]);
+  });
 
   test("the Dockerfile admits exactly the shared package modules", () => {
     expect(admittedShared.map((file) => file.slice(REPO_ROOT.length + 1))).toEqual([
@@ -148,13 +182,12 @@ describe("in-image module graph — the image ships packages/runner/src plus the
 
   test("no packages/runner/src module imports outside that tree and the admitted files", () => {
     const offenders: string[] = [];
-    for (const file of collectFiles(IN_IMAGE_FACE)) {
+    for (const file of collectFiles(RUNNER_SRC)) {
       const source = readFileSync(file, "utf8");
       for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
         const specifier = match[1]!;
         const target = resolveModuleTarget(specifier, file);
-        const admissible =
-          target.startsWith(`${IN_IMAGE_FACE}/`) || admittedShared.includes(target);
+        const admissible = target.startsWith(`${RUNNER_SRC}/`) || admittedShared.includes(target);
         if (!admissible) offenders.push(`${file.slice(REPO_ROOT.length + 1)}: ${specifier}`);
       }
     }
