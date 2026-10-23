@@ -7,8 +7,6 @@
  * bidirectional keyof walk and the behavior tests.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { en, type Dictionary } from "../../src/i18n/en";
 import { zhCN } from "../../src/i18n/zh-CN";
 import { LOCALE_COOKIE, LOCALES, resolveLocale, serializeLocaleCookie, type Locale } from "../../src/i18n/resolve";
@@ -228,27 +226,6 @@ describe("document title + login copy", () => {
     expect(t("zh_CN", "login.signIn")).toBe("使用 GitHub 登录");
     expect(t("en", "login.heading")).toBe("Sign in");
     expect(t("en", "login.signIn")).toBe("Sign in with GitHub");
-  });
-});
-
-describe("REVIEW_ENABLED user copy is absent on restyled surfaces", () => {
-  test("no dictionary leaf contains REVIEW_ENABLED", () => {
-    for (const locale of LOCALES) {
-      for (const key of collectKeys(dictionaries[locale])) {
-        const value = t(locale, key as DictionaryKey);
-        expect(value, `${locale} ${key}`).not.toContain("REVIEW_ENABLED");
-      }
-    }
-  });
-
-  test("SPA tsx/ts sources on the restyled surface do not contain REVIEW_ENABLED", () => {
-    const spaRoot = join(import.meta.dir, "../../src/spa");
-    const hits: string[] = [];
-    for (const file of new Bun.Glob("**/*.{ts,tsx}").scanSync({ cwd: spaRoot })) {
-      const text = readFileSync(join(spaRoot, file), "utf8");
-      if (text.includes("REVIEW_ENABLED")) hits.push(file);
-    }
-    expect(hits).toEqual([]);
   });
 });
 

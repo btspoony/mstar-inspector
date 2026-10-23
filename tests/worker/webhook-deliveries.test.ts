@@ -14,7 +14,7 @@
  *     immediately after classifyWebhook returns (before the reject return):
  *     reject → rejected (status_code = the classifier's status), ignore →
  *     ignored, job + review_enabled=0 → paused, job → ok. Pre-classify
- *     failures (413 / kill-switch / db-guard / 404 / decrypt 500) record
+ *     failures (413 / db-guard / 404 / decrypt 500) record
  *     nothing (the retired legacy face recorded nothing — AL-20-1: legacy
  *     不落行).
  *   - Recording is best-effort: a store failure logs a structured warn
@@ -408,7 +408,6 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const { kv } = makeKv();
     const { queue } = makeQueue();
     return {
-      REVIEW_ENABLED: "true",
       IDEMPOTENCY_KV: kv as never,
       REVIEW_QUEUE: queue as never,
       DB: db as never,
@@ -675,18 +674,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(fields.event).toBe("delivery_record_failed");
   });
 
-  test("pre-classify failures record NOTHING: kill-switch → 2xx ignored, unknown slug → 404", async () => {
+  test("pre-classify failures record NOTHING: unknown slug → 404", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const body = JSON.stringify(PR_PAYLOAD);
-
-    // Emergency brake (REVIEW_ENABLED exactly "false" — AC4a) returns
-    // before the slug lookup.
-    const envKill = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "false" });
-    const resKill = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), envKill);
-    expect(resKill.status).toBe(200);
-    expect(await resKill.text()).toBe("ignored");
 
     // Unknown slug → 404 before any signature work.
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
