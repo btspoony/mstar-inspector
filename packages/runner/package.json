@@ -1,0 +1,10 @@
+{
+  "name": "@mstar-inspector/runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mstar-harness/engine": "4.0.4",
+    "@oh-my-pi/pi-coding-agent": "18.12.3"
+  }
+}
