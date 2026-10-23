@@ -125,7 +125,7 @@ import {
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
-import { isCommandConfigKey } from "../contracts/credential-key";
+import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
@@ -2888,7 +2888,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
     return c.json({ ok: false, reason: "unexpected" as const }, 400);
   }
   // A `!`-prefixed key would be run as a shell command by the review
-  // runtime's config-value resolver (../contracts/credential-key.ts) — the
+  // runtime's config-value resolver (packages/shared/src/credential-key.ts) — the
   // same rule the runner's payload decoder enforces fail-closed. The keyed
   // face reuses the existing `unexpected` reason (the enum is closed; the
   // ProviderKeyLimit path below sets the precedent).
@@ -3033,7 +3033,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       });
     }
     // A `!`-prefixed key would be run as a shell command by the review
-    // runtime's config-value resolver (../contracts/credential-key.ts) — the
+    // runtime's config-value resolver (packages/shared/src/credential-key.ts) — the
     // same rule the runner's payload decoder enforces fail-closed.
     if (isCommandConfigKey(plainKey)) {
       return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
@@ -3311,7 +3311,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       });
     }
     // A `!`-prefixed key would be run as a shell command by the review
-    // runtime's config-value resolver (../contracts/credential-key.ts) — the
+    // runtime's config-value resolver (packages/shared/src/credential-key.ts) — the
     // same rule the runner's payload decoder enforces fail-closed.
     if (isCommandConfigKey(plainKey)) {
       return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
@@ -3453,7 +3453,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       });
     }
     // A `!`-prefixed key would be run as a shell command by the review
-    // runtime's config-value resolver (../contracts/credential-key.ts) — the
+    // runtime's config-value resolver (packages/shared/src/credential-key.ts) — the
     // same rule the runner's payload decoder enforces fail-closed.
     if (isCommandConfigKey(plainKey)) {
       return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);

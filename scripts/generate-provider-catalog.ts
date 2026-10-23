@@ -316,8 +316,8 @@ async function main(): Promise<void> {
  * Credential transport: an \`envName\` is RETAINED mapping metadata, never the
  * variable the key rides. A configured pool reaches the review container as the
  * runner's STDIN credential payload (consumer.ts buildRunnerCredentials,
- * src/review/credential-payload.ts), and the in-image runner loads it into the
- * run's IN-MEMORY credential store as \`source:"login"\` api_key rows — the
+ * packages/shared/src/credential-payload.ts), and the in-image runner loads it
+ * into the run's IN-MEMORY credential store as \`source:"login"\` api_key rows — the
  * per-run agent directory holds only the non-secret models.yml. \`envName\`
  * only marks allowlist membership (providerEnvName).
  *

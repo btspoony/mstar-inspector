@@ -94,8 +94,8 @@ export type RecurrenceGroup = {
  * §7.1 owns the normative shapes). Snake_case D1 column names, same
  * convention as `ReviewRow` / `FindingRow`. The typed journal domain
  * shapes (`PublicationPayload`, `PublicationRow`, `Lease`, …) live in
- * `src/store/finding-lifecycle.ts` / `src/contracts/recheck.ts`; these are
- * the storage-layer rows they map from. Timestamps are integer Unix
+ * `src/store/finding-lifecycle.ts` / `packages/shared/src/recheck-wire.ts`; these
+ * are the storage-layer rows they map from. Timestamps are integer Unix
  * milliseconds (spec §7.0), not the datetime TEXT of the 0001 tables.
  */
 

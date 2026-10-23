@@ -82,7 +82,7 @@ import { MERGE_CLASSES, REVIEW_EMOJI } from "@mstar-harness/engine";
 import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../review/schema";
 import { redactSecrets } from "./redact";
 import { computeFindingFingerprint } from "../store/fingerprint";
-import type { Assessment, Coverage, Scope, Discussion } from "../contracts/recheck";
+import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";

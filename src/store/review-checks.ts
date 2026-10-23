@@ -46,7 +46,7 @@
  * call, no clock of its own (one supplied `nowMs` per transaction, §7.0).
  */
 
-import type { Scope } from "../contracts/recheck";
+import type { Scope } from "../../packages/shared/src/recheck-wire";
 import { suspensionCredentialOf, type Lease, type SuspensionKind } from "./finding-lifecycle";
 import type { D1Like, ReviewCheckRow } from "./types";
 
@@ -111,7 +111,7 @@ export { suspensionCredentialOf };
 export type { SuspensionKind };
 
 /** The authenticated routing scope (spec §7.0) — same vocabulary as the store. */
-export type { Scope } from "../contracts/recheck";
+export type { Scope } from "../../packages/shared/src/recheck-wire";
 export type { Lease, PublicationProof } from "./finding-lifecycle";
 
 // ---------------------------------------------------------------------------

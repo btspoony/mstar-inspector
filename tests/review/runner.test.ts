@@ -55,10 +55,10 @@ import { join } from "node:path";
 
 import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { MstarReviewV1 } from "@mstar-harness/engine";
-import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../src/review/runtime";
+import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../packages/shared/src/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { capabilityHostsYaml } from "../../src/review/models-synthesis";
-import { encodeCredentialPayload } from "../../src/review/credential-payload";
+import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import { createInMemoryAuthStorage, main } from "../../src/review/runner";
 import { sk } from "../helpers/fake-secrets";
 

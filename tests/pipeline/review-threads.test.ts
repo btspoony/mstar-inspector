@@ -26,7 +26,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { Scope } from "../../src/contracts/recheck";
+import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { GraphqlOctokit } from "../../src/pipeline/review-threads";
 import {
   issueDigestOf,

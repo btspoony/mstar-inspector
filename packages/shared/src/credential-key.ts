@@ -19,16 +19,16 @@
  * A provider key is DATA, never a config value, so both boundaries refuse the
  * shape:
  *
- *   - the runner's payload decoder (`src/review/credential-payload.ts`) — the
- *     hard fail-closed gate, BEFORE any credential row is written;
+ *   - the runner's payload decoder (`packages/shared/src/credential-payload.ts`)
+ *     — the hard fail-closed gate, BEFORE any credential row is written;
  *   - the dashboard's key routes (`src/dashboard/index.ts`) — a keyed 400 where
  *     the operator typed it, instead of a failed review run later.
  *
  * Zero-dependency by construction: this file is admitted into the in-image
  * runner graph (sandbox-image/omp/Dockerfile COPYs it beside
- * src/contracts/recheck.ts) and is consumed by the Worker faces, so it must
- * keep importing nothing (tests/review/runtime-boundary.test.ts asserts that
- * for every admitted contract file).
+ * packages/shared/src/recheck-wire.ts) and is consumed by the Worker faces, so
+ * it must keep importing nothing (tests/review/runtime-boundary.test.ts asserts
+ * that for every admitted contract file).
  */
 
 /** The prefix the SDK's config-value resolver reads as "run this as a command". */
