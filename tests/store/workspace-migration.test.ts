@@ -253,4 +253,46 @@ describe("migrations/0030_workspace_membership_cutover.sql (applied once)", () =
     expect(role.role).toBe("owner");
     expect(countRows(db, "workspace_members")).toBe(1);
   });
+
+  // KNOWN ONE-TIME RE-GRANT, pinned as current behaviour rather than "fixed":
+  // a database that ran this branch BEFORE 0030 existed can hold a pre-cutover
+  // user who was removed through the members page — that path deletes the
+  // membership row and writes no `removed_logins` tombstone, so the `NOT
+  // EXISTS` guard cannot tell them from a login that was never a member. The
+  // first apply re-adds them to `default`. The production upgrade path is
+  // unaffected (base `removeUser` writes the tombstone in the same batch), and
+  // the effect is one-shot because the ledger applies this file once.
+  // Operator guidance: docs/deploy.md § "The FIRST application has the same
+  // blind spot".
+  test("KNOWN: a pre-cutover user removed on the members page before the first apply is re-granted once", async () => {
+    const db = dbBeforeCutover();
+    // The row was written while the retired allowlist admitted logins: its
+    // `created_at` predates the cutover, which is what makes 0030 want it.
+    insertUser(db, "user-members-page-removed", "members-page-removed", "member");
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, 'admin', ?)",
+      )
+      .run("user-members-page-removed", "2026-01-01T00:00:00.000Z");
+    // Removed the way this branch's members page removes somebody.
+    expect(await deleteWorkspaceMember(db, "default", "user-members-page-removed")).toBe(true);
+    expect(defaultMembers(db)).toEqual([]);
+    // The membership-only removal leaves no tombstone — that is the blind spot.
+    expect(countRows(db, "removed_logins")).toBe(0);
+
+    runFile(db, MEMBERSHIP_CUTOVER);
+
+    expect(defaultMembers(db)).toEqual(["members-page-removed"]);
+    const role = db.raw
+      .query("SELECT role FROM workspace_members WHERE workspace_id = 'default' AND user_id = ?")
+      .get("user-members-page-removed") as { role: string };
+    // The legacy `users.role` mapping decides the re-granted role — the
+    // pre-removal `admin` membership is gone, only the users row speaks.
+    expect(role.role).toBe("member");
+
+    // One-shot: a second apply cannot add anything, and a deploy never replays
+    // this file through the ledger.
+    runFile(db, MEMBERSHIP_CUTOVER);
+    expect(defaultMembers(db)).toEqual(["members-page-removed"]);
+  });
 });
