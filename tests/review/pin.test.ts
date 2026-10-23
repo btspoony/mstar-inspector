@@ -131,6 +131,45 @@ describe("engine dependency pin", () => {
   });
 });
 
+describe("cross-side engine parity", () => {
+  // The root workspace (Worker) and the runner package install their own
+  // lockfiles; the image installs the CLI at the same version. All three must
+  // resolve the SAME engine — otherwise the in-image runner runs against a
+  // different harness than the repo's tests and the image pin.
+  test("root bun.lock, runner bun.lock and harnessVersion agree", () => {
+    const resolved = [
+      join(REPO_ROOT, "bun.lock"),
+      join(REPO_ROOT, "packages", "runner", "bun.lock"),
+    ].map(
+      (path) =>
+        readFileSync(path, "utf8").match(
+          /"@mstar-harness\/engine": \["@mstar-harness\/engine@([^"]+)"/,
+        )?.[1],
+    );
+    expect(resolved).toEqual([
+      OMP_SANDBOX_IMAGE_PINS.harnessVersion,
+      OMP_SANDBOX_IMAGE_PINS.harnessVersion,
+    ]);
+  });
+});
+
+describe("runner package face", () => {
+  const runnerPkg = JSON.parse(
+    readFileSync(join(REPO_ROOT, "packages", "runner", "package.json"), "utf8"),
+  ) as { version: string; dependencies: Record<string, string> };
+
+  test("runner dependencies are exactly the engine and the omp SDK", () => {
+    expect(Object.keys(runnerPkg.dependencies).sort()).toEqual([
+      "@mstar-harness/engine",
+      "@oh-my-pi/pi-coding-agent",
+    ]);
+  });
+
+  test("Dockerfile runner package version label mirrors packages/runner/package.json", () => {
+    expect(DOCKERFILE).toContain(`LABEL io.mstar.runner-package-version=${runnerPkg.version}`);
+  });
+});
+
 describe("review skill version pin", () => {
   test("REVIEW_SKILL_VERSION + suffix binds to the Dockerfile fetch sha prefix", () => {
     const fetchSha = DOCKERFILE.match(/fetch --depth 1 origin ([0-9a-f]{40})/)?.[1];
