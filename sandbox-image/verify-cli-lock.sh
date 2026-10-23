@@ -11,9 +11,10 @@
 #   - every lock entry is installed at the recorded version;
 #   - no installed package — at ANY depth, including a package nested inside
 #     another package's own node_modules — is absent from the lock;
-#   - a lock that parses to fewer rows than the installed top-level packages
-#     is treated as truncated and fails as a PARSE error, never as a pass and
-#     never as a per-package drift message.
+#   - the lock is structurally complete (balanced braces, closing `}` as the
+#     last non-empty line) and parses to at least as many rows as there are
+#     installed top-level packages; either failure is a PARSE error, never a
+#     pass and never a per-package drift message.
 #
 # Both sides are compared in the lockfile's own key form: a lock key is the
 # install path with every `node_modules/` segment removed (`a/b` = b nested
@@ -39,6 +40,19 @@ if [ ! -f "$lock" ]; then
 fi
 if [ ! -d "$modules" ]; then
   echo "FAIL cli-lock-nodemodules: no installed tree at $modules" >&2
+  exit 1
+fi
+
+# F2 — the lock must be structurally complete before any row is trusted: a
+# file truncated after its last package row still parses to the full row set
+# and would pass every content comparison, so validate the object's shape.
+opened="$(grep -o '{' "$lock" | wc -l | tr -d ' ' || true)"
+closed="$(grep -o '}' "$lock" | wc -l | tr -d ' ' || true)"
+lastline="$(grep -v '^[[:space:]]*$' "$lock" | tail -n 1 | sed 's/[[:space:]]*$//')"
+if [ "$opened" != "$closed" ] || [ "$lastline" != "}" ]; then
+  echo "FAIL cli-lock-parse: $lock is not a balanced object ($opened '{' vs" \
+    "$closed '}', last non-empty line '${lastline}') — truncated or corrupt lock" >&2
+  echo "CLI_LOCK_VERIFY=fail (parse)" >&2
   exit 1
 fi
 
@@ -109,8 +123,9 @@ while IFS=' ' read -r key spec; do
   printf '%s %s\n' "$key" "${spec##*@}" >> "$lockver"
 done < "$rows"
 
-# F2 — a short parse is a PARSE failure, not a clean tree: a truncated or
-# corrupt lock must not be able to explain itself away as "fewer packages".
+# F2 (size) — a lock whose shape is intact can still be short: deleting whole
+# package rows keeps the braces balanced. A row count below the installed
+# top-level packages is a PARSE failure too, never a clean tree.
 # (An installed top-level package the lock never names trips the same guard —
 # the size relation covers both, and both mean lock and tree disagree.)
 if [ "$lock_rows" -lt "$top_installed" ]; then
