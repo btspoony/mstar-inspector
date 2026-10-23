@@ -11,7 +11,7 @@
  *   1. generate the BASE from the App's selected image's CAPABILITY HOSTS
  *      (the runner input carries the hosts the consumer resolved from
  *      src/contracts/sandbox-images.ts — this module cannot import the
- *      contract: the in-image runner module graph stays inside src/review,
+ *      contract: the in-image runner package owns its own module graph,
  *      tests/review/runtime-boundary);
  *   2. merge the declared custom-provider blocks under `providers:` —
  *      capability/base provider ids WIN on collision, a custom id never
@@ -34,7 +34,7 @@
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { type CapabilityHost, type CustomProviderDeclaration } from "../../packages/shared/src/runtime";
+import { type CapabilityHost, type CustomProviderDeclaration } from "../../shared/src/runtime";
 
 /** File name the SDK loads from the agentDir (model-registry single-file). */
 const MODELS_YAML_NAME = "models.yml";

@@ -55,7 +55,7 @@ set -euo pipefail
 cd /opt/runner
 
 bun -e '
-import { capabilityHostsYaml, writePerReviewModelsYaml } from "/opt/runner/src/review/models-synthesis.ts";
+import { capabilityHostsYaml, writePerReviewModelsYaml } from "/opt/runner/packages/runner/src/models-synthesis.ts";
 import { ModelRegistry, discoverAuthStorage, createAgentSession } from "@oh-my-pi/pi-coding-agent";
 import { join } from "node:path";
 import { readFileSync, rmSync } from "node:fs";

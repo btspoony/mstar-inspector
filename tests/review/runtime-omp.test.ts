@@ -53,8 +53,8 @@ import {
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
 import type { AgentRuntime, ReviewLevel } from "../../packages/shared/src/runtime";
-import type { SupervisedSeat } from "../../src/review/runtime-omp";
-import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../src/review/recheck";
+import type { SupervisedSeat } from "../../packages/runner/src/runtime-omp";
+import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
 import type { RecheckDoc, RecheckInput } from "../../packages/shared/src/recheck-wire";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
@@ -400,7 +400,7 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
 // The `?test=runtime-omp` query is REQUIRED as well: bun's mock.module
 // registry is process-global and leaks across test files in one `bun test`
 // run, keyed by resolved specifier. tests/review/runner.test.ts mocks this
-// very module ("../../src/review/runtime-omp"), and test-file execution order
+// very module ("../../packages/runner/src/runtime-omp"), and test-file execution order
 // is filesystem-dependent — Linux CI (bun 1.4.0) ran runner.test.ts first, so
 // this import bound runner's stub and every createAgentSession /
 // runStructuredSubagent assertion saw zero calls (13 failures). The query
@@ -408,7 +408,7 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
 // here, while its own omp SDK imports still resolve through the mocks above.
 // The specifier goes through a const so tsc never resolves the query-suffixed
 // path (non-literal dynamic imports are untyped, hence the cast).
-const RUNTIME_OMP_SPEC = "../../src/review/runtime-omp.ts?test=runtime-omp";
+const RUNTIME_OMP_SPEC = "../../packages/runner/src/runtime-omp.ts?test=runtime-omp";
 const { ompAgentRuntime, superviseSeats, SUMMARY_MD_BUDGET, SEAT_GAP_MAX_CHARS } = (await import(RUNTIME_OMP_SPEC)) as {
   ompAgentRuntime: AgentRuntime;
   superviseSeats: (opts: {
@@ -647,7 +647,7 @@ describe("ompAgentRuntime.runReview — parent session", () => {
 
     // The definition was snapshotted from the clone at session creation (the
     // runtime removes it again when the run resolves).
-    expect(installedSeatAgent).toBe(readFileSync(join(import.meta.dir, "../../src/review/seat-agent.md"), "utf8"));
+    expect(installedSeatAgent).toBe(readFileSync(join(import.meta.dir, "../../packages/runner/src/seat-agent.md"), "utf8"));
     expect(installedSeatAgent).toContain("name: mstar-review-seat");
     expect(installedSeatAgent).toContain("tools: [read, grep, glob]");
     expect(installedSeatAgent).not.toMatch(/^spawns:/m);

@@ -94,9 +94,9 @@ import {
   type MstarReviewFinding,
   type MstarReviewV1,
 } from "@mstar-harness/engine";
-import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../packages/shared/src/runtime";
+import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
 import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat } from "./recheck";
-import type { RecheckDoc } from "../../packages/shared/src/recheck-wire";
+import type { RecheckDoc } from "../../shared/src/recheck-wire";
 
 /**
  * Environment override for the mstar-harness plugin root — the primary,
@@ -109,8 +109,8 @@ const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 /**
  * Resolve the local mstar-harness plugin root, in priority order:
  *   1. $HARNESS_PLUGIN_ROOT — explicit configuration (primary surface);
- *   2. the sibling directory `../mstar-harness` relative to this package
- *      (the main-repo layout).
+ *   2. the sibling directory `mstar-harness` next to the repository root
+ *      (three levels up from this file: src → runner → packages → root).
  * There is no machine-absolute fallback: an unresolvable root fails closed
  * and names the env var to set. M0 never installs from GitHub. Resolved
  * lazily per call so tests can inject a fixture root regardless of module
@@ -119,7 +119,7 @@ const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 export function resolveHarnessRoot(): string {
   const fromEnv = Bun.env[HARNESS_ROOT_ENV]?.trim();
   if (fromEnv) return fromEnv;
-  const sibling = resolve(import.meta.dir, "../../../mstar-harness");
+  const sibling = resolve(import.meta.dir, "../../../../mstar-harness");
   if (existsSync(sibling)) return sibling;
   throw new Error(
     `mstar-harness plugin root not found: set ${HARNESS_ROOT_ENV} to the plugin checkout (no sibling checkout at ${sibling})`,

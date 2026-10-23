@@ -17,9 +17,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateMstarReviewV1 } from "@mstar-harness/engine";
 import { getSandboxImage } from "../src/contracts/sandbox-images";
-import { writePerReviewModelsYaml } from "../src/review/models-synthesis";
-import { createInMemoryAuthStorage } from "../src/review/runner";
-import { ompAgentRuntime, parseModelSelectors } from "../src/review/runtime-omp";
+import { writePerReviewModelsYaml } from "../packages/runner/src/models-synthesis";
+import { createInMemoryAuthStorage } from "../packages/runner/src/runner";
+import { ompAgentRuntime, parseModelSelectors } from "../packages/runner/src/runtime-omp";
 
 const worktreePath = process.argv[2] ?? process.cwd();
 const hosts = getSandboxImage("omp")?.hosts ?? [];
