@@ -7,16 +7,26 @@
 # nothing about what ended up on disk: a layer whose node_modules came from
 # somewhere else, a partially-copied tree, or a lock edited after resolution
 # would all install "successfully" while shipping versions the lock never
-# named. This closes the loop against the installed tree — every lock entry
-# must be present at the recorded version, and no installed package may be
-# absent from the lock.
+# named. This closes the loop against the installed tree:
+#   - every lock entry is installed at the recorded version;
+#   - no installed package — at ANY depth, including a package nested inside
+#     another package's own node_modules — is absent from the lock;
+#   - a lock that parses to fewer rows than the installed top-level packages
+#     is treated as truncated and fails as a PARSE error, never as a pass and
+#     never as a per-package drift message.
+#
+# Both sides are compared in the lockfile's own key form: a lock key is the
+# install path with every `node_modules/` segment removed (`a/b` = b nested
+# under a, scoped names keep their slash), which is why the installed path is
+# collapsed rather than the key expanded — that direction is unambiguous at
+# any nesting depth.
 #
 # Usage: verify-cli-lock.sh [install-root]
 #   install-root  the global install dir holding bun.lock + node_modules;
 #                 defaults to /root/.bun/install/global (where the build
 #                 COPYs the committed manifest + lock).
 #
-# Offline, no node: POSIX shell plus sed/grep/head/mktemp from the Debian base.
+# Offline, no node: POSIX shell plus sed/grep/head/wc/mktemp from the Debian base.
 set -eu
 
 root="${1:-/root/.bun/install/global}"
@@ -32,91 +42,117 @@ if [ ! -d "$modules" ]; then
   exit 1
 fi
 
-rows="$(mktemp)"
-top="$(mktemp)"
-trap 'rm -f "$rows" "$top"' EXIT
+rows="$(mktemp)"      # "<lock key> <resolved spec>" per lock packages row
+lockver="$(mktemp)"   # "<lock key> <version>"
+installed="$(mktemp)" # "<path relative to node_modules>" per installed package
+seen="$(mktemp)"      # lock keys the installed tree accounted for
+trap 'rm -f "$rows" "$lockver" "$installed" "$seen"' EXIT
 
+# Install path → lock key: drop every `node_modules/` separator segment.
+collapse() {
+  out=""
+  rest="$1"
+  while :; do
+    case "$rest" in
+      *"/node_modules/"*)
+        out="$out${rest%%/node_modules/*}/"
+        rest="${rest#*/node_modules/}"
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$out$rest"
+}
+
+# --- the installed tree, walked recursively ------------------------------
+# A package is a directory holding package.json; its own nested node_modules is
+# walked too (bun resolves conflicting transitives that way), scoped names sit
+# one level under @scope, and dot entries (.bin, caches) are not packages.
+walk() {
+  for entry in "$1"/*; do
+    [ -d "$entry" ] || continue
+    base="${entry##*/}"
+    case "$base" in .*) continue ;; esac
+    if [ -f "$entry/package.json" ]; then
+      printf '%s\n' "${entry#"$modules"/}" >> "$installed"
+      if [ -d "$entry/node_modules" ]; then walk "$entry/node_modules"; fi
+    else
+      case "$base" in
+        @*)
+          for sub in "$entry"/*; do
+            [ -d "$sub" ] || continue
+            [ -f "$sub/package.json" ] || continue
+            printf '%s\n' "${sub#"$modules"/}" >> "$installed"
+            if [ -d "$sub/node_modules" ]; then walk "$sub/node_modules"; fi
+          done
+          ;;
+      esac
+    fi
+  done
+}
+walk "$modules"
+
+installed_total="$(wc -l < "$installed" | tr -d ' ')"
+# Top-level = not reached through another package's node_modules.
+nested_installed="$(grep -c '/node_modules/' "$installed" || true)"
+top_installed=$((installed_total - nested_installed))
+
+# --- the lock's resolved set ---------------------------------------------
 # Packages rows carry the resolved name@version in their first array element:
 #   "name": ["name@version", "", { ... }, "sha512-…"],
 # The workspaces block (a plain string value, no array) never matches, and a
 # row whose spec lost its version is not parseable as resolved.
 sed -n 's/^    "\([^"]*\)": \["\([^"]*\)".*/\1 \2/p' "$lock" > "$rows"
-if [ ! -s "$rows" ]; then
-  # An unparsed lock must not read as "nothing to check".
-  echo "FAIL cli-lock-parse: no resolved packages rows found in $lock" >&2
+lock_rows="$(wc -l < "$rows" | tr -d ' ')"
+while IFS=' ' read -r key spec; do
+  [ -n "${key:-}" ] || continue
+  printf '%s %s\n' "$key" "${spec##*@}" >> "$lockver"
+done < "$rows"
+
+# F2 — a short parse is a PARSE failure, not a clean tree: a truncated or
+# corrupt lock must not be able to explain itself away as "fewer packages".
+# (An installed top-level package the lock never names trips the same guard —
+# the size relation covers both, and both mean lock and tree disagree.)
+if [ "$lock_rows" -lt "$top_installed" ]; then
+  echo "FAIL cli-lock-parse: $lock yields $lock_rows resolved rows, fewer than" \
+    "the $top_installed top-level packages installed in $modules; the lock does" \
+    "not cover the installed tree (truncated/corrupt lock, or an unexpected" \
+    "installed package)" >&2
+  echo "CLI_LOCK_VERIFY=fail (parse)" >&2
   exit 1
 fi
 
-checked=0
 drift=0
-while IFS=' ' read -r key spec; do
-  [ -n "${key:-}" ] || continue
-  version="${spec##*@}"
-  # The lock key is a bare name for top-level rows and `<parent key>/<dep>`
-  # for bun's nested-disambiguation rows; derive the on-disk package path.
-  rest="${key%/*}"
-  package="${key##*/}"
-  parent=""
-  if [ "$rest" != "$key" ]; then
-    previous="${rest##*/}"
-    if [ "${previous#@}" != "$previous" ]; then
-      # Scoped name: the dep is `<@scope>/<name>`, everything before it is
-      # the parent's install path.
-      if [ "$rest" = "$previous" ]; then
-        parent=""
-      else
-        parent="${rest%"/$previous"}"
-      fi
-      package="$previous/$package"
-    else
-      parent="$rest"
-    fi
-  fi
-  if [ -n "$parent" ]; then
-    path="$modules/$parent/node_modules/$package"
-  else
-    path="$modules/$package"
-    printf '%s\n' "$package" >> "$top"
-  fi
-  checked=$((checked + 1))
-  if [ ! -f "$path/package.json" ]; then
-    echo "FAIL cli-lock-missing: $package ($version in lock) is not installed at" \
-      "${path#"$modules"/}" >&2
+while IFS= read -r relative; do
+  [ -n "$relative" ] || continue
+  key="$(collapse "$relative")"
+  entry="$(grep -F -- "$key " "$lockver" | head -n 1 || true)"
+  if [ -z "$entry" ]; then
+    echo "FAIL cli-lock-unexpected: $relative is installed but absent from $lock" >&2
     drift=$((drift + 1))
     continue
   fi
-  installed="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$path/package.json" | head -n 1)"
-  if [ "$installed" != "$version" ]; then
-    echo "FAIL cli-lock-version: $package lock=$version installed=${installed:-none}" >&2
+  printf '%s\n' "$key" >> "$seen"
+  locked="${entry#* }"
+  resolved="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$modules/$relative/package.json" | head -n 1)"
+  if [ "$resolved" != "$locked" ]; then
+    echo "FAIL cli-lock-version: $relative lock=$locked installed=${resolved:-none}" >&2
     drift=$((drift + 1))
   fi
-done < "$rows"
+done < "$installed"
 
-# The other direction: an installed top-level package the lock does not name
-# means the tree is not the locked set (stale layer, hand-copied node_modules).
-for entry in "$modules"/*; do
-  [ -e "$entry" ] || continue
-  base="${entry##*/}"
-  if [ "${base#@}" != "$base" ]; then
-    for sub in "$entry"/*; do
-      [ -e "$sub" ] || continue
-      if ! grep -Fxq "$base/${sub##*/}" "$top"; then
-        echo "FAIL cli-lock-unexpected: $base/${sub##*/} is installed but absent" \
-          "from $lock" >&2
-        drift=$((drift + 1))
-      fi
-    done
-  elif [ -d "$entry" ]; then
-    if ! grep -Fxq "$base" "$top"; then
-      echo "FAIL cli-lock-unexpected: $base is installed but absent from $lock" >&2
-      drift=$((drift + 1))
-    fi
+while IFS=' ' read -r key locked; do
+  [ -n "${key:-}" ] || continue
+  if ! grep -Fxq -- "$key" "$seen"; then
+    echo "FAIL cli-lock-missing: $key ($locked in lock) is not installed" >&2
+    drift=$((drift + 1))
   fi
-done
+done < "$lockver"
 
 if [ "$drift" -ne 0 ]; then
-  echo "CLI_LOCK_VERIFY=fail ($drift drift(s) across $checked lock entries)" >&2
+  echo "CLI_LOCK_VERIFY=fail ($drift drift(s) across $lock_rows lock entries and" \
+    "$installed_total installed packages)" >&2
   exit 1
 fi
 
-echo "CLI_LOCK_VERIFY=pass ($checked lock entries match $modules)"
+echo "CLI_LOCK_VERIFY=pass ($lock_rows lock entries match $modules; $installed_total installed packages)"
