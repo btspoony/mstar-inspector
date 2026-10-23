@@ -135,19 +135,20 @@ describe("sandbox image CLI pin", () => {
     // COPY before the RUN that consumes it, and the install is the frozen
     // form: a live `bun add --global` re-resolved the CLI's caret ranges on
     // every build (I-000009), which is exactly what this layer must not do.
+    // Instructions only: a commented-out line runs nothing.
     const copy = "COPY sandbox-image/cli-global/package.json sandbox-image/cli-global/bun.lock";
     const install = "bun install --frozen-lockfile --production";
-    expect(DOCKERFILE).toContain(copy);
-    expect(DOCKERFILE).toContain(install);
-    expect(DOCKERFILE.indexOf(copy)).toBeLessThan(DOCKERFILE.indexOf(install));
-    expect(DOCKERFILE).not.toContain("bun add --global");
+    expect(INSTRUCTIONS).toContain(copy);
+    expect(INSTRUCTIONS).toContain(install);
+    expect(INSTRUCTIONS.indexOf(copy)).toBeLessThan(INSTRUCTIONS.indexOf(install));
+    expect(INSTRUCTIONS).not.toContain("bun add --global");
   });
 
   test("Dockerfile links the installed bins onto PATH", () => {
-    expect(DOCKERFILE).toContain("ln -sf ../install/global/node_modules/.bin/mstar ");
-    expect(DOCKERFILE).toContain("ln -sf ../install/global/node_modules/.bin/mstar-harness ");
+    expect(INSTRUCTIONS).toContain("ln -sf ../install/global/node_modules/.bin/mstar ");
+    expect(INSTRUCTIONS).toContain("ln -sf ../install/global/node_modules/.bin/mstar-harness ");
     // The no-node rewrite still targets the linked shim.
-    expect(DOCKERFILE).toContain(
+    expect(INSTRUCTIONS).toContain(
       "sed -i --follow-symlinks '1s|.*|#!/usr/bin/env bun|' /root/.bun/bin/mstar",
     );
   });
