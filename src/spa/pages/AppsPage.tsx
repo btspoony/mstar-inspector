@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { t } from "../../i18n";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -19,27 +19,41 @@ import { apiBase } from "../workspace-base";
 const TABLE_HEADER = "bg-(--background-200)";
 const TABLE_HEAD_LABEL = "text-xs tracking-(--typo-label-12-tracking)";
 
+/**
+ * Create eligibility for the workspace the PATH addresses, recomputed per
+ * render — the once-injected `boot.canCreateApp` snapshot goes stale on the
+ * first switcher navigation (pushState, no new document). The addressed ref
+ * matches a membership on either identifier (id or slug); a page with no
+ * ref (the legacy single-workspace mount) keeps trusting the snapshot, as
+ * does a ref no membership names (nothing better is known client-side).
+ * `workspaceRequired` (multi-workspace, no target) disables creation
+ * regardless — the deployment cannot say which workspace an App would join.
+ */
+export function canCreateAppFor(boot: SpaBoot, addressedRef: string | null): boolean {
+  if (boot.workspaceRequired === true) return false;
+  if (addressedRef === null) return boot.canCreateApp !== false;
+  const membership = boot.memberships?.find((m) => m.id === addressedRef || m.slug === addressedRef);
+  return membership === undefined ? boot.canCreateApp !== false : membership.role !== "member";
+}
+
 export function AppsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [payload, setPayload] = useState<AppsPayload | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  const cancelledRef = useRef(false);
-  // Boot-injected capability: the caller's role IN THE ADDRESSED WORKSPACE
-  // (I-000082) — a plain member cannot manage the App the manifest flow would
-  // create, and a deployment that cannot be narrowed to one workspace has no
-  // target at all. The control stays visible-but-disabled with the reason, so
-  // the page explains itself instead of silently dropping the action.
-  const canCreate = boot.canCreateApp !== false;
+  // Read per render (the MembersPage precedent): the switcher navigates with
+  // pushState + popstate, so no new document re-injects the boot — the page
+  // base must track the URL it is actually on.
+  const base = apiBase();
+  const canCreate = canCreateAppFor(boot, base === "/dashboard" ? null : base.slice("/dashboard/".length));
   const unavailableReason =
     boot.workspaceRequired === true
       ? t(locale, "apps.createUnavailable.workspace")
       : t(locale, "apps.createUnavailable.role");
 
-  async function load(): Promise<void> {
+  const load = useCallback(async (): Promise<void> => {
     setState("loading");
     try {
-      const parsed = parseApps(await fetchJson(`${apiBase()}/api/apps`));
-      if (cancelledRef.current) return;
+      const parsed = parseApps(await fetchJson(`${base}/api/apps`));
       if (!parsed) {
         setState("error");
         return;
@@ -47,17 +61,13 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       setPayload(parsed);
       setState("ok");
     } catch {
-      if (!cancelledRef.current) setState("error");
+      setState("error");
     }
-  }
+  }, [base]);
 
   useEffect(() => {
-    cancelledRef.current = false;
     void load();
-    return () => {
-      cancelledRef.current = true;
-    };
-  }, []);
+  }, [load]);
 
   // Loading rides the shared skeleton as the page's full loading face —
   // the component's heading placeholder stands in for the real h1 (AD-582).

@@ -11,7 +11,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t, type DictionaryKey } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
-import { WorkspaceSetupPage, creationLanding } from "../../src/spa/pages/WorkspaceSetupPage";
+import { WorkspaceSetupPage, creationLanding, inviteAcceptPath, inviteAcceptNotice, inviteLanding } from "../../src/spa/pages/WorkspaceSetupPage";
 
 const source = readFileSync(
   join(import.meta.dir, "../../src/spa/pages/WorkspaceSetupPage.tsx"),
@@ -19,11 +19,10 @@ const source = readFileSync(
 );
 
 describe("workspace creation page", () => {
-  test("posts the creation route and offers no second path into a workspace", () => {
+  test("posts the creation route and mounts no background fetch", () => {
     expect(source).toContain('postForm("/dashboard/api/workspaces"');
-    // Creation is the only membership producer here: no invite-accept call, no
-    // workspace listing, no auto-join on mount.
-    expect(source).not.toContain("/api/members/invites");
+    // The page loads nothing on mount: creation and the invite accepts are
+    // the only membership producers, both user-triggered.
     expect(source).not.toContain("useEffect");
   });
 
@@ -82,5 +81,65 @@ describe("workspace creation page", () => {
     );
     expect(plain).not.toContain("no accounts yet");
     expect(empty).toContain("no accounts yet");
+  });
+});
+
+/**
+ * MF-2 — the invitee's accept surface. The boot carries `pendingInvites`,
+ * so the creation page (the `needsWorkspace` landing) must offer the Accept
+ * action; a login with no invites still sees only the create form.
+ */
+describe("workspace creation page — pending invitations", () => {
+  const inviteeBoot: SpaBoot = {
+    locale: "en",
+    login: "invitee",
+    name: null,
+    needsWorkspace: true,
+    pendingInvites: [
+      { workspaceRef: "acme", inviteId: "inv_1", role: "admin", expiresAt: "2099-01-01T00:00:00Z" },
+      { workspaceRef: "beta", inviteId: "inv_2", role: "member", expiresAt: "2099-01-01T00:00:00Z" },
+    ],
+  };
+
+  test("an invitee sees the invite list with workspace, role and Accept", () => {
+    const markup = renderToStaticMarkup(createElement(WorkspaceSetupPage, { boot: inviteeBoot }));
+    // Each invite names its workspace and invited role, with an Accept
+    // action per row — and the create form stays below for the uninvited.
+    expect(markup).toContain("acme");
+    expect(markup).toContain("beta");
+    expect(markup).toContain("admin");
+    // "Accept" also appears in the description copy — count the buttons.
+    expect(markup.match(/>Accept</g)).toHaveLength(2);
+    expect(markup).toContain(t("en", "workspace.invitesHeading"));
+  });
+
+  test("a login with no invites sees the create form and no Accept action", () => {
+    const markup = renderToStaticMarkup(
+      createElement(WorkspaceSetupPage, {
+        boot: { locale: "en", login: "founder", name: null, needsWorkspace: true },
+      }),
+    );
+    expect(markup).toContain(t("en", "workspace.setupHeading"));
+    expect(markup).not.toContain(t("en", "workspace.invitesHeading"));
+    expect(markup).not.toContain(t("en", "workspace.inviteAccept"));
+  });
+
+  test("accept posts under the invited workspace's ref and lands on its Apps page", () => {
+    // The invite row carries the ref — the `needsWorkspace` path names none,
+    // so the POST must address the invite's workspace prefix.
+    expect(inviteAcceptPath("acme", "inv_1")).toBe("/dashboard/acme/api/members/invites/inv_1/accept");
+    expect(inviteLanding("acme")).toBe("/dashboard/acme/apps");
+  });
+
+  test("a failed accept maps the refusal body onto a dictionary notice", () => {
+    // 409 `invite.expired` and 410 "no longer pending" keep their distinct
+    // reasons; anything else is the generic failure face.
+    expect(inviteAcceptNotice(409, "invite.expired")).toBe("workspace.inviteExpired");
+    expect(inviteAcceptNotice(410, "invite is no longer pending")).toBe("workspace.inviteGone");
+    expect(inviteAcceptNotice(500, "")).toBe("workspace.inviteAcceptFailed");
+    for (const key of ["workspace.inviteExpired", "workspace.inviteGone", "workspace.inviteAcceptFailed"]) {
+      expect(t("en", key as DictionaryKey)).toBeTruthy();
+      expect(t("zh_CN", key as DictionaryKey)).toBeTruthy();
+    }
   });
 });
