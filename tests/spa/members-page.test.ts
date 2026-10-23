@@ -1,11 +1,15 @@
 /**
  * Members page rebuilt on shadcn Table + invite toolbox bar +
- * confirm dialogs. Mixed contract: static source pins for the presentational
- * shape (no DOM runner, the settings-layout.test.ts precedent) plus executed
- * assertions over the page's own read/refusal seams, so a wiring regression
- * fails here without pinning the code's spelling.
- * F-07: the Joined column renders through the shared
- * relative-time helper, with the absolute stamp kept as a native tooltip.
+ * confirm dialogs.
+ *
+ * Executed contract only: the page's read/refusal/visibility seams
+ * (`loadMembersPage`, `postMemberWrite`, `inviteFailureNotice`,
+ * `showsPendingInvites`) and the dictionary copy they surface. The previous
+ * ui-kit / column / relative-time source pins were deleted — they red-lined
+ * refactors without proving behaviour, and a component whose state lives in
+ * `useState` renders as the loading skeleton under SSR, so its markup has no
+ * executable face here. `tests/spa/relative-time.test.ts` keeps the Joined
+ * column's helper contract.
  *
  * Every read and write hangs off the page's workspace base, and the page
  * carries pending invitations with revoke.
@@ -33,37 +37,6 @@ const invite = (): InviteRow => ({
 });
 
 describe("members page shadcn rebuild", () => {
-  test("table, dropdown, dialog, select, input, button come from the ui kit — zero native controls", () => {
-    for (const component of ["table", "dropdown-menu", "dialog", "select", "input", "button"]) {
-      expect(source).toContain(`@/components/ui/${component}`);
-    }
-    // No CSS-modules classes or native controls on the rebuilt surface.
-    expect(source).not.toContain("pages.module.css");
-    expect(source).not.toMatch(/<button[\s>]/);
-    expect(source).not.toMatch(/<input[\s>]/);
-    expect(source).not.toMatch(/<select[\s>]/);
-  });
-
-  test("columns are login / role / joined / actions with the visibility notice on top", () => {
-    for (const key of [
-      "members.tableLogin",
-      "members.roleLabel",
-      "members.tableJoined",
-      "members.tableActions",
-      "members.visibleToMembers",
-    ]) {
-      expect(source).toContain(`"${key}"`);
-    }
-  });
-
-  test("joined column renders the shared relative-time helper (F-07)", () => {
-    expect(source).toContain('from "../relative-time"');
-    // Same call shape as AppsPage / SettingsPage: value first, locale second.
-    expect(source).toContain("formatRelativeTime(member.created_at, locale)");
-    // The absolute stamp survives as the cell's native tooltip, not the visible text.
-    expect(source).toContain("title={member.created_at}");
-  });
-
   test("every read hangs off the workspace base", async () => {
     const calls: string[] = [];
     const realFetch = globalThis.fetch;

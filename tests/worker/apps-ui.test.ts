@@ -21,8 +21,6 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
-import { matchSpaRoute } from "../../src/spa/routes";
-import { apiBase } from "../../src/spa/workspace-base";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
@@ -576,79 +574,5 @@ describe("GET /dashboard/default/apps/:slug/settings (SPA-owned)", () => {
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
-  });
-});
-
-describe("Apps list → App settings wayfinding", () => {
-  const APPS_SOURCE = join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx");
-
-  test("each App row links to the App detail route under the page's workspace base", () => {
-    const source = readFileSync(APPS_SOURCE, "utf8");
-    // The link target is the detail route (App detail IA).
-    expect(source).toContain("const href = `${apiBase()}/apps/${app.slug}`;");
-    // Legacy navigation keeps the historical detail path: the base is empty
-    // of a workspace segment when the current page is not workspace-scoped.
-    expect(apiBase("/dashboard/apps")).toBe("/dashboard");
-    expect(apiBase("/dashboard/acme/apps")).toBe("/dashboard/acme");
-    expect(source).not.toContain("/dashboard/default/apps/${app.slug}/settings");
-    // The visible per-row destination label comes from the dictionary —
-    // detail semantics, and the settings key is retired.
-    expect(source).toContain('{t(locale, "apps.detail")}');
-    expect(t("en", "apps.detail")).toBe("Detail");
-    expect(t("zh_CN", "apps.detail")).toBe("详情");
-    expect(source).not.toContain('{t(locale, "apps.settings")}');
-    // User-visible route semantics: what the link emits is the detail
-    // surface the SPA matcher owns (slug captured, not a 404 stub). The
-    // legacy settings path is a permanent deep link onto the detail
-    // page's settings tab — one page id serves both detail paths.
-    expect(matchSpaRoute("/dashboard/acme/apps/detail")).toEqual({
-      page: "app-detail",
-      pathname: "/dashboard/acme/apps/detail",
-      slug: "detail",
-      workspaceRef: "acme",
-    });
-    expect(matchSpaRoute("/dashboard/acme/apps/detail/settings")).toEqual({
-      page: "app-detail",
-      pathname: "/dashboard/acme/apps/detail/settings",
-      slug: "detail",
-      workspaceRef: "acme",
-    });
-  });
-
-  test("the row link names its destination for assistive tech", () => {
-    const source = readFileSync(APPS_SOURCE, "utf8");
-    expect(source).toContain('aria-label={t(locale, "apps.openAria", { slug: app.slug })}');
-    expect(t("en", "apps.openAria", { slug: "acme" })).toBe("Open acme detail");
-    expect(t("zh_CN", "apps.openAria", { slug: "acme" })).toBe("打开 acme 详情");
-  });
-
-  test("the empty Apps state stays honest: composed create guidance, creation is the only path", () => {
-    const source = readFileSync(APPS_SOURCE, "utf8");
-    // EmptyState title + description copy (keys).
-    expect(source).toContain('t(locale, "apps.emptyTitle")');
-    expect(source).toContain('t(locale, "apps.emptyDescription")');
-    expect(t("en", "apps.emptyTitle")).toContain("No Apps yet");
-    expect(t("en", "apps.emptyDescription")).toContain("Create GitHub App");
-    expect(t("zh_CN", "apps.emptyTitle")).toContain("还没有 App");
-    // Creation remains the manifest-flow POST form — the same CreateAppButton
-    // component is reused as the empty-state action while the header yields
-    // its slot (one form instance on the page, never duplicated). The action
-    // hangs off the page's own workspace prefix so the App lands in the
-    // workspace the user is looking at.
-    expect(source).toContain("`${apiBase()}/manifest/start`");
-    expect(source).toContain("{!appsEmpty ? createAction : null}");
-    expect(source).toContain("action={createAction}");
-  });
-
-  test("loading and load-failure feedback ride the state trio", () => {
-    const source = readFileSync(APPS_SOURCE, "utf8");
-    expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
-    // Retry is wired to the page's own load function (the loaded face takes it
-    // as a callback so its markup is renderable in tests).
-    expect(source).toContain("onRetry={() => void load()}");
-    expect(source).toContain("<ErrorState locale={locale} onRetry={onRetry} />");
-    // The old text-notice faces are retired from this page.
-    expect(source).not.toContain("LoadingNotice");
-    expect(source).not.toContain("LoadFailedNotice");
   });
 });

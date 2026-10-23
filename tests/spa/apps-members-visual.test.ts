@@ -20,6 +20,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList, AppsView } from "../../src/spa/pages/AppsPage";
+import { matchSpaRoute } from "../../src/spa/routes";
 import { withLocation } from "./browser-stub";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
@@ -246,5 +247,93 @@ describe("Create action is a boot capability (I-000082)", () => {
     }
     // The empty face still explains the state without offering a dead end.
     expect(renderFace(false, 0)).toContain(t("en", "apps.emptyTitle"));
+  });
+});
+
+describe("Apps list → App detail wayfinding (rendered)", () => {
+  const ROW = {
+    slug: "demo",
+    github_app_id: 1,
+    status: "active" as const,
+    review_enabled: 1,
+    created_by: "mallory",
+    health: { latest: null, rejected24h: 0 },
+  };
+  const PAYLOAD = { viewer: { login: "mallory", role: "admin" as const }, apps: [ROW] };
+
+  /** The real row component under the page's actual pathname. */
+  function renderList(pathname: string): string {
+    return withLocation(pathname, () =>
+      renderToStaticMarkup(createElement(AppsList, { locale: "en", payload: PAYLOAD })),
+    );
+  }
+
+  /** Every href the list emits, with the route it resolves to. */
+  function destinations(pathname: string): Array<[string, string | undefined]> {
+    return [...renderList(pathname).matchAll(/href="([^"]+)"/g)].map(([, href]) => {
+      const route = matchSpaRoute(href ?? "");
+      return [href ?? "", route?.page];
+    });
+  }
+
+  test("each row links to the App detail route the matcher owns, under the page's own base", () => {
+    // What the link emits must resolve as an app-detail route, not a 404 stub.
+    // The legacy mount keeps the historical path; the workspace page rides its
+    // workspace prefix.
+    expect(destinations("/dashboard/apps")).toEqual([
+      ["/dashboard/apps/demo", "app-detail"],
+      ["/dashboard/apps/demo", "app-detail"],
+    ]);
+    expect(destinations("/dashboard/acme/apps")).toEqual([
+      ["/dashboard/acme/apps/demo", "app-detail"],
+      ["/dashboard/acme/apps/demo", "app-detail"],
+    ]);
+  });
+
+  test("the row anchor names its destination for assistive tech and says Detail, never Settings", () => {
+    const html = renderList("/dashboard/acme/apps");
+    expect(html).toContain(`aria-label="${t("en", "apps.openAria", { slug: "demo" })}"`);
+    expect(t("en", "apps.openAria", { slug: "demo" })).toBe("Open demo detail");
+    expect(t("zh_CN", "apps.openAria", { slug: "demo" })).toBe("打开 demo 详情");
+    expect(html).toContain(`>${t("en", "apps.detail")}<`);
+    expect(t("zh_CN", "apps.detail")).toBe("详情");
+  });
+
+  test("the empty Apps face keeps one Create form — creation is the only path", () => {
+    const renderFace = (apps: number): string =>
+      renderToStaticMarkup(
+        createElement(AppsView, {
+          locale: "en",
+          state: "ok",
+          payload: { ...PAYLOAD, apps: PAYLOAD.apps.slice(0, apps) },
+          canCreate: true,
+          unavailableReason: "",
+          onRetry: () => {},
+        }),
+      );
+    for (const apps of [0, 1]) {
+      const html = renderFace(apps);
+      expect(html.match(/<form/g)?.length, `apps=${apps}`).toBe(1);
+      expect(html, `apps=${apps}`).toContain("manifest/start");
+    }
+    expect(renderFace(0)).toContain(t("en", "apps.emptyTitle"));
+  });
+
+  test("load failure renders the composed error with the retry affordance", () => {
+    const html = renderToStaticMarkup(
+      createElement(AppsView, {
+        locale: "en",
+        state: "error",
+        payload: null,
+        canCreate: true,
+        unavailableReason: "",
+        onRetry: () => {},
+      }),
+    );
+    expect(html).toContain('role="alert"');
+    expect(html).toContain(t("en", "common.loadFailed"));
+    // The retry control is present; AppsPage binds it to its own reload
+    // (`onRetry={() => void load()}`), which this SSR face cannot click.
+    expect(html).toContain(t("en", "common.retry"));
   });
 });
