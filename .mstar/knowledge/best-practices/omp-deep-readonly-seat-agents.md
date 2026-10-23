@@ -25,7 +25,7 @@ Copying harness `agents/*.md` unchanged into `<worktree>/.omp/agents/` looks lik
 
 ## Guidance
 
-Install **OMP-native** seat definitions through `toOmpSeatDefinition` in `src/review/runtime-omp.ts`: `tools: [read, grep, glob, yield]` **and** `structured: true`. Both are required: the deep parent dispatches these seats with the SDK built-in `task` tool, and the deep session's isolated settings leave `task.structured` off (it sets only `fetch.enabled`, `retry.*` and `task.agentModelOverrides`), so an unstructured spawn filters `yield` out of the child's tool list unless the definition's own `structured: true` opts it back in. Load harness **prompt/skill bodies** from `HARNESS_PLUGIN_ROOT` at runtime; do not copy role frontmatter. Limit installs to `DEEP_SEAT_ROLES`. Parse installed agents in tests the way `parseAgentFields` does.
+Install **OMP-native** seat definitions through `toOmpSeatDefinition` in `packages/runner/src/runtime-omp.ts`: `tools: [read, grep, glob, yield]` **and** `structured: true`. Both are required: the deep parent dispatches these seats with the SDK built-in `task` tool, and the deep session's isolated settings leave `task.structured` off (it sets only `fetch.enabled`, `retry.*` and `task.agentModelOverrides`), so an unstructured spawn filters `yield` out of the child's tool list unless the definition's own `structured: true` opts it back in. Load harness **prompt/skill bodies** from `HARNESS_PLUGIN_ROOT` at runtime; do not copy role frontmatter. Limit installs to `DEEP_SEAT_ROLES`. Parse installed agents in tests the way `parseAgentFields` does.
 
 ## Why This Matters
 

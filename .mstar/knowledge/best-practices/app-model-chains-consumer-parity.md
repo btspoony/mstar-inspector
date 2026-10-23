@@ -6,7 +6,7 @@ category: best-practices
 severity: high
 topic: app detail ops & providers
 tags: [d1, migration, backfill, model-chains, consumer, parity, omp, models-yml]
-related_components: [migrations/0017_app_model_chains.sql, src/dashboard/app-config-store.ts, src/pipeline/consumer.ts, src/review/runtime-omp.ts]
+related_components: [migrations/0017_app_model_chains.sql, src/dashboard/app-config-store.ts, src/pipeline/consumer.ts, packages/runner/src/runtime-omp.ts]
 ---
 
 # Named model chains with byte-identical runner parity

@@ -22,7 +22,8 @@
  *                          the required capabilityHosts: the deployed omp
  *                          image's hosts resolved from the same source-
  *                          controlled registry the consumer uses), exec
- *                          the in-image runner (src/review/runner.ts) on its
+ *                          the in-image runner
+ *                          (packages/runner/src/runner.ts) on its
  *                          current `--level quick --input <file>` CLI with
  *                          the ark credential payload on its stdin pipe, parse the
  *                          stdout with parseReviewOutput, then destroy. The
@@ -86,8 +87,8 @@ function smokeRepo(env: SmokeEnv): string | null {
 const CLONE_DIR = "/workspace/repo";
 /** Runner --input JSON path (same constant as the production consumer). */
 const INPUT_PATH = "/workspace/review-input.json";
-/** In-image runner path (Dockerfile v2: WORKDIR /opt/runner, COPY src/review). */
-const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
+/** In-image runner path (Dockerfile: WORKDIR /opt/runner, COPY packages/runner/src). */
+const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
 /** Image omp agent dir (PI_CODING_AGENT_DIR, empty — the runner synthesizes every models.yml). */
 const OMP_AGENT_DIR = "/opt/omp-agent";

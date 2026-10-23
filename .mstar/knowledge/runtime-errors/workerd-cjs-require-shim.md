@@ -20,7 +20,7 @@ tags:
   - deploy-gate
 related_components:
   - src/contracts/sandbox-images.ts
-  - sandbox-image/omp/Dockerfile
+  - sandbox-image/Dockerfile
 ---
 
 # Workerd start-up crash from a Node-targeted bundle's CJS require shim

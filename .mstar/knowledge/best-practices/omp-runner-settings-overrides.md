@@ -39,4 +39,4 @@ Any `createAgentSession`-based runner needing per-agent/per-role models; any "wh
 
 ## Examples
 
-- `src/review/runtime-omp.ts` (`seatModels` synthesis + `deepSessionOptions` overrides), `src/review/runner.ts` (`parseRunnerInput` guard), `src/pipeline/consumer.ts` (input threading), `tests/review/**` (settings-capture + byte-compat).
+- `packages/runner/src/runtime-omp.ts` (`seatModels` synthesis + `deepSessionOptions` overrides), `packages/runner/src/runner.ts` (`parseRunnerInput` guard), `src/pipeline/consumer.ts` (input threading), `tests/review/**` (settings-capture + byte-compat).

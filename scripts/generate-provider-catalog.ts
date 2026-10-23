@@ -10,8 +10,8 @@
  * lands in src/contracts/ (not src/pipeline/) because the dashboard imports
  * it directly and dashboard modules must not import pipeline code (Q2 — the
  * pipeline face at src/pipeline/provider-catalog.ts re-exports the contract
- * for pipeline consumers; src/review is untouched and stays the only
- * directory the sandbox image copies).
+ * for pipeline consumers; the sandbox image copies only
+ * packages/{shared,runner}/src).
  *
  * Inputs (both pinned):
  *   1. `scripts/provider-catalog/models.dev-2026-09-04.json` — a trimmed
