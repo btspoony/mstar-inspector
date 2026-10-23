@@ -43,7 +43,7 @@
 #   packages/runner/{package.json,bun.lock}
 #   packages/{shared,runner}/src
 #   packages/runner/verify-synthesis.sh
-#   sandbox-image/{verify-cli-shim.sh,cli-global/{package.json,bun.lock}}
+#   sandbox-image/{verify-cli-shim.sh,verify-cli-lock.sh,cli-global/{package.json,bun.lock}}
 # A repo-root .dockerignore keeps the context lean (node_modules and tests excluded).
 
 # Sandbox SDK 1.0: the 0.12 `FROM docker.io/cloudflare/sandbox:<ver>` base is
@@ -151,6 +151,12 @@ RUN cd /root/.bun/install/global \
     && ln -sf ../install/global/node_modules/.bin/mstar /root/.bun/bin/mstar \
     && ln -sf ../install/global/node_modules/.bin/mstar-harness /root/.bun/bin/mstar-harness \
     && sed -i --follow-symlinks '1s|.*|#!/usr/bin/env bun|' /root/.bun/bin/mstar
+# The installed tree must BE the locked set: a stale/partial layer or a lock
+# edited after resolution would install "cleanly" while shipping versions the
+# lock never named. COPYed below the install layer so editing the script never
+# re-resolves anything; the check itself runs against the tree just installed.
+COPY sandbox-image/verify-cli-lock.sh /opt/verify-cli-lock.sh
+RUN sh /opt/verify-cli-lock.sh
 ENV PATH="/root/.bun/bin:${PATH}"
 # The assertion script is COPYed below the install/PATH layer so editing it
 # never invalidates the network install layer; the check stays adjacent to it.
