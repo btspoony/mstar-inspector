@@ -110,10 +110,13 @@ RUN git init /opt/mstar-harness \
 # toolcall path is a tracked follow-up — no such mechanism
 # exists in this image. Exact pin `@mstar-harness/cli@4.0.4`: image pinning
 # discipline — the repo manifest `^4.0.4` exception does NOT extend to the
-# image. The CLI dist ships `#!/usr/bin/env bun` (verified) and the Bun 1.4.0
-# installed above executes it directly, so no node is added. The global bin
-# dir is put on PATH so sandbox exec resolves the `mstar` shim.
-RUN bun add --global @mstar-harness/cli@4.0.4
+# image. The CLI dist ships `#!/usr/bin/env node` (observed) and this image
+# ships no node, so the build rewrites the installed shim to
+# `#!/usr/bin/env bun` — the Bun 1.4.0 installed above executes it directly,
+# no node is added. The global bin dir is put on PATH so sandbox exec
+# resolves the `mstar` shim.
+RUN bun add --global @mstar-harness/cli@4.0.4 \
+    && sed -i --follow-symlinks '1s|.*|#!/usr/bin/env bun|' /root/.bun/bin/mstar
 ENV PATH="/root/.bun/bin:${PATH}"
 
 # omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (no baked
