@@ -195,6 +195,24 @@ describe("workspace_invites store", () => {
     expect(membershipCount(db, "octocat")).toBe(1);
   });
 
+  test("a repeat accept reports the membership's CURRENT role, owner included", async () => {
+    const db = createFixture("octocat");
+    const created = await invite(db, "octocat");
+    expect(await acceptInvite(db, created.id, "octocat", NOW)).toMatchObject({ role: "member" });
+
+    // Promoted after accepting: the repeat accept reports the membership, not
+    // the invitable role domain the invite row carries.
+    db.raw
+      .prepare("UPDATE workspace_members SET role = 'owner' WHERE workspace_id = ?")
+      .run(WORKSPACE);
+
+    expect(await acceptInvite(db, created.id, "octocat", NOW)).toEqual({
+      kind: "accepted",
+      workspaceId: WORKSPACE,
+      role: "owner",
+    });
+  });
+
   test("accept refuses a login mismatch and a revoked invite without writing", async () => {
     const db = createFixture("octocat");
     const created = await invite(db, "octocat");

@@ -1,12 +1,35 @@
 import { useState, type FormEvent } from "react";
-import { t } from "../../i18n";
+import { t, type DictionaryKey } from "../../i18n";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
+import { formatRelativeTime } from "../relative-time";
 import { parseCreatedWorkspace } from "./data";
 import { PageNotice, type NoticeKind } from "./PageNotice";
+
+type PendingInvite = NonNullable<SpaBoot["pendingInvites"]>[number];
+
+/** The workspace-scoped accept POST — the invite row carries the ref the
+    path must address (a `needsWorkspace` login's own path names none). */
+export function inviteAcceptPath(workspaceRef: string, inviteId: string): string {
+  return `/dashboard/${workspaceRef}/api/members/invites/${inviteId}/accept`;
+}
+
+/** A successful accept lands on the invited workspace's Apps page. */
+export function inviteLanding(workspaceRef: string): string {
+  return `/dashboard/${workspaceRef}/apps`;
+}
+
+/** The refusal body (`invite.expired` 409 / "no longer pending" 410, or an
+    unknown failure) mapped onto a dictionary key — the notice channel of
+    MembersPage's invite writes. */
+export function inviteAcceptNotice(status: number, body: string): DictionaryKey {
+  if (status === 409 && body.includes("invite.expired")) return "workspace.inviteExpired";
+  if (status === 410) return "workspace.inviteGone";
+  return "workspace.inviteAcceptFailed";
+}
 
 /** Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
 const NAME_MAX_LENGTH = 80;
@@ -37,6 +60,27 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
   const [name, setName] = useState("");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
+
+  // Accepting one invite joins the workspace: a full navigation lands the
+  // shell on the invited workspace, whose next document boot carries the
+  // fresh membership (the boot snapshot in memory is pre-accept).
+  async function onAccept(invite: PendingInvite): Promise<void> {
+    if (acceptingId !== null) return; // in-flight guard — no double submit
+    setAcceptingId(invite.inviteId);
+    try {
+      const { status, body } = await postForm(inviteAcceptPath(invite.workspaceRef, invite.inviteId), {});
+      if (status < 400) {
+        window.location.assign(inviteLanding(invite.workspaceRef));
+        return;
+      }
+      setNotice({ kind: "error", message: t(locale, inviteAcceptNotice(status, body)) });
+    } catch {
+      setNotice({ kind: "error", message: t(locale, "workspace.inviteAcceptFailed") });
+    } finally {
+      setAcceptingId(null);
+    }
+  }
 
   async function onCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -82,6 +126,38 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
           neither `saas` nor a later sign-in may claim the instance story. */}
       {boot.emptyInstance === true ? (
         <p className="text-sm text-muted-foreground">{t(locale, "workspace.emptyInstance")}</p>
+      ) : null}
+      {/* Pending invitations are the boot-built discovery surface (MF-2):
+          an invited login sees the invites above the create form — accepting
+          joins the workspace, so creation stays only for the uninvited. */}
+      {boot.pendingInvites !== undefined && boot.pendingInvites.length > 0 ? (
+        <div className="flex max-w-lg flex-col gap-3">
+          <h2 className="font-semibold text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">
+            {t(locale, "workspace.invitesHeading")}
+          </h2>
+          <p className="text-sm text-muted-foreground">{t(locale, "workspace.invitesDescription")}</p>
+          <ul className="flex flex-col gap-3">
+            {boot.pendingInvites.map((invite) => (
+              <li
+                key={invite.inviteId}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card p-4"
+              >
+                <div className="flex flex-col gap-0.5">
+                  <p className="text-sm font-medium">{invite.workspaceRef}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {t(locale, "workspace.inviteMeta", {
+                      role: t(locale, `members.role.${invite.role}`),
+                      expires: formatRelativeTime(invite.expiresAt, locale),
+                    })}
+                  </p>
+                </div>
+                <Button onClick={() => void onAccept(invite)} disabled={acceptingId !== null}>
+                  {t(locale, "workspace.inviteAccept")}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
       <Card className="max-w-lg">
         <CardHeader>

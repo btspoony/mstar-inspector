@@ -220,6 +220,15 @@ export const zhCN: Dictionary = {
     nameRequired: "请输入工作区名称。",
     nameTooLong: "最多 {max} 个字符。",
     createFailed: "创建工作区失败，请重试。",
+    /** 创建界面上的待处理邀请——受邀者的接受入口（MF-2）。 */
+    invitesHeading: "你收到了邀请",
+    invitesDescription: "接受邀请即可加入对应工作区，也可以在下方创建自己的工作区。",
+    inviteAccept: "接受",
+    /** {role} = 受邀的工作区角色；{expires} = 相对的到期时间。 */
+    inviteMeta: "以 {role} 身份被邀请——{expires} 到期",
+    inviteExpired: "该邀请已过期。",
+    inviteGone: "该邀请已失效——可能已被撤回。",
+    inviteAcceptFailed: "接受邀请失败，请重试。",
     /** 工作区 URL（slug）改名——设置表单与拒绝文案。 */
     slugHeading: "工作区 URL",
     slugDescription:

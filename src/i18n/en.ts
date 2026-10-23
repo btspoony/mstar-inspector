@@ -249,6 +249,15 @@ export const en = {
     nameRequired: "Enter a workspace name.",
     nameTooLong: "Use at most {max} characters.",
     createFailed: "Could not create the workspace — try again.",
+    /** Pending invitations on the creation surface — the invitee's accept path (MF-2). */
+    invitesHeading: "Workspace invitations",
+    invitesDescription: "Accept an invitation to join that workspace, or create your own below.",
+    inviteAccept: "Accept",
+    /** {role} = the invited workspace role; {expires} = the relative expiry stamp. */
+    inviteMeta: "Invited as {role} — expires {expires}",
+    inviteExpired: "This invitation has expired.",
+    inviteGone: "This invitation is no longer pending — it may have been revoked.",
+    inviteAcceptFailed: "Could not accept the invitation — try again.",
     /** Workspace URL (slug) rename — the settings control and its refusal faces. */
     slugHeading: "Workspace URL",
     slugDescription:

@@ -32,7 +32,10 @@ to separate the two while still allowing bounded support work, and to make every
    outsider`. An operator who is a member has ordinary rights; the allowlist is never consulted first.
 3. **A grant is time-boxed and workspace-scoped.** `support_grants(workspace_id, operator_login, expires_at,
    reason, granted_by)`; expiry is evaluated per request from `expires_at`, with no background job. A grant on
-   W1 grants nothing on W2.
+   W1 grants nothing on W2. The table is append-only, so a window ends by appending a row that is already over
+   (never by `UPDATE`/`DELETE`), and both reads judge **one** row per (workspace, operator) — the newest by
+   `rowid`. Filtering every row by `expires_at` instead would leave a revoked grant live behind its
+   superseded row.
 4. **Derive the ceiling from the route table, not handler discipline.** Every workspace route declares
    `access: read | write`; an undeclared route defaults to **write**, so a later route cannot silently widen the
    operator surface. Read means metadata plus the member list; everything else answers 403.

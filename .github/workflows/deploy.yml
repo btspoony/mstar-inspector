@@ -95,10 +95,13 @@ jobs:
       - name: Apply D1 migrations (remote)
         run: bunx wrangler d1 migrations apply mstar-inspector-db --remote
 
-      # 0027 is idempotent (INSERT…SELECT … WHERE NOT EXISTS): re-running it is
-      # the repair step for a partially-applied deploy. The gate below proves
-      # the repair actually closed every gap.
-      - name: Re-run workspace backfill (0027, idempotent)
+      # 0027 now carries ONLY the App-attribution repair (INSERT…SELECT … WHERE
+      # NOT EXISTS over app_workspaces), so replaying it heals a partially
+      # applied deploy and writes nothing else. The membership half moved to
+      # the forward-only 0030_workspace_membership_cutover.sql, applied once by
+      # the step above: replaying a per-person write here made every routine
+      # deploy re-add every login (removed members included) to 'default'.
+      - name: Re-run App attribution repair (0027, idempotent)
         run: bunx wrangler d1 execute mstar-inspector-db --remote --file migrations/0027_workspace_backfill.sql
 
       # ABORT GATE: every execution-facing App read INNER JOINs

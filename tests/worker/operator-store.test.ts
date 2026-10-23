@@ -103,6 +103,47 @@ describe("hasValidGrant", () => {
     expect(await hasValidGrant(db, W2, OPERATOR, NOW)).toBe(false);
   });
 
+  // Revocation is an append (`docs/deploy.md` § Opening a support window): the
+  // superseding row must be able to close a window its predecessor still
+  // claims, or the documented path silently leaves the grant live.
+  test("an appended already-over row revokes the window; both rows stay stored", async () => {
+    const db = createFixture();
+    await grant(db, W1, LATER);
+    expect(await hasValidGrant(db, W1, OPERATOR, NOW)).toBe(true);
+    expect(await listActiveSupportGrants(db, W1, NOW)).toHaveLength(1);
+
+    await insertSupportGrant(db, {
+      workspaceId: W1,
+      operatorLogin: OPERATOR,
+      reason: "revoked: request withdrawn",
+      grantedBy: "deploy-operator",
+      now: NOW,
+      expiresAt: NOW, // `expires_at > now` is false at NOW and later
+    });
+
+    expect(await hasValidGrant(db, W1, OPERATOR, NOW)).toBe(false);
+    expect(await hasValidGrant(db, W1, OPERATOR, "2026-11-01T00:00:00.000Z")).toBe(false);
+    // The notice disappears on the next read…
+    expect(await listActiveSupportGrants(db, W1, NOW)).toEqual([]);
+    // …and the revoked grant stays readable as history.
+    const rows = db.raw.prepare("SELECT reason FROM support_grants ORDER BY rowid").all() as Array<{
+      reason: string;
+    }>;
+    expect(rows.map((row) => row.reason)).toEqual(["investigating webhook delivery", "revoked: request withdrawn"]);
+  });
+
+  test("a new window appended after a revocation re-opens access", async () => {
+    const db = createFixture();
+    await grant(db, W1, PAST); // lapsed
+    await grant(db, W1, PAST); // revoked (already over)
+    expect(await hasValidGrant(db, W1, OPERATOR, NOW)).toBe(false);
+
+    await grant(db, W1, LATER); // a deliberate new grant
+
+    expect(await hasValidGrant(db, W1, OPERATOR, NOW)).toBe(true);
+    expect((await listActiveSupportGrants(db, W1, NOW)).map((row) => row.expires_at)).toEqual([LATER]);
+  });
+
   test("no grant at all, or a grant for another login, answers false", async () => {
     const db = createFixture();
     expect(await hasValidGrant(db, W1, OPERATOR, NOW)).toBe(false);

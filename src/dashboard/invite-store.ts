@@ -27,6 +27,14 @@
 export type InviteRole = "admin" | "member";
 
 /**
+ * `workspace_members.role` domain (0026 CHECK). The accept path REPORTS a
+ * membership, and a membership can be `owner` — an invitee accepted at
+ * `member` may have been promoted since, so a repeat accept must not type the
+ * answer as an invitable role.
+ */
+export type WorkspaceMemberRole = "owner" | "admin" | "member";
+
+/**
  * Invite lifecycle (migration 0028 CHECK domain). `expired` is written only by
  * the write-path flip — never by a caller.
  */
@@ -69,7 +77,7 @@ export class InvitePendingExistsError extends Error {
  * revoked, expired, or lost the accept race).
  */
 export type AcceptInviteOutcome =
-  | { kind: "accepted"; workspaceId: string; role: InviteRole }
+  | { kind: "accepted"; workspaceId: string; role: WorkspaceMemberRole }
   | { kind: "not_found" }
   | { kind: "expired" }
   | { kind: "gone" };
@@ -384,7 +392,7 @@ async function memberRoleOf(
   db: InviteStoreD1,
   workspaceId: string,
   login: string,
-): Promise<InviteRole | null> {
+): Promise<WorkspaceMemberRole | null> {
   const row = await db
     .prepare(
       `SELECT wm.role AS role
@@ -393,6 +401,6 @@ async function memberRoleOf(
         WHERE wm.workspace_id = ? AND u.github_login = ? COLLATE NOCASE`,
     )
     .bind(workspaceId, login)
-    .first<{ role: InviteRole }>();
+    .first<{ role: WorkspaceMemberRole }>();
   return row?.role ?? null;
 }

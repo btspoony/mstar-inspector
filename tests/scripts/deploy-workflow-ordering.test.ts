@@ -152,7 +152,7 @@ const DEPLOYMENT_VAR = '--var "DEPLOYMENT_MODE:saas"';
 /** The retired tenant-mode var, assembled so this file does not match its own scan. */
 const RETIRED_VAR = ["WORKSPACE", "TENANT", "MODE"].join("_");
 const GATE = "Assert zero orphan Apps (pre-deploy gate)";
-const BACKFILL = "Re-run workspace backfill (0027, idempotent)";
+const BACKFILL = "Re-run App attribution repair (0027, idempotent)";
 
 /**
  * The version that serves a deploy is created by the LAST version-creating
@@ -223,6 +223,27 @@ for (const { file, migrations, refIdentity, refNeedles, serving } of WORKFLOWS) 
       for (const i of deployCapable) {
         expect(i, `${file}: "${steps[i]!.name}" runs before the zero-orphan gate`).toBeGreaterThan(gate);
       }
+    });
+
+    test("the replayed file the deploy hands wrangler writes no workspace membership", () => {
+      // The regression this split exists for: whatever `--file` path the step
+      // relays is re-applied on EVERY deploy, so it must not write a per-person
+      // membership row (a routine deploy then re-adds every login — removed
+      // members included — to `default`). Asserted against the file on disk the
+      // step actually names, not a copy.
+      const step = steps.find((s) => s.name === BACKFILL)!;
+      expect(step, `${file}: backfill step is missing`).toBeDefined();
+      const path = /--file\s+(\S+\.sql)/.exec(step.run ?? "")?.[1];
+      expect(path, `${file}: backfill step must name a --file migration`).toBeTruthy();
+      const source = readFileSync(join(REPO_ROOT, path!), "utf8").replace(/--.*$/gm, "");
+
+      expect(source, `${file}: ${path} replays a workspace_members write`).not.toMatch(
+        /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+workspace_members\b/i,
+      );
+      // It still carries the repair the gate depends on.
+      expect(source, `${file}: ${path} must still map Apps`).toMatch(
+        /INSERT\s+INTO\s+app_workspaces\b/i,
+      );
     });
 
     test("ref identity is asserted before every deploy-capable step", () => {
