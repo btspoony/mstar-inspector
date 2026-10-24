@@ -68,6 +68,7 @@ import {
 } from "./apps-store";
 import {
   countLiveWorkspaces,
+  countLiveWorkspacesCreatedBy,
   countMembershipsForLogin,
   createWorkspace,
   getMembership,
@@ -83,6 +84,11 @@ import {
   type WorkspaceMembershipOption,
   type WorkspaceRole,
 } from "./workspace-store";
+import {
+  WORKSPACE_LIMITS,
+  WorkspaceCreationLimitError,
+  assertWorkspaceCreationAllowed,
+} from "./workspace-limits";
 import {
   InvitePendingExistsError,
   acceptInvite,
@@ -1048,6 +1054,19 @@ dashboardApp.post("/api/workspaces", async (c) => {
   if (name.length === 0) return c.text("Enter a workspace name.", 400);
   if (name.length > WORKSPACE_NAME_MAX_LENGTH) {
     return c.text(`Workspace name must be at most ${WORKSPACE_NAME_MAX_LENGTH} characters.`, 400);
+  }
+  // The cap is keyed on workspaces this login CREATED (not ones it can use),
+  // and it runs before the id-mint loop: a refusal never reaches
+  // createWorkspace, so it writes zero rows.
+  try {
+    assertWorkspaceCreationAllowed({
+      userId: user.id,
+      liveWorkspaceCount: await countLiveWorkspacesCreatedBy(db, user.id),
+      limits: WORKSPACE_LIMITS,
+    });
+  } catch (err) {
+    if (err instanceof WorkspaceCreationLimitError) return c.text(err.message, 409);
+    throw err;
   }
   const createdAt = new Date().toISOString();
   for (let attempt = 0; attempt < WORKSPACE_ID_ATTEMPTS; attempt++) {

@@ -3664,6 +3664,10 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     return (db.raw.query("SELECT COUNT(*) AS n FROM workspaces").get() as CountRow).n;
   }
 
+  function memberRowCount(db: DashboardD1 & { raw: Database }): number {
+    return (db.raw.query("SELECT COUNT(*) AS n FROM workspace_members").get() as CountRow).n;
+  }
+
   test("creates the workspace and its owner membership, returning the ref", async () => {
     const db = createDashboardTestD1();
     db.raw.exec("DELETE FROM users");
@@ -3722,6 +3726,35 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     const res = await createWorkspaceRequest(db, "deployer", { name });
     expect(res.status).toBe(201);
     expect(((await res.json()) as { name: string }).name).toBe(name);
+  });
+
+  test("a login's sixth live workspace is refused with the exact 409 body and writes nothing", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    await createUser(db, { login: "deployer", role: "member" });
+
+    for (let i = 1; i <= 5; i++) {
+      const res = await createWorkspaceRequest(db, "deployer", { name: `Workspace ${i}` });
+      expect(res.status, `creation ${i}`).toBe(201);
+    }
+    // Five created + 0026's seeded `default` (created_by NULL, so it consumes
+    // nobody's quota); each creation also wrote its owner membership.
+    const workspacesBefore = workspaceCount(db);
+    const membersBefore = memberRowCount(db);
+    expect(workspacesBefore).toBe(6);
+    expect(membersBefore).toBe(5);
+
+    // The sixth attempt — and an immediate retry — hit the cap: the identical
+    // plain-text 409 body, zero rows on either table.
+    for (const name of ["Sixth", "Retry"]) {
+      const res = await createWorkspaceRequest(db, "deployer", { name });
+      expect(res.status, name).toBe(409);
+      expect(await res.text()).toBe(
+        "You already have 5 live workspaces you created. Delete one of those before creating another.",
+      );
+      expect(workspaceCount(db), name).toBe(workspacesBefore);
+      expect(memberRowCount(db), name).toBe(membersBefore);
+    }
   });
 
   test("anonymous → 302 to login, zero writes", async () => {
