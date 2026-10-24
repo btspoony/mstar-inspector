@@ -2,7 +2,7 @@
  * Dashboard chrome: left sidebar (Apps / Members) +
  * slim navbar (theme + Lang + username + logout).
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
@@ -125,11 +125,20 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
 
 export function Layout({ boot, pathname, flash: bootFlash, children }: LayoutProps) {
   const route = matchSpaRoute(pathname);
-  // One-shot: this render shows the boot's flash, then the mount effect clears
-  // it after paint, so this instance can never show the spent outcome again —
-  // including an A → B → A walk that returns to the landing path.
+  // One-shot per NAVIGATION, not per mount: the boot's flash stays on screen
+  // through any re-render of the same pathname (it rendered, so it must be
+  // seen), and the first move away clears it — which is what keeps an
+  // A → B → A walk from showing a spent outcome again.
   const [flash, setFlash] = useState(bootFlash);
-  useEffect(() => setFlash(null), []);
+  const shownOn = useRef(pathname);
+  // Layout effect, not passive: the frame that presents the NEW pathname must
+  // not still carry the previous page's outcome. A same-pathname re-render
+  // returns early, so the copy is cleared by navigation only.
+  useLayoutEffect(() => {
+    if (shownOn.current === pathname) return;
+    shownOn.current = pathname;
+    setFlash(null);
+  }, [pathname]);
   if (route?.page === "login") {
     return <LoginChrome>{children}</LoginChrome>;
   }

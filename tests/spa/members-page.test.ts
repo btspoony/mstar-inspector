@@ -506,7 +506,7 @@ describe("workspace settings block", () => {
     }
   });
 
-  test("a mounted shell shows the flash once and never again, whatever the path", async () => {
+  test("a mounted shell keeps the flash until the pathname changes", async () => {
     const win = new Window({ url: "http://localhost/dashboard" });
     const scope = globalThis as unknown as Record<string, unknown>;
     const installed = {
@@ -557,12 +557,17 @@ describe("workspace settings block", () => {
         act(async () => root.render(createElement(Shell, { pathname })));
 
       await render("/dashboard");
-      await render("/dashboard/apps");
+      // A plain re-render of the same pathname must keep showing it: the copy
+      // is cleared by navigation, never by a mount/render pass.
       await render("/dashboard");
-
       const line = "Workspace deleted. Its Apps are not reviewed.";
       expect(paints[0]!.split(line).length - 1).toBe(1);
-      expect(paints.slice(1).join("")).not.toContain(line);
+      expect(paints[1]!.split(line).length - 1).toBe(1);
+
+      // The first move away spends it, so the walk back shows nothing.
+      await render("/dashboard/apps");
+      await render("/dashboard");
+      expect(paints.at(-1)!.split(line).length - 1).toBe(0);
       await act(async () => root.unmount());
     } finally {
       for (const key of Object.keys(installed)) delete scope[key];
