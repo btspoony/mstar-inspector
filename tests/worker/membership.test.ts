@@ -935,3 +935,68 @@ describe("member role change and removal (AC5)", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("workspace summary in the member payload", () => {
+  type MembersBody = {
+    workspace: {
+      plan: { id: string; name: string };
+      memberLimit: number;
+      reviewAttemptsThisMonth: number;
+    };
+    members: Array<{ github_login: string }>;
+  };
+
+  /** One metered started execution (the ledger's only required columns). */
+  function insertUsage(db: TestD1, reviewId: string, occurredAt: string, workspaceId = WORKSPACE): void {
+    db.raw
+      .prepare("INSERT INTO usage_events (review_id, seq, workspace_id, occurred_at) VALUES (?, 1, ?, ?)")
+      .run(reviewId, workspaceId, occurredAt);
+  }
+
+  test("a free workspace reports the Free plan, its member limit and this month's attempts", async () => {
+    const { db } = fixture();
+    use(db);
+    const now = new Date();
+    const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+    // Two rows inside the current UTC month (the first instant counts), one
+    // before it, and one in another workspace — the count is this workspace's.
+    insertUsage(db, "review-in-1", new Date(monthStart).toISOString());
+    insertUsage(db, "review-in-2", now.toISOString());
+    insertUsage(db, "review-out", new Date(monthStart - 1).toISOString());
+    insertUsage(db, "review-other", now.toISOString(), "ws-other");
+
+    const res = await request(MEMBERS, "dana");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MembersBody;
+    expect(body.workspace).toEqual({
+      plan: { id: "free", name: "Free" },
+      memberLimit: 5,
+      reviewAttemptsThisMonth: 2,
+    });
+    // The existing member fields are unchanged by the addition.
+    expect(body.members.map((row) => row.github_login).sort()).toEqual([
+      "carol",
+      "dana",
+      "mallory",
+      "olive",
+    ]);
+  });
+
+  test("an active pro subscription changes the reported plan, not the limit", async () => {
+    const { db } = fixture();
+    use(db);
+    const now = new Date().toISOString();
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'pro', 'active', ?, ?)",
+      )
+      .run(WORKSPACE, now, now);
+
+    const body = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
+    expect(body.workspace).toEqual({
+      plan: { id: "pro", name: "Pro" },
+      memberLimit: 5,
+      reviewAttemptsThisMonth: 0,
+    });
+  });
+});

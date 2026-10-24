@@ -18,8 +18,22 @@ export type MemberRow = {
   created_at: string;
 };
 
-/** The member-list payload: the caller's own role + every workspace member. */
-export type MembersPayload = { viewer: { role: WorkspaceRole }; members: MemberRow[] };
+/** The workspace's plan, seat limit and month-to-date review attempts. */
+export type WorkspaceSummary = {
+  plan: { id: string; name: string };
+  memberLimit: number;
+  reviewAttemptsThisMonth: number;
+};
+
+/**
+ * The member-list payload: the caller's own role, the workspace summary and
+ * every workspace member.
+ */
+export type MembersPayload = {
+  viewer: { role: WorkspaceRole };
+  workspace: WorkspaceSummary;
+  members: MemberRow[];
+};
 
 /** One live pending invite (`GET /:ref/api/members/invites`). */
 export type InviteRow = {
@@ -676,6 +690,25 @@ function isWorkspaceRole(value: unknown): value is WorkspaceRole {
 }
 
 /**
+ * The `workspace` block of the member payload — every field is required, so a
+ * rolled-back Worker (no summary) fails the parse instead of rendering a page
+ * with invented limits.
+ */
+function parseWorkspaceSummary(data: unknown): WorkspaceSummary | null {
+  if (!isRecord(data) || !isRecord(data.plan)) return null;
+  const { plan } = data;
+  if (typeof plan.id !== "string" || typeof plan.name !== "string") return null;
+  if (typeof data.memberLimit !== "number" || typeof data.reviewAttemptsThisMonth !== "number") {
+    return null;
+  }
+  return {
+    plan: { id: plan.id, name: plan.name },
+    memberLimit: data.memberLimit,
+    reviewAttemptsThisMonth: data.reviewAttemptsThisMonth,
+  };
+}
+
+/**
  * `GET /:ref/api/members` — the caller's own workspace role plus the member
  * list. A drifted row (unknown role) fails the parse instead of rendering a
  * role the server never grants.
@@ -684,6 +717,8 @@ export function parseMembers(data: unknown): MembersPayload | null {
   if (!isRecord(data) || !isRecord(data.viewer) || !Array.isArray(data.members)) return null;
   const viewerRole = data.viewer.role;
   if (!isWorkspaceRole(viewerRole)) return null;
+  const workspace = parseWorkspaceSummary(data.workspace);
+  if (!workspace) return null;
   const members: MemberRow[] = [];
   for (const row of data.members) {
     if (!isRecord(row)) return null;
@@ -698,7 +733,7 @@ export function parseMembers(data: unknown): MembersPayload | null {
       created_at: row.created_at,
     });
   }
-  return { viewer: { role: viewerRole }, members };
+  return { viewer: { role: viewerRole }, workspace, members };
 }
 
 /**

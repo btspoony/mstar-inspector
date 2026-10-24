@@ -96,6 +96,7 @@ import {
   memberSlotAvailable,
   resolveWorkspacePlan,
 } from "./entitlement";
+import { countUsageEventsSince } from "../store/usage-store";
 import {
   InvitePendingExistsError,
   acceptInvite,
@@ -1618,7 +1619,9 @@ function inviteMutationResponse(
  * declared `read`, so a granted platform operator reaches it too. The operator
  * response carries ONLY the two AC2 fields (login + role): no row ids, no join
  * stamps, no viewer role, since an operator holds no workspace role and can
- * act on nothing here. For a member the payload is unchanged.
+ * act on nothing here. A member's payload keeps its fields and adds the
+ * settings summary: the resolved plan, its member limit and the attempts
+ * metered this UTC month.
  */
 const memberListRoute = async (c: DashboardContext) => {
   const tenant = c.get("tenant");
@@ -1634,8 +1637,21 @@ const memberListRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
   const members = await listWorkspaceMembers(member.db, member.scope.workspaceId);
+  const plan = await resolveWorkspacePlan(member.db, member.scope.workspaceId);
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+  const reviewAttemptsThisMonth = await countUsageEventsSince(
+    member.db,
+    member.scope.workspaceId,
+    monthStart,
+  );
   return c.json({
     viewer: { login: member.user.github_login, role: member.scope.role },
+    workspace: {
+      plan: { id: plan.id, name: plan.name },
+      memberLimit: plan.includedMembers,
+      reviewAttemptsThisMonth,
+    },
     members: members.map((row) => ({
       id: row.id,
       github_login: row.github_login,

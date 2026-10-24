@@ -23,6 +23,23 @@ export type UsageEventInput = {
   occurredAt: string;
 };
 
+/**
+ * This workspace's started executions at or after `sinceIso` — the
+ * month-to-date read behind the settings surface. `occurred_at` is an
+ * ISO-8601 UTC string, so the string comparison is the time comparison.
+ */
+export async function countUsageEventsSince(
+  db: D1Like,
+  workspaceId: string,
+  sinceIso: string,
+): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM usage_events WHERE workspace_id = ? AND occurred_at >= ?`)
+    .bind(workspaceId, sinceIso)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
 /** Append one started-execution row, minting the attempt `seq`. */
 export async function recordUsageEvent(db: D1Like, input: UsageEventInput): Promise<void> {
   await db

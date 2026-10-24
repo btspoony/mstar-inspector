@@ -149,17 +149,24 @@ describe("insights search wiring", () => {
 });
 
 describe("members/apps/settings parsers", () => {
-  test("parseMembers requires the viewer role plus id/login/role/created_at per row", () => {
+  test("parseMembers requires the viewer role, the workspace summary and id/login/role/created_at per row", () => {
     const row = { id: "u1", github_login: "octocat", role: "owner" as const, created_at: "2026-01-01 00:00:00" };
-    expect(parseMembers({ viewer: { role: "owner" }, members: [row] })).toEqual({
+    const workspace = { plan: { id: "free", name: "Free" }, memberLimit: 5, reviewAttemptsThisMonth: 2 };
+    expect(parseMembers({ viewer: { role: "owner" }, workspace, members: [row] })).toEqual({
       viewer: { role: "owner" },
+      workspace,
       members: [row],
     });
     // An off-vocabulary role fails the parse instead of rendering it.
-    expect(parseMembers({ viewer: { role: "owner" }, members: [{ ...row, role: "adminx" }] })).toBeNull();
-    expect(parseMembers({ viewer: { role: "owner" }, members: [{ github_login: "octocat" }] })).toBeNull();
+    expect(parseMembers({ viewer: { role: "owner" }, workspace, members: [{ ...row, role: "adminx" }] })).toBeNull();
+    expect(parseMembers({ viewer: { role: "owner" }, workspace, members: [{ github_login: "octocat" }] })).toBeNull();
     // No viewer role = not a members payload (a non-member cannot get here).
     expect(parseMembers({ members: [row] })).toBeNull();
+    // A rolled-back Worker without the summary fails instead of inventing limits.
+    expect(parseMembers({ viewer: { role: "owner" }, members: [row] })).toBeNull();
+    expect(
+      parseMembers({ viewer: { role: "owner" }, workspace: { plan: { id: "free" }, memberLimit: 5 }, members: [row] }),
+    ).toBeNull();
   });
 
   test("parseInvites requires id/login/role/created_at/expires_at, role never owner", () => {
