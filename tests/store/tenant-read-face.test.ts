@@ -29,6 +29,7 @@ const APP_INPUT: CreateAppInput = {
   privateKeyEnc: "v1.primary.aXZpdi.Y3QmIHRhZw==",
   webhookSecretEnc: "v1.primary.aXZpdi.d2ViaG9vaw==",
   createdBy: "octocat",
+  workspaceId: "default",
 };
 
 async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Promise<GithubAppRow> {

@@ -1440,6 +1440,7 @@ describe("/dashboard manifest routes", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const { session, state } = await startManifest();
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
@@ -1474,6 +1475,7 @@ describe("/dashboard manifest routes", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const { session, state } = await startManifest();
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
@@ -2139,6 +2141,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const start = await worker.fetch(
@@ -2210,6 +2213,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const warns = spyOnWarn();
     const res = await doCommit({ env, holdValue });
@@ -2246,6 +2250,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const res = await doCommit({ env, holdValue: await freshHold() });
     expect(res.status).toBe(409);
@@ -2680,6 +2685,7 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: overrides.createdBy ?? "octocat",
+      workspaceId: "default",
     }).then(async (row) => {
       if (!overrides.deletedAt) return row;
       await dbOf(env).raw
@@ -2984,6 +2990,7 @@ describe("dashboard users store (users.ts)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "octocat",
+      workspaceId: "default",
     });
     // The accepted-invite shape: a users row (sign-in) plus the membership the
     // accept POST writes. createUser alone admits nobody.
@@ -3657,6 +3664,19 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     return (db.raw.query("SELECT COUNT(*) AS n FROM workspaces").get() as CountRow).n;
   }
 
+  function memberRowCount(db: DashboardD1 & { raw: Database }): number {
+    return (db.raw.query("SELECT COUNT(*) AS n FROM workspace_members").get() as CountRow).n;
+  }
+
+  /** Live workspaces this user created — the cap's own count. */
+  function createdLiveCount(db: DashboardD1 & { raw: Database }, userId: string): number {
+    return (
+      db.raw
+        .query("SELECT COUNT(*) AS n FROM workspaces WHERE created_by = ? AND deleted_at IS NULL")
+        .get(userId) as CountRow
+    ).n;
+  }
+
   test("creates the workspace and its owner membership, returning the ref", async () => {
     const db = createDashboardTestD1();
     db.raw.exec("DELETE FROM users");
@@ -3715,6 +3735,99 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     const res = await createWorkspaceRequest(db, "deployer", { name });
     expect(res.status).toBe(201);
     expect(((await res.json()) as { name: string }).name).toBe(name);
+  });
+
+  test("a login's sixth live workspace is refused with the exact 409 body and writes nothing", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    await createUser(db, { login: "deployer", role: "member" });
+
+    for (let i = 1; i <= 5; i++) {
+      const res = await createWorkspaceRequest(db, "deployer", { name: `Workspace ${i}` });
+      expect(res.status, `creation ${i}`).toBe(201);
+    }
+    // Five created + 0026's seeded `default` (created_by NULL, so it consumes
+    // nobody's quota); each creation also wrote its owner membership.
+    const workspacesBefore = workspaceCount(db);
+    const membersBefore = memberRowCount(db);
+    expect(workspacesBefore).toBe(6);
+    expect(membersBefore).toBe(5);
+
+    // The sixth attempt — and an immediate retry — hit the cap: the identical
+    // plain-text 409 body, zero rows on either table.
+    for (const name of ["Sixth", "Retry"]) {
+      const res = await createWorkspaceRequest(db, "deployer", { name });
+      expect(res.status, name).toBe(409);
+      expect(await res.text()).toBe(
+        "You already have 5 live workspaces you created. Creating another is not available, and nothing on this page frees a slot.",
+      );
+      expect(workspaceCount(db), name).toBe(workspacesBefore);
+      expect(memberRowCount(db), name).toBe(membersBefore);
+    }
+  });
+
+  test("the cap counts workspaces the login CREATED, not ones it joined or the deployment total", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    const creator = await createUser(db, { login: "deployer", role: "member" });
+    const joiner = await createUser(db, { login: "joiner", role: "member" });
+    const created: string[] = [];
+    for (let i = 1; i <= 5; i++) {
+      const res = await createWorkspaceRequest(db, "deployer", { name: `Workspace ${i}` });
+      expect(res.status, `creation ${i}`).toBe(201);
+      const body = (await res.json()) as { id: string };
+      created.push(body.id);
+    }
+    expect(createdLiveCount(db, creator.id)).toBe(5);
+    // `joiner` belongs to all five but created none of them.
+    for (const id of created) {
+      db.raw
+        .prepare(
+          "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, 'member', ?)",
+        )
+        .run(id, joiner.id, new Date().toISOString());
+    }
+    expect(memberRowCount(db)).toBe(10);
+
+    // A deployment-wide count (6 live) or a membership count (5) would refuse;
+    // the creation-keyed count lets the joiner's FIRST creation through.
+    const res = await createWorkspaceRequest(db, "joiner", { name: "Joiners own" });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string };
+    const rows = db.raw
+      .query("SELECT workspace_id, user_id, role FROM workspace_members WHERE workspace_id = ?")
+      .all(body.id) as MemberRow[];
+    expect(rows).toEqual([{ workspace_id: body.id, user_id: joiner.id, role: "owner" }]);
+    expect(createdLiveCount(db, joiner.id)).toBe(1);
+  });
+
+  test("a soft-deleted workspace frees its slot: the sixth creation then succeeds", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    const user = await createUser(db, { login: "deployer", role: "member" });
+    const first = await createWorkspaceRequest(db, "deployer", { name: "Workspace 1" });
+    expect(first.status).toBe(201);
+    const retired = (await first.json()) as { id: string };
+    for (let i = 2; i <= 5; i++) {
+      const res = await createWorkspaceRequest(db, "deployer", { name: `Workspace ${i}` });
+      expect(res.status, `creation ${i}`).toBe(201);
+    }
+    expect(createdLiveCount(db, user.id)).toBe(5);
+
+    // No production soft-delete face exists yet; the fixture retires one row
+    // exactly as `workspace-slug.test.ts` models a retired workspace.
+    db.raw
+      .prepare("UPDATE workspaces SET deleted_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), retired.id);
+    expect(createdLiveCount(db, user.id)).toBe(4);
+    // The retired row is skipped, not removed: the table still holds the 5
+    // created rows plus 0026's seeded `default`.
+    expect(workspaceCount(db)).toBe(6);
+
+    // The freed slot is usable: the same login's sixth live creation lands.
+    const res = await createWorkspaceRequest(db, "deployer", { name: "Replacement" });
+    expect(res.status).toBe(201);
+    expect(createdLiveCount(db, user.id)).toBe(5);
   });
 
   test("anonymous → 302 to login, zero writes", async () => {

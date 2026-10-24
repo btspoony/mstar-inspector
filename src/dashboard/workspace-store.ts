@@ -241,6 +241,24 @@ export async function countLiveWorkspaces(db: WorkspaceStoreD1): Promise<number>
 }
 
 /**
+ * How many live workspaces this USER created — the count the creation cap is
+ * keyed on, so a workspace the login merely belongs to (including one it was
+ * invited into) never consumes the quota. Soft-deleted workspaces free their
+ * slot; `created_by IS NULL` rows (the seeded `default`, pre-backfill legacy)
+ * match nobody.
+ */
+export async function countLiveWorkspacesCreatedBy(
+  db: WorkspaceStoreD1,
+  userId: string,
+): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM workspaces WHERE created_by = ? AND deleted_at IS NULL`)
+    .bind(userId)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
  * How many live workspaces this login belongs to — `0` is the "no workspace
  * yet" state that offers creation. Soft-deleted workspaces do not
  * count: a retired tenant is not a home.
