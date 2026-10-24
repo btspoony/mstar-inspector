@@ -31,6 +31,7 @@ import {
   deleteRefusal,
   deleteWorkspace,
   inviteFailureNotice,
+  leaveWorkspaceForDashboard,
   loadMembersPage,
   MembersTable,
   postMemberWrite,
@@ -455,6 +456,56 @@ describe("workspace settings block", () => {
     }
   });
 
+  test("a 404 delete leaves for the dashboard carrying the one-shot unavailable flash", async () => {
+    const redirects: string[] = [];
+    const calls: string[] = [];
+    const realFetch = globalThis.fetch;
+    const scope = globalThis as {
+      window?: { location: { assign: (url: string) => void } };
+      sessionStorage?: Storage;
+    };
+    const store = new Map<string, string>();
+    globalThis.fetch = (async (input: unknown) => {
+      calls.push(String(input));
+      return new Response("", { status: 404 });
+    }) as unknown as typeof fetch;
+    scope.window = { location: { assign: (url: string) => redirects.push(url) } };
+    scope.sessionStorage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage;
+    try {
+      // The refusal is terminal and the write itself neither navigates nor
+      // flashes — the page's 404 branch hands over to the terminal move below.
+      expect(deleteRefusal(404)).toEqual({ next: "leave" });
+      expect(await deleteWorkspace("/dashboard/acme")).toBe(404);
+      expect(redirects).toEqual([]);
+      expect(store.size).toBe(0);
+
+      leaveWorkspaceForDashboard();
+      expect(redirects).toEqual(["/dashboard"]);
+      // The landing states it once from the flash and consumes the key.
+      const line = "This workspace is no longer available to you.";
+      const landing = renderToStaticMarkup(
+        createElement(Layout, {
+          boot: { locale: "en", login: "octocat", name: null },
+          pathname: "/dashboard",
+          flash: takeFlash(),
+          children: createElement("p", null, "page"),
+        }),
+      );
+      expect(landing.split(line).length - 1).toBe(1);
+      expect(store.has(FLASH_STORAGE_KEY)).toBe(false);
+      // No reload: the delete was the only request issued.
+      expect(calls).toEqual(["/dashboard/acme/api/workspace/delete"]);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete scope.window;
+      delete scope.sessionStorage;
+    }
+  });
+
   test("a mounted shell shows the flash once and never again, whatever the path", async () => {
     const win = new Window({ url: "http://localhost/dashboard" });
     const scope = globalThis as unknown as Record<string, unknown>;
@@ -493,7 +544,7 @@ describe("workspace settings block", () => {
           createElement(Layout, {
             boot: { locale: "en", login: "octocat", name: null },
             pathname,
-            flash: true,
+            flash: "workspaceDeleted",
             children: createElement("p", null, "page"),
           }),
         );
@@ -527,14 +578,10 @@ describe("workspace settings block", () => {
       key: "members.deleteWorkspaceNotOwner",
     });
     // 404: the workspace is gone OR this viewer lost the membership — leave
-    // for the dashboard, no reload, and no invented cause in the copy.
-    expect(deleteRefusal(404)).toEqual({
-      next: "leave",
-      kind: "warn",
-      key: "members.deleteWorkspaceUnavailable",
-    });
+    // for the dashboard; the copy rides the flash instead of an inline notice.
+    expect(deleteRefusal(404)).toEqual({ next: "leave" });
     expect(t("en", "members.deleteWorkspaceNotOwner")).toBe("Only the workspace owner can delete it.");
-    expect(t("en", "members.deleteWorkspaceUnavailable")).toBe(
+    expect(t("en", "notice.warn.workspaceUnavailable")).toBe(
       "This workspace is no longer available to you.",
     );
     // A 5xx keeps the generic wording and leaves the page untouched; a network

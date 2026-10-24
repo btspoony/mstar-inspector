@@ -85,7 +85,7 @@ import { encodeCredentialPayload, type CredentialPools } from "../../packages/sh
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
-import { recordUsageEvent } from "../store/usage-store";
+import { hasUsageEventForReview, recordUsageEvent } from "../store/usage-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   applyPublishedLifecycle,
@@ -279,6 +279,8 @@ export type ConsumerLogFields = {
    */
   review_id?: string;
   workspace_id?: string;
+  /** Whether a failed usage insert had in fact landed (ambiguous D1 failure). */
+  usage_applied?: boolean;
   /** Review tier resolved from REVIEW_LEVEL. */
   level?: ReviewLevel;
   /** Runner wall-clock budget for `level` (ms) — runnerTimeoutMs(level). */
@@ -2262,8 +2264,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       await recordUsageEvent(deps.env.DB, usageEvent);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
+      // A pre-commit failure and an ambiguous one (the write landed, the driver
+      // threw) reach this catch identically. The ledger read-back separates
+      // them: `applied: false` is the only backfillable case; `applied: true`
+      // means the row exists and this failure is noise. An unreadable ledger is
+      // recorded as not applied — a backfill must re-check before it writes,
+      // since the insert mints `seq + 1` and a blind re-insert would double-count.
+      const applied = await hasUsageEventForReview(deps.env.DB, reviewId).catch(() => false);
       deps.log.warn(
-        { ...fields, review_id: reviewId, workspace_id: workspaceId },
+        { ...fields, review_id: reviewId, workspace_id: workspaceId, usage_applied: applied },
         `usage_events insert failed (review continues): ${detail}`,
       );
       // The failure row is best-effort too — its own guard keeps a recording
@@ -2276,7 +2285,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           pr_number: payload.pr_number,
           head_sha: headSha,
           stage: "usage",
-          error: `usage_events insert failed: ${detail} ${JSON.stringify({ reviewId, workspaceId })}`,
+          error: `usage_events insert failed: ${detail} ${JSON.stringify({ reviewId, workspaceId, applied })}`,
         });
       } catch (recordErr) {
         const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);

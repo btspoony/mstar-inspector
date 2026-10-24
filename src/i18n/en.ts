@@ -92,6 +92,7 @@ export const en = {
     warn: {
       alreadyMember: "{login} is already a member — nothing changed.",
       invitePending: "{login} already has a pending invitation — nothing changed.",
+      workspaceUnavailable: "This workspace is no longer available to you.",
     },
     error: {
       enterLogin: "Enter a GitHub login to invite.",
@@ -214,7 +215,6 @@ export const en = {
       "This cannot be undone. Members will lose access, pending invites will be cancelled, and Apps in this workspace will no longer be reviewed. A review that has already started is not cancelled.",
     deleteWorkspaceFailed: "Could not delete the workspace — try again.",
     deleteWorkspaceNotOwner: "Only the workspace owner can delete it.",
-    deleteWorkspaceUnavailable: "This workspace is no longer available to you.",
     inviteLabel: "Invite by GitHub login",
     invitePlaceholder: "e.g. octocat",
     inviteButton: "Invite member",

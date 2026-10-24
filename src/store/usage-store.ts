@@ -50,3 +50,16 @@ export async function recordUsageEvent(db: D1Like, input: UsageEventInput): Prom
     .bind(input.reviewId, input.workspaceId, input.occurredAt)
     .run();
 }
+
+/**
+ * Whether the ledger already holds an execution row for this identity — the
+ * read-back that tells a PRE-commit insert failure apart from an ambiguous
+ * one (the write landed, the driver threw). Only the former is backfillable.
+ */
+export async function hasUsageEventForReview(db: D1Like, reviewId: string): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM usage_events WHERE review_id = ?`)
+    .bind(reviewId)
+    .first<{ n: number }>();
+  return (row?.n ?? 0) > 0;
+}
