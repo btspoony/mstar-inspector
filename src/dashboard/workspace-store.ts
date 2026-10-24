@@ -42,7 +42,7 @@ type WorkspaceStoreStatement = {
   }>;
 };
 
-type WorkspaceStoreD1 = {
+export type WorkspaceStoreD1 = {
   prepare(query: string): WorkspaceStoreStatement;
 };
 
@@ -273,6 +273,32 @@ export async function countMembershipsForLogin(
          JOIN users u ON u.id = wm.user_id
          JOIN workspaces w ON w.id = wm.workspace_id
         WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL`,
+    )
+    .bind(login)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
+ * How many live FREE workspaces this login belongs to — the count the free-slot
+ * predicate reads. A workspace with no subscription row is on `free`
+ * (absence-means-free), a `free` subscription row is on `free` too, and a
+ * membership in any other plan's workspace does not consume the slot.
+ * Soft-deleted workspaces do not count: a retired tenant is not a home.
+ */
+export async function countFreeMembershipsForLogin(
+  db: WorkspaceStoreD1,
+  login: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM workspace_members wm
+         JOIN users u ON u.id = wm.user_id
+         JOIN workspaces w ON w.id = wm.workspace_id
+         LEFT JOIN workspace_subscriptions s ON s.workspace_id = w.id
+        WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL
+          AND (s.workspace_id IS NULL OR s.plan_id = 'free')`,
     )
     .bind(login)
     .first<{ n: number }>();
