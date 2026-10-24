@@ -26,6 +26,7 @@ import type { SpaBoot } from "../boot";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
+import { setFlash } from "../flash";
 import { formatRelativeTime } from "../relative-time";
 import { apiBase } from "../workspace-base";
 import {
@@ -36,6 +37,7 @@ import {
   type InviteRow,
   type MemberRow,
   type WorkspaceRole,
+  type WorkspaceSummary,
 } from "./data";
 import { PageNotice, type NoticeKind } from "./PageNotice";
 
@@ -65,6 +67,7 @@ export type MembersPageData = {
   members: MemberRow[];
   role: WorkspaceRole;
   invites: InviteRow[];
+  workspace: WorkspaceSummary;
 };
 
 /**
@@ -78,7 +81,12 @@ export async function loadMembersPage(base: string): Promise<MembersPageData | n
   const invites = canInviteMembers(payload.viewer.role)
     ? (parseInvites(await fetchJson(`${base}/api/members/invites`)) ?? [])
     : [];
-  return { members: payload.members, role: payload.viewer.role, invites };
+  return {
+    members: payload.members,
+    role: payload.viewer.role,
+    invites,
+    workspace: payload.workspace,
+  };
 }
 
 /**
@@ -132,6 +140,105 @@ export function postMemberWrite(
     case "remove":
       return postForm(`${base}/members/remove`, { userId: write.userId });
   }
+}
+
+/**
+ * The "This workspace" block — plan, seats and this month's metered review
+ * attempts. The upgrade position stays empty by product decision: no price, no
+ * purchase control, no billing link. Split out of the stateful page so the
+ * copy is assertable under static render (the `MembersTable` precedent).
+ */
+export function WorkspacePanel({
+  locale,
+  workspace,
+  memberCount,
+}: {
+  locale: Locale;
+  workspace: WorkspaceSummary;
+  memberCount: number;
+}) {
+  // A pending invite occupies a seat at the cap, so the seat state reads the
+  // same count the invite gate enforces — never the member rows alone.
+  const filled = memberCount + workspace.pendingInvites;
+  const slots = workspace.memberLimit - filled;
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="font-medium text-base">{t(locale, "members.workspaceHeading")}</h2>
+      <dl className="grid gap-4 rounded-md border p-4 sm:grid-cols-3">
+        <div className="flex flex-col gap-1">
+          <dt className="text-xs text-muted-foreground">{t(locale, "members.planLabel")}</dt>
+          <dd className="text-sm font-medium">{workspace.plan.name}</dd>
+          {workspace.plan.id === "free" ? (
+            <dd className="text-xs text-muted-foreground">{t(locale, "members.planFreeHint")}</dd>
+          ) : null}
+        </div>
+        <div className="flex flex-col gap-1">
+          <dt className="text-xs text-muted-foreground">{t(locale, "members.membersLabel")}</dt>
+          <dd className="text-sm font-medium tabular-nums">
+            {t(locale, "members.memberSeats", { count: memberCount, limit: workspace.memberLimit })}
+          </dd>
+          {workspace.pendingInvites > 0 ? (
+            <dd className="text-xs text-muted-foreground">
+              {t(
+                locale,
+                workspace.pendingInvites === 1 ? "members.pendingInviteOne" : "members.pendingInvites",
+                { count: workspace.pendingInvites },
+              )}
+            </dd>
+          ) : null}
+          <dd className="text-xs text-muted-foreground">
+            {slots > 0
+              ? t(locale, "members.slotsLeft", { count: slots })
+              : t(locale, "members.noSeatsLeft")}
+          </dd>
+        </div>
+        <div className="flex flex-col gap-1">
+          <dt className="text-xs text-muted-foreground">{t(locale, "members.reviewAttemptsLabel")}</dt>
+          <dd className="text-sm font-medium tabular-nums">{workspace.reviewAttemptsThisMonth}</dd>
+          <dd className="text-xs text-muted-foreground">{t(locale, "members.reviewAttemptsHint")}</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+/**
+ * The owner-only deletion entry. Non-owners never see it; the route refuses
+ * them independently.
+ */
+export function DeleteWorkspaceAction({
+  locale,
+  role,
+  busy,
+  onDelete,
+}: {
+  locale: Locale;
+  role: WorkspaceRole | null;
+  busy: boolean;
+  onDelete: () => void;
+}) {
+  if (role !== "owner") return null;
+  return (
+    <section className="flex flex-col gap-2">
+      <Button type="button" variant="destructive" className="w-fit" disabled={busy} onClick={onDelete}>
+        {t(locale, "members.deleteWorkspace")}
+      </Button>
+    </section>
+  );
+}
+
+/**
+ * The owner's delete write: the one soft-delete route. A success lands on the
+ * dashboard root — this workspace's own paths answer 404 afterwards — and
+ * flashes the outcome once for the landing shell.
+ */
+export async function deleteWorkspace(base: string): Promise<number> {
+  const { status } = await postForm(`${base}/api/workspace/delete`, {});
+  if (status < 400) {
+    setFlash();
+    window.location.assign("/dashboard");
+  }
+  return status;
 }
 
 /**
@@ -241,11 +348,13 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
   const [members, setMembers] = useState<MemberRow[] | null>(null);
   const [memberRole, setMemberRole] = useState<WorkspaceRole | null>(null);
   const [invites, setInvites] = useState<InviteRow[]>([]);
+  const [workspace, setWorkspace] = useState<WorkspaceSummary | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const [inviteLogin, setInviteLogin] = useState("");
   const [inviteRole, setInviteRole] = useState<"admin" | "member">("member");
   const [pending, setPending] = useState<PendingAction | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const roleLabel = (role: WorkspaceRole): string => t(locale, `members.role.${role}`);
@@ -270,6 +379,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
         setMembers(payload.members);
         setMemberRole(payload.role);
         setInvites(payload.invites);
+        setWorkspace(payload.workspace);
         setState("ok");
       } catch {
         if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
@@ -382,6 +492,25 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
     }
   }
 
+  async function onConfirmDelete(): Promise<void> {
+    if (busy) return; // in-flight guard — no double-submit
+    setBusy(true);
+    try {
+      const status = await deleteWorkspace(base);
+      // A success navigates away; only a refusal returns here.
+      if (status >= 400) {
+        setDeleteOpen(false);
+        setNotice({ kind: "error", message: t(locale, "members.deleteWorkspaceFailed") });
+      }
+    } catch {
+      // Network failure — postForm throws on fetch rejection.
+      setDeleteOpen(false);
+      setNotice({ kind: "error", message: t(locale, "members.deleteWorkspaceFailed") });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Loading rides the shared skeleton as the page's full loading face —
   // the component's heading placeholder stands in for the real h1 (AD-582).
   // Foreground only: `load` flips to "loading" solely on the initial/retry
@@ -400,8 +529,9 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
       </div>
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
-      {state === "ok" && members ? (
+      {state === "ok" && members && workspace ? (
         <>
+          <WorkspacePanel locale={locale} workspace={workspace} memberCount={members.length} />
           {canInvite ? (
             <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onInvite(event)}>
               <div className="flex flex-col gap-1.5">
@@ -497,6 +627,14 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
           ) : null}
         </>
       ) : null}
+      {state === "ok" ? (
+        <DeleteWorkspaceAction
+          locale={locale}
+          role={memberRole}
+          busy={busy}
+          onDelete={() => setDeleteOpen(true)}
+        />
+      ) : null}
       <Dialog
         open={pending !== null}
         onOpenChange={(open) => {
@@ -555,6 +693,29 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
               </DialogFooter>
             </>
           ) : null}
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          if (!open && !busy) setDeleteOpen(false);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t(locale, "members.deleteWorkspaceTitle")}</DialogTitle>
+            <DialogDescription>{t(locale, "members.deleteWorkspaceBody")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline" disabled={busy}>
+                {t(locale, "common.cancel")}
+              </Button>
+            </DialogClose>
+            <Button variant="destructive" disabled={busy} onClick={() => void onConfirmDelete()}>
+              {t(locale, "members.deleteWorkspace")}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

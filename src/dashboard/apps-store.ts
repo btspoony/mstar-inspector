@@ -315,16 +315,21 @@ type AppsStoreD1 = {
 /**
  * Tenant read face (migration 0026) — there is exactly one. Every
  * execution-facing App read INNER JOINs `app_workspaces`, so an App with no
- * workspace mapping is invisible to every face.
+ * workspace mapping is invisible to every face; the two resolution reads also
+ * require the workspace itself to be live, so a soft-deleted tenant is
+ * unresolvable and can never start a review.
  */
 
 /**
- * The three execution-facing App reads. FROZEN — do not reword them; call
- * sites and tests assert these exact strings.
+ * The two execution-facing App resolutions plus the operator list. FROZEN —
+ * do not reword them; call sites and tests assert these exact strings.
+ * `listApps` deliberately does NOT filter on `workspaces.deleted_at`: it is
+ * the operator read-only list with no execution face, and retiring a tenant
+ * must not hide its Apps from operators.
  */
 export const APP_READ_SQL = {
-  getAppById: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.id = ?`,
-  getAppBySlug: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.slug = ?`,
+  getAppById: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
+  getAppBySlug: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.slug = ?`,
   listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
@@ -437,7 +442,10 @@ export function createAppsStore(db: AppsStoreD1) {
       return row;
     },
 
-    /** By slug; resolves soft-deleted and disabled rows too (callers filter). */
+    /**
+     * By slug; resolves soft-deleted and disabled App rows too (callers
+     * filter), but NOT an App whose workspace is soft-deleted.
+     */
     async getAppBySlug(slug: string): Promise<GithubAppRow | null> {
       return db
         .prepare(APP_READ_SQL.getAppBySlug)
@@ -445,7 +453,10 @@ export function createAppsStore(db: AppsStoreD1) {
         .first<GithubAppRow>();
     },
 
-    /** By id; resolves soft-deleted and disabled rows too (callers filter). */
+    /**
+     * By id; resolves soft-deleted and disabled App rows too (callers
+     * filter), but NOT an App whose workspace is soft-deleted.
+     */
     async getAppById(id: string): Promise<GithubAppRow | null> {
       return db.prepare(APP_READ_SQL.getAppById).bind(id).first<GithubAppRow>();
     },

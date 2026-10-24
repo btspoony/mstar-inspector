@@ -49,9 +49,10 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "runner",
   "sandbox",
   "pipeline",
+  "usage",
 ]);
 
-export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline";
+export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline" | "usage";
 
 /**
  * One failure event to record. `head_sha` is the AUTHORITATIVE checkout sha

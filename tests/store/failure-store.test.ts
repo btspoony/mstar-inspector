@@ -63,8 +63,8 @@ describe("createFailureStore", () => {
     expect((await store.listRecent()).length).toBe(0);
   });
 
-  test("FAILURE_STAGES is exactly the AL-1 + AL-6 vocabulary (frozen)", () => {
-    expect(FAILURE_STAGES).toEqual(["parse", "runner", "sandbox", "pipeline"]);
+  test("FAILURE_STAGES is exactly the AL-1 + AL-6 + usage vocabulary (frozen)", () => {
+    expect(FAILURE_STAGES).toEqual(["parse", "runner", "sandbox", "pipeline", "usage"]);
   });
 
   test("listRecent returns newest-first with a rowid tiebreak, bounded by limit", async () => {

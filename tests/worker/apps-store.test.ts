@@ -338,6 +338,18 @@ describe("apps-store (createAppsStore)", () => {
     expect((await store(db).getAppById(app.id))?.deleted_at).not.toBeNull();
   });
 
+  test("a soft-deleted workspace makes both resolution reads null; listApps still sees the App", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    db.raw
+      .prepare("UPDATE workspaces SET deleted_at = datetime('now') WHERE id = ?")
+      .run(APP_INPUT.workspaceId!);
+    expect(await store(db).getAppBySlug(APP_INPUT.slug)).toBeNull();
+    expect(await store(db).getAppById(app.id)).toBeNull();
+    // The operator list has no execution face — a retired tenant stays visible.
+    expect((await store(db).listApps()).map((row) => row.id)).toEqual([app.id]);
+  });
+
   test("listApps returns non-deleted apps, newest first", async () => {
     const db = createMigratedD1();
     const older = await seedApp(db, { slug: "older", githubAppId: 1 });

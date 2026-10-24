@@ -72,6 +72,15 @@ function world() {
   seedMembership(db, ids.ivan, "admin");
   seedMembership(db, ids.mallory, "member");
   seedMembership(db, ids.hubot, "member");
+  // The role matrix is not a member-cap test: its six role fixtures plus a
+  // live invite already exceed the `free` plan's five seats, so the world buys
+  // enough seats and the cap keeps its own cases in membership.test.ts.
+  db.raw.prepare("UPDATE plans SET included_members = 10 WHERE id = 'pro'").run();
+  db.raw
+    .prepare(
+      "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'pro', 'active', ?, ?)",
+    )
+    .run(WORKSPACE, new Date().toISOString(), new Date().toISOString());
   return { db, ids };
 }
 

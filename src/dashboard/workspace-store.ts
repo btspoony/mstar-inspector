@@ -42,7 +42,7 @@ type WorkspaceStoreStatement = {
   }>;
 };
 
-type WorkspaceStoreD1 = {
+export type WorkspaceStoreD1 = {
   prepare(query: string): WorkspaceStoreStatement;
 };
 
@@ -240,19 +240,25 @@ export async function countLiveWorkspaces(db: WorkspaceStoreD1): Promise<number>
 }
 
 /**
- * How many live workspaces this USER created — the count the creation cap is
- * keyed on, so a workspace the login merely belongs to (including one it was
- * invited into) never consumes the quota. Soft-deleted workspaces free their
- * slot; `created_by IS NULL` rows (the seeded `default`, pre-backfill legacy)
- * match nobody.
+ * How many seats one workspace has taken: its live `workspace_members` rows
+ * plus its pending invites that have not lapsed. The invite half carries the
+ * invite reads' own lazy-expiry predicate (`status = 'pending' AND expires_at
+ * > ?`), so a row whose expiry passed but no write has flipped yet consumes no
+ * seat. This is the count the member-cap predicate reads.
  */
-export async function countLiveWorkspacesCreatedBy(
+export async function countMembersAndPendingInvites(
   db: WorkspaceStoreD1,
-  userId: string,
+  workspaceId: string,
+  nowIso: string,
 ): Promise<number> {
   const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM workspaces WHERE created_by = ? AND deleted_at IS NULL`)
-    .bind(userId)
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?)
+       + (SELECT COUNT(*) FROM workspace_invites
+           WHERE workspace_id = ? AND status = 'pending' AND expires_at > ?) AS n`,
+    )
+    .bind(workspaceId, workspaceId, nowIso)
     .first<{ n: number }>();
   return row?.n ?? 0;
 }
@@ -273,6 +279,34 @@ export async function countMembershipsForLogin(
          JOIN users u ON u.id = wm.user_id
          JOIN workspaces w ON w.id = wm.workspace_id
         WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL`,
+    )
+    .bind(login)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
+ * How many live FREE workspaces this login belongs to — the count the free-slot
+ * predicate reads. Same rule as {@link resolveWorkspacePlan}: only an `active`
+ * subscription row counts, so a workspace with no row (or only a non-active
+ * one) is on `free`, and a membership in any other plan's workspace does not
+ * consume the slot. Soft-deleted workspaces do not count: a retired tenant is
+ * not a home.
+ */
+export async function countFreeMembershipsForLogin(
+  db: WorkspaceStoreD1,
+  login: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM workspace_members wm
+         JOIN users u ON u.id = wm.user_id
+         JOIN workspaces w ON w.id = wm.workspace_id
+         LEFT JOIN workspace_subscriptions s
+                ON s.workspace_id = w.id AND s.status = 'active'
+        WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL
+          AND (s.plan_id IS NULL OR s.plan_id = 'free')`,
     )
     .bind(login)
     .first<{ n: number }>();
@@ -378,10 +412,11 @@ export async function setWorkspaceSlug(
 }
 
 /**
- * Create one workspace and its creator's `owner` membership as ONE `batch` — a
- * workspace without an owner, or an owner without a workspace, must never be
- * observable. `slug` equals `id` by contract (the id is already
- * lowercase, so the two can never disagree on case).
+ * Create one workspace, its creator's `owner` membership and its `free`
+ * subscription as ONE `batch` — a workspace without an owner, or an owner
+ * without a workspace, must never be observable. `slug` equals `id` by
+ * contract (the id is already lowercase, so the two can never disagree on
+ * case).
  *
  * Returns false when the slug is already taken (the UNIQUE index is the final
  * word), so the caller can mint another id instead of 500ing.
@@ -405,6 +440,12 @@ export async function createWorkspace(
            VALUES (?, ?, 'owner', ?)`,
         )
         .bind(input.id, input.userId, input.createdAt),
+      db
+        .prepare(
+          `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+           VALUES (?, 'free', 'active', ?, ?)`,
+        )
+        .bind(input.id, input.createdAt, input.createdAt),
     ]);
     inserted = results[0]!;
   } catch (err) {
@@ -413,4 +454,34 @@ export async function createWorkspace(
     throw err;
   }
   return inserted.meta.changes > 0;
+}
+
+/**
+ * Retire one workspace as ONE `batch`: stamp `deleted_at`, drop every
+ * membership and revoke the pending invites. The row itself is never
+ * hard-deleted — every live read filters `deleted_at IS NULL`, so the tenant
+ * stops resolving while its history stays readable.
+ *
+ * Deletion is idempotent: the `deleted_at IS NULL` guard, the now-empty
+ * membership set and the no-longer-`pending` invites make a replay change
+ * nothing, so both the first call and a replay report success.
+ */
+export async function deleteWorkspace(
+  db: WorkspaceStoreWriteD1,
+  workspaceId: string,
+  deletedAt: string,
+): Promise<boolean> {
+  await db.batch([
+    db
+      .prepare(`UPDATE workspaces SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`)
+      .bind(deletedAt, workspaceId),
+    db.prepare(`DELETE FROM workspace_members WHERE workspace_id = ?`).bind(workspaceId),
+    db
+      .prepare(
+        `UPDATE workspace_invites SET status = 'revoked'
+          WHERE workspace_id = ? AND status = 'pending'`,
+      )
+      .bind(workspaceId),
+  ]);
+  return true;
 }
