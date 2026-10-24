@@ -2239,11 +2239,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // dedup reads and the journal handoff above have missed, so a duplicate
     // delivery of a completed review never reaches this insert; a genuine
     // re-execution after a runner failure mints the next `seq` for the same
-    // review. The product rule is "count, never refuse": one bounded retry
-    // absorbs a transient D1 failure, and a write that still fails is logged
-    // and recorded as a `usage` failure row carrying the metered identity
-    // (`reviewId` + `workspaceId`) so the dropped attempt can be reconciled.
-    // The review continues either way.
+    // review. The product rule is "count, never refuse": a write failure is
+    // logged and recorded as a `usage` failure row carrying the metered
+    // identity (`reviewId` + `workspaceId`) so the dropped attempt can be
+    // reconciled. The review continues either way.
     const reviewId = idemKey({
       // The metered identity is the PAYLOAD identity (plan § Consumer write
       // point 3): the authoritative checkout sha refines the review row only,
@@ -2256,13 +2255,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     });
     const usageEvent = { reviewId, workspaceId, occurredAt: new Date().toISOString() };
     try {
-      try {
-        await recordUsageEvent(deps.env.DB, usageEvent);
-      } catch {
-        // One retry, no backoff: the ledger write is off the review's critical
-        // path, and the failure row below is the last resort.
-        await recordUsageEvent(deps.env.DB, usageEvent);
-      }
+      // No retry: the insert mints `seq + 1` for this `review_id`, so an
+      // automatic retry after an ambiguous failure (the write applied, the
+      // driver threw) would count one execution twice. A dropped row stays
+      // reconcilable through the `usage` failure row below instead.
+      await recordUsageEvent(deps.env.DB, usageEvent);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(

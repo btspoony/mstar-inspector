@@ -214,7 +214,7 @@ export const en = {
       "This cannot be undone. Members will lose access, pending invites will be cancelled, and Apps in this workspace will no longer be reviewed. A review that has already started is not cancelled.",
     deleteWorkspaceFailed: "Could not delete the workspace — try again.",
     deleteWorkspaceNotOwner: "Only the workspace owner can delete it.",
-    deleteWorkspaceAlreadyDeleted: "This workspace was already deleted.",
+    deleteWorkspaceUnavailable: "This workspace is no longer available to you.",
     inviteLabel: "Invite by GitHub login",
     invitePlaceholder: "e.g. octocat",
     inviteButton: "Invite member",

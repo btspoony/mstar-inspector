@@ -28,7 +28,7 @@ import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   DeleteWorkspaceAction,
   WorkspacePanel,
-  deleteFailureNotice,
+  deleteRefusal,
   deleteWorkspace,
   inviteFailureNotice,
   loadMembersPage,
@@ -519,17 +519,31 @@ describe("workspace settings block", () => {
     }
   });
 
-  test("a refused delete maps its status to copy that never says to retry", () => {
-    expect(deleteFailureNotice(403)).toEqual({ kind: "warn", key: "members.deleteWorkspaceNotOwner" });
-    expect(deleteFailureNotice(404)).toEqual({
+  test("a refused delete picks copy and next move by status", () => {
+    // 403: not the owner — stay, reload in the background, name the cause.
+    expect(deleteRefusal(403)).toEqual({
+      next: "reload",
       kind: "warn",
-      key: "members.deleteWorkspaceAlreadyDeleted",
+      key: "members.deleteWorkspaceNotOwner",
+    });
+    // 404: the workspace is gone OR this viewer lost the membership — leave
+    // for the dashboard, no reload, and no invented cause in the copy.
+    expect(deleteRefusal(404)).toEqual({
+      next: "leave",
+      kind: "warn",
+      key: "members.deleteWorkspaceUnavailable",
     });
     expect(t("en", "members.deleteWorkspaceNotOwner")).toBe("Only the workspace owner can delete it.");
-    expect(t("en", "members.deleteWorkspaceAlreadyDeleted")).toBe("This workspace was already deleted.");
-    // Any other status keeps the generic wording; a network failure throws
-    // before it ever reaches this mapping.
-    expect(deleteFailureNotice(500)).toEqual({ kind: "error", key: "members.deleteWorkspaceFailed" });
+    expect(t("en", "members.deleteWorkspaceUnavailable")).toBe(
+      "This workspace is no longer available to you.",
+    );
+    // A 5xx keeps the generic wording and leaves the page untouched; a network
+    // failure throws before it ever reaches this mapping.
+    expect(deleteRefusal(500)).toEqual({
+      next: "stay",
+      kind: "error",
+      key: "members.deleteWorkspaceFailed",
+    });
   });
 
   test("a refused delete keeps the page in place and flashes nothing", async () => {

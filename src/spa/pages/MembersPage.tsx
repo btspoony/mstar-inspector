@@ -107,20 +107,29 @@ export function inviteFailureNotice(
 }
 
 /**
- * The refusal copy for a delete that did not happen. 403 means this viewer is
- * no longer the workspace owner and 404 means it is already gone — neither can
- * succeed on a retry, so only an unknown status keeps the generic wording.
+ * What a refused delete must say and do next.
+ *
+ * 403: this viewer is no longer the owner — the page stays and a background
+ * reload refreshes `memberRole`, which is what removes the stale owner-only
+ * entry. 404: the workspace does not resolve for this viewer (deleted
+ * elsewhere, or the membership is gone) — nothing on the page is worth
+ * reloading, so it leaves, and the copy names no cause it cannot know. Any
+ * other status (a 5xx) keeps the generic retry wording and leaves the page
+ * untouched.
  */
-export function deleteFailureNotice(status: number): {
-  kind: NoticeKind;
-  key:
-    | "members.deleteWorkspaceNotOwner"
-    | "members.deleteWorkspaceAlreadyDeleted"
-    | "members.deleteWorkspaceFailed";
-} {
-  if (status === 403) return { kind: "warn", key: "members.deleteWorkspaceNotOwner" };
-  if (status === 404) return { kind: "warn", key: "members.deleteWorkspaceAlreadyDeleted" };
-  return { kind: "error", key: "members.deleteWorkspaceFailed" };
+export type DeleteRefusal =
+  | { next: "reload"; kind: NoticeKind; key: "members.deleteWorkspaceNotOwner" }
+  | { next: "leave"; kind: NoticeKind; key: "members.deleteWorkspaceUnavailable" }
+  | { next: "stay"; kind: NoticeKind; key: "members.deleteWorkspaceFailed" };
+
+export function deleteRefusal(status: number): DeleteRefusal {
+  if (status === 403) {
+    return { next: "reload", kind: "warn", key: "members.deleteWorkspaceNotOwner" };
+  }
+  if (status === 404) {
+    return { next: "leave", kind: "warn", key: "members.deleteWorkspaceUnavailable" };
+  }
+  return { next: "stay", kind: "error", key: "members.deleteWorkspaceFailed" };
 }
 
 /**
@@ -519,12 +528,18 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
       // A success navigates away; only a refusal returns here.
       if (status >= 400) {
         setDeleteOpen(false);
-        // Reload in the background first: the refreshed `memberRole` is what
-        // removes a now-stale owner-only entry. Then the status-specific copy
-        // wins over any notice that reload may have raised.
-        await load({ background: true });
-        const failure = deleteFailureNotice(status);
-        setNotice({ kind: failure.kind, message: t(locale, failure.key) });
+        const refusal = deleteRefusal(status);
+        if (refusal.next === "leave") {
+          // The workspace no longer resolves for this viewer: leave the dead
+          // page for the same landing a successful delete uses. No background
+          // reload — it could only 404 again.
+          window.location.assign("/dashboard");
+          return;
+        }
+        // 403 only: the refreshed `memberRole` removes the stale owner-only
+        // entry; then the refusal copy wins over any notice that reload raised.
+        if (refusal.next === "reload") await load({ background: true });
+        setNotice({ kind: refusal.kind, message: t(locale, refusal.key) });
       }
     } catch {
       // Network failure — postForm throws on fetch rejection.
