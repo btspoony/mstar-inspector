@@ -240,6 +240,30 @@ export async function countLiveWorkspaces(db: WorkspaceStoreD1): Promise<number>
 }
 
 /**
+ * How many seats one workspace has taken: its live `workspace_members` rows
+ * plus its pending invites that have not lapsed. The invite half carries the
+ * invite reads' own lazy-expiry predicate (`status = 'pending' AND expires_at
+ * > ?`), so a row whose expiry passed but no write has flipped yet consumes no
+ * seat. This is the count the member-cap predicate reads.
+ */
+export async function countMembersAndPendingInvites(
+  db: WorkspaceStoreD1,
+  workspaceId: string,
+  nowIso: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?)
+       + (SELECT COUNT(*) FROM workspace_invites
+           WHERE workspace_id = ? AND status = 'pending' AND expires_at > ?) AS n`,
+    )
+    .bind(workspaceId, workspaceId, nowIso)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
  * How many live workspaces this login belongs to — `0` is the "no workspace
  * yet" state that offers creation. Soft-deleted workspaces do not
  * count: a retired tenant is not a home.

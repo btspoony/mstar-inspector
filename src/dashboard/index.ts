@@ -69,6 +69,7 @@ import {
 import {
   countFreeMembershipsForLogin,
   countLiveWorkspaces,
+  countMembersAndPendingInvites,
   countMembershipsForLogin,
   createWorkspace,
   getMembership,
@@ -88,7 +89,10 @@ import {
   FREE_SLOT_REFUSAL,
   FreeWorkspaceSlotError,
   INVITE_FREE_SLOT_REFUSAL,
+  MEMBER_CAP_REFUSAL,
+  MemberCapError,
   freeSlotAvailable,
+  memberSlotAvailable,
   resolveWorkspacePlan,
 } from "./entitlement";
 import {
@@ -1661,7 +1665,9 @@ const inviteListRoute = async (c: DashboardContext) => {
  * Create one pending invite (AC2). `owner` or `admin` only; inviting an
  * existing member or a login that already has a live pending invite is 409 and
  * writes nothing. A lapsed pending row is flipped terminal by the store before
- * the insert, so re-inviting after expiry is legal.
+ * the insert, so re-inviting after expiry is legal. The plan's member cap
+ * counts members plus live pending invites; at the cap the route answers the
+ * Product copy's 409 without writing.
  */
 const inviteCreateRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
@@ -1702,6 +1708,18 @@ const inviteCreateRoute = async (c: DashboardContext) => {
     return inviteMutationResponse(c, "Already a member.", 409);
   }
   try {
+    // The plan's seats are members plus live pending invites; a lapsed pending
+    // row has already stopped counting, so a refusal here writes nothing and
+    // revoking an invite frees the seat immediately.
+    const plan = await resolveWorkspacePlan(gate.db, gate.scope.workspaceId);
+    const seats = await countMembersAndPendingInvites(
+      gate.db,
+      gate.scope.workspaceId,
+      now.toISOString(),
+    );
+    if (!memberSlotAvailable(seats, plan.includedMembers)) {
+      throw new MemberCapError(MEMBER_CAP_REFUSAL);
+    }
     await createInvite(gate.db, {
       workspaceId: gate.scope.workspaceId,
       login,
@@ -1711,6 +1729,12 @@ const inviteCreateRoute = async (c: DashboardContext) => {
       expiresAt: new Date(now.getTime() + INVITE_TTL_MS).toISOString(),
     });
   } catch (err) {
+    if (err instanceof MemberCapError) {
+      // The plan is out of seats (members + live pending invites): 409 with
+      // the Product copy, zero writes. Only this class carries that boundary;
+      // anything else stays a 500.
+      return inviteMutationResponse(c, err.message, 409);
+    }
     if (err instanceof InvitePendingExistsError) {
       // A live pending invite already exists (sequential pre-state or a lost
       // concurrent race) — the first row is untouched.

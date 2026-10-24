@@ -82,6 +82,15 @@ export const FREE_SLOT_REFUSAL =
 export const INVITE_FREE_SLOT_REFUSAL =
   "You were not added. You already belong to a free workspace, and you can belong to only one at a time. Delete that workspace if you own it. If you do not, an owner or admin of that workspace must remove you. Then accept this invite. The invite is still pending.";
 
+/**
+ * The Product copy for an invite that would exceed the plan's member cap,
+ * verbatim (§ Sixth member). The sentence names five literally because both
+ * plans include five members today; a plan with a different number must turn
+ * this into a formatter — do not interpolate the count now.
+ */
+export const MEMBER_CAP_REFUSAL =
+  "This invite was not sent. This workspace already has five people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.";
+
 /** Refusal for a creation / acceptance that would exceed the free slot: a 409 body. */
 export class FreeWorkspaceSlotError extends Error {
   constructor(body: string) {
