@@ -18,7 +18,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createElement } from "react";
+import { act, createElement, useLayoutEffect, useRef } from "react";
+import { Window } from "happy-dom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { FLASH_STORAGE_KEY, takeFlash } from "../../src/spa/flash";
@@ -445,22 +446,74 @@ describe("workspace settings block", () => {
       );
       expect(landing.split(line).length - 1).toBe(1);
       expect(store.has(FLASH_STORAGE_KEY)).toBe(false);
-      // Same session, second render: the flash is spent, so the shell boots
-      // with nothing left to show. (The layout also gates on the landing path,
-      // so an in-session navigation cannot re-show it.)
-      const second = renderToStaticMarkup(
-        createElement(Layout, {
-          boot: { locale: "en", login: "octocat", name: null },
-          pathname: "/dashboard",
-          flash: takeFlash(),
-          children: createElement("p", null, "page"),
-        }),
-      );
-      expect(second).not.toContain(line);
     } finally {
       globalThis.fetch = realFetch;
       delete scope.window;
       delete scope.sessionStorage;
+    }
+  });
+
+  test("a mounted shell shows the flash once and never again, whatever the path", async () => {
+    const win = new Window({ url: "http://localhost/dashboard" });
+    const scope = globalThis as unknown as Record<string, unknown>;
+    const installed = {
+      window: win,
+      document: win.document,
+      navigator: win.navigator,
+      HTMLElement: win.HTMLElement,
+      Element: win.Element,
+      Node: win.Node,
+      Event: win.Event,
+      MutationObserver: win.MutationObserver,
+      requestAnimationFrame: win.requestAnimationFrame.bind(win),
+      cancelAnimationFrame: win.cancelAnimationFrame.bind(win),
+      IS_REACT_ACT_ENVIRONMENT: true,
+    };
+    Object.assign(scope, installed);
+    const paints: string[] = [];
+    try {
+      // The one module that must load AFTER the browser globals exist: React
+      // DOM caches `canUseDOM` at evaluation, so a static import here would
+      // take the server path. Every other module is a normal static import.
+      const { createRoot } = await import("react-dom/client");
+
+      // Records every committed paint: layout effects run after the DOM
+      // mutation and before the flash-clearing passive effect, so the first
+      // paint stays observable even though act() flushes effects on return.
+      function Shell({ pathname }: { pathname: string }) {
+        const ref = useRef<HTMLDivElement>(null);
+        useLayoutEffect(() => {
+          paints.push(ref.current?.innerHTML ?? "");
+        });
+        return createElement(
+          "div",
+          { ref },
+          createElement(Layout, {
+            boot: { locale: "en", login: "octocat", name: null },
+            pathname,
+            flash: true,
+            children: createElement("p", null, "page"),
+          }),
+        );
+      }
+
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      const render = (pathname: string) =>
+        act(async () => root.render(createElement(Shell, { pathname })));
+
+      await render("/dashboard");
+      await render("/dashboard/apps");
+      await render("/dashboard");
+
+      const line = "Workspace deleted. Its Apps are not reviewed.";
+      expect(paints[0]!.split(line).length - 1).toBe(1);
+      expect(paints.slice(1).join("")).not.toContain(line);
+      await act(async () => root.unmount());
+    } finally {
+      for (const key of Object.keys(installed)) delete scope[key];
+      win.close();
     }
   });
 

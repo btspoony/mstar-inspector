@@ -2,7 +2,7 @@
  * Dashboard chrome: left sidebar (Apps / Members) +
  * slim navbar (theme + Lang + username + logout).
  */
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
@@ -18,7 +18,7 @@ import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-me
 type LayoutProps = {
   boot: SpaBoot;
   pathname: string;
-  /** One-shot outcome read at boot (`./flash`): rendered only by the landing path. */
+  /** One-shot outcome read at boot (`./flash`): shown on this mount only. */
   flash: boolean;
   children: ReactNode;
 };
@@ -112,13 +112,13 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
   );
 }
 
-export function Layout({ boot, pathname, flash, children }: LayoutProps) {
+export function Layout({ boot, pathname, flash: bootFlash, children }: LayoutProps) {
   const route = matchSpaRoute(pathname);
-  // One-shot: the flash belongs to the path the boot read it for. Any later
-  // in-session navigation renders another path, so the spent outcome cannot
-  // reappear — no module-level latch, no effect that would erase it before the
-  // user reads it.
-  const [flashPath] = useState(pathname);
+  // One-shot: this render shows the boot's flash, then the mount effect clears
+  // it after paint, so this instance can never show the spent outcome again —
+  // including an A → B → A walk that returns to the landing path.
+  const [flash, setFlash] = useState(bootFlash);
+  useEffect(() => setFlash(false), []);
   if (route?.page === "login") {
     return <LoginChrome>{children}</LoginChrome>;
   }
@@ -126,7 +126,7 @@ export function Layout({ boot, pathname, flash, children }: LayoutProps) {
   // page's rename card (rendered as `children`) writes it.
   return (
     <WorkspaceMembershipsProvider boot={boot}>
-      <DashboardChrome boot={boot} pathname={pathname} flash={flash && pathname === flashPath}>
+      <DashboardChrome boot={boot} pathname={pathname} flash={flash}>
         {children}
       </DashboardChrome>
     </WorkspaceMembershipsProvider>
