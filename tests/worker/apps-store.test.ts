@@ -97,7 +97,7 @@ const APP_INPUT: CreateAppInput = {
   privateKeyEnc: "v1.primary.aXZpdi.Y3QmIHRhZw==",
   webhookSecretEnc: "v1.primary.aXZpdi.d2ViaG9vaw==",
   createdBy: "octocat",
-  // Required since plan 109: ownership is a caller input, never a lookup.
+  // Required: ownership is a caller input, never a store lookup.
   workspaceId: "default",
 };
 

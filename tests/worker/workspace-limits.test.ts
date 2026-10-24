@@ -1,9 +1,9 @@
 /**
  * Unit tests: the pure workspace-creation cap (`workspace-limits.ts`).
  *
- * Boundary shape from plan 109 Design B: count 4 → allowed, 5 → refused,
- * 6 → refused. The refusal is the named error whose message is the layout's
- * 409 body, so both the class and the exact string are pinned.
+ * Boundary shape: count 4 → allowed, 5 → refused, 6 → refused. The refusal is
+ * the named error whose message is the layout's 409 body, so both the class and
+ * the exact string are pinned.
  */
 import { describe, expect, test } from "bun:test";
 import {

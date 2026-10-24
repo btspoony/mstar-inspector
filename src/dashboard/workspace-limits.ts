@@ -7,6 +7,10 @@
  * M3 replacement point: the route passes `WORKSPACE_LIMITS` today; M3 passes a
  * `WorkspaceLimits` resolved from the login's entitlement/plan instead — the
  * predicate, its call shape and its tests never change.
+ *
+ * Known limit: this check is not an atomic reservation — two concurrent
+ * creations can both read the same count and pass. Atomic enforcement is
+ * required before the first paid plan.
  */
 
 /** The cap for one login; the seam M3's entitlement lookup fills. */

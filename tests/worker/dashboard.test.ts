@@ -3766,6 +3766,41 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     }
   });
 
+  test("the cap counts workspaces the login CREATED, not ones it joined or the deployment total", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    const creator = await createUser(db, { login: "deployer", role: "member" });
+    const joiner = await createUser(db, { login: "joiner", role: "member" });
+    const created: string[] = [];
+    for (let i = 1; i <= 5; i++) {
+      const res = await createWorkspaceRequest(db, "deployer", { name: `Workspace ${i}` });
+      expect(res.status, `creation ${i}`).toBe(201);
+      const body = (await res.json()) as { id: string };
+      created.push(body.id);
+    }
+    expect(createdLiveCount(db, creator.id)).toBe(5);
+    // `joiner` belongs to all five but created none of them.
+    for (const id of created) {
+      db.raw
+        .prepare(
+          "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, 'member', ?)",
+        )
+        .run(id, joiner.id, new Date().toISOString());
+    }
+    expect(memberRowCount(db)).toBe(10);
+
+    // A deployment-wide count (6 live) or a membership count (5) would refuse;
+    // the creation-keyed count lets the joiner's FIRST creation through.
+    const res = await createWorkspaceRequest(db, "joiner", { name: "Joiners own" });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string };
+    const rows = db.raw
+      .query("SELECT workspace_id, user_id, role FROM workspace_members WHERE workspace_id = ?")
+      .all(body.id) as MemberRow[];
+    expect(rows).toEqual([{ workspace_id: body.id, user_id: joiner.id, role: "owner" }]);
+    expect(createdLiveCount(db, joiner.id)).toBe(1);
+  });
+
   test("a soft-deleted workspace frees its slot: the sixth creation then succeeds", async () => {
     const db = createDashboardTestD1();
     db.raw.exec("DELETE FROM users");
