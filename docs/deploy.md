@@ -1274,6 +1274,13 @@ runs through the flows below instead of a staging domain.
 
 ### Pre-production verification (this Worker's real options)
 
+> **Staging environment** — the flows below run against the default (staging)
+> environment and the `mstar-inspector.42ch.dev` domain; the environment-free
+> `wrangler versions upload` and `wrangler versions deploy <version-id>@0%`
+> resolve the top-level config block. Production promotion is a separate path
+> with its own resources and approval (§ Production environment,
+> § Rollback (production)).
+
 **No versioned Preview URLs.** The Worker implements the `SandboxV1` Durable
 Object (container binding) — Cloudflare does NOT generate preview URLs for
 Workers implementing a DO (docs: Preview URLs → Limitations; verified live:
@@ -1315,6 +1322,13 @@ only via `wrangler deploy`).
 > `wrangler deploy` → smoke → digest record. The steps below are the manual
 > equivalent, kept as reference for local runs and for recovering from a
 > failed automated deploy.
+>
+> **Staging environment** — every command below targets the default (staging)
+> environment: the staging Worker `mstar-inspector`, the staging database
+> (`mstar-inspector-db`), and the `mstar-inspector.42ch.dev` domain. The
+> environment-free form in this section (`wrangler deployments list`) resolves
+> the top-level config block; production is a separate environment with its
+> own Worker, database and workflow (§ Production environment).
 
 Order lock (plan Clarify #5): code merge → `wrangler deploy` (the container
 image auto-rebuilds when the Dockerfile/build context changed) → post-deploy
@@ -1434,6 +1448,12 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > below are extra / local investigation steps, not the workflow smoke — for
 > local runs and for investigating a red run.
 >
+> **Staging environment** — the manual checks below read the staging database
+> (`mstar-inspector-db`) and the staging Worker `mstar-inspector`, which the
+> flag-free commands resolve. Investigating a red **production** run uses that
+> Worker's own resources — § Production red-run equivalents at the end of this
+> section.
+>
 > **URL permanence:** `/dashboard/apps` — and `/dashboard/apps/` —
 > are permanently retired → 301 `/dashboard`; do not re-introduce the path
 > (browsers cache the 301).
@@ -1477,6 +1497,25 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    ```
    `model` is the effective chain head selector, or NULL meaning the in-image
    default ran (§ Image pins and digest record).
+
+### Production red-run equivalents
+
+> **Production environment** — these commands read the production Worker
+> `mstar-inspector-production` and the production database
+> (`mstar-inspector-prod-db`), for investigating a red `deploy-prod.yml` run.
+> They are not the staging checks above.
+
+```bash
+wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
+  "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
+  "SELECT COUNT(*) AS n FROM review_failures"
+wrangler tail --env production
+```
+
+`review_failures` must be present and the count queryable. `wrangler tail
+--env production` streams the production Worker's log — the same evidence the
+staging checks read from a flag-free `wrangler tail`.
 
 ## Multi-App go-live
 
@@ -1678,9 +1717,15 @@ column.
 
 ### 5. Rollback (multi-App)
 
-Rollback is `wrangler rollback --env production` (see ### Rollback (production)
-above) — there is no legacy face to repoint to; the per-App webhook URL on
-GitHub is unchanged by a Worker rollback.
+Rollback is `wrangler versions deploy --env production <version-id>@100%`
+(see ### Rollback (production) above) — it re-points production at an
+already-uploaded version and leaves the container image at whatever the last
+`wrangler deploy` pushed; there is no legacy face to repoint to, and the
+per-App webhook URL on GitHub is unchanged. `wrangler rollback` is acceptable
+only as a one-step shortcut for that same version-only re-point when the
+target is the immediately previous version and no container image changed;
+across a container-affecting release use the explicit version id (or the
+re-dispatch door).
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
   (the chain head is `0025`). The code-only precedent (0002 — new code
@@ -1743,6 +1788,13 @@ Operationally that means:
 
 ## Rollback
 
+> **Staging environment** — the commands below target the staging Worker
+> `mstar-inspector` and the staging database (`mstar-inspector-db`);
+> production rollback is `### Rollback (production)`. The production **D1**
+> restore path is currently **undocumented**: this runbook records no
+> production `time-travel restore` command and no production bookmark
+> source, so that path is an open gap rather than a procedure.
+>
 > Rollback is a **manual human action** — the Deploy workflow never rolls
 > back automatically. A failed deploy stops red; the operator investigates
 > and, if needed, rolls back by hand.
