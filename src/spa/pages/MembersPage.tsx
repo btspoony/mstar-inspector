@@ -112,23 +112,21 @@ export function inviteFailureNotice(
  * 403: this viewer is no longer the owner — the page stays and a background
  * reload refreshes `memberRole`, which is what removes the stale owner-only
  * entry. 404: the workspace does not resolve for this viewer (deleted
- * elsewhere, or the membership is gone) — nothing on the page is worth
- * reloading, so it leaves, and the copy names no cause it cannot know. Any
- * other status (a 5xx) keeps the generic retry wording and leaves the page
- * untouched.
+ * elsewhere, or the membership is gone) — the page is dead, so it leaves for
+ * the dashboard and carries its copy through the flash instead of an inline
+ * notice it would never render. Any other status (a 5xx) keeps the generic
+ * retry wording and leaves the page untouched.
  */
 export type DeleteRefusal =
   | { next: "reload"; kind: NoticeKind; key: "members.deleteWorkspaceNotOwner" }
-  | { next: "leave"; kind: NoticeKind; key: "members.deleteWorkspaceUnavailable" }
+  | { next: "leave" }
   | { next: "stay"; kind: NoticeKind; key: "members.deleteWorkspaceFailed" };
 
 export function deleteRefusal(status: number): DeleteRefusal {
   if (status === 403) {
     return { next: "reload", kind: "warn", key: "members.deleteWorkspaceNotOwner" };
   }
-  if (status === 404) {
-    return { next: "leave", kind: "warn", key: "members.deleteWorkspaceUnavailable" };
-  }
+  if (status === 404) return { next: "leave" };
   return { next: "stay", kind: "error", key: "members.deleteWorkspaceFailed" };
 }
 
@@ -263,10 +261,21 @@ export function DeleteWorkspaceAction({
 export async function deleteWorkspace(base: string): Promise<number> {
   const { status } = await postForm(`${base}/api/workspace/delete`, {});
   if (status < 400) {
-    setFlash();
+    setFlash("workspaceDeleted");
     window.location.assign("/dashboard");
   }
   return status;
+}
+
+/**
+ * The terminal 404 outcome: the workspace no longer resolves for this viewer,
+ * so the page leaves for the dashboard carrying the one-shot "unavailable"
+ * flash — the landing states it once. No background reload and no inline
+ * notice: neither would have anything valid left to show.
+ */
+export function leaveWorkspaceForDashboard(): void {
+  setFlash("workspaceUnavailable");
+  window.location.assign("/dashboard");
 }
 
 /**
@@ -395,23 +404,25 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
   // background refresh surfaces through the notice channel instead of the
   // page-level error state.
   const load = useCallback(
-    async ({ background = false }: { background?: boolean } = {}): Promise<void> => {
+    async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
       if (!background) setState("loading");
       try {
         const payload = await loadMembersPage(base);
         if (!payload) {
           if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
           else setState("error");
-          return;
+          return false;
         }
         setMembers(payload.members);
         setMemberRole(payload.role);
         setInvites(payload.invites);
         setWorkspace(payload.workspace);
         setState("ok");
+        return true;
       } catch {
         if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
         else setState("error");
+        return false;
       }
     },
     [base, locale],
@@ -530,16 +541,14 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
         setDeleteOpen(false);
         const refusal = deleteRefusal(status);
         if (refusal.next === "leave") {
-          // The workspace no longer resolves for this viewer: leave the dead
-          // page for the same landing a successful delete uses. No background
-          // reload — it could only 404 again.
-          window.location.assign("/dashboard");
+          leaveWorkspaceForDashboard();
           return;
         }
-        // 403 only: the refreshed `memberRole` removes the stale owner-only
-        // entry; then the refusal copy wins over any notice that reload raised.
-        if (refusal.next === "reload") await load({ background: true });
-        setNotice({ kind: refusal.kind, message: t(locale, refusal.key) });
+        // 403: the refreshed `memberRole` removes the stale owner-only entry.
+        // A reload that itself failed already published the load-failure
+        // notice; that one outranks the refusal copy, so leave it standing.
+        const refreshed = refusal.next === "reload" ? await load({ background: true }) : true;
+        if (refreshed) setNotice({ kind: refusal.kind, message: t(locale, refusal.key) });
       }
     } catch {
       // Network failure — postForm throws on fetch rejection.

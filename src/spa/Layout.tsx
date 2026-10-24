@@ -10,6 +10,7 @@ import { t } from "../i18n";
 import type { SpaBoot } from "./boot";
 import { AppSidebar } from "./components/AppSidebar";
 import { SupportNotice } from "./components/SupportNotice";
+import type { FlashKind } from "./flash";
 import { PageNotice } from "./pages/PageNotice";
 import { matchSpaRoute } from "./routes";
 import { buildNavbarModel, buildSidebarModel, buildWorkspaceSwitcherModel } from "./shell";
@@ -19,8 +20,17 @@ type LayoutProps = {
   boot: SpaBoot;
   pathname: string;
   /** One-shot outcome read at boot (`./flash`): shown on this mount only. */
-  flash: boolean;
+  flash: FlashKind | null;
   children: ReactNode;
+};
+
+/** The one-shot outcome copy: tone plus the dictionary key that states it. */
+const FLASH_NOTICE: Record<
+  FlashKind,
+  { kind: "success" | "warn"; key: "notice.success.workspaceDeleted" | "notice.warn.workspaceUnavailable" }
+> = {
+  workspaceDeleted: { kind: "success", key: "notice.success.workspaceDeleted" },
+  workspaceUnavailable: { kind: "warn", key: "notice.warn.workspaceUnavailable" },
 };
 
 type Theme = "light" | "dark";
@@ -55,6 +65,7 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
   const memberships = useLiveMemberships(boot);
   const switcher = buildWorkspaceSwitcherModel({ ...boot, memberships }, pathname);
   const navbar = buildNavbarModel(boot);
+  const flashNotice = flash === null ? null : FLASH_NOTICE[flash];
   const [theme, setTheme] = useState<Theme>(effectiveTheme);
 
   function toggleTheme() {
@@ -102,8 +113,8 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
           <SupportNotice boot={boot} pathname={pathname} />
           {/* One-shot outcome from the page just left (the delete flow): the
               boot read and cleared its key, so this load shows it once. */}
-          {flash ? (
-            <PageNotice kind="success" message={t(boot.locale, "notice.success.workspaceDeleted")} />
+          {flashNotice ? (
+            <PageNotice kind={flashNotice.kind} message={t(boot.locale, flashNotice.key)} />
           ) : null}
           {children}
         </div>
@@ -118,7 +129,7 @@ export function Layout({ boot, pathname, flash: bootFlash, children }: LayoutPro
   // it after paint, so this instance can never show the spent outcome again —
   // including an A → B → A walk that returns to the landing path.
   const [flash, setFlash] = useState(bootFlash);
-  useEffect(() => setFlash(false), []);
+  useEffect(() => setFlash(null), []);
   if (route?.page === "login") {
     return <LoginChrome>{children}</LoginChrome>;
   }

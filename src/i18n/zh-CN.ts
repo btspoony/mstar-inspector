@@ -78,6 +78,7 @@ export const zhCN: Dictionary = {
     warn: {
       alreadyMember: "{login} 已是成员 — 未做更改。",
       invitePending: "{login} 已有待接受的邀请 — 未做更改。",
+      workspaceUnavailable: "你已无法访问此工作区。",
     },
     error: {
       enterLogin: "请输入要邀请的 GitHub 登录名。",
@@ -190,7 +191,6 @@ export const zhCN: Dictionary = {
       "此操作无法撤销。成员将失去访问权限，待接受的邀请将被撤销，本工作区内的 App 将不再接受审查。已开始的审查不会被取消。",
     deleteWorkspaceFailed: "无法删除工作区 — 请重试。",
     deleteWorkspaceNotOwner: "只有工作区所有者才能删除它。",
-    deleteWorkspaceUnavailable: "你已无法访问此工作区。",
     inviteLabel: "按 GitHub 登录名邀请",
     invitePlaceholder: "例如 octocat",
     inviteButton: "邀请成员",

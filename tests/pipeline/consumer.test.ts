@@ -4955,6 +4955,45 @@ describe("usage ledger (migration 0031)", () => {
       idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
     );
     expect(row.error).toContain('"workspaceId":"default"');
+    // Nothing landed: this is the one backfillable variant.
+    expect(row.error).toContain('"applied":false');
+  });
+
+  test("an ambiguous usage failure records applied: true so it is not backfilled twice", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The real insert runs, THEN the driver "throws" — the ambiguous failure
+    // the ledger read-back exists to tell apart from a pre-commit one.
+    const appliedThenThrew: TestD1 = {
+      ...db,
+      prepare(query: string) {
+        const real = db.prepare(query);
+        if (!query.includes("INSERT INTO usage_events")) return real;
+        return {
+          bind: (...values: unknown[]) => ({
+            run: async () => {
+              await real.bind(...values).run();
+              throw new Error("usage boom after commit");
+            },
+          }),
+        } as never;
+      },
+    };
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: appliedThenThrew as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    // The row exists, so `applied: true` marks the failure as noise and keeps
+    // a backfill from minting a second `seq` for the same execution.
+    expect(usageRows(db)).toHaveLength(1);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error).toContain('"applied":true');
   });
 
   test("a genuine re-execution after a runner failure mints seq 2 for the same review", async () => {
