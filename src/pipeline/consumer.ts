@@ -85,7 +85,7 @@ import { encodeCredentialPayload, type CredentialPools } from "../../packages/sh
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
-import { hasUsageEventForReview, recordUsageEvent } from "../store/usage-store";
+import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   applyPublishedLifecycle,
@@ -2255,7 +2255,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       ...key,
       head_sha: payload.head_sha || "no-sha",
     });
-    const usageEvent = { reviewId, workspaceId, occurredAt: new Date().toISOString() };
+    const usageEvent = {
+      reviewId,
+      // The durable identity of THIS attempt: a review may already hold earlier
+      // rows, so the failure read-back below must ask by token, not by review.
+      executionToken: crypto.randomUUID(),
+      workspaceId,
+      occurredAt: new Date().toISOString(),
+    };
     try {
       // No retry: the insert mints `seq + 1` for this `review_id`, so an
       // automatic retry after an ambiguous failure (the write applied, the
@@ -2265,12 +2272,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       // A pre-commit failure and an ambiguous one (the write landed, the driver
-      // threw) reach this catch identically. The ledger read-back separates
+      // threw) reach this catch identically. The token read-back separates
       // them: `applied: false` is the only backfillable case; `applied: true`
-      // means the row exists and this failure is noise. An unreadable ledger is
-      // recorded as not applied — a backfill must re-check before it writes,
-      // since the insert mints `seq + 1` and a blind re-insert would double-count.
-      const applied = await hasUsageEventForReview(deps.env.DB, reviewId).catch(() => false);
+      // means THIS execution's row is present and the failure is noise.
+      const applied = await hasUsageEventForExecutionToken(
+        deps.env.DB,
+        usageEvent.executionToken,
+      ).catch(() => false);
       deps.log.warn(
         { ...fields, review_id: reviewId, workspace_id: workspaceId, usage_applied: applied },
         `usage_events insert failed (review continues): ${detail}`,
@@ -2285,7 +2293,12 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           pr_number: payload.pr_number,
           head_sha: headSha,
           stage: "usage",
-          error: `usage_events insert failed: ${detail} ${JSON.stringify({ reviewId, workspaceId, applied })}`,
+          error: `usage_events insert failed: ${detail} ${JSON.stringify({
+            reviewId,
+            workspaceId,
+            executionToken: usageEvent.executionToken,
+            applied,
+          })}`,
         });
       } catch (recordErr) {
         const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);

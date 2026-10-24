@@ -28,6 +28,13 @@
 -- back. workspace_id is the FK that keeps a usage row attributable to a real
 -- tenant.
 --
+-- execution_token is the durable identity of ONE started execution (the
+-- producer mints a UUID per attempt, before it writes). seq answers "which
+-- attempt of this review"; the token answers "this attempt" — which is what
+-- lets a failed insert be read back as landed or not even when earlier
+-- attempts are already on record. It is UNIQUE, so one execution can never be
+-- counted twice by a replayed write.
+--
 -- Append-only on the production DB: creates new tables only, touches no
 -- existing table. There is deliberately no ON DELETE clause (0004/0026
 -- precedent): removal is soft delete, and the default NO ACTION makes a hard
@@ -63,16 +70,21 @@ CREATE TABLE workspace_subscriptions (
 );
 
 CREATE TABLE usage_events (
-  review_id    TEXT NOT NULL,
-  seq          INTEGER NOT NULL,
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-  occurred_at  TEXT NOT NULL,
+  review_id       TEXT NOT NULL,
+  seq             INTEGER NOT NULL,
+  execution_token TEXT NOT NULL,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id),
+  occurred_at     TEXT NOT NULL,
   PRIMARY KEY (review_id, seq)
 );
 
 -- Serves the month-window count (`WHERE workspace_id = ? AND occurred_at >= ?`);
 -- the (review_id, seq) PK cannot.
 CREATE INDEX usage_events_workspace_occurred ON usage_events(workspace_id, occurred_at);
+
+-- One row per execution attempt: the read-back after a failed insert asks by
+-- token, and a replayed write cannot double-count the same execution.
+CREATE UNIQUE INDEX usage_events_execution_token ON usage_events(execution_token);
 
 INSERT INTO plans (
   id, name, monthly_price_cents, included_members, extra_member_price_cents,

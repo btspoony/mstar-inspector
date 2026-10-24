@@ -4873,6 +4873,7 @@ describe("usage ledger (migration 0031)", () => {
           head_sha: SHA,
         }),
         seq: 1,
+        execution_token: expect.any(String),
         workspace_id: "default",
         occurred_at: expect.any(String),
       },
@@ -4996,6 +4997,55 @@ describe("usage ledger (migration 0031)", () => {
     expect(failureRows(db)[0]!.error).toContain('"applied":true');
   });
 
+  test("a pre-commit failure on the second attempt is applied: false even with seq 1 present", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const reviewId = idemKey({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: SHA,
+    });
+    // A prior attempt already metered seq 1 for this review.
+    db.raw
+      .prepare(
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
+         VALUES (?, 1, 'prior-execution', 'default', ?)`,
+      )
+      .run(reviewId, new Date().toISOString());
+    let insertAttempts = 0;
+    const failingUsageDb: TestD1 = {
+      ...db,
+      prepare(query: string) {
+        if (!query.includes("INSERT INTO usage_events")) return db.prepare(query);
+        return {
+          bind: () => ({
+            run: async () => {
+              insertAttempts += 1;
+              throw new Error("usage boom");
+            },
+          }),
+        } as never;
+      },
+    };
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: failingUsageDb as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(insertAttempts).toBe(1);
+    // THIS execution wrote nothing, so it is backfillable — asking by row count
+    // for the review would have answered "applied" from the earlier attempt.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error).toContain('"applied":false');
+    expect(usageRows(db)).toHaveLength(1);
+  });
+
   test("a genuine re-execution after a runner failure mints seq 2 for the same review", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -5023,6 +5073,9 @@ describe("usage ledger (migration 0031)", () => {
       [key, 1],
       [key, 2],
     ]);
+    // Each attempt carries its own durable identity, so a later failure can be
+    // read back by token instead of by the review's row count.
+    expect(new Set(usageRows(db).map((row) => row.execution_token)).size).toBe(2);
     expect(reviewCount(db)).toBe(1);
   });
 

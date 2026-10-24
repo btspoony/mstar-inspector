@@ -70,12 +70,15 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
   test("usage_events keys usage per (review_id, seq) and needs a real workspace", () => {
     const db = createMigratedTestD1();
     const insert = db.raw.prepare(
-      "INSERT INTO usage_events (review_id, seq, workspace_id, occurred_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at) VALUES (?, ?, ?, ?, ?)",
     );
-    insert.run("review-1", 1, "default", "2026-10-24T00:00:00.000Z");
-    expect(() => insert.run("review-1", 1, "default", "2026-10-24T00:00:00.000Z")).toThrow();
-    insert.run("review-1", 2, "default", "2026-10-24T00:00:00.000Z");
-    expect(() => insert.run("review-2", 1, "missing", "2026-10-24T00:00:00.000Z")).toThrow();
+    const at = "2026-10-24T00:00:00.000Z";
+    insert.run("review-1", 1, "token-1", "default", at);
+    expect(() => insert.run("review-1", 1, "token-2", "default", at)).toThrow();
+    insert.run("review-1", 2, "token-3", "default", at);
+    // One execution, one row: the same token can never be counted twice.
+    expect(() => insert.run("review-1", 3, "token-3", "default", at)).toThrow();
+    expect(() => insert.run("review-2", 1, "token-4", "missing", at)).toThrow();
     db.raw.close();
   });
 
@@ -83,6 +86,8 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
     const db = createMigratedTestD1();
     const indexes = db.raw.query("PRAGMA index_list('usage_events')").all() as Array<{ name: string }>;
     expect(indexes.map((index) => index.name)).toContain("usage_events_workspace_occurred");
+    // The execution identity is unique, so a replayed write cannot double-count.
+    expect(indexes.map((index) => index.name)).toContain("usage_events_execution_token");
     db.raw.close();
   });
 

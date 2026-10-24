@@ -19,6 +19,12 @@ import type { D1Like } from "./types";
 /** The usage row input. `occurredAt` is an ISO-8601 string supplied by the caller. */
 export type UsageEventInput = {
   reviewId: string;
+  /**
+   * One per STARTED execution attempt, minted by the producer before it writes
+   * (UNIQUE in the table). It is the identity a failed insert is read back by:
+   * earlier attempts for the same review must never answer for this one.
+   */
+  executionToken: string;
   workspaceId: string;
   occurredAt: string;
 };
@@ -44,22 +50,27 @@ export async function countUsageEventsSince(
 export async function recordUsageEvent(db: D1Like, input: UsageEventInput): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO usage_events (review_id, seq, workspace_id, occurred_at)
-       SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3 FROM usage_events WHERE review_id = ?1`,
+      `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
+       SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4 FROM usage_events WHERE review_id = ?1`,
     )
-    .bind(input.reviewId, input.workspaceId, input.occurredAt)
+    .bind(input.reviewId, input.executionToken, input.workspaceId, input.occurredAt)
     .run();
 }
 
 /**
- * Whether the ledger already holds an execution row for this identity — the
- * read-back that tells a PRE-commit insert failure apart from an ambiguous
- * one (the write landed, the driver threw). Only the former is backfillable.
+ * Whether THIS execution attempt's row landed — the read-back that tells a
+ * PRE-commit insert failure apart from an ambiguous one (the write landed, the
+ * driver threw). It asks by `execution_token`, never by a row count: a review
+ * may already hold earlier attempts, and a count would mislabel a failed second
+ * attempt as applied. Only `false` is backfillable.
  */
-export async function hasUsageEventForReview(db: D1Like, reviewId: string): Promise<boolean> {
+export async function hasUsageEventForExecutionToken(
+  db: D1Like,
+  executionToken: string,
+): Promise<boolean> {
   const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM usage_events WHERE review_id = ?`)
-    .bind(reviewId)
-    .first<{ n: number }>();
-  return (row?.n ?? 0) > 0;
+    .prepare(`SELECT 1 AS present FROM usage_events WHERE execution_token = ?`)
+    .bind(executionToken)
+    .first<{ present: number }>();
+  return row !== null;
 }
