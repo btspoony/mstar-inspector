@@ -2,9 +2,10 @@
  * Migration 0031: plan catalogue, workspace subscriptions, usage ledger.
  *
  * The migration is the product here, so the assertions pin its contract rather
- * than the DDL text: two seeded plans with NULL (not sentinel) optional
- * limits, absence-of-subscription as the free default, and the review-attempt
- * idempotency key. The fixture is the repo's fully-migrated D1 double, which
+ * than the DDL text: two seeded plans with NULL (not sentinel) prices and
+ * optional limits, absence-of-subscription as the free default, and the
+ * (review_id, seq) usage ledger key. The fixture is the fully-migrated D1
+ * double, which
  * walks `migrations/` in filename order exactly like
  * `wrangler d1 migrations apply`.
  */
@@ -22,7 +23,7 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
       {
         id: "free",
         name: "Free",
-        monthly_price_cents: 0,
+        monthly_price_cents: null,
         included_members: 5,
         extra_member_price_cents: null,
         platform_key_limit: null,
@@ -33,9 +34,9 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
       {
         id: "pro",
         name: "Pro",
-        monthly_price_cents: 0,
+        monthly_price_cents: null,
         included_members: 5,
-        extra_member_price_cents: 500,
+        extra_member_price_cents: null,
         platform_key_limit: null,
         reviews_included: null,
         apps_per_workspace: null,
@@ -66,7 +67,7 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
     db.raw.close();
   });
 
-  test("usage_events is idempotent per (review_id, seq) and needs a real workspace", () => {
+  test("usage_events keys usage per (review_id, seq) and needs a real workspace", () => {
     const db = createMigratedTestD1();
     const insert = db.raw.prepare(
       "INSERT INTO usage_events (review_id, seq, workspace_id, occurred_at) VALUES (?, ?, ?, ?)",

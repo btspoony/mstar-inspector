@@ -4,10 +4,10 @@
 -- Every limit column describes a plan-level capability, and NULL is the
 -- contract, not a missing value: a NULL limit means "unlimited" when the
 -- column is a quota (platform_key_limit, reviews_included,
--- apps_per_workspace) and "not enabled" when the column is a price
--- (extra_member_price_cents). Never encode either state as a sentinel number
--- (0 or -1) — a consumer that forgets the sentinel would read it as a real
--- quota.
+-- apps_per_workspace) and "not configured" when the column is a price
+-- (monthly_price_cents, extra_member_price_cents). Never encode either state
+-- as a sentinel number (0 or -1) — a consumer that forgets the sentinel would
+-- read it as a real price or quota.
 --
 -- workspace_subscriptions is the tenant side: at most one row per workspace
 -- (workspace_id is the PK), pointing at a plans row. There is deliberately NO
@@ -17,11 +17,15 @@
 -- ('active' today); it is not a CHECK domain yet because the only writer is
 -- workspace creation.
 --
--- usage_events is the review attempt ledger: (review_id, seq) is the
--- idempotency key, so a redelivered webhook or a retried attempt cannot be
--- counted twice. review_id is an idempotency-key STRING and deliberately not a
--- FK — the ledger records attempts even when the review row itself rolls back.
--- workspace_id is the FK that keeps a usage row attributable to a real tenant.
+-- usage_events is the review usage ledger and (review_id, seq) is its key.
+-- seq is minted per STARTED execution of a review: a genuine re-execution
+-- after a runner failure therefore adds a second row for the same review_id
+-- and is counted again, deliberately. A duplicate delivery of a completed
+-- review writes nothing — the dedup reads run before this insert. Each
+-- review_id may legitimately hold several rows. review_id is a STRING and
+-- deliberately not an FK: an attempt can outlive a review row that rolled
+-- back. workspace_id is the FK that keeps a usage row attributable to a real
+-- tenant.
 --
 -- Append-only on the production DB: creates new tables only, touches no
 -- existing table. There is deliberately no ON DELETE clause (0004/0026
@@ -32,17 +36,14 @@
 -- is created and seeded first in this file.
 --
 -- The seed uses a fixed ISO timestamp rather than a database clock so the
--- applied rows are byte-identical across local and remote applies.
---
--- pro.monthly_price_cents is a structural placeholder (0): nothing displays or
--- charges a price yet; real pricing is a later checkout input and must update
--- this row before any price surface ships. pro.extra_member_price_cents is a
--- placeholder $5.00 (500 cents) for the same reason.
+-- applied rows are byte-identical across local and remote applies. No plan
+-- carries a price yet: both price columns are NULL ("not configured") until
+-- pricing exists, so no surface can read a made-up amount.
 
 CREATE TABLE plans (
   id                       TEXT PRIMARY KEY,
   name                     TEXT NOT NULL,
-  monthly_price_cents      INTEGER NOT NULL,
+  monthly_price_cents      INTEGER,
   included_members         INTEGER NOT NULL,
   extra_member_price_cents INTEGER,
   platform_key_limit       INTEGER,
@@ -72,5 +73,5 @@ INSERT INTO plans (
   platform_key_limit, reviews_included, apps_per_workspace, created_at
 )
 VALUES
-  ('free', 'Free', 0, 5, NULL, NULL, NULL, NULL, '2026-10-24T00:00:00.000Z'),
-  ('pro',  'Pro',  0, 5, 500,  NULL, NULL, NULL, '2026-10-24T00:00:00.000Z');
+  ('free', 'Free', NULL, 5, NULL, NULL, NULL, NULL, '2026-10-24T00:00:00.000Z'),
+  ('pro',  'Pro',  NULL, 5, NULL, NULL, NULL, NULL, '2026-10-24T00:00:00.000Z');
