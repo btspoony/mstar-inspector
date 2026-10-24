@@ -2850,6 +2850,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(kvPuts).toHaveLength(0);
     // The ok path resolves silently (queue auto-ack) — nothing retried.
     expect(messageRetryCalls).toHaveLength(0);
+    // The handoff returns before the usage insert: a journal hit is not a
+    // started execution and writes no ledger row.
+    expect(usageRows(db)).toHaveLength(0);
     // The journal row is untouched (pending recovery is never deleted).
     const pub = db.raw.query("SELECT phase, recovery_state FROM review_publications WHERE id = 'dddddddd-0000-4000-8000-000000000004'").get() as {
       phase: string;
@@ -4942,5 +4945,35 @@ describe("usage ledger (migration 0031)", () => {
     expect(usageRows(db)).toHaveLength(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "usage" });
+  });
+
+  test("a genuine re-execution after a runner failure mints seq 2 for the same review", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    // Attempt 1: the runner fails, so no reviews row, KV done or journal row
+    // exists — both dedup reads and the journal handoff miss on the retry.
+    runnerExitCode = 1;
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+    expect(usageRows(db).map((row) => row.seq)).toEqual([1]);
+
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    await consumer(makeBatch(makePayload()));
+
+    const key = idemKey({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: SHA,
+    });
+    expect(usageRows(db).map((row) => [row.review_id, row.seq])).toEqual([
+      [key, 1],
+      [key, 2],
+    ]);
+    expect(reviewCount(db)).toBe(1);
   });
 });

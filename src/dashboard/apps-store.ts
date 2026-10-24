@@ -442,7 +442,10 @@ export function createAppsStore(db: AppsStoreD1) {
       return row;
     },
 
-    /** By slug; resolves soft-deleted and disabled rows too (callers filter). */
+    /**
+     * By slug; resolves soft-deleted and disabled App rows too (callers
+     * filter), but NOT an App whose workspace is soft-deleted.
+     */
     async getAppBySlug(slug: string): Promise<GithubAppRow | null> {
       return db
         .prepare(APP_READ_SQL.getAppBySlug)
@@ -450,7 +453,10 @@ export function createAppsStore(db: AppsStoreD1) {
         .first<GithubAppRow>();
     },
 
-    /** By id; resolves soft-deleted and disabled rows too (callers filter). */
+    /**
+     * By id; resolves soft-deleted and disabled App rows too (callers
+     * filter), but NOT an App whose workspace is soft-deleted.
+     */
     async getAppById(id: string): Promise<GithubAppRow | null> {
       return db.prepare(APP_READ_SQL.getAppById).bind(id).first<GithubAppRow>();
     },
