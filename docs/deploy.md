@@ -1511,7 +1511,8 @@ openssl rand -base64 32
 Set it as a **GitHub Secret** (`DASHBOARD_ENCRYPTION_KEY`) — the Deploy
 workflow injects it on the next deploy (never in git; `.dev.vars` for local
 `wrangler dev`). The manual `wrangler secret put` below is the local/fallback
-form:
+form: it targets the default (staging) environment, while production's value is
+set through the GitHub Secret above:
 
 ```bash
 wrangler secret put DASHBOARD_ENCRYPTION_KEY
@@ -1677,8 +1678,8 @@ runner evidence, not the column.
 
 ### 5. Rollback (multi-App)
 
-Rollback is `wrangler rollback` (see § Rollback below) — there is no legacy
-face to repoint to; the per-App webhook URL on GitHub is unchanged by a
+Rollback is `wrangler rollback` (see ### Rollback (production)) — there is no
+legacy face to repoint to; the per-App webhook URL on GitHub is unchanged by a
 Worker rollback.
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
