@@ -549,7 +549,7 @@ VALUES
 ```
 
 ```sh
-wrangler d1 execute mstar-inspector --remote \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production \
   --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','<reason>','<you>','$(date -u +%FT%TZ)','<ISO expiry>')"
 ```
 
@@ -562,7 +562,7 @@ control at all, and **revocation is an append-only write, not a delete**:
 # Close the window now: append a superseding row whose window is already over.
 # The old row is untouched history, so "revoked" stays distinguishable from
 # "lapsed" and the audit trail keeps both.
-wrangler d1 execute mstar-inspector --remote \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production \
   --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','revoked: <why>','<you>','$(date -u +%FT%TZ)','$(date -u +%FT%TZ)')"
 ```
 
@@ -621,7 +621,7 @@ could only have got a `default` membership from the replay, so the join on
    list is exactly the damage:
 
    ```sh
-   wrangler d1 execute mstar-inspector-db --remote \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production \
      --command "SELECT u.github_login, wm.role, wm.created_at, u.created_at AS signed_up_at FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = 'default' AND wm.created_at = '2026-10-21T00:00:00.000Z' AND u.created_at >= '2026-10-22T11:13:45.000Z'"
    ```
 
@@ -637,7 +637,7 @@ could only have got a `default` membership from the replay, so the join on
    they carry the same fixed stamp. The `users` rows themselves stay.
 
    ```sh
-   wrangler d1 execute mstar-inspector-db --remote \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production \
      --command "DELETE FROM workspace_members WHERE workspace_id = 'default' AND created_at = '2026-10-21T00:00:00.000Z' AND user_id IN (SELECT id FROM users WHERE created_at >= '2026-10-22T11:13:45.000Z')"
    ```
 
@@ -659,10 +659,15 @@ could only have got a `default` membership from the replay, so the join on
 
 Ordering note: run (1), then (2). There is no third step to order against. If
 the deployment has **not** yet applied `0030`, apply it first (`wrangler d1
-migrations apply`): until it has, the legitimate pre-cutover rows it would
-write are missing, and step (2) is still correct on its own predicate.
+migrations apply mstar-inspector-prod-db --remote --env production`): until it
+has, the legitimate pre-cutover rows it would write are missing, and step (2)
+is still correct on its own predicate.
 
 ### The FIRST application has the same blind spot
+
+**Scope: this subsection targets a staging copy or a self-hosted deployment
+tracking the branch — not the production upgrade path, so its commands use the
+staging binding (`mstar-inspector-db`).**
 
 The hand re-run above is not the only way `0030` can restore somebody. Its
 `NOT EXISTS` guard looks at live memberships only, so the **first** ledger
@@ -920,6 +925,10 @@ exist before the first deploy:
     change, not a casual follow-up.
 
 ### D1 migrations (forward-only)
+
+> **Staging database** — the commands below run against the staging DB
+> (`mstar-inspector-db`); a production apply uses
+> `mstar-inspector-prod-db --remote --env production`.
 
 The apply is **preceded by a pre-apply snapshot** — the restore point
 every `0024`/`0025` rollback refers to (§ Rollback). `0024` rebuilds
@@ -1502,7 +1511,8 @@ openssl rand -base64 32
 Set it as a **GitHub Secret** (`DASHBOARD_ENCRYPTION_KEY`) — the Deploy
 workflow injects it on the next deploy (never in git; `.dev.vars` for local
 `wrangler dev`). The manual `wrangler secret put` below is the local/fallback
-form:
+form: it targets the default (staging) environment, while production's value is
+set through the GitHub Secret above:
 
 ```bash
 wrangler secret put DASHBOARD_ENCRYPTION_KEY
@@ -1571,7 +1581,7 @@ and the settings model faces write and read.
    and webhook URL. Verify in D1 (grab the `id` — the R1 pin below needs
    it):
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT id, slug, name, status, created_by, created_at FROM github_apps ORDER BY created_at DESC LIMIT 1"
    ```
    Healthy — exactly one row (the App just committed; the query caps at
@@ -1633,9 +1643,9 @@ chain: an override referencing a provider with no configured key fails
 closed the same way (Bugbot 7aaf18f4).
 Per-role overrides (the seat references in `app_model_chain_seats`, 0017; the
 pre-`0017` `app_model_roles` rows were backfilled into named chains and are
-read-retired) are deliberately NOT
-column-reflected — pin those with the completed review + `wrangler tail`
-runner evidence, not the column.
+read-retired) are deliberately NOT column-reflected — pin those with the
+completed review + `wrangler tail --env production` runner evidence, not the
+column.
 
 1. **Configure the chain** — on the App's settings page, set **Model chain**
    to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
@@ -1648,7 +1658,7 @@ runner evidence, not the column.
 3. **Assert the column** — the review lands and the row records the chain
    head:
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT model, skill_version, reviewed_at FROM reviews WHERE app_id = '<app-id>' ORDER BY reviewed_at DESC LIMIT 1"
    ```
    `model` must equal the configured chain head (`ark-plan/deepseek-v4-flash`
@@ -1657,7 +1667,7 @@ runner evidence, not the column.
    `effectiveModelChain`). The triggering delivery is visible in the same
    window:
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT outcome, event_name, status_code, created_at FROM webhook_deliveries WHERE app_id = '<app-id>' ORDER BY created_at DESC LIMIT 1"
    ```
    `outcome` must be `ok` — the ok row records the webhook ACCEPTED
@@ -1668,17 +1678,17 @@ runner evidence, not the column.
 
 ### 5. Rollback (multi-App)
 
-Rollback is `wrangler rollback` (see § Rollback below) — there is no legacy
-face to repoint to; the per-App webhook URL on GitHub is unchanged by a
-Worker rollback.
+Rollback is `wrangler rollback --env production` (see ### Rollback (production)
+above) — there is no legacy face to repoint to; the per-App webhook URL on
+GitHub is unchanged by a Worker rollback.
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
   (the chain head is `0025`). The code-only precedent (0002 — new code
   tolerates the prior schema) covers additive migrations; `0024` and `0025`
   rebuilt tables, so pre-`0024` code does not run against the live schema and
   their rollback needs the pre-apply snapshot as well (§ D1 migrations,
-  § Rollback). The `0023` removal tombstones stay safe on a code rollback: a
-  version predating `removed_logins` simply ignores the table.
+  ### Rollback (production)). The `0023` removal tombstones stay safe on a code
+  rollback: a version predating `removed_logins` simply ignores the table.
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
@@ -1754,8 +1764,9 @@ Operationally that means:
   # Revert the code first (Worker rollback above), then restore the database
   # to the pre-apply snapshot recorded in § D1 migrations. Destructive and
   # in-place on a GA backend; prints an undo bookmark before it runs.
-  # (The `time-travel info` step in § D1 migrations decides this branch: it
-  # fails outright on an alpha database, which takes the alpha path below.)
+  # (The bookmark is the one printed by the staging `time-travel info` step in
+  # § D1 migrations. That step also decides this branch: it fails outright on
+  # an alpha database, which takes the alpha path below.)
   wrangler d1 time-travel restore mstar-inspector-db --bookmark=<pre-apply-bookmark>
   ```
   The bookmark is valid for 30 days after the apply and is the only restore
@@ -2084,7 +2095,7 @@ Monthly (or when the table grows noticeably), delete rows older than 30
 days:
 
 ```bash
-wrangler d1 execute mstar-inspector-db --remote --command \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
   "DELETE FROM review_failures WHERE created_at < datetime('now','-30 days')"
 ```
 
