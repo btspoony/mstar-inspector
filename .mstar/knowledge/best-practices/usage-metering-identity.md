@@ -37,7 +37,7 @@ Inside the sandbox, **after** the authoritative sha and **after** both idempoten
 - the failure table enforces a producer-side stage vocabulary — add the new stage there (`usage`) or the recorder throws inside your catch;
 - if that vocabulary lives only in code (no DDL `CHECK`), widening it costs one line and no migration;
 - wrap the recording call in its own guard so a doubly-failed write still cannot mask the review;
-- read the failed attempt back by its `execution_token` and record `applied` in that row: only `applied: false` is backfillable, because the insert mints `seq + 1` — a blind re-insert after an ambiguous failure (the write landed, the driver threw) would count one execution twice.
+- read the failed attempt back by its `execution_token` and record `applied` as `true | false | "unknown"`: `true` means this execution's row is present (the failure is noise), `false` means the read succeeded and found nothing — the only state that authorises a backfill — and `"unknown"` means the read itself failed. A backfill must re-check the token before inserting: the unique index only rejects a replay that reuses the recorded token, and a fresh token mints another `seq`.
 
 ## Index for the read you will add
 

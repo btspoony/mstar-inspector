@@ -279,8 +279,8 @@ export type ConsumerLogFields = {
    */
   review_id?: string;
   workspace_id?: string;
-  /** Whether a failed usage insert had in fact landed (ambiguous D1 failure). */
-  usage_applied?: boolean;
+  /** Whether a failed usage insert landed: true, false (verified absent), or unreadable. */
+  usage_applied?: boolean | "unknown";
   /** Review tier resolved from REVIEW_LEVEL. */
   level?: ReviewLevel;
   /** Runner wall-clock budget for `level` (ms) — runnerTimeoutMs(level). */
@@ -2264,21 +2264,25 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       occurredAt: new Date().toISOString(),
     };
     try {
-      // No retry: the insert mints `seq + 1` for this `review_id`, so an
-      // automatic retry after an ambiguous failure (the write applied, the
-      // driver threw) would count one execution twice. A dropped row stays
-      // reconcilable through the `usage` failure row below instead.
+      // No retry: a replay of the SAME token is already idempotent (the unique
+      // index rejects it), and a retry that minted a NEW token would be a
+      // different execution by definition — a second count for one attempt. A
+      // dropped row stays reconcilable through the `usage` failure row below.
       await recordUsageEvent(deps.env.DB, usageEvent);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       // A pre-commit failure and an ambiguous one (the write landed, the driver
-      // threw) reach this catch identically. The token read-back separates
-      // them: `applied: false` is the only backfillable case; `applied: true`
-      // means THIS execution's row is present and the failure is noise.
-      const applied = await hasUsageEventForExecutionToken(
+      // threw) reach this catch identically. The token read-back separates them
+      // and reports THREE states: `true` — this execution's row is present, so
+      // the failure is noise; `false` — the read succeeded and found nothing,
+      // the only state a backfill may act on; `"unknown"` — the read itself
+      // failed, so nothing is known. A backfill must re-check the token before
+      // inserting: the unique index only rejects a replay that REUSES the
+      // recorded token, and a fresh token would mint another `seq`.
+      const applied: true | false | "unknown" = await hasUsageEventForExecutionToken(
         deps.env.DB,
         usageEvent.executionToken,
-      ).catch(() => false);
+      ).catch(() => "unknown" as const);
       deps.log.warn(
         { ...fields, review_id: reviewId, workspace_id: workspaceId, usage_applied: applied },
         `usage_events insert failed (review continues): ${detail}`,
