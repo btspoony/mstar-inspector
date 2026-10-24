@@ -13,7 +13,7 @@ import {
 } from "../../src/dashboard/workspace-limits";
 
 const MESSAGE =
-  "You already have 5 live workspaces you created. Delete one of those before creating another.";
+  "You already have 5 live workspaces you created. Creating another is not available, and nothing on this page frees a slot.";
 
 /** The value the predicate refuses with, or a guard failure when it lets one through. */
 function refusal(liveWorkspaceCount: number): unknown {

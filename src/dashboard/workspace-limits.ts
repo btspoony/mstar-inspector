@@ -23,7 +23,7 @@ export const WORKSPACE_LIMITS: WorkspaceLimits = Object.freeze({ perLogin: 5 });
 export class WorkspaceCreationLimitError extends Error {
   constructor(limit: number) {
     super(
-      `You already have ${limit} live workspaces you created. Delete one of those before creating another.`,
+      `You already have ${limit} live workspaces you created. Creating another is not available, and nothing on this page frees a slot.`,
     );
     this.name = "WorkspaceCreationLimitError";
   }

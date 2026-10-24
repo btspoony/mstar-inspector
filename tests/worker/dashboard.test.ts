@@ -3759,7 +3759,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
       const res = await createWorkspaceRequest(db, "deployer", { name });
       expect(res.status, name).toBe(409);
       expect(await res.text()).toBe(
-        "You already have 5 live workspaces you created. Delete one of those before creating another.",
+        "You already have 5 live workspaces you created. Creating another is not available, and nothing on this page frees a slot.",
       );
       expect(workspaceCount(db), name).toBe(workspacesBefore);
       expect(memberRowCount(db), name).toBe(membersBefore);
