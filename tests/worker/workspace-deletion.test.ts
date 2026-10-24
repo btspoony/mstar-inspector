@@ -153,9 +153,22 @@ function inviteStatuses(db: TestD1): Array<{ status: string }> {
     .all() as Array<{ status: string }>;
 }
 
+function subscriptionStatuses(db: TestD1): Array<{ status: string }> {
+  return db.raw
+    .prepare("SELECT status FROM workspace_subscriptions WHERE workspace_id = 'default'")
+    .all() as Array<{ status: string }>;
+}
+
 describe("POST /dashboard/<ref>/api/workspace/delete", () => {
-  test("the owner retires the workspace, its memberships and its pending invites", async () => {
+  test("the owner retires the workspace, its memberships, its pending invites and its subscription", async () => {
     const { db } = deletionFixture();
+    const now = new Date().toISOString();
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES ('default', 'free', 'active', ?, ?)`,
+      )
+      .run(now, now);
 
     const res = await request(db, DELETE_PATH, "dana", { method: "POST" });
 
@@ -168,6 +181,8 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
       count(db, "SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = 'default'"),
     ).toBe(0);
     expect(inviteStatuses(db)).toEqual([{ status: "revoked" }]);
+    // A retired tenant must not leave an `active` plan row behind.
+    expect(subscriptionStatuses(db)).toEqual([{ status: "canceled" }]);
   });
 
   test("every workspace path answers 404 afterwards — this one included", async () => {
@@ -234,7 +249,7 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
     expect(inviteStatuses(db)).toEqual([{ status: "pending" }]);
   });
 
-  test("a store-level replay is a no-op that still reports success", async () => {
+  test("a store-level replay is a no-op that reports it changed nothing", async () => {
     const { db } = deletionFixture();
     expect((await request(db, DELETE_PATH, "dana", { method: "POST" })).status).toBe(200);
     const stampedAt = deletedAtOf(db);
@@ -243,7 +258,7 @@ describe("POST /dashboard/<ref>/api/workspace/delete", () => {
     // row would be re-stamped.
     const replayed = await deleteWorkspace(db, "default", new Date(Date.now() + 60_000).toISOString());
 
-    expect(replayed).toBe(true);
+    expect(replayed).toBe(false);
     expect(deletedAtOf(db)).toBe(stampedAt);
     expect(count(db, "SELECT COUNT(*) AS n FROM workspace_members")).toBe(0);
     expect(inviteStatuses(db)).toEqual([{ status: "revoked" }]);

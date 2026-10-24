@@ -22,6 +22,18 @@ import type { WorkspaceStoreD1 } from "./workspace-store";
 /** The plan shape the entitlement decisions read; the catalogue's other limits stay unread here. */
 export type PlanLimits = { id: string; name: string; includedMembers: number };
 
+/** The seeded free plan's id — the one plan id an absent subscription resolves to. */
+export const FREE_PLAN_ID = "free";
+
+/**
+ * Whether a resolved plan id is the free tier. THE one spelling of that rule:
+ * the acceptance gate, the free-membership counter and the creation guard all
+ * read it, so a second free plan id is a one-line change here.
+ */
+export function isFreeTierPlan(planId: string | null | undefined): boolean {
+  return planId == null || planId === FREE_PLAN_ID;
+}
+
 /**
  * The workspace's active plan limits, or the seeded `free` limits when it has
  * no active subscription row. A missing `free` row means migration 0031 did
@@ -45,8 +57,9 @@ export async function resolveWorkspacePlan(
   const free = await db
     .prepare(
       `SELECT id AS id, name AS name, included_members AS includedMembers
-         FROM plans WHERE id = 'free'`,
+         FROM plans WHERE id = ?`,
     )
+    .bind(FREE_PLAN_ID)
     .first<PlanLimits>();
   if (!free) {
     throw new Error("plans is missing the seeded 'free' row; apply migration 0031_plans_usage.sql");

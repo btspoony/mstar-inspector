@@ -17,11 +17,14 @@
  * is what makes a replacement invite after expiry legal while a second invite
  * for a live pending row is still a UNIQUE violation.
  *
- * Zero-dependency leaf (the `workspace-store` module boundary): the `db`
- * parameter is a locally-declared narrow D1 face (types only, zero imports),
- * satisfied structurally by the real `D1Database`, the dashboard test double,
- * and the store layer's `D1Like`.
+ * Module boundary (the `workspace-store` one): the `db` parameter is a
+ * locally-declared narrow D1 face (types only). The single exception is the
+ * joined `./entitlement` import — the create batch enforces the plan's seat cap
+ * itself (it must, or two concurrent creates both pass the route's read) and
+ * refuses with the entitlement's own cap error instead of copying either below.
  */
+
+import { MemberCapError, MEMBER_CAP_REFUSAL, resolveWorkspacePlan } from "./entitlement";
 
 /** Invite role inside one workspace (migration 0028 CHECK domain; no `owner`). */
 export type InviteRole = "admin" | "member";
@@ -119,14 +122,34 @@ WHERE workspace_id = ? AND status = 'pending' AND expires_at <= ?`;
 /** Live-invite read predicate — lazy expiry, so every read filters it. */
 const LIVE = `status = 'pending' AND expires_at > ?`;
 
+/**
+ * The seat guard, as a SQL condition the insert carries: members plus live
+ * pending invites below the plan's included seats. Re-reading the count inside
+ * the insert is what closes the read-then-write window — two concurrent creates
+ * both pass the route's fast-fail read, and the second one's condition is false,
+ * so its batch writes no invite row. Parameters: `?2` the workspace, `?6` the
+ * stamp the flip above used (so a lapsed row is already `expired` and holds no
+ * seat), `?8` the plan's included members.
+ */
+const SEAT_GUARD_SQL = `(SELECT
+        (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?2)
+      + (SELECT COUNT(*) FROM workspace_invites
+          WHERE workspace_id = ?2 AND status = 'pending' AND expires_at > ?6)) < ?8`;
+
 const INVITE_COLUMNS = `id, workspace_id, github_login, role, status, invited_by,
        created_at, expires_at, accepted_at`;
 
 /**
  * Create a pending invite. The flip runs first so a lapsed row stops blocking
- * the partial unique index; the insert then either succeeds or trips that
- * index, which surfaces as {@link InvitePendingExistsError} (the first row is
- * untouched — the batch rolls back).
+ * the partial unique index; the insert then either succeeds, trips that index
+ * (which surfaces as {@link InvitePendingExistsError}), or is refused by the
+ * plan's seat cap.
+ *
+ * The cap is enforced BY the write: the insert carries {@link SEAT_GUARD_SQL},
+ * so at the cap it writes no row and this throws {@link MemberCapError} — the
+ * winner of a concurrent pair cannot push the workspace past its plan. The
+ * plan is resolved here rather than passed in: the catalogue is static, and the
+ * store is the one place that must know the limit it enforces.
  */
 export async function createInvite(
   db: InviteStoreD1,
@@ -150,15 +173,18 @@ export async function createInvite(
     expires_at: input.expiresAt,
     accepted_at: null,
   };
+  const plan = await resolveWorkspacePlan(db, input.workspaceId);
+  let results: { results: unknown[]; meta: { changes: number; last_row_id: number } }[];
   try {
-    await db.batch([
+    results = await db.batch([
       db.prepare(FLIP_LAPSED_SQL).bind(input.workspaceId, input.now),
       db
         .prepare(
           `INSERT INTO workspace_invites
              (id, workspace_id, github_login, role, status, invited_by,
               created_at, expires_at, accepted_at)
-           VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, NULL)`,
+           SELECT ?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, NULL
+            WHERE ${SEAT_GUARD_SQL}`,
         )
         .bind(
           row.id,
@@ -168,12 +194,16 @@ export async function createInvite(
           row.invited_by,
           row.created_at,
           row.expires_at,
+          plan.includedMembers,
         ),
     ]);
   } catch (err) {
     if (isUniqueConstraintError(err)) throw new InvitePendingExistsError(input.login);
     throw err;
   }
+  // The guard refused: no invite row was written (the flip above only ever
+  // expires already-lapsed rows, so it changed no seat).
+  if (results[1]!.meta.changes === 0) throw new MemberCapError(MEMBER_CAP_REFUSAL);
   return row;
 }
 

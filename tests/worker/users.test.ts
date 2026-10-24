@@ -126,7 +126,15 @@ describe("createWorkspace (workspace-store)", () => {
     const createdAt = new Date().toISOString();
     // 0026's seed owns `default`; a second insert under the same id trips the
     // UNIQUE slug index, and the batch aborts as a unit.
-    expect(await createWorkspace(db, { id: "default", name: "Dup", userId: user.id, createdAt })).toBe(false);
+    expect(
+      await createWorkspace(db, {
+        id: "default",
+        name: "Dup",
+        userId: user.id,
+        githubLogin: user.github_login,
+        createdAt,
+      }),
+    ).toBe(false);
     const members = db.raw
       .query("SELECT * FROM workspace_members WHERE workspace_id = 'default'")
       .all();

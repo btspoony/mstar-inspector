@@ -1003,34 +1003,32 @@ describe("workspace summary in the member payload", () => {
     });
   });
 
-  test("live pending invites are counted; a lapsed one consumes no seat", async () => {
+  test("a live pending invite is counted; a lapsed one consumes no seat", async () => {
     const { db, users } = fixture();
     use(db);
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + 60_000).toISOString();
-    const invite = (login: string) =>
-      createInvite(db, {
-        workspaceId: WORKSPACE,
-        login,
-        role: "member",
-        invitedBy: users.owner,
-        now: now.toISOString(),
-        expiresAt,
-      });
-    const lapsed = await invite("hubot");
-    await invite("sprocket");
+    // Four members already hold four of the plan's five seats, so the seat
+    // guard admits exactly one pending invite — the count the summary reports.
+    const live = await createInvite(db, {
+      workspaceId: WORKSPACE,
+      login: "hubot",
+      role: "member",
+      invitedBy: users.owner,
+      now: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+    });
 
-    const two = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
-    expect(two.workspace.pendingInvites).toBe(2);
+    const counted = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
+    expect(counted.workspace.pendingInvites).toBe(1);
     // The member fields themselves stay the member rows.
-    expect(two.members.length).toBe(4);
+    expect(counted.members.length).toBe(4);
 
     // The cap's own lazy-expiry predicate: a past expires_at frees the seat
     // even before a write flips the row's status.
     db.raw
       .prepare("UPDATE workspace_invites SET expires_at = ? WHERE id = ?")
-      .run(new Date(now.getTime() - 1_000).toISOString(), lapsed.id);
-    const one = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
-    expect(one.workspace.pendingInvites).toBe(1);
+      .run(new Date(now.getTime() - 1_000).toISOString(), live.id);
+    const lapsed = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
+    expect(lapsed.workspace.pendingInvites).toBe(0);
   });
 });

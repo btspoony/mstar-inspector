@@ -107,6 +107,23 @@ export function inviteFailureNotice(
 }
 
 /**
+ * The refusal copy for a delete that did not happen. 403 means this viewer is
+ * no longer the workspace owner and 404 means it is already gone — neither can
+ * succeed on a retry, so only an unknown status keeps the generic wording.
+ */
+export function deleteFailureNotice(status: number): {
+  kind: NoticeKind;
+  key:
+    | "members.deleteWorkspaceNotOwner"
+    | "members.deleteWorkspaceAlreadyDeleted"
+    | "members.deleteWorkspaceFailed";
+} {
+  if (status === 403) return { kind: "warn", key: "members.deleteWorkspaceNotOwner" };
+  if (status === 404) return { kind: "warn", key: "members.deleteWorkspaceAlreadyDeleted" };
+  return { kind: "error", key: "members.deleteWorkspaceFailed" };
+}
+
+/**
  * Whether the pending-invitation section renders: manager-only AND non-empty,
  * so a plain member — who never loads the list — shows no empty heading either.
  */
@@ -188,7 +205,9 @@ export function WorkspacePanel({
           ) : null}
           <dd className="text-xs text-muted-foreground">
             {slots > 0
-              ? t(locale, "members.slotsLeft", { count: slots })
+              ? t(locale, slots === 1 ? "members.slotsLeftOne" : "members.slotsLeft", {
+                  count: slots,
+                })
               : t(locale, "members.noSeatsLeft")}
           </dd>
         </div>
@@ -500,7 +519,12 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
       // A success navigates away; only a refusal returns here.
       if (status >= 400) {
         setDeleteOpen(false);
-        setNotice({ kind: "error", message: t(locale, "members.deleteWorkspaceFailed") });
+        // Reload in the background first: the refreshed `memberRole` is what
+        // removes a now-stale owner-only entry. Then the status-specific copy
+        // wins over any notice that reload may have raised.
+        await load({ background: true });
+        const failure = deleteFailureNotice(status);
+        setNotice({ kind: failure.kind, message: t(locale, failure.key) });
       }
     } catch {
       // Network failure — postForm throws on fetch rejection.

@@ -13,7 +13,8 @@ import {
   memberSlotAvailable,
   resolveWorkspacePlan,
 } from "../../src/dashboard/entitlement";
-import { countFreeMembershipsForLogin } from "../../src/dashboard/workspace-store";
+import { countFreeMembershipsForLogin, createWorkspace } from "../../src/dashboard/workspace-store";
+import { createInvite } from "../../src/dashboard/invite-store";
 import { createMigratedTestD1, type TestD1 } from "./helpers";
 
 const TS = "2026-10-24T00:00:00.000Z";
@@ -132,6 +133,61 @@ describe("countFreeMembershipsForLogin", () => {
     // The resolver and the count must agree: a non-active row is "no plan".
     expect((await resolveWorkspacePlan(db, "ws-pro-inactive")).id).toBe("free");
     expect(await countFreeMembershipsForLogin(db, "octocat")).toBe(2);
+    db.raw.close();
+  });
+});
+
+describe("in-write guards", () => {
+  test("createWorkspace refuses a login already in a live free workspace and writes zero rows", async () => {
+    const db = createMigratedTestD1();
+    seedUser(db, "u1", "octocat");
+    seedWorkspace(db, "ws-free");
+    seedMembership(db, "ws-free", "u1");
+    seedSubscription(db, "ws-free", "free");
+
+    // No route read ran here: the guard inside the creation batch is what
+    // refuses, and it must leave nothing behind (no orphan workspace,
+    // membership or subscription row).
+    await expect(
+      createWorkspace(db, {
+        id: "ws-new",
+        name: "New",
+        userId: "u1",
+        githubLogin: "OCTOCAT",
+        createdAt: TS,
+      }),
+    ).rejects.toThrow(FreeWorkspaceSlotError);
+
+    const count = (sql: string): number => db.raw.query<{ n: number }, []>(sql).get()?.n ?? 0;
+    expect(count("SELECT COUNT(*) AS n FROM workspaces WHERE id = 'ws-new'")).toBe(0);
+    expect(count("SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = 'ws-new'")).toBe(0);
+    expect(count("SELECT COUNT(*) AS n FROM workspace_subscriptions WHERE workspace_id = 'ws-new'")).toBe(0);
+    db.raw.close();
+  });
+
+  test("createInvite refuses at the plan's cap and writes zero rows", async () => {
+    const db = createMigratedTestD1();
+    // Five members fill the seeded free plan's five seats, so only the
+    // in-write predicate can refuse this insert.
+    for (let i = 0; i < 5; i += 1) {
+      seedUser(db, `u${i}`, `user${i}`);
+      seedMembership(db, "default", `u${i}`);
+    }
+
+    await expect(
+      createInvite(db, {
+        workspaceId: "default",
+        login: "newcomer",
+        role: "member",
+        invitedBy: "u0",
+        now: TS,
+        expiresAt: "2026-10-24T00:05:00.000Z",
+      }),
+    ).rejects.toThrow(MemberCapError);
+
+    expect(
+      db.raw.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM workspace_invites").get()?.n ?? 0,
+    ).toBe(0);
     db.raw.close();
   });
 });

@@ -178,6 +178,7 @@ export const zhCN: Dictionary = {
     membersLabel: "成员",
     memberSeats: "{count} / {limit}",
     slotsLeft: "还剩 {count} 个名额",
+    slotsLeftOne: "只剩 {count} 个名额",
     noSeatsLeft: "名额已满",
     pendingInviteOne: "{count} 个待接受的邀请",
     pendingInvites: "{count} 个待接受的邀请",
@@ -188,6 +189,8 @@ export const zhCN: Dictionary = {
     deleteWorkspaceBody:
       "此操作无法撤销。成员将失去访问权限，待接受的邀请将被撤销，本工作区内的 App 将不再接受审查。已开始的审查不会被取消。",
     deleteWorkspaceFailed: "无法删除工作区 — 请重试。",
+    deleteWorkspaceNotOwner: "只有工作区所有者才能删除它。",
+    deleteWorkspaceAlreadyDeleted: "此工作区已被删除。",
     inviteLabel: "按 GitHub 登录名邀请",
     invitePlaceholder: "例如 octocat",
     inviteButton: "邀请成员",

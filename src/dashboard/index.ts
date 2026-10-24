@@ -93,6 +93,7 @@ import {
   MEMBER_CAP_REFUSAL,
   MemberCapError,
   freeSlotAvailable,
+  isFreeTierPlan,
   memberSlotAvailable,
   resolveWorkspacePlan,
 } from "./entitlement";
@@ -1063,28 +1064,38 @@ dashboardApp.post("/api/workspaces", async (c) => {
   if (name.length > WORKSPACE_NAME_MAX_LENGTH) {
     return c.text(`Workspace name must be at most ${WORKSPACE_NAME_MAX_LENGTH} characters.`, 400);
   }
-  // One free workspace per login: the gate reads the login's live FREE
-  // memberships (a paid workspace does not consume the slot) before the
-  // id-mint loop, so a refusal never reaches createWorkspace and writes zero
-  // rows.
+  // One free workspace per login: the read below is fast-fail UX only — the
+  // authority is `createWorkspace`'s own insert guard, so a creation that
+  // commits between this read and the write still cannot land a second free
+  // workspace, and its refusal arrives as the same 409 body.
   try {
     const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
     if (!freeSlotAvailable(freeCount)) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
+    const createdAt = new Date().toISOString();
+    for (let attempt = 0; attempt < WORKSPACE_ID_ATTEMPTS; attempt++) {
+      const id = createWorkspaceId();
+      const created = await createWorkspace(db, {
+        id,
+        name,
+        userId: user.id,
+        githubLogin: user.github_login,
+        createdAt,
+      });
+      if (created) {
+        // The client cannot derive the post-creation landing: a new workspace
+        // may be the second one, so `/dashboard` would strand the creator on a
+        // slug-less shell. The new workspace's own App list is the answer.
+        return c.json(
+          { id, slug: id, name, role: "owner" as const, appsPath: `/dashboard/${id}/apps` },
+          201,
+        );
+      }
+    }
+    return c.text("Could not allocate a workspace id — try again.", 500);
   } catch (err) {
     if (err instanceof FreeWorkspaceSlotError) return c.text(err.message, 409);
     throw err;
   }
-  const createdAt = new Date().toISOString();
-  for (let attempt = 0; attempt < WORKSPACE_ID_ATTEMPTS; attempt++) {
-    const id = createWorkspaceId();
-    if (await createWorkspace(db, { id, name, userId: user.id, createdAt })) {
-      // The client cannot derive the post-creation landing: a new workspace
-      // may be the second one, so `/dashboard` would strand the creator on a
-      // slug-less shell. The new workspace's own App list is the answer.
-      return c.json({ id, slug: id, name, role: "owner" as const, appsPath: `/dashboard/${id}/apps` }, 201);
-    }
-  }
-  return c.text("Could not allocate a workspace id — try again.", 500);
 });
 
 // --- Locale preference (i18n) ---
@@ -1737,7 +1748,9 @@ const inviteCreateRoute = async (c: DashboardContext) => {
   try {
     // The plan's seats are members plus live pending invites; a lapsed pending
     // row has already stopped counting, so a refusal here writes nothing and
-    // revoking an invite frees the seat immediately.
+    // revoking an invite frees the seat immediately. This read is fast-fail UX:
+    // `createInvite` re-checks the same predicate inside its insert, which is
+    // what a concurrent pair of invitations cannot both pass.
     const plan = await resolveWorkspacePlan(gate.db, gate.scope.workspaceId);
     const seats = await countMembersAndPendingInvites(
       gate.db,
@@ -1827,7 +1840,7 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
     invite.status === "pending" &&
     invite.expires_at > now &&
     invite.github_login.toLowerCase() === user.github_login.toLowerCase();
-  if (wouldAccept && (await resolveWorkspacePlan(db, tenant.workspaceId)).id === "free") {
+  if (wouldAccept && isFreeTierPlan((await resolveWorkspacePlan(db, tenant.workspaceId)).id)) {
     const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
     if (!freeSlotAvailable(freeCount)) {
       return inviteMutationResponse(c, INVITE_FREE_SLOT_REFUSAL, 409);
@@ -1900,8 +1913,9 @@ const memberRemoveRoute = async (c: DashboardContext) => {
 
 /**
  * Retire the current workspace (`owner`-only). One batch (see
- * `deleteWorkspace`): memberships go, pending invites are revoked, the row is
- * stamped `deleted_at` and stops resolving everywhere — including this route,
+ * `deleteWorkspace`): memberships go, pending invites are revoked, the active
+ * subscription is canceled and the row is stamped `deleted_at` and stops
+ * resolving everywhere — including this route,
  * whose `:workspaceRef` gate answers 404 on a replay.
  *
  * The workspace comes from the resolved tenant scope, never from the body: the
