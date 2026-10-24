@@ -2,11 +2,11 @@
  * Migration 0031: plan catalogue, workspace subscriptions, usage ledger.
  *
  * The migration is the product here, so the assertions pin its contract rather
- * than the DDL text: two seeded plans with NULL (not sentinel) prices and
- * optional limits, absence-of-subscription as the free default, and the
+ * than the DDL text: free.monthly_price_cents is 0 (a configured free plan),
+ * while pro.monthly_price_cents and both extra_member_price_cents are NULL
+ * (not configured); absence-of-subscription is the free default; and the
  * (review_id, seq) usage ledger key. The fixture is the fully-migrated D1
- * double, which
- * walks `migrations/` in filename order exactly like
+ * double, which walks `migrations/` in filename order exactly like
  * `wrangler d1 migrations apply`.
  */
 import { describe, expect, test } from "bun:test";
