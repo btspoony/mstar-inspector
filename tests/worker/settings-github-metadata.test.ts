@@ -111,6 +111,7 @@ async function seededWorld(privateKeyPem: string): Promise<{ db: TestD1; appId: 
     privateKeyEnc: await box.encryptSecret(privateKeyPem, `github_apps.private_key_enc:${id}`),
     webhookSecretEnc: await box.encryptSecret("test-app-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     createdBy: "mallory",
+    workspaceId: "default",
   });
   return { db, appId: id };
 }

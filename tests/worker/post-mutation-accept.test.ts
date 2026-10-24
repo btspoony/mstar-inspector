@@ -63,6 +63,7 @@ async function seed(db: ReturnType<typeof createD1>): Promise<void> {
     createdBy: "octocat",
     privateKeyEnc: enc.privateKeyEnc,
     webhookSecretEnc: enc.webhookSecretEnc,
+    workspaceId: "default",
   });
 }
 

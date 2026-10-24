@@ -115,6 +115,7 @@ async function insightsWorld(): Promise<{
     privateKeyEnc: await box.encryptSecret("test-pem", `github_apps.private_key_enc:${appId}`),
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${appId}`),
     createdBy: "mallory",
+    workspaceId: "default",
   });
   await createAppsStore(db).createApp({
     id: otherAppId,
@@ -124,6 +125,7 @@ async function insightsWorld(): Promise<{
     privateKeyEnc: await box.encryptSecret("test-pem", `github_apps.private_key_enc:${otherAppId}`),
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${otherAppId}`),
     createdBy: "mallory",
+    workspaceId: "default",
   });
 
   const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().replace("T", " ").slice(0, 19);

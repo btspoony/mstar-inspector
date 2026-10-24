@@ -1440,6 +1440,7 @@ describe("/dashboard manifest routes", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const { session, state } = await startManifest();
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
@@ -1474,6 +1475,7 @@ describe("/dashboard manifest routes", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const { session, state } = await startManifest();
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
@@ -2139,6 +2141,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const start = await worker.fetch(
@@ -2210,6 +2213,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const warns = spyOnWarn();
     const res = await doCommit({ env, holdValue });
@@ -2246,6 +2250,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
+      workspaceId: "default",
     });
     const res = await doCommit({ env, holdValue: await freshHold() });
     expect(res.status).toBe(409);
@@ -2680,6 +2685,7 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: overrides.createdBy ?? "octocat",
+      workspaceId: "default",
     }).then(async (row) => {
       if (!overrides.deletedAt) return row;
       await dbOf(env).raw
@@ -2984,6 +2990,7 @@ describe("dashboard users store (users.ts)", () => {
       privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "octocat",
+      workspaceId: "default",
     });
     // The accepted-invite shape: a users row (sign-in) plus the membership the
     // accept POST writes. createUser alone admits nobody.

@@ -97,6 +97,8 @@ const APP_INPUT: CreateAppInput = {
   privateKeyEnc: "v1.primary.aXZpdi.Y3QmIHRhZw==",
   webhookSecretEnc: "v1.primary.aXZpdi.d2ViaG9vaw==",
   createdBy: "octocat",
+  // Required since plan 109: ownership is a caller input, never a lookup.
+  workspaceId: "default",
 };
 
 async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Promise<GithubAppRow> {
@@ -496,33 +498,26 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect(appCount(db)).toBe(1);
   });
 
-  test("no workspace → an unnamed createApp refuses and writes nothing", async () => {
-    const db = createMigratedD1();
-    rawRun(db, "DELETE FROM workspaces");
-    await expect(seedApp(db)).rejects.toThrow(/names no workspace and the deployment has none or several/);
-    expect(appCount(db)).toBe(0);
-    expect(mappingRows(db)).toEqual([]);
+  test("CreateAppInput.workspaceId is required (compile-time, strict-only)", async () => {
+    const { workspaceId: _omitted, ...input } = APP_INPUT;
+    // @ts-expect-error — workspaceId is required; omitting it must not compile (the sole-workspace fallback is deleted)
+    await expect(store(createMigratedD1()).createApp(input)).rejects.toThrow();
   });
 
-  test("two workspaces → an unnamed createApp refuses; a NAMED one writes into that workspace", async () => {
+  test("a NAMED workspace target receives the App's mapping", async () => {
     const db = createMigratedD1();
     rawRun(
       db,
       `INSERT INTO workspaces (id, slug, name, created_by, created_at)
        VALUES ('second', 'second', 'Second', NULL, '2026-10-21T00:00:00.000Z')`,
     );
-    await expect(seedApp(db)).rejects.toThrow(/names no workspace and the deployment has none or several/);
-    expect(appCount(db)).toBe(0);
-    expect(mappingRows(db)).toEqual([]);
     // The named path is the multi-workspace answer: the App lands exactly where
     // the caller said, whichever workspace that is.
     const app = await seedApp(db, { workspaceId: "second" });
     expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "second" }]);
   });
 
-  test("a soft-deleted workspace row is not the sole workspace: the live one stays the only candidate", async () => {
-    // The same live-row predicate as getSoleWorkspace — a retired tenant must
-    // neither make the count ambiguous nor receive a new App's mapping.
+  test("a soft-deleted workspace row is never the write target: the named live one receives the mapping", async () => {
     const db = createMigratedD1();
     rawRun(
       db,
@@ -533,10 +528,10 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "default" }]);
   });
 
-  test("no live workspace (the only row is soft-deleted) → createApp refuses and writes nothing", async () => {
+  test("a soft-deleted NAMED target refuses the write with zero rows and the pinned message", async () => {
     const db = createMigratedD1();
-    rawRun(db, "UPDATE workspaces SET deleted_at = '2026-10-21T01:00:00.000Z'");
-    await expect(seedApp(db)).rejects.toThrow(/names no workspace and the deployment has none or several/);
+    rawRun(db, "UPDATE workspaces SET deleted_at = '2026-10-21T01:00:00.000Z' WHERE id = 'default'");
+    await expect(seedApp(db)).rejects.toThrow("apps-store: createApp target workspace is not live");
     expect(appCount(db)).toBe(0);
     expect(mappingRows(db)).toEqual([]);
   });

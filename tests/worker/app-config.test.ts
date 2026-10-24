@@ -318,6 +318,7 @@ async function seedApp(
     privateKeyEnc: await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     createdBy: opts.createdBy,
+    workspaceId: "default",
   });
 }
 
