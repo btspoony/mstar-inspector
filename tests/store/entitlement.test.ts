@@ -118,6 +118,22 @@ describe("countFreeMembershipsForLogin", () => {
     expect(await countFreeMembershipsForLogin(db, "OCTOCAT")).toBe(2);
     db.raw.close();
   });
+
+  test("a non-active subscription is free, so it consumes a free slot like the resolver says", async () => {
+    const db = createMigratedTestD1();
+    seedUser(db, "u1", "octocat");
+    seedWorkspace(db, "ws-pro-inactive");
+    seedMembership(db, "ws-pro-inactive", "u1");
+    seedSubscription(db, "ws-pro-inactive", "pro", "canceled");
+    seedWorkspace(db, "ws-free-inactive");
+    seedMembership(db, "ws-free-inactive", "u1");
+    seedSubscription(db, "ws-free-inactive", "free", "canceled");
+
+    // The resolver and the count must agree: a non-active row is "no plan".
+    expect((await resolveWorkspacePlan(db, "ws-pro-inactive")).id).toBe("free");
+    expect(await countFreeMembershipsForLogin(db, "octocat")).toBe(2);
+    db.raw.close();
+  });
 });
 
 describe("refusals", () => {

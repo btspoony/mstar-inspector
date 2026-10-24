@@ -281,10 +281,11 @@ export async function countMembershipsForLogin(
 
 /**
  * How many live FREE workspaces this login belongs to — the count the free-slot
- * predicate reads. A workspace with no subscription row is on `free`
- * (absence-means-free), a `free` subscription row is on `free` too, and a
- * membership in any other plan's workspace does not consume the slot.
- * Soft-deleted workspaces do not count: a retired tenant is not a home.
+ * predicate reads. Same rule as {@link resolveWorkspacePlan}: only an `active`
+ * subscription row counts, so a workspace with no row (or only a non-active
+ * one) is on `free`, and a membership in any other plan's workspace does not
+ * consume the slot. Soft-deleted workspaces do not count: a retired tenant is
+ * not a home.
  */
 export async function countFreeMembershipsForLogin(
   db: WorkspaceStoreD1,
@@ -296,9 +297,10 @@ export async function countFreeMembershipsForLogin(
          FROM workspace_members wm
          JOIN users u ON u.id = wm.user_id
          JOIN workspaces w ON w.id = wm.workspace_id
-         LEFT JOIN workspace_subscriptions s ON s.workspace_id = w.id
+         LEFT JOIN workspace_subscriptions s
+                ON s.workspace_id = w.id AND s.status = 'active'
         WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL
-          AND (s.workspace_id IS NULL OR s.plan_id = 'free')`,
+          AND (s.plan_id IS NULL OR s.plan_id = 'free')`,
     )
     .bind(login)
     .first<{ n: number }>();
