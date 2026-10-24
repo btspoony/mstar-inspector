@@ -146,6 +146,14 @@ export type GithubAppRow = {
 export type GithubAppStatus = "active" | "disabled";
 
 /**
+ * An execution-facing App row: the two resolutions INNER JOIN `app_workspaces`,
+ * so `workspace_id` is present by construction. Typing it here (instead of at
+ * the call sites with `!`) keeps the invariant where SQL enforces it — a future
+ * LEFT JOIN breaks the read's type rather than binding `undefined`.
+ */
+export type GithubAppTenantRow = GithubAppRow & { workspace_id: string };
+
+/**
  * The per-App auto-trigger vocabulary (migration 0022, spec
  * review-trigger-policy §2 — exact enum spelling is wire-visible: the
  * settings POST body carries it and the SPA replays it). Producer-side
@@ -446,19 +454,19 @@ export function createAppsStore(db: AppsStoreD1) {
      * By slug; resolves soft-deleted and disabled App rows too (callers
      * filter), but NOT an App whose workspace is soft-deleted.
      */
-    async getAppBySlug(slug: string): Promise<GithubAppRow | null> {
+    async getAppBySlug(slug: string): Promise<GithubAppTenantRow | null> {
       return db
         .prepare(APP_READ_SQL.getAppBySlug)
         .bind(slug)
-        .first<GithubAppRow>();
+        .first<GithubAppTenantRow>();
     },
 
     /**
      * By id; resolves soft-deleted and disabled App rows too (callers
      * filter), but NOT an App whose workspace is soft-deleted.
      */
-    async getAppById(id: string): Promise<GithubAppRow | null> {
-      return db.prepare(APP_READ_SQL.getAppById).bind(id).first<GithubAppRow>();
+    async getAppById(id: string): Promise<GithubAppTenantRow | null> {
+      return db.prepare(APP_READ_SQL.getAppById).bind(id).first<GithubAppTenantRow>();
     },
 
     /** Dashboard list: non-deleted rows, newest first (stable id tiebreak). */

@@ -4911,29 +4911,57 @@ describe("usage ledger (migration 0031)", () => {
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
   });
 
-  test("a failed usage insert still completes the review and records exactly one usage failure row", async () => {
+  /**
+   * A DB double whose `usage_events` insert throws for its first `failures`
+   * attempts, then runs the real statement — the smallest way to exercise the
+   * ledger's one bounded retry. Every other statement is untouched.
+   */
+  function flakyUsageDb(db: TestD1, failures: number): TestD1 {
+    let remaining = failures;
+    return {
+      ...db,
+      prepare(query: string) {
+        if (!query.includes("INSERT INTO usage_events")) return db.prepare(query);
+        return {
+          bind(...values: unknown[]) {
+            return {
+              run: async () => {
+                if (remaining > 0) {
+                  remaining -= 1;
+                  throw new Error("usage boom");
+                }
+                return db.prepare(query).bind(...values).run();
+              },
+            };
+          },
+        } as never;
+      },
+    };
+  }
+
+  test("a usage insert that fails once is retried: one row and no failure row", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Smallest possible double: only the usage insert throws; every other
-    // statement (including the failure row that records it) is real.
-    const failingUsageDb: TestD1 = {
-      ...db,
-      prepare(query: string) {
-        if (query.includes("INSERT INTO usage_events")) {
-          return {
-            bind: () => ({
-              run: async () => {
-                throw new Error("usage boom");
-              },
-            }),
-          } as never;
-        }
-        return db.prepare(query);
-      },
-    };
     const consumer = createReviewConsumer(
-      await makeEnv({ DB: failingUsageDb as never }),
+      await makeEnv({ DB: flakyUsageDb(db, 1) as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(usageRows(db)).toHaveLength(1);
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a usage insert that fails twice still completes the review and records the metered identity", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: flakyUsageDb(db, 2) as never }),
       testLog,
       testOverrides,
     );
@@ -4944,7 +4972,14 @@ describe("usage ledger (migration 0031)", () => {
     expect(reviewCount(db)).toBe(1);
     expect(usageRows(db)).toHaveLength(0);
     expect(failureRows(db)).toHaveLength(1);
-    expect(failureRows(db)[0]).toMatchObject({ stage: "usage" });
+    const row = failureRows(db)[0]!;
+    expect(row).toMatchObject({ stage: "usage" });
+    // The dropped attempt is reconcilable: the failure row carries the exact
+    // ledger identity the insert would have written, plus the workspace.
+    expect(row.error).toContain(
+      idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+    );
+    expect(row.error).toContain('"workspaceId":"default"');
   });
 
   test("a genuine re-execution after a runner failure mints seq 2 for the same review", async () => {

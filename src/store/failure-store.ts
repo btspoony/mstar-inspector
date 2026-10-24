@@ -36,13 +36,15 @@
 import type { D1Like } from "./types";
 
 /**
- * The producer-side stage vocabulary (AL-1 + AL-6 extension, frozen):
- * `parse` = the runner's stdout failed parseReviewOutput validation
+ * The producer-side stage vocabulary (AL-1 + AL-6 extension, plus `usage` —
+ * frozen): `parse` = the runner's stdout failed parseReviewOutput validation
  * (deterministic model-output failure — degrade + ack path); `runner` =
  * the in-image review run itself failed (non-zero exit / exec error);
  * `sandbox` = container acquisition or an in-sandbox git/diff/numstat/input
  * step failed; `pipeline` = worker-side orchestration (level/credential/
- * config resolution, comment post, …).
+ * config resolution, comment post, …); `usage` = the execution's
+ * `usage_events` ledger insert failed and the review continued, so the row is
+ * the only record of the dropped metered attempt (it carries the `reviewId`).
  */
 export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "parse",

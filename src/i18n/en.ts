@@ -201,6 +201,7 @@ export const en = {
     membersLabel: "Members",
     memberSeats: "{count} / {limit}",
     slotsLeft: "{count} slots left",
+    slotsLeftOne: "{count} slot left",
     noSeatsLeft: "No seats left",
     pendingInviteOne: "{count} pending invitation",
     pendingInvites: "{count} pending invitations",
@@ -212,6 +213,8 @@ export const en = {
     deleteWorkspaceBody:
       "This cannot be undone. Members will lose access, pending invites will be cancelled, and Apps in this workspace will no longer be reviewed. A review that has already started is not cancelled.",
     deleteWorkspaceFailed: "Could not delete the workspace — try again.",
+    deleteWorkspaceNotOwner: "Only the workspace owner can delete it.",
+    deleteWorkspaceAlreadyDeleted: "This workspace was already deleted.",
     inviteLabel: "Invite by GitHub login",
     invitePlaceholder: "e.g. octocat",
     inviteButton: "Invite member",

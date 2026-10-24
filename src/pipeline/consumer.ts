@@ -272,6 +272,13 @@ export type ConsumerLogFields = {
   /** github_apps.id the job resolves to (per-App jobs only). */
   app_id?: string;
   idempotency_key?: string;
+  /**
+   * The metered ledger identity (`usage_events.review_id`) and its workspace.
+   * Carried on the usage-write failure lines so a dropped attempt can be
+   * reconciled from logs as well as from the `usage` failure row.
+   */
+  review_id?: string;
+  workspace_id?: string;
   /** Review tier resolved from REVIEW_LEVEL. */
   level?: ReviewLevel;
   /** Runner wall-clock budget for `level` (ms) — runnerTimeoutMs(level). */
@@ -1350,7 +1357,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
   const cached = deps.appCommenters.get(appRef.appId);
   if (cached !== undefined && cached.fingerprint === fingerprint) {
-    return { kind: "ok", commenter: cached.commenter, githubAppId: cached.githubAppId, workspaceId: row.workspace_id! };
+    return { kind: "ok", commenter: cached.commenter, githubAppId: cached.githubAppId, workspaceId: row.workspace_id };
   }
   // Cache miss (first message for this App) or fingerprint mismatch
   // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
@@ -1363,7 +1370,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   );
   const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
   deps.appCommenters.set(appRef.appId, { commenter, fingerprint, githubAppId: row.github_app_id });
-  return { kind: "ok", commenter, githubAppId: row.github_app_id, workspaceId: row.workspace_id! };
+  return { kind: "ok", commenter, githubAppId: row.github_app_id, workspaceId: row.workspace_id };
 }
 
 /**
@@ -2232,23 +2239,36 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // dedup reads and the journal handoff above have missed, so a duplicate
     // delivery of a completed review never reaches this insert; a genuine
     // re-execution after a runner failure mints the next `seq` for the same
-    // review. The product rule is "count, never refuse": a write failure is
-    // logged and recorded as a `usage` failure row, and the review continues.
+    // review. The product rule is "count, never refuse": one bounded retry
+    // absorbs a transient D1 failure, and a write that still fails is logged
+    // and recorded as a `usage` failure row carrying the metered identity
+    // (`reviewId` + `workspaceId`) so the dropped attempt can be reconciled.
+    // The review continues either way.
+    const reviewId = idemKey({
+      // The metered identity is the PAYLOAD identity (plan § Consumer write
+      // point 3): the authoritative checkout sha refines the review row only,
+      // so a force-push between delivery and retry cannot split one review
+      // into two ledger identities. A comment-mention job has no payload sha
+      // and shares one stable per-PR identity — `idemKey` refuses an empty
+      // sha, so the "no commit" sentinel stands in.
+      ...key,
+      head_sha: payload.head_sha || "no-sha",
+    });
+    const usageEvent = { reviewId, workspaceId, occurredAt: new Date().toISOString() };
     try {
-      await recordUsageEvent(deps.env.DB, {
-        // The metered identity is the PAYLOAD identity (plan § Consumer write
-        // point 3): the authoritative checkout sha refines the review row only,
-        // so a force-push between delivery and retry cannot split one review
-        // into two ledger identities. A comment-mention job has no payload sha
-        // and shares one stable per-PR identity — `idemKey` refuses an empty
-        // sha, so the "no commit" sentinel stands in.
-        reviewId: idemKey({ ...key, head_sha: payload.head_sha ?? "no-sha" }),
-        workspaceId,
-        occurredAt: new Date().toISOString(),
-      });
+      try {
+        await recordUsageEvent(deps.env.DB, usageEvent);
+      } catch {
+        // One retry, no backoff: the ledger write is off the review's critical
+        // path, and the failure row below is the last resort.
+        await recordUsageEvent(deps.env.DB, usageEvent);
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `usage_events insert failed (review continues): ${detail}`);
+      deps.log.warn(
+        { ...fields, review_id: reviewId, workspace_id: workspaceId },
+        `usage_events insert failed (review continues): ${detail}`,
+      );
       // The failure row is best-effort too — its own guard keeps a recording
       // failure from reaching the pipeline.
       try {
@@ -2259,7 +2279,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           pr_number: payload.pr_number,
           head_sha: headSha,
           stage: "usage",
-          error: `usage_events insert failed: ${detail}`,
+          error: `usage_events insert failed: ${detail} ${JSON.stringify({ reviewId, workspaceId })}`,
         });
       } catch (recordErr) {
         const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);

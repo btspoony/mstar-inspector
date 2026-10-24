@@ -28,6 +28,7 @@ import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   DeleteWorkspaceAction,
   WorkspacePanel,
+  deleteFailureNotice,
   deleteWorkspace,
   inviteFailureNotice,
   loadMembersPage,
@@ -222,8 +223,9 @@ describe("members page shadcn rebuild", () => {
     // background-reload contract (mirrors SettingsPage): `load` flips
     // to "loading" (the PageSkeleton gate) on foreground loads only.
     expect(source).toContain('if (!background) setState("loading")');
-    // Both op paths (invite submit + dialog confirm) reload in the background.
-    expect(source.split("load({ background: true })").length - 1).toBe(2);
+    // Every op path (invite submit, dialog confirm, refused delete) reloads in
+    // the background.
+    expect(source.split("load({ background: true })").length - 1).toBe(3);
     // No bare foreground await remains: a bare `await load()` would flip the
     // page into the skeleton state mid-op and blink out the op PageNotice.
     expect(source).not.toContain("await load()");
@@ -334,7 +336,7 @@ describe("workspace settings block", () => {
     expect(html).toContain("Free");
     expect(html).toContain("BYOK only");
     expect(html).toContain("4 / 5");
-    expect(html).toContain("1 slots left");
+    expect(html).toContain("1 slot left");
     expect(html).toContain(t("en", "members.reviewAttemptsLabel"));
     expect(html).toContain("128");
     expect(html).toContain("Counted, not limited.");
@@ -385,7 +387,7 @@ describe("workspace settings block", () => {
       }),
     );
     expect(html).toContain("2 pending invitations");
-    expect(html).toContain("1 slots left");
+    expect(html).toContain("1 slot left");
   });
 
   test("the delete entry renders for the owner only", () => {
@@ -515,6 +517,19 @@ describe("workspace settings block", () => {
       for (const key of Object.keys(installed)) delete scope[key];
       win.close();
     }
+  });
+
+  test("a refused delete maps its status to copy that never says to retry", () => {
+    expect(deleteFailureNotice(403)).toEqual({ kind: "warn", key: "members.deleteWorkspaceNotOwner" });
+    expect(deleteFailureNotice(404)).toEqual({
+      kind: "warn",
+      key: "members.deleteWorkspaceAlreadyDeleted",
+    });
+    expect(t("en", "members.deleteWorkspaceNotOwner")).toBe("Only the workspace owner can delete it.");
+    expect(t("en", "members.deleteWorkspaceAlreadyDeleted")).toBe("This workspace was already deleted.");
+    // Any other status keeps the generic wording; a network failure throws
+    // before it ever reaches this mapping.
+    expect(deleteFailureNotice(500)).toEqual({ kind: "error", key: "members.deleteWorkspaceFailed" });
   });
 
   test("a refused delete keeps the page in place and flashes nothing", async () => {
