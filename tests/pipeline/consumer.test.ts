@@ -455,6 +455,13 @@ function failureRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<
   return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
+/** All rows of the usage_events ledger in the real D1 double. */
+function usageRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
+  return db.raw.query("SELECT * FROM usage_events ORDER BY review_id, seq").all() as Array<
+    Record<string, unknown>
+  >;
+}
+
 describe("createReviewConsumer", () => {
   test("findByIdempotencyKey hit after clone → ack: no post, no insert, destroy", async () => {
     reset();
@@ -1787,6 +1794,9 @@ describe("createReviewConsumer", () => {
       // The workspace plane every App read joins; 0027 attributes the legacy
       // App above to the 'default' workspace exactly as a real deployment does.
       "0027_workspace_backfill.sql",
+      // 0031 completes the current set: the consumer meters every started
+      // execution into usage_events.
+      "0031_plans_usage.sql",
     ]) {
       db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
     }
@@ -4807,7 +4817,7 @@ describe("workspace attribution gate (one read face)", () => {
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
-      /per-App credential resolution failed: app 11111111-2222-3333-4444-555555555555 not found or has no workspace mapping/,
+      /per-App credential resolution failed: app 11111111-2222-3333-4444-555555555555 not found, has no workspace mapping, or its workspace is deleted/,
     );
 
     // Structural: nothing ran — no sandbox step, no commenter instance (so no
@@ -4822,7 +4832,7 @@ describe("workspace attribution gate (one read face)", () => {
     expect(messageRetryCalls).toHaveLength(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
-    expect(String(failureRows(db)[0]!.error)).toContain("not found or has no workspace mapping");
+    expect(String(failureRows(db)[0]!.error)).toContain("or its workspace is deleted");
   });
 
   test("a genuinely missing App takes the same not-found path", async () => {
@@ -4833,10 +4843,104 @@ describe("workspace attribution gate (one read face)", () => {
     await expect(
       consumer(makeBatch(makePayload({ appRef: { appId: "no-such-app" } }))),
     ).rejects.toThrow(
-      /per-App credential resolution failed: app no-such-app not found or has no workspace mapping$/,
+      /per-App credential resolution failed: app no-such-app not found, has no workspace mapping, or its workspace is deleted$/,
     );
 
     expect(commenterCalls).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0);
+  });
+});
+
+describe("usage ledger (migration 0031)", () => {
+  test("a normal message writes exactly one row: the App's workspace, review id, seq 1", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(usageRows(db)).toEqual([
+      {
+        review_id: idemKey({
+          installation_id: 123,
+          owner: "acme",
+          repo: "widgets",
+          pr_number: 42,
+          head_sha: SHA,
+        }),
+        seq: 1,
+        workspace_id: "default",
+        occurred_at: expect.any(String),
+      },
+    ]);
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("a duplicate delivery that hits dedup writes no row", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const store = createArtifactStore(db);
+    await store.put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: VALID_OUTPUT,
+      appId: TEST_APP_ID,
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(usageRows(db)).toHaveLength(0);
+  });
+
+  test("a soft-deleted workspace is unresolvable — fail closed before any sandbox or usage row", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    db.raw.prepare("UPDATE workspaces SET deleted_at = datetime('now') WHERE id = 'default'").run();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/or its workspace is deleted/);
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(usageRows(db)).toHaveLength(0);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
+  });
+
+  test("a failed usage insert still completes the review and records exactly one usage failure row", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Smallest possible double: only the usage insert throws; every other
+    // statement (including the failure row that records it) is real.
+    const failingUsageDb: TestD1 = {
+      ...db,
+      prepare(query: string) {
+        if (query.includes("INSERT INTO usage_events")) {
+          return {
+            bind: () => ({
+              run: async () => {
+                throw new Error("usage boom");
+              },
+            }),
+          } as never;
+        }
+        return db.prepare(query);
+      },
+    };
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: failingUsageDb as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    // "count, never refuse": the review ran to completion.
+    expect(reviewCount(db)).toBe(1);
+    expect(usageRows(db)).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "usage" });
   });
 });
