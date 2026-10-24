@@ -240,24 +240,6 @@ export async function countLiveWorkspaces(db: WorkspaceStoreD1): Promise<number>
 }
 
 /**
- * How many live workspaces this USER created — the count the creation cap is
- * keyed on, so a workspace the login merely belongs to (including one it was
- * invited into) never consumes the quota. Soft-deleted workspaces free their
- * slot; `created_by IS NULL` rows (the seeded `default`, pre-backfill legacy)
- * match nobody.
- */
-export async function countLiveWorkspacesCreatedBy(
-  db: WorkspaceStoreD1,
-  userId: string,
-): Promise<number> {
-  const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM workspaces WHERE created_by = ? AND deleted_at IS NULL`)
-    .bind(userId)
-    .first<{ n: number }>();
-  return row?.n ?? 0;
-}
-
-/**
  * How many live workspaces this login belongs to — `0` is the "no workspace
  * yet" state that offers creation. Soft-deleted workspaces do not
  * count: a retired tenant is not a home.
@@ -406,10 +388,11 @@ export async function setWorkspaceSlug(
 }
 
 /**
- * Create one workspace and its creator's `owner` membership as ONE `batch` — a
- * workspace without an owner, or an owner without a workspace, must never be
- * observable. `slug` equals `id` by contract (the id is already
- * lowercase, so the two can never disagree on case).
+ * Create one workspace, its creator's `owner` membership and its `free`
+ * subscription as ONE `batch` — a workspace without an owner, or an owner
+ * without a workspace, must never be observable. `slug` equals `id` by
+ * contract (the id is already lowercase, so the two can never disagree on
+ * case).
  *
  * Returns false when the slug is already taken (the UNIQUE index is the final
  * word), so the caller can mint another id instead of 500ing.
@@ -433,6 +416,12 @@ export async function createWorkspace(
            VALUES (?, ?, 'owner', ?)`,
         )
         .bind(input.id, input.userId, input.createdAt),
+      db
+        .prepare(
+          `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+           VALUES (?, 'free', 'active', ?, ?)`,
+        )
+        .bind(input.id, input.createdAt, input.createdAt),
     ]);
     inserted = results[0]!;
   } catch (err) {

@@ -67,6 +67,14 @@ export function memberSlotAvailable(
   return memberAndPendingCount < includedMembers;
 }
 
+/**
+ * The Product copy for a creation / acceptance that exceeds the free slot,
+ * verbatim (§ Creation). It is the raw 409 body the refusal class carries, and
+ * every free-slot gate passes this same string so the copy has one home.
+ */
+export const FREE_SLOT_REFUSAL =
+  "This workspace was not created. You already belong to a free workspace, and you can belong to only one at a time. Delete that workspace if you own it. If you do not, an owner or admin of that workspace must remove you. Then create this one.";
+
 /** Refusal for a creation / acceptance that would exceed the free slot: a 409 body. */
 export class FreeWorkspaceSlotError extends Error {
   constructor(body: string) {

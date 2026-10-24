@@ -67,8 +67,8 @@ import {
   type ReviewTriggerMode,
 } from "./apps-store";
 import {
+  countFreeMembershipsForLogin,
   countLiveWorkspaces,
-  countLiveWorkspacesCreatedBy,
   countMembershipsForLogin,
   createWorkspace,
   getMembership,
@@ -85,10 +85,10 @@ import {
   type WorkspaceRole,
 } from "./workspace-store";
 import {
-  WORKSPACE_LIMITS,
-  WorkspaceCreationLimitError,
-  assertWorkspaceCreationAllowed,
-} from "./workspace-limits";
+  FREE_SLOT_REFUSAL,
+  FreeWorkspaceSlotError,
+  freeSlotAvailable,
+} from "./entitlement";
 import {
   InvitePendingExistsError,
   acceptInvite,
@@ -1055,17 +1055,15 @@ dashboardApp.post("/api/workspaces", async (c) => {
   if (name.length > WORKSPACE_NAME_MAX_LENGTH) {
     return c.text(`Workspace name must be at most ${WORKSPACE_NAME_MAX_LENGTH} characters.`, 400);
   }
-  // The cap is keyed on workspaces this login CREATED (not ones it can use),
-  // and it runs before the id-mint loop: a refusal never reaches
-  // createWorkspace, so it writes zero rows.
+  // One free workspace per login: the gate reads the login's live FREE
+  // memberships (a paid workspace does not consume the slot) before the
+  // id-mint loop, so a refusal never reaches createWorkspace and writes zero
+  // rows.
   try {
-    assertWorkspaceCreationAllowed({
-      userId: user.id,
-      liveWorkspaceCount: await countLiveWorkspacesCreatedBy(db, user.id),
-      limits: WORKSPACE_LIMITS,
-    });
+    const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
+    if (!freeSlotAvailable(freeCount)) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
   } catch (err) {
-    if (err instanceof WorkspaceCreationLimitError) return c.text(err.message, 409);
+    if (err instanceof FreeWorkspaceSlotError) return c.text(err.message, 409);
     throw err;
   }
   const createdAt = new Date().toISOString();
