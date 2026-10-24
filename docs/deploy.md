@@ -1678,9 +1678,9 @@ runner evidence, not the column.
 
 ### 5. Rollback (multi-App)
 
-Rollback is `wrangler rollback` (see ### Rollback (production)) — there is no
-legacy face to repoint to; the per-App webhook URL on GitHub is unchanged by a
-Worker rollback.
+Rollback is `wrangler rollback` (see ### Rollback (production) above) — there is
+no legacy face to repoint to; the per-App webhook URL on GitHub is unchanged
+by a Worker rollback.
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
   (the chain head is `0025`). The code-only precedent (0002 — new code
