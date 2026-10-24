@@ -23,7 +23,7 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
       {
         id: "free",
         name: "Free",
-        monthly_price_cents: null,
+        monthly_price_cents: 0,
         included_members: 5,
         extra_member_price_cents: null,
         platform_key_limit: null,

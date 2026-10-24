@@ -4,10 +4,11 @@
 -- Every limit column describes a plan-level capability, and NULL is the
 -- contract, not a missing value: a NULL limit means "unlimited" when the
 -- column is a quota (platform_key_limit, reviews_included,
--- apps_per_workspace) and "not configured" when the column is a price
--- (monthly_price_cents, extra_member_price_cents). Never encode either state
--- as a sentinel number (0 or -1) — a consumer that forgets the sentinel would
--- read it as a real price or quota.
+-- apps_per_workspace). For a price column (monthly_price_cents,
+-- extra_member_price_cents) the two states are distinct: 0 is a REAL price
+-- (the plan is free), NULL means pricing is not configured yet. Never encode
+-- "unlimited" or "not configured" as a sentinel number — a consumer that
+-- forgets the sentinel would read it as a real quota or charge.
 --
 -- workspace_subscriptions is the tenant side: at most one row per workspace
 -- (workspace_id is the PK), pointing at a plans row. There is deliberately NO
@@ -36,9 +37,10 @@
 -- is created and seeded first in this file.
 --
 -- The seed uses a fixed ISO timestamp rather than a database clock so the
--- applied rows are byte-identical across local and remote applies. No plan
--- carries a price yet: both price columns are NULL ("not configured") until
--- pricing exists, so no surface can read a made-up amount.
+-- applied rows are byte-identical across local and remote applies. free is a
+-- genuinely free plan and therefore prices at 0. pro is not priced yet, so its
+-- monthly price is NULL ("not configured") and no surface can read a made-up
+-- amount. Neither plan prices extra members.
 
 CREATE TABLE plans (
   id                       TEXT PRIMARY KEY,
@@ -73,5 +75,5 @@ INSERT INTO plans (
   platform_key_limit, reviews_included, apps_per_workspace, created_at
 )
 VALUES
-  ('free', 'Free', NULL, 5, NULL, NULL, NULL, NULL, '2026-10-24T00:00:00.000Z'),
+  ('free', 'Free', 0,    5, NULL, NULL, NULL, NULL, '2026-10-24T00:00:00.000Z'),
   ('pro',  'Pro',  NULL, 5, NULL, NULL, NULL, NULL, '2026-10-24T00:00:00.000Z');
