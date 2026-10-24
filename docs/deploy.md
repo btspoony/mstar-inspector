@@ -659,8 +659,9 @@ could only have got a `default` membership from the replay, so the join on
 
 Ordering note: run (1), then (2). There is no third step to order against. If
 the deployment has **not** yet applied `0030`, apply it first (`wrangler d1
-migrations apply`): until it has, the legitimate pre-cutover rows it would
-write are missing, and step (2) is still correct on its own predicate.
+migrations apply mstar-inspector-prod-db --remote --env production`): until it
+has, the legitimate pre-cutover rows it would write are missing, and step (2)
+is still correct on its own predicate.
 
 ### The FIRST application has the same blind spot
 
@@ -683,7 +684,7 @@ never a member, and the first apply re-adds them to `default` with no invite.
 An operator of such a database should, **before** applying `0030`:
 
 ```sh
-wrangler d1 execute mstar-inspector-prod-db --remote --env production \
+wrangler d1 execute mstar-inspector-db --remote \
   --command "SELECT u.id, u.github_login, u.created_at FROM users u WHERE u.created_at < '2026-10-22T11:13:45.000Z' AND u.role IN ('admin', 'member') AND NOT EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = 'default' AND wm.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM removed_logins r WHERE r.github_login = u.github_login COLLATE NOCASE)"
 ```
 
@@ -708,7 +709,7 @@ login they remember removing is the row to tombstone. Do it for **only** those
 logins:
 
 ```sh
-wrangler d1 execute mstar-inspector-prod-db --remote --env production \
+wrangler d1 execute mstar-inspector-db --remote \
   --command "INSERT INTO removed_logins (github_login, removed_at) VALUES ('<login>', '<ISO-8601 UTC>')"
 ```
 
@@ -923,7 +924,7 @@ exist before the first deploy:
 
 > **Staging database** — the commands below run against the staging DB
 > (`mstar-inspector-db`); a production apply uses
-> `mstar-inspector-prod-db --env production`.
+> `mstar-inspector-prod-db --remote --env production`.
 
 The apply is **preceded by a pre-apply snapshot** — the restore point
 every `0024`/`0025` rollback refers to (§ Rollback). `0024` rebuilds
@@ -957,7 +958,10 @@ wrangler d1 time-travel info mstar-inspector-db
 
 # 1b. GA backend: keep the printed bookmark string — it is the restore point.
 #     (Re-running the command reprints the CURRENT bookmark.)
+#     Staging (`mstar-inspector-db`) and production; the production bookmark is
+#     the one § Rollback's `time-travel restore` consumes.
 wrangler d1 time-travel info mstar-inspector-db
+wrangler d1 time-travel info mstar-inspector-prod-db --env production
 
 # 1b′. alpha — or an UNKNOWN backend (fail closed): export the whole database
 #      instead — this file IS the restore point, and it restores on either
@@ -1429,6 +1433,10 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > below are extra / local investigation steps, not the workflow smoke — for
 > local runs and for investigating a red run.
 >
+> The `d1 execute` checks below read the **production** database
+> (`mstar-inspector-prod-db`, `--env production`): they inspect live production
+> rows, not local state.
+>
 > **URL permanence:** `/dashboard/apps` — and `/dashboard/apps/` —
 > are permanently retired → 301 `/dashboard`; do not re-introduce the path
 > (browsers cache the 301).
@@ -1758,8 +1766,10 @@ Operationally that means:
   # Revert the code first (Worker rollback above), then restore the database
   # to the pre-apply snapshot recorded in § D1 migrations. Destructive and
   # in-place on a GA backend; prints an undo bookmark before it runs.
-  # (The `time-travel info` step in § D1 migrations decides this branch: it
-  # fails outright on an alpha database, which takes the alpha path below.)
+  # (This bookmark comes from `wrangler d1 time-travel info
+  # mstar-inspector-prod-db --env production` in § D1 migrations — the
+  # production form of that step. That step also decides this branch: it fails
+  # outright on an alpha database, which takes the alpha path below.)
   wrangler d1 time-travel restore mstar-inspector-prod-db --env production --bookmark=<pre-apply-bookmark>
   ```
   The bookmark is valid for 30 days after the apply and is the only restore
