@@ -4,16 +4,17 @@
  * reads how many live workspaces the login CREATED (`workspaces.created_by`
  * with `deleted_at IS NULL`) and passes the count in.
  *
- * M3 replacement point: the route passes `WORKSPACE_LIMITS` today; M3 passes a
- * `WorkspaceLimits` resolved from the login's entitlement/plan instead — the
- * predicate, its call shape and its tests never change.
+ * Replacement point: when the entitlement/plan limit replaces the constant,
+ * the route passes a `WorkspaceLimits` resolved from the login's
+ * entitlement/plan instead — the predicate, its call shape and its tests never
+ * change.
  *
  * Known limit: this check is not an atomic reservation — two concurrent
  * creations can both read the same count and pass. Atomic enforcement is
  * required before the first paid plan.
  */
 
-/** The cap for one login; the seam M3's entitlement lookup fills. */
+/** The cap for one login; the seam an entitlement lookup would fill. */
 export type WorkspaceLimits = { perLogin: number };
 
 /** The only edit point today. Frozen so no caller can widen it in place. */
@@ -25,9 +26,9 @@ export const WORKSPACE_LIMITS: WorkspaceLimits = Object.freeze({ perLogin: 5 });
  * message-sniffing; the message is the user-visible 409 body.
  */
 export class WorkspaceCreationLimitError extends Error {
-  constructor(limit: number) {
+  constructor(count: number, limit: number) {
     super(
-      `You already have ${limit} live workspaces you created. Creating another is not available, and nothing on this page frees a slot.`,
+      `You already have ${count} live workspaces you created; the limit is ${limit}. Creating another is not available, and nothing on this page frees a slot.`,
     );
     this.name = "WorkspaceCreationLimitError";
   }
@@ -44,6 +45,6 @@ export function assertWorkspaceCreationAllowed(input: {
   limits: WorkspaceLimits;
 }): void {
   if (input.liveWorkspaceCount >= input.limits.perLogin) {
-    throw new WorkspaceCreationLimitError(input.limits.perLogin);
+    throw new WorkspaceCreationLimitError(input.liveWorkspaceCount, input.limits.perLogin);
   }
 }
