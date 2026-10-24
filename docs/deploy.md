@@ -549,7 +549,7 @@ VALUES
 ```
 
 ```sh
-wrangler d1 execute mstar-inspector --remote \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production \
   --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','<reason>','<you>','$(date -u +%FT%TZ)','<ISO expiry>')"
 ```
 
@@ -562,7 +562,7 @@ control at all, and **revocation is an append-only write, not a delete**:
 # Close the window now: append a superseding row whose window is already over.
 # The old row is untouched history, so "revoked" stays distinguishable from
 # "lapsed" and the audit trail keeps both.
-wrangler d1 execute mstar-inspector --remote \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production \
   --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','revoked: <why>','<you>','$(date -u +%FT%TZ)','$(date -u +%FT%TZ)')"
 ```
 
@@ -621,7 +621,7 @@ could only have got a `default` membership from the replay, so the join on
    list is exactly the damage:
 
    ```sh
-   wrangler d1 execute mstar-inspector-db --remote \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production \
      --command "SELECT u.github_login, wm.role, wm.created_at, u.created_at AS signed_up_at FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = 'default' AND wm.created_at = '2026-10-21T00:00:00.000Z' AND u.created_at >= '2026-10-22T11:13:45.000Z'"
    ```
 
@@ -637,7 +637,7 @@ could only have got a `default` membership from the replay, so the join on
    they carry the same fixed stamp. The `users` rows themselves stay.
 
    ```sh
-   wrangler d1 execute mstar-inspector-db --remote \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production \
      --command "DELETE FROM workspace_members WHERE workspace_id = 'default' AND created_at = '2026-10-21T00:00:00.000Z' AND user_id IN (SELECT id FROM users WHERE created_at >= '2026-10-22T11:13:45.000Z')"
    ```
 
@@ -683,7 +683,7 @@ never a member, and the first apply re-adds them to `default` with no invite.
 An operator of such a database should, **before** applying `0030`:
 
 ```sh
-wrangler d1 execute mstar-inspector-db --remote \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production \
   --command "SELECT u.id, u.github_login, u.created_at FROM users u WHERE u.created_at < '2026-10-22T11:13:45.000Z' AND u.role IN ('admin', 'member') AND NOT EXISTS (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id = 'default' AND wm.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM removed_logins r WHERE r.github_login = u.github_login COLLATE NOCASE)"
 ```
 
@@ -708,7 +708,7 @@ login they remember removing is the row to tombstone. Do it for **only** those
 logins:
 
 ```sh
-wrangler d1 execute mstar-inspector-db --remote \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production \
   --command "INSERT INTO removed_logins (github_login, removed_at) VALUES ('<login>', '<ISO-8601 UTC>')"
 ```
 
@@ -920,6 +920,10 @@ exist before the first deploy:
     change, not a casual follow-up.
 
 ### D1 migrations (forward-only)
+
+> **Staging database** — the commands below run against the staging DB
+> (`mstar-inspector-db`); a production apply uses
+> `mstar-inspector-prod-db --env production`.
 
 The apply is **preceded by a pre-apply snapshot** — the restore point
 every `0024`/`0025` rollback refers to (§ Rollback). `0024` rebuilds
@@ -1437,9 +1441,9 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 2. **D1 migration check (real D1)** — verifies migration 0010 applied and the
    sweep's signal table is queryable:
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT COUNT(*) AS n FROM review_failures"
    ```
    `review_failures` must be present and the count queryable.
@@ -1463,7 +1467,7 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    review + `wrangler tail` runner evidence, not the column.
 4. **Confirm the D1 row:**
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT id, model, skill_version FROM reviews ORDER BY reviewed_at DESC LIMIT 1"
    ```
    `model` is the effective chain head selector, or NULL meaning the in-image
@@ -1571,7 +1575,7 @@ and the settings model faces write and read.
    and webhook URL. Verify in D1 (grab the `id` — the R1 pin below needs
    it):
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT id, slug, name, status, created_by, created_at FROM github_apps ORDER BY created_at DESC LIMIT 1"
    ```
    Healthy — exactly one row (the App just committed; the query caps at
@@ -1648,7 +1652,7 @@ runner evidence, not the column.
 3. **Assert the column** — the review lands and the row records the chain
    head:
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT model, skill_version, reviewed_at FROM reviews WHERE app_id = '<app-id>' ORDER BY reviewed_at DESC LIMIT 1"
    ```
    `model` must equal the configured chain head (`ark-plan/deepseek-v4-flash`
@@ -1657,7 +1661,7 @@ runner evidence, not the column.
    `effectiveModelChain`). The triggering delivery is visible in the same
    window:
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT outcome, event_name, status_code, created_at FROM webhook_deliveries WHERE app_id = '<app-id>' ORDER BY created_at DESC LIMIT 1"
    ```
    `outcome` must be `ok` — the ok row records the webhook ACCEPTED
@@ -1756,7 +1760,7 @@ Operationally that means:
   # in-place on a GA backend; prints an undo bookmark before it runs.
   # (The `time-travel info` step in § D1 migrations decides this branch: it
   # fails outright on an alpha database, which takes the alpha path below.)
-  wrangler d1 time-travel restore mstar-inspector-db --bookmark=<pre-apply-bookmark>
+  wrangler d1 time-travel restore mstar-inspector-prod-db --env production --bookmark=<pre-apply-bookmark>
   ```
   The bookmark is valid for 30 days after the apply and is the only restore
   point for these migrations — without it, a pre-`0024` rollback is a
@@ -2084,7 +2088,7 @@ Monthly (or when the table grows noticeably), delete rows older than 30
 days:
 
 ```bash
-wrangler d1 execute mstar-inspector-db --remote --command \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
   "DELETE FROM review_failures WHERE created_at < datetime('now','-30 days')"
 ```
 
