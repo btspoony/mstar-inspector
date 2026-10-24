@@ -962,10 +962,7 @@ wrangler d1 time-travel info mstar-inspector-db
 
 # 1b. GA backend: keep the printed bookmark string — it is the restore point.
 #     (Re-running the command reprints the CURRENT bookmark.)
-#     Staging (`mstar-inspector-db`) and production; the production bookmark is
-#     the one § Rollback's `time-travel restore` consumes.
 wrangler d1 time-travel info mstar-inspector-db
-wrangler d1 time-travel info mstar-inspector-prod-db --env production
 
 # 1b′. alpha — or an UNKNOWN backend (fail closed): export the whole database
 #      instead — this file IS the restore point, and it restores on either
@@ -1437,10 +1434,6 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > below are extra / local investigation steps, not the workflow smoke — for
 > local runs and for investigating a red run.
 >
-> The `d1 execute` checks below read the **production** database
-> (`mstar-inspector-prod-db`, `--env production`): they inspect live production
-> rows, not local state.
->
 > **URL permanence:** `/dashboard/apps` — and `/dashboard/apps/` —
 > are permanently retired → 301 `/dashboard`; do not re-introduce the path
 > (browsers cache the 301).
@@ -1453,9 +1446,9 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 2. **D1 migration check (real D1)** — verifies migration 0010 applied and the
    sweep's signal table is queryable:
    ```bash
-   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
+   wrangler d1 execute mstar-inspector-db --remote --command \
      "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
+   wrangler d1 execute mstar-inspector-db --remote --command \
      "SELECT COUNT(*) AS n FROM review_failures"
    ```
    `review_failures` must be present and the count queryable.
@@ -1479,7 +1472,7 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    review + `wrangler tail` runner evidence, not the column.
 4. **Confirm the D1 row:**
    ```bash
-   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
+   wrangler d1 execute mstar-inspector-db --remote --command \
      "SELECT id, model, skill_version FROM reviews ORDER BY reviewed_at DESC LIMIT 1"
    ```
    `model` is the effective chain head selector, or NULL meaning the in-image
@@ -1753,9 +1746,8 @@ Operationally that means:
 > back automatically. A failed deploy stops red; the operator investigates
 > and, if needed, rolls back by hand.
 
-- Worker code/config: redeploy the previous version —
-  `wrangler rollback --env production` (or check out the previous commit and
-  `wrangler deploy --env production`). Rollback restores
+- Worker code/config: redeploy the previous version — `wrangler rollback`
+  (or check out the previous commit and `wrangler deploy`). Rollback restores
   Worker code + cron triggers + consumer config; the container image follows
   the checked-out Dockerfile.
 - D1 migrations are **forward-only**: never reverse a migration on rollback.
@@ -1771,11 +1763,10 @@ Operationally that means:
   # Revert the code first (Worker rollback above), then restore the database
   # to the pre-apply snapshot recorded in § D1 migrations. Destructive and
   # in-place on a GA backend; prints an undo bookmark before it runs.
-  # (This bookmark comes from `wrangler d1 time-travel info
-  # mstar-inspector-prod-db --env production` in § D1 migrations — the
-  # production form of that step. That step also decides this branch: it fails
-  # outright on an alpha database, which takes the alpha path below.)
-  wrangler d1 time-travel restore mstar-inspector-prod-db --env production --bookmark=<pre-apply-bookmark>
+  # (The bookmark is the one printed by the staging `time-travel info` step in
+  # § D1 migrations. That step also decides this branch: it fails outright on
+  # an alpha database, which takes the alpha path below.)
+  wrangler d1 time-travel restore mstar-inspector-db --bookmark=<pre-apply-bookmark>
   ```
   The bookmark is valid for 30 days after the apply and is the only restore
   point for these migrations — without it, a pre-`0024` rollback is a
