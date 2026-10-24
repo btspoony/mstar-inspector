@@ -455,3 +455,33 @@ export async function createWorkspace(
   }
   return inserted.meta.changes > 0;
 }
+
+/**
+ * Retire one workspace as ONE `batch`: stamp `deleted_at`, drop every
+ * membership and revoke the pending invites. The row itself is never
+ * hard-deleted — every live read filters `deleted_at IS NULL`, so the tenant
+ * stops resolving while its history stays readable.
+ *
+ * Deletion is idempotent: the `deleted_at IS NULL` guard, the now-empty
+ * membership set and the no-longer-`pending` invites make a replay change
+ * nothing, so both the first call and a replay report success.
+ */
+export async function deleteWorkspace(
+  db: WorkspaceStoreWriteD1,
+  workspaceId: string,
+  deletedAt: string,
+): Promise<boolean> {
+  await db.batch([
+    db
+      .prepare(`UPDATE workspaces SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`)
+      .bind(deletedAt, workspaceId),
+    db.prepare(`DELETE FROM workspace_members WHERE workspace_id = ?`).bind(workspaceId),
+    db
+      .prepare(
+        `UPDATE workspace_invites SET status = 'revoked'
+          WHERE workspace_id = ? AND status = 'pending'`,
+      )
+      .bind(workspaceId),
+  ]);
+  return true;
+}

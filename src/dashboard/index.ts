@@ -72,6 +72,7 @@ import {
   countMembersAndPendingInvites,
   countMembershipsForLogin,
   createWorkspace,
+  deleteWorkspace,
   getMembership,
   getSoleWorkspace,
   getSoleWorkspaceAccess,
@@ -1869,6 +1870,27 @@ const memberRemoveRoute = async (c: DashboardContext) => {
     return inviteMutationResponse(c, "Cannot remove the last owner.", 409);
   }
   return inviteMutationResponse(c, "ok", 200);
+};
+
+/**
+ * Retire the current workspace (`owner`-only). One batch (see
+ * `deleteWorkspace`): memberships go, pending invites are revoked, the row is
+ * stamped `deleted_at` and stops resolving everywhere — including this route,
+ * whose `:workspaceRef` gate answers 404 on a replay.
+ *
+ * The workspace comes from the resolved tenant scope, never from the body: the
+ * path ref already passed the membership gate, so a body id could only name
+ * another tenant. `next` names where the SPA goes after the delete — the
+ * shell, because the workspace it was on no longer exists.
+ */
+const workspaceDeleteRoute = async (c: DashboardContext) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  if (gate.scope.role !== "owner") {
+    return c.text("Only the workspace owner can delete it.", 403);
+  }
+  await deleteWorkspace(gate.db, gate.scope.workspaceId, new Date().toISOString());
+  return c.json({ deleted: true, next: "/dashboard" }, 200);
 };
 
 /**
@@ -3862,6 +3884,9 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/api/members/invites/:id/accept", handler: inviteAcceptRoute, access: "write" },
   { method: "post", path: "/members/role", handler: memberRoleRoute, access: "write" },
   { method: "post", path: "/members/remove", handler: memberRemoveRoute, access: "write" },
+  // Owner-only workspace retirement. `write` (never `read`): a granted platform
+  // operator may inspect, never delete a tenant.
+  { method: "post", path: "/api/workspace/delete", handler: workspaceDeleteRoute, access: "write" },
   // Support + audit (platform-operator support, 2026-10): the granted operator's
   // read-only face, the members' undismissable notice, and the owner/admin audit
   // read.
