@@ -1110,7 +1110,7 @@ describe("App creation is owner/admin", () => {
     expect((await post("carol", "/dashboard/other/manifest/start", env)).status).toBe(403);
   });
 
-  test("the manifest flow carries the target workspace end to end: start → callback → commit into W2", async () => {
+  test("the manifest flow carries the target workspace end to end: start → callback → commit into W2, and W1 cannot read the App (404)", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-acme", "acme");
     seedWorkspace(db, "ws-other", "other");
@@ -1146,6 +1146,25 @@ describe("App creation is owner/admin", () => {
       .prepare("SELECT app_workspaces.workspace_id AS ws FROM app_workspaces JOIN github_apps ON github_apps.id = app_workspaces.app_id WHERE github_apps.github_app_id = ?")
       .get(CONVERSION.id) as { ws: string } | null;
     expect(mapping?.ws).toBe("ws-other");
+    // The READ is tenant-scoped too, for the very row this flow created: the
+    // owning workspace serves it, and the sibling — same session, same slug —
+    // answers the settings-family 404 (invisible, not merely forbidden).
+    const ownerRead = await worker.fetch(
+      await authedRequest("/dashboard/other/apps/mstar-inspector-dana/onboarding", "dana", {
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(ownerRead.status).toBe(200);
+    expect(await ownerRead.text()).toContain("mstar-inspector-dana");
+    const siblingRead = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps/mstar-inspector-dana/onboarding", "dana", {
+        accept: "text/html",
+      }),
+      env,
+    );
+    expect(siblingRead.status).toBe(404);
+    expect(siblingRead.headers.get("Location")).toBeNull();
   });
 
   test("a workspace RENAMED mid-flow still receives the App (the flow binds the stable id, not the slug)", async () => {

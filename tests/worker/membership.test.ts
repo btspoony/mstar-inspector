@@ -473,6 +473,48 @@ describe("invite accept (AC3)", () => {
     expect(memberRows(db)).toBe(4);
   });
 
+  test("an EXPIRED invite can be re-issued to the same login and the re-invite is accepted", async () => {
+    const { db, users } = fixture();
+    use(db);
+    // A lapsed invite, driven through the accept route so its terminal state
+    // is the one the route itself produces (`expired`, not a hand-set row).
+    const lapsed = await createInvite(db, {
+      workspaceId: WORKSPACE,
+      login: "hubot",
+      role: "member",
+      invitedBy: users.owner,
+      now: new Date(Date.now() - 120_000).toISOString(),
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    seedUser(db, "hubot");
+    const expired = await request(`/dashboard/acme/api/members/invites/${lapsed.id}/accept`, "hubot", {
+      method: "POST",
+    });
+    expect(expired.status).toBe(409);
+    expect(inviteStatus(db, lapsed.id)).toBe("expired");
+
+    // The terminal row does not block a re-invite: a new pending row is minted
+    // (the pending uniqueness index only covers live invites) and the old row
+    // keeps its expired state.
+    const reissue = await request(INVITES, "dana", { method: "POST", body: "login=hubot&role=admin" });
+    expect(reissue.status).toBe(200);
+    const fresh = db.raw
+      .prepare("SELECT id, role, status FROM workspace_invites WHERE status = 'pending'")
+      .get() as { id: string; role: string; status: string };
+    expect(fresh.id).not.toBe(lapsed.id);
+    expect(fresh.role).toBe("admin");
+    expect(inviteStatus(db, lapsed.id)).toBe("expired");
+
+    // The re-invite is accepted and the membership lands at the NEW role.
+    const accept = await request(`/dashboard/acme/api/members/invites/${fresh.id}/accept`, "hubot", {
+      method: "POST",
+    });
+    expect(accept.status).toBe(200);
+    expect(memberRole(db, "hubot")).toBe("admin");
+    expect(inviteStatus(db, fresh.id)).toBe("accepted");
+    expect(pendingInvites(db)).toBe(0);
+  });
+
   test("a lapsed pending invite answers 409 invite.expired once, then 410", async () => {
     const { db, users } = fixture();
     use(db);
@@ -557,6 +599,46 @@ describe("member role change and removal (AC5)", () => {
     });
     expect(remove.status).toBe(403);
     expect(memberRows(db)).toBe(2);
+  });
+
+  test("an owner demoting a non-last peer owner is allowed: 200 and both roles as posted", async () => {
+    const { db, users } = fixture();
+    use(db);
+    // TWO owners: the guard's clause is about the LAST owner, so a peer change
+    // falls outside it — the multi-owner case this guard must not block.
+    expect(memberRole(db, "dana")).toBe("owner");
+    expect(memberRole(db, "olive")).toBe("owner");
+
+    const res = await request("/dashboard/acme/members/role", "dana", {
+      method: "POST",
+      body: `userId=${users.secondOwner}&role=admin`,
+    });
+    expect(res.status).toBe(200);
+    expect(memberRole(db, "olive")).toBe("admin");
+    expect(memberRole(db, "dana")).toBe("owner");
+    expect(memberRows(db)).toBe(4);
+  });
+
+  test("the last-owner guard does not fire for a peer: only the sole owner's own demotion is 409, both rows unchanged", async () => {
+    const { db, users } = fixture();
+    use(db);
+    // The peer demotion lands — the guard is silent for a non-last owner…
+    const peer = await request("/dashboard/acme/members/role", "dana", {
+      method: "POST",
+      body: `userId=${users.secondOwner}&role=member`,
+    });
+    expect(peer.status).toBe(200);
+    // …and the 409 belongs only to the now-sole owner demoting themselves.
+    const self = await request("/dashboard/acme/members/role", "dana", {
+      method: "POST",
+      body: `userId=${users.owner}&role=member`,
+    });
+    expect(self.status).toBe(409);
+    expect(await self.text()).toContain("only owner");
+    // Zero writes on the refusal: both rows keep the roles they held before it.
+    expect(memberRole(db, "dana")).toBe("owner");
+    expect(memberRole(db, "olive")).toBe("member");
+    expect(memberRows(db)).toBe(4);
   });
 
   test("owner removal: allowed for a non-last owner, the actor's own removal is 409", async () => {

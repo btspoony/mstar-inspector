@@ -133,9 +133,8 @@ export async function getWorkspaceMember(
 
 /**
  * The deployment's single live workspace, or null when it does not carry
- * exactly one. M1 is single-workspace (the same assumption `createApp` makes);
- * the mode-independent manifest flow has no tenant scope on its request, so its
- * strict-mode landing page names the workspace through this read.
+ * exactly one. Route-level resolution for requests that name no workspace.
+ * It confers no tenant — the store takes ownership as a caller input.
  */
 export async function getSoleWorkspace(db: WorkspaceStoreD1): Promise<WorkspaceRow | null> {
   const rows = await db
@@ -236,6 +235,24 @@ export async function getWorkspaceAccessByRef(
 export async function countLiveWorkspaces(db: WorkspaceStoreD1): Promise<number> {
   const row = await db
     .prepare(`SELECT COUNT(*) AS n FROM workspaces WHERE deleted_at IS NULL`)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
+ * How many live workspaces this USER created — the count the creation cap is
+ * keyed on, so a workspace the login merely belongs to (including one it was
+ * invited into) never consumes the quota. Soft-deleted workspaces free their
+ * slot; `created_by IS NULL` rows (the seeded `default`, pre-backfill legacy)
+ * match nobody.
+ */
+export async function countLiveWorkspacesCreatedBy(
+  db: WorkspaceStoreD1,
+  userId: string,
+): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM workspaces WHERE created_by = ? AND deleted_at IS NULL`)
+    .bind(userId)
     .first<{ n: number }>();
   return row?.n ?? 0;
 }

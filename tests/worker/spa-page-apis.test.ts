@@ -81,6 +81,7 @@ async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
     privateKeyEnc: enc.privateKeyEnc,
     webhookSecretEnc: enc.webhookSecretEnc,
     createdBy: "mallory",
+    workspaceId: "default",
   });
   return db;
 }

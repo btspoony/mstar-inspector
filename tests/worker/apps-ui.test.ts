@@ -93,6 +93,7 @@ async function seedApp(
     privateKeyEnc: enc.privateKeyEnc,
     webhookSecretEnc: enc.webhookSecretEnc,
     createdBy: opts.createdBy,
+    workspaceId: "default",
   });
 }
 
