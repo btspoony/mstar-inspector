@@ -26,6 +26,7 @@ import {
   revokeInvite,
 } from "../../src/dashboard/invite-store";
 import type { WorkspaceInviteRow } from "../../src/dashboard/invite-store";
+import { FreeWorkspaceSlotError } from "../../src/dashboard/entitlement";
 
 const WORKSPACE = "default";
 const INVITER = "user-operator";
@@ -258,5 +259,64 @@ describe("workspace_invites store", () => {
     // The lapsed row is terminal now, so it can never resurface as pending.
     expect(rowOf(db, lapsed.id).status).toBe("expired");
     expect(await listPendingInvites(db, WORKSPACE, NOW)).toHaveLength(0);
+  });
+});
+
+/** A second live workspace on `planId`, with `login` as its owner. */
+function seedMembership(db: TestD1, workspaceId: string, login: string, planId: string): void {
+  db.raw
+    .prepare(
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+       VALUES (?, ?, ?, NULL, ?, NULL)`,
+    )
+    .run(workspaceId, workspaceId, workspaceId, NOW);
+  db.raw
+    .prepare(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+       SELECT ?, id, 'owner', ? FROM users WHERE github_login = ?`,
+    )
+    .run(workspaceId, NOW, login);
+  db.raw
+    .prepare(
+      `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+       VALUES (?, ?, 'active', ?, ?)`,
+    )
+    .run(workspaceId, planId, NOW, NOW);
+}
+
+describe("accept free-slot guard (store level, route gate bypassed)", () => {
+  test("a login in a live free workspace cannot accept a free invite; the invite stays pending", async () => {
+    const db = createFixture("mallory");
+    seedMembership(db, "ws-elsewhere", "mallory", "free");
+    const pending = await invite(db, "mallory");
+
+    // No route read ran here: the guard inside the membership insert refuses,
+    // and the batch leaves the invite pending.
+    await expect(acceptInvite(db, pending.id, "mallory", NOW)).rejects.toBeInstanceOf(
+      FreeWorkspaceSlotError,
+    );
+
+    expect(membershipCount(db, "mallory")).toBe(0);
+    expect(rowOf(db, pending.id).status).toBe("pending");
+  });
+
+  test("a pro target accepts even when the login already holds a free workspace", async () => {
+    const db = createFixture("mallory");
+    seedMembership(db, "ws-elsewhere", "mallory", "free");
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES (?, 'pro', 'active', ?, ?)`,
+      )
+      .run(WORKSPACE, NOW, NOW);
+    const pending = await invite(db, "mallory");
+
+    expect(await acceptInvite(db, pending.id, "mallory", NOW)).toEqual({
+      kind: "accepted",
+      workspaceId: WORKSPACE,
+      role: "member",
+    });
+    expect(membershipCount(db, "mallory")).toBe(1);
+    expect(rowOf(db, pending.id).status).toBe("accepted");
   });
 });

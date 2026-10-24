@@ -24,7 +24,14 @@
  * refuses with the entitlement's own cap error instead of copying either below.
  */
 
-import { MemberCapError, MEMBER_CAP_REFUSAL, resolveWorkspacePlan } from "./entitlement";
+import {
+  FREE_PLAN_ID,
+  FreeWorkspaceSlotError,
+  INVITE_FREE_SLOT_REFUSAL,
+  MemberCapError,
+  MEMBER_CAP_REFUSAL,
+  resolveWorkspacePlan,
+} from "./entitlement";
 
 /** Invite role inside one workspace (migration 0028 CHECK domain; no `owner`). */
 export type InviteRole = "admin" | "member";
@@ -135,6 +142,28 @@ const SEAT_GUARD_SQL = `(SELECT
         (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?2)
       + (SELECT COUNT(*) FROM workspace_invites
           WHERE workspace_id = ?2 AND status = 'pending' AND expires_at > ?6)) < ?8`;
+
+/**
+ * The acceptance's free-slot guard (SF-1), as a SQL condition the membership
+ * insert carries: the row may only be written when the TARGET workspace is on a
+ * paid plan, or the accepting login holds no live free membership yet — the
+ * same join rule as `countFreeMembershipsForLogin`. Re-reading it inside the
+ * insert is what closes the read-then-write window the route gate leaves open.
+ * Parameters: `?4` the free plan id; `?2` the accepting login; `i` is the
+ * invite row.
+ */
+const ACCEPT_FREE_SLOT_GUARD_SQL = `(EXISTS (
+        SELECT 1 FROM workspace_subscriptions ts
+         WHERE ts.workspace_id = i.workspace_id AND ts.status = 'active'
+           AND ts.plan_id <> ?4)
+      OR (SELECT COUNT(*) FROM workspace_members m
+            JOIN users mu ON mu.id = m.user_id
+            JOIN workspaces w ON w.id = m.workspace_id
+            LEFT JOIN workspace_subscriptions s
+                   ON s.workspace_id = w.id AND s.status = 'active'
+           WHERE mu.github_login = ?2 COLLATE NOCASE
+             AND w.deleted_at IS NULL
+             AND (s.plan_id IS NULL OR s.plan_id = ?4)) < 1)`;
 
 const INVITE_COLUMNS = `id, workspace_id, github_login, role, status, invited_by,
        created_at, expires_at, accepted_at`;
@@ -344,6 +373,12 @@ export async function revokeInvite(
  * update) instead of admitting a member from a dead invite. Repeat accepts are
  * idempotent: the re-read finds the membership and returns success without a
  * second row.
+ *
+ * The free slot is enforced BY the write too: the membership insert carries
+ * {@link ACCEPT_FREE_SLOT_GUARD_SQL}, and the invite is only consumed when the
+ * accepting login is a member of that workspace — so a refusal leaves the
+ * invite pending and throws {@link FreeWorkspaceSlotError}. The route's read
+ * stays fast-fail UX.
  */
 export async function acceptInvite(
   db: InviteStoreD1,
@@ -386,19 +421,24 @@ export async function acceptInvite(
     db
       .prepare(
         `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
-         SELECT i.workspace_id, u.id, i.role, ?
+         SELECT i.workspace_id, u.id, i.role, ?1
            FROM workspace_invites i
-           JOIN users u ON u.github_login = ? COLLATE NOCASE
-          WHERE i.id = ? AND i.status = 'pending' AND i.expires_at > ?
+           JOIN users u ON u.github_login = ?2 COLLATE NOCASE
+          WHERE i.id = ?3 AND i.status = 'pending' AND i.expires_at > ?1
+            AND ${ACCEPT_FREE_SLOT_GUARD_SQL}
          ON CONFLICT DO NOTHING`,
       )
-      .bind(now, login, inviteId, now),
+      .bind(now, login, inviteId, FREE_PLAN_ID),
     db
       .prepare(
-        `UPDATE workspace_invites SET status = 'accepted', accepted_at = ?
-          WHERE id = ? AND status = 'pending' AND expires_at > ?`,
+        `UPDATE workspace_invites SET status = 'accepted', accepted_at = ?1
+          WHERE id = ?2 AND status = 'pending' AND expires_at > ?1
+            AND EXISTS (SELECT 1 FROM workspace_members wm
+                          JOIN users u ON u.id = wm.user_id
+                         WHERE wm.workspace_id = workspace_invites.workspace_id
+                           AND u.github_login = ?3 COLLATE NOCASE)`,
       )
-      .bind(now, inviteId, now),
+      .bind(now, inviteId, login),
   ]);
 
   // Classify by re-read: a membership row proves the batch admitted (or had
@@ -414,7 +454,10 @@ export async function acceptInvite(
   if (after === null || after.status === "revoked" || after.status === "expired") {
     return { kind: "gone" };
   }
-  return { kind: "not_found" };
+  // Still pending with no membership written: the insert's free-slot guard
+  // refused it. Statement (3) only consumes the invite for an admitted login,
+  // so the invite stays pending.
+  throw new FreeWorkspaceSlotError(INVITE_FREE_SLOT_REFUSAL);
 }
 
 /** The login's role in one workspace, or null when they are not a member. */

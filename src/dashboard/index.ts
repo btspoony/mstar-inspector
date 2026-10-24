@@ -99,6 +99,7 @@ import {
 } from "./entitlement";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
+  type AcceptInviteOutcome,
   InvitePendingExistsError,
   acceptInvite,
   createInvite,
@@ -1847,7 +1848,18 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
     }
   }
 
-  const outcome = await acceptInvite(db, inviteId, user.github_login, now);
+  // The read above is fast-fail UX; `acceptInvite` re-checks the slot inside
+  // its membership insert, and its refusal is the same 409 body with the
+  // invite left pending (statement 3 only consumes it for an admitted login).
+  let outcome: AcceptInviteOutcome;
+  try {
+    outcome = await acceptInvite(db, inviteId, user.github_login, now);
+  } catch (err) {
+    if (err instanceof FreeWorkspaceSlotError) {
+      return inviteMutationResponse(c, err.message, 409);
+    }
+    throw err;
+  }
   switch (outcome.kind) {
     case "accepted":
       return inviteMutationResponse(c, `ok ${outcome.role}`, 200);
