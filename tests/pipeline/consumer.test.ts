@@ -4911,63 +4911,38 @@ describe("usage ledger (migration 0031)", () => {
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
   });
 
-  /**
-   * A DB double whose `usage_events` insert throws for its first `failures`
-   * attempts, then runs the real statement — the smallest way to exercise the
-   * ledger's one bounded retry. Every other statement is untouched.
-   */
-  function flakyUsageDb(db: TestD1, failures: number): TestD1 {
-    let remaining = failures;
-    return {
+  test("a failed usage insert is not retried: no row, one failure row carrying the identity", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    let insertAttempts = 0;
+    // Smallest possible double: only the usage insert throws — and counts its
+    // attempts; every other statement (the failure row included) is real.
+    const failingUsageDb: TestD1 = {
       ...db,
       prepare(query: string) {
         if (!query.includes("INSERT INTO usage_events")) return db.prepare(query);
         return {
-          bind(...values: unknown[]) {
-            return {
-              run: async () => {
-                if (remaining > 0) {
-                  remaining -= 1;
-                  throw new Error("usage boom");
-                }
-                return db.prepare(query).bind(...values).run();
-              },
-            };
-          },
+          bind: () => ({
+            run: async () => {
+              insertAttempts += 1;
+              throw new Error("usage boom");
+            },
+          }),
         } as never;
       },
     };
-  }
-
-  test("a usage insert that fails once is retried: one row and no failure row", async () => {
-    reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
-      await makeEnv({ DB: flakyUsageDb(db, 1) as never }),
+      await makeEnv({ DB: failingUsageDb as never }),
       testLog,
       testOverrides,
     );
 
     await consumer(makeBatch(makePayload()));
 
-    expect(reviewCount(db)).toBe(1);
-    expect(usageRows(db)).toHaveLength(1);
-    expect(failureRows(db)).toHaveLength(0);
-  });
-
-  test("a usage insert that fails twice still completes the review and records the metered identity", async () => {
-    reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(
-      await makeEnv({ DB: flakyUsageDb(db, 2) as never }),
-      testLog,
-      testOverrides,
-    );
-
-    await consumer(makeBatch(makePayload()));
-
+    // Exactly one attempt: the insert mints `seq + 1`, so retrying after an
+    // ambiguous failure (write applied, driver threw) would double-count.
+    expect(insertAttempts).toBe(1);
     // "count, never refuse": the review ran to completion.
     expect(reviewCount(db)).toBe(1);
     expect(usageRows(db)).toHaveLength(0);
