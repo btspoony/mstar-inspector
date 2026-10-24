@@ -1643,9 +1643,9 @@ chain: an override referencing a provider with no configured key fails
 closed the same way (Bugbot 7aaf18f4).
 Per-role overrides (the seat references in `app_model_chain_seats`, 0017; the
 pre-`0017` `app_model_roles` rows were backfilled into named chains and are
-read-retired) are deliberately NOT
-column-reflected — pin those with the completed review + `wrangler tail`
-runner evidence, not the column.
+read-retired) are deliberately NOT column-reflected — pin those with the
+completed review + `wrangler tail --env production` runner evidence, not the
+column.
 
 1. **Configure the chain** — on the App's settings page, set **Model chain**
    to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
@@ -1678,9 +1678,9 @@ runner evidence, not the column.
 
 ### 5. Rollback (multi-App)
 
-Rollback is `wrangler rollback` (see ### Rollback (production) above) — there is
-no legacy face to repoint to; the per-App webhook URL on GitHub is unchanged
-by a Worker rollback.
+Rollback is `wrangler rollback --env production` (see ### Rollback (production)
+above) — there is no legacy face to repoint to; the per-App webhook URL on
+GitHub is unchanged by a Worker rollback.
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
   (the chain head is `0025`). The code-only precedent (0002 — new code
