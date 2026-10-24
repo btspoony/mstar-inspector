@@ -10,6 +10,7 @@ import { t } from "../i18n";
 import type { SpaBoot } from "./boot";
 import { AppSidebar } from "./components/AppSidebar";
 import { SupportNotice } from "./components/SupportNotice";
+import { PageNotice } from "./pages/PageNotice";
 import { matchSpaRoute } from "./routes";
 import { buildNavbarModel, buildSidebarModel, buildWorkspaceSwitcherModel } from "./shell";
 import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-memberships";
@@ -17,6 +18,8 @@ import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-me
 type LayoutProps = {
   boot: SpaBoot;
   pathname: string;
+  /** One-shot outcome read at boot (`./flash`): rendered on this page load only. */
+  flash: boolean;
   children: ReactNode;
 };
 
@@ -45,7 +48,7 @@ function LoginChrome({ children }: { children: ReactNode }) {
   return <div className="min-h-svh bg-background text-foreground font-sans">{children}</div>;
 }
 
-function DashboardChrome({ boot, pathname, children }: LayoutProps) {
+function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
   const sidebar = buildSidebarModel(boot, pathname);
   // The LIVE list, not the boot's snapshot: an in-page rename patches it, and
   // a switcher built from the frozen boot would keep offering the retired slug.
@@ -97,6 +100,11 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
               the tenant must see an active operator grant on any screen, and it
               carries no control (AC4). */}
           <SupportNotice boot={boot} pathname={pathname} />
+          {/* One-shot outcome from the page just left (the delete flow): the
+              boot read and cleared its key, so this load shows it once. */}
+          {flash ? (
+            <PageNotice kind="success" message={t(boot.locale, "notice.success.workspaceDeleted")} />
+          ) : null}
           {children}
         </div>
       </SidebarInset>
@@ -104,7 +112,7 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
   );
 }
 
-export function Layout({ boot, pathname, children }: LayoutProps) {
+export function Layout({ boot, pathname, flash, children }: LayoutProps) {
   const route = matchSpaRoute(pathname);
   if (route?.page === "login") {
     return <LoginChrome>{children}</LoginChrome>;
@@ -113,7 +121,7 @@ export function Layout({ boot, pathname, children }: LayoutProps) {
   // page's rename card (rendered as `children`) writes it.
   return (
     <WorkspaceMembershipsProvider boot={boot}>
-      <DashboardChrome boot={boot} pathname={pathname}>
+      <DashboardChrome boot={boot} pathname={pathname} flash={flash}>
         {children}
       </DashboardChrome>
     </WorkspaceMembershipsProvider>

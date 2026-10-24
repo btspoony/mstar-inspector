@@ -87,6 +87,7 @@ export const en = {
       removedMember: "Removed {login}.",
       roleChanged: "{login} is now {role}.",
       revoked: "Revoked the invitation for {login}.",
+      workspaceDeleted: "Workspace deleted. Its Apps are not reviewed.",
     },
     warn: {
       alreadyMember: "{login} is already a member — nothing changed.",

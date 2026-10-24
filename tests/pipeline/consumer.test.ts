@@ -4976,4 +4976,33 @@ describe("usage ledger (migration 0031)", () => {
     ]);
     expect(reviewCount(db)).toBe(1);
   });
+
+  test("the payload sha is the metered identity — a differing checkout sha keeps one review_id", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Same delivery identity, different authoritative checkout: both dedup
+    // reads and the journal miss (they key off the checkout sha), so this is a
+    // second started execution of the SAME payload review.
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
+    await consumer(makeBatch(makePayload()));
+
+    const key = idemKey({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: SHA,
+    });
+    expect(usageRows(db).map((row) => [row.review_id, row.seq])).toEqual([
+      [key, 1],
+      [key, 2],
+    ]);
+  });
 });

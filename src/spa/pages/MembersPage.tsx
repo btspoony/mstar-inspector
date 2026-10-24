@@ -26,6 +26,7 @@ import type { SpaBoot } from "../boot";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
+import { setFlash } from "../flash";
 import { formatRelativeTime } from "../relative-time";
 import { apiBase } from "../workspace-base";
 import {
@@ -228,11 +229,15 @@ export function DeleteWorkspaceAction({
 
 /**
  * The owner's delete write: the one soft-delete route. A success lands on the
- * dashboard root — this workspace's own paths answer 404 afterwards.
+ * dashboard root — this workspace's own paths answer 404 afterwards — and
+ * flashes the outcome once for the landing shell.
  */
 export async function deleteWorkspace(base: string): Promise<number> {
   const { status } = await postForm(`${base}/api/workspace/delete`, {});
-  if (status < 400) window.location.assign("/dashboard");
+  if (status < 400) {
+    setFlash();
+    window.location.assign("/dashboard");
+  }
   return status;
 }
 

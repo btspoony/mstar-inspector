@@ -79,6 +79,13 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
     db.raw.close();
   });
 
+  test("the month-window count has its own index", () => {
+    const db = createMigratedTestD1();
+    const indexes = db.raw.query("PRAGMA index_list('usage_events')").all() as Array<{ name: string }>;
+    expect(indexes.map((index) => index.name)).toContain("usage_events_workspace_occurred");
+    db.raw.close();
+  });
+
   test("the file is not re-runnable: a second apply fails on the existing tables", () => {
     const db = createMigratedTestD1();
     const sql = readFileSync(join(import.meta.dir, "../../migrations", MIGRATION), "utf8");

@@ -21,6 +21,8 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
+import { FLASH_STORAGE_KEY, takeFlash } from "../../src/spa/flash";
+import { Layout } from "../../src/spa/Layout";
 import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   DeleteWorkspaceAction,
@@ -400,40 +402,81 @@ describe("workspace settings block", () => {
       "This cannot be undone. Members will lose access, pending invites will be cancelled, and Apps in this workspace will no longer be reviewed. A review that has already started is not cancelled.",
     );
     expect(t("en", "members.deleteWorkspace")).toBe("Delete workspace");
+    expect(t("en", "notice.success.workspaceDeleted")).toBe(
+      "Workspace deleted. Its Apps are not reviewed.",
+    );
+    expect(t("zh_CN", "notice.success.workspaceDeleted")).toBe("工作区已删除，其 App 不再接受审查。");
   });
 
   test("confirm posts to the workspace delete route, then lands on /dashboard", async () => {
     const calls: Array<{ url: string; method: string }> = [];
     const redirects: string[] = [];
     const realFetch = globalThis.fetch;
-    const scope = globalThis as { window?: { location: { assign: (url: string) => void } } };
+    const scope = globalThis as {
+      window?: { location: { assign: (url: string) => void } };
+      sessionStorage?: Storage;
+    };
+    const store = new Map<string, string>();
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       calls.push({ url: String(input), method: init?.method ?? "GET" });
       return new Response("", { status: 200 });
     }) as unknown as typeof fetch;
     scope.window = { location: { assign: (url: string) => redirects.push(url) } };
+    scope.sessionStorage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage;
     try {
       expect(await deleteWorkspace("/dashboard/acme")).toBe(200);
       expect(calls).toEqual([{ url: "/dashboard/acme/api/workspace/delete", method: "POST" }]);
       expect(redirects).toEqual(["/dashboard"]);
+
+      // F-2: the boot read consumes the flash; the landing shell renders it
+      // through the notice exactly once, then nothing remains.
+      const line = "Workspace deleted. Its Apps are not reviewed.";
+      const landing = renderToStaticMarkup(
+        createElement(Layout, {
+          boot: { locale: "en", login: "octocat", name: null },
+          pathname: "/dashboard",
+          flash: takeFlash(),
+          children: createElement("p", null, "page"),
+        }),
+      );
+      expect(landing.split(line).length - 1).toBe(1);
+      expect(store.has(FLASH_STORAGE_KEY)).toBe(false);
+      // The next page load boots with no flash.
+      expect(takeFlash()).toBe(false);
     } finally {
       globalThis.fetch = realFetch;
       delete scope.window;
+      delete scope.sessionStorage;
     }
   });
 
-  test("a refused delete keeps the page in place", async () => {
+  test("a refused delete keeps the page in place and flashes nothing", async () => {
     const redirects: string[] = [];
     const realFetch = globalThis.fetch;
-    const scope = globalThis as { window?: { location: { assign: (url: string) => void } } };
+    const scope = globalThis as {
+      window?: { location: { assign: (url: string) => void } };
+      sessionStorage?: Storage;
+    };
+    const store = new Map<string, string>();
     globalThis.fetch = (async () => new Response("owner only", { status: 403 })) as unknown as typeof fetch;
     scope.window = { location: { assign: (url: string) => redirects.push(url) } };
+    scope.sessionStorage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    } as unknown as Storage;
     try {
       expect(await deleteWorkspace("/dashboard/acme")).toBe(403);
       expect(redirects).toEqual([]);
+      expect(store.size).toBe(0);
     } finally {
       globalThis.fetch = realFetch;
       delete scope.window;
+      delete scope.sessionStorage;
     }
   });
 });

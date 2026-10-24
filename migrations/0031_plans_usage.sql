@@ -70,6 +70,10 @@ CREATE TABLE usage_events (
   PRIMARY KEY (review_id, seq)
 );
 
+-- Serves the month-window count (`WHERE workspace_id = ? AND occurred_at >= ?`);
+-- the (review_id, seq) PK cannot.
+CREATE INDEX usage_events_workspace_occurred ON usage_events(workspace_id, occurred_at);
+
 INSERT INTO plans (
   id, name, monthly_price_cents, included_members, extra_member_price_cents,
   platform_key_limit, reviews_included, apps_per_workspace, created_at

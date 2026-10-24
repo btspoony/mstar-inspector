@@ -73,6 +73,7 @@ export const zhCN: Dictionary = {
       removedMember: "已移除 {login}。",
       roleChanged: "{login} 现在是{role}。",
       revoked: "已撤销给 {login} 的邀请。",
+      workspaceDeleted: "工作区已删除，其 App 不再接受审查。",
     },
     warn: {
       alreadyMember: "{login} 已是成员 — 未做更改。",
