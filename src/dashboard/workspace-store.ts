@@ -133,10 +133,8 @@ export async function getWorkspaceMember(
 
 /**
  * The deployment's single live workspace, or null when it does not carry
- * exactly one. Route-level resolution for requests that name no workspace:
- * the mode-independent manifest flow has no tenant scope on its request, so
- * its strict-mode landing page names the workspace through this read. It
- * confers no tenant — the store takes ownership as a caller input.
+ * exactly one. Route-level resolution for requests that name no workspace.
+ * It confers no tenant — the store takes ownership as a caller input.
  */
 export async function getSoleWorkspace(db: WorkspaceStoreD1): Promise<WorkspaceRow | null> {
   const rows = await db

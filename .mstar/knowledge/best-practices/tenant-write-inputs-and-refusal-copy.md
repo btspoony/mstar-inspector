@@ -1,6 +1,6 @@
 # Tenant write inputs and refusal copy
 
-Two rules the inspector proved in production-shaped code, with the failure each one prevents.
+Three rules the inspector proved in production-shaped code, with the failure each one prevents.
 
 ## 1. Tenant ownership is a required input, never a lookup
 
@@ -29,9 +29,10 @@ When a limit refuses a request, the message is read as instructions. If it says 
 **Rule.** Before shipping a refusal sentence, trace the action it names to a reachable route. If there is none, the sentence states the fact only:
 
 ```
-You already have 5 live workspaces you created. Creating another is not available,
-and nothing on this page frees a slot.
+You already have ${count} live workspaces you created; the limit is ${limit}. Creating another is not available, and nothing on this page frees a slot.
 ```
+
+`count` is the observed count of live workspaces the actor created, not the cap; `limit` is the configured cap. Naming both keeps the sentence true when the count and the limit disagree.
 
 **Corollary — the client may not show the server text.** This dashboard's workspace-create page renders a generic failure for every non-201, so the server sentence is effectively internal today. Write it as if a user will read it anyway: the client contract can change without anyone revisiting the string.
 
