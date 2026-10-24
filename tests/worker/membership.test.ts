@@ -238,8 +238,13 @@ describe("pending invite visibility (AC4)", () => {
 
 describe("invite creation (AC2)", () => {
   test("owner and admin create one pending invite; the row carries the invited role", async () => {
-    const { db } = fixture();
+    const { db, users } = fixture();
     use(db);
+    // The fixture's four members leave ONE seat and this case mints two
+    // invites, so drop a non-actor member: the cap has its own cases below.
+    db.raw
+      .prepare("DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?")
+      .run(WORKSPACE, users.secondOwner);
     for (const login of ["dana", "carol"]) {
       const target = login === "dana" ? "hubot" : "ada";
       const res = await request(INVITES, login, {
@@ -274,8 +279,14 @@ describe("invite creation (AC2)", () => {
   });
 
   test("a second pending invite for the same login is 409 and leaves the first row untouched", async () => {
-    const { db } = fixture();
+    const { db, users } = fixture();
     use(db);
+    // Four members + the first pending invite would fill the five-seat cap and
+    // the cap refusal would answer first; drop a member so this stays the
+    // duplicate-invite case it is named for.
+    db.raw
+      .prepare("DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?")
+      .run(WORKSPACE, users.secondOwner);
     expect((await request(INVITES, "dana", { method: "POST", body: "login=hubot" })).status).toBe(200);
     const first = db.raw
       .prepare("SELECT id, role, created_at FROM workspace_invites WHERE status = 'pending'")
@@ -325,6 +336,92 @@ describe("invite creation (AC2)", () => {
       expect(res.status, body).toBe(400);
     }
     expect(pendingInvites(db)).toBe(0);
+  });
+});
+
+describe("invite creation member cap", () => {
+  const MEMBER_CAP_REFUSAL =
+    "This invite was not sent. This workspace already has five people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.";
+
+  /** A live pending invite, minted at the store so the route stays the subject. */
+  function seedLiveInvite(db: TestD1, invitedBy: string, login = "newcomer") {
+    const now = new Date();
+    return createInvite(db, {
+      workspaceId: WORKSPACE,
+      login,
+      role: "member",
+      invitedBy,
+      now: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+    });
+  }
+
+  test("the fifth person is invitable; the sixth person's invite is the exact 409 and writes nothing", async () => {
+    const { db } = fixture();
+    use(db);
+    expect((await request(INVITES, "dana", { method: "POST", body: "login=hubot" })).status).toBe(200);
+    expect(pendingInvites(db)).toBe(1);
+
+    const res = await request(INVITES, "carol", { method: "POST", body: "login=ada" });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(MEMBER_CAP_REFUSAL);
+    expect(pendingInvites(db)).toBe(1);
+  });
+
+  test("a live pending invite consumes a seat: four members plus one pending refuse the next invite", async () => {
+    const { db, users } = fixture();
+    use(db);
+    await seedLiveInvite(db, users.owner);
+    const res = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(MEMBER_CAP_REFUSAL);
+    expect(pendingInvites(db)).toBe(1);
+  });
+
+  test("revoking the pending invite frees the seat for the same call", async () => {
+    const { db, users } = fixture();
+    use(db);
+    const invite = await seedLiveInvite(db, users.owner);
+    expect((await request(INVITES, "dana", { method: "POST", body: "login=ada" })).status).toBe(409);
+
+    const revoked = await request(`${INVITES}/${invite.id}/revoke`, "dana", { method: "POST" });
+    expect(revoked.status).toBe(200);
+    const retry = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
+    expect(retry.status).toBe(200);
+    expect(pendingInvites(db)).toBe(1);
+  });
+
+  test("a lapsed pending invite consumes no seat", async () => {
+    const { db, users } = fixture();
+    use(db);
+    const now = new Date();
+    await createInvite(db, {
+      workspaceId: WORKSPACE,
+      login: "lapsed",
+      role: "member",
+      invitedBy: users.owner,
+      now: new Date(now.getTime() - 120_000).toISOString(),
+      expiresAt: new Date(now.getTime() - 60_000).toISOString(),
+    });
+    const res = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
+    expect(res.status).toBe(200);
+    expect(pendingInvites(db)).toBe(1);
+  });
+
+  test("a pro workspace is capped at five too", async () => {
+    const { db, users } = fixture();
+    const ts = new Date().toISOString();
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'pro', 'active', ?, ?)",
+      )
+      .run(WORKSPACE, ts, ts);
+    use(db);
+    await seedLiveInvite(db, users.owner);
+    const res = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(MEMBER_CAP_REFUSAL);
+    expect(pendingInvites(db)).toBe(1);
   });
 });
 
@@ -535,6 +632,92 @@ describe("invite accept (AC3)", () => {
     expect(inviteStatus(db, lapsed.id)).toBe("expired");
     expect((await request(path, "hubot", { method: "POST" })).status).toBe(410);
     expect(memberRows(db)).toBe(4);
+  });
+});
+
+/**
+ * The accepting login's free slot (Invite acceptance gate). `ws-acme` seeds no
+ * subscription row, so it resolves to `free`; these cases place the invitee in
+ * a second live free workspace, or price the target.
+ */
+describe("invite accept free slot", () => {
+  const FREE_SLOT_INVITE_REFUSAL =
+    "You were not added. You already belong to a free workspace, and you can belong to only one at a time. Delete that workspace if you own it. If you do not, an owner or admin of that workspace must remove you. Then accept this invite. The invite is still pending.";
+
+  /** A second live free workspace (`second`, owner `erin`) with `hubot` as a member; returns hubot's user id. */
+  function seedSecondWorkspace(db: TestD1): string {
+    seedWorkspace(db, "ws-second", "second");
+    seedMembership(db, "ws-second", seedUser(db, "erin"), "owner");
+    const hubot = seedUser(db, "hubot");
+    seedMembership(db, "ws-second", hubot, "member");
+    return hubot;
+  }
+
+  function inviteHubotToAcme(db: TestD1, invitedBy: string) {
+    return createInvite(db, {
+      workspaceId: WORKSPACE,
+      login: "hubot",
+      role: "member",
+      invitedBy,
+      now: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+  }
+
+  test("a login already in a live free workspace is refused with the exact 409 body, leaving the invite pending", async () => {
+    const { db, users } = fixture();
+    seedSecondWorkspace(db);
+    use(db);
+    const invite = await inviteHubotToAcme(db, users.owner);
+
+    const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "hubot", {
+      method: "POST",
+    });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(FREE_SLOT_INVITE_REFUSAL);
+    expect(inviteStatus(db, invite.id)).toBe("pending");
+    expect(memberRows(db)).toBe(4);
+  });
+
+  test("removing that membership lets the same accept through", async () => {
+    const { db, users } = fixture();
+    const hubotId = seedSecondWorkspace(db);
+    use(db);
+    const invite = await inviteHubotToAcme(db, users.owner);
+    const path = `/dashboard/acme/api/members/invites/${invite.id}/accept`;
+    expect((await request(path, "hubot", { method: "POST" })).status).toBe(409);
+
+    // The existing removal path: the second workspace's owner drops the login.
+    const removed = await request("/dashboard/second/members/remove", "erin", {
+      method: "POST",
+      body: `userId=${hubotId}`,
+    });
+    expect(removed.status).toBe(200);
+    expect(count(db, "SELECT COUNT(*) AS n FROM workspace_members WHERE user_id = ?", hubotId)).toBe(0);
+
+    const accepted = await request(path, "hubot", { method: "POST" });
+    expect(accepted.status).toBe(200);
+    expect(inviteStatus(db, invite.id)).toBe("accepted");
+    expect(memberRole(db, "hubot")).toBe("member");
+  });
+
+  test("a pro target accepts regardless of the login's free workspace", async () => {
+    const { db, users } = fixture();
+    seedSecondWorkspace(db);
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'pro', 'active', ?, ?)",
+      )
+      .run(WORKSPACE, new Date().toISOString(), new Date().toISOString());
+    use(db);
+    const invite = await inviteHubotToAcme(db, users.owner);
+
+    const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "hubot", {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(inviteStatus(db, invite.id)).toBe("accepted");
+    expect(memberRole(db, "hubot")).toBe("member");
   });
 });
 
@@ -750,5 +933,105 @@ describe("member role change and removal (AC5)", () => {
       body: `userId=${users.outsider}`,
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("workspace summary in the member payload", () => {
+  type MembersBody = {
+    workspace: {
+      plan: { id: string; name: string };
+      memberLimit: number;
+      reviewAttemptsThisMonth: number;
+      pendingInvites: number;
+    };
+    members: Array<{ github_login: string }>;
+  };
+
+  /** One metered started execution (the ledger's only required columns). */
+  function insertUsage(db: TestD1, reviewId: string, occurredAt: string, workspaceId = WORKSPACE): void {
+    db.raw
+      .prepare(
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
+         VALUES (?, 1, ?, ?, ?)`,
+      )
+      .run(reviewId, `${reviewId}:${occurredAt}`, workspaceId, occurredAt);
+  }
+
+  test("a free workspace reports the Free plan, its member limit and this month's attempts", async () => {
+    const { db } = fixture();
+    use(db);
+    const now = new Date();
+    const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+    // Two rows inside the current UTC month (the first instant counts), one
+    // before it, and one in another workspace — the count is this workspace's.
+    insertUsage(db, "review-in-1", new Date(monthStart).toISOString());
+    insertUsage(db, "review-in-2", now.toISOString());
+    insertUsage(db, "review-out", new Date(monthStart - 1).toISOString());
+    insertUsage(db, "review-other", now.toISOString(), "ws-other");
+
+    const res = await request(MEMBERS, "dana");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MembersBody;
+    expect(body.workspace).toEqual({
+      plan: { id: "free", name: "Free" },
+      memberLimit: 5,
+      reviewAttemptsThisMonth: 2,
+      pendingInvites: 0,
+    });
+    // The existing member fields are unchanged by the addition.
+    expect(body.members.map((row) => row.github_login).sort()).toEqual([
+      "carol",
+      "dana",
+      "mallory",
+      "olive",
+    ]);
+  });
+
+  test("an active pro subscription changes the reported plan, not the limit", async () => {
+    const { db } = fixture();
+    use(db);
+    const now = new Date().toISOString();
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'pro', 'active', ?, ?)",
+      )
+      .run(WORKSPACE, now, now);
+
+    const body = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
+    expect(body.workspace).toEqual({
+      plan: { id: "pro", name: "Pro" },
+      memberLimit: 5,
+      reviewAttemptsThisMonth: 0,
+      pendingInvites: 0,
+    });
+  });
+
+  test("a live pending invite is counted; a lapsed one consumes no seat", async () => {
+    const { db, users } = fixture();
+    use(db);
+    const now = new Date();
+    // Four members already hold four of the plan's five seats, so the seat
+    // guard admits exactly one pending invite — the count the summary reports.
+    const live = await createInvite(db, {
+      workspaceId: WORKSPACE,
+      login: "hubot",
+      role: "member",
+      invitedBy: users.owner,
+      now: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+    });
+
+    const counted = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
+    expect(counted.workspace.pendingInvites).toBe(1);
+    // The member fields themselves stay the member rows.
+    expect(counted.members.length).toBe(4);
+
+    // The cap's own lazy-expiry predicate: a past expires_at frees the seat
+    // even before a write flips the row's status.
+    db.raw
+      .prepare("UPDATE workspace_invites SET expires_at = ? WHERE id = ?")
+      .run(new Date(now.getTime() - 1_000).toISOString(), live.id);
+    const lapsed = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
+    expect(lapsed.workspace.pendingInvites).toBe(0);
   });
 });

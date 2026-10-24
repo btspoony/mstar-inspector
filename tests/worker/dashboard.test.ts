@@ -2506,6 +2506,8 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0026_workspaces.sql",
   // 0028: the SPA boot's pending-invite discovery read.
   "0028_workspace_invites.sql",
+  // 0031: workspace creation writes its `free` subscription row.
+  "0031_plans_usage.sql",
 ] as const;
 
 function createDashboardTestD1(
@@ -3634,6 +3636,10 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
   /** The plan's id contract: `ws_` + 22 chars of lowercase base32. */
   const WORKSPACE_ID = /^ws_[a-z2-7]{22}$/;
 
+  /** The Product copy § Creation — the exact 409 body a refusal must carry. */
+  const FREE_SLOT_REFUSAL =
+    "This workspace was not created. You already belong to a free workspace, and you can belong to only one at a time. Delete that workspace if you own it. If you do not, an owner or admin of that workspace must remove you. Then create this one.";
+
   /** A signed-in login POSTing the creation form through the real mount. */
   async function createWorkspaceRequest(
     db: DashboardD1 & { raw: Database },
@@ -3668,16 +3674,11 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     return (db.raw.query("SELECT COUNT(*) AS n FROM workspace_members").get() as CountRow).n;
   }
 
-  /** Live workspaces this user created — the cap's own count. */
-  function createdLiveCount(db: DashboardD1 & { raw: Database }, userId: string): number {
-    return (
-      db.raw
-        .query("SELECT COUNT(*) AS n FROM workspaces WHERE created_by = ? AND deleted_at IS NULL")
-        .get(userId) as CountRow
-    ).n;
+  function subscriptionRowCount(db: DashboardD1 & { raw: Database }): number {
+    return (db.raw.query("SELECT COUNT(*) AS n FROM workspace_subscriptions").get() as CountRow).n;
   }
 
-  test("creates the workspace and its owner membership, returning the ref", async () => {
+  test("creates the workspace, its owner membership and its free subscription, returning the ref", async () => {
     const db = createDashboardTestD1();
     db.raw.exec("DELETE FROM users");
     const user = await createUser(db, { login: "deployer", role: "member" });
@@ -3699,6 +3700,10 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
       .query("SELECT workspace_id, user_id, role FROM workspace_members WHERE workspace_id = ?")
       .all(body.id) as MemberRow[];
     expect(members).toEqual([{ workspace_id: body.id, user_id: user.id, role: "owner" }]);
+    const subscriptions = db.raw
+      .query("SELECT workspace_id, plan_id, status FROM workspace_subscriptions WHERE workspace_id = ?")
+      .all(body.id);
+    expect(subscriptions).toEqual([{ workspace_id: body.id, plan_id: "free", status: "active" }]);
     // No auto-join anywhere else: 0026's seeded `default` workspace keeps its
     // empty membership table — there is no "first user owns the only
     // workspace" fallback.
@@ -3737,102 +3742,79 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     expect(((await res.json()) as { name: string }).name).toBe(name);
   });
 
-  test("a login's sixth live workspace is refused with the exact 409 body and writes nothing", async () => {
+  test("a second free workspace for the same login is refused with the exact 409 body and writes nothing", async () => {
     const db = createDashboardTestD1();
     db.raw.exec("DELETE FROM users");
     await createUser(db, { login: "deployer", role: "member" });
 
-    for (let i = 1; i <= 5; i++) {
-      const res = await createWorkspaceRequest(db, "deployer", { name: `Workspace ${i}` });
-      expect(res.status, `creation ${i}`).toBe(201);
-    }
-    // Five created + 0026's seeded `default` (created_by NULL, so it consumes
-    // nobody's quota); each creation also wrote its owner membership.
+    const first = await createWorkspaceRequest(db, "deployer", { name: "First" });
+    expect(first.status).toBe(201);
     const workspacesBefore = workspaceCount(db);
     const membersBefore = memberRowCount(db);
-    expect(workspacesBefore).toBe(6);
-    expect(membersBefore).toBe(5);
+    const subscriptionsBefore = subscriptionRowCount(db);
+    expect(subscriptionsBefore).toBe(1); // only the created workspace's row
 
-    // The sixth attempt — and an immediate retry — hit the cap: the identical
-    // plain-text 409 body, zero rows on either table.
-    for (const name of ["Sixth", "Retry"]) {
+    // The second attempt — and an immediate retry — hit the free slot: the
+    // identical plain-text 409 body, zero rows on any of the three tables.
+    for (const name of ["Second", "Retry"]) {
       const res = await createWorkspaceRequest(db, "deployer", { name });
       expect(res.status, name).toBe(409);
-      expect(await res.text()).toBe(
-        "You already have 5 live workspaces you created; the limit is 5. Creating another is not available, and nothing on this page frees a slot.",
-      );
+      expect(await res.text(), name).toBe(FREE_SLOT_REFUSAL);
       expect(workspaceCount(db), name).toBe(workspacesBefore);
       expect(memberRowCount(db), name).toBe(membersBefore);
+      expect(subscriptionRowCount(db), name).toBe(subscriptionsBefore);
     }
   });
 
-  test("the cap counts workspaces the login CREATED, not ones it joined or the deployment total", async () => {
-    const db = createDashboardTestD1();
-    db.raw.exec("DELETE FROM users");
-    const creator = await createUser(db, { login: "deployer", role: "member" });
-    const joiner = await createUser(db, { login: "joiner", role: "member" });
-    const created: string[] = [];
-    for (let i = 1; i <= 5; i++) {
-      const res = await createWorkspaceRequest(db, "deployer", { name: `Workspace ${i}` });
-      expect(res.status, `creation ${i}`).toBe(201);
-      const body = (await res.json()) as { id: string };
-      created.push(body.id);
-    }
-    expect(createdLiveCount(db, creator.id)).toBe(5);
-    // `joiner` belongs to all five but created none of them.
-    for (const id of created) {
-      db.raw
-        .prepare(
-          "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, 'member', ?)",
-        )
-        .run(id, joiner.id, new Date().toISOString());
-    }
-    expect(memberRowCount(db)).toBe(10);
-
-    // A deployment-wide count (6 live) or a membership count (5) would refuse;
-    // the creation-keyed count lets the joiner's FIRST creation through.
-    const res = await createWorkspaceRequest(db, "joiner", { name: "Joiners own" });
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { id: string };
-    const rows = db.raw
-      .query("SELECT workspace_id, user_id, role FROM workspace_members WHERE workspace_id = ?")
-      .all(body.id) as MemberRow[];
-    expect(rows).toEqual([{ workspace_id: body.id, user_id: joiner.id, role: "owner" }]);
-    expect(createdLiveCount(db, joiner.id)).toBe(1);
-
-    // The same fixture also requires the cap to exist: `deployer` created all
-    // five live workspaces, so its next creation is refused.
-    const capped = await createWorkspaceRequest(db, "deployer", { name: "Deployers sixth" });
-    expect(capped.status).toBe(409);
-  });
-
-  test("a soft-deleted workspace frees its slot: the sixth creation then succeeds", async () => {
+  test("owning a pro workspace does not consume the free slot", async () => {
     const db = createDashboardTestD1();
     db.raw.exec("DELETE FROM users");
     const user = await createUser(db, { login: "deployer", role: "member" });
+    const now = new Date().toISOString();
+    db.raw
+      .prepare(
+        "INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at) VALUES ('ws_pro', 'ws_pro', 'Pro', ?, ?, NULL)",
+      )
+      .run(user.id, now);
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('ws_pro', ?, 'owner', ?)",
+      )
+      .run(user.id, now);
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES ('ws_pro', 'pro', 'active', ?, ?)",
+      )
+      .run(now, now);
+
+    const res = await createWorkspaceRequest(db, "deployer", { name: "Free one" });
+    expect(res.status).toBe(201);
+    const plans = db.raw
+      .query("SELECT plan_id FROM workspace_subscriptions ORDER BY plan_id")
+      .all();
+    expect(plans).toEqual([{ plan_id: "free" }, { plan_id: "pro" }]);
+  });
+
+  test("a soft-deleted workspace frees the slot: the next creation succeeds", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    await createUser(db, { login: "deployer", role: "member" });
     const first = await createWorkspaceRequest(db, "deployer", { name: "Workspace 1" });
     expect(first.status).toBe(201);
     const retired = (await first.json()) as { id: string };
-    for (let i = 2; i <= 5; i++) {
-      const res = await createWorkspaceRequest(db, "deployer", { name: `Workspace ${i}` });
-      expect(res.status, `creation ${i}`).toBe(201);
-    }
-    expect(createdLiveCount(db, user.id)).toBe(5);
 
-    // No production soft-delete face exists yet; the fixture retires one row
-    // exactly as `workspace-slug.test.ts` models a retired workspace.
+    const refused = await createWorkspaceRequest(db, "deployer", { name: "Workspace 2" });
+    expect(refused.status).toBe(409);
+
+    // No production soft-delete face exists yet; the fixture retires the row
+    // exactly as `workspace-slug.test.ts` models a retired workspace. Its
+    // subscription row stays — a retired tenant is not a home.
     db.raw
       .prepare("UPDATE workspaces SET deleted_at = ? WHERE id = ?")
       .run(new Date().toISOString(), retired.id);
-    expect(createdLiveCount(db, user.id)).toBe(4);
-    // The retired row is skipped, not removed: the table still holds the 5
-    // created rows plus 0026's seeded `default`.
-    expect(workspaceCount(db)).toBe(6);
 
-    // The freed slot is usable: the same login's sixth live creation lands.
     const res = await createWorkspaceRequest(db, "deployer", { name: "Replacement" });
     expect(res.status).toBe(201);
-    expect(createdLiveCount(db, user.id)).toBe(5);
   });
 
   test("anonymous → 302 to login, zero writes", async () => {

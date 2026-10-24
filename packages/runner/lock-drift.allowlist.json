@@ -41,7 +41,7 @@
   "type-fest": { "reason": "omp-transitive", "root": "0.13.1", "runner": "0.20.2" },
   "typed-query-selector": { "reason": "omp-transitive", "root": "2.12.2", "runner": "2.12.3" },
   "undici-types": { "reason": "omp-transitive", "root": "8.3.0", "runner": "8.9.0" },
-  "ws": { "reason": "omp-transitive", "root": "8.21.0", "runner": "8.22.0" },
+  "ws": { "reason": "omp-transitive", "root": "8.21.3", "runner": "8.22.0" },
   "yargs": { "reason": "omp-transitive", "root": "18.1.0", "runner": "18.2.0" },
   "zod": { "reason": "omp-transitive", "root": "4.6.7", "runner": "3.25.76" }
 }

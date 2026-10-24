@@ -5,11 +5,18 @@
  * questions the routing layer needs: which workspace does this path ref (id or
  * slug) name, and what is this user's role inside it.
  *
- * Zero-dependency leaf (the `apps-store` module boundary): the `db` parameter
- * is a locally-declared narrow D1 face (types only, zero imports), satisfied
- * structurally by the real `D1Database`, the dashboard test double, and the
- * store layer's `D1Like`.
+ * Module boundary (the `apps-store` one): the `db` parameter is a
+ * locally-declared narrow D1 face (types only). The single exception is the
+ * joined `./entitlement` import — the creation batch refuses with the
+ * entitlement's own slot error and spells the free plan id once there, instead
+ * of copying either below.
  */
+
+import {
+  FREE_PLAN_ID,
+  FREE_SLOT_REFUSAL,
+  FreeWorkspaceSlotError,
+} from "./entitlement";
 
 /** Membership role inside one workspace (migration 0026 CHECK domain). */
 export type WorkspaceRole = "owner" | "admin" | "member";
@@ -42,7 +49,7 @@ type WorkspaceStoreStatement = {
   }>;
 };
 
-type WorkspaceStoreD1 = {
+export type WorkspaceStoreD1 = {
   prepare(query: string): WorkspaceStoreStatement;
 };
 
@@ -240,19 +247,25 @@ export async function countLiveWorkspaces(db: WorkspaceStoreD1): Promise<number>
 }
 
 /**
- * How many live workspaces this USER created — the count the creation cap is
- * keyed on, so a workspace the login merely belongs to (including one it was
- * invited into) never consumes the quota. Soft-deleted workspaces free their
- * slot; `created_by IS NULL` rows (the seeded `default`, pre-backfill legacy)
- * match nobody.
+ * How many seats one workspace has taken: its live `workspace_members` rows
+ * plus its pending invites that have not lapsed. The invite half carries the
+ * invite reads' own lazy-expiry predicate (`status = 'pending' AND expires_at
+ * > ?`), so a row whose expiry passed but no write has flipped yet consumes no
+ * seat. This is the count the member-cap predicate reads.
  */
-export async function countLiveWorkspacesCreatedBy(
+export async function countMembersAndPendingInvites(
   db: WorkspaceStoreD1,
-  userId: string,
+  workspaceId: string,
+  nowIso: string,
 ): Promise<number> {
   const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM workspaces WHERE created_by = ? AND deleted_at IS NULL`)
-    .bind(userId)
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?)
+       + (SELECT COUNT(*) FROM workspace_invites
+           WHERE workspace_id = ? AND status = 'pending' AND expires_at > ?) AS n`,
+    )
+    .bind(workspaceId, workspaceId, nowIso)
     .first<{ n: number }>();
   return row?.n ?? 0;
 }
@@ -275,6 +288,34 @@ export async function countMembershipsForLogin(
         WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL`,
     )
     .bind(login)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/**
+ * How many live FREE workspaces this login belongs to — the count the free-slot
+ * predicate reads. Same rule as {@link resolveWorkspacePlan}: only an `active`
+ * subscription row counts, so a workspace with no row (or only a non-active
+ * one) is on `free`, and a membership in any other plan's workspace does not
+ * consume the slot. Soft-deleted workspaces do not count: a retired tenant is
+ * not a home.
+ */
+export async function countFreeMembershipsForLogin(
+  db: WorkspaceStoreD1,
+  login: string,
+): Promise<number> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM workspace_members wm
+         JOIN users u ON u.id = wm.user_id
+         JOIN workspaces w ON w.id = wm.workspace_id
+         LEFT JOIN workspace_subscriptions s
+                ON s.workspace_id = w.id AND s.status = 'active'
+        WHERE u.github_login = ? COLLATE NOCASE AND w.deleted_at IS NULL
+          AND (s.plan_id IS NULL OR s.plan_id = ?)`,
+    )
+    .bind(login, FREE_PLAN_ID)
     .first<{ n: number }>();
   return row?.n ?? 0;
 }
@@ -378,39 +419,129 @@ export async function setWorkspaceSlug(
 }
 
 /**
- * Create one workspace and its creator's `owner` membership as ONE `batch` — a
- * workspace without an owner, or an owner without a workspace, must never be
- * observable. `slug` equals `id` by contract (the id is already
- * lowercase, so the two can never disagree on case).
+ * The free-slot guard, as a SQL condition every insert of the creation batch
+ * carries: "this login holds no live free membership yet". Re-reading it inside
+ * the batch is what closes the read-then-write window — two concurrent
+ * creations both pass the route's fast-fail read, and the second one's
+ * predicates all evaluate false, so its batch writes zero rows. Parameters:
+ * `?5` the login, `?6` the free plan id; the rest of each statement binds
+ * `?1` id, `?2` name, `?3` user id, `?4` created stamp. `?1` is excluded from
+ * the count because the statements run in sequence inside one transaction: by
+ * the subscription insert, the owner membership above is already visible.
+ */
+const FREE_SLOT_GUARD_SQL = `(SELECT COUNT(*)
+       FROM workspace_members m
+       JOIN users u ON u.id = m.user_id
+       JOIN workspaces w ON w.id = m.workspace_id
+       LEFT JOIN workspace_subscriptions s
+              ON s.workspace_id = w.id AND s.status = 'active'
+      WHERE u.github_login = ?5 COLLATE NOCASE
+        AND w.deleted_at IS NULL
+        AND w.id <> ?1
+        AND (s.plan_id IS NULL OR s.plan_id = ?6)) < 1`;
+
+/**
+ * Create one workspace, its creator's `owner` membership and its `free`
+ * subscription as ONE `batch` — a workspace without an owner, or an owner
+ * without a workspace, must never be observable. `slug` equals `id` by
+ * contract (the id is already lowercase, so the two can never disagree on
+ * case).
+ *
+ * The free slot is enforced BY the write: all three inserts carry
+ * {@link FREE_SLOT_GUARD_SQL}, so a login that already holds a live free
+ * workspace gets zero rows from every statement and the refusal leaves nothing
+ * behind (a `batch` that committed cannot be rolled back after the fact, so
+ * the guard has to be part of each statement rather than a check after it).
  *
  * Returns false when the slug is already taken (the UNIQUE index is the final
- * word), so the caller can mint another id instead of 500ing.
+ * word), so the caller can mint another id instead of 500ing. Throws
+ * {@link FreeWorkspaceSlotError} when the guard refused.
  */
 export async function createWorkspace(
   db: WorkspaceStoreWriteD1,
-  input: { id: string; name: string; userId: string; createdAt: string },
+  input: {
+    id: string;
+    name: string;
+    userId: string;
+    githubLogin: string;
+    createdAt: string;
+  },
 ): Promise<boolean> {
-  let inserted: { meta: { changes: number; last_row_id: number } };
+  const binds = [
+    input.id,
+    input.name,
+    input.userId,
+    input.createdAt,
+    input.githubLogin,
+    FREE_PLAN_ID,
+  ] as const;
+  let results: { results: unknown[]; meta: { changes: number; last_row_id: number } }[];
   try {
-    const results = await db.batch([
+    results = await db.batch([
       db
         .prepare(
           `INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
-           VALUES (?, ?, ?, ?, ?, NULL)`,
+           SELECT ?1, ?1, ?2, ?3, ?4, NULL WHERE ${FREE_SLOT_GUARD_SQL}`,
         )
-        .bind(input.id, input.id, input.name, input.userId, input.createdAt),
+        .bind(...binds),
       db
         .prepare(
           `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
-           VALUES (?, ?, 'owner', ?)`,
+           SELECT ?1, ?3, 'owner', ?4 WHERE ${FREE_SLOT_GUARD_SQL}`,
         )
-        .bind(input.id, input.userId, input.createdAt),
+        .bind(...binds),
+      db
+        .prepare(
+          `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+           SELECT ?1, ?6, 'active', ?4, ?4 WHERE ${FREE_SLOT_GUARD_SQL}`,
+        )
+        .bind(...binds),
     ]);
-    inserted = results[0]!;
   } catch (err) {
     // The batch aborts as a unit, so a taken slug leaves no orphan membership.
     if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) return false;
     throw err;
   }
-  return inserted.meta.changes > 0;
+  // The guard refused: every statement wrote zero rows, so nothing to undo.
+  if (results[1]!.meta.changes === 0) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
+  return results[0]!.meta.changes > 0;
+}
+
+/**
+ * Retire one workspace as ONE `batch`: stamp `deleted_at`, cancel the active
+ * subscription, drop every membership and revoke the pending invites. The row
+ * itself is never hard-deleted — every live read filters `deleted_at IS NULL`,
+ * so the tenant stops resolving while its history stays readable. The
+ * subscription goes with the tenant: a retired workspace must not leave an
+ * `active` plan row for a later billing or support read to pick up.
+ *
+ * Returns whether THIS call retired the workspace: the `deleted_at IS NULL`
+ * guard means a replay changes no row, so a caller can tell "retired now" from
+ * "already gone, or never existed". The HTTP route still answers 200 on its
+ * idempotent path (a replay never reaches here — the tenant gate 404s it).
+ */
+export async function deleteWorkspace(
+  db: WorkspaceStoreWriteD1,
+  workspaceId: string,
+  deletedAt: string,
+): Promise<boolean> {
+  const [retired] = await db.batch([
+    db
+      .prepare(`UPDATE workspaces SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`)
+      .bind(deletedAt, workspaceId),
+    db
+      .prepare(
+        `UPDATE workspace_subscriptions SET status = 'canceled', updated_at = ?
+          WHERE workspace_id = ? AND status = 'active'`,
+      )
+      .bind(deletedAt, workspaceId),
+    db.prepare(`DELETE FROM workspace_members WHERE workspace_id = ?`).bind(workspaceId),
+    db
+      .prepare(
+        `UPDATE workspace_invites SET status = 'revoked'
+          WHERE workspace_id = ? AND status = 'pending'`,
+      )
+      .bind(workspaceId),
+  ]);
+  return retired!.meta.changes > 0;
 }

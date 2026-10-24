@@ -85,6 +85,7 @@ import { encodeCredentialPayload, type CredentialPools } from "../../packages/sh
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
+import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   applyPublishedLifecycle,
@@ -271,6 +272,15 @@ export type ConsumerLogFields = {
   /** github_apps.id the job resolves to (per-App jobs only). */
   app_id?: string;
   idempotency_key?: string;
+  /**
+   * The metered ledger identity (`usage_events.review_id`) and its workspace.
+   * Carried on the usage-write failure lines so a dropped attempt can be
+   * reconciled from logs as well as from the `usage` failure row.
+   */
+  review_id?: string;
+  workspace_id?: string;
+  /** Whether a failed usage insert landed: true, false (verified absent), or unreadable. */
+  usage_applied?: boolean | "unknown";
   /** Review tier resolved from REVIEW_LEVEL. */
   level?: ReviewLevel;
   /** Runner wall-clock budget for `level` (ms) — runnerTimeoutMs(level). */
@@ -1282,7 +1292,9 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
  * as an immediate ack-skip. NOT a throw: a throw would enter the
  * retry→DLQ path — the wrong semantics for an intentional pause.
  */
-type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter; githubAppId: number } | { kind: "paused" };
+type CommenterResolution =
+  | { kind: "ok"; commenter: ReviewCommenter; githubAppId: number; workspaceId: string }
+  | { kind: "paused" };
 
 /**
  * Resolve the commenter for one message (architect lock L4
@@ -1313,10 +1325,11 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
   if (row === null) {
     deps.appCommenters.delete(appRef.appId);
-    // An unmapped App is indistinguishable from a missing one (the INNER JOIN
-    // yields null for both) — the message names both causes.
+    // Two resolutions are indistinguishable from a missing one (the INNER
+    // JOINs yield null for all three): no `app_workspaces` mapping and a
+    // soft-deleted workspace — the message names every cause.
     throw new Error(
-      `per-App credential resolution failed: app ${appRef.appId} not found or has no workspace mapping`,
+      `per-App credential resolution failed: app ${appRef.appId} not found, has no workspace mapping, or its workspace is deleted`,
     );
   }
   if (row.deleted_at !== null) {
@@ -1346,7 +1359,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
   const cached = deps.appCommenters.get(appRef.appId);
   if (cached !== undefined && cached.fingerprint === fingerprint) {
-    return { kind: "ok", commenter: cached.commenter, githubAppId: cached.githubAppId };
+    return { kind: "ok", commenter: cached.commenter, githubAppId: cached.githubAppId, workspaceId: row.workspace_id };
   }
   // Cache miss (first message for this App) or fingerprint mismatch
   // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
@@ -1359,7 +1372,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   );
   const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
   deps.appCommenters.set(appRef.appId, { commenter, fingerprint, githubAppId: row.github_app_id });
-  return { kind: "ok", commenter, githubAppId: row.github_app_id };
+  return { kind: "ok", commenter, githubAppId: row.github_app_id, workspaceId: row.workspace_id };
 }
 
 /**
@@ -2045,7 +2058,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       );
       return { kind: "paused" };
     }
-    const { commenter, githubAppId } = resolution;
+    const { commenter, githubAppId, workspaceId } = resolution;
     // Per-App AI config: hangs off the SAME appRef resolution as
     // the commenter — one getAppConfig read per message, before the
     // guard/sandbox so an unresolvable config (undecryptable key envelope,
@@ -2222,6 +2235,79 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
       );
       return { kind: "ok" };
+    }
+
+    // 4b. Usage ledger (migration 0031): one row per STARTED execution. Both
+    // dedup reads and the journal handoff above have missed, so a duplicate
+    // delivery of a completed review never reaches this insert; a genuine
+    // re-execution after a runner failure mints the next `seq` for the same
+    // review. The product rule is "count, never refuse": a write failure is
+    // logged and recorded as a `usage` failure row carrying the metered
+    // identity (`reviewId` + `workspaceId`) so the dropped attempt can be
+    // reconciled. The review continues either way.
+    const reviewId = idemKey({
+      // The metered identity is the PAYLOAD identity (plan § Consumer write
+      // point 3): the authoritative checkout sha refines the review row only,
+      // so a force-push between delivery and retry cannot split one review
+      // into two ledger identities. A comment-mention job has no payload sha
+      // and shares one stable per-PR identity — `idemKey` refuses an empty
+      // sha, so the "no commit" sentinel stands in.
+      ...key,
+      head_sha: payload.head_sha || "no-sha",
+    });
+    const usageEvent = {
+      reviewId,
+      // The durable identity of THIS attempt: a review may already hold earlier
+      // rows, so the failure read-back below must ask by token, not by review.
+      executionToken: crypto.randomUUID(),
+      workspaceId,
+      occurredAt: new Date().toISOString(),
+    };
+    try {
+      // No retry: a replay of the SAME token is already idempotent (the unique
+      // index rejects it), and a retry that minted a NEW token would be a
+      // different execution by definition — a second count for one attempt. A
+      // dropped row stays reconcilable through the `usage` failure row below.
+      await recordUsageEvent(deps.env.DB, usageEvent);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      // A pre-commit failure and an ambiguous one (the write landed, the driver
+      // threw) reach this catch identically. The token read-back separates them
+      // and reports THREE states: `true` — this execution's row is present, so
+      // the failure is noise; `false` — the read succeeded and found nothing,
+      // the only state a backfill may act on; `"unknown"` — the read itself
+      // failed, so nothing is known. A backfill must re-check the token before
+      // inserting: the unique index only rejects a replay that REUSES the
+      // recorded token, and a fresh token would mint another `seq`.
+      const applied: true | false | "unknown" = await hasUsageEventForExecutionToken(
+        deps.env.DB,
+        usageEvent.executionToken,
+      ).catch(() => "unknown" as const);
+      deps.log.warn(
+        { ...fields, review_id: reviewId, workspace_id: workspaceId, usage_applied: applied },
+        `usage_events insert failed (review continues): ${detail}`,
+      );
+      // The failure row is best-effort too — its own guard keeps a recording
+      // failure from reaching the pipeline.
+      try {
+        await deps.failureStore.record({
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: headSha,
+          stage: "usage",
+          error: `usage_events insert failed: ${detail} ${JSON.stringify({
+            reviewId,
+            workspaceId,
+            executionToken: usageEvent.executionToken,
+            applied,
+          })}`,
+        });
+      } catch (recordErr) {
+        const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+        deps.log.warn(fields, `review_failures insert failed (usage failure, review continues): ${recordDetail}`);
+      }
     }
 
     // 5. §7.7 step 3 — lifecycle context: apply this scope's pending

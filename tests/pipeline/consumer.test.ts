@@ -455,6 +455,13 @@ function failureRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<
   return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
+/** All rows of the usage_events ledger in the real D1 double. */
+function usageRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
+  return db.raw.query("SELECT * FROM usage_events ORDER BY review_id, seq").all() as Array<
+    Record<string, unknown>
+  >;
+}
+
 describe("createReviewConsumer", () => {
   test("findByIdempotencyKey hit after clone → ack: no post, no insert, destroy", async () => {
     reset();
@@ -1787,6 +1794,9 @@ describe("createReviewConsumer", () => {
       // The workspace plane every App read joins; 0027 attributes the legacy
       // App above to the 'default' workspace exactly as a real deployment does.
       "0027_workspace_backfill.sql",
+      // 0031 completes the current set: the consumer meters every started
+      // execution into usage_events.
+      "0031_plans_usage.sql",
     ]) {
       db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
     }
@@ -2840,6 +2850,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(kvPuts).toHaveLength(0);
     // The ok path resolves silently (queue auto-ack) — nothing retried.
     expect(messageRetryCalls).toHaveLength(0);
+    // The handoff returns before the usage insert: a journal hit is not a
+    // started execution and writes no ledger row.
+    expect(usageRows(db)).toHaveLength(0);
     // The journal row is untouched (pending recovery is never deleted).
     const pub = db.raw.query("SELECT phase, recovery_state FROM review_publications WHERE id = 'dddddddd-0000-4000-8000-000000000004'").get() as {
       phase: string;
@@ -4807,7 +4820,7 @@ describe("workspace attribution gate (one read face)", () => {
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
-      /per-App credential resolution failed: app 11111111-2222-3333-4444-555555555555 not found or has no workspace mapping/,
+      /per-App credential resolution failed: app 11111111-2222-3333-4444-555555555555 not found, has no workspace mapping, or its workspace is deleted/,
     );
 
     // Structural: nothing ran — no sandbox step, no commenter instance (so no
@@ -4822,7 +4835,7 @@ describe("workspace attribution gate (one read face)", () => {
     expect(messageRetryCalls).toHaveLength(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
-    expect(String(failureRows(db)[0]!.error)).toContain("not found or has no workspace mapping");
+    expect(String(failureRows(db)[0]!.error)).toContain("or its workspace is deleted");
   });
 
   test("a genuinely missing App takes the same not-found path", async () => {
@@ -4833,10 +4846,331 @@ describe("workspace attribution gate (one read face)", () => {
     await expect(
       consumer(makeBatch(makePayload({ appRef: { appId: "no-such-app" } }))),
     ).rejects.toThrow(
-      /per-App credential resolution failed: app no-such-app not found or has no workspace mapping$/,
+      /per-App credential resolution failed: app no-such-app not found, has no workspace mapping, or its workspace is deleted$/,
     );
 
     expect(commenterCalls).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0);
+  });
+});
+
+describe("usage ledger (migration 0031)", () => {
+  test("a normal message writes exactly one row: the App's workspace, review id, seq 1", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(usageRows(db)).toEqual([
+      {
+        review_id: idemKey({
+          installation_id: 123,
+          owner: "acme",
+          repo: "widgets",
+          pr_number: 42,
+          head_sha: SHA,
+        }),
+        seq: 1,
+        execution_token: expect.any(String),
+        workspace_id: "default",
+        occurred_at: expect.any(String),
+      },
+    ]);
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("a duplicate delivery that hits dedup writes no row", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const store = createArtifactStore(db);
+    await store.put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: VALID_OUTPUT,
+      appId: TEST_APP_ID,
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(usageRows(db)).toHaveLength(0);
+  });
+
+  test("a soft-deleted workspace is unresolvable — fail closed before any sandbox or usage row", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    db.raw.prepare("UPDATE workspaces SET deleted_at = datetime('now') WHERE id = 'default'").run();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/or its workspace is deleted/);
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(usageRows(db)).toHaveLength(0);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
+  });
+
+  test("a failed usage insert is not retried: no row, one failure row carrying the identity", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    let insertAttempts = 0;
+    // Smallest possible double: only the usage insert throws — and counts its
+    // attempts; every other statement (the failure row included) is real.
+    const failingUsageDb: TestD1 = {
+      ...db,
+      prepare(query: string) {
+        if (!query.includes("INSERT INTO usage_events")) return db.prepare(query);
+        return {
+          bind: () => ({
+            run: async () => {
+              insertAttempts += 1;
+              throw new Error("usage boom");
+            },
+          }),
+        } as never;
+      },
+    };
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: failingUsageDb as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    // Exactly one attempt: the insert mints `seq + 1`, so retrying after an
+    // ambiguous failure (write applied, driver threw) would double-count.
+    expect(insertAttempts).toBe(1);
+    // "count, never refuse": the review ran to completion.
+    expect(reviewCount(db)).toBe(1);
+    expect(usageRows(db)).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = failureRows(db)[0]!;
+    expect(row).toMatchObject({ stage: "usage" });
+    // The dropped attempt is reconcilable: the failure row carries the exact
+    // ledger identity the insert would have written, plus the workspace.
+    expect(row.error).toContain(
+      idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+    );
+    expect(row.error).toContain('"workspaceId":"default"');
+    // Nothing landed: this is the one backfillable variant.
+    expect(row.error).toContain('"applied":false');
+  });
+
+  test("an ambiguous usage failure records applied: true so it is not backfilled twice", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The real insert runs, THEN the driver "throws" — the ambiguous failure
+    // the ledger read-back exists to tell apart from a pre-commit one.
+    const appliedThenThrew: TestD1 = {
+      ...db,
+      prepare(query: string) {
+        const real = db.prepare(query);
+        if (!query.includes("INSERT INTO usage_events")) return real;
+        return {
+          bind: (...values: unknown[]) => ({
+            run: async () => {
+              await real.bind(...values).run();
+              throw new Error("usage boom after commit");
+            },
+          }),
+        } as never;
+      },
+    };
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: appliedThenThrew as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    // The row exists, so `applied: true` marks the failure as noise and keeps
+    // a backfill from minting a second `seq` for the same execution.
+    expect(usageRows(db)).toHaveLength(1);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error).toContain('"applied":true');
+  });
+
+  test("a pre-commit failure on the second attempt is applied: false even with seq 1 present", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const reviewId = idemKey({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: SHA,
+    });
+    // A prior attempt already metered seq 1 for this review.
+    db.raw
+      .prepare(
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
+         VALUES (?, 1, 'prior-execution', 'default', ?)`,
+      )
+      .run(reviewId, new Date().toISOString());
+    let insertAttempts = 0;
+    const failingUsageDb: TestD1 = {
+      ...db,
+      prepare(query: string) {
+        if (!query.includes("INSERT INTO usage_events")) return db.prepare(query);
+        return {
+          bind: () => ({
+            run: async () => {
+              insertAttempts += 1;
+              throw new Error("usage boom");
+            },
+          }),
+        } as never;
+      },
+    };
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: failingUsageDb as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(insertAttempts).toBe(1);
+    // THIS execution wrote nothing, so it is backfillable — asking by row count
+    // for the review would have answered "applied" from the earlier attempt.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error).toContain('"applied":false');
+    expect(usageRows(db)).toHaveLength(1);
+  });
+
+  test("an unreadable ledger records applied: \"unknown\" instead of a false claim", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Both the insert AND the token read-back fail: the failure row must say
+    // so instead of reporting "not applied", which would authorise a backfill.
+    const unreadableDb: TestD1 = {
+      ...db,
+      prepare(query: string) {
+        if (query.includes("WHERE execution_token")) {
+          return {
+            bind: () => ({
+              first: async () => {
+                throw new Error("ledger unreadable");
+              },
+            }),
+          } as never;
+        }
+        if (!query.includes("INSERT INTO usage_events")) return db.prepare(query);
+        return {
+          bind: () => ({
+            run: async () => {
+              throw new Error("usage boom");
+            },
+          }),
+        } as never;
+      },
+    };
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: unreadableDb as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error).toContain('"applied":"unknown"');
+  });
+
+  test("a genuine re-execution after a runner failure mints seq 2 for the same review", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    // Attempt 1: the runner fails, so no reviews row, KV done or journal row
+    // exists — both dedup reads and the journal handoff miss on the retry.
+    runnerExitCode = 1;
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+    expect(usageRows(db).map((row) => row.seq)).toEqual([1]);
+
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    await consumer(makeBatch(makePayload()));
+
+    const key = idemKey({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: SHA,
+    });
+    expect(usageRows(db).map((row) => [row.review_id, row.seq])).toEqual([
+      [key, 1],
+      [key, 2],
+    ]);
+    // Each attempt carries its own durable identity, so a later failure can be
+    // read back by token instead of by the review's row count.
+    expect(new Set(usageRows(db).map((row) => row.execution_token)).size).toBe(2);
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("the payload sha is the metered identity — a differing checkout sha keeps one review_id", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Same delivery identity, different authoritative checkout: both dedup
+    // reads and the journal miss (they key off the checkout sha), so this is a
+    // second started execution of the SAME payload review.
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
+    await consumer(makeBatch(makePayload()));
+
+    const key = idemKey({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: SHA,
+    });
+    expect(usageRows(db).map((row) => [row.review_id, row.seq])).toEqual([
+      [key, 1],
+      [key, 2],
+    ]);
+  });
+
+  test("a job without a payload sha keeps one review identity across checkout shas", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: null })));
+
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
+    await consumer(makeBatch(makePayload({ head_sha: null })));
+
+    const key = idemKey({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: "no-sha",
+    });
+    expect(usageRows(db).map((row) => [row.review_id, row.seq])).toEqual([
+      [key, 1],
+      [key, 2],
+    ]);
   });
 });
