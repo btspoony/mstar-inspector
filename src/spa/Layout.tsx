@@ -19,7 +19,7 @@ import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-me
 type LayoutProps = {
   boot: SpaBoot;
   pathname: string;
-  /** One-shot outcome read at boot (`./flash`): shown on this mount only. */
+  /** One-shot outcome read at boot (`./flash`): shown until the pathname changes. */
   flash: FlashKind | null;
   children: ReactNode;
 };

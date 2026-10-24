@@ -531,8 +531,9 @@ describe("workspace settings block", () => {
       const { createRoot } = await import("react-dom/client");
 
       // Records every committed paint: layout effects run after the DOM
-      // mutation and before the flash-clearing passive effect, so the first
-      // paint stays observable even though act() flushes effects on return.
+      // mutation and before the pathname-keyed flash-clear re-renders, so the
+      // painted frames stay observable even though act() flushes effects on
+      // return.
       function Shell({ pathname }: { pathname: string }) {
         const ref = useRef<HTMLDivElement>(null);
         useLayoutEffect(() => {

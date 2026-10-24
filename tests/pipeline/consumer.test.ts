@@ -5046,6 +5046,46 @@ describe("usage ledger (migration 0031)", () => {
     expect(usageRows(db)).toHaveLength(1);
   });
 
+  test("an unreadable ledger records applied: \"unknown\" instead of a false claim", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Both the insert AND the token read-back fail: the failure row must say
+    // so instead of reporting "not applied", which would authorise a backfill.
+    const unreadableDb: TestD1 = {
+      ...db,
+      prepare(query: string) {
+        if (query.includes("WHERE execution_token")) {
+          return {
+            bind: () => ({
+              first: async () => {
+                throw new Error("ledger unreadable");
+              },
+            }),
+          } as never;
+        }
+        if (!query.includes("INSERT INTO usage_events")) return db.prepare(query);
+        return {
+          bind: () => ({
+            run: async () => {
+              throw new Error("usage boom");
+            },
+          }),
+        } as never;
+      },
+    };
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: unreadableDb as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error).toContain('"applied":"unknown"');
+  });
+
   test("a genuine re-execution after a runner failure mints seq 2 for the same review", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
