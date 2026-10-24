@@ -1687,8 +1687,8 @@ GitHub is unchanged by a Worker rollback.
   tolerates the prior schema) covers additive migrations; `0024` and `0025`
   rebuilt tables, so pre-`0024` code does not run against the live schema and
   their rollback needs the pre-apply snapshot as well (§ D1 migrations,
-  § Rollback). The `0023` removal tombstones stay safe on a code rollback: a
-  version predating `removed_logins` simply ignores the table.
+  ### Rollback (production)). The `0023` removal tombstones stay safe on a code
+  rollback: a version predating `removed_logins` simply ignores the table.
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
