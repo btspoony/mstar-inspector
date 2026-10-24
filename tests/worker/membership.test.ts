@@ -538,6 +538,92 @@ describe("invite accept (AC3)", () => {
   });
 });
 
+/**
+ * The accepting login's free slot (Invite acceptance gate). `ws-acme` seeds no
+ * subscription row, so it resolves to `free`; these cases place the invitee in
+ * a second live free workspace, or price the target.
+ */
+describe("invite accept free slot", () => {
+  const FREE_SLOT_INVITE_REFUSAL =
+    "You were not added. You already belong to a free workspace, and you can belong to only one at a time. Delete that workspace if you own it. If you do not, an owner or admin of that workspace must remove you. Then accept this invite. The invite is still pending.";
+
+  /** A second live free workspace (`second`, owner `erin`) with `hubot` as a member; returns hubot's user id. */
+  function seedSecondWorkspace(db: TestD1): string {
+    seedWorkspace(db, "ws-second", "second");
+    seedMembership(db, "ws-second", seedUser(db, "erin"), "owner");
+    const hubot = seedUser(db, "hubot");
+    seedMembership(db, "ws-second", hubot, "member");
+    return hubot;
+  }
+
+  function inviteHubotToAcme(db: TestD1, invitedBy: string) {
+    return createInvite(db, {
+      workspaceId: WORKSPACE,
+      login: "hubot",
+      role: "member",
+      invitedBy,
+      now: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+  }
+
+  test("a login already in a live free workspace is refused with the exact 409 body, leaving the invite pending", async () => {
+    const { db, users } = fixture();
+    seedSecondWorkspace(db);
+    use(db);
+    const invite = await inviteHubotToAcme(db, users.owner);
+
+    const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "hubot", {
+      method: "POST",
+    });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(FREE_SLOT_INVITE_REFUSAL);
+    expect(inviteStatus(db, invite.id)).toBe("pending");
+    expect(memberRows(db)).toBe(4);
+  });
+
+  test("removing that membership lets the same accept through", async () => {
+    const { db, users } = fixture();
+    const hubotId = seedSecondWorkspace(db);
+    use(db);
+    const invite = await inviteHubotToAcme(db, users.owner);
+    const path = `/dashboard/acme/api/members/invites/${invite.id}/accept`;
+    expect((await request(path, "hubot", { method: "POST" })).status).toBe(409);
+
+    // The existing removal path: the second workspace's owner drops the login.
+    const removed = await request("/dashboard/second/members/remove", "erin", {
+      method: "POST",
+      body: `userId=${hubotId}`,
+    });
+    expect(removed.status).toBe(200);
+    expect(count(db, "SELECT COUNT(*) AS n FROM workspace_members WHERE user_id = ?", hubotId)).toBe(0);
+
+    const accepted = await request(path, "hubot", { method: "POST" });
+    expect(accepted.status).toBe(200);
+    expect(inviteStatus(db, invite.id)).toBe("accepted");
+    expect(memberRole(db, "hubot")).toBe("member");
+  });
+
+  test("a pro target accepts regardless of the login's free workspace", async () => {
+    const { db, users } = fixture();
+    seedSecondWorkspace(db);
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'pro', 'active', ?, ?)",
+      )
+      .run(WORKSPACE, new Date().toISOString(), new Date().toISOString());
+    use(db);
+    const invite = await inviteHubotToAcme(db, users.owner);
+
+    const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "hubot", {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(inviteStatus(db, invite.id)).toBe("accepted");
+    expect(memberRole(db, "hubot")).toBe("member");
+  });
+});
+
 describe("member role change and removal (AC5)", () => {
   test("owner changes a member's workspace role; users.role is not written", async () => {
     const { db, users } = fixture();

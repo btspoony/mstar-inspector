@@ -87,7 +87,9 @@ import {
 import {
   FREE_SLOT_REFUSAL,
   FreeWorkspaceSlotError,
+  INVITE_FREE_SLOT_REFUSAL,
   freeSlotAvailable,
+  resolveWorkspacePlan,
 } from "./entitlement";
 import {
   InvitePendingExistsError,
@@ -1742,7 +1744,9 @@ const inviteRevokeRoute = async (c: DashboardContext) => {
  * Outcomes follow the plan's failure table exactly: login mismatch or unknown
  * invite → 404; terminal (revoked/expired) → 410; lapsed-but-pending → 409
  * `invite.expired` (the store flips the row in the same request, so a repeat is
- * 410); success → 200.
+ * 410); the accepting login already holds a free workspace and the target is
+ * `free` → 409 Product copy § Invite acceptance with the invite left pending;
+ * success → 200.
  */
 const inviteAcceptRoute = async (c: DashboardContext) => {
   const db = dashboardD1(c.env);
@@ -1761,7 +1765,25 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
   const invite = await getInviteInWorkspace(db, tenant.workspaceId, inviteId);
   if (!invite) return await tenantNotFound(c);
 
-  const outcome = await acceptInvite(db, inviteId, user.github_login, new Date().toISOString());
+  const now = new Date().toISOString();
+  // The free slot gates only an acceptance that could otherwise land: a foreign
+  // login (404) and a terminal or lapsed row (410 / 409 `invite.expired`) keep
+  // their own answers — the copy below asserts the invite is STILL pending. The
+  // slot belongs to the accepting login and is spent only by a live membership
+  // in a workspace that resolves to `free`, so a paid target is never gated.
+  // Nothing is written before this point, so a refusal leaves the row pending.
+  const wouldAccept =
+    invite.status === "pending" &&
+    invite.expires_at > now &&
+    invite.github_login.toLowerCase() === user.github_login.toLowerCase();
+  if (wouldAccept && (await resolveWorkspacePlan(db, tenant.workspaceId)).id === "free") {
+    const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
+    if (!freeSlotAvailable(freeCount)) {
+      return inviteMutationResponse(c, INVITE_FREE_SLOT_REFUSAL, 409);
+    }
+  }
+
+  const outcome = await acceptInvite(db, inviteId, user.github_login, now);
   switch (outcome.kind) {
     case "accepted":
       return inviteMutationResponse(c, `ok ${outcome.role}`, 200);
