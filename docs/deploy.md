@@ -665,6 +665,10 @@ is still correct on its own predicate.
 
 ### The FIRST application has the same blind spot
 
+**Scope: this subsection targets a staging copy or a self-hosted deployment
+tracking the branch — not the production upgrade path, so its commands use the
+staging binding (`mstar-inspector-db`).**
+
 The hand re-run above is not the only way `0030` can restore somebody. Its
 `NOT EXISTS` guard looks at live memberships only, so the **first** ledger
 application — the normal, once-per-database one — re-grants `default` to any
@@ -1749,8 +1753,9 @@ Operationally that means:
 > back automatically. A failed deploy stops red; the operator investigates
 > and, if needed, rolls back by hand.
 
-- Worker code/config: redeploy the previous version — `wrangler rollback`
-  (or check out the previous commit and `wrangler deploy`). Rollback restores
+- Worker code/config: redeploy the previous version —
+  `wrangler rollback --env production` (or check out the previous commit and
+  `wrangler deploy --env production`). Rollback restores
   Worker code + cron triggers + consumer config; the container image follows
   the checked-out Dockerfile.
 - D1 migrations are **forward-only**: never reverse a migration on rollback.
