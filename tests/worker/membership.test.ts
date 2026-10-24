@@ -942,6 +942,7 @@ describe("workspace summary in the member payload", () => {
       plan: { id: string; name: string };
       memberLimit: number;
       reviewAttemptsThisMonth: number;
+      pendingInvites: number;
     };
     members: Array<{ github_login: string }>;
   };
@@ -972,6 +973,7 @@ describe("workspace summary in the member payload", () => {
       plan: { id: "free", name: "Free" },
       memberLimit: 5,
       reviewAttemptsThisMonth: 2,
+      pendingInvites: 0,
     });
     // The existing member fields are unchanged by the addition.
     expect(body.members.map((row) => row.github_login).sort()).toEqual([
@@ -997,6 +999,38 @@ describe("workspace summary in the member payload", () => {
       plan: { id: "pro", name: "Pro" },
       memberLimit: 5,
       reviewAttemptsThisMonth: 0,
+      pendingInvites: 0,
     });
+  });
+
+  test("live pending invites are counted; a lapsed one consumes no seat", async () => {
+    const { db, users } = fixture();
+    use(db);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 60_000).toISOString();
+    const invite = (login: string) =>
+      createInvite(db, {
+        workspaceId: WORKSPACE,
+        login,
+        role: "member",
+        invitedBy: users.owner,
+        now: now.toISOString(),
+        expiresAt,
+      });
+    const lapsed = await invite("hubot");
+    await invite("sprocket");
+
+    const two = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
+    expect(two.workspace.pendingInvites).toBe(2);
+    // The member fields themselves stay the member rows.
+    expect(two.members.length).toBe(4);
+
+    // The cap's own lazy-expiry predicate: a past expires_at frees the seat
+    // even before a write flips the row's status.
+    db.raw
+      .prepare("UPDATE workspace_invites SET expires_at = ? WHERE id = ?")
+      .run(new Date(now.getTime() - 1_000).toISOString(), lapsed.id);
+    const one = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
+    expect(one.workspace.pendingInvites).toBe(1);
   });
 });

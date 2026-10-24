@@ -45,7 +45,12 @@ const invite = (): InviteRow => ({
 });
 
 /** The members payload's workspace summary — one free workspace, two attempts. */
-const WORKSPACE = { plan: { id: "free", name: "Free" }, memberLimit: 5, reviewAttemptsThisMonth: 2 };
+const WORKSPACE = {
+  plan: { id: "free", name: "Free" },
+  memberLimit: 5,
+  reviewAttemptsThisMonth: 2,
+  pendingInvites: 0,
+};
 
 describe("members page shadcn rebuild", () => {
   test("every read hangs off the workspace base", async () => {
@@ -310,7 +315,12 @@ describe("members table (rendered)", () => {
 });
 
 describe("workspace settings block", () => {
-  const FREE = { plan: { id: "free", name: "Free" }, memberLimit: 5, reviewAttemptsThisMonth: 128 };
+  const FREE = {
+    plan: { id: "free", name: "Free" },
+    memberLimit: 5,
+    reviewAttemptsThisMonth: 128,
+    pendingInvites: 0,
+  };
 
   test("the labels carry the Product copy; a free workspace shows BYOK only", () => {
     const html = renderToStaticMarkup(
@@ -333,7 +343,12 @@ describe("workspace settings block", () => {
     const html = renderToStaticMarkup(
       createElement(WorkspacePanel, {
         locale: "en",
-        workspace: { plan: { id: "pro", name: "Pro" }, memberLimit: 5, reviewAttemptsThisMonth: 0 },
+        workspace: {
+          plan: { id: "pro", name: "Pro" },
+          memberLimit: 5,
+          reviewAttemptsThisMonth: 0,
+          pendingInvites: 0,
+        },
         memberCount: 5,
       }),
     );
@@ -342,6 +357,32 @@ describe("workspace settings block", () => {
     expect(html).toContain("5 / 5");
     expect(html).toContain("No seats left");
     expect(html).not.toContain("slots left");
+  });
+
+  test("a pending invite occupies a seat: 4 members + 1 pending reads No seats left", () => {
+    const html = renderToStaticMarkup(
+      createElement(WorkspacePanel, {
+        locale: "en",
+        workspace: { ...FREE, pendingInvites: 1 },
+        memberCount: 4,
+      }),
+    );
+    expect(html).toContain("4 / 5");
+    expect(html).toContain("1 pending invitation");
+    expect(html).toContain("No seats left");
+    expect(html).not.toContain("slots left");
+  });
+
+  test("the pending line pluralizes and the slot count subtracts it", () => {
+    const html = renderToStaticMarkup(
+      createElement(WorkspacePanel, {
+        locale: "en",
+        workspace: { ...FREE, pendingInvites: 2 },
+        memberCount: 2,
+      }),
+    );
+    expect(html).toContain("2 pending invitations");
+    expect(html).toContain("1 slots left");
   });
 
   test("the delete entry renders for the owner only", () => {

@@ -18,11 +18,13 @@ export type MemberRow = {
   created_at: string;
 };
 
-/** The workspace's plan, seat limit and month-to-date review attempts. */
+/** The workspace's plan, seat limit, meter and waiting invites. */
 export type WorkspaceSummary = {
   plan: { id: string; name: string };
   memberLimit: number;
   reviewAttemptsThisMonth: number;
+  /** Live (unexpired) pending invites — each one already occupies a seat. */
+  pendingInvites: number;
 };
 
 /**
@@ -701,10 +703,12 @@ function parseWorkspaceSummary(data: unknown): WorkspaceSummary | null {
   if (typeof data.memberLimit !== "number" || typeof data.reviewAttemptsThisMonth !== "number") {
     return null;
   }
+  if (typeof data.pendingInvites !== "number") return null;
   return {
     plan: { id: plan.id, name: plan.name },
     memberLimit: data.memberLimit,
     reviewAttemptsThisMonth: data.reviewAttemptsThisMonth,
+    pendingInvites: data.pendingInvites,
   };
 }
 

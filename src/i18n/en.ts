@@ -201,6 +201,8 @@ export const en = {
     memberSeats: "{count} / {limit}",
     slotsLeft: "{count} slots left",
     noSeatsLeft: "No seats left",
+    pendingInviteOne: "{count} pending invitation",
+    pendingInvites: "{count} pending invitations",
     reviewAttemptsLabel: "Review attempts this month",
     reviewAttemptsHint: "Counted, not limited.",
     /** Owner-only workspace deletion: entry, confirmation body and refusal. */

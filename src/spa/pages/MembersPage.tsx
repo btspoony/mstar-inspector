@@ -156,7 +156,10 @@ export function WorkspacePanel({
   workspace: WorkspaceSummary;
   memberCount: number;
 }) {
-  const slots = workspace.memberLimit - memberCount;
+  // A pending invite occupies a seat at the cap, so the seat state reads the
+  // same count the invite gate enforces — never the member rows alone.
+  const filled = memberCount + workspace.pendingInvites;
+  const slots = workspace.memberLimit - filled;
   return (
     <section className="flex flex-col gap-2">
       <h2 className="font-medium text-base">{t(locale, "members.workspaceHeading")}</h2>
@@ -173,6 +176,15 @@ export function WorkspacePanel({
           <dd className="text-sm font-medium tabular-nums">
             {t(locale, "members.memberSeats", { count: memberCount, limit: workspace.memberLimit })}
           </dd>
+          {workspace.pendingInvites > 0 ? (
+            <dd className="text-xs text-muted-foreground">
+              {t(
+                locale,
+                workspace.pendingInvites === 1 ? "members.pendingInviteOne" : "members.pendingInvites",
+                { count: workspace.pendingInvites },
+              )}
+            </dd>
+          ) : null}
           <dd className="text-xs text-muted-foreground">
             {slots > 0
               ? t(locale, "members.slotsLeft", { count: slots })

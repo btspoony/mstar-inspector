@@ -151,7 +151,12 @@ describe("insights search wiring", () => {
 describe("members/apps/settings parsers", () => {
   test("parseMembers requires the viewer role, the workspace summary and id/login/role/created_at per row", () => {
     const row = { id: "u1", github_login: "octocat", role: "owner" as const, created_at: "2026-01-01 00:00:00" };
-    const workspace = { plan: { id: "free", name: "Free" }, memberLimit: 5, reviewAttemptsThisMonth: 2 };
+    const workspace = {
+      plan: { id: "free", name: "Free" },
+      memberLimit: 5,
+      reviewAttemptsThisMonth: 2,
+      pendingInvites: 1,
+    };
     expect(parseMembers({ viewer: { role: "owner" }, workspace, members: [row] })).toEqual({
       viewer: { role: "owner" },
       workspace,
@@ -166,6 +171,14 @@ describe("members/apps/settings parsers", () => {
     expect(parseMembers({ viewer: { role: "owner" }, members: [row] })).toBeNull();
     expect(
       parseMembers({ viewer: { role: "owner" }, workspace: { plan: { id: "free" }, memberLimit: 5 }, members: [row] }),
+    ).toBeNull();
+    // The pending count is required too: a partial summary never renders.
+    expect(
+      parseMembers({
+        viewer: { role: "owner" },
+        workspace: { plan: { id: "free", name: "Free" }, memberLimit: 5, reviewAttemptsThisMonth: 2 },
+        members: [row],
+      }),
     ).toBeNull();
   });
 

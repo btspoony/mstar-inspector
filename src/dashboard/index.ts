@@ -1645,12 +1645,22 @@ const memberListRoute = async (c: DashboardContext) => {
     member.scope.workspaceId,
     monthStart,
   );
+  // A pending invite occupies a seat at the cap, so the summary derives that
+  // count as (members + pending, the cap's own predicate) minus the member
+  // rows already in hand — never a second, differently-filtered count.
+  const seats = await countMembersAndPendingInvites(
+    member.db,
+    member.scope.workspaceId,
+    now.toISOString(),
+  );
+  const pendingInvites = Math.max(seats - members.length, 0);
   return c.json({
     viewer: { login: member.user.github_login, role: member.scope.role },
     workspace: {
       plan: { id: plan.id, name: plan.name },
       memberLimit: plan.includedMembers,
       reviewAttemptsThisMonth,
+      pendingInvites,
     },
     members: members.map((row) => ({
       id: row.id,
