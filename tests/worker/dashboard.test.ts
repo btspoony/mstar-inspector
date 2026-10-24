@@ -3668,6 +3668,15 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     return (db.raw.query("SELECT COUNT(*) AS n FROM workspace_members").get() as CountRow).n;
   }
 
+  /** Live workspaces this user created — the cap's own count. */
+  function createdLiveCount(db: DashboardD1 & { raw: Database }, userId: string): number {
+    return (
+      db.raw
+        .query("SELECT COUNT(*) AS n FROM workspaces WHERE created_by = ? AND deleted_at IS NULL")
+        .get(userId) as CountRow
+    ).n;
+  }
+
   test("creates the workspace and its owner membership, returning the ref", async () => {
     const db = createDashboardTestD1();
     db.raw.exec("DELETE FROM users");
@@ -3755,6 +3764,35 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
       expect(workspaceCount(db), name).toBe(workspacesBefore);
       expect(memberRowCount(db), name).toBe(membersBefore);
     }
+  });
+
+  test("a soft-deleted workspace frees its slot: the sixth creation then succeeds", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    const user = await createUser(db, { login: "deployer", role: "member" });
+    const first = await createWorkspaceRequest(db, "deployer", { name: "Workspace 1" });
+    expect(first.status).toBe(201);
+    const retired = (await first.json()) as { id: string };
+    for (let i = 2; i <= 5; i++) {
+      const res = await createWorkspaceRequest(db, "deployer", { name: `Workspace ${i}` });
+      expect(res.status, `creation ${i}`).toBe(201);
+    }
+    expect(createdLiveCount(db, user.id)).toBe(5);
+
+    // No production soft-delete face exists yet; the fixture retires one row
+    // exactly as `workspace-slug.test.ts` models a retired workspace.
+    db.raw
+      .prepare("UPDATE workspaces SET deleted_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), retired.id);
+    expect(createdLiveCount(db, user.id)).toBe(4);
+    // The retired row is skipped, not removed: the table still holds the 5
+    // created rows plus 0026's seeded `default`.
+    expect(workspaceCount(db)).toBe(6);
+
+    // The freed slot is usable: the same login's sixth live creation lands.
+    const res = await createWorkspaceRequest(db, "deployer", { name: "Replacement" });
+    expect(res.status).toBe(201);
+    expect(createdLiveCount(db, user.id)).toBe(5);
   });
 
   test("anonymous → 302 to login, zero writes", async () => {
