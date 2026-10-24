@@ -12,8 +12,10 @@ import {
   assertWorkspaceCreationAllowed,
 } from "../../src/dashboard/workspace-limits";
 
-const MESSAGE =
-  "You already have 5 live workspaces you created. Creating another is not available, and nothing on this page frees a slot.";
+const MESSAGE_AT_5_OF_5 =
+  "You already have 5 live workspaces you created; the limit is 5. Creating another is not available, and nothing on this page frees a slot.";
+const MESSAGE_AT_6_OF_5 =
+  "You already have 6 live workspaces you created; the limit is 5. Creating another is not available, and nothing on this page frees a slot.";
 
 /** The value the predicate refuses with, or a guard failure when it lets one through. */
 function refusal(liveWorkspaceCount: number): unknown {
@@ -43,13 +45,13 @@ describe("assertWorkspaceCreationAllowed (workspace creation cap)", () => {
   test("5 live workspaces (the limit itself) is refused: instanceof + exact message", () => {
     const err = refusal(5);
     expect(err).toBeInstanceOf(WorkspaceCreationLimitError);
-    expect((err as Error).message).toBe(MESSAGE);
+    expect((err as Error).message).toBe(MESSAGE_AT_5_OF_5);
   });
 
-  test("6 live workspaces (over the limit) is refused identically", () => {
+  test("6 live workspaces (over the limit) is refused: the body states the observed count", () => {
     const err = refusal(6);
     expect(err).toBeInstanceOf(WorkspaceCreationLimitError);
-    expect((err as Error).message).toBe(MESSAGE);
+    expect((err as Error).message).toBe(MESSAGE_AT_6_OF_5);
   });
 
   test("the cap is read from the frozen constant", () => {

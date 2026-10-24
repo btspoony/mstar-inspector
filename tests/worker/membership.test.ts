@@ -605,7 +605,7 @@ describe("member role change and removal (AC5)", () => {
     const { db, users } = fixture();
     use(db);
     // TWO owners: the guard's clause is about the LAST owner, so a peer change
-    // falls outside it. This is the regression the plan needs — it must not 409.
+    // falls outside it — the multi-owner case this guard must not block.
     expect(memberRole(db, "dana")).toBe("owner");
     expect(memberRole(db, "olive")).toBe("owner");
 

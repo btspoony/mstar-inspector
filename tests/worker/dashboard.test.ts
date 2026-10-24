@@ -3759,7 +3759,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
       const res = await createWorkspaceRequest(db, "deployer", { name });
       expect(res.status, name).toBe(409);
       expect(await res.text()).toBe(
-        "You already have 5 live workspaces you created. Creating another is not available, and nothing on this page frees a slot.",
+        "You already have 5 live workspaces you created; the limit is 5. Creating another is not available, and nothing on this page frees a slot.",
       );
       expect(workspaceCount(db), name).toBe(workspacesBefore);
       expect(memberRowCount(db), name).toBe(membersBefore);
@@ -3799,6 +3799,11 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
       .all(body.id) as MemberRow[];
     expect(rows).toEqual([{ workspace_id: body.id, user_id: joiner.id, role: "owner" }]);
     expect(createdLiveCount(db, joiner.id)).toBe(1);
+
+    // The same fixture also requires the cap to exist: `deployer` created all
+    // five live workspaces, so its next creation is refused.
+    const capped = await createWorkspaceRequest(db, "deployer", { name: "Deployers sixth" });
+    expect(capped.status).toBe(409);
   });
 
   test("a soft-deleted workspace frees its slot: the sixth creation then succeeds", async () => {
