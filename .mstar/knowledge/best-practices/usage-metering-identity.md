@@ -17,12 +17,14 @@ Reviews dedup on the authoritative `git rev-parse HEAD` (the checked-out sha), b
 ## 3. The ledger mints its own sequence
 
 ```sql
-INSERT INTO usage_events (review_id, seq, workspace_id, occurred_at)
-SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3
+INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
+SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4
   FROM usage_events WHERE review_id = ?1
 ```
 
 One statement, no read-then-write window: SQLite's write lock serialises the max-and-insert. `seq` is 1, 2, 3… per `review_id`; a genuine re-execution after a runner failure legitimately mints the next number.
+
+`execution_token` is the producer-minted (UUID), `UNIQUE` identity of **this** attempt: `seq` answers "which attempt of the review", the token answers "this attempt". That distinction is what makes a failed insert readable — a review may already hold earlier rows, so "does any row exist" would report a failed second attempt as applied.
 
 ## Where the write sits
 
@@ -34,7 +36,8 @@ Inside the sandbox, **after** the authoritative sha and **after** both idempoten
 
 - the failure table enforces a producer-side stage vocabulary — add the new stage there (`usage`) or the recorder throws inside your catch;
 - if that vocabulary lives only in code (no DDL `CHECK`), widening it costs one line and no migration;
-- wrap the recording call in its own guard so a doubly-failed write still cannot mask the review.
+- wrap the recording call in its own guard so a doubly-failed write still cannot mask the review;
+- read the failed attempt back by its `execution_token` and record `applied` in that row: only `applied: false` is backfillable, because the insert mints `seq + 1` — a blind re-insert after an ambiguous failure (the write landed, the driver threw) would count one execution twice.
 
 ## Index for the read you will add
 

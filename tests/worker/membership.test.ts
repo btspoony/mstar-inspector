@@ -950,8 +950,11 @@ describe("workspace summary in the member payload", () => {
   /** One metered started execution (the ledger's only required columns). */
   function insertUsage(db: TestD1, reviewId: string, occurredAt: string, workspaceId = WORKSPACE): void {
     db.raw
-      .prepare("INSERT INTO usage_events (review_id, seq, workspace_id, occurred_at) VALUES (?, 1, ?, ?)")
-      .run(reviewId, workspaceId, occurredAt);
+      .prepare(
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
+         VALUES (?, 1, ?, ?, ?)`,
+      )
+      .run(reviewId, `${reviewId}:${occurredAt}`, workspaceId, occurredAt);
   }
 
   test("a free workspace reports the Free plan, its member limit and this month's attempts", async () => {
