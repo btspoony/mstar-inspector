@@ -18,7 +18,7 @@ import { useLiveMemberships, WorkspaceMembershipsProvider } from "./workspace-me
 type LayoutProps = {
   boot: SpaBoot;
   pathname: string;
-  /** One-shot outcome read at boot (`./flash`): rendered on this page load only. */
+  /** One-shot outcome read at boot (`./flash`): rendered only by the landing path. */
   flash: boolean;
   children: ReactNode;
 };
@@ -114,6 +114,11 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
 
 export function Layout({ boot, pathname, flash, children }: LayoutProps) {
   const route = matchSpaRoute(pathname);
+  // One-shot: the flash belongs to the path the boot read it for. Any later
+  // in-session navigation renders another path, so the spent outcome cannot
+  // reappear — no module-level latch, no effect that would erase it before the
+  // user reads it.
+  const [flashPath] = useState(pathname);
   if (route?.page === "login") {
     return <LoginChrome>{children}</LoginChrome>;
   }
@@ -121,7 +126,7 @@ export function Layout({ boot, pathname, flash, children }: LayoutProps) {
   // page's rename card (rendered as `children`) writes it.
   return (
     <WorkspaceMembershipsProvider boot={boot}>
-      <DashboardChrome boot={boot} pathname={pathname} flash={flash}>
+      <DashboardChrome boot={boot} pathname={pathname} flash={flash && pathname === flashPath}>
         {children}
       </DashboardChrome>
     </WorkspaceMembershipsProvider>

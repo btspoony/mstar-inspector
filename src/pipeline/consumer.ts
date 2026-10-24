@@ -2236,12 +2236,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // logged and recorded as a `usage` failure row, and the review continues.
     try {
       await recordUsageEvent(deps.env.DB, {
-        // The metered identity is the PAYLOAD sha (plan § Consumer write point
-        // 3): the authoritative checkout sha refines the review row only, so a
-        // force-push between delivery and checkout cannot split one review into
-        // two ledger identities. A comment-mention job has no payload sha; the
-        // checkout sha stands in.
-        reviewId: idemKey({ ...key, head_sha: payload.head_sha ?? headSha }),
+        // The metered identity is the PAYLOAD identity (plan § Consumer write
+        // point 3): the authoritative checkout sha refines the review row only,
+        // so a force-push between delivery and retry cannot split one review
+        // into two ledger identities. A comment-mention job has no payload sha
+        // and shares one stable per-PR identity — `idemKey` refuses an empty
+        // sha, so the "no commit" sentinel stands in.
+        reviewId: idemKey({ ...key, head_sha: payload.head_sha ?? "no-sha" }),
         workspaceId,
         occurredAt: new Date().toISOString(),
       });

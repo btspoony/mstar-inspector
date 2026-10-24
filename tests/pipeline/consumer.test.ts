@@ -5005,4 +5005,30 @@ describe("usage ledger (migration 0031)", () => {
       [key, 2],
     ]);
   });
+
+  test("a job without a payload sha keeps one review identity across checkout shas", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: null })));
+
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    resolvedSha = "fedcba9876543210fedcba9876543210fedcba98";
+    await consumer(makeBatch(makePayload({ head_sha: null })));
+
+    const key = idemKey({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: "no-sha",
+    });
+    expect(usageRows(db).map((row) => [row.review_id, row.seq])).toEqual([
+      [key, 1],
+      [key, 2],
+    ]);
+  });
 });

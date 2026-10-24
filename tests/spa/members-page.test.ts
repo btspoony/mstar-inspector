@@ -445,8 +445,18 @@ describe("workspace settings block", () => {
       );
       expect(landing.split(line).length - 1).toBe(1);
       expect(store.has(FLASH_STORAGE_KEY)).toBe(false);
-      // The next page load boots with no flash.
-      expect(takeFlash()).toBe(false);
+      // Same session, second render: the flash is spent, so the shell boots
+      // with nothing left to show. (The layout also gates on the landing path,
+      // so an in-session navigation cannot re-show it.)
+      const second = renderToStaticMarkup(
+        createElement(Layout, {
+          boot: { locale: "en", login: "octocat", name: null },
+          pathname: "/dashboard",
+          flash: takeFlash(),
+          children: createElement("p", null, "page"),
+        }),
+      );
+      expect(second).not.toContain(line);
     } finally {
       globalThis.fetch = realFetch;
       delete scope.window;
