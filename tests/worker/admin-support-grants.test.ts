@@ -194,6 +194,14 @@ describe("POST /_internal_admin/api/support-grants", () => {
     expect(grantCount(db)).toBe(0);
     expect(auditRows(db)).toEqual([]);
   });
+
+  test("a JSON null root is a 400, not a throw — and writes nothing", async () => {
+    const db = fixture();
+    const res = await api(db, { method: "POST", path: "/api/support-grants", body: "null" });
+    expect(res.status).toBe(400);
+    expect(grantCount(db)).toBe(0);
+    expect(auditRows(db)).toEqual([]);
+  });
 });
 
 // --- revoke -----------------------------------------------------------------

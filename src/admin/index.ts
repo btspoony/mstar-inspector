@@ -190,14 +190,17 @@ async function createGrant(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
-  let body: GrantBody = {};
+  let parsed: unknown = {};
   try {
-    body = (await c.req.json()) as GrantBody;
+    parsed = await c.req.json();
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
   const invalid = (detail: string) => c.json({ error: `invalid support grant: ${detail}` }, 400);
-  const { workspaceId, operatorLogin: targetLogin, reason, ttlHours } = body;
+  // A JSON root that is not an object (a bare `null` included) is the shape
+  // gate's 400: reading fields off it would throw out of the handler.
+  if (parsed === null || typeof parsed !== "object") return invalid("body must be a JSON object");
+  const { workspaceId, operatorLogin: targetLogin, reason, ttlHours } = parsed as GrantBody;
   if (typeof workspaceId !== "string" || workspaceId.length === 0) {
     return invalid("workspaceId must be a non-empty workspace id");
   }
