@@ -8,7 +8,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   FreeWorkspaceSlotError,
+  MEMBER_CAP_REFUSAL,
   MemberCapError,
+  UNLIMITED_PLAN_ID,
   freeSlotAvailable,
   memberSlotAvailable,
   resolveWorkspacePlan,
@@ -69,6 +71,17 @@ describe("resolveWorkspacePlan", () => {
     db.raw.close();
   });
 
+  test("an active unlimited subscription resolves to a null seat limit, not a number", async () => {
+    const db = createMigratedTestD1();
+    seedSubscription(db, "default", UNLIMITED_PLAN_ID);
+    expect(await resolveWorkspacePlan(db, "default")).toEqual({
+      id: "unlimited",
+      name: "Unlimited",
+      includedMembers: null,
+    });
+    db.raw.close();
+  });
+
   test("a non-active subscription resolves to free", async () => {
     const db = createMigratedTestD1();
     seedSubscription(db, "default", "pro", "canceled");
@@ -95,6 +108,11 @@ describe("slot predicates", () => {
     expect(memberSlotAvailable(4, 5)).toBe(true);
     expect(memberSlotAvailable(5, 5)).toBe(false);
     expect(memberSlotAvailable(6, 5)).toBe(false);
+  });
+
+  test("a null limit is no cap, so any count fits", () => {
+    expect(memberSlotAvailable(0, null)).toBe(true);
+    expect(memberSlotAvailable(6, null)).toBe(true);
   });
 });
 
@@ -183,11 +201,36 @@ describe("in-write guards", () => {
         now: TS,
         expiresAt: "2026-10-24T00:05:00.000Z",
       }),
-    ).rejects.toThrow(MemberCapError);
+    ).rejects.toThrow(MEMBER_CAP_REFUSAL(5));
 
     expect(
       db.raw.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM workspace_invites").get()?.n ?? 0,
     ).toBe(0);
+    db.raw.close();
+  });
+
+  test("a null seat limit admits the invite a five-seat plan refuses", async () => {
+    const db = createMigratedTestD1();
+    // The same five filled seats that trip the free plan above.
+    for (let i = 0; i < 5; i += 1) {
+      seedUser(db, `u${i}`, `user${i}`);
+      seedMembership(db, "default", `u${i}`);
+    }
+    seedSubscription(db, "default", UNLIMITED_PLAN_ID);
+
+    const created = await createInvite(db, {
+      workspaceId: "default",
+      login: "newcomer",
+      role: "member",
+      invitedBy: "u0",
+      now: TS,
+      expiresAt: "2026-10-24T00:05:00.000Z",
+    });
+
+    expect(created.status).toBe("pending");
+    expect(
+      db.raw.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM workspace_invites").get()?.n ?? 0,
+    ).toBe(1);
     db.raw.close();
   });
 });
@@ -200,5 +243,64 @@ describe("refusals", () => {
     const cap = new MemberCapError("member cap body");
     expect(cap.name).toBe("MemberCapError");
     expect(cap.message).toBe("member cap body");
+  });
+
+  test("the member-cap copy names the plan's actual seat limit", () => {
+    expect(MEMBER_CAP_REFUSAL(5)).toContain("already has 5 people");
+    expect(MEMBER_CAP_REFUSAL(20)).toContain("already has 20 people");
+  });
+});
+
+describe("migration 0032 (unlimited plan)", () => {
+  test("the rebuilt plans table keeps both seeded rows, the FK and a nullable seat limit", () => {
+    const db = createMigratedTestD1();
+    const seeded = {
+      monthly_price_cents: null,
+      included_members: 5,
+      extra_member_price_cents: null,
+      platform_key_limit: null,
+      reviews_included: null,
+      apps_per_workspace: null,
+      created_at: "2026-10-24T00:00:00.000Z",
+    };
+
+    // Both seeded rows survive the rebuild byte-identically.
+    expect(db.raw.prepare("SELECT * FROM plans WHERE id <> 'unlimited' ORDER BY id").all()).toEqual([
+      { ...seeded, id: "free", name: "Free", monthly_price_cents: 0 },
+      { ...seeded, id: "pro", name: "Pro" },
+    ]);
+
+    // The column is relaxed — the reason the table was rebuilt at all ...
+    expect(
+      db.raw
+        .prepare(
+          `SELECT type, "notnull" FROM pragma_table_info('plans') WHERE name = 'included_members'`,
+        )
+        .get(),
+    ).toEqual({ type: "INTEGER", notnull: 0 });
+    // ... and the new tier is one real row with every quota NULL.
+    expect(
+      db.raw.prepare("SELECT included_members FROM plans WHERE id = 'unlimited'").get(),
+    ).toEqual({ included_members: null });
+
+    // The child FK survived the drop/re-create: declared, and still enforced.
+    expect(
+      db.raw
+        .prepare(
+          `SELECT COUNT(*) AS n FROM pragma_foreign_key_list('workspace_subscriptions')
+            WHERE "table" = 'plans' AND "from" = 'plan_id' AND "to" = 'id'`,
+        )
+        .get(),
+    ).toEqual({ n: 1 });
+    expect(() =>
+      db.raw
+        .prepare(
+          `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+           VALUES ('default', 'no-such-plan', 'active', ?, ?)`,
+        )
+        .run(TS, TS),
+    ).toThrow(/FOREIGN KEY/);
+
+    db.raw.close();
   });
 });

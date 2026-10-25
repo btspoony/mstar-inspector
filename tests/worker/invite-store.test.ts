@@ -27,7 +27,7 @@ import {
 } from "../../src/dashboard/invite-store";
 import type { WorkspaceInviteRow } from "../../src/dashboard/invite-store";
 import { countMembersAndPendingInvites } from "../../src/dashboard/workspace-store";
-import { FreeWorkspaceSlotError } from "../../src/dashboard/entitlement";
+import { FreeWorkspaceSlotError, MEMBER_CAP_REFUSAL } from "../../src/dashboard/entitlement";
 
 const WORKSPACE = "default";
 const INVITER = "user-operator";
@@ -349,5 +349,84 @@ describe("accept free-slot guard (store level, route gate bypassed)", () => {
     });
     expect(membershipCount(db, "mallory")).toBe(1);
     expect(rowOf(db, pending.id).status).toBe("accepted");
+  });
+
+  test("an unlimited target accepts the same way: it is not the free tier", async () => {
+    const db = createFixture("mallory");
+    seedMembership(db, "ws-elsewhere", "mallory", "free");
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES (?, 'unlimited', 'active', ?, ?)`,
+      )
+      .run(WORKSPACE, NOW, NOW);
+    const pending = await invite(db, "mallory");
+
+    expect(await acceptInvite(db, pending.id, "mallory", NOW)).toEqual({
+      kind: "accepted",
+      workspaceId: WORKSPACE,
+      role: "member",
+    });
+    expect(membershipCount(db, "mallory")).toBe(1);
+  });
+});
+
+describe("seat limit (store level)", () => {
+  /** Fill the workspace's seats with plain members (no cap guards members). */
+  function seedMembers(db: TestD1, count: number): void {
+    for (let i = 0; i < count; i += 1) {
+      seedUser(db, `user-seat-${i}`, `seat-${i}`);
+      db.raw
+        .prepare(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+           VALUES (?, ?, 'member', ?)`,
+        )
+        .run(WORKSPACE, `user-seat-${i}`, NOW);
+    }
+  }
+
+  function subscribe(db: TestD1, planId: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES (?, ?, 'active', ?, ?)`,
+      )
+      .run(WORKSPACE, planId, NOW, NOW);
+  }
+
+  /** The one invite insert the store prepared, so the shape can be inspected. */
+  function insertSql(captured: string[]): string {
+    const sql = captured.find((query) => /^\s*INSERT INTO workspace_invites/i.test(query));
+    if (sql === undefined) throw new Error("createInvite prepared no invite insert");
+    return sql;
+  }
+
+  test("a five-seat plan refuses at five, names that limit and writes nothing", async () => {
+    const db = createFixture("newcomer");
+    seedMembers(db, 5);
+    const captured: string[] = [];
+
+    await expect(invite(recordSql(db, captured), "newcomer")).rejects.toThrow(
+      MEMBER_CAP_REFUSAL(5),
+    );
+
+    expect(statuses(db)).toEqual([]);
+    // The numeric path keeps the seat condition, bound as ?8.
+    expect(insertSql(captured)).toContain("?8");
+  });
+
+  test("a null limit writes the invite past the five-seat cap, with no seat condition", async () => {
+    const db = createFixture("newcomer");
+    seedMembers(db, 6);
+    subscribe(db, "unlimited");
+    const captured: string[] = [];
+
+    const created = await invite(recordSql(db, captured), "newcomer");
+
+    expect(created.status).toBe("pending");
+    expect(statuses(db)).toEqual(["pending"]);
+    // A NULL bound into ?8 would make `count < ?8` evaluate to NULL and write
+    // no row, so the unlimited insert must not carry the condition at all.
+    expect(insertSql(captured)).not.toContain("?8");
   });
 });

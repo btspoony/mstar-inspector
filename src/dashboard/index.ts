@@ -1695,6 +1695,8 @@ const memberListRoute = async (c: DashboardContext) => {
     viewer: { login: member.user.github_login, role: member.scope.role },
     workspace: {
       plan: { id: plan.id, name: plan.name },
+      // Null means "no seat cap" (the unlimited tier); the field stays present
+      // in both modes and only rendering branches on it.
       memberLimit: plan.includedMembers,
       reviewAttemptsThisMonth,
       pendingInvites,
@@ -1776,15 +1778,17 @@ const inviteCreateRoute = async (c: DashboardContext) => {
     // row has already stopped counting, so a refusal here writes nothing and
     // revoking an invite frees the seat immediately. This read is fast-fail UX:
     // `createInvite` re-checks the same predicate inside its insert, which is
-    // what a concurrent pair of invitations cannot both pass.
+    // what a concurrent pair of invitations cannot both pass. A null limit has
+    // no seats to exhaust, so this gate cannot fire for it.
     const plan = await resolveWorkspacePlan(gate.db, gate.scope.workspaceId);
+    const limit = plan.includedMembers;
     const seats = await countMembersAndPendingInvites(
       gate.db,
       gate.scope.workspaceId,
       now.toISOString(),
     );
-    if (!memberSlotAvailable(seats, plan.includedMembers)) {
-      throw new MemberCapError(MEMBER_CAP_REFUSAL);
+    if (limit !== null && !memberSlotAvailable(seats, limit)) {
+      throw new MemberCapError(MEMBER_CAP_REFUSAL(limit));
     }
     await createInvite(gate.db, {
       workspaceId: gate.scope.workspaceId,

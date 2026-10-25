@@ -341,7 +341,7 @@ describe("invite creation (AC2)", () => {
 
 describe("invite creation member cap", () => {
   const MEMBER_CAP_REFUSAL =
-    "This invite was not sent. This workspace already has five people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.";
+    "This invite was not sent. This workspace already has 5 people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.";
 
   /** A live pending invite, minted at the store so the route stays the subject. */
   function seedLiveInvite(db: TestD1, invitedBy: string, login = "newcomer") {
@@ -429,6 +429,22 @@ describe("invite creation member cap", () => {
     expect(res.status).toBe(409);
     expect(await res.text()).toBe(MEMBER_CAP_REFUSAL);
     expect(pendingInvites(db)).toBe(1);
+  });
+
+  test("an unlimited workspace's invite path writes with no seat refusal", async () => {
+    const { db, users } = fixture();
+    const ts = new Date().toISOString();
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'unlimited', 'active', ?, ?)",
+      )
+      .run(WORKSPACE, ts, ts);
+    use(db);
+    // The same five people a capped plan refuses the sixth against.
+    await seedLiveInvite(db, users.owner);
+    const res = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
+    expect(res.status).toBe(200);
+    expect(pendingInvites(db)).toBe(2);
   });
 });
 
