@@ -2,24 +2,27 @@
  * Platform-operator store — the one read/write authority for `support_grants`
  * and `audit_events` (migration 0029 is the DDL single source).
  *
- * The five exports are the whole surface — two appends (`insertSupportGrant`,
- * `insertAuditEvent`), two listing reads (`listActiveSupportGrants`,
- * `listAuditEvents`) and the validity probe (`hasValidGrant`). Nothing else:
- * this module exports NO update and NO delete for either table, because both
- * are append-only history.
+ * The exports are the whole surface — two appends (`insertSupportGrant`,
+ * `insertAuditEvent`), three listing reads (`listActiveSupportGrants`,
+ * `listAllActiveSupportGrants`, `listAuditEvents`), the validity probe
+ * (`hasValidGrant`) and ONE delete (`deleteSupportGrant`). A grant is a
+ * time-boxed access aid, not history (spec operator-admin-surface §3.4), so
+ * the operator console revokes it by deleting the row; `audit_events` stays
+ * append-only by construction.
  *   * `support_grants` is the time-boxed, workspace-scoped window that lets a
  *     non-member platform operator read a workspace's identity fields and
  *     member list. Expiry is evaluated per request from the stored
  *     `expires_at` (`> now`), never by a timer or a status flip, so a lapsed
  *     grant stops matching exactly like no row at all.
- *     The tables are append-only, so a window is closed by appending a row
- *     whose own window is already over — both reads therefore judge ONE row
- *     per (workspace, operator): the newest by `rowid` (insertion order). A
- *     superseding row ends the window on the next request and the row it
- *     supersedes stays readable as history.
+ *     Both reads judge ONE row per (workspace, operator): the newest by
+ *     `rowid` (insertion order), so an appended row can end a window its
+ *     predecessor still claims. The console's revocation deletes the whole
+ *     pair (see `deleteSupportGrant`), so it can never reveal an older row.
  *   * `audit_events` records the operator access attempt in the workspace gate
  *     (`support.read` | `support.forbidden` | `support.denied`), one row per
- *     operator request, and every read of it is owner/admin-only.
+ *     operator request, and the console's grant maintenance
+ *     (`support.grant.create` | `support.grant.delete`), one row per write.
+ *     Every read of it is owner/admin-only.
  *
  * Zero-dependency leaf (the `workspace-store` / `invite-store` module
  * boundary): the `db` parameter is a locally-declared narrow D1 face (types
@@ -27,8 +30,17 @@
  * dashboard test double.
  */
 
-/** Closed `audit_events.action` vocabulary (free TEXT in the DDL, checked here). */
-export type SupportAuditAction = "support.read" | "support.forbidden" | "support.denied";
+/**
+ * Closed `audit_events.action` vocabulary (free TEXT in the DDL, checked
+ * here). The two `support.grant.*` rows are the console's grant maintenance:
+ * the actor is the operator who wrote, the workspace is the grant's target.
+ */
+export type SupportAuditAction =
+  | "support.read"
+  | "support.forbidden"
+  | "support.denied"
+  | "support.grant.create"
+  | "support.grant.delete";
 
 /** A `support_grants` row (migration 0029). */
 export type SupportGrantRow = {
@@ -66,6 +78,17 @@ type OperatorStoreD1 = {
 };
 
 const GRANT_COLUMNS = `id, workspace_id, operator_login, reason, granted_by, created_at, expires_at`;
+
+/**
+ * The newest append for one (workspace, operator) — the ONE row both grant
+ * reads judge. `rowid` is insertion order because `created_at` is
+ * caller-supplied and may tie.
+ */
+const NEWEST_APPEND = `g.rowid = (
+            SELECT MAX(x.rowid) FROM support_grants x
+             WHERE x.workspace_id = g.workspace_id
+               AND x.operator_login = g.operator_login
+          )`;
 
 const AUDIT_COLUMNS = `id, workspace_id, actor_login, action, created_at`;
 
@@ -143,11 +166,35 @@ export async function insertSupportGrant(
 }
 
 /**
+ * Remove one grant by id and return the row it removed, or null when no such
+ * row exists — the console's revoke path.
+ *
+ * EVERY append for the same (workspace, operator) goes with it. The reads
+ * judge the newest append for that pair, so deleting only the newest row would
+ * hand the window back to the row it superseded: a revocation that silently
+ * restores access. The pair, not the row, is the window.
+ */
+export async function deleteSupportGrant(
+  db: OperatorStoreD1,
+  id: string,
+): Promise<SupportGrantRow | null> {
+  const row = await db
+    .prepare(`SELECT ${GRANT_COLUMNS} FROM support_grants WHERE id = ?`)
+    .bind(id)
+    .first<SupportGrantRow>();
+  if (row === null) return null;
+  await db
+    .prepare("DELETE FROM support_grants WHERE workspace_id = ? AND operator_login = ?")
+    .bind(row.workspace_id, row.operator_login)
+    .run();
+  return row;
+}
+
+/**
  * The workspace's open support windows, longest-lived first — the members'
  * undismissable notice read. Same one-row-per-operator rule as
  * `hasValidGrant`: only the NEWEST append for each operator may raise a
- * notice, so an append-only revocation removes the notice on the next request
- * even though the superseded row is still stored and still unexpired.
+ * notice, so a revocation removes the notice on the next request.
  */
 export async function listActiveSupportGrants(
   db: OperatorStoreD1,
@@ -158,14 +205,32 @@ export async function listActiveSupportGrants(
     .prepare(
       `SELECT ${GRANT_COLUMNS} FROM support_grants g
         WHERE g.workspace_id = ? AND g.expires_at > ?
-          AND g.rowid = (
-            SELECT MAX(x.rowid) FROM support_grants x
-             WHERE x.workspace_id = g.workspace_id
-               AND x.operator_login = g.operator_login
-          )
+          AND ${NEWEST_APPEND}
         ORDER BY expires_at DESC, id ASC`,
     )
     .bind(workspaceId, now)
+    .all<SupportGrantRow>();
+  return results;
+}
+
+/**
+ * Every open support window across ALL workspaces, longest-lived first — the
+ * console's list. Same one-row-per-(workspace, operator) rule as
+ * `listActiveSupportGrants`, without the workspace filter, so one statement
+ * answers the whole console table.
+ */
+export async function listAllActiveSupportGrants(
+  db: OperatorStoreD1,
+  now: string,
+): Promise<SupportGrantRow[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT ${GRANT_COLUMNS} FROM support_grants g
+        WHERE g.expires_at > ?
+          AND ${NEWEST_APPEND}
+        ORDER BY expires_at DESC, id ASC`,
+    )
+    .bind(now)
     .all<SupportGrantRow>();
   return results;
 }

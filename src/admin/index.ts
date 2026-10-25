@@ -12,18 +12,20 @@
  */
 import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
+import { listAllActiveSupportGrants } from "../dashboard/operator-store";
 import { resolveLocale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
 import { ADMIN_PAGES } from "../spa/admin/pages";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, isFlagEnabled, listFlags } from "./flags";
 import { operatorLogin, type AdminContext } from "./gate";
+import { createSupportGrant, revokeSupportGrant } from "./support-grants";
 import { listUsers } from "./users";
 import { listWorkspaces, setWorkspacePlan } from "./workspaces";
 
 /** One declaration row of this namespace's own route table. */
 type AdminRoute = {
-  method: "get" | "patch";
+  method: "get" | "post" | "patch" | "delete";
   path: string;
   handler: (c: AdminContext) => Response | Promise<Response>;
 };
@@ -159,6 +161,100 @@ async function assignPlan(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Every open support window across workspaces — one statement, newest append
+ * per (workspace, operator), expired rows excluded. The console's list reads
+ * are deliberately unaudited (spec §4): audit rows attach to writes.
+ */
+async function readSupportGrants(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  return c.json({ grants: await listAllActiveSupportGrants(db, new Date().toISOString()) });
+}
+
+/** One `POST /api/support-grants` body; every field is validated below. */
+type GrantBody = {
+  workspaceId?: unknown;
+  operatorLogin?: unknown;
+  reason?: unknown;
+  ttlHours?: unknown;
+};
+
+/**
+ * Create one support grant. The body's shape and a usable expiry are decided
+ * here; the store write and its single audit row are `./support-grants`.
+ */
+async function createGrant(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  let body: GrantBody = {};
+  try {
+    body = (await c.req.json()) as GrantBody;
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  const invalid = (detail: string) => c.json({ error: `invalid support grant: ${detail}` }, 400);
+  const { workspaceId, operatorLogin: targetLogin, reason, ttlHours } = body;
+  if (typeof workspaceId !== "string" || workspaceId.length === 0) {
+    return invalid("workspaceId must be a non-empty workspace id");
+  }
+  if (typeof targetLogin !== "string" || targetLogin.length === 0) {
+    return invalid("operatorLogin must be a non-empty GitHub login");
+  }
+  if (typeof reason !== "string" || reason.trim().length === 0) {
+    return invalid("reason must be non-empty");
+  }
+  // The expiry is computed here so an unusable number is a 400, never a
+  // `RangeError` out of `toISOString`.
+  const now = new Date();
+  const expires =
+    typeof ttlHours === "number" && Number.isFinite(ttlHours) && ttlHours > 0
+      ? new Date(now.getTime() + ttlHours * 3_600_000)
+      : null;
+  if (expires === null || Number.isNaN(expires.getTime())) {
+    return invalid("ttlHours must be a positive number of hours");
+  }
+  const outcome = await createSupportGrant(db, {
+    workspaceId,
+    operatorLogin: targetLogin,
+    reason,
+    grantedBy: login,
+    now: now.toISOString(),
+    expiresAt: expires.toISOString(),
+  });
+  if (outcome.kind === "unknown_workspace") {
+    return invalid(`workspaceId ${JSON.stringify(workspaceId)} is not a live workspace`);
+  }
+  return c.json({ grant: outcome.grant }, 201);
+}
+
+/**
+ * Revoke one grant by id: the row is deleted (a grant is time-boxed access,
+ * not history — spec §3.4) and exactly one audit row is appended with the
+ * grant's workspace. An unknown id writes nothing.
+ */
+async function revokeGrant(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const id = c.req.param("id");
+  if (!id) return c.notFound();
+  const outcome = await revokeSupportGrant(db, {
+    id,
+    actorLogin: login,
+    now: new Date().toISOString(),
+  });
+  if (outcome.kind === "not_found") {
+    return c.json({ error: `no support grant with id ${JSON.stringify(id)}` }, 404);
+  }
+  return c.json({ id, workspaceId: outcome.workspaceId });
+}
+
+/**
  * The console document (`src/spa/admin.html`). `ASSETS` holds it and no other
  * route serves it: spa-dispatch matches only `/index.html` and `/assets/*`, so
  * this gated handler is the document's single entry point.
@@ -185,6 +281,9 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
   { method: "get", path: "/api/users", handler: readUsers },
   { method: "patch", path: "/api/workspaces/:id/plan", handler: assignPlan },
+  { method: "get", path: "/api/support-grants", handler: readSupportGrants },
+  { method: "post", path: "/api/support-grants", handler: createGrant },
+  { method: "delete", path: "/api/support-grants/:id", handler: revokeGrant },
   { method: "get", path: "/", handler: serveDocument },
   ...ADMIN_PAGES.map((page) => ({ method: "get" as const, path: `/${page.id}`, handler: serveDocument })),
 ];
@@ -192,6 +291,8 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
 /** The admin sub-app. Exported as a mountable Hono instance for `src/worker/index.ts`. */
 export const adminApp = new Hono<{ Bindings: Env }>();
 for (const route of ADMIN_ROUTES) {
-  if (route.method === "patch") adminApp.patch(route.path, route.handler);
-  else adminApp.get(route.path, route.handler);
+  if (route.method === "get") adminApp.get(route.path, route.handler);
+  else if (route.method === "post") adminApp.post(route.path, route.handler);
+  else if (route.method === "patch") adminApp.patch(route.path, route.handler);
+  else adminApp.delete(route.path, route.handler);
 }

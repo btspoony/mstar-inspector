@@ -11,19 +11,20 @@
  *   - a grant on W1 answers false on W2 (the lookup is workspace-keyed);
  *   - the notice read lists only unexpired rows of that one workspace;
  *   - audit inserts come back newest first, bounded by `limit`;
- *   - the module exports no update/delete path at all (append-only).
+ *   - revocation deletes the whole (workspace, operator) window, so no older
+ *     append can come back to life.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
-import * as operatorStore from "../../src/dashboard/operator-store";
 import {
+  deleteSupportGrant,
   hasValidGrant,
   insertAuditEvent,
   insertSupportGrant,
   listActiveSupportGrants,
+  listAllActiveSupportGrants,
   listAuditEvents,
+  type SupportGrantRow,
 } from "../../src/dashboard/operator-store";
 
 const W1 = "default";
@@ -45,7 +46,7 @@ function createFixture(): TestD1 {
   return db;
 }
 
-function grant(db: TestD1, workspaceId: string, expiresAt: string, login = OPERATOR): Promise<unknown> {
+function grant(db: TestD1, workspaceId: string, expiresAt: string, login = OPERATOR): Promise<SupportGrantRow> {
   return insertSupportGrant(db, {
     workspaceId,
     operatorLogin: login,
@@ -220,31 +221,50 @@ describe("audit events", () => {
   });
 });
 
-describe("append-only store shape", () => {
-  test("the module exports exactly five functions — no update or delete path", () => {
-    const exported = Object.keys(operatorStore).sort();
-    expect(exported).toEqual([
-      "hasValidGrant",
-      "insertAuditEvent",
-      "insertSupportGrant",
-      "listActiveSupportGrants",
-      "listAuditEvents",
-    ]);
-    expect(exported.filter((name) => /update|delete|remove|revoke/i.test(name))).toEqual([]);
-  });
+describe("listAllActiveSupportGrants", () => {
+  test("across workspaces: live windows only, one per operator, newest append decides", async () => {
+    const db = createFixture();
+    // W1: a still-unexpired row that a newer (already over) append supersedes.
+    await grant(db, W1, LATER);
+    await grant(db, W1, PAST);
+    // W1, a second operator, and W2 — the two live rows.
+    await grant(db, W1, "2026-11-05T00:00:00.000Z", "Other-Bot");
+    await grant(db, W2, LATER);
 
-  // The export set cannot see a statement that never became an export, and the
-  // contract here IS "no writer exists" — so the source shape is the evidence.
-  test("no UPDATE or DELETE statement exists anywhere in the module", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/dashboard/operator-store.ts"), "utf8");
-    // Statements only: a comment or string may name the rule it guarantees.
-    const statements = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-    // A statement starts a line with the verb and a table name follows, so a
-    // comment or message that merely contains the word cannot fail this.
-    expect(statements).not.toMatch(/^\s*(UPDATE|DELETE)\s+[A-Za-z_]/im);
-    // …and the verbs cannot hide mid-statement inside a multi-line template.
-    expect(statements).not.toMatch(/\b(UPDATE|DELETE)\s+FROM\s+[A-Za-z_]/i);
-    expect(statements).not.toMatch(/\bUPDATE\s+[A-Za-z_]+\s+SET\b/i);
+    const rows = await listAllActiveSupportGrants(db, NOW);
+    // Longest-lived first; the superseded W1 row is absent even though it is
+    // still stored and still unexpired.
+    expect(rows.map((row) => [row.workspace_id, row.operator_login])).toEqual([
+      [W1, "Other-Bot"],
+      [W2, OPERATOR],
+    ]);
+  });
+});
+
+describe("deleteSupportGrant", () => {
+  test("removes the whole (workspace, operator) window, never hands it back to an older row", async () => {
+    const db = createFixture();
+    await grant(db, W1, LATER);
+    const newest = await grant(db, W1, "2026-11-05T00:00:00.000Z");
+    await grant(db, W2, LATER);
+    expect(await hasValidGrant(db, W1, OPERATOR, NOW)).toBe(true);
+
+    const removed = await deleteSupportGrant(db, newest.id);
+    expect(removed?.id).toBe(newest.id);
+
+    // Not "the previous append is live again" — the window is closed.
+    expect(await hasValidGrant(db, W1, OPERATOR, NOW)).toBe(false);
+    expect(await listActiveSupportGrants(db, W1, NOW)).toEqual([]);
+    const remaining = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM support_grants WHERE workspace_id = ?")
+      .get(W1) as { n: number };
+    expect(remaining.n).toBe(0);
+    // The other workspace's grant is untouched.
+    expect(await hasValidGrant(db, W2, OPERATOR, NOW)).toBe(true);
+
+    // An id that is not there removes nothing.
+    expect(await deleteSupportGrant(db, "no-such-grant")).toBeNull();
+    expect(await hasValidGrant(db, W2, OPERATOR, NOW)).toBe(true);
   });
 });
 
