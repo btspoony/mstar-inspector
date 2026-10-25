@@ -26,6 +26,14 @@ export type SpaBoot = {
    */
   workspaceRef?: string;
   /**
+   * The deployment shape (`DEPLOYMENT_MODE`), resolved by the Worker: `saas`
+   * or `self-hosted`. The SPA branches rendering on it (plan chip, members
+   * plan card) instead of inferring a shape or asking for a second fetch. The
+   * Worker sets it on every shell it serves; `EMPTY_BOOT` (no document) has
+   * none.
+   */
+  deploymentMode?: "self-hosted" | "saas";
+  /**
    * Absent or `true` = the caller may run the manifest Create flow. The server
    * sets `false` for a caller who is not owner/admin of the addressed
    * workspace, who would not be able to manage the App the flow creates

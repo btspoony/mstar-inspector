@@ -231,6 +231,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // Absent fields add nothing, so a ref-less boot keeps its JSON key order.
   const boot: SpaBoot = {
     ...auth.boot,
+    deploymentMode,
     ...(firstInstance ? { emptyInstance: true } : {}),
     ...(routeRef ?? supportRef ?? extras.workspaceRef) === undefined
       ? {}
