@@ -268,7 +268,7 @@ export const en = {
     setupDescription:
       "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",
     /**
-     * The switcher menu's creation dialog (plan 115): the same POST, opened by
+     * The switcher menu's creation dialog: the same POST, opened by
      * a member who already has a workspace — so it cannot claim "no workspace
      * yet", and it makes no plan statement (the surface is not mode-gated).
      */

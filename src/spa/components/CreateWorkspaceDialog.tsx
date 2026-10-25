@@ -1,5 +1,5 @@
 /**
- * Workspace creation from the top-bar switcher (plan 115, Task 6). Before this
+ * Workspace creation from the top-bar switcher. Before this
  * surface, the menu item sent an existing member to `/dashboard`, which serves
  * the creation form only for a `needsWorkspace` boot — so the click landed on
  * their own workspace. The dialog posts the same route with the same name
