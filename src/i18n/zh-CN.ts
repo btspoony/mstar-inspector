@@ -186,6 +186,7 @@ export const zhCN: Dictionary = {
     slotsLeft: "还剩 {count} 个名额",
     slotsLeftOne: "只剩 {count} 个名额",
     noSeatsLeft: "名额已满",
+    noMemberLimit: "无上限",
     pendingInviteOne: "{count} 个待接受的邀请",
     pendingInvites: "{count} 个待接受的邀请",
     reviewAttemptsLabel: "本月审查次数",

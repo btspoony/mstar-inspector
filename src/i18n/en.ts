@@ -212,6 +212,7 @@ export const en = {
     slotsLeft: "{count} slots left",
     slotsLeftOne: "{count} slot left",
     noSeatsLeft: "No seats left",
+    noMemberLimit: "No limit",
     pendingInviteOne: "{count} pending invitation",
     pendingInvites: "{count} pending invitations",
     reviewAttemptsLabel: "Review attempts this month",

@@ -330,7 +330,12 @@ describe("workspace settings block", () => {
 
   test("the labels carry the Product copy; a free workspace shows BYOK only", () => {
     const html = renderToStaticMarkup(
-      createElement(WorkspacePanel, { locale: "en", workspace: FREE, memberCount: 4 }),
+      createElement(WorkspacePanel, {
+        locale: "en",
+        workspace: FREE,
+        memberCount: 4,
+        deploymentMode: "saas",
+      }),
     );
     expect(html).toContain(t("en", "members.workspaceHeading"));
     expect(html).toContain(t("en", "members.planLabel"));
@@ -349,6 +354,7 @@ describe("workspace settings block", () => {
     const html = renderToStaticMarkup(
       createElement(WorkspacePanel, {
         locale: "en",
+        deploymentMode: "saas",
         workspace: {
           plan: { id: "pro", name: "Pro" },
           memberLimit: 5,
@@ -366,11 +372,12 @@ describe("workspace settings block", () => {
   });
 
   test("the plan label is whatever the workspace prop says (P2 mode split guard)", () => {
-    // The card renders `workspace.plan` verbatim — no client-side plan naming —
-    // so a later deployment/mode split only has to change the payload.
+    // `saas` renders `workspace.plan` verbatim — no client-side plan naming —
+    // so a plan change only has to change the payload.
     const html = renderToStaticMarkup(
       createElement(WorkspacePanel, {
         locale: "en",
+        deploymentMode: "saas",
         workspace: { ...FREE, plan: { id: "team", name: "Team plan" } },
         memberCount: 1,
       }),
@@ -383,6 +390,7 @@ describe("workspace settings block", () => {
     const html = renderToStaticMarkup(
       createElement(WorkspacePanel, {
         locale: "en",
+        deploymentMode: "saas",
         workspace: { ...FREE, pendingInvites: 1 },
         memberCount: 4,
       }),
@@ -397,12 +405,55 @@ describe("workspace settings block", () => {
     const html = renderToStaticMarkup(
       createElement(WorkspacePanel, {
         locale: "en",
+        deploymentMode: "saas",
         workspace: { ...FREE, pendingInvites: 2 },
         memberCount: 2,
       }),
     );
     expect(html).toContain("2 pending invitations");
     expect(html).toContain("1 slot left");
+  });
+
+  test("self-hosted drops the plan card and the seat countdown; the meter stays", () => {
+    const html = renderToStaticMarkup(
+      createElement(WorkspacePanel, {
+        locale: "en",
+        deploymentMode: "self-hosted",
+        // The real self-hosted payload: every workspace resolves `unlimited`.
+        workspace: { ...FREE, memberLimit: null },
+        memberCount: 4,
+      }),
+    );
+    expect(html).toContain(t("en", "members.workspaceHeading"));
+    expect(html).not.toContain(t("en", "members.planLabel"));
+    expect(html).not.toContain("Free");
+    // A plain count plus the no-limit note — no quota, no countdown.
+    expect(html).toContain(">4<");
+    expect(html).toContain(t("en", "members.noMemberLimit"));
+    expect(html).not.toContain("4 / 5");
+    expect(html).not.toMatch(/slots? left|No seats left/);
+    // The meter is mode-independent.
+    expect(html).toContain(t("en", "members.reviewAttemptsLabel"));
+    expect(html).toContain("128");
+  });
+
+  test('a null limit reads as no limit in saas too — no arithmetic, no "null"', () => {
+    const html = renderToStaticMarkup(
+      createElement(WorkspacePanel, {
+        locale: "en",
+        deploymentMode: "saas",
+        // `pro` / `unlimited` carry a NULL `included_members`.
+        workspace: { ...FREE, plan: { id: "unlimited", name: "Unlimited" }, memberLimit: null },
+        memberCount: 4,
+      }),
+    );
+    expect(html).toContain("Unlimited");
+    expect(html).toContain(">4<");
+    expect(html).toContain(t("en", "members.noMemberLimit"));
+    expect(html).not.toContain("/ 5");
+    expect(html).not.toContain("null");
+    expect(html).not.toMatch(/slots? left|No seats left/);
+    expect(html).toContain("128");
   });
 
   test("the delete entry renders for the owner only", () => {

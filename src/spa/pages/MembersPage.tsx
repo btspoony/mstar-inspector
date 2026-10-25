@@ -165,7 +165,10 @@ export function postMemberWrite(
 
 /**
  * The "This workspace" block — plan, seats and this month's metered review
- * attempts. The upgrade position stays empty by product decision: no price, no
+ * attempts. `self-hosted` drops the plan card and shows seats as a plain count
+ * (spec §2: every workspace resolves `unlimited` there), and `memberLimit:
+ * null` reads the same way in `saas` — never `0`, never interpolated as
+ * "null". The upgrade position stays empty by product decision: no price, no
  * purchase control, no billing link. Split out of the stateful page so the
  * copy is assertable under static render (the `MembersTable` precedent).
  */
@@ -173,29 +176,40 @@ export function WorkspacePanel({
   locale,
   workspace,
   memberCount,
+  deploymentMode,
 }: {
   locale: Locale;
   workspace: WorkspaceSummary;
   memberCount: number;
+  deploymentMode: SpaBoot["deploymentMode"];
 }) {
+  // A self-hosted deployment caps nothing, so its mode decides the reading —
+  // not a limit that the payload could only carry by breaking that contract.
+  const memberLimit = deploymentMode === "self-hosted" ? null : workspace.memberLimit;
   // A pending invite occupies a seat at the cap, so the seat state reads the
   // same count the invite gate enforces — never the member rows alone.
-  const filled = memberCount + workspace.pendingInvites;
-  const slots = workspace.memberLimit - filled;
+  const slots =
+    memberLimit === null ? null : memberLimit - (memberCount + workspace.pendingInvites);
   return (
     <section className="flex flex-col gap-2">
       <h2 className="font-medium text-base">{t(locale, "members.workspaceHeading")}</h2>
       <StatGrid>
-        <StatCard
-          label={t(locale, "members.planLabel")}
-          value={workspace.plan.name}
-          hint={workspace.plan.id === "free" ? t(locale, "members.planFreeHint") : undefined}
-        />
+        {deploymentMode === "self-hosted" ? null : (
+          <StatCard
+            label={t(locale, "members.planLabel")}
+            value={workspace.plan.name}
+            hint={workspace.plan.id === "free" ? t(locale, "members.planFreeHint") : undefined}
+          />
+        )}
         {/* The seats card carries two hint lines: the pending-invite line
-            when there is one, then the seat countdown. */}
+            when there is one, then the seat countdown or the no-limit note. */}
         <StatCard
           label={t(locale, "members.membersLabel")}
-          value={t(locale, "members.memberSeats", { count: memberCount, limit: workspace.memberLimit })}
+          value={
+            memberLimit === null
+              ? memberCount
+              : t(locale, "members.memberSeats", { count: memberCount, limit: memberLimit })
+          }
           hint={
             <span className="flex flex-col gap-1">
               {workspace.pendingInvites > 0 ? (
@@ -208,11 +222,13 @@ export function WorkspacePanel({
                 </span>
               ) : null}
               <span>
-                {slots > 0
-                  ? t(locale, slots === 1 ? "members.slotsLeftOne" : "members.slotsLeft", {
-                      count: slots,
-                    })
-                  : t(locale, "members.noSeatsLeft")}
+                {slots === null
+                  ? t(locale, "members.noMemberLimit")
+                  : slots > 0
+                    ? t(locale, slots === 1 ? "members.slotsLeftOne" : "members.slotsLeft", {
+                        count: slots,
+                      })
+                    : t(locale, "members.noSeatsLeft")}
               </span>
             </span>
           }
@@ -610,7 +626,12 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
       {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
       {state === "ok" && members && workspace ? (
         <>
-          <WorkspacePanel locale={locale} workspace={workspace} memberCount={members.length} />
+          <WorkspacePanel
+            locale={locale}
+            workspace={workspace}
+            memberCount={members.length}
+            deploymentMode={boot.deploymentMode}
+          />
           {canInvite ? (
             <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onInvite(event)}>
               <div className="flex flex-col gap-1.5">
