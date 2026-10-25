@@ -1,6 +1,6 @@
 /**
- * The top-bar workspace control (the workspace-identifier work, 2026-10; moved
- * out of the sidebar header by plan 115). URL-only: picking a workspace rewrites
+ * The top-bar workspace control (moved out of the sidebar header into the
+ * navbar's left cluster). URL-only: picking a workspace rewrites
  * the workspace segment of the CURRENT path and lets the router re-render from
  * the pathname — no fetch, no reload, no cookie. A workspace the current path
  * has no resource for stays a 404 on that URL (the unknown-path stub), which is
@@ -82,10 +82,11 @@ export function WorkspaceSwitcher({
   const current = model.options.find((option) => option.ref === model.currentRef);
   // The plan chip is a `saas` surface only (D15/D20): self-hosted has no tier
   // to display. It rides the CURRENT workspace's name, so a path that names no
-  // workspace (the navigator) shows no chip — and it renders from the boot: no
-  // second fetch, no client-side plan resolution.
-  const plan =
-    current === undefined || boot.deploymentMode !== "saas" ? undefined : boot.workspacePlan;
+  // workspace (the navigator) shows no chip. The value comes from that
+  // membership row, never from the boot's addressed workspace: a switch only
+  // rewrites the URL, so a boot-keyed plan would keep naming the workspace the
+  // document loaded with.
+  const plan = boot.deploymentMode === "saas" ? model.currentPlan : undefined;
   const blockedReason: BlockedReason | null =
     boot.canCreateWorkspace === false ? (boot.createWorkspaceBlockedReason ?? null) : null;
   return (

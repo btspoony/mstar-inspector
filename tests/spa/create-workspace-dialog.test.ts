@@ -1,5 +1,5 @@
 /**
- * Create-workspace from the switcher menu (plan 115, Task 6).
+ * Create-workspace from the switcher menu.
  *
  * Before this surface the enabled "New workspace" item sent the browser to
  * `/dashboard`, which served the creation form only for a `needsWorkspace`
@@ -25,10 +25,9 @@ const boot: SpaBoot = {
   name: "The Octocat",
   workspaceRef: "acme",
   deploymentMode: "saas",
-  workspacePlan: "Free",
   canCreateWorkspace: true,
   createWorkspaceBlockedReason: null,
-  memberships: [{ id: "ws_acme", slug: "acme", name: "Acme", role: "owner" }],
+  memberships: [{ id: "ws_acme", slug: "acme", name: "Acme", role: "owner", plan: "Free" }],
 };
 
 type Post = { url: string; method: string; body: string };
@@ -269,7 +268,6 @@ describe("create from the switcher menu", () => {
   test("self-hosted shows the same creation surface — only the free-slot rule is mode-gated", async () => {
     const surface = await openMenu(() => created(), {
       deploymentMode: "self-hosted",
-      workspacePlan: "Unlimited",
     });
     try {
       expect(surface.item?.getAttribute("aria-disabled")).toBeNull();

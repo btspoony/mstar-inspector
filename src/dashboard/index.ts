@@ -277,9 +277,8 @@ export async function operatorSupportWorkspace(
 
 /**
  * The boot extras for one signed-in login: whether the login belongs to no
- * live workspace yet, the workspace ref the SHELL should navigate with, that
- * workspace's plan name (the top bar's chip), and whether this login may run
- * the App-creation flow.
+ * live workspace yet, the workspace ref the SHELL should navigate with, and
+ * whether this login may run the App-creation flow.
  *
  * `requestedRef` is the workspace the request addresses — the `/:workspaceRef`
  * segment of the page that carries the shell. Creation is judged in THAT
@@ -303,7 +302,6 @@ export async function workspaceBoot(
   requestedRef?: string,
 ): Promise<{
   workspaceRef?: string;
-  workspacePlan?: string;
   canCreateApp?: boolean;
   needsWorkspace?: boolean;
   workspaceRequired?: boolean;
@@ -322,12 +320,6 @@ export async function workspaceBoot(
   if (access !== null) {
     return {
       workspaceRef: access.slug,
-      // The top bar's plan chip data, resolved on the SAME access read (no
-      // second fetch in the shell). The mode decides the value before any DB
-      // read, so `self-hosted` answers `Unlimited` for free.
-      workspacePlan: (
-        await resolveWorkspacePlan(db, access.id, deploymentModeOf(env.DEPLOYMENT_MODE))
-      ).name,
       // A new App lands in the addressed workspace, where a plain member has
       // no manage rights — so creation is owner/admin there.
       canCreateApp: canManageRole(access.role),
@@ -344,16 +336,29 @@ export async function workspaceBoot(
 
 /**
  * The signed-in login's live workspace memberships as the SPA boot's switcher
- * rows (`{id, slug, name, role}`) — the shell's only source of a workspace
- * ref and of the caller's role there. An unbound store answers `[]`.
+ * rows (`{id, slug, name, role, plan}`) — the shell's only source of a
+ * workspace ref and of the caller's role there. An unbound store answers `[]`.
+ *
+ * `plan` answers the top bar's chip for EVERY row, not just the addressed
+ * workspace: a switch only rewrites the URL and never re-boots, so the chip
+ * must read the plan of whichever workspace the URL then names. Both modes
+ * carry it (D16: the mode gates rendering, never the payload) — `self-hosted`
+ * resolves `Unlimited` before any DB read.
  */
 export async function workspaceMembershipsForLogin(
   env: Env,
   login: string,
-): Promise<WorkspaceMembershipOption[]> {
+): Promise<Array<WorkspaceMembershipOption & { plan: string }>> {
   const db = dashboardD1(env);
   if (db === null) return [];
-  return listWorkspaceMembershipOptions(db, login);
+  const rows = await listWorkspaceMembershipOptions(db, login);
+  const mode = deploymentModeOf(env.DEPLOYMENT_MODE);
+  return Promise.all(
+    rows.map(async (row) => ({
+      ...row,
+      plan: (await resolveWorkspacePlan(db, row.id, mode)).name,
+    })),
+  );
 }
 
 /**

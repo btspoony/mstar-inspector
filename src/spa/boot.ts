@@ -26,13 +26,6 @@ export type SpaBoot = {
    */
   workspaceRef?: string;
   /**
-   * The addressed workspace's plan NAME (`Free` / `Pro` / `Unlimited`), resolved
-   * with the deployment mode on the same boot read. The top bar's plan chip
-   * renders it in `saas` only (D15/D20) — the mode gates the rendering, never
-   * the payload, so `self-hosted` carries the same shape.
-   */
-  workspacePlan?: string;
-  /**
    * The deployment shape (`DEPLOYMENT_MODE`), resolved by the Worker: `saas`
    * or `self-hosted`. The SPA branches rendering on it (plan chip, members
    * plan card) instead of inferring a shape or asking for a second fetch. The
@@ -81,6 +74,13 @@ export type SpaBoot = {
     slug: string;
     name: string;
     role: "owner" | "admin" | "member";
+    /**
+     * This workspace's plan NAME (`Free` / `Pro` / `Unlimited`) — what the top
+     * bar's chip shows for whichever of these rows the URL names, so a switch
+     * needs no second boot. Carried in both modes (D16: the mode gates
+     * rendering, never the payload); `self-hosted` resolves `Unlimited`.
+     */
+    plan: string;
   }>;
   /**
    * The signed-in login's live pending workspace invitations — the invitee's

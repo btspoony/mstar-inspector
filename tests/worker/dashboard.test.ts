@@ -474,7 +474,7 @@ describe("/dashboard routes", () => {
     expect(body).toContain('"login":"octocat"');
     // The identity block carries no top-level role any more: the workspace
     // role rides `memberships[]` (pinned here), and nothing else does.
-    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"owner"}]');
+    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"owner","plan":"Unlimited"}]');
     // Key order is part of the installed-document contract, and the deployment
     // mode rides right after the identity fields.
     expect(body).toContain(
@@ -513,7 +513,7 @@ describe("/dashboard routes", () => {
     expect(member.status).toBe(200);
     const memberBody = await member.text();
     expect(memberBody).toContain('"login":"mallory"');
-    expect(memberBody).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member"}]');
+    expect(memberBody).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member","plan":"Unlimited"}]');
   });
 
   test("GET /dashboard with a tampered session cookie → 302 to login (treated as logged out)", async () => {
@@ -3938,7 +3938,7 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
     const boot = JSON.parse(
       /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(body)?.[1] ?? "{}",
     ) as Parameters<typeof buildWorkspaceSwitcherModel>[0];
-    // One membership is still a LIST (plan 115): the menu names the workspace
+    // One membership is still a LIST: the menu names the workspace
     // the shell is scoped to, and its only row is already current — so there is
     // no other row to pick, which is what the byte/cookie assertions above pin.
     expect(boot.memberships).toHaveLength(1);

@@ -208,7 +208,7 @@ describe("sidebar hover hierarchy recipe (AD-622)", () => {
 });
 
 /**
- * 4. Top-bar workspace switcher (plan 115): the control left the sidebar header
+ * 4. Top-bar workspace switcher: the control left the sidebar header
  *    for the navbar's left cluster. Its ROWS live in a Radix portal, so the
  *    current-row mark and the disabled item's stated reason are only observable
  *    on a mounted render — hence happy-dom here rather than a source pin.
@@ -225,12 +225,11 @@ describe("top-bar workspace switcher (mounted)", () => {
     name: "The Octocat",
     workspaceRef: "acme",
     deploymentMode: "saas",
-    workspacePlan: "Free",
     canCreateWorkspace: true,
     createWorkspaceBlockedReason: null,
     memberships: [
-      { id: "ws_acme", slug: "acme", name: "Acme", role: "owner" },
-      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member" },
+      { id: "ws_acme", slug: "acme", name: "Acme", role: "owner", plan: "Free" },
+      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member", plan: "Unlimited" },
     ],
   };
 

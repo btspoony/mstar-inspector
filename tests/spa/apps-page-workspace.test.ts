@@ -28,8 +28,8 @@ const boot: SpaBoot = {
   workspaceRef: "acme",
   canCreateApp: true,
   memberships: [
-    { id: "ws_a", slug: "acme", name: "Acme", role: "owner" },
-    { id: "ws_b", slug: "beta", name: "Beta", role: "member" },
+    { id: "ws_a", slug: "acme", name: "Acme", role: "owner", plan: "Free" },
+    { id: "ws_b", slug: "beta", name: "Beta", role: "member", plan: "Free" },
   ],
 };
 

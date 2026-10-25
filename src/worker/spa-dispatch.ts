@@ -250,7 +250,6 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     ...(routeRef ?? supportRef ?? extras.workspaceRef) === undefined
       ? {}
       : { workspaceRef: routeRef ?? supportRef ?? extras.workspaceRef },
-    ...(extras.workspacePlan === undefined ? {} : { workspacePlan: extras.workspacePlan }),
     ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
     ...(login === null
       ? {}

@@ -119,10 +119,16 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
  * away, a revoked membership), or name no workspace at all. Then the control
  * marks NO row — a wrong current row is worse than none, so there is no
  * fallback to the first membership.
+ *
+ * `currentPlan` is that same membership row's plan NAME: the URL decides which
+ * workspace the shell is scoped to, so the plan chip has to follow the URL, not
+ * the document's boot-time workspace. Absent when no row is current, and on
+ * `self-hosted`, whose rows carry no plan (no chip there).
  */
 export type WorkspaceSwitcherModel = {
   label: string;
   currentRef: string | null;
+  currentPlan?: string;
   target: "replace" | "apps";
   options: Array<{ ref: string; name: string }>;
 };
@@ -136,9 +142,15 @@ export function buildWorkspaceSwitcherModel(
   const options = memberships.map(({ slug, name }) => ({ ref: slug, name }));
   const label = t(boot.locale, "nav.workspaceSwitcher");
   const pathRef = workspaceRefOf(pathname);
-  if (pathRef === null) return { label, currentRef: null, target: "apps", options };
-  const current = memberships.find((m) => pathRef === m.id || pathRef === m.slug);
-  return { label, currentRef: current?.slug ?? null, target: "replace", options };
+  const current =
+    pathRef === null ? undefined : memberships.find((m) => pathRef === m.id || pathRef === m.slug);
+  return {
+    label,
+    currentRef: current?.slug ?? null,
+    currentPlan: current?.plan,
+    target: pathRef === null ? "apps" : "replace",
+    options,
+  };
 }
 
 /**

@@ -79,12 +79,16 @@ describe("boot create-workspace capability", () => {
     expect(boot.createWorkspaceBlockedReason).toBeNull();
   });
 
-  test("the plan chip's data rides the boot: the resolved plan name, in both modes", async () => {
-    // The top bar renders this in `saas` only (D15/D20), but the payload keeps
-    // one shape (D16): the mode gates rendering, not the data. The seeded
-    // `default` workspace carries no subscription row here, so `saas` falls
-    // back to `free`, and `self-hosted` answers before any DB read.
-    expect((await bootFor("saas", true)).workspacePlan).toBe("Free");
-    expect((await bootFor("self-hosted", true)).workspacePlan).toBe("Unlimited");
+  test("the plan chip's data rides each membership row, in both modes", async () => {
+    // Each row names its OWN workspace's plan, because a switch only rewrites
+    // the URL: a boot-level plan would keep naming the document's workspace
+    // after the user moved to another one. Both modes carry it (D16: the mode
+    // gates rendering, never the payload). The seeded `default` workspace holds
+    // no subscription row here, so `saas` falls back to `free`, and
+    // `self-hosted` resolves `unlimited` before any DB read.
+    expect((await bootFor("saas", true)).memberships?.map((row) => row.plan)).toEqual(["Free"]);
+    expect((await bootFor("self-hosted", true)).memberships?.map((row) => row.plan)).toEqual([
+      "Unlimited",
+    ]);
   });
 });
