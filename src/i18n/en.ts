@@ -268,6 +268,12 @@ export const en = {
     setupDescription:
       "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",
     /**
+     * The switcher menu's creation dialog (plan 115): the same POST, opened by
+     * a member who already has a workspace — so it cannot claim "no workspace
+     * yet", and it makes no plan statement (the surface is not mode-gated).
+     */
+    createDialogDescription: "Name it and you become its owner — you can invite teammates afterwards.",
+    /**
      * The `self-hosted` empty-instance line: this sign-in created the
      * deployment's first account. Absent on `saas` and once `users` is
      * non-empty.

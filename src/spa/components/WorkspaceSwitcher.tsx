@@ -8,8 +8,11 @@
  *
  * The menu ends with "New workspace": enabled when the boot allows it, and at
  * the free-slot cap a DISABLED row carrying the stated reason — a user needs to
- * know why they cannot create one, and the rule itself.
+ * know why they cannot create one, and the rule itself. The enabled row opens
+ * the shell's creation dialog (`CreateWorkspaceDialog`); the disabled one opens
+ * nothing.
  */
+import { useState } from "react";
 import { ChevronDown, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,6 +30,7 @@ import { t, type DictionaryKey } from "../../i18n";
 import { navigate } from "../router";
 import { replaceWorkspaceRef } from "../routes";
 import type { WorkspaceSwitcherModel } from "../shell";
+import { CreateWorkspaceDialog } from "./CreateWorkspaceDialog";
 
 type BlockedReason = NonNullable<SpaBoot["createWorkspaceBlockedReason"]>;
 
@@ -34,13 +38,6 @@ type BlockedReason = NonNullable<SpaBoot["createWorkspaceBlockedReason"]>;
 const BLOCKED_REASON_KEY: Record<BlockedReason, DictionaryKey> = {
   free_slot: "nav.newWorkspaceBlockedFreeSlot",
 };
-
-/**
- * The Worker's creation mount. A full document navigation, not `navigate()`:
- * the boot decides what that path serves (a workspace-less login gets the
- * creation form), and the in-memory boot is pre-creation.
- */
-export const WORKSPACE_CREATION_PATH = "/dashboard";
 
 /**
  * Point the page at another workspace and hand the router the new path: either
@@ -72,6 +69,10 @@ export function WorkspaceSwitcher({
   model: WorkspaceSwitcherModel | null;
   boot: SpaBoot;
 }) {
+  // The creation dialog lives here because this menu is its only entry: an
+  // existing member creates from the switcher (Task 6), while a
+  // no-workspace login still gets the routed setup page.
+  const [creating, setCreating] = useState(false);
   // No membership at all is not a choice: the shell renders no control.
   if (model === null) return null;
   const locale = boot.locale;
@@ -88,44 +89,44 @@ export function WorkspaceSwitcher({
   const blockedReason: BlockedReason | null =
     boot.canCreateWorkspace === false ? (boot.createWorkspaceBlockedReason ?? null) : null;
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="max-w-64 justify-start" aria-label={model.label}>
-          <span className="truncate">{current?.name ?? model.label}</span>
-          {plan === undefined ? null : (
-            <span className="rounded-full border border-primary/40 px-1.5 text-xs text-primary">{plan}</span>
-          )}
-          <ChevronDown aria-hidden="true" className="opacity-50" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-64">
-        <DropdownMenuLabel>{model.label}</DropdownMenuLabel>
-        {/* A radio group: "the current workspace" is a chosen row, not a click
-            target — each row reports `aria-checked`. An empty value marks none. */}
-        <DropdownMenuRadioGroup
-          value={model.currentRef ?? ""}
-          onValueChange={(ref) => void switchWorkspace(ref, model.target)}
-        >
-          {model.options.map((option) => (
-            <DropdownMenuRadioItem key={option.ref} value={option.ref}>
-              <span className="truncate">{option.name}</span>
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          disabled={boot.canCreateWorkspace === false}
-          onSelect={() => window.location.assign(WORKSPACE_CREATION_PATH)}
-        >
-          <Plus aria-hidden="true" />
-          <span className="flex flex-col">
-            <span>{t(locale, "nav.newWorkspace")}</span>
-            {blockedReason === null ? null : (
-              <span className="text-xs text-muted-foreground">{t(locale, BLOCKED_REASON_KEY[blockedReason])}</span>
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline" size="sm" className="max-w-64 justify-start" aria-label={model.label}>
+            <span className="truncate">{current?.name ?? model.label}</span>
+            {plan === undefined ? null : (
+              <span className="rounded-full border border-primary/40 px-1.5 text-xs text-primary">{plan}</span>
             )}
-          </span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+            <ChevronDown aria-hidden="true" className="opacity-50" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-64">
+          <DropdownMenuLabel>{model.label}</DropdownMenuLabel>
+          {/* A radio group: "the current workspace" is a chosen row, not a click
+              target — each row reports `aria-checked`. An empty value marks none. */}
+          <DropdownMenuRadioGroup
+            value={model.currentRef ?? ""}
+            onValueChange={(ref) => void switchWorkspace(ref, model.target)}
+          >
+            {model.options.map((option) => (
+              <DropdownMenuRadioItem key={option.ref} value={option.ref}>
+                <span className="truncate">{option.name}</span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem disabled={boot.canCreateWorkspace === false} onSelect={() => setCreating(true)}>
+            <Plus aria-hidden="true" />
+            <span className="flex flex-col">
+              <span>{t(locale, "nav.newWorkspace")}</span>
+              {blockedReason === null ? null : (
+                <span className="text-xs text-muted-foreground">{t(locale, BLOCKED_REASON_KEY[blockedReason])}</span>
+              )}
+            </span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <CreateWorkspaceDialog boot={boot} open={creating} onOpenChange={setCreating} />
+    </>
   );
 }
