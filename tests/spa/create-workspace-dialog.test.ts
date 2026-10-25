@@ -131,8 +131,27 @@ async function openMenu(
     itemText: item?.textContent,
     /** Select the new-workspace row (Radix items select on click). */
     clickNewWorkspace: async () => {
+      // The menu unmounts its content once an item is chosen; reopen before a
+      // second selection so a test can close the dialog and come back.
+      if (win.document.querySelector('[data-slot="dropdown-menu-item"]') === null) {
+        await act(async () => {
+          trigger?.dispatchEvent(
+            new win.PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }),
+          );
+        });
+      }
+      const row = win.document.querySelector('[data-slot="dropdown-menu-item"]');
       await act(async () => {
-        item?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+        row?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+    },
+    /** Dismiss the dialog with its Cancel button. */
+    cancel: async () => {
+      const target = [...win.document.querySelectorAll('[role="dialog"] button')].find(
+        (button) => button.textContent === t("en", "common.cancel"),
+      );
+      await act(async () => {
+        target?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
     },
     dialog: () => win.document.querySelector('[role="dialog"]'),
@@ -206,6 +225,26 @@ describe("create from the switcher menu", () => {
       expect(surface.dialog()?.textContent).toContain(FREE_SLOT_REFUSAL);
       expect(surface.dialog()?.querySelector('[role="alert"]')?.textContent).toBe(FREE_SLOT_REFUSAL);
       expect(surface.assigned).toEqual([]);
+    } finally {
+      await surface.cleanup();
+    }
+  });
+
+  test("Cancel after a 409 closes clean: the reopened dialog has no name and no stale refusal", async () => {
+    const surface = await openMenu(() => new Response(FREE_SLOT_REFUSAL, { status: 409 }));
+    try {
+      await surface.clickNewWorkspace();
+      await surface.submit("Second one");
+      expect(surface.dialog()?.querySelector('[role="alert"]')?.textContent).toBe(FREE_SLOT_REFUSAL);
+
+      await surface.cancel();
+      expect(surface.dialog()).toBeNull();
+
+      // Every close path resets: Cancel included, not just ESC and the overlay.
+      await surface.clickNewWorkspace();
+      expect(surface.dialog()).not.toBeNull();
+      expect((surface.dialog()?.querySelector("#create-workspace-name") as HTMLInputElement | null)?.value).toBe("");
+      expect(surface.dialog()?.querySelector('[role="alert"]')).toBeNull();
     } finally {
       await surface.cleanup();
     }

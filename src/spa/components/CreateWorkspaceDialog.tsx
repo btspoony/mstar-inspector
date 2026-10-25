@@ -45,6 +45,16 @@ export function CreateWorkspaceDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  function handleOpenChange(next: boolean): void {
+    if (busy) return; // a POST in flight cannot be dismissed under itself
+    // A reopened dialog starts clean: the previous attempt's name and refusal
+    // belong to that attempt. Every close path (ESC, overlay, Cancel) routes
+    // through here.
+    setName("");
+    setError(null);
+    onOpenChange(next);
+  }
+
   async function onCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy) return; // in-flight guard — no double submit
@@ -77,17 +87,7 @@ export function CreateWorkspaceDialog({
   }
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (busy) return; // a POST in flight cannot be dismissed under itself
-        // A reopened dialog starts clean: the previous attempt's name and
-        // refusal belong to that attempt.
-        setName("");
-        setError(null);
-        onOpenChange(next);
-      }}
-    >
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t(locale, "workspace.setupHeading")}</DialogTitle>
@@ -109,7 +109,7 @@ export function CreateWorkspaceDialog({
           </div>
           {error === null ? null : <PageNotice kind="error" message={error} />}
           <DialogFooter>
-            <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="outline" disabled={busy} onClick={() => handleOpenChange(false)}>
               {t(locale, "common.cancel")}
             </Button>
             <Button type="submit" disabled={busy}>
