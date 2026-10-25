@@ -76,7 +76,10 @@ function envFor(db: TestD1): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
-    DEPLOYMENT_MODE: "self-hosted",
+    // `saas`: the seat cap and the free-slot rule bind that mode only. In
+    // `self-hosted` every workspace resolves to `unlimited`, so the same
+    // fixtures would correctly admit instead of refusing.
+    DEPLOYMENT_MODE: "saas",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DB: db,
   } as unknown as Env;
@@ -215,7 +218,7 @@ describe("pending invite visibility (AC4)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
 
     for (const login of ["dana", "carol"]) {
       const res = await request(INVITES, login);
@@ -353,7 +356,7 @@ describe("invite creation member cap", () => {
       invitedBy,
       now: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60_000).toISOString(),
-    });
+    }, "saas");
   }
 
   test("the fifth person is invitable; the sixth person's invite is the exact 409 and writes nothing", async () => {
@@ -402,7 +405,7 @@ describe("invite creation member cap", () => {
       invitedBy: users.owner,
       now: new Date(now.getTime() - 120_000).toISOString(),
       expiresAt: new Date(now.getTime() - 60_000).toISOString(),
-    });
+    }, "saas");
     const res = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
     expect(res.status).toBe(200);
     expect(pendingInvites(db)).toBe(1);
@@ -459,7 +462,7 @@ describe("invite revoke (AC6)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
 
     const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/revoke`, "dana", {
       method: "POST",
@@ -488,7 +491,7 @@ describe("invite revoke (AC6)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     const memberRes = await request(`/dashboard/acme/api/members/invites/${invite.id}/revoke`, "mallory", {
       method: "POST",
     });
@@ -516,7 +519,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     // The person signs in FIRST (C3: the invite path never creates a users row).
     seedUser(db, "hubot");
 
@@ -543,7 +546,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "hubot");
     const path = `/dashboard/acme/api/members/invites/${invite.id}/accept`;
     expect((await request(path, "hubot", { method: "POST" })).status).toBe(200);
@@ -561,7 +564,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "mallory2");
     const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "mallory2", {
       method: "POST",
@@ -581,7 +584,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.outsider,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "hubot");
     expect(
       (await request(`/dashboard/acme/api/members/invites/${foreign.id}/accept`, "hubot", { method: "POST" }))
@@ -605,7 +608,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date(Date.now() - 120_000).toISOString(),
       expiresAt: new Date(Date.now() - 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "hubot");
     const expired = await request(`/dashboard/acme/api/members/invites/${lapsed.id}/accept`, "hubot", {
       method: "POST",
@@ -645,7 +648,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date(Date.now() - 120_000).toISOString(),
       expiresAt: new Date(Date.now() - 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "hubot");
     const path = `/dashboard/acme/api/members/invites/${lapsed.id}/accept`;
     const first = await request(path, "hubot", { method: "POST" });
@@ -684,7 +687,7 @@ describe("invite accept free slot", () => {
       invitedBy,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
   }
 
   test("a login already in a live free workspace is refused with the exact 409 body, leaving the invite pending", async () => {
@@ -883,7 +886,7 @@ describe("member role change and removal (AC5)", () => {
       invitedBy: users.member,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
 
     const res = await request("/dashboard/acme/members/remove", "dana", {
       method: "POST",
@@ -924,7 +927,7 @@ describe("member role change and removal (AC5)", () => {
       invitedBy: users.outsider,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     const accept = await request(`/dashboard/other/api/members/invites/${invite.id}/accept`, "mallory", {
       method: "POST",
     });
@@ -1042,7 +1045,7 @@ describe("workspace summary in the member payload", () => {
       invitedBy: users.owner,
       now: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60_000).toISOString(),
-    });
+    }, "saas");
 
     const counted = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
     expect(counted.workspace.pendingInvites).toBe(1);

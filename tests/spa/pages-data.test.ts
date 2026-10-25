@@ -182,6 +182,26 @@ describe("members/apps/settings parsers", () => {
     ).toBeNull();
   });
 
+  test("parseMembers accepts a null memberLimit (no cap) and still rejects an absent one", () => {
+    const row = { id: "u1", github_login: "octocat", role: "owner" as const, created_at: "2026-01-01 00:00:00" };
+    const unlimited = {
+      plan: { id: "unlimited", name: "Unlimited" },
+      memberLimit: null,
+      reviewAttemptsThisMonth: 0,
+      pendingInvites: 0,
+    };
+    // `null` is the unlimited tier's real value: the summary must parse, not be
+    // discarded over a field that is present and meaningful.
+    expect(parseMembers({ viewer: { role: "owner" }, workspace: unlimited, members: [row] })).toEqual({
+      viewer: { role: "owner" },
+      workspace: unlimited,
+      members: [row],
+    });
+    // Absent is still drift, so the field stays required.
+    const { memberLimit: _omitted, ...absent } = unlimited;
+    expect(parseMembers({ viewer: { role: "owner" }, workspace: absent, members: [row] })).toBeNull();
+  });
+
   test("parseInvites requires id/login/role/created_at/expires_at, role never owner", () => {
     const row = {
       id: "i1",

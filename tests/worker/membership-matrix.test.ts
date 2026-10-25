@@ -145,7 +145,7 @@ async function seedPendingInvite(db: TestD1, invitedBy: string): Promise<string>
     invitedBy,
     now: now.toISOString(),
     expiresAt: new Date(now.getTime() + 60_000).toISOString(),
-  });
+  }, "saas");
   return invite.id;
 }
 

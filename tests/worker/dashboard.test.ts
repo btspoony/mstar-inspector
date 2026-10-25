@@ -3647,6 +3647,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     db: DashboardD1 & { raw: Database },
     login: string,
     form: Record<string, string>,
+    mode: "saas" | "self-hosted" = "self-hosted",
   ): Promise<Response> {
     const session = await createSessionValue(login, null, SESSION_SECRET);
     return worker.fetch(
@@ -3659,7 +3660,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
         },
         body: new URLSearchParams(form),
       }),
-      makeDbEnv(db),
+      makeDbEnv(db, { DEPLOYMENT_MODE: mode }),
     );
   }
 
@@ -3749,7 +3750,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     db.raw.exec("DELETE FROM users");
     await createUser(db, { login: "deployer", role: "member" });
 
-    const first = await createWorkspaceRequest(db, "deployer", { name: "First" });
+    const first = await createWorkspaceRequest(db, "deployer", { name: "First" }, "saas");
     expect(first.status).toBe(201);
     const workspacesBefore = workspaceCount(db);
     const membersBefore = memberRowCount(db);
@@ -3759,13 +3760,29 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     // The second attempt — and an immediate retry — hit the free slot: the
     // identical plain-text 409 body, zero rows on any of the three tables.
     for (const name of ["Second", "Retry"]) {
-      const res = await createWorkspaceRequest(db, "deployer", { name });
+      const res = await createWorkspaceRequest(db, "deployer", { name }, "saas");
       expect(res.status, name).toBe(409);
       expect(await res.text(), name).toBe(FREE_SLOT_REFUSAL);
       expect(workspaceCount(db), name).toBe(workspacesBefore);
       expect(memberRowCount(db), name).toBe(membersBefore);
       expect(subscriptionRowCount(db), name).toBe(subscriptionsBefore);
     }
+  });
+
+  test("self-hosted allows a second workspace: nothing resolves to free there", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    await createUser(db, { login: "deployer", role: "member" });
+
+    // The same fixture the saas guard refuses above; `self-hosted` is
+    // "always allowed" (spec §4), and the created workspace still records its
+    // free row because that row is what a saas switch would resolve.
+    expect((await createWorkspaceRequest(db, "deployer", { name: "First" })).status).toBe(201);
+    expect((await createWorkspaceRequest(db, "deployer", { name: "Second" })).status).toBe(201);
+    expect(subscriptionRowCount(db)).toBe(2);
+    expect(
+      db.raw.query("SELECT plan_id FROM workspace_subscriptions ORDER BY created_at").all(),
+    ).toEqual([{ plan_id: "free" }, { plan_id: "free" }]);
   });
 
   test("owning a pro workspace does not consume the free slot", async () => {
@@ -3789,7 +3806,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
       )
       .run(now, now);
 
-    const res = await createWorkspaceRequest(db, "deployer", { name: "Free one" });
+    const res = await createWorkspaceRequest(db, "deployer", { name: "Free one" }, "saas");
     expect(res.status).toBe(201);
     const plans = db.raw
       .query("SELECT plan_id FROM workspace_subscriptions ORDER BY plan_id")
@@ -3801,11 +3818,11 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     const db = createDashboardTestD1();
     db.raw.exec("DELETE FROM users");
     await createUser(db, { login: "deployer", role: "member" });
-    const first = await createWorkspaceRequest(db, "deployer", { name: "Workspace 1" });
+    const first = await createWorkspaceRequest(db, "deployer", { name: "Workspace 1" }, "saas");
     expect(first.status).toBe(201);
     const retired = (await first.json()) as { id: string };
 
-    const refused = await createWorkspaceRequest(db, "deployer", { name: "Workspace 2" });
+    const refused = await createWorkspaceRequest(db, "deployer", { name: "Workspace 2" }, "saas");
     expect(refused.status).toBe(409);
 
     // No production soft-delete face exists yet; the fixture retires the row
@@ -3815,7 +3832,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
       .prepare("UPDATE workspaces SET deleted_at = ? WHERE id = ?")
       .run(new Date().toISOString(), retired.id);
 
-    const res = await createWorkspaceRequest(db, "deployer", { name: "Replacement" });
+    const res = await createWorkspaceRequest(db, "deployer", { name: "Replacement" }, "saas");
     expect(res.status).toBe(201);
   });
 

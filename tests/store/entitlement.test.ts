@@ -52,7 +52,7 @@ function seedSubscription(db: TestD1, workspaceId: string, planId: string, statu
 describe("resolveWorkspacePlan", () => {
   test("a workspace without a subscription row resolves to the seeded free limits", async () => {
     const db = createMigratedTestD1();
-    expect(await resolveWorkspacePlan(db, "default")).toEqual({
+    expect(await resolveWorkspacePlan(db, "default", "saas")).toEqual({
       id: "free",
       name: "Free",
       includedMembers: 5,
@@ -63,7 +63,7 @@ describe("resolveWorkspacePlan", () => {
   test("an active pro subscription resolves to pro limits", async () => {
     const db = createMigratedTestD1();
     seedSubscription(db, "default", "pro");
-    expect(await resolveWorkspacePlan(db, "default")).toEqual({
+    expect(await resolveWorkspacePlan(db, "default", "saas")).toEqual({
       id: "pro",
       name: "Pro",
       includedMembers: 5,
@@ -74,7 +74,7 @@ describe("resolveWorkspacePlan", () => {
   test("an active unlimited subscription resolves to a null seat limit, not a number", async () => {
     const db = createMigratedTestD1();
     seedSubscription(db, "default", UNLIMITED_PLAN_ID);
-    expect(await resolveWorkspacePlan(db, "default")).toEqual({
+    expect(await resolveWorkspacePlan(db, "default", "saas")).toEqual({
       id: "unlimited",
       name: "Unlimited",
       includedMembers: null,
@@ -85,14 +85,42 @@ describe("resolveWorkspacePlan", () => {
   test("a non-active subscription resolves to free", async () => {
     const db = createMigratedTestD1();
     seedSubscription(db, "default", "pro", "canceled");
-    expect((await resolveWorkspacePlan(db, "default")).id).toBe("free");
+    expect((await resolveWorkspacePlan(db, "default", "saas")).id).toBe("free");
     db.raw.close();
   });
 
   test("a missing seeded free row is an error, not invented limits", async () => {
     const db = createMigratedTestD1();
     db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
-    await expect(resolveWorkspacePlan(db, "default")).rejects.toThrow(/seeded 'free' row/);
+    await expect(resolveWorkspacePlan(db, "default", "saas")).rejects.toThrow(/seeded 'free' row/);
+    db.raw.close();
+  });
+});
+
+describe("resolveWorkspacePlan — the mode decides before any read", () => {
+  test("self-hosted resolves unlimited even when the workspace holds an active free row", async () => {
+    const db = createMigratedTestD1();
+    // Every workspace created today holds this row; it must not cap the seats
+    // (spec §4: conditioning on it would leave existing deployments at five).
+    seedSubscription(db, "default", "free");
+    expect(await resolveWorkspacePlan(db, "default", "self-hosted")).toEqual({
+      id: UNLIMITED_PLAN_ID,
+      name: "Unlimited",
+      includedMembers: null,
+    });
+    db.raw.close();
+  });
+
+  test("self-hosted resolves unlimited for a workspace with no subscription row", async () => {
+    const db = createMigratedTestD1();
+    expect((await resolveWorkspacePlan(db, "default", "self-hosted")).id).toBe(UNLIMITED_PLAN_ID);
+    db.raw.close();
+  });
+
+  test("self-hosted reads no catalogue row, so a missing free row cannot fail it", async () => {
+    const db = createMigratedTestD1();
+    db.raw.prepare("DELETE FROM plans WHERE id = 'free'").run();
+    expect((await resolveWorkspacePlan(db, "default", "self-hosted")).includedMembers).toBeNull();
     db.raw.close();
   });
 });
@@ -149,7 +177,7 @@ describe("countFreeMembershipsForLogin", () => {
     seedSubscription(db, "ws-free-inactive", "free", "canceled");
 
     // The resolver and the count must agree: a non-active row is "no plan".
-    expect((await resolveWorkspacePlan(db, "ws-pro-inactive")).id).toBe("free");
+    expect((await resolveWorkspacePlan(db, "ws-pro-inactive", "saas")).id).toBe("free");
     expect(await countFreeMembershipsForLogin(db, "octocat")).toBe(2);
     db.raw.close();
   });
@@ -173,13 +201,40 @@ describe("in-write guards", () => {
         userId: "u1",
         githubLogin: "OCTOCAT",
         createdAt: TS,
-      }),
+      }, "saas"),
     ).rejects.toThrow(FreeWorkspaceSlotError);
 
     const count = (sql: string): number => db.raw.query<{ n: number }, []>(sql).get()?.n ?? 0;
     expect(count("SELECT COUNT(*) AS n FROM workspaces WHERE id = 'ws-new'")).toBe(0);
     expect(count("SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = 'ws-new'")).toBe(0);
     expect(count("SELECT COUNT(*) AS n FROM workspace_subscriptions WHERE workspace_id = 'ws-new'")).toBe(0);
+    db.raw.close();
+  });
+
+  test("self-hosted creation is always allowed and still writes the free subscription row", async () => {
+    const db = createMigratedTestD1();
+    // The same fixture the saas guard refuses above.
+    seedUser(db, "u1", "octocat");
+    seedWorkspace(db, "ws-free");
+    seedMembership(db, "ws-free", "u1");
+    seedSubscription(db, "ws-free", "free");
+
+    expect(
+      await createWorkspace(
+        db,
+        { id: "ws-new", name: "New", userId: "u1", githubLogin: "octocat", createdAt: TS },
+        "self-hosted",
+      ),
+    ).toBe(true);
+
+    // The row records what SaaS would resolve; only resolution ignores it.
+    expect(
+      db.raw
+        .query<{ plan_id: string; status: string }, []>(
+          "SELECT plan_id, status FROM workspace_subscriptions WHERE workspace_id = 'ws-new'",
+        )
+        .get(),
+    ).toEqual({ plan_id: "free", status: "active" });
     db.raw.close();
   });
 
@@ -200,7 +255,7 @@ describe("in-write guards", () => {
         invitedBy: "u0",
         now: TS,
         expiresAt: "2026-10-24T00:05:00.000Z",
-      }),
+      }, "saas"),
     ).rejects.toThrow(MEMBER_CAP_REFUSAL(5));
 
     expect(
@@ -225,7 +280,7 @@ describe("in-write guards", () => {
       invitedBy: "u0",
       now: TS,
       expiresAt: "2026-10-24T00:05:00.000Z",
-    });
+    }, "saas");
 
     expect(created.status).toBe("pending");
     expect(

@@ -27,6 +27,7 @@
  * refuses with the entitlement's own cap error instead of copying either below.
  */
 
+import type { DeploymentMode } from "../worker/env";
 import {
   FREE_PLAN_ID,
   FreeWorkspaceSlotError,
@@ -213,7 +214,9 @@ const INVITE_INSERT_SQL = `INSERT INTO workspace_invites
  * workspace past its plan. A NULL limit means no cap: the insert then carries
  * no seat condition at all, so the value never reaches the bind as NULL. The
  * plan is resolved here rather than passed in: the catalogue is static, and the
- * store is the one place that must know the limit it enforces.
+ * store is the one place that must know the limit it enforces. The mode is the
+ * caller's because this store cannot see the request env, and `self-hosted`
+ * resolves `unlimited` before reading the catalogue at all (spec §2).
  */
 export async function createInvite(
   db: InviteStoreD1,
@@ -225,6 +228,7 @@ export async function createInvite(
     now: string;
     expiresAt: string;
   },
+  mode: DeploymentMode,
 ): Promise<WorkspaceInviteRow> {
   const row: WorkspaceInviteRow = {
     id: crypto.randomUUID(),
@@ -237,7 +241,7 @@ export async function createInvite(
     expires_at: input.expiresAt,
     accepted_at: null,
   };
-  const limit = (await resolveWorkspacePlan(db, input.workspaceId)).includedMembers;
+  const limit = (await resolveWorkspacePlan(db, input.workspaceId, mode)).includedMembers;
   const values: unknown[] = [
     row.id,
     row.workspace_id,
@@ -409,12 +413,19 @@ export async function revokeInvite(
  * accepting login is a member of that workspace — so a refusal leaves the
  * invite pending and throws {@link FreeWorkspaceSlotError}. The route's read
  * stays fast-fail UX.
+ *
+ * The rule binds `saas` only (spec §3/§4): `self-hosted` resolves every
+ * workspace to `unlimited`, so nothing is on the free tier and the guard would
+ * only refuse an acceptance that must be allowed. The saas SQL text is
+ * unchanged; the self-hosted insert simply carries no slot condition (and so
+ * binds no free plan id).
  */
 export async function acceptInvite(
   db: InviteStoreD1,
   inviteId: string,
   login: string,
   now: string,
+  mode: DeploymentMode,
 ): Promise<AcceptInviteOutcome> {
   const invite = await db
     .prepare(`SELECT ${INVITE_COLUMNS} FROM workspace_invites WHERE id = ?`)
@@ -446,6 +457,8 @@ export async function acceptInvite(
     return { kind: "expired" };
   }
 
+  // `saas` keeps the guard's bytes exactly; self-hosted carries no condition.
+  const freeSlotCondition = mode === "saas" ? `\n            AND ${ACCEPT_FREE_SLOT_GUARD_SQL}` : "";
   await db.batch([
     db.prepare(FLIP_LAPSED_SQL).bind(invite.workspace_id, now),
     db
@@ -454,11 +467,10 @@ export async function acceptInvite(
          SELECT i.workspace_id, u.id, i.role, ?1
            FROM workspace_invites i
            JOIN users u ON u.github_login = ?2 COLLATE NOCASE
-          WHERE i.id = ?3 AND i.status = 'pending' AND i.expires_at > ?1
-            AND ${ACCEPT_FREE_SLOT_GUARD_SQL}
+          WHERE i.id = ?3 AND i.status = 'pending' AND i.expires_at > ?1${freeSlotCondition}
          ON CONFLICT DO NOTHING`,
       )
-      .bind(now, login, inviteId, FREE_PLAN_ID),
+      .bind(now, login, inviteId, ...(mode === "saas" ? [FREE_PLAN_ID] : [])),
     db
       .prepare(
         `UPDATE workspace_invites SET status = 'accepted', accepted_at = ?1

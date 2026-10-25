@@ -17,6 +17,7 @@
  * close this (a batch is atomic within one request, never isolated across
  * requests). Atomic enforcement is required before the first paid plan.
  */
+import type { DeploymentMode } from "../worker/env";
 import type { WorkspaceStoreD1 } from "./workspace-store";
 
 /**
@@ -43,14 +44,35 @@ export function isFreeTierPlan(planId: string | null | undefined): boolean {
 }
 
 /**
+ * `self-hosted` resolves to this — the seeded `unlimited` row mirrored as a
+ * constant so the mode answers BEFORE any DB read (spec §2 rule 1). The name
+ * mirrors migration 0032; self-hosted never renders the plan card (spec §4).
+ */
+const UNLIMITED_LIMITS: PlanLimits = {
+  id: UNLIMITED_PLAN_ID,
+  name: "Unlimited",
+  includedMembers: null,
+};
+
+/**
  * The workspace's active plan limits, or the seeded `free` limits when it has
- * no active subscription row. A missing `free` row means migration 0031 did
- * not apply, so it throws instead of inventing limits.
+ * no active subscription row.
+ *
+ * The mode decides FIRST: `self-hosted` is `unlimited` for every workspace,
+ * including the ones holding an `active free` row (every workspace created
+ * today does, so conditioning on "no subscription" would leave existing
+ * deployments capped — spec §4). The row stays truthful for a switch back to
+ * `saas`; only resolution ignores it.
+ *
+ * A missing `free` row means migration 0031 did not apply, so it throws
+ * instead of inventing limits.
  */
 export async function resolveWorkspacePlan(
   db: WorkspaceStoreD1,
   workspaceId: string,
+  mode: DeploymentMode,
 ): Promise<PlanLimits> {
+  if (mode === "self-hosted") return UNLIMITED_LIMITS;
   const subscribed = await db
     .prepare(
       `SELECT p.id AS id, p.name AS name, p.included_members AS includedMembers

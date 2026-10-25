@@ -21,7 +21,8 @@ export type MemberRow = {
 /** The workspace's plan, seat limit, meter and waiting invites. */
 export type WorkspaceSummary = {
   plan: { id: string; name: string };
-  memberLimit: number;
+  /** `null` = no seat cap (the unlimited tier), never `0`. */
+  memberLimit: number | null;
   reviewAttemptsThisMonth: number;
   /** Live (unexpired) pending invites — each one already occupies a seat. */
   pendingInvites: number;
@@ -715,13 +716,17 @@ function isWorkspaceRole(value: unknown): value is WorkspaceRole {
 /**
  * The `workspace` block of the member payload — every field is required, so a
  * rolled-back Worker (no summary) fails the parse instead of rendering a page
- * with invented limits.
+ * with invented limits. `memberLimit` is present in both modes and is `null`
+ * for the unlimited tier (no cap), which is a real value, not a missing one.
  */
 function parseWorkspaceSummary(data: unknown): WorkspaceSummary | null {
   if (!isRecord(data) || !isRecord(data.plan)) return null;
   const { plan } = data;
   if (typeof plan.id !== "string" || typeof plan.name !== "string") return null;
-  if (typeof data.memberLimit !== "number" || typeof data.reviewAttemptsThisMonth !== "number") {
+  if (
+    (data.memberLimit !== null && typeof data.memberLimit !== "number") ||
+    typeof data.reviewAttemptsThisMonth !== "number"
+  ) {
     return null;
   }
   if (typeof data.pendingInvites !== "number") return null;
