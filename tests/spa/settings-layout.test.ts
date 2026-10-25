@@ -1641,7 +1641,7 @@ describe("section-scoped op feedback", () => {
 
 describe("settings header typography", () => {
   test("app-slug heading rides the detail shell's PageHeader; no off-scale page heading remains (audit UI-45-08)", () => {
-    // SUPERSEDE (App detail IA → plan 114 T3): the slug heading moved onto the
+    // SUPERSEDE (App detail IA): the slug heading moved onto the
     // AppDetailPage shell as the identity header, and its face now lives in
     // the one PageHeader spelling (heading-24 page title, serving BOTH tabs).
     // The settings tab carries no page heading of its own anymore.

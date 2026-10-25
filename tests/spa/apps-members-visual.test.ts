@@ -27,10 +27,10 @@ const spaRoot = join(import.meta.dir, "../../src/spa");
 const appsPage = readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8");
 const membersPage = readFileSync(join(spaRoot, "pages/MembersPage.tsx"), "utf8");
 const tablePrimitive = readFileSync(join(spaRoot, "components/ui/table.tsx"), "utf8");
-// The pill moved out of the page into the shared primitive (plan 114 T1):
+// The pill moved out of the page into the shared primitive:
 // its shape/tone tokens are asserted where they now live.
 const statusBadgePrimitive = readFileSync(join(spaRoot, "components/StatusBadge.tsx"), "utf8");
-// Plan 114 T2: the page face moved into the composition primitives — the
+// The page face moved into the composition primitives — the
 // heading step and the table header face are asserted where they now live,
 // and the pages only compose them.
 const pageHeaderPrimitive = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf8");

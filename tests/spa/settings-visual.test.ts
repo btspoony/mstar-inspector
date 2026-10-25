@@ -128,9 +128,9 @@ describe("settings section rhythm (AD-591)", () => {
 
 describe("settings heading idiom (QC convergence)", () => {
   test("the slug identity header rides PageHeader's heading-24 face on the detail shell; no raw size utilities anywhere", () => {
-    // SUPERSEDE (App detail IA → plan 114 T3): the identity header moved onto
-    // the AppDetailPage shell with the heading-24 face; plan 114 T3 moved that
-    // face into the ONE PageHeader spelling and the shell composes it. The
+    // SUPERSEDE (App detail IA): the identity header moved onto
+    // the AppDetailPage shell with the heading-24 face; that face now lives in
+    // the ONE PageHeader spelling and the shell composes it. The
     // settings tab keeps the card-title heading-16 step only.
     expect(pageHeader).toContain("text-(length:--typo-heading-24-size)");
     expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
@@ -331,7 +331,7 @@ describe("chains panel faces (review deferrals)", () => {
       settingsPage.indexOf("function ChainsCard"),
       settingsPage.indexOf("function SeatsCard"),
     );
-    // Plan 114 T3: the panel title now composes the shared SectionCardTitle
+    // The panel title now composes the shared SectionCardTitle
     // instead of re-spelling the heading-16 utility chain at the site.
     expect(chainsBody).toContain("<SectionCardTitle>{tab.id}</SectionCardTitle>");
     expect(chainsBody).not.toContain("text-(length:--typo-heading-16-size)");

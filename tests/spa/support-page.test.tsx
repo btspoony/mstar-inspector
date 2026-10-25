@@ -1,5 +1,5 @@
 /**
- * Support page — the platform operator's read-only face (plan 114 T4).
+ * Support page — the platform operator's read-only face.
  *
  * Rendered in a real DOM (happy-dom) because the page's contract lives in its
  * effect: ONE read of the workspace's support view, and the rendered face
@@ -133,7 +133,7 @@ describe("support page", () => {
   });
 });
 
-describe("support page composition (plan 114)", () => {
+describe("support page composition", () => {
   test("composes the shared header, card and table primitives", () => {
     expect(source).toContain("<PageHeader");
     expect(source).toContain("<SectionCard");

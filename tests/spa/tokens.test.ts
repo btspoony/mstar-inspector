@@ -564,7 +564,7 @@ describe("DESIGN.md theme contract", () => {
     // The lock wording is gone from every theme location.
     expect(md).not.toContain("No independent theme toggle");
     expect(md).not.toContain("navbar theme button");
-    // Narrowed (plan 114): `switcher` alone is legitimate — the
+    // Narrowed: `switcher` alone is legitimate — the
     // WorkspaceSwitcher control — so this pin names only the retired
     // theme-toggle wording (case-insensitively, so a re-capitalised
     // restatement cannot slip past the literal pins above).

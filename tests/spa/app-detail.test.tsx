@@ -151,7 +151,7 @@ describe("tab shell rendering (static SSR)", () => {
     expect(identity).not.toContain("Review health");
   });
 
-  test("the identity status pill renders the shared primitive from the one derivation (plan 114 T3)", () => {
+  test("the identity status pill renders the shared primitive from the single derivation", () => {
     // The adapter that used to live in AppsPage is gone; the page and the
     // list both read this one derivation, and the pill face is the shared
     // component's token-backed tone.

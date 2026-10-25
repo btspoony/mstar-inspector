@@ -34,7 +34,7 @@ describe("workspace creation page", () => {
     expect(source).not.toMatch(/<input[\s>]/);
   });
 
-  test("composes the page header and the shared card surface (plan 114 T4)", () => {
+  test("composes the page header and the shared card surface", () => {
     // The page-title step and the two-tier card have ONE spelling each, and
     // both live in the primitives; the invite row is the shared surface
     // rather than a hand-assembled rounded box.
