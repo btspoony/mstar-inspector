@@ -30,6 +30,11 @@ const tablePrimitive = readFileSync(join(spaRoot, "components/ui/table.tsx"), "u
 // The pill moved out of the page into the shared primitive (plan 114 T1):
 // its shape/tone tokens are asserted where they now live.
 const statusBadgePrimitive = readFileSync(join(spaRoot, "components/StatusBadge.tsx"), "utf8");
+// Plan 114 T2: the page face moved into the composition primitives — the
+// heading step and the table header face are asserted where they now live,
+// and the pages only compose them.
+const pageHeaderPrimitive = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf8");
+const dataTablePrimitive = readFileSync(join(spaRoot, "components/DataTable.tsx"), "utf8");
 
 describe("AppsPage table reinforcement (AD-581)", () => {
   test("identity cell is the brand surface: slug primary line + AppID meta line", () => {
@@ -96,10 +101,31 @@ describe("AppsPage table reinforcement (AD-581)", () => {
   });
 
   test("row hover is the restyled primitive's tinted surface; header row opts out", () => {
-    // ui/table.tsx carries hover:bg-muted on data rows — the page
-    // must not shadow it, and the header band opts out of the row hover.
-    expect(appsPage).toContain('className="cursor-pointer"');
-    expect(appsPage).toContain('<TableRow className="hover:bg-inherit">');
+    // ui/table.tsx carries hover:bg-muted on data rows. The page adds only its
+    // own clickable face through DataTable's rowProps; the header-band opt-out
+    // lives in the primitive (components/DataTable.test.tsx pins it there).
+    const html = withLocation("/dashboard/apps", () =>
+      renderToStaticMarkup(
+        createElement(AppsList, {
+          locale: "en",
+          payload: {
+            viewer: { login: "mallory", role: "member" },
+            apps: [
+              {
+                slug: "demo",
+                github_app_id: 1,
+                status: "active",
+                review_enabled: 1,
+                created_by: "mallory",
+                health: { latest: null, rejected24h: 0 },
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    expect(html).toMatch(/<tr[^>]*class="[^"]*cursor-pointer/);
+    expect(html).toContain("hover:bg-inherit");
   });
 
   test("the health cell keeps the shared outcome map and gains tabular figures", () => {
@@ -110,23 +136,26 @@ describe("AppsPage table reinforcement (AD-581)", () => {
 
 describe("v0.3 page face (A4/A5)", () => {
   test("page titles ride the heading-24 token step", () => {
-    for (const [name, source] of [
-      ["AppsPage", appsPage],
-      ["MembersPage", membersPage],
-    ] as const) {
-      expect(source, name).toContain("text-(length:--typo-heading-24-size)");
-      expect(source, name).toContain("leading-(--typo-heading-24-line)");
-      expect(source, name).toContain("tracking-(--typo-heading-24-tracking)");
+    // ONE spelling of the page-title face, and it lives in PageHeader; a page
+    // that re-spells it would drift off the step this pins.
+    expect(pageHeaderPrimitive).toContain("text-(length:--typo-heading-24-size)");
+    expect(pageHeaderPrimitive).toContain("leading-(--typo-heading-24-line)");
+    expect(pageHeaderPrimitive).toContain("tracking-(--typo-heading-24-tracking)");
+    for (const [name, source] of [["AppsPage", appsPage]] as const) {
+      expect(source, name).toContain("<PageHeader");
+      expect(source, name).not.toContain("text-(length:--typo-heading-24-size)");
     }
   });
 
   test("table header face: background-200 band + label-12 headers (DESIGN.md Table)", () => {
-    for (const [name, source] of [
-      ["AppsPage", appsPage],
-      ["MembersPage", membersPage],
-    ] as const) {
-      expect(source, name).toContain('bg-(--background-200)');
-      expect(source, name).toContain("text-xs tracking-(--typo-label-12-tracking)");
+    // The shell + header face is DataTable's; each page composes it and keeps
+    // no table-header spelling of its own.
+    expect(dataTablePrimitive).toContain("bg-(--background-200)");
+    expect(dataTablePrimitive).toContain("text-xs tracking-(--typo-label-12-tracking)");
+    for (const [name, source] of [["AppsPage", appsPage]] as const) {
+      expect(source, name).toContain("<DataTable");
+      expect(source, name).not.toContain("bg-(--background-200)");
+      expect(source, name).not.toContain("TABLE_HEAD_LABEL");
     }
   });
 
