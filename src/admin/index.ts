@@ -11,12 +11,14 @@
  * (`./gate.ts`) — no mounted middleware stands in for it.
  */
 import { Hono } from "hono";
+import { isPlatformOperator } from "../dashboard/index";
 import { resolveLocale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
 import { ADMIN_PAGES } from "../spa/admin/pages";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, isFlagEnabled, listFlags } from "./flags";
 import { operatorLogin, type AdminContext } from "./gate";
+import { listUsers } from "./users";
 import { listWorkspaces, setWorkspacePlan } from "./workspaces";
 
 /** One declaration row of this namespace's own route table. */
@@ -101,6 +103,22 @@ async function readWorkspaces(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Every known user with its SQL-side counts — one statement. `isOperator` comes
+ * from the env allowlist through `isPlatformOperator`, the same predicate the
+ * gate uses, so the listed flag and the authorization decision cannot diverge.
+ */
+async function readUsers(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const users = await listUsers(db, new Date().toISOString());
+  return c.json({
+    users: users.map((user) => ({ ...user, isOperator: isPlatformOperator(c.env, user.login) })),
+  });
+}
+
+/**
  * Assign one workspace's plan. An unknown plan id is a 400 with no write; a
  * downgrade below the live member count is allowed and only blocks new invites
  * (spec §3.2), so this handler never removes a member.
@@ -165,6 +183,7 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/flags", handler: readFlags },
   { method: "patch", path: "/api/flags", handler: setFlag },
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
+  { method: "get", path: "/api/users", handler: readUsers },
   { method: "patch", path: "/api/workspaces/:id/plan", handler: assignPlan },
   { method: "get", path: "/", handler: serveDocument },
   ...ADMIN_PAGES.map((page) => ({ method: "get" as const, path: `/${page.id}`, handler: serveDocument })),
