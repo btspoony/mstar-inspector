@@ -34,6 +34,14 @@ export type SpaBoot = {
    */
   deploymentMode?: "self-hosted" | "saas";
   /**
+   * `true` = the viewer is a platform operator on a `saas` deployment — the
+   * only shape that mounts `/_internal_admin` (compass D8). Both conjuncts are
+   * resolved server-side (`isPlatformOperator` + the deployment mode), so the
+   * client never evaluates the allowlist. Always present on a served shell;
+   * `false` for an anonymous boot.
+   */
+  isOperator?: boolean;
+  /**
    * Absent or `true` = the caller may run the manifest Create flow. The server
    * sets `false` for a caller who is not owner/admin of the addressed
    * workspace, who would not be able to manage the App the flow creates

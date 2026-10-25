@@ -14,6 +14,8 @@ export const zhCN: Dictionary = {
     primary: "主导航",
     apps: "应用",
     members: "成员",
+    /** 侧栏底部的平台运营入口（仅 saas 上的 operator 可见）。 */
+    platformOperations: "平台运营",
     /** 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
     language: "EN",
     /** 主题切换：仅图标的按钮；状态与动作在 aria 文案中表达。 */

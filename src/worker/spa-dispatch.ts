@@ -21,6 +21,7 @@ import { getCookie } from "hono/cookie";
 import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
 import {
+  isPlatformOperator,
   operatorSupportWorkspace,
   signedInLanding,
   workspaceBoot,
@@ -255,6 +256,13 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   const boot: SpaBoot = {
     ...auth.boot,
     deploymentMode,
+    // Entry visibility (spec §5): ONE server-derived boolean — allowlist
+    // membership AND `saas`, the only shape that mounts the console. The
+    // client never sees the allowlist; `self-hosted` can never resolve true.
+    isOperator:
+      deploymentMode === "saas" &&
+      auth.boot.login !== null &&
+      isPlatformOperator(c.env, auth.boot.login),
     ...(firstInstance ? { emptyInstance: true } : {}),
     ...(routeRef ?? supportRef ?? extras.workspaceRef) === undefined
       ? {}

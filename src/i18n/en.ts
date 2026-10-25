@@ -24,6 +24,8 @@ export const en = {
     primary: "Primary navigation",
     apps: "Apps",
     members: "Members",
+    /** Sidebar-footer entry to the platform console (operators on `saas`). */
+    platformOperations: "Platform operations",
     /** Label of the OTHER locale — the toggle target (en shows 中文, zh_CN shows EN). */
     language: "中文",
     /** Theme toggle: icon-only button; state + action live in the aria copy. */
