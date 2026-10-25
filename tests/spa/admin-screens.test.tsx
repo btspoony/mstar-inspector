@@ -1,7 +1,7 @@
 /**
- * The console's flags and workspaces screens: each screen's loading, error,
- * empty and populated states, plus the writes they own — the flag toggle and
- * the per-row plan picker (exactly ONE PATCH).
+ * The console's four screens: each screen's loading, error,
+ * empty and populated states, plus the writes they own — the flag toggle, the
+ * per-row plan picker (exactly ONE PATCH) and the support-grant create/revoke.
  *
  * Mounted in happy-dom (support-notice / create-workspace precedents) because
  * the states live in effects and both controls are Radix widgets that only
@@ -184,6 +184,20 @@ async function workspacesScreen(respond: Respond): Promise<Surface> {
   }, respond);
 }
 
+async function usersScreen(respond: Respond): Promise<Surface> {
+  return mount(async () => {
+    const { UsersPage } = await import("../../src/spa/admin/UsersPage");
+    return createElement(UsersPage);
+  }, respond);
+}
+
+async function supportScreen(respond: Respond): Promise<Surface> {
+  return mount(async () => {
+    const { SupportGrantsPage } = await import("../../src/spa/admin/SupportGrantsPage");
+    return createElement(SupportGrantsPage);
+  }, respond);
+}
+
 const never = () => new Promise<Response>(() => {});
 const failed = () => new Response("boom", { status: 500 });
 
@@ -220,6 +234,34 @@ const WORKSPACES = [
     createdAt: "2026-09-18T09:00:00.000Z",
   },
 ];
+
+const USERS = [
+  {
+    login: "octocat",
+    createdAt: "2026-08-26T09:00:00.000Z",
+    workspaceCount: 2,
+    activeGrantCount: 0,
+    isOperator: true,
+  },
+  {
+    login: "ops",
+    createdAt: "2026-08-30T09:00:00.000Z",
+    workspaceCount: 1,
+    activeGrantCount: 2,
+    isOperator: false,
+  },
+  { login: "yuki", createdAt: "2026-09-18T09:00:00.000Z", workspaceCount: 1, activeGrantCount: 0, isOperator: false },
+];
+
+const GRANT = {
+  id: "g1",
+  workspace_id: "ws_1",
+  operator_login: "ops",
+  reason: "incident 42",
+  granted_by: "octocat",
+  created_at: "2026-10-25T09:00:00.000Z",
+  expires_at: "2026-10-26T09:00:00.000Z",
+};
 
 describe("Flags screen", () => {
   test("loading renders the table skeleton", async () => {
@@ -328,6 +370,132 @@ describe("Workspaces screen", () => {
     expect(patches[0]?.body).toEqual({ planId: "pro" });
     // The accepted plan is what the row now shows.
     expect(rowContaining(surface, "Acme")?.textContent).toContain("pro");
+    await surface.close();
+  });
+});
+
+describe("Users screen", () => {
+  test("loading renders the table skeleton", async () => {
+    const surface = await usersScreen(never);
+    expect(surface.container.querySelector('[data-slot="page-skeleton"]')).not.toBeNull();
+    await surface.close();
+  });
+
+  test("a failed read renders the error state", async () => {
+    const surface = await usersScreen(failed);
+    expect(surface.container.querySelector('[data-slot="error-state"]')?.textContent).toContain(
+      "Could not load the user list.",
+    );
+    await surface.close();
+  });
+
+  test("an empty list renders the empty state", async () => {
+    const surface = await usersScreen(() => json({ users: [] }));
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No users");
+    await surface.close();
+  });
+
+  test("rows separate operator status from live support access", async () => {
+    const surface = await usersScreen(() => json({ users: USERS }));
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(3);
+    expect(rowContaining(surface, "octocat")?.textContent).toContain("Operator");
+    expect(rowContaining(surface, "octocat")?.textContent).toContain("2026-08-26");
+    expect(rowContaining(surface, "ops")?.textContent).toContain("Support (2)");
+    expect(rowContaining(surface, "yuki")?.textContent).toContain("User");
+    await surface.close();
+  });
+});
+
+describe("Support access screen", () => {
+  const respondWith =
+    (grants: () => unknown): Respond =>
+    (request) => {
+      if (request.method !== "GET") return json({}, 201);
+      return json(
+        request.url.endsWith("/support-grants") ? { grants: grants() } : { workspaces: WORKSPACES },
+      );
+    };
+
+  test("loading renders the table skeleton", async () => {
+    const surface = await supportScreen(never);
+    expect(surface.container.querySelector('[data-slot="page-skeleton"]')).not.toBeNull();
+    await surface.close();
+  });
+
+  test("a failed read renders the error state", async () => {
+    const surface = await supportScreen(failed);
+    expect(surface.container.querySelector('[data-slot="error-state"]')?.textContent).toContain(
+      "Could not load the support grants.",
+    );
+    await surface.close();
+  });
+
+  test("no open window renders the empty state beside the create form", async () => {
+    const surface = await supportScreen(respondWith(() => []));
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain(
+      "No open support windows",
+    );
+    expect(surface.container.querySelector("#grant-operator")).not.toBeNull();
+    await surface.close();
+  });
+
+  test("rows name the operator, workspace, reason and expiry", async () => {
+    const surface = await supportScreen(respondWith(() => [GRANT]));
+    const row = rowContaining(surface, "incident 42");
+    expect(row?.textContent).toContain("ops");
+    expect(row?.textContent).toContain("Acme");
+    expect(row?.textContent).toContain("2026-10-26 09:00");
+    await surface.close();
+  });
+
+  test("the form creates one grant and the row revokes it", async () => {
+    let created = false;
+    const surface = await supportScreen((request) => {
+      if (request.method === "POST") {
+        created = true;
+        return json({ grant: GRANT }, 201);
+      }
+      if (request.method === "DELETE") return json({ id: GRANT.id, workspaceId: GRANT.workspace_id });
+      return json(
+        request.url.endsWith("/support-grants") ? { grants: created ? [GRANT] : [] } : { workspaces: WORKSPACES },
+      );
+    });
+
+    await surface.openSelect(surface.container.querySelector("#grant-workspace"));
+    await surface.pickOption("Acme");
+    await surface.type("#grant-operator", "ops");
+    await surface.type("#grant-reason", "incident 42");
+    await act(async () => {
+      surface.container
+        .querySelector("form")
+        ?.dispatchEvent(new surface.win.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await act(async () => {});
+
+    const posts = surface.sent.filter((request) => request.method === "POST");
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.url).toBe("/_internal_admin/api/support-grants");
+    expect(posts[0]?.body).toEqual({
+      workspaceId: "ws_1",
+      operatorLogin: "ops",
+      reason: "incident 42",
+      ttlHours: 24,
+    });
+
+    // The list is the server's answer, so the created row arrives by re-read.
+    expect(rowContaining(surface, "incident 42")?.textContent).toContain("Acme");
+
+    const revoke = [...surface.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Revoke",
+    );
+    await surface.click(revoke ?? null);
+
+    const deletes = surface.sent.filter((request) => request.method === "DELETE");
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]?.url).toBe("/_internal_admin/api/support-grants/g1");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain(
+      "No open support windows",
+    );
     await surface.close();
   });
 });
