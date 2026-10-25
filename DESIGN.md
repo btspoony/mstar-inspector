@@ -1,7 +1,7 @@
 ---
-version: 0.3.4
+version: 0.3.5
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted). Supersedes the earlier theme lock (2026-09-04, user instruction). v0.3 (AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (AD-641, 2026-09-11) retires the sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the neutral accent tint. v0.3.3 (AD-653, 2026-09-12) adds the insights daily stacked-bar chart vocabulary: severity stacks keep the frozen 700-step semantic family (red/amber/gray), category stacks join teal/purple/pink with blue-700 staying the neutral unknown-slug tone and gray-700 the uncategorized fallback — Appendix A gains their dual-theme vs-card rows. v0.3.4 (2026-09-16, user feedback round) makes the default deterministic: the prefers-color-scheme OS fallback is removed, so with no stored choice every browser renders dark, and the SPA body canvas is painted background-100."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted). Supersedes the earlier theme lock (2026-09-04, user instruction). v0.3 (AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (AD-641, 2026-09-11) retires the sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the neutral accent tint. v0.3.3 (AD-653, 2026-09-12) adds the insights daily stacked-bar chart vocabulary: severity stacks keep the frozen 700-step semantic family (red/amber/gray), category stacks join teal/purple/pink with blue-700 staying the neutral unknown-slug tone and gray-700 the uncategorized fallback — Appendix A gains their dual-theme vs-card rows. v0.3.4 (2026-09-16, user feedback round) makes the default deterministic: the prefers-color-scheme OS fallback is removed, so with no stored choice every browser renders dark, and the SPA body canvas is painted background-100. v0.3.5 (2026-10-25) documents the composition primitives — PageHeader, StatCard/StatGrid, DataTable, StatusBadge — with their fixed type and spacing steps; documentation only, no token value moved."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -859,6 +859,103 @@ Discipline (iteration 018 hard constraint #7):
 Component tokens live in frontmatter `components:` and reference `{colors.X}`
 (dark default). CSS in `tokens.css` re-expresses them as custom properties
 that follow the active theme because they point at color variables.
+
+### Composition primitives (v0.3.5)
+
+Four presentational primitives are the sanctioned spelling for a dashboard
+page's header, stat panel, table and status pill: `PageHeader`, `StatCard` /
+`StatGrid`, `DataTable` and `StatusBadge`. They render from props only — no
+hooks, no fetch — and resolve no copy: the page passes its `t()` results in.
+Every class binds the tokens below through arbitrary-value utilities; none of
+them introduces a styling mechanism or a token name.
+
+**Rule.** Pages compose from these primitives (plus `SectionCard` /
+`SectionCardTitle`). Re-spelling a primitive's class chain in a page is the
+duplication this layer exists to prevent; a page whose shape genuinely differs
+is reported, not absorbed by a page-specific prop.
+
+**The fixed type scale.** The composition layer uses three steps, no others:
+
+| Step | Face |
+|------|------|
+| `heading-24` | page title (`PageHeader.title`) |
+| `heading-16` | section/card title and the stat figure (`StatCard.value`) |
+| `label-12` | uppercase muted label (`StatCard.label`), table headers |
+
+`label-12` is the scale's smallest step: there is no 11px token and no
+`label-11`. A surface needing smaller text moves to `label-12`, never to a
+one-off size.
+
+**The three spacing steps.** Page composition stays on `spacing-6` (24px) for
+a page's outer column between its blocks, `spacing-4` (16px) between the cards
+of a `StatGrid`, and `spacing-3` (12px) inside a header column. Tighter gaps
+inside one primitive (4–6px between a label, its figure and its hint) are that
+primitive's own micro-rhythm, not a page-level choice. `SectionGroup`'s
+group-to-group `spacing-8` rhythm stays its own idiom.
+
+#### PageHeader
+
+| Prop | Type | Slot semantics |
+|------|------|----------------|
+| `title` | `ReactNode` (required) | The page's `h1`, on `heading-24` at `font-semibold`. One page title per page, one spelling. |
+| `description` | `ReactNode` | Muted line under the title — the page's purpose or read-only contract. |
+| `actions` | `ReactNode` | Cluster beside the title, baseline-aligned: the page's primary action. |
+| `backLink` | `ReactNode` | Wayfinding link above the title. |
+
+The slots carry content, not layout configuration: a differently shaped header
+composes the slot rather than passing layout props.
+
+#### StatCard / StatGrid
+
+| Prop | Type | Slot semantics |
+|------|------|----------------|
+| `StatCard.label` | `ReactNode` (required) | Uppercase muted `label-12` term. |
+| `StatCard.value` | `ReactNode` (required) | The figure on the `heading-16` size/line/tracking steps at `font-medium`, `tabular-nums`. |
+| `StatCard.hint` | `ReactNode` | Muted line under the figure — meta, unit note or window. |
+| `StatCard.progress` | `number` (0–1) | Optional bar; clamps outside the range and quantises to 10% steps. |
+| `StatGrid.children` | `ReactNode` | The semantic `<dl>` wrapper: responsive, three columns from `sm`. |
+
+`StatCard` renders one `<dt>`/`<dd>` group, so it is written for `StatGrid`
+rather than standalone.
+
+#### DataTable
+
+| Prop | Type | Slot semantics |
+|------|------|----------------|
+| `columns` | `readonly DataTableColumn<T>[]` | Per column: `header` (`ReactNode`), `cell(row)`, optional `align: "right"` for figure columns. |
+| `rows` | `readonly T[]` | The page's rows; the primitive owns no data. |
+| `rowKey` | `(row: T) => string` | Stable row identity. |
+| `empty` | `ReactNode` | When `rows` is empty and this is given, the page's empty state replaces the table instead of a bare header band. |
+| `rowProps` | `(row: T) => ComponentProps<"tr">` | Per-row passthrough: the page's row class or click handler. |
+
+One shell and one header face: container radius + hairline, `background-200`
+header band, `label-12` headers (12px, `font-medium`, `label-12` tracking),
+`copy-14` cells, right alignment for `align: "right"`. Pages keep their own
+cells; they do not re-spell the shell.
+
+#### StatusBadge
+
+`tone` (required: `neutral` | `success` | `warning` | `error` | `brand`) plus
+the `<span>` props; `className` merges. Tone maps to the existing `badge`
+component tokens — `neutral` = `--badge-bg` / `--badge-fg`, `success` =
+`--badge-success-bg` / `-fg`, `warning` = `--badge-warn-bg` / `-fg`, `error` =
+`--badge-error-bg` / `-fg`, `brand` = `--brand-700` on `--background-100`.
+Shape comes from `--badge-height` and `--badge-radius`. The caller passes the
+label and owns what a status means; `brand` is an accent surface, never an
+alert.
+
+**Documented gaps (v0.3.5).** Two shapes remain hand-rolled because no
+primitive owns them yet; they are recorded here rather than presented as
+covered:
+
+- **Outside-card section heading.** There is no primitive for a section title
+  that sits directly on the page canvas. `WorkspaceSetupPage`'s invite block
+  spells the `heading-16` chain by hand, and `MembersPage`'s pending-invites
+  section spells a 16px `<h2>` (`text-base font-medium`). `SectionCardTitle`
+  is a card title; widening it is a separate change.
+- **Login hero.** `LoginPage` keeps its centred `heading-32` card title — the
+  rare hero step the type scale declares for wordmark-scale titles, not a page
+  title.
 
 ### Button
 

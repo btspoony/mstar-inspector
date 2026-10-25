@@ -8,9 +8,10 @@
  * budget.
  *
  * Locked contract:
- * - version 0.3.4 (0.3.0 = the v0.3 value rebase; 0.3.1 = the font flip;
+ * - version 0.3.5 (0.3.0 = the v0.3 value rebase; 0.3.1 = the font flip;
  * 0.3.2 = sidebar tint; 0.3.3 = stacked palette; 0.3.4 = deterministic
- * dark default — the prefers-color-scheme OS fallback is removed),
+ * dark default — the prefers-color-scheme OS fallback is removed;
+ * 0.3.5 = composition-primitive documentation),
  *     defaultTheme dark; the theme mechanism is the manual
  *     data-theme override (navbar toggle); unset = dark default —
  *     the frontmatter keys were rewritten together with the
@@ -117,9 +118,10 @@ describe("DESIGN.md L2 dual-theme tokens", () => {
   test("frontmatter version, default theme, and L1 name continuity", async () => {
     const fm = await loadFrontmatter();
     // 0.3.4 = deterministic dark default (2026-09-16 user feedback round:
-    // the OS fallback branch is deleted from every value site) on top of
-    // the stacked-palette increment.
-    expect(fm.version).toBe("0.3.4");
+    // the OS fallback branch is deleted from every value site); 0.3.5
+    // (2026-10-25) documents the composition primitives — no token value
+    // moved.
+    expect(fm.version).toBe("0.3.5");
     expect(fm.defaultTheme).toBe("dark");
     // Manual data-theme override (navbar toggle); unset = dark
     // default — top-level keys and themes: keys move together.
@@ -562,7 +564,13 @@ describe("DESIGN.md theme contract", () => {
     // The lock wording is gone from every theme location.
     expect(md).not.toContain("No independent theme toggle");
     expect(md).not.toContain("navbar theme button");
-    expect(md).not.toContain("switcher");
+    // Narrowed (plan 114): `switcher` alone is legitimate — the
+    // WorkspaceSwitcher control — so this pin names only the retired
+    // theme-toggle wording (case-insensitively, so a re-capitalised
+    // restatement cannot slip past the literal pins above).
+    expect(md.toLowerCase()).not.toMatch(
+      /no independent theme toggle|navbar theme button|do not introduce a theme toggle/,
+    );
     expect(md).not.toContain("Do not introduce a theme toggle");
   });
 });
