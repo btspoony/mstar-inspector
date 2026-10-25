@@ -31,24 +31,35 @@ later analysis.
 
 ```mermaid
 flowchart LR
-    GH["GitHub webhook"] --> WH["POST /webhook/:appSlug<br/>verify + classify"]
+    D["Dashboard SPA<br/>register Apps · BYOK keys · model chain"] -->|"encrypted per-App credentials"| DB[("D1 store")]
+    GH["GitHub webhook<br/>POST /webhook/:appSlug"] --> WH["verify signature<br/>with that App's secret"]
     WH --> Q[("Queue")]
     Q --> CO["Consumer"]
-    CO --> SB["Sandbox<br/>clone + agent review"]
-    SB --> CM["Issues comment upsert"]
-    SB --> DB[("D1 store")]
+    CO --> SB["Sandbox container<br/>clone → multi-seat agent review"]
+    SB --> CM["single upserted PR comment<br/>+ advisory Check Run"]
+    SB --> DB
 ```
+
+One deployment serves any number of GitHub Apps. Each App is registered
+through the dashboard and brings its own encrypted credentials, provider keys
+(BYOK) and model chain, stored in D1 — there are no shared review credentials
+at the deployment level. Incoming webhooks are routed per App slug, reviews
+run one-at-a-time in one-shot Sandbox containers, and every result is stored
+structurally (`mstar.review/v1`) in D1 for dedup, recurrence and health
+analytics.
+
+The deployment shape is a single switch: `DEPLOYMENT_MODE` — `self-hosted`
+(the `wrangler.jsonc` top-level default, for your own copy) or `saas` (this
+repo's own multi-tenant service). There is no code-level default: an unset or
+misspelled value fails loud at startup. You almost certainly want
+`self-hosted`; the other shape is documented for operators in
+[`docs/deploy.md` § Deployment mode](docs/deploy.md#deployment-mode-deployment_mode).
 
 ## Quick start
 
-Two deployment paths — pick the one that matches who you are:
+Deploy a pinned release to your own Cloudflare account:
 
-- **Self-hosting your own copy** (forks, private deployments) → **Path A**: deploy a pinned release to your own Cloudflare account.
-- **Working on this repo** → **Path B**: merging to `main` deploys staging automatically.
-
-> Prerequisites (both paths): a [Cloudflare](https://developers.cloudflare.com/workers/) account (Workers + D1 + Queues + Containers), a GitHub account, and [Bun](https://bun.sh) ≥ 1.3.14 locally. The full runbook — Cloudflare resource setup, D1 migrations, secrets inventory, go-live checklist — lives in [`docs/deploy.md`](docs/deploy.md).
-
-### Path A — deploy your own copy (pinned release)
+> Prerequisites: a [Cloudflare](https://developers.cloudflare.com/workers/) account (Workers + D1 + Queues + Containers), a GitHub account, and [Bun](https://bun.sh) ≥ 1.4.0 locally. The full runbook — Cloudflare resource setup, D1 migrations, secrets inventory, go-live checklist — lives in [`docs/deploy.md`](docs/deploy.md).
 
 1. **Pin a released version** — published releases are tagged (see the [Releases page](https://github.com/btspoony/mstar-inspector/releases)); deploying a tag gives you that exact source, and the sandbox container image is rebuilt from that checkout at deploy time:
 
@@ -86,73 +97,23 @@ Two deployment paths — pick the one that matches who you are:
 
    ```bash
    bun run build:spa        # required — the SPA assets are not committed
-   wrangler deploy           # also builds/pushes the sandbox container image
+   wrangler deploy          # also builds/pushes the sandbox container image
    curl https://<your-worker>/healthz   # {"ok":true,"version":"vX.Y.Z"}
    ```
 
-   `wrangler deploy` takes `DEPLOYMENT_MODE` from the top-level `vars`
-   (`self-hosted`) — correct for a single self-hosted copy. Deploying a
-   multi-tenant copy instead? Pass `--var "DEPLOYMENT_MODE:saas"`; there is no
-   default, so an unset or misspelled value fails loud at startup.
+   `wrangler deploy` takes `DEPLOYMENT_MODE` from the top-level `vars` in
+   `wrangler.jsonc` (`self-hosted`) — correct for a self-hosted copy. See
+   [Architecture](#architecture) for the deployment-shape switch.
 
    No allowlist is needed: sign-in is open to any GitHub login, and the first
    person in creates a workspace and becomes its owner — see
    [`docs/deploy.md`](docs/deploy.md) § 6.
 
-6. Continue with **step 3 below** (sign in and register your GitHub App).
+6. **Sign in and register a GitHub App** — visit `https://<your-worker>/dashboard`, sign in with GitHub, and follow the **Register App** manifest flow. It creates the GitHub App on your account with a per-App webhook URL of the form `{origin}/webhook/<slug>`, stores the PEM and webhook secret encrypted in D1, and shows you the exact webhook URL to set.
 
-### Path B — this repo's staging (maintainers)
+7. **Configure the App** — on the dashboard Settings page for the App, add the provider API key(s) the review model needs (BYOK, encrypted in D1) and a model chain. An App without these fails its reviews closed — see [Per-App configuration](#per-app-configuration).
 
-This repo runs two instances: **production** at
-`https://inspector.mstar.page` — deployed when the Release workflow dispatches
-the production workflow on a non-prerelease tag (a Release published with the
-workflow's own `GITHUB_TOKEN` fires no `release: published` run, so that
-dispatch is the normal path; a Release published by hand in the UI deploys
-through the retained `release: published` trigger, whose job-level tag guard
-skips a prerelease tag) — and
-**staging** at `mstar-inspector.42ch.dev`, deployed on every push to
-`main`. This path sets up staging; production's one-time bring-up (its own
-Cloudflare resources, GitHub `production` environment, OAuth callback) is in
-[`docs/deploy.md`](docs/deploy.md#production-environment).
-
-1. **Deploy** — merging to `main` deploys staging automatically via the [Deploy workflow](.github/workflows/deploy.yml) (secrets → D1 migrations → `wrangler deploy` → smoke → digest record). For a manual/local deploy:
-
-   ```bash
-   bun install
-   bun run build:spa
-   wrangler deploy --var "DEPLOYMENT_MODE:saas"
-   ```
-
-   The `--var` is not optional here: the workflow passes `saas` on every
-   deploy, while a bare `wrangler deploy` resolves the top-level
-   `self-hosted` from `wrangler.jsonc` — the wrong shape for staging.
-
-   No dashboard access list is required: sign-in is open to any GitHub login,
-   and a new account creates its own workspace (becoming its owner) or accepts
-   an invitation — see [`docs/deploy.md`](docs/deploy.md) § 6.
-
-2. **Set the dashboard secrets** (four; no review credentials live at Worker level) — as **GitHub Secrets** (Settings → Environments → `staging` → Secrets), which the Deploy workflow injects into the Worker on every deploy. This staging-environment mapping is this repo's automation only — a self-hosted copy (Path A) sets the same four values directly on the Worker:
-
-   ```bash
-   # generate values locally, then add them under the staging environment:
-   openssl rand -base64 32    # DASHBOARD_ENCRYPTION_KEY — encrypts per-App credentials in D1
-   openssl rand -base64 32    # DASHBOARD_SESSION_SECRET — session-cookie HMAC key
-   # OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET — a GitHub OAuth App
-   # whose callback is {origin}/dashboard/oauth/callback
-   # (GitHub forbids the GITHUB_ prefix on secret names, so the GitHub-side
-   #  names drop it; the Worker still receives GITHUB_OAUTH_CLIENT_ID /
-   #  GITHUB_OAUTH_CLIENT_SECRET via the Deploy workflow's bulk mapping.
-   #  OAUTH_CLIENT_ID is a variable — client id is not sensitive;
-   #  OAUTH_CLIENT_SECRET is a secret.)
-   ```
-
-### Then (both paths)
-
-3. **Sign in and register a GitHub App** — visit `https://<your-worker>/dashboard`, sign in with GitHub, and follow the **Register App** manifest flow. It creates the GitHub App on your account with a per-App webhook URL of the form `{origin}/webhook/<slug>`, stores the PEM and webhook secret encrypted in D1, and shows you the exact webhook URL to set.
-
-4. **Configure the App** — on the dashboard Settings page for the App, add the provider API key(s) the review model needs (BYOK, encrypted in D1) and a model chain. An App without these fails its reviews closed — see [Per-App configuration](#per-app-configuration).
-
-5. **Enable reviews and open a PR** — reviews are on per App by default (the dashboard Pause/Resume switch is the only review control), then open or update a PR in a repo where the App is installed.
+8. **Enable reviews and open a PR** — reviews are on per App by default (the dashboard Pause/Resume switch is the only review control), then open or update a PR in a repo where the App is installed.
 
    The review runs in a sandbox container and its result appears as one comment on the PR (upserted — no comment spam across force-pushes).
 
@@ -168,7 +129,6 @@ Cloudflare resources, GitHub `production` environment, OAuth callback) is in
 - **Crash-safe publication**: the complete publication payload is staged privately in D1 before any GitHub mutation. If a crash or API failure interrupts the send or the subsequent database apply, the 15-minute cron reconciler completes it from that journal — or retries an already-authorized thread resolution — without re-running the paid review, with bounded retries and a visible terminal give-up state. Contract: [`.mstar/specs/review-lifecycle.md`](.mstar/specs/review-lifecycle.md) §7.
 
 > The lifecycle, credential and recovery behavior above is covered by the implementation's scoped behavioral tests and static checks. Live GitHub / GitHub App behavior — the returned installation grant and remote thread resolution in particular — is **not** verified in this repository: no live scoped run was authorized (spec §7.13).
-
 
 ## Agent runtimes
 
@@ -192,10 +152,11 @@ Everything a review needs is configured **per App** on the dashboard Settings pa
 
 ## Operations
 
-- **Review control**: per-App `review_enabled` (dashboard Pause/Resume) is the only review switch — there is no deployment-wide brake. Pausing an App answers 2xx with zero enqueue while the webhook stays healthy.
-- **Deploys are automated on this repo**: merging to `main` runs the [Deploy workflow](.github/workflows/deploy.yml) — secrets injection, D1 migrations, `wrangler deploy`, post-deploy smoke, and the image-digest record. A failed run stops red (no auto-rollback); see [`docs/deploy.md`](docs/deploy.md) for failure semantics and the manual rollback path. Self-hosting your own copy? You deploy manually (or wire your own pipeline) — see [Path A](#path-a--deploy-your-own-copy-pinned-release).
-- **Releases are versioned**: a release is cut by merging a `release vX.Y.Z` PR, which tags the release and publishes a GitHub Release with bilingual changelog and deploy evidence — and for a non-prerelease tag the Release workflow **dispatches** the production deploy to `https://inspector.mstar.page` (explicitly: a Release created with the workflow's `GITHUB_TOKEN` triggers no `release: published` run, so the dispatch is the normal path — a Release published by hand deploys through that retained trigger, whose job-level tag guard skips a prerelease tag; the release chain never dispatches a prerelease, while a manual dispatch on a tag ref — the bring-up/rollback door — may deploy one) — see [`docs/release.md`](docs/release.md) and the [Releases page](https://github.com/btspoony/mstar-inspector/releases).
-- **Secrets inventory, deploy steps, rollback, and the full Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md).
+- **Review control** — per-App `review_enabled` (dashboard Pause/Resume) is the only review switch — there is no deployment-wide brake. Pausing an App answers 2xx with zero enqueue while the webhook stays healthy.
+- **Failure semantics, rollback, secrets inventory, and the Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md).
+- **Cutting a versioned release** → [`docs/release.md`](docs/release.md) and the [Releases page](https://github.com/btspoony/mstar-inspector/releases).
+
+> This repository also runs its own staging and production instances behind automated deploys and a release train. That machinery is operator-facing and documented in `docs/deploy.md` / `docs/release.md`; it is not part of a self-hosted deployment.
 
 ## Local development
 
@@ -206,15 +167,16 @@ bun test
 ```
 
 - Local `wrangler dev` secrets go in `.dev.vars` (gitignored) — see `.env.example`.
-- Review runner CLI (the in-image entry): `bun run review --level <quick|default> --input <json-file>` — prints the `mstar.review/v1` envelope JSON on stdout.
+- Review runner CLI (the in-image entry): `bun run review --level <quick|default|deep> --input <json-file>` — prints the `mstar.review/v1` envelope JSON on stdout.
 - Sandbox smoke: `bun run scripts/sandbox-smoke.ts` (requires `SMOKE_APP_ID` / `SMOKE_PRIVATE_KEY`; see the file header) — it mints the same repository-scoped **read-only** `sandbox-read` grant the Worker uses and fails closed on any broader returned capability; full runbook in [`docs/deploy.md`](docs/deploy.md#sandbox-smoke).
 
 ## Documentation
 
 | Document | What it covers |
 |----------|----------------|
-| [`docs/deploy.md`](docs/deploy.md) | Deploy docs: automated-deploy primary path (workflow triggers + failure semantics), Cloudflare resources, D1 migrations, secrets inventory, manual reference steps, Multi-App go-live checklist, rollback |
+| [`docs/deploy.md`](docs/deploy.md) | Deploy docs: Cloudflare resources, D1 migrations, secrets inventory, manual reference steps, Multi-App go-live checklist, rollback — plus this repo's own operator docs (staging/production automated deploys, `DEPLOYMENT_MODE`) |
 | [`docs/release.md`](docs/release.md) | Release docs: cutting a versioned release (fragment changelog → `release vX` PR → tag + GitHub Release), the first-cut live-verification checklist, failure/recovery paths |
+| [`.mstar/specs/`](.mstar/specs/README.md) | Behavioral specs behind the implementation (e.g. [`review-lifecycle.md`](.mstar/specs/review-lifecycle.md)) — the contracts the tests and docs reference |
 
 ## License
 
