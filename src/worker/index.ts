@@ -33,6 +33,7 @@ import { defaultLog, handleReviewJob } from "./handlers";
 import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
+import { adminApp } from "../admin/index";
 import { trailingSlashRedirect } from "./redirects";
 import { spaDispatch } from "./spa-dispatch";
 import { APP_VERSION } from "../version";
@@ -365,8 +366,25 @@ app.post("/webhook/:appSlug", async (c) => {
   return c.text("accepted", 200);
 });
 
+/**
+ * The `saas` router: `app` plus the hidden operator console.
+ *
+ * Built here, after every `app` registration — `route()` copies the source
+ * app's route table at call time, so a route added to `app` later would be
+ * absent from this one. The admin mount belongs to this router only: the
+ * module body runs once per isolate while the deployment shape arrives per
+ * request, which is why the choice happens in `fetch` instead of a mount
+ * condition. A `self-hosted` deployment therefore serves `app`, where
+ * `/_internal_admin` is an unknown path (404) for every caller — no runtime
+ * mode flag inside a handler.
+ */
+const saasApp = new Hono<{ Bindings: Env }>()
+  .route("/", app)
+  .route("/_internal_admin", adminApp);
+
 export default {
-  fetch: app.fetch,
+  fetch: (request: Request, env: Env, ctx?: ExecutionContext): Response | Promise<Response> =>
+    (env.DEPLOYMENT_MODE === "saas" ? saasApp : app).fetch(request, env, ctx),
   // 06 queue wiring — the ONLY legal worker → pipeline edge (compass A).
   // Dynamic import: the consumer statically loads the sandbox adapter, which
   // imports the workerd-only `cloudflare:workers` builtin — Bun's test runner
