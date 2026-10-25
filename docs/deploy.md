@@ -513,9 +513,14 @@ restores by hand.
   keep it with the deploy record**:
   `wrangler d1 time-travel info mstar-inspector-prod-db --env production`
   (or `--timestamp=<RFC3339>` from before the apply, for that point's
-  bookmark). If that command reports an alpha (or any UNKNOWN) backend
-  instead of a bookmark, Time Travel does not exist for the database — use
-  Cloudflare's export/restore guidance rather than the bookmark path.
+  bookmark). Two outcomes are distinct: a confirmed `alpha` backend means
+  Time Travel does not exist for that database — skip the bookmark path and
+  use Cloudflare's export/restore guidance instead. Any UNKNOWN outcome
+  (authentication, network, or unparseable failure) establishes nothing
+  about support: it only means the backend cannot be determined from this
+  environment, so **stop the restore decision** until access or backend
+  verification is available — do not assert Time Travel is unavailable and
+  do not choose an alternative recovery path on that basis.
 - **Secrets/vars** — untouched by a version-only rollback; a re-dispatched older
   tag rewrites them from the `production` environment and that tag's config
   (previous bullet). Rotate explicitly when the rollback is
@@ -1845,13 +1850,16 @@ Operationally that means:
   point for these migrations — without it, a pre-`0024` rollback is a
   credential-loss event for every App (the promoted rows are unreadable to the
   old code: three-segment AAD + real `key_id`).
-- **Legacy `alpha` backend** (or any **UNKNOWN** backend — fail closed, take
-  this path): Time Travel does not exist there, so the pre-apply snapshot is
-  the § D1 migrations **export file** instead of a bookmark. Restore by
-  importing it into a NEW database, repointing the D1 binding at it and
-  redeploying the pre-`0024` code — an alpha database cannot be restored in
-  place, and the two rebuilt credential tables are what make this migration
-  the one place where the distinction matters.
+- **Legacy `alpha` backend — or an UNKNOWN backend (fail closed).** A
+  confirmed `alpha` database has no Time Travel, so the pre-apply snapshot is
+  the § D1 migrations **export file** instead of a bookmark. An UNKNOWN
+  result from step 1a (auth, network or unparseable failure) says nothing
+  about Time Travel support: resolve it before choosing a restore path, and
+  use the export file as the interim restore point — it is valid on both
+  backends. Restore by importing it into a NEW database, repointing the D1
+  binding at it and redeploying the pre-`0024` code — an alpha database
+  cannot be restored in place, and the two rebuilt credential tables are
+  what make this migration the one place where the distinction matters.
   ```bash
   wrangler d1 create mstar-inspector-db-restored
   wrangler d1 execute mstar-inspector-db-restored --remote --file=pre-0025-snapshot.sql

@@ -14,7 +14,7 @@
 --     the worker's scheduled sweep) turns a lapsed 'pending' row into
 --     'expired', and a lapsed row that neither has reached yet still reads
 --     'pending', so every read keeps the
---     `status = 'pending' AND expires_at > ?` predicate. There is no timer.
+--     `status = 'pending' AND expires_at > ?` predicate.
 --   * role domain excludes 'owner': ownership is granted by workspace
 --     creation or by an explicit owner-only promote, never by an invite.
 --   * github_login carries COLLATE NOCASE, which governs both partial
