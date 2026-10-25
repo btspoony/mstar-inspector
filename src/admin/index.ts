@@ -17,6 +17,7 @@ import { ADMIN_PAGES } from "../spa/admin/pages";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, isFlagEnabled, listFlags } from "./flags";
 import { operatorLogin, type AdminContext } from "./gate";
+import { listWorkspaces } from "./workspaces";
 
 /** One declaration row of this namespace's own route table. */
 type AdminRoute = {
@@ -88,6 +89,18 @@ async function setFlag(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Every live workspace with its SQL-side counts, owner login and resolved
+ * plan — one statement, so the console never fans out a read per row.
+ */
+async function readWorkspaces(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  return c.json({ workspaces: await listWorkspaces(db, new Date().toISOString()) });
+}
+
+/**
  * The console document (`src/spa/admin.html`). `ASSETS` holds it and no other
  * route serves it: spa-dispatch matches only `/index.html` and `/assets/*`, so
  * this gated handler is the document's single entry point.
@@ -111,6 +124,7 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/me", handler: readMe },
   { method: "get", path: "/api/flags", handler: readFlags },
   { method: "patch", path: "/api/flags", handler: setFlag },
+  { method: "get", path: "/api/workspaces", handler: readWorkspaces },
   { method: "get", path: "/", handler: serveDocument },
   ...ADMIN_PAGES.map((page) => ({ method: "get" as const, path: `/${page.id}`, handler: serveDocument })),
 ];
