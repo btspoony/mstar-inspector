@@ -336,6 +336,8 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       // 0026 + 0027: the webhook's slug lookup is the joined tenant read, so
       // the fixture carries the workspace plane and the App's mapping.
       "0026_workspaces.sql",
+      // 0033: the enqueue decision reads the `review_global` server flag.
+      "0033_platform_admin.sql",
     ];
     if (withDeliveries) {
       names.push("0011_webhook_deliveries.sql");

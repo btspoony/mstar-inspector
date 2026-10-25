@@ -3,7 +3,7 @@
  * Tested without a DOM runner.
  */
 
-import type { DictionaryKey } from "../../i18n";
+import { t, type DictionaryKey, type Locale } from "../../i18n";
 
 export type Role = "admin" | "member";
 
@@ -21,7 +21,8 @@ export type MemberRow = {
 /** The workspace's plan, seat limit, meter and waiting invites. */
 export type WorkspaceSummary = {
   plan: { id: string; name: string };
-  memberLimit: number;
+  /** `null` = no seat cap (the unlimited tier), never `0`. */
+  memberLimit: number | null;
   reviewAttemptsThisMonth: number;
   /** Live (unexpired) pending invites — each one already occupies a seat. */
   pendingInvites: number;
@@ -455,12 +456,33 @@ export function canInviteMembers(role: WorkspaceRole | null): boolean {
  * Paused = active but reviews switched off (one predicate for
  * both faces). The two wire representations of `review_enabled` — raw
  * integer on the apps list face (dashboard/index.ts), boolean on the
- * settings face (`!== 0` coercion) — are normalized here, so AppsPage's
- * StatusBadge and SettingsPage's OpsCard share one derivation.
+ * settings face (`!== 0` coercion) — are normalized here, so the App status
+ * pill and SettingsPage's OpsCard share one derivation.
  */
 export function isPaused(app: { status: string; review_enabled: number | boolean }): boolean {
   const enabled = typeof app.review_enabled === "boolean" ? app.review_enabled : app.review_enabled !== 0;
   return app.status === "active" && !enabled;
+}
+
+/**
+ * The App status pill's copy + tone, derived once for both faces that show it
+ * (the Apps list and the App detail shell). The face itself belongs to
+ * `components/StatusBadge`; only what a status MEANS lives here.
+ */
+export function appStatusPill(
+  locale: Locale,
+  app: { status: string; review_enabled: number | boolean },
+): { label: string; tone: "success" | "warning" } {
+  const paused = isPaused(app);
+  return {
+    label:
+      app.status === "disabled"
+        ? t(locale, "apps.status.disabled")
+        : paused
+          ? t(locale, "apps.status.paused")
+          : t(locale, "apps.status.active"),
+    tone: app.status === "disabled" || paused ? "warning" : "success",
+  };
 }
 
 export function parseInsightsSearch(search: string): InsightsSearch {
@@ -694,13 +716,17 @@ function isWorkspaceRole(value: unknown): value is WorkspaceRole {
 /**
  * The `workspace` block of the member payload — every field is required, so a
  * rolled-back Worker (no summary) fails the parse instead of rendering a page
- * with invented limits.
+ * with invented limits. `memberLimit` is present in both modes and is `null`
+ * for the unlimited tier (no cap), which is a real value, not a missing one.
  */
 function parseWorkspaceSummary(data: unknown): WorkspaceSummary | null {
   if (!isRecord(data) || !isRecord(data.plan)) return null;
   const { plan } = data;
   if (typeof plan.id !== "string" || typeof plan.name !== "string") return null;
-  if (typeof data.memberLimit !== "number" || typeof data.reviewAttemptsThisMonth !== "number") {
+  if (
+    (data.memberLimit !== null && typeof data.memberLimit !== "number") ||
+    typeof data.reviewAttemptsThisMonth !== "number"
+  ) {
     return null;
   }
   if (typeof data.pendingInvites !== "number") return null;

@@ -27,7 +27,7 @@ import {
 } from "../../src/dashboard/invite-store";
 import type { WorkspaceInviteRow } from "../../src/dashboard/invite-store";
 import { countMembersAndPendingInvites } from "../../src/dashboard/workspace-store";
-import { FreeWorkspaceSlotError } from "../../src/dashboard/entitlement";
+import { FreeWorkspaceSlotError, MEMBER_CAP_REFUSAL } from "../../src/dashboard/entitlement";
 
 const WORKSPACE = "default";
 const INVITER = "user-operator";
@@ -61,7 +61,7 @@ function invite(db: TestD1, login: string, now = NOW, expiresAt = LATER): Promis
     invitedBy: INVITER,
     now,
     expiresAt,
-  });
+  }, "saas");
 }
 
 /** The row as stored (status included; the store's reads filter lazily). */
@@ -182,14 +182,14 @@ describe("workspace_invites store", () => {
     const db = createFixture("octocat");
     const lapsed = await invite(db, "octocat", NOW, LATER);
 
-    const first = await acceptInvite(db, lapsed.id, "octocat", "2026-11-01T00:00:00.000Z");
+    const first = await acceptInvite(db, lapsed.id, "octocat", "2026-11-01T00:00:00.000Z", "saas");
     expect(first).toEqual({ kind: "expired" });
     // The write-path flip ran: the row is terminal even though nothing admitted.
     expect(rowOf(db, lapsed.id).status).toBe("expired");
     expect(rowOf(db, lapsed.id).accepted_at).toBeNull();
     expect(membershipCount(db, "octocat")).toBe(0);
 
-    const repeat = await acceptInvite(db, lapsed.id, "octocat", "2026-11-01T00:00:00.000Z");
+    const repeat = await acceptInvite(db, lapsed.id, "octocat", "2026-11-01T00:00:00.000Z", "saas");
     expect(repeat).toEqual({ kind: "gone" });
   });
 
@@ -197,14 +197,14 @@ describe("workspace_invites store", () => {
     const db = createFixture("octocat");
     const created = await invite(db, "octocat");
 
-    const accepted = await acceptInvite(db, created.id, "octocat", NOW);
+    const accepted = await acceptInvite(db, created.id, "octocat", NOW, "saas");
     expect(accepted).toEqual({ kind: "accepted", workspaceId: WORKSPACE, role: "member" });
     expect(membershipCount(db, "octocat")).toBe(1);
     expect(rowOf(db, created.id).status).toBe("accepted");
     expect(rowOf(db, created.id).accepted_at).toBe(NOW);
     expect(await listPendingInvites(db, WORKSPACE, NOW)).toHaveLength(0);
 
-    const repeat = await acceptInvite(db, created.id, "octocat", NOW);
+    const repeat = await acceptInvite(db, created.id, "octocat", NOW, "saas");
     expect(repeat).toEqual({ kind: "accepted", workspaceId: WORKSPACE, role: "member" });
     expect(membershipCount(db, "octocat")).toBe(1);
   });
@@ -212,7 +212,7 @@ describe("workspace_invites store", () => {
   test("a repeat accept reports the membership's CURRENT role, owner included", async () => {
     const db = createFixture("octocat");
     const created = await invite(db, "octocat");
-    expect(await acceptInvite(db, created.id, "octocat", NOW)).toMatchObject({ role: "member" });
+    expect(await acceptInvite(db, created.id, "octocat", NOW, "saas")).toMatchObject({ role: "member" });
 
     // Promoted after accepting: the repeat accept reports the membership, not
     // the invitable role domain the invite row carries.
@@ -220,7 +220,7 @@ describe("workspace_invites store", () => {
       .prepare("UPDATE workspace_members SET role = 'owner' WHERE workspace_id = ?")
       .run(WORKSPACE);
 
-    expect(await acceptInvite(db, created.id, "octocat", NOW)).toEqual({
+    expect(await acceptInvite(db, created.id, "octocat", NOW, "saas")).toEqual({
       kind: "accepted",
       workspaceId: WORKSPACE,
       role: "owner",
@@ -231,11 +231,11 @@ describe("workspace_invites store", () => {
     const db = createFixture("octocat");
     const created = await invite(db, "octocat");
 
-    expect(await acceptInvite(db, created.id, "someone-else", NOW)).toEqual({ kind: "not_found" });
+    expect(await acceptInvite(db, created.id, "someone-else", NOW, "saas")).toEqual({ kind: "not_found" });
     expect(rowOf(db, created.id).status).toBe("pending");
 
     await revokeInvite(db, WORKSPACE, created.id);
-    expect(await acceptInvite(db, created.id, "octocat", NOW)).toEqual({ kind: "gone" });
+    expect(await acceptInvite(db, created.id, "octocat", NOW, "saas")).toEqual({ kind: "gone" });
     expect(membershipCount(db, "octocat")).toBe(0);
     expect(rowOf(db, created.id).status).toBe("revoked");
   });
@@ -249,7 +249,7 @@ describe("workspace_invites store", () => {
     expect((await listInvitesForLogin(db, "OCTOCAT", NOW)).map((row) => row.id)).toEqual([
       created.id,
     ]);
-    expect(await acceptInvite(db, created.id, "octocat", NOW)).toMatchObject({ kind: "accepted" });
+    expect(await acceptInvite(db, created.id, "octocat", NOW, "saas")).toMatchObject({ kind: "accepted" });
     expect(membershipCount(db, "OctoCat")).toBe(1);
 
     // The partial unique index is NOCASE too: a case-variant duplicate is the
@@ -323,7 +323,7 @@ describe("accept free-slot guard (store level, route gate bypassed)", () => {
 
     // No route read ran here: the guard inside the membership insert refuses,
     // and the batch leaves the invite pending.
-    await expect(acceptInvite(db, pending.id, "mallory", NOW)).rejects.toBeInstanceOf(
+    await expect(acceptInvite(db, pending.id, "mallory", NOW, "saas")).rejects.toBeInstanceOf(
       FreeWorkspaceSlotError,
     );
 
@@ -342,12 +342,225 @@ describe("accept free-slot guard (store level, route gate bypassed)", () => {
       .run(WORKSPACE, NOW, NOW);
     const pending = await invite(db, "mallory");
 
-    expect(await acceptInvite(db, pending.id, "mallory", NOW)).toEqual({
+    expect(await acceptInvite(db, pending.id, "mallory", NOW, "saas")).toEqual({
       kind: "accepted",
       workspaceId: WORKSPACE,
       role: "member",
     });
     expect(membershipCount(db, "mallory")).toBe(1);
     expect(rowOf(db, pending.id).status).toBe("accepted");
+  });
+
+  test("an unlimited target accepts the same way: it is not the free tier", async () => {
+    const db = createFixture("mallory");
+    seedMembership(db, "ws-elsewhere", "mallory", "free");
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES (?, 'unlimited', 'active', ?, ?)`,
+      )
+      .run(WORKSPACE, NOW, NOW);
+    const pending = await invite(db, "mallory");
+
+    expect(await acceptInvite(db, pending.id, "mallory", NOW, "saas")).toEqual({
+      kind: "accepted",
+      workspaceId: WORKSPACE,
+      role: "member",
+    });
+    expect(membershipCount(db, "mallory")).toBe(1);
+  });
+
+  test("self-hosted accepts the same login the guard refuses in saas: the rule binds saas only", async () => {
+    const db = createFixture("mallory");
+    seedMembership(db, "ws-elsewhere", "mallory", "free");
+    const pending = await invite(db, "mallory");
+
+    // Same fixture as the refusal above, resolved in self-hosted: nothing is on
+    // the free tier there, so the acceptance must land.
+    expect(await acceptInvite(db, pending.id, "mallory", NOW, "self-hosted")).toEqual({
+      kind: "accepted",
+      workspaceId: WORKSPACE,
+      role: "member",
+    });
+    expect(membershipCount(db, "mallory")).toBe(1);
+    expect(rowOf(db, pending.id).status).toBe("accepted");
+  });
+});
+
+describe("seat limit (store level)", () => {
+  /** Fill the workspace's seats with plain members (no cap guards members). */
+  function seedMembers(db: TestD1, count: number): void {
+    for (let i = 0; i < count; i += 1) {
+      seedUser(db, `user-seat-${i}`, `seat-${i}`);
+      db.raw
+        .prepare(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+           VALUES (?, ?, 'member', ?)`,
+        )
+        .run(WORKSPACE, `user-seat-${i}`, NOW);
+    }
+  }
+
+  function subscribe(db: TestD1, planId: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES (?, ?, 'active', ?, ?)`,
+      )
+      .run(WORKSPACE, planId, NOW, NOW);
+  }
+
+  /** The one invite insert the store prepared, so the shape can be inspected. */
+  function insertSql(captured: string[]): string {
+    const sql = captured.find((query) => /^\s*INSERT INTO workspace_invites/i.test(query));
+    if (sql === undefined) throw new Error("createInvite prepared no invite insert");
+    return sql;
+  }
+
+  /** The workspace's member rows — the count the acceptance guard reads. */
+  function memberCount(db: TestD1): number {
+    const row = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = ?")
+      .get(WORKSPACE) as { n: number };
+    return row.n;
+  }
+
+  /** The operator's downgrade write (src/admin/workspaces.ts): plan id only —
+   * it never removes a member or an invite row. */
+  function downgrade(db: TestD1, planId: string): void {
+    db.raw
+      .prepare("UPDATE workspace_subscriptions SET plan_id = ?, updated_at = ? WHERE workspace_id = ?")
+      .run(planId, NOW, WORKSPACE);
+  }
+
+  test("a five-seat plan refuses at five, names that limit and writes nothing", async () => {
+    const db = createFixture("newcomer");
+    seedMembers(db, 5);
+    const captured: string[] = [];
+
+    await expect(invite(recordSql(db, captured), "newcomer")).rejects.toThrow(
+      MEMBER_CAP_REFUSAL(5),
+    );
+
+    expect(statuses(db)).toEqual([]);
+    // The numeric path keeps the seat condition, bound as ?8.
+    expect(insertSql(captured)).toContain("?8");
+  });
+
+  test("a null limit writes the invite past the five-seat cap, with no seat condition", async () => {
+    const db = createFixture("newcomer");
+    seedMembers(db, 6);
+    subscribe(db, "unlimited");
+    const captured: string[] = [];
+
+    const created = await invite(recordSql(db, captured), "newcomer");
+
+    expect(created.status).toBe("pending");
+    expect(statuses(db)).toEqual(["pending"]);
+    // A NULL bound into ?8 would make `count < ?8` evaluate to NULL and write
+    // no row, so the unlimited insert must not carry the condition at all.
+    expect(insertSql(captured)).not.toContain("?8");
+  });
+
+  test("a pending invite at limit minus one converts into the last seat", async () => {
+    const db = createFixture("newcomer");
+    seedMembers(db, 4);
+    const pending = await invite(db, "newcomer");
+
+    // Four members plus one pending already fill the five-seat plan. The
+    // acceptance converts that pending seat (`members + 1`, `pending - 1`), so
+    // the guard must count MEMBERS only — counting the pending row again would
+    // refuse this legitimate conversion.
+    expect(await acceptInvite(db, pending.id, "newcomer", NOW, "saas")).toEqual({
+      kind: "accepted",
+      workspaceId: WORKSPACE,
+      role: "member",
+    });
+    expect(memberCount(db)).toBe(5);
+    expect(rowOf(db, pending.id).status).toBe("accepted");
+  });
+
+  test("an accept at the cap refuses with member_cap and writes no member row", async () => {
+    const db = createFixture("newcomer");
+    subscribe(db, "unlimited");
+    seedMembers(db, 5);
+    // Minted while the plan was unlimited, then the workspace is downgraded:
+    // the pending row outlives the seat it was issued against.
+    const pending = await invite(db, "newcomer");
+    downgrade(db, "free");
+
+    expect(await acceptInvite(db, pending.id, "newcomer", NOW, "saas")).toEqual({
+      kind: "member_cap",
+      limit: 5,
+    });
+    expect(memberCount(db)).toBe(5);
+    expect(rowOf(db, pending.id).status).toBe("pending");
+  });
+
+  test("a null limit binds no seat condition, so the accept lands past the five-seat cap", async () => {
+    const db = createFixture("newcomer");
+    seedMembers(db, 6);
+    subscribe(db, "unlimited");
+    const pending = await invite(db, "newcomer");
+
+    // A NULL bound into the comparison would make `count < NULL` NULL and
+    // refuse every acceptance on an unlimited plan.
+    expect(await acceptInvite(db, pending.id, "newcomer", NOW, "saas")).toEqual({
+      kind: "accepted",
+      workspaceId: WORKSPACE,
+      role: "member",
+    });
+    expect(memberCount(db)).toBe(7);
+    expect(rowOf(db, pending.id).status).toBe("accepted");
+  });
+
+  test("a downgrade that strands pending invites stops successive accepts exactly at the new cap", async () => {
+    const db = createFixture("a", "b", "c", "d");
+    subscribe(db, "unlimited");
+    seedMembers(db, 3);
+    const pending = [
+      await invite(db, "a"),
+      await invite(db, "b"),
+      await invite(db, "c"),
+      await invite(db, "d"),
+    ];
+    // Three members plus four pending: `members + pending` sits above the
+    // five-seat plan the workspace now resolves to.
+    downgrade(db, "free");
+
+    const kinds: string[] = [];
+    for (const row of pending) {
+      kinds.push((await acceptInvite(db, row.id, row.github_login, NOW, "saas")).kind);
+    }
+
+    // Exactly two conversions fit (3 → 4 → 5); the rest refuse and stay
+    // pending, so they become acceptable again once a seat frees.
+    expect(kinds).toEqual(["accepted", "accepted", "member_cap", "member_cap"]);
+    expect(memberCount(db)).toBe(5);
+    expect(statuses(db).filter((status) => status === "accepted")).toHaveLength(2);
+    expect(statuses(db).filter((status) => status === "pending")).toHaveLength(2);
+  });
+
+  test("two accepts issued against the last free seat admit exactly one", async () => {
+    const db = createFixture("racer-a", "racer-b");
+    subscribe(db, "unlimited");
+    seedMembers(db, 4);
+    const first = await invite(db, "racer-a");
+    const second = await invite(db, "racer-b");
+    downgrade(db, "free");
+
+    // The acceptance path has NO seat pre-read, so both calls reach the
+    // membership insert and only the count inside it can hold the plan. The
+    // bun:sqlite double brackets every batch in BEGIN/COMMIT on one connection,
+    // so the pair runs back-to-back here; it is the same insert-time decision
+    // the loser of a true race makes.
+    const outcomes = [
+      await acceptInvite(db, first.id, "racer-a", NOW, "saas"),
+      await acceptInvite(db, second.id, "racer-b", NOW, "saas"),
+    ];
+
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(["accepted", "member_cap"]);
+    expect(memberCount(db)).toBe(5);
+    expect(rowOf(db, second.id).status).toBe("pending");
   });
 });

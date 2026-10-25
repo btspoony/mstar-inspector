@@ -24,6 +24,8 @@ export const en = {
     primary: "Primary navigation",
     apps: "Apps",
     members: "Members",
+    /** Sidebar-footer entry to the platform console (operators on `saas`). */
+    platformOperations: "Platform operations",
     /** Label of the OTHER locale — the toggle target (en shows 中文, zh_CN shows EN). */
     language: "中文",
     /** Theme toggle: icon-only button; state + action live in the aria copy. */
@@ -35,6 +37,19 @@ export const en = {
     signedInAs: "Signed in as {name}",
     /** Label of the shell's workspace switcher (the select itself shows names). */
     workspaceSwitcher: "Workspace",
+    /** The switcher menu's last row — the workspace-creation entry. */
+    newWorkspace: "New workspace",
+    /**
+     * Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
+     * "free_slot"`): this login already holds its one free workspace.
+     */
+    newWorkspaceBlockedFreeSlot:
+      "You already belong to a free workspace — one per login. Delete it, or ask its owner to remove you, then create another.",
+    /**
+     * Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
+     * "flag"`): the operator closed workspace creation platform-wide.
+     */
+    newWorkspaceBlockedFlag: "Workspace creation is closed on this platform right now.",
   },
   common: {
     pageTitle: "{page} — {brand}",
@@ -67,6 +82,8 @@ export const en = {
       missingCode: "GitHub did not return an authorization code.",
       codeRejected: "GitHub rejected the authorization code.",
       profileFailed: "Could not read your GitHub profile.",
+      /** `signup_open` is off: an unknown login cannot create an account. */
+      signupClosed: "Sign-up is closed on this platform right now.",
     },
     loading: "Loading…",
     loadFailed: "Could not load this page.",
@@ -204,6 +221,7 @@ export const en = {
     slotsLeft: "{count} slots left",
     slotsLeftOne: "{count} slot left",
     noSeatsLeft: "No seats left",
+    noMemberLimit: "No limit",
     pendingInviteOne: "{count} pending invitation",
     pendingInvites: "{count} pending invitations",
     reviewAttemptsLabel: "Review attempts this month",
@@ -258,6 +276,12 @@ export const en = {
     setupHeading: "Create a workspace",
     setupDescription:
       "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",
+    /**
+     * The switcher menu's creation dialog: the same POST, opened by
+     * a member who already has a workspace — so it cannot claim "no workspace
+     * yet", and it makes no plan statement (the surface is not mode-gated).
+     */
+    createDialogDescription: "Name it and you become its owner — you can invite teammates afterwards.",
     /**
      * The `self-hosted` empty-instance line: this sign-in created the
      * deployment's first account. Absent on `saas` and once `users` is

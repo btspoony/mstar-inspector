@@ -213,6 +213,17 @@ describe("SPA boot face — the marker drives the guidance", () => {
     return shell("/dashboard", envFor(db, mode), cookies);
   }
 
+  test("every signed-in shell carries the resolved deployment mode", async () => {
+    const db = populatedInstance();
+    for (const mode of ["self-hosted", "saas"] as const) {
+      const res = await signedInShell(db, mode, null);
+      expect(res.status).toBe(200);
+      // The SPA branches rendering on this field instead of inferring the shape
+      // or asking for a second fetch.
+      expect(bootOf(await res.text()).deploymentMode, mode).toBe(mode);
+    }
+  });
+
   test("self-hosted + marker → the boot carries emptyInstance and the marker is spent", async () => {
     const db = populatedInstance();
     const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);

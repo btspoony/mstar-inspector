@@ -76,7 +76,10 @@ function envFor(db: TestD1): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
-    DEPLOYMENT_MODE: "self-hosted",
+    // `saas`: the seat cap and the free-slot rule bind that mode only. In
+    // `self-hosted` every workspace resolves to `unlimited`, so the same
+    // fixtures would correctly admit instead of refusing.
+    DEPLOYMENT_MODE: "saas",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DB: db,
   } as unknown as Env;
@@ -215,7 +218,7 @@ describe("pending invite visibility (AC4)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
 
     for (const login of ["dana", "carol"]) {
       const res = await request(INVITES, login);
@@ -341,7 +344,7 @@ describe("invite creation (AC2)", () => {
 
 describe("invite creation member cap", () => {
   const MEMBER_CAP_REFUSAL =
-    "This invite was not sent. This workspace already has five people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.";
+    "This invite was not sent. This workspace already has 5 people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.";
 
   /** A live pending invite, minted at the store so the route stays the subject. */
   function seedLiveInvite(db: TestD1, invitedBy: string, login = "newcomer") {
@@ -353,7 +356,7 @@ describe("invite creation member cap", () => {
       invitedBy,
       now: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60_000).toISOString(),
-    });
+    }, "saas");
   }
 
   test("the fifth person is invitable; the sixth person's invite is the exact 409 and writes nothing", async () => {
@@ -402,7 +405,7 @@ describe("invite creation member cap", () => {
       invitedBy: users.owner,
       now: new Date(now.getTime() - 120_000).toISOString(),
       expiresAt: new Date(now.getTime() - 60_000).toISOString(),
-    });
+    }, "saas");
     const res = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
     expect(res.status).toBe(200);
     expect(pendingInvites(db)).toBe(1);
@@ -430,6 +433,22 @@ describe("invite creation member cap", () => {
     expect(await res.text()).toBe(MEMBER_CAP_REFUSAL);
     expect(pendingInvites(db)).toBe(1);
   });
+
+  test("an unlimited workspace's invite path writes with no seat refusal", async () => {
+    const { db, users } = fixture();
+    const ts = new Date().toISOString();
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'unlimited', 'active', ?, ?)",
+      )
+      .run(WORKSPACE, ts, ts);
+    use(db);
+    // The same five people a capped plan refuses the sixth against.
+    await seedLiveInvite(db, users.owner);
+    const res = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
+    expect(res.status).toBe(200);
+    expect(pendingInvites(db)).toBe(2);
+  });
 });
 
 describe("invite revoke (AC6)", () => {
@@ -443,7 +462,7 @@ describe("invite revoke (AC6)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
 
     const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/revoke`, "dana", {
       method: "POST",
@@ -472,7 +491,7 @@ describe("invite revoke (AC6)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     const memberRes = await request(`/dashboard/acme/api/members/invites/${invite.id}/revoke`, "mallory", {
       method: "POST",
     });
@@ -500,7 +519,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     // The person signs in FIRST (C3: the invite path never creates a users row).
     seedUser(db, "hubot");
 
@@ -527,7 +546,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "hubot");
     const path = `/dashboard/acme/api/members/invites/${invite.id}/accept`;
     expect((await request(path, "hubot", { method: "POST" })).status).toBe(200);
@@ -545,7 +564,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "mallory2");
     const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "mallory2", {
       method: "POST",
@@ -565,7 +584,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.outsider,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "hubot");
     expect(
       (await request(`/dashboard/acme/api/members/invites/${foreign.id}/accept`, "hubot", { method: "POST" }))
@@ -589,7 +608,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date(Date.now() - 120_000).toISOString(),
       expiresAt: new Date(Date.now() - 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "hubot");
     const expired = await request(`/dashboard/acme/api/members/invites/${lapsed.id}/accept`, "hubot", {
       method: "POST",
@@ -629,7 +648,7 @@ describe("invite accept (AC3)", () => {
       invitedBy: users.owner,
       now: new Date(Date.now() - 120_000).toISOString(),
       expiresAt: new Date(Date.now() - 60_000).toISOString(),
-    });
+    }, "saas");
     seedUser(db, "hubot");
     const path = `/dashboard/acme/api/members/invites/${lapsed.id}/accept`;
     const first = await request(path, "hubot", { method: "POST" });
@@ -639,6 +658,43 @@ describe("invite accept (AC3)", () => {
     expect(inviteStatus(db, lapsed.id)).toBe("expired");
     expect((await request(path, "hubot", { method: "POST" })).status).toBe(410);
     expect(memberRows(db)).toBe(4);
+  });
+
+  test("an over-cap pending invite from a downgraded plan is the named 409 and writes no member", async () => {
+    const { db, users } = fixture();
+    const ts = new Date().toISOString();
+    // The invite and the fifth member are minted under `unlimited`; the
+    // operator's downgrade removes neither, so the pending row has no seat left
+    // and only the write-time guard can refuse it.
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'unlimited', 'active', ?, ?)",
+      )
+      .run(WORKSPACE, ts, ts);
+    const invite = await createInvite(db, {
+      workspaceId: WORKSPACE,
+      login: "hubot",
+      role: "member",
+      invitedBy: users.owner,
+      now: ts,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }, "saas");
+    seedMembership(db, WORKSPACE, seedUser(db, "fifth"), "member");
+    db.raw
+      .prepare("UPDATE workspace_subscriptions SET plan_id = 'free', updated_at = ? WHERE workspace_id = ?")
+      .run(ts, WORKSPACE);
+    seedUser(db, "hubot");
+    use(db);
+
+    const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "hubot", {
+      method: "POST",
+    });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(
+      "You were not added. This workspace is at its plan's limit of 5 members. An owner or admin must remove a member, or the workspace must move to a larger plan, before this invite can be accepted. The invite is still pending.",
+    );
+    expect(memberRows(db)).toBe(5);
+    expect(inviteStatus(db, invite.id)).toBe("pending");
   });
 });
 
@@ -668,7 +724,7 @@ describe("invite accept free slot", () => {
       invitedBy,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
   }
 
   test("a login already in a live free workspace is refused with the exact 409 body, leaving the invite pending", async () => {
@@ -867,7 +923,7 @@ describe("member role change and removal (AC5)", () => {
       invitedBy: users.member,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
 
     const res = await request("/dashboard/acme/members/remove", "dana", {
       method: "POST",
@@ -908,7 +964,7 @@ describe("member role change and removal (AC5)", () => {
       invitedBy: users.outsider,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
     const accept = await request(`/dashboard/other/api/members/invites/${invite.id}/accept`, "mallory", {
       method: "POST",
     });
@@ -1026,7 +1082,7 @@ describe("workspace summary in the member payload", () => {
       invitedBy: users.owner,
       now: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60_000).toISOString(),
-    });
+    }, "saas");
 
     const counted = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
     expect(counted.workspace.pendingInvites).toBe(1);

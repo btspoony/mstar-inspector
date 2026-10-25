@@ -21,12 +21,16 @@ import { getCookie } from "hono/cookie";
 import { resolveLocale, type Locale } from "../i18n";
 import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
 import {
+  isPlatformOperator,
   operatorSupportWorkspace,
   signedInLanding,
   workspaceBoot,
   pendingInvitesForLogin,
   workspaceMembershipsForLogin,
 } from "../dashboard/index";
+import { freeSlotAvailable } from "../dashboard/entitlement";
+import { countFreeMembershipsForLogin } from "../dashboard/workspace-store";
+import { isFlagEnabled } from "../admin/flags";
 import {
   FIRST_INSTANCE_COOKIE,
   SESSION_COOKIE,
@@ -209,6 +213,26 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     const landing = await signedInLanding(c.env, login);
     if (landing !== "/dashboard") return c.redirect(landing, 302);
   }
+  // The create-workspace capability the shell's top-bar menu mirrors. The
+  // operator's `workspace_creation_open` flag wins over the per-login free
+  // slot — it closes creation for EVERYONE, so the slot read is skipped while
+  // it is off — and `self-hosted` resolves every workspace to `unlimited`, so
+  // creation is otherwise always allowed there and the free-membership count is
+  // never read (spec §4). The creation route re-checks both, so this is copy,
+  // not authority. A signed-in shell always has a store: `readShellAuth` denied
+  // otherwise (hence the same narrow face it reads through).
+  const db = (c.env as Env & { DB?: DashboardD1 }).DB;
+  let createBlockedReason: SpaBoot["createWorkspaceBlockedReason"] = null;
+  if (login !== null && db !== undefined) {
+    if (!(await isFlagEnabled(db, "workspace_creation_open"))) {
+      createBlockedReason = "flag";
+    } else if (
+      deploymentMode === "saas" &&
+      !freeSlotAvailable(await countFreeMembershipsForLogin(db, login))
+    ) {
+      createBlockedReason = "free_slot";
+    }
+  }
   // The shell's Apps/brand links need the active workspace, and the shell
   // outlives the URL: a client-side navigation (spaClick → pushState) to a page
   // whose pathname names no workspace changes the pathname but not the boot, so
@@ -231,11 +255,25 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // Absent fields add nothing, so a ref-less boot keeps its JSON key order.
   const boot: SpaBoot = {
     ...auth.boot,
+    deploymentMode,
+    // Entry visibility (spec §5): ONE server-derived boolean — allowlist
+    // membership AND `saas`, the only shape that mounts the console. The
+    // client never sees the allowlist; `self-hosted` can never resolve true.
+    isOperator:
+      deploymentMode === "saas" &&
+      auth.boot.login !== null &&
+      isPlatformOperator(c.env, auth.boot.login),
     ...(firstInstance ? { emptyInstance: true } : {}),
     ...(routeRef ?? supportRef ?? extras.workspaceRef) === undefined
       ? {}
       : { workspaceRef: routeRef ?? supportRef ?? extras.workspaceRef },
     ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
+    ...(login === null
+      ? {}
+      : {
+          canCreateWorkspace: createBlockedReason === null,
+          createWorkspaceBlockedReason: createBlockedReason,
+        }),
     ...(supportRef === null
       ? extras.needsWorkspace === true
         ? { needsWorkspace: true }

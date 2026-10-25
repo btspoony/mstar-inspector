@@ -69,6 +69,8 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0026_workspaces.sql",
     // 0028: the SPA boot reads pending invites.
     "0028_workspace_invites.sql",
+    // 0033: the SPA boot reads the `workspace_creation_open` server flag.
+    "0033_platform_admin.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -204,7 +206,7 @@ describe("the Apps page shell (workspace-scoped SPA route)", () => {
     expect(body).toContain("window.__BOOT__=");
     expect(body).toContain('"login":"hubot"');
     // The boot carries the workspace memberships (id + role), never users.role.
-    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member"}]');
+    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member","plan":"Unlimited"}]');
   });
 
   test("the retired deployment-level /dashboard/apps answers 404", async () => {

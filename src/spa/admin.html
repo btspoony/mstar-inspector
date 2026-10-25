@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <title>Morning Star — Platform operations</title>
+    <script>
+      // Same pre-paint theme bootstrap as the workspace shell: a stored manual
+      // choice applies before first paint; nothing stored renders dark.
+      try {
+        const t = localStorage.getItem("mstar.dashboard.theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch {}
+    </script>
+    <!--SPA_BOOT-->
+    <style>
+      /* Console chrome only — the workspace shell's Layout is deliberately not
+         reused, so this document carries its own minimal frame. Tokens come
+         from tokens.css (imported by ./admin/main.tsx). */
+      body {
+        font-family: "Geist Sans", system-ui, sans-serif;
+      }
+      .admin {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .admin-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        border-bottom: 1px solid var(--gray-alpha-200);
+        padding-bottom: 12px;
+      }
+      .admin-header h1 {
+        margin: 0;
+        font-size: 20px;
+      }
+      .admin-nav {
+        display: flex;
+        gap: 4px;
+        margin: 16px 0 24px;
+        flex-wrap: wrap;
+      }
+      .admin-nav a {
+        color: var(--gray-800);
+        text-decoration: none;
+        padding: 6px 10px;
+        border-radius: 6px;
+      }
+      .admin-nav a[aria-current="page"] {
+        background: var(--gray-alpha-200);
+        color: var(--gray-1000);
+      }
+      .admin-main {
+        border: 1px solid var(--gray-alpha-200);
+        border-radius: 8px;
+        padding: 16px;
+      }
+      .muted {
+        color: var(--gray-700);
+        font-size: 13px;
+        margin: 4px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./admin/main.tsx"></script>
+  </body>
+</html>

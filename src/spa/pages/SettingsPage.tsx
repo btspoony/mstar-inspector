@@ -1877,11 +1877,10 @@ function ChainsCard({
           {namedTabs.map((tab) => (
             <TabsContent key={tab.id} forceMount value={tab.id}>
               <div className="mb-2 flex items-center justify-between gap-2">
-                {/* (review deferral): the panel's title face
-                    rides the heading-16 token step — the same face as the
-                    SectionCardTitle card titles, expressed through the
-                    --typo-* idiom instead of the 16px inherit. */}
-                <span className="font-semibold text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">{tab.id}</span>
+                {/* (review deferral): the panel title rides the SAME
+                    SectionCardTitle face as every card title — no second
+                    heading-16 spelling at this site. */}
+                <SectionCardTitle>{tab.id}</SectionCardTitle>
                 <Button type="button" variant="destructive" size="sm" onClick={() => onRemoveChain(tab.id)}>
                   {t(locale, "settings.remove")}
                 </Button>

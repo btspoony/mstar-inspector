@@ -20,7 +20,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { DataTable, type DataTableColumn } from "@/components/DataTable";
+import { PageHeader } from "@/components/PageHeader";
+import { StatCard, StatGrid } from "@/components/StatCard";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { EmptyState } from "../components/state/EmptyState";
@@ -40,11 +42,6 @@ import {
   type WorkspaceSummary,
 } from "./data";
 import { PageNotice, type NoticeKind } from "./PageNotice";
-
-/** DESIGN.md Table: header band on background-200, headers at label-12
-    (12px; the primitive's font-medium supplies the 500 weight). */
-const TABLE_HEADER = "bg-(--background-200)";
-const TABLE_HEAD_LABEL = "text-xs tracking-(--typo-label-12-tracking)";
 
 /** Row action awaiting manager confirmation in the shared dialog. */
 type PendingAction =
@@ -168,7 +165,10 @@ export function postMemberWrite(
 
 /**
  * The "This workspace" block — plan, seats and this month's metered review
- * attempts. The upgrade position stays empty by product decision: no price, no
+ * attempts. `self-hosted` drops the plan card and shows seats as a plain count
+ * (spec §2: every workspace resolves `unlimited` there), and `memberLimit:
+ * null` reads the same way in `saas` — never `0`, never interpolated as
+ * "null". The upgrade position stays empty by product decision: no price, no
  * purchase control, no billing link. Split out of the stateful page so the
  * copy is assertable under static render (the `MembersTable` precedent).
  */
@@ -176,54 +176,69 @@ export function WorkspacePanel({
   locale,
   workspace,
   memberCount,
+  deploymentMode,
 }: {
   locale: Locale;
   workspace: WorkspaceSummary;
   memberCount: number;
+  deploymentMode: SpaBoot["deploymentMode"];
 }) {
+  // A self-hosted deployment caps nothing, so its mode decides the reading —
+  // not a limit that the payload could only carry by breaking that contract.
+  const memberLimit = deploymentMode === "self-hosted" ? null : workspace.memberLimit;
   // A pending invite occupies a seat at the cap, so the seat state reads the
   // same count the invite gate enforces — never the member rows alone.
-  const filled = memberCount + workspace.pendingInvites;
-  const slots = workspace.memberLimit - filled;
+  const slots =
+    memberLimit === null ? null : memberLimit - (memberCount + workspace.pendingInvites);
   return (
     <section className="flex flex-col gap-2">
       <h2 className="font-medium text-base">{t(locale, "members.workspaceHeading")}</h2>
-      <dl className="grid gap-4 rounded-md border p-4 sm:grid-cols-3">
-        <div className="flex flex-col gap-1">
-          <dt className="text-xs text-muted-foreground">{t(locale, "members.planLabel")}</dt>
-          <dd className="text-sm font-medium">{workspace.plan.name}</dd>
-          {workspace.plan.id === "free" ? (
-            <dd className="text-xs text-muted-foreground">{t(locale, "members.planFreeHint")}</dd>
-          ) : null}
-        </div>
-        <div className="flex flex-col gap-1">
-          <dt className="text-xs text-muted-foreground">{t(locale, "members.membersLabel")}</dt>
-          <dd className="text-sm font-medium tabular-nums">
-            {t(locale, "members.memberSeats", { count: memberCount, limit: workspace.memberLimit })}
-          </dd>
-          {workspace.pendingInvites > 0 ? (
-            <dd className="text-xs text-muted-foreground">
-              {t(
-                locale,
-                workspace.pendingInvites === 1 ? "members.pendingInviteOne" : "members.pendingInvites",
-                { count: workspace.pendingInvites },
-              )}
-            </dd>
-          ) : null}
-          <dd className="text-xs text-muted-foreground">
-            {slots > 0
-              ? t(locale, slots === 1 ? "members.slotsLeftOne" : "members.slotsLeft", {
-                  count: slots,
-                })
-              : t(locale, "members.noSeatsLeft")}
-          </dd>
-        </div>
-        <div className="flex flex-col gap-1">
-          <dt className="text-xs text-muted-foreground">{t(locale, "members.reviewAttemptsLabel")}</dt>
-          <dd className="text-sm font-medium tabular-nums">{workspace.reviewAttemptsThisMonth}</dd>
-          <dd className="text-xs text-muted-foreground">{t(locale, "members.reviewAttemptsHint")}</dd>
-        </div>
-      </dl>
+      <StatGrid>
+        {deploymentMode === "self-hosted" ? null : (
+          <StatCard
+            label={t(locale, "members.planLabel")}
+            value={workspace.plan.name}
+            hint={workspace.plan.id === "free" ? t(locale, "members.planFreeHint") : undefined}
+          />
+        )}
+        {/* The seats card carries two hint lines: the pending-invite line
+            when there is one, then the seat countdown or the no-limit note. */}
+        <StatCard
+          label={t(locale, "members.membersLabel")}
+          value={
+            memberLimit === null
+              ? memberCount
+              : t(locale, "members.memberSeats", { count: memberCount, limit: memberLimit })
+          }
+          hint={
+            <span className="flex flex-col gap-1">
+              {workspace.pendingInvites > 0 ? (
+                <span>
+                  {t(
+                    locale,
+                    workspace.pendingInvites === 1 ? "members.pendingInviteOne" : "members.pendingInvites",
+                    { count: workspace.pendingInvites },
+                  )}
+                </span>
+              ) : null}
+              <span>
+                {slots === null
+                  ? t(locale, "members.noMemberLimit")
+                  : slots > 0
+                    ? t(locale, slots === 1 ? "members.slotsLeftOne" : "members.slotsLeft", {
+                        count: slots,
+                      })
+                    : t(locale, "members.noSeatsLeft")}
+              </span>
+            </span>
+          }
+        />
+        <StatCard
+          label={t(locale, "members.reviewAttemptsLabel")}
+          value={workspace.reviewAttemptsThisMonth}
+          hint={t(locale, "members.reviewAttemptsHint")}
+        />
+      </StatGrid>
     </section>
   );
 }
@@ -300,83 +315,87 @@ export function MembersTable({
   onAction: (action: PendingAction) => void;
 }) {
   const ownerCount = members.filter((m) => m.role === "owner").length;
-  return (
-    <div className="overflow-hidden rounded-md border">
-      <Table>
-        <TableHeader className={TABLE_HEADER}>
-          <TableRow className="hover:bg-inherit">
-            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableLogin")}</TableHead>
-            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.roleLabel")}</TableHead>
-            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableJoined")}</TableHead>
-            <TableHead className={`text-right ${TABLE_HEAD_LABEL}`}>{t(locale, "members.tableActions")}</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {members.map((member) => {
-            const self =
-              viewerLogin !== null && member.github_login.toLowerCase() === viewerLogin.toLowerCase();
-            // Client-side mirror of the server guards: the sole owner
-            // cannot be demoted or removed; an `admin` may only remove
-            // plain members and may not change any role.
-            // The routes remain the SSOT (conditional UPDATE/DELETE
-            // close the race); this only greys out the actions the
-            // server would refuse anyway.
-            const soleOwner = member.role === "owner" && ownerCount === 1;
-            const roleBlocked = memberRole !== "owner";
-            const protectedMember = soleOwner || (memberRole === "admin" && member.role !== "member");
-            const nextRole: "admin" | "member" = member.role === "member" ? "admin" : "member";
-            return (
-              <TableRow key={member.id}>
-                <TableCell className="font-medium">
-                  {member.github_login}
-                  {self ? (
-                    <span className="ml-2 text-muted-foreground">({t(locale, "members.you")})</span>
-                  ) : null}
-                </TableCell>
-                <TableCell>{t(locale, `members.role.${member.role}`)}</TableCell>
-                {/* Shared relative-time copy (F-07); the raw SQLite
-                    UTC stamp stays reachable as the native tooltip. */}
-                <TableCell className="text-muted-foreground tabular-nums" title={member.created_at}>
-                  {formatRelativeTime(member.created_at, locale)}
-                </TableCell>
-                <TableCell className="text-right">
-                  {self || !canInvite ? null : (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          aria-label={t(locale, "members.actionsMenuLabel", { login: member.github_login })}
-                        >
-                          <MoreHorizontal />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          disabled={protectedMember || roleBlocked}
-                          onSelect={() => onAction({ kind: "role", member, nextRole })}
-                        >
-                          {t(locale, member.role === "member" ? "members.makeAdmin" : "members.makeMember")}
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant="destructive"
-                          disabled={protectedMember}
-                          onSelect={() => onAction({ kind: "remove", member })}
-                        >
-                          {t(locale, "members.remove")}
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  )}
-                </TableCell>
-              </TableRow>
-            );
-          })}
-        </TableBody>
-      </Table>
-    </div>
-  );
+
+  const columns: DataTableColumn<MemberRow>[] = [
+    {
+      header: t(locale, "members.tableLogin"),
+      cell: (member) => (
+        <span className="font-medium">
+          {member.github_login}
+          {viewerLogin !== null && member.github_login.toLowerCase() === viewerLogin.toLowerCase() ? (
+            <span className="ml-2 text-muted-foreground">({t(locale, "members.you")})</span>
+          ) : null}
+        </span>
+      ),
+    },
+    {
+      header: t(locale, "members.roleLabel"),
+      cell: (member) => t(locale, `members.role.${member.role}`),
+    },
+    {
+      header: t(locale, "members.tableJoined"),
+      // Shared relative-time copy (F-07); the raw SQLite UTC stamp stays
+      // reachable as the native tooltip.
+      cell: (member) => (
+        <span className="text-muted-foreground tabular-nums" title={member.created_at}>
+          {formatRelativeTime(member.created_at, locale)}
+        </span>
+      ),
+    },
+    {
+      header: t(locale, "members.tableActions"),
+      align: "right",
+      cell: (member) => {
+        if (
+          !canInvite ||
+          (viewerLogin !== null && member.github_login.toLowerCase() === viewerLogin.toLowerCase())
+        ) {
+          return null;
+        }
+        // Client-side mirror of the server guards: the sole owner
+        // cannot be demoted or removed; an `admin` may only remove
+        // plain members and may not change any role.
+        // The routes remain the SSOT (conditional UPDATE/DELETE
+        // close the race); this only greys out the actions the
+        // server would refuse anyway.
+        const soleOwner = member.role === "owner" && ownerCount === 1;
+        const roleBlocked = memberRole !== "owner";
+        const protectedMember = soleOwner || (memberRole === "admin" && member.role !== "member");
+        const nextRole: "admin" | "member" = member.role === "member" ? "admin" : "member";
+        return (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={t(locale, "members.actionsMenuLabel", { login: member.github_login })}
+              >
+                <MoreHorizontal />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                disabled={protectedMember || roleBlocked}
+                onSelect={() => onAction({ kind: "role", member, nextRole })}
+              >
+                {t(locale, member.role === "member" ? "members.makeAdmin" : "members.makeMember")}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                disabled={protectedMember}
+                onSelect={() => onAction({ kind: "remove", member })}
+              >
+                {t(locale, "members.remove")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        );
+      },
+    },
+  ];
+
+  return <DataTable columns={columns} rows={members} rowKey={(member) => member.id} />;
 }
 
 export function MembersPage({ boot }: { boot: SpaBoot }) {
@@ -567,19 +586,52 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
     return <PageSkeleton locale={locale} kind="table" />;
   }
 
+  const inviteColumns: DataTableColumn<InviteRow>[] = [
+    {
+      header: t(locale, "members.tableLogin"),
+      cell: (invite) => <span className="font-medium">{invite.github_login}</span>,
+    },
+    { header: t(locale, "members.roleLabel"), cell: (invite) => roleLabel(invite.role) },
+    {
+      header: t(locale, "members.tableExpires"),
+      cell: (invite) => (
+        <span className="text-muted-foreground tabular-nums" title={invite.expires_at}>
+          {formatRelativeTime(invite.expires_at, locale)}
+        </span>
+      ),
+    },
+    {
+      header: t(locale, "members.tableActions"),
+      align: "right",
+      cell: (invite) => (
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onClick={() => setPending({ kind: "revoke", invite })}
+        >
+          {t(locale, "members.revoke")}
+        </Button>
+      ),
+    },
+  ];
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-1.5">
-        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">
-          {t(locale, "members.heading")}
-        </h1>
-        <p className="text-sm text-muted-foreground">{t(locale, "members.visibleToMembers")}</p>
-      </div>
+      <PageHeader
+        title={t(locale, "members.heading")}
+        description={t(locale, "members.visibleToMembers")}
+      />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
       {state === "ok" && members && workspace ? (
         <>
-          <WorkspacePanel locale={locale} workspace={workspace} memberCount={members.length} />
+          <WorkspacePanel
+            locale={locale}
+            workspace={workspace}
+            memberCount={members.length}
+            deploymentMode={boot.deploymentMode}
+          />
           {canInvite ? (
             <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onInvite(event)}>
               <div className="flex flex-col gap-1.5">
@@ -636,41 +688,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
           {showsPendingInvites(memberRole, invites) ? (
             <section className="flex flex-col gap-2">
               <h2 className="font-medium text-base">{t(locale, "members.pendingHeading")}</h2>
-              <div className="overflow-hidden rounded-md border">
-                <Table>
-                  <TableHeader className={TABLE_HEADER}>
-                    <TableRow className="hover:bg-inherit">
-                      <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableLogin")}</TableHead>
-                      <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.roleLabel")}</TableHead>
-                      <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableExpires")}</TableHead>
-                      <TableHead className={`text-right ${TABLE_HEAD_LABEL}`}>
-                        {t(locale, "members.tableActions")}
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {invites.map((invite) => (
-                      <TableRow key={invite.id}>
-                        <TableCell className="font-medium">{invite.github_login}</TableCell>
-                        <TableCell>{roleLabel(invite.role)}</TableCell>
-                        <TableCell className="text-muted-foreground tabular-nums" title={invite.expires_at}>
-                          {formatRelativeTime(invite.expires_at, locale)}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={busy}
-                            onClick={() => setPending({ kind: "revoke", invite })}
-                          >
-                            {t(locale, "members.revoke")}
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
+              <DataTable columns={inviteColumns} rows={invites} rowKey={(invite) => invite.id} />
             </section>
           ) : null}
         </>

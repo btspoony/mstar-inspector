@@ -89,7 +89,7 @@ describe("signInDashboardUser", () => {
       invitedBy: inviter.id,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    }, "saas");
 
     // The operator path is a hard DELETE of the users row; a NOT NULL
     // invited_by would fail the FK here and 500 the operator action.
@@ -133,7 +133,7 @@ describe("createWorkspace (workspace-store)", () => {
         userId: user.id,
         githubLogin: user.github_login,
         createdAt,
-      }),
+      }, "saas"),
     ).toBe(false);
     const members = db.raw
       .query("SELECT * FROM workspace_members WHERE workspace_id = 'default'")

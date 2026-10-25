@@ -33,6 +33,8 @@ import { defaultLog, handleReviewJob } from "./handlers";
 import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
+import { adminApp } from "../admin/index";
+import { isFlagEnabled } from "../admin/flags";
 import { trailingSlashRedirect } from "./redirects";
 import { spaDispatch } from "./spa-dispatch";
 import { APP_VERSION } from "../version";
@@ -342,6 +344,18 @@ app.post("/webhook/:appSlug", async (c) => {
     );
     return c.text("ignored", 200);
   }
+  // Global review flag (spec §3.1, compass D21): OFF closes the ENQUEUE face
+  // for every App — same contract as the per-App pause above (2xx, zero
+  // enqueue) and deliberately NOT a dequeue-side check: work already queued
+  // keeps running. Absent flag row = enabled.
+  if (!(await isFlagEnabled(db, "review_global"))) {
+    webhookInfo(
+      "review_global_off",
+      `slug=${slug}`,
+      "per-App webhook ignored with 2xx — review_global flag off (zero enqueue)",
+    );
+    return c.text("ignored", 200);
+  }
   // Lock L3: the App identity is attached at the route handler — after
   // classification, before the queue send. The queue message carries the
   // appId reference only (lock L4: the PEM never leaves the consumer).
@@ -365,8 +379,25 @@ app.post("/webhook/:appSlug", async (c) => {
   return c.text("accepted", 200);
 });
 
+/**
+ * The `saas` router: `app` plus the hidden operator console.
+ *
+ * Built here, after every `app` registration — `route()` copies the source
+ * app's route table at call time, so a route added to `app` later would be
+ * absent from this one. The admin mount belongs to this router only: the
+ * module body runs once per isolate while the deployment shape arrives per
+ * request, which is why the choice happens in `fetch` instead of a mount
+ * condition. A `self-hosted` deployment therefore serves `app`, where
+ * `/_internal_admin` is an unknown path (404) for every caller — no runtime
+ * mode flag inside a handler.
+ */
+const saasApp = new Hono<{ Bindings: Env }>()
+  .route("/", app)
+  .route("/_internal_admin", adminApp);
+
 export default {
-  fetch: app.fetch,
+  fetch: (request: Request, env: Env, ctx?: ExecutionContext): Response | Promise<Response> =>
+    (env.DEPLOYMENT_MODE === "saas" ? saasApp : app).fetch(request, env, ctx),
   // 06 queue wiring — the ONLY legal worker → pipeline edge (compass A).
   // Dynamic import: the consumer statically loads the sandbox adapter, which
   // imports the workerd-only `cloudflare:workers` builtin — Bun's test runner

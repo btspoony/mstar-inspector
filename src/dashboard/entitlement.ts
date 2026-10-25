@@ -17,13 +17,22 @@
  * close this (a batch is atomic within one request, never isolated across
  * requests). Atomic enforcement is required before the first paid plan.
  */
+import type { DeploymentMode } from "../worker/env";
 import type { WorkspaceStoreD1 } from "./workspace-store";
 
-/** The plan shape the entitlement decisions read; the catalogue's other limits stay unread here. */
-export type PlanLimits = { id: string; name: string; includedMembers: number };
+/**
+ * The plan shape the entitlement decisions read; the catalogue's other limits
+ * stay unread here. `includedMembers` follows 0031's NULL-means-unlimited
+ * contract: a number is the seat cap, NULL is no cap at all — every consumer
+ * must branch on it, never fall back to `0`.
+ */
+export type PlanLimits = { id: string; name: string; includedMembers: number | null };
 
 /** The seeded free plan's id — the one plan id an absent subscription resolves to. */
 export const FREE_PLAN_ID = "free";
+
+/** The no-seat-cap plan id; its `included_members` is NULL by design. */
+export const UNLIMITED_PLAN_ID = "unlimited";
 
 /**
  * Whether a resolved plan id is the free tier. THE one spelling of that rule:
@@ -35,14 +44,35 @@ export function isFreeTierPlan(planId: string | null | undefined): boolean {
 }
 
 /**
+ * `self-hosted` resolves to this — the seeded `unlimited` row mirrored as a
+ * constant so the mode answers BEFORE any DB read (spec §2 rule 1). The name
+ * mirrors migration 0032; self-hosted never renders the plan card (spec §4).
+ */
+const UNLIMITED_LIMITS: PlanLimits = {
+  id: UNLIMITED_PLAN_ID,
+  name: "Unlimited",
+  includedMembers: null,
+};
+
+/**
  * The workspace's active plan limits, or the seeded `free` limits when it has
- * no active subscription row. A missing `free` row means migration 0031 did
- * not apply, so it throws instead of inventing limits.
+ * no active subscription row.
+ *
+ * The mode decides FIRST: `self-hosted` is `unlimited` for every workspace,
+ * including the ones holding an `active free` row (every workspace created
+ * today does, so conditioning on "no subscription" would leave existing
+ * deployments capped — spec §4). The row stays truthful for a switch back to
+ * `saas`; only resolution ignores it.
+ *
+ * A missing `free` row means migration 0031 did not apply, so it throws
+ * instead of inventing limits.
  */
 export async function resolveWorkspacePlan(
   db: WorkspaceStoreD1,
   workspaceId: string,
+  mode: DeploymentMode,
 ): Promise<PlanLimits> {
+  if (mode === "self-hosted") return UNLIMITED_LIMITS;
   const subscribed = await db
     .prepare(
       `SELECT p.id AS id, p.name AS name, p.included_members AS includedMembers
@@ -72,12 +102,16 @@ export function freeSlotAvailable(freeMembershipCount: number): boolean {
   return freeMembershipCount < 1;
 }
 
-/** The plan's included members are the cap; a pending invite counts as taken. */
+/**
+ * The plan's included members are the cap; a pending invite counts as taken.
+ * A NULL limit is no cap, so the answer is always yes and no caller can read
+ * the absence as "zero seats".
+ */
 export function memberSlotAvailable(
   memberAndPendingCount: number,
-  includedMembers: number,
+  includedMembers: number | null,
 ): boolean {
-  return memberAndPendingCount < includedMembers;
+  return includedMembers === null || memberAndPendingCount < includedMembers;
 }
 
 /**
@@ -97,12 +131,24 @@ export const INVITE_FREE_SLOT_REFUSAL =
 
 /**
  * The Product copy for an invite that would exceed the plan's member cap,
- * verbatim (§ Sixth member). The sentence names five literally because both
- * plans include five members today; a plan with a different number must turn
- * this into a formatter — do not interpolate the count now.
+ * verbatim (§ Sixth member) except for the plan's actual seat limit. Only a
+ * numeric limit has a refusal: a NULL limit means no cap, so no copy exists
+ * for it and no caller may ask.
  */
-export const MEMBER_CAP_REFUSAL =
-  "This invite was not sent. This workspace already has five people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.";
+export function MEMBER_CAP_REFUSAL(includedMembers: number): string {
+  return `This invite was not sent. This workspace already has ${includedMembers} people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.`;
+}
+
+/**
+ * The Product copy for an acceptance the plan's seat cap refuses. Unlike
+ * {@link MEMBER_CAP_REFUSAL} — which is about SENDING an invite — this one
+ * names acceptance, and the invite IS still pending: accepting it again is the
+ * recovery once a seat is freed or the plan grows. Reached only with a numeric
+ * limit; an unlimited plan has no cap and so no such refusal.
+ */
+export function ACCEPT_MEMBER_CAP_REFUSAL(includedMembers: number): string {
+  return `You were not added. This workspace is at its plan's limit of ${includedMembers} members. An owner or admin must remove a member, or the workspace must move to a larger plan, before this invite can be accepted. The invite is still pending.`;
+}
 
 /** Refusal for a creation / acceptance that would exceed the free slot: a 409 body. */
 export class FreeWorkspaceSlotError extends Error {

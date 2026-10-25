@@ -4,7 +4,7 @@
  */
 import { NAV_ITEMS, t, type Locale } from "../i18n";
 import type { SpaBoot } from "./boot";
-import { replaceWorkspaceRef, workspaceRefOf } from "./routes";
+import { workspaceRefOf } from "./routes";
 
 export type ShellNavItem = { href: string; label: string; current: boolean };
 
@@ -14,6 +14,12 @@ export type SidebarModel = {
   brandHref: string;
   navLabel: string;
   items: ShellNavItem[];
+  /**
+   * Footer entry to the platform console. Present only for a `saas` boot whose
+   * viewer is a platform operator — the Worker combines both conjuncts into
+   * `SpaBoot.isOperator`, so this model never evaluates the allowlist.
+   */
+  operatorLink?: { href: string; label: string };
 };
 
 export type NavbarModel = {
@@ -93,6 +99,11 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
         current: isNavCurrent(href, pathname),
       };
     }),
+    // Footer entry, never a nav item: the console lives outside the SPA route
+    // table, and NAV_ITEMS order stays the workspace IA.
+    ...(boot.isOperator === true
+      ? { operatorLink: { href: "/_internal_admin", label: t(boot.locale, "nav.platformOperations") } }
+      : {}),
   };
 }
 
@@ -105,19 +116,31 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
  * or the readable `slug` (they are equal until an owner renames it) — so the
  * current row matches on both while the value shown and navigated to is always
  * the `slug` (a switch target must be the readable ref, never a stale one).
- * Null when the login belongs to at most one workspace — a one-entry select is
- * not a choice, so the shell renders no control at all — and null when the path
- * has no workspace segment to rewrite, where a control would render and then
- * no-op every choice.
+ * Null only when the login belongs to no workspace at all: an empty list is not
+ * a choice.
+ *
+ * `target` is how a pick moves: `replace` rewrites the current path's workspace
+ * segment, so the page stays the same page under another workspace. A path with
+ * no workspace segment (the root workbench, `/index.html`) has nothing to
+ * rewrite — there the control is a NAVIGATOR and a pick opens that workspace's
+ * Apps page.
  *
  * `currentRef` is the `slug` of the membership the pathname names, else null:
  * the path can carry an identifier this login no longer lists (a slug renamed
- * away, a revoked membership). Then the control marks NO row — a wrong current
- * row is worse than none, so there is no fallback to the first membership.
+ * away, a revoked membership), or name no workspace at all. Then the control
+ * marks NO row — a wrong current row is worse than none, so there is no
+ * fallback to the first membership.
+ *
+ * `currentPlan` is that same membership row's plan NAME: the URL decides which
+ * workspace the shell is scoped to, so the plan chip has to follow the URL, not
+ * the document's boot-time workspace. Absent when no row is current, and on
+ * `self-hosted`, whose rows carry no plan (no chip there).
  */
 export type WorkspaceSwitcherModel = {
   label: string;
   currentRef: string | null;
+  currentPlan?: string;
+  target: "replace" | "apps";
   options: Array<{ ref: string; name: string }>;
 };
 
@@ -126,18 +149,17 @@ export function buildWorkspaceSwitcherModel(
   pathname: string,
 ): WorkspaceSwitcherModel | null {
   const memberships = boot.memberships ?? [];
-  if (memberships.length < 2) return null;
+  if (memberships.length === 0) return null;
   const options = memberships.map(({ slug, name }) => ({ ref: slug, name }));
+  const label = t(boot.locale, "nav.workspaceSwitcher");
   const pathRef = workspaceRefOf(pathname);
-  // ONE predicate for "this path can be switched": the path grammar the route
-  // matcher and the API base read, plus the rewrite the switch itself performs.
-  // A path outside either has no segment to rewrite, so the control would only
-  // no-op every choice.
-  if (pathRef === null || replaceWorkspaceRef(pathname, pathRef) === null) return null;
-  const current = memberships.find((m) => pathRef === m.id || pathRef === m.slug);
+  const current =
+    pathRef === null ? undefined : memberships.find((m) => pathRef === m.id || pathRef === m.slug);
   return {
-    label: t(boot.locale, "nav.workspaceSwitcher"),
+    label,
     currentRef: current?.slug ?? null,
+    currentPlan: current?.plan,
+    target: pathRef === null ? "apps" : "replace",
     options,
   };
 }

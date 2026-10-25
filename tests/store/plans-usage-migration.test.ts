@@ -17,7 +17,10 @@ import { createMigratedTestD1 } from "./helpers";
 const MIGRATION = "0031_plans_usage.sql";
 
 describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () => {
-  test("plans has exactly the two seeded rows, with the fixed timestamp", () => {
+  // 0032 replaced the catalogue with a nullable-seat shape and added the
+  // `unlimited` tier, so the applied DB carries three rows: 0031's free/pro
+  // seed plus 0032's every-quota-NULL tier (timestamps stay the fixed seeds).
+  test("plans has the three catalogue rows — free, pro and the unlimited tier — with the fixed timestamps", () => {
     const db = createMigratedTestD1();
     expect(db.raw.query("SELECT * FROM plans ORDER BY id").all()).toEqual([
       {
@@ -41,6 +44,17 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
         reviews_included: null,
         apps_per_workspace: null,
         created_at: "2026-10-24T00:00:00.000Z",
+      },
+      {
+        id: "unlimited",
+        name: "Unlimited",
+        monthly_price_cents: null,
+        included_members: null,
+        extra_member_price_cents: null,
+        platform_key_limit: null,
+        reviews_included: null,
+        apps_per_workspace: null,
+        created_at: "2026-10-25T00:00:00.000Z",
       },
     ]);
     db.raw.close();

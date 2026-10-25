@@ -87,6 +87,7 @@ import {
   type WorkspaceRole,
 } from "./workspace-store";
 import {
+  ACCEPT_MEMBER_CAP_REFUSAL,
   FREE_SLOT_REFUSAL,
   FreeWorkspaceSlotError,
   INVITE_FREE_SLOT_REFUSAL,
@@ -161,6 +162,7 @@ import {
   listActiveSupportGrants,
   listAuditEvents,
 } from "./operator-store";
+import { isFlagEnabled } from "../admin/flags";
 import {
   errorPage,
   forbiddenPage,
@@ -336,16 +338,29 @@ export async function workspaceBoot(
 
 /**
  * The signed-in login's live workspace memberships as the SPA boot's switcher
- * rows (`{id, slug, name, role}`) — the shell's only source of a workspace
- * ref and of the caller's role there. An unbound store answers `[]`.
+ * rows (`{id, slug, name, role, plan}`) — the shell's only source of a
+ * workspace ref and of the caller's role there. An unbound store answers `[]`.
+ *
+ * `plan` answers the top bar's chip for EVERY row, not just the addressed
+ * workspace: a switch only rewrites the URL and never re-boots, so the chip
+ * must read the plan of whichever workspace the URL then names. Both modes
+ * carry it (D16: the mode gates rendering, never the payload) — `self-hosted`
+ * resolves `Unlimited` before any DB read.
  */
 export async function workspaceMembershipsForLogin(
   env: Env,
   login: string,
-): Promise<WorkspaceMembershipOption[]> {
+): Promise<Array<WorkspaceMembershipOption & { plan: string }>> {
   const db = dashboardD1(env);
   if (db === null) return [];
-  return listWorkspaceMembershipOptions(db, login);
+  const rows = await listWorkspaceMembershipOptions(db, login);
+  const mode = deploymentModeOf(env.DEPLOYMENT_MODE);
+  return Promise.all(
+    rows.map(async (row) => ({
+      ...row,
+      plan: (await resolveWorkspacePlan(db, row.id, mode)).name,
+    })),
+  );
 }
 
 /**
@@ -893,8 +908,12 @@ dashboardApp.use("*", async (c, next) => {
   return next();
 });
 
-/** Platform-operator allowlist membership — NOCASE, same parser as every login list. */
-function isPlatformOperator(env: Env, login: string): boolean {
+/**
+ * Platform-operator allowlist membership — NOCASE, same parser as every login
+ * list. The ONE allowlist predicate: the admin gate (`src/admin/gate.ts`)
+ * imports this rather than restating it.
+ */
+export function isPlatformOperator(env: Env, login: string): boolean {
   return parseLoginList(env.PLATFORM_OPERATORS).some(
     (entry) => entry.toLowerCase() === login.toLowerCase(),
   );
@@ -999,6 +1018,15 @@ dashboardApp.get("/oauth/callback", async (c) => {
   // Not atomic with the insert below: two concurrent first sign-ins can both
   // read 0 and both claim "first account". Cosmetic sentence only, so no lock.
   const emptyInstance = deploymentMode === "self-hosted" && (await countUsers(db)) === 0;
+  // Signup flag (spec §3.1): closed means no NEW `users` row — a login that
+  // already has one signs in unchanged. Absent flag row = open. The refusal
+  // mints no session and writes nothing, so the state-expiry header set above
+  // is withdrawn, like the removal deny below.
+  if (!(await isFlagEnabled(db, "signup_open")) && (await getUserByLogin(db, user.login)) === null) {
+    logOAuthFailure("sign_in", "signup_closed", { login: user.login });
+    c.header("Set-Cookie", undefined);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.signupClosed"), requestLocale(c)), 403);
+  }
   const decision = await signInDashboardUser(db, user.login);
   if (decision.outcome === "deny") {
     // The only deny is a recorded removal, so the deny face is the removal
@@ -1056,6 +1084,14 @@ const WORKSPACE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 const WORKSPACE_ID_ATTEMPTS = 6;
 export const WORKSPACE_NAME_MAX_LENGTH = 80;
 
+/**
+ * The 409 body when the operator's `workspace_creation_open` flag is off
+ * (spec §3.1): creation is closed for EVERYONE, so the per-login free-slot copy
+ * would name the wrong cause.
+ */
+const WORKSPACE_CREATION_CLOSED_REFUSAL =
+  "This workspace was not created. Workspace creation is closed on this platform right now.";
+
 /** A fresh workspace id; 256 is divisible by 32, so the sampling is unbiased. */
 function createWorkspaceId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(22));
@@ -1077,23 +1113,37 @@ dashboardApp.post("/api/workspaces", async (c) => {
   if (name.length > WORKSPACE_NAME_MAX_LENGTH) {
     return c.text(`Workspace name must be at most ${WORKSPACE_NAME_MAX_LENGTH} characters.`, 400);
   }
-  // One free workspace per login: the read below is fast-fail UX only — the
-  // authority is `createWorkspace`'s own insert guard, so a creation that
-  // commits between this read and the write still cannot land a second free
-  // workspace, and its refusal arrives as the same 409 body.
+  // One free workspace per login, and `saas` only: the read below is fast-fail
+  // UX for the authority in `createWorkspace`'s own insert guard, so a creation
+  // that commits between this read and the write still cannot land a second
+  // free workspace. Self-hosted resolves every workspace to `unlimited`
+  // (spec §4 "always allowed"), so the rule and its read are skipped there.
+  const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   try {
-    const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
-    if (!freeSlotAvailable(freeCount)) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
+    // Operator flag first: when creation is closed platform-wide the per-login
+    // free-slot answer is irrelevant, so its read is skipped. Absent flag row
+    // = open.
+    if (!(await isFlagEnabled(db, "workspace_creation_open"))) {
+      return c.text(WORKSPACE_CREATION_CLOSED_REFUSAL, 409);
+    }
+    if (mode === "saas") {
+      const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
+      if (!freeSlotAvailable(freeCount)) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
+    }
     const createdAt = new Date().toISOString();
     for (let attempt = 0; attempt < WORKSPACE_ID_ATTEMPTS; attempt++) {
       const id = createWorkspaceId();
-      const created = await createWorkspace(db, {
-        id,
-        name,
-        userId: user.id,
-        githubLogin: user.github_login,
-        createdAt,
-      });
+      const created = await createWorkspace(
+        db,
+        {
+          id,
+          name,
+          userId: user.id,
+          githubLogin: user.github_login,
+          createdAt,
+        },
+        mode,
+      );
       if (created) {
         // The client cannot derive the post-creation landing: a new workspace
         // may be the second one, so `/dashboard` would strand the creator on a
@@ -1674,7 +1724,11 @@ const memberListRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
   const members = await listWorkspaceMembers(member.db, member.scope.workspaceId);
-  const plan = await resolveWorkspacePlan(member.db, member.scope.workspaceId);
+  const plan = await resolveWorkspacePlan(
+    member.db,
+    member.scope.workspaceId,
+    deploymentModeOf(c.env.DEPLOYMENT_MODE),
+  );
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
   const reviewAttemptsThisMonth = await countUsageEventsSince(
@@ -1695,6 +1749,8 @@ const memberListRoute = async (c: DashboardContext) => {
     viewer: { login: member.user.github_login, role: member.scope.role },
     workspace: {
       plan: { id: plan.id, name: plan.name },
+      // Null means "no seat cap" (the unlimited tier); the field stays present
+      // in both modes and only rendering branches on it.
       memberLimit: plan.includedMembers,
       reviewAttemptsThisMonth,
       pendingInvites,
@@ -1776,24 +1832,32 @@ const inviteCreateRoute = async (c: DashboardContext) => {
     // row has already stopped counting, so a refusal here writes nothing and
     // revoking an invite frees the seat immediately. This read is fast-fail UX:
     // `createInvite` re-checks the same predicate inside its insert, which is
-    // what a concurrent pair of invitations cannot both pass.
-    const plan = await resolveWorkspacePlan(gate.db, gate.scope.workspaceId);
+    // what a concurrent pair of invitations cannot both pass. A null limit has
+    // no seats to exhaust, so this gate cannot fire for it — and self-hosted
+    // resolves `unlimited` before it reads anything.
+    const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
+    const plan = await resolveWorkspacePlan(gate.db, gate.scope.workspaceId, mode);
+    const limit = plan.includedMembers;
     const seats = await countMembersAndPendingInvites(
       gate.db,
       gate.scope.workspaceId,
       now.toISOString(),
     );
-    if (!memberSlotAvailable(seats, plan.includedMembers)) {
-      throw new MemberCapError(MEMBER_CAP_REFUSAL);
+    if (limit !== null && !memberSlotAvailable(seats, limit)) {
+      throw new MemberCapError(MEMBER_CAP_REFUSAL(limit));
     }
-    await createInvite(gate.db, {
-      workspaceId: gate.scope.workspaceId,
-      login,
-      role,
-      invitedBy: gate.user.id,
-      now: now.toISOString(),
-      expiresAt: new Date(now.getTime() + INVITE_TTL_MS).toISOString(),
-    });
+    await createInvite(
+      gate.db,
+      {
+        workspaceId: gate.scope.workspaceId,
+        login,
+        role,
+        invitedBy: gate.user.id,
+        now: now.toISOString(),
+        expiresAt: new Date(now.getTime() + INVITE_TTL_MS).toISOString(),
+      },
+      mode,
+    );
   } catch (err) {
     if (err instanceof MemberCapError) {
       // The plan is out of seats (members + live pending invites): 409 with
@@ -1836,6 +1900,8 @@ const inviteRevokeRoute = async (c: DashboardContext) => {
  * `invite.expired` (the store flips the row in the same request, so a repeat is
  * 410); the accepting login already holds a free workspace and the target is
  * `free` → 409 Product copy § Invite acceptance with the invite left pending;
+ * the workspace's members are at the plan's seat limit (a downgrade can leave
+ * pending invites without seats) → 409 acceptance copy, also left pending;
  * success → 200.
  */
 const inviteAcceptRoute = async (c: DashboardContext) => {
@@ -1856,17 +1922,23 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
   if (!invite) return await tenantNotFound(c);
 
   const now = new Date().toISOString();
+  const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   // The free slot gates only an acceptance that could otherwise land: a foreign
   // login (404) and a terminal or lapsed row (410 / 409 `invite.expired`) keep
   // their own answers — the copy below asserts the invite is STILL pending. The
   // slot belongs to the accepting login and is spent only by a live membership
   // in a workspace that resolves to `free`, so a paid target is never gated.
+  // Self-hosted resolves `unlimited` for every workspace, so this branch is
+  // unreachable there without a mode check of its own.
   // Nothing is written before this point, so a refusal leaves the row pending.
   const wouldAccept =
     invite.status === "pending" &&
     invite.expires_at > now &&
     invite.github_login.toLowerCase() === user.github_login.toLowerCase();
-  if (wouldAccept && isFreeTierPlan((await resolveWorkspacePlan(db, tenant.workspaceId)).id)) {
+  if (
+    wouldAccept &&
+    isFreeTierPlan((await resolveWorkspacePlan(db, tenant.workspaceId, mode)).id)
+  ) {
     const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
     if (!freeSlotAvailable(freeCount)) {
       return inviteMutationResponse(c, INVITE_FREE_SLOT_REFUSAL, 409);
@@ -1878,7 +1950,7 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
   // invite left pending (statement 3 only consumes it for an admitted login).
   let outcome: AcceptInviteOutcome;
   try {
-    outcome = await acceptInvite(db, inviteId, user.github_login, now);
+    outcome = await acceptInvite(db, inviteId, user.github_login, now, mode);
   } catch (err) {
     if (err instanceof FreeWorkspaceSlotError) {
       return inviteMutationResponse(c, err.message, 409);
@@ -1888,6 +1960,8 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
   switch (outcome.kind) {
     case "accepted":
       return inviteMutationResponse(c, `ok ${outcome.role}`, 200);
+    case "member_cap":
+      return inviteMutationResponse(c, ACCEPT_MEMBER_CAP_REFUSAL(outcome.limit), 409);
     case "expired":
       return inviteMutationResponse(c, "invite.expired", 409);
     case "gone":
