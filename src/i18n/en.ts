@@ -75,6 +75,8 @@ export const en = {
       missingCode: "GitHub did not return an authorization code.",
       codeRejected: "GitHub rejected the authorization code.",
       profileFailed: "Could not read your GitHub profile.",
+      /** `signup_open` is off: an unknown login cannot create an account. */
+      signupClosed: "Sign-up is closed on this platform right now.",
     },
     loading: "Loading…",
     loadFailed: "Could not load this page.",

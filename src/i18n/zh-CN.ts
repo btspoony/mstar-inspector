@@ -58,6 +58,8 @@ export const zhCN: Dictionary = {
       missingCode: "GitHub 未返回授权码。",
       codeRejected: "GitHub 拒绝了授权码。",
       profileFailed: "无法读取你的 GitHub 资料。",
+      /** `signup_open` 关闭：未知账号无法创建账户。 */
+      signupClosed: "平台当前已关闭注册。",
     },
     loading: "加载中…",
     loadFailed: "无法加载此页面。",

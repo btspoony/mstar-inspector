@@ -161,6 +161,7 @@ import {
   listActiveSupportGrants,
   listAuditEvents,
 } from "./operator-store";
+import { isFlagEnabled } from "../admin/flags";
 import {
   errorPage,
   forbiddenPage,
@@ -906,8 +907,12 @@ dashboardApp.use("*", async (c, next) => {
   return next();
 });
 
-/** Platform-operator allowlist membership — NOCASE, same parser as every login list. */
-function isPlatformOperator(env: Env, login: string): boolean {
+/**
+ * Platform-operator allowlist membership — NOCASE, same parser as every login
+ * list. The ONE allowlist predicate: the admin gate (`src/admin/gate.ts`)
+ * imports this rather than restating it.
+ */
+export function isPlatformOperator(env: Env, login: string): boolean {
   return parseLoginList(env.PLATFORM_OPERATORS).some(
     (entry) => entry.toLowerCase() === login.toLowerCase(),
   );
@@ -1012,6 +1017,15 @@ dashboardApp.get("/oauth/callback", async (c) => {
   // Not atomic with the insert below: two concurrent first sign-ins can both
   // read 0 and both claim "first account". Cosmetic sentence only, so no lock.
   const emptyInstance = deploymentMode === "self-hosted" && (await countUsers(db)) === 0;
+  // Signup flag (spec §3.1): closed means no NEW `users` row — a login that
+  // already has one signs in unchanged. Absent flag row = open. The refusal
+  // mints no session and writes nothing, so the state-expiry header set above
+  // is withdrawn, like the removal deny below.
+  if (!(await isFlagEnabled(db, "signup_open")) && (await getUserByLogin(db, user.login)) === null) {
+    logOAuthFailure("sign_in", "signup_closed", { login: user.login });
+    c.header("Set-Cookie", undefined);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.signupClosed"), requestLocale(c)), 403);
+  }
   const decision = await signInDashboardUser(db, user.login);
   if (decision.outcome === "deny") {
     // The only deny is a recorded removal, so the deny face is the removal
