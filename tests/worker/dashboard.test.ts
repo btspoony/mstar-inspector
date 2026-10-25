@@ -3945,5 +3945,6 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
     const model = buildWorkspaceSwitcherModel(boot, "/dashboard/default/apps");
     expect(model?.currentRef).toBe("default");
     expect(model?.options).toEqual([{ ref: "default", name: "Default" }]);
+    expect(model?.target).toBe("replace");
   });
 });

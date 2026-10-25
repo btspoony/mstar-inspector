@@ -105,18 +105,25 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
  * or the readable `slug` (they are equal until an owner renames it) — so the
  * current row matches on both while the value shown and navigated to is always
  * the `slug` (a switch target must be the readable ref, never a stale one).
- * Null only when the login belongs to no workspace at all (an empty list is not
- * a choice) and when the path has no workspace segment to rewrite, where a
- * control would render and then no-op every choice.
+ * Null only when the login belongs to no workspace at all: an empty list is not
+ * a choice.
+ *
+ * `target` is how a pick moves: `replace` rewrites the current path's workspace
+ * segment, so the page stays the same page under another workspace. A path with
+ * no workspace segment (the root workbench, `/index.html`) has nothing to
+ * rewrite — there the control is a NAVIGATOR and a pick opens that workspace's
+ * Apps page.
  *
  * `currentRef` is the `slug` of the membership the pathname names, else null:
  * the path can carry an identifier this login no longer lists (a slug renamed
- * away, a revoked membership). Then the control marks NO row — a wrong current
- * row is worse than none, so there is no fallback to the first membership.
+ * away, a revoked membership), or name no workspace at all. Then the control
+ * marks NO row — a wrong current row is worse than none, so there is no
+ * fallback to the first membership.
  */
 export type WorkspaceSwitcherModel = {
   label: string;
   currentRef: string | null;
+  target: "replace" | "apps";
   options: Array<{ ref: string; name: string }>;
 };
 
@@ -129,9 +136,9 @@ export function buildWorkspaceSwitcherModel(
   const options = memberships.map(({ slug, name }) => ({ ref: slug, name }));
   const label = t(boot.locale, "nav.workspaceSwitcher");
   const pathRef = workspaceRefOf(pathname);
-  if (pathRef === null) return null;
+  if (pathRef === null) return { label, currentRef: null, target: "apps", options };
   const current = memberships.find((m) => pathRef === m.id || pathRef === m.slug);
-  return { label, currentRef: current?.slug ?? null, options };
+  return { label, currentRef: current?.slug ?? null, target: "replace", options };
 }
 
 /**

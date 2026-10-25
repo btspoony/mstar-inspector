@@ -43,16 +43,22 @@ const BLOCKED_REASON_KEY: Record<BlockedReason, DictionaryKey> = {
 export const WORKSPACE_CREATION_PATH = "/dashboard";
 
 /**
- * Point the current page at another workspace and hand the router the new
- * path. False when the pathname names no workspace to rewrite (a
- * deployment-level page) — the control then has nothing to switch.
+ * Point the page at another workspace and hand the router the new path: either
+ * rewrite the current path's workspace segment, or — on a path that names no
+ * workspace — open that workspace's Apps page. False when a rewrite was asked
+ * for and the pathname names no workspace to rewrite.
  */
 export function switchWorkspace(
   nextRef: string,
+  target: WorkspaceSwitcherModel["target"] = "replace",
   pathname: string = window.location.pathname,
   search: string = window.location.search,
   hash: string = window.location.hash,
 ): boolean {
+  if (target === "apps") {
+    navigate(`/dashboard/${nextRef}/apps`);
+    return true;
+  }
   const path = replaceWorkspaceRef(pathname, nextRef);
   if (path === null) return false;
   navigate(`${path}${search}${hash}`);
@@ -74,8 +80,9 @@ export function WorkspaceSwitcher({
   // NO row is current, so the trigger shows the control's own label.
   const current = model.options.find((option) => option.ref === model.currentRef);
   // The plan chip is a `saas` surface only (D15/D20): self-hosted has no tier
-  // to display. It rides the CURRENT workspace's name, and renders from the
-  // boot — no second fetch, no client-side plan resolution.
+  // to display. It rides the CURRENT workspace's name, so a path that names no
+  // workspace (the navigator) shows no chip — and it renders from the boot: no
+  // second fetch, no client-side plan resolution.
   const plan =
     current === undefined || boot.deploymentMode !== "saas" ? undefined : boot.workspacePlan;
   const blockedReason: BlockedReason | null =
@@ -97,7 +104,7 @@ export function WorkspaceSwitcher({
             target — each row reports `aria-checked`. An empty value marks none. */}
         <DropdownMenuRadioGroup
           value={model.currentRef ?? ""}
-          onValueChange={(ref) => void switchWorkspace(ref)}
+          onValueChange={(ref) => void switchWorkspace(ref, model.target)}
         >
           {model.options.map((option) => (
             <DropdownMenuRadioItem key={option.ref} value={option.ref}>

@@ -3,9 +3,11 @@
  * plan 115) — the URL-only navigation contract and the control's surface.
  *
  * Picking another workspace must rewrite ONLY the workspace segment of the
- * current path and hand the new URL to the router. Executed proof, not source
- * shapes: one `pushState`, one synthetic `popstate`, zero requests, and no
- * write to the address bar, the cookie jar or the document.
+ * current path and hand the new URL to the router; a path that names no
+ * workspace gets no rewrite, so there the control NAVIGATES to the picked
+ * workspace's Apps page. Executed proof, not source shapes: one `pushState`,
+ * one synthetic `popstate`, zero requests, and no write to the address bar, the
+ * cookie jar or the document.
  *
  * The menu's portalled rows (the current-row mark, the disabled item's reason)
  * are unreachable from a static render; they are pinned on a mounted render in
@@ -127,12 +129,15 @@ describe("workspace switcher — URL-only switch", () => {
     expect(rec.cookieWrites).toEqual([]);
   });
 
-  test("a path with no workspace segment switches nothing", () => {
-    const rec = withBrowser("/dashboard/apps", "", () => {
-      expect(switchWorkspace("ws_7d41")).toBe(false);
+  test("a path with no workspace segment navigates to the picked workspace's Apps page", () => {
+    // The root workbench has no workspace segment to rewrite: the control is a
+    // navigator, and the picked row opens a real page of that workspace.
+    const rec = withBrowser("/dashboard", "", () => {
+      expect(switchWorkspace("ws_7d41", "apps")).toBe(true);
     });
-    expect(rec.pushed).toEqual([]);
-    expect(rec.events).toEqual([]);
+    expect(rec.pushed).toEqual(["/dashboard/ws_7d41/apps"]);
+    expect(rec.events).toEqual(["popstate"]);
+    expect(rec.requests).toEqual([]);
   });
 });
 
@@ -201,21 +206,25 @@ describe("workspace switcher — the control's list", () => {
     expect(model?.options.map((option) => option.ref)).toEqual(["acme-labs", "ws_7d41"]);
   });
 
-  test("no control on a path with no workspace segment to rewrite", () => {
-    // `/dashboard` is the post-login landing of a multi-workspace deployment and
-    // `/index.html` the shell document addressed directly: a control there would
-    // render and no-op every choice.
+  test("a path with no workspace segment is a navigator, not a rewriter", () => {
+    // `/dashboard` is the post-login landing and `/index.html` the shell
+    // document addressed directly: neither has a segment to rewrite, so a pick
+    // must OPEN that workspace's Apps page.
     for (const pathname of ["/dashboard", "/dashboard/apps", "/index.html"]) {
-      expect(buildWorkspaceSwitcherModel(boot, pathname), pathname).toBeNull();
+      const model = buildWorkspaceSwitcherModel(boot, pathname);
+      expect(model?.target, pathname).toBe("apps");
+      // Nothing is current: the URL names no workspace.
+      expect(model?.currentRef, pathname).toBeNull();
     }
+    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps")?.target).toBe("replace");
   });
 
-  test("no control where only one of the two path grammars holds", () => {
+  test("an unrouted path navigates instead of rewriting into a second 404", () => {
     // `workspaceRefOf` reads `apps|members|api` as the second segment; a path
-    // outside that family has no workspace route to switch, so the control
-    // must not render even though `replaceWorkspaceRef` could rewrite it.
-    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/nope")).toBeNull();
-    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps/thing")).not.toBeNull();
+    // outside that family names no workspace page, so the control opens a real
+    // one. A routed workspace path keeps the in-place rewrite.
+    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/nope")?.target).toBe("apps");
+    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps/thing")?.target).toBe("replace");
   });
 });
 
@@ -252,8 +261,13 @@ describe("workspace switcher — rendered surface", () => {
     expect(selfHosted).not.toContain("Unlimited");
   });
 
-  test("no control renders on the root workbench", () => {
-    expect(renderSwitcher(boot, "/dashboard")).toBe("");
+  test("a navigator names no workspace on the trigger — the label and no plan chip stand in", () => {
+    const html = renderSwitcher(boot, "/dashboard");
+    expect(html).toContain('aria-label="Workspace"');
+    expect(html).not.toContain("Acme");
+    // The chip belongs to a workspace's name; with no current row there is
+    // nothing for it to qualify.
+    expect(html).not.toContain("Free");
   });
 
   test("a path naming an unlisted ref names NO workspace — never a stand-in", () => {
@@ -274,7 +288,7 @@ describe("workspace switcher — rendered surface", () => {
     const model = buildWorkspaceSwitcherModel(boot, "/dashboard/ws_acme/apps");
     expect(model?.currentRef).toBe("acme");
     const record = withBrowser("/dashboard/ws_acme/apps", "", () => {
-      switchWorkspace(model!.currentRef!);
+      switchWorkspace(model!.currentRef!, model!.target);
     });
     expect(record.pushed).toEqual(["/dashboard/acme/apps"]);
   });
