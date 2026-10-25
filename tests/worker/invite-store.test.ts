@@ -417,6 +417,22 @@ describe("seat limit (store level)", () => {
     return sql;
   }
 
+  /** The workspace's member rows — the count the acceptance guard reads. */
+  function memberCount(db: TestD1): number {
+    const row = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = ?")
+      .get(WORKSPACE) as { n: number };
+    return row.n;
+  }
+
+  /** The operator's downgrade write (src/admin/workspaces.ts): plan id only —
+   * it never removes a member or an invite row. */
+  function downgrade(db: TestD1, planId: string): void {
+    db.raw
+      .prepare("UPDATE workspace_subscriptions SET plan_id = ?, updated_at = ? WHERE workspace_id = ?")
+      .run(planId, NOW, WORKSPACE);
+  }
+
   test("a five-seat plan refuses at five, names that limit and writes nothing", async () => {
     const db = createFixture("newcomer");
     seedMembers(db, 5);
@@ -444,5 +460,107 @@ describe("seat limit (store level)", () => {
     // A NULL bound into ?8 would make `count < ?8` evaluate to NULL and write
     // no row, so the unlimited insert must not carry the condition at all.
     expect(insertSql(captured)).not.toContain("?8");
+  });
+
+  test("a pending invite at limit minus one converts into the last seat", async () => {
+    const db = createFixture("newcomer");
+    seedMembers(db, 4);
+    const pending = await invite(db, "newcomer");
+
+    // Four members plus one pending already fill the five-seat plan. The
+    // acceptance converts that pending seat (`members + 1`, `pending - 1`), so
+    // the guard must count MEMBERS only — counting the pending row again would
+    // refuse this legitimate conversion.
+    expect(await acceptInvite(db, pending.id, "newcomer", NOW, "saas")).toEqual({
+      kind: "accepted",
+      workspaceId: WORKSPACE,
+      role: "member",
+    });
+    expect(memberCount(db)).toBe(5);
+    expect(rowOf(db, pending.id).status).toBe("accepted");
+  });
+
+  test("an accept at the cap refuses with member_cap and writes no member row", async () => {
+    const db = createFixture("newcomer");
+    subscribe(db, "unlimited");
+    seedMembers(db, 5);
+    // Minted while the plan was unlimited, then the workspace is downgraded:
+    // the pending row outlives the seat it was issued against.
+    const pending = await invite(db, "newcomer");
+    downgrade(db, "free");
+
+    expect(await acceptInvite(db, pending.id, "newcomer", NOW, "saas")).toEqual({
+      kind: "member_cap",
+      limit: 5,
+    });
+    expect(memberCount(db)).toBe(5);
+    expect(rowOf(db, pending.id).status).toBe("pending");
+  });
+
+  test("a null limit binds no seat condition, so the accept lands past the five-seat cap", async () => {
+    const db = createFixture("newcomer");
+    seedMembers(db, 6);
+    subscribe(db, "unlimited");
+    const pending = await invite(db, "newcomer");
+
+    // A NULL bound into the comparison would make `count < NULL` NULL and
+    // refuse every acceptance on an unlimited plan.
+    expect(await acceptInvite(db, pending.id, "newcomer", NOW, "saas")).toEqual({
+      kind: "accepted",
+      workspaceId: WORKSPACE,
+      role: "member",
+    });
+    expect(memberCount(db)).toBe(7);
+    expect(rowOf(db, pending.id).status).toBe("accepted");
+  });
+
+  test("a downgrade that strands pending invites stops successive accepts exactly at the new cap", async () => {
+    const db = createFixture("a", "b", "c", "d");
+    subscribe(db, "unlimited");
+    seedMembers(db, 3);
+    const pending = [
+      await invite(db, "a"),
+      await invite(db, "b"),
+      await invite(db, "c"),
+      await invite(db, "d"),
+    ];
+    // Three members plus four pending: `members + pending` sits above the
+    // five-seat plan the workspace now resolves to.
+    downgrade(db, "free");
+
+    const kinds: string[] = [];
+    for (const row of pending) {
+      kinds.push((await acceptInvite(db, row.id, row.github_login, NOW, "saas")).kind);
+    }
+
+    // Exactly two conversions fit (3 → 4 → 5); the rest refuse and stay
+    // pending, so they become acceptable again once a seat frees.
+    expect(kinds).toEqual(["accepted", "accepted", "member_cap", "member_cap"]);
+    expect(memberCount(db)).toBe(5);
+    expect(statuses(db).filter((status) => status === "accepted")).toHaveLength(2);
+    expect(statuses(db).filter((status) => status === "pending")).toHaveLength(2);
+  });
+
+  test("two accepts issued against the last free seat admit exactly one", async () => {
+    const db = createFixture("racer-a", "racer-b");
+    subscribe(db, "unlimited");
+    seedMembers(db, 4);
+    const first = await invite(db, "racer-a");
+    const second = await invite(db, "racer-b");
+    downgrade(db, "free");
+
+    // The acceptance path has NO seat pre-read, so both calls reach the
+    // membership insert and only the count inside it can hold the plan. The
+    // bun:sqlite double brackets every batch in BEGIN/COMMIT on one connection,
+    // so the pair runs back-to-back here; it is the same insert-time decision
+    // the loser of a true race makes.
+    const outcomes = [
+      await acceptInvite(db, first.id, "racer-a", NOW, "saas"),
+      await acceptInvite(db, second.id, "racer-b", NOW, "saas"),
+    ];
+
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(["accepted", "member_cap"]);
+    expect(memberCount(db)).toBe(5);
+    expect(rowOf(db, second.id).status).toBe("pending");
   });
 });

@@ -139,6 +139,17 @@ export function MEMBER_CAP_REFUSAL(includedMembers: number): string {
   return `This invite was not sent. This workspace already has ${includedMembers} people, counting members and pending invites. Remove a member or revoke a pending invite, then send the invite again.`;
 }
 
+/**
+ * The Product copy for an acceptance the plan's seat cap refuses. Unlike
+ * {@link MEMBER_CAP_REFUSAL} — which is about SENDING an invite — this one
+ * names acceptance, and the invite IS still pending: accepting it again is the
+ * recovery once a seat is freed or the plan grows. Reached only with a numeric
+ * limit; an unlimited plan has no cap and so no such refusal.
+ */
+export function ACCEPT_MEMBER_CAP_REFUSAL(includedMembers: number): string {
+  return `You were not added. This workspace is at its plan's limit of ${includedMembers} members. An owner or admin must remove a member, or the workspace must move to a larger plan, before this invite can be accepted. The invite is still pending.`;
+}
+
 /** Refusal for a creation / acceptance that would exceed the free slot: a 409 body. */
 export class FreeWorkspaceSlotError extends Error {
   constructor(body: string) {

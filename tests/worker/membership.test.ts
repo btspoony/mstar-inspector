@@ -659,6 +659,43 @@ describe("invite accept (AC3)", () => {
     expect((await request(path, "hubot", { method: "POST" })).status).toBe(410);
     expect(memberRows(db)).toBe(4);
   });
+
+  test("an over-cap pending invite from a downgraded plan is the named 409 and writes no member", async () => {
+    const { db, users } = fixture();
+    const ts = new Date().toISOString();
+    // The invite and the fifth member are minted under `unlimited`; the
+    // operator's downgrade removes neither, so the pending row has no seat left
+    // and only the write-time guard can refuse it.
+    db.raw
+      .prepare(
+        "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, 'unlimited', 'active', ?, ?)",
+      )
+      .run(WORKSPACE, ts, ts);
+    const invite = await createInvite(db, {
+      workspaceId: WORKSPACE,
+      login: "hubot",
+      role: "member",
+      invitedBy: users.owner,
+      now: ts,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }, "saas");
+    seedMembership(db, WORKSPACE, seedUser(db, "fifth"), "member");
+    db.raw
+      .prepare("UPDATE workspace_subscriptions SET plan_id = 'free', updated_at = ? WHERE workspace_id = ?")
+      .run(ts, WORKSPACE);
+    seedUser(db, "hubot");
+    use(db);
+
+    const res = await request(`/dashboard/acme/api/members/invites/${invite.id}/accept`, "hubot", {
+      method: "POST",
+    });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(
+      "You were not added. This workspace is at its plan's limit of 5 members. An owner or admin must remove a member, or the workspace must move to a larger plan, before this invite can be accepted. The invite is still pending.",
+    );
+    expect(memberRows(db)).toBe(5);
+    expect(inviteStatus(db, invite.id)).toBe("pending");
+  });
 });
 
 /**

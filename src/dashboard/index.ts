@@ -87,6 +87,7 @@ import {
   type WorkspaceRole,
 } from "./workspace-store";
 import {
+  ACCEPT_MEMBER_CAP_REFUSAL,
   FREE_SLOT_REFUSAL,
   FreeWorkspaceSlotError,
   INVITE_FREE_SLOT_REFUSAL,
@@ -1899,6 +1900,8 @@ const inviteRevokeRoute = async (c: DashboardContext) => {
  * `invite.expired` (the store flips the row in the same request, so a repeat is
  * 410); the accepting login already holds a free workspace and the target is
  * `free` → 409 Product copy § Invite acceptance with the invite left pending;
+ * the workspace's members are at the plan's seat limit (a downgrade can leave
+ * pending invites without seats) → 409 acceptance copy, also left pending;
  * success → 200.
  */
 const inviteAcceptRoute = async (c: DashboardContext) => {
@@ -1957,6 +1960,8 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
   switch (outcome.kind) {
     case "accepted":
       return inviteMutationResponse(c, `ok ${outcome.role}`, 200);
+    case "member_cap":
+      return inviteMutationResponse(c, ACCEPT_MEMBER_CAP_REFUSAL(outcome.limit), 409);
     case "expired":
       return inviteMutationResponse(c, "invite.expired", 409);
     case "gone":

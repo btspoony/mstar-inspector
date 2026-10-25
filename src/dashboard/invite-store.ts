@@ -88,13 +88,17 @@ export class InvitePendingExistsError extends Error {
  * → 200, `not_found` → 404 (missing invite or login mismatch, byte-identical
  * to an unknown workspace), `expired` → 409 `invite.expired` (lapsed, the row
  * was just flipped to its terminal state), `gone` → 410 (the row is terminal:
- * revoked, expired, or lost the accept race).
+ * revoked, expired, or lost the accept race), `member_cap` → 409 with the
+ * acceptance copy (the plan's seats are all taken by members; the invite was
+ * NOT consumed — it stays pending and becomes acceptable again once a seat is
+ * freed, so a plan downgrade strands nothing).
  */
 export type AcceptInviteOutcome =
   | { kind: "accepted"; workspaceId: string; role: WorkspaceMemberRole }
   | { kind: "not_found" }
   | { kind: "expired" }
-  | { kind: "gone" };
+  | { kind: "gone" }
+  | { kind: "member_cap"; limit: number };
 
 /** Narrow D1 face: reads plus the invite write paths' batched statements. */
 type InviteStoreStatement = {
@@ -187,6 +191,32 @@ const ACCEPT_FREE_SLOT_GUARD_SQL = `(EXISTS (
            WHERE mu.github_login = ?2 COLLATE NOCASE
              AND w.deleted_at IS NULL
              AND (s.plan_id IS NULL OR s.plan_id = ?4)) < 1)`;
+
+/**
+ * The acceptance's seat condition, as a SQL condition its membership insert
+ * carries: the target workspace's MEMBERS below the plan's included seats.
+ * Re-reading the count inside the insert is what closes the read-then-write
+ * window — two accepts racing past the same pre-read cannot both land.
+ *
+ * Members only, deliberately: an acceptance CONVERTS one pending invite into
+ * one member (`members + 1`, `pending - 1`), so the invite rule's
+ * `members + pending <= limit` sum is unchanged by it. Counting the pending
+ * row here too would refuse a legitimate conversion at `limit - 1` members.
+ * The converse is why the guard cannot be dropped after a downgrade: the
+ * operator's plan change never removes a member or an invite, so
+ * `members + pending` can sit above the new cap. Admitting those pending
+ * invites one at a time raises members only while a seat is free; once they
+ * reach the cap the rest refuse `member_cap` and stay pending. Refusing every
+ * conversion instead would strand invites that were legitimately issued.
+ *
+ * Parameters: the workspace comes from the insert's own `i` row. `?5` is the
+ * limit: a numeric limit only exists in `saas`, where the free-slot guard
+ * above has already bound `?4` (`resolveWorkspacePlan` answers `unlimited` for
+ * `self-hosted` before reading the catalogue).
+ */
+const ACCEPT_SEAT_GUARD_SQL = `(SELECT COUNT(*)
+        FROM workspace_members am
+       WHERE am.workspace_id = i.workspace_id) < ?5`;
 
 const INVITE_COLUMNS = `id, workspace_id, github_login, role, status, invited_by,
        created_at, expires_at, accepted_at`;
@@ -408,17 +438,29 @@ export async function revokeInvite(
  * idempotent: the re-read finds the membership and returns success without a
  * second row.
  *
+ * The plan's seat cap is enforced BY the write as well: for a numeric limit
+ * the membership insert carries {@link ACCEPT_SEAT_GUARD_SQL}, so members can
+ * never exceed the plan — not when two accepts race past the same pre-read,
+ * and not when a downgrade left more pending invites than the new plan has
+ * free seats. A refused acceptance writes nothing and consumes nothing: the
+ * invite stays pending and the outcome is `member_cap`, so it becomes
+ * acceptable again once a member is removed or the plan grows. A NULL limit
+ * means no cap; the insert then carries no seat condition at all, because
+ * binding NULL would make `count < NULL` evaluate to NULL and refuse every
+ * acceptance on an unlimited plan.
+ *
  * The free slot is enforced BY the write too: the membership insert carries
  * {@link ACCEPT_FREE_SLOT_GUARD_SQL}, and the invite is only consumed when the
  * accepting login is a member of that workspace — so a refusal leaves the
  * invite pending and throws {@link FreeWorkspaceSlotError}. The route's read
  * stays fast-fail UX.
  *
- * The rule binds `saas` only (spec §3/§4): `self-hosted` resolves every
- * workspace to `unlimited`, so nothing is on the free tier and the guard would
- * only refuse an acceptance that must be allowed. The saas SQL text is
+ * The free-slot rule binds `saas` only (spec §3/§4): `self-hosted` resolves
+ * every workspace to `unlimited`, so nothing is on the free tier and the guard
+ * would only refuse an acceptance that must be allowed. The saas SQL text is
  * unchanged; the self-hosted insert simply carries no slot condition (and so
- * binds no free plan id).
+ * binds no free plan id). The seat condition is inert there for the same
+ * reason: `unlimited` is a NULL limit.
  */
 export async function acceptInvite(
   db: InviteStoreD1,
@@ -457,8 +499,21 @@ export async function acceptInvite(
     return { kind: "expired" };
   }
 
-  // `saas` keeps the guard's bytes exactly; self-hosted carries no condition.
-  const freeSlotCondition = mode === "saas" ? `\n            AND ${ACCEPT_FREE_SLOT_GUARD_SQL}` : "";
+  // Conditions append in the order their parameters are bound: the free-slot
+  // guard binds `?4` (saas only), the seat guard binds `?5` (numeric limit
+  // only). Both are OMITTED, never bound as NULL, when inert.
+  const limit = (await resolveWorkspacePlan(db, invite.workspace_id, mode)).includedMembers;
+  const bindings: unknown[] = [now, login, inviteId];
+  const conditions: string[] = [];
+  if (mode === "saas") {
+    conditions.push(ACCEPT_FREE_SLOT_GUARD_SQL);
+    bindings.push(FREE_PLAN_ID);
+  }
+  if (limit !== null) {
+    conditions.push(ACCEPT_SEAT_GUARD_SQL);
+    bindings.push(limit);
+  }
+  const guard = conditions.map((condition) => `\n            AND ${condition}`).join("");
   await db.batch([
     db.prepare(FLIP_LAPSED_SQL).bind(invite.workspace_id, now),
     db
@@ -467,10 +522,10 @@ export async function acceptInvite(
          SELECT i.workspace_id, u.id, i.role, ?1
            FROM workspace_invites i
            JOIN users u ON u.github_login = ?2 COLLATE NOCASE
-          WHERE i.id = ?3 AND i.status = 'pending' AND i.expires_at > ?1${freeSlotCondition}
+          WHERE i.id = ?3 AND i.status = 'pending' AND i.expires_at > ?1${guard}
          ON CONFLICT DO NOTHING`,
       )
-      .bind(now, login, inviteId, ...(mode === "saas" ? [FREE_PLAN_ID] : [])),
+      .bind(...bindings),
     db
       .prepare(
         `UPDATE workspace_invites SET status = 'accepted', accepted_at = ?1
@@ -496,10 +551,29 @@ export async function acceptInvite(
   if (after === null || after.status === "revoked" || after.status === "expired") {
     return { kind: "gone" };
   }
-  // Still pending with no membership written: the insert's free-slot guard
-  // refused it. Statement (3) only consumes the invite for an admitted login,
-  // so the invite stays pending.
+  // Still pending with no membership written: a guard inside the insert
+  // refused, and statement (3) only consumes the invite for an admitted login,
+  // so the invite stays pending either way.
+  //
+  // Which guard? The re-read is needed only because both refusals leave the
+  // same state on a free target, where both conditions are present. A taken
+  // seat answers first: it is the blocker an operator cannot clear by freeing
+  // the invitee's own slot. The count is the guard's own predicate re-read, so
+  // it can only disagree under a concurrent membership write — where both
+  // answers are true and the refusal (and its zero writes) is identical.
+  if (limit !== null && (await memberCountOf(db, invite.workspace_id)) >= limit) {
+    return { kind: "member_cap", limit };
+  }
   throw new FreeWorkspaceSlotError(INVITE_FREE_SLOT_REFUSAL);
+}
+
+/** The target workspace's member rows — the count the acceptance guard reads. */
+async function memberCountOf(db: InviteStoreD1, workspaceId: string): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = ?`)
+    .bind(workspaceId)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
 }
 
 /** The login's role in one workspace, or null when they are not a member. */
