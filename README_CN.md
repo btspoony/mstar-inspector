@@ -4,7 +4,7 @@
 
 # [Morning Star Inspector](https://github.com/btspoony/mstar-inspector)
 
- 用于自动化 PR 审查的自托管 GitHub App
+用于自动化 PR 审查的自托管 GitHub App
 
 [English](README.md) / 中文
 
@@ -21,33 +21,40 @@ findings 落入 D1 供后续分析。
 - **一份部署，多 App 共用** —— 通过 dashboard 注册任意数量的 GitHub App；每个 App 拥有独立的 slug、加密凭据、BYOK provider keys 和模型链
 - **隔离执行** —— 每次审查运行在一次性 Cloudflare Sandbox 容器中（clone → review → 销毁），镜像内零密钥
 - **结构化结果** —— 审查产出 `mstar.review/v1` envelope（verdict + 分级 findings）持久化到 D1，为后续去重、复现统计和健康分析提供数据层
+- **findings 生命周期跨轮保留** —— 未解决的 findings 跨轮存续：每轮将它们对照当前代码与讨论重新验证，结果呈现在同一条总体评论中，且只自动 resolve 那些 Inspector 能证明属于自己、且被积极修复的 review thread（finding 的 *addressed* 处置从不等同于 *resolved* 的 GitHub thread）
 - **按 App 的触发模式** —— 每个 App 在 settings 页选择审查何时自动启动：`open`（仅首次打开）、`every_push`（默认——打开、push、重新打开）或 `manual`（从不自动审查）；任何模式下，PR 作者或仓库所有者在 PR 评论中 @提及 App 的 bot（`@your-app-slug[bot]`）即可（重新）启动一次审查
-- **设计上 fail-closed** —— 暂停的 App 不再启动新的审查：每个 App 必须自带 provider key 与模型链，配置缺失的 App 审查会大声失败，绝不动用别人的凭据
+- **设计上 fail-closed** —— 暂停的 App 不再启动新的审查（包括其模型运行）、发布与行内评论创建；只有有界的[恢复例外](docs/deploy.md#lifecycle-recovery-7111)可以完成已授权的工作，且仅限仍处于活跃状态的 App。每个 App 必须自带 provider key 与模型链：配置缺失的 App 审查会大声失败，绝不动用别人的凭据
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    GH["GitHub webhook"] --> WH["POST /webhook/:appSlug<br/>验签 + 分类"]
+    D["Dashboard SPA<br/>注册 App · BYOK keys · 模型链"] -->|"per-App 加密凭据"| DB[("D1 存储")]
+    GH["GitHub webhook<br/>POST /webhook/:appSlug"] --> WH["用该 App 的 secret<br/>验签"]
     WH --> Q[("Queue")]
     Q --> CO["Consumer"]
-    CO --> SB["Sandbox<br/>clone + agent 审查"]
-    SB --> CM["Issues 评论 upsert"]
-    SB --> DB[("D1 存储")]
+    CO --> SB["Sandbox 容器<br/>clone → 多席位 agent 审查"]
+    SB --> CM["单条 upsert PR 评论<br/>+ advisory Check Run"]
+    SB --> DB
 ```
+
+一份部署服务任意数量的 GitHub App。每个 App 通过 dashboard 注册，自带加密凭据、provider key（BYOK）
+与模型链，存放在 D1——部署层不存在共享的审查凭据。入站 webhook 按 App slug 路由，审查在一次性
+Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.review/v1`）落入 D1，供去重、复现统计与健康
+分析使用。
+
+部署形态只有一个开关：`DEPLOYMENT_MODE`——`self-hosted`（`wrangler.jsonc` 顶层默认值，用于你自己的
+副本）或 `saas`（本仓库自己的多租户服务）。代码层没有默认值：未设置或拼错会在启动时明确失败。你几乎
+一定需要 `self-hosted`；另一种形态的说明面向运营方，见
+[`docs/deploy.md` § Deployment mode](docs/deploy.md#deployment-mode-deployment_mode)。
 
 ## 快速开始
 
-两条部署路径——按你的身份选择：
+把某个定版 release 部署到你自己的 Cloudflare 账号：
 
-- **自托管自己的副本**（fork / 私有部署）→ **路径 A**：把某个定版 release 部署到你自己的 Cloudflare 账号。
-- **参与本仓库开发** → **路径 B**：合并到 `main` 自动部署 staging。
-
-> 前置（两条路径相同）：[Cloudflare](https://developers.cloudflare.com/workers/) 账号（Workers + D1 + Queues + Containers）、GitHub 账号、本地
-> [Bun](https://bun.sh) ≥ 1.3.14。完整 runbook——含 Cloudflare 资源初始化与 D1 迁移——见
-> [`docs/deploy.md`](docs/deploy.md)。
-
-### 路径 A —— 自托管定版副本
+> 前置：[Cloudflare](https://developers.cloudflare.com/workers/) 账号（Workers + D1 + Queues + Containers）、GitHub 账号、本地
+> [Bun](https://bun.sh) ≥ 1.4.0。完整 runbook——Cloudflare 资源初始化、D1 迁移、secrets 清单、go-live
+> checklist——见 [`docs/deploy.md`](docs/deploy.md)。
 
 1. **锁定定版**——发布的版本以 tag 形式提供（见 [Releases 页面](https://github.com/btspoony/mstar-inspector/releases)）；部署某个 tag 即部署该份源码，sandbox 容器镜像也会在该 checkout 上于部署时重新构建：
 
@@ -85,55 +92,25 @@ flowchart LR
 
    ```bash
    bun run build:spa        # 必需——SPA 产物不进 git
-   wrangler deploy   # 同时构建/推送 sandbox 容器镜像
+   wrangler deploy          # 同时构建/推送 sandbox 容器镜像
    curl https://<your-worker>/healthz   # {"ok":true,"version":"vX.Y.Z"}
    ```
 
-   `wrangler deploy` 从顶层 `vars` 取 `DEPLOYMENT_MODE`（`self-hosted`）——对单实例自托管副本是正确取值。要部署多租户副本，请显式传 `--var "DEPLOYMENT_MODE:saas"`；该变量没有默认值，未设置或拼错会在启动时明确失败。
+   `wrangler deploy` 从 `wrangler.jsonc` 顶层 `vars` 取 `DEPLOYMENT_MODE`（`self-hosted`）——对自托管副本
+   是正确取值。部署形态开关见[架构](#架构)一节。
 
-   无需任何登录名名单：登录对任意 GitHub 账号开放，第一个进来的人创建工作区并成为其所有者——见 [`docs/deploy.md`](docs/deploy.md) § 6.
+   无需任何登录名单：登录对任意 GitHub 账号开放，第一个进来的人创建工作区并成为其所有者——见
+   [`docs/deploy.md`](docs/deploy.md) § 6。
 
-6. 继续**下方第 3 步**（登录并注册你的 GitHub App）。
-
-### 路径 B —— 本仓库的 staging（维护者）
-
-1. **部署** —— 合并到 `main` 即通过 [Deploy workflow](.github/workflows/deploy.yml) 自动部署（secrets 注入 → D1 迁移 → `wrangler deploy` → 冒烟 → digest 记录）。手工/本地部署：
-
-   ```bash
-   bun install
-   bun run build:spa
-   wrangler deploy --var "DEPLOYMENT_MODE:saas"
-   ```
-
-   `--var` 在这里不能省：workflow 每次部署都传 `saas`，而裸 `wrangler deploy` 会取 `wrangler.jsonc` 顶层的 `self-hosted`——对 staging 是错误的形态。
-
-   无需 dashboard 访问名单：登录对任意 GitHub 账号开放，新账号可自行创建工作区（成为其所有者）或接受邀请——见 [`docs/deploy.md`](docs/deploy.md) § 6.
-
-2. **设置 dashboard 密钥**（四个；审查凭据不放在 Worker 层）—— 在 **staging environment**（Settings → Environments → `staging` → Secrets）配置，Deploy workflow 在每次部署时注入 Worker。这套 staging-environment 映射只属于本仓库的自动化——自托管副本（路径 A）直接在 Worker 上设置同样的四个值：
-
-   ```bash
-   # 本地生成值，然后添加到 staging environment：
-   openssl rand -base64 32    # DASHBOARD_ENCRYPTION_KEY —— 加密 D1 中的 per-App 凭据
-   openssl rand -base64 32    # DASHBOARD_SESSION_SECRET —— 会话 cookie HMAC key
-   # OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET —— 一个 GitHub OAuth App，
-   # 回调地址为 {origin}/dashboard/oauth/callback
-   # （GitHub 保留 GITHUB_ 前缀给自身，secret 名不得以它开头，故 GitHub 侧
-   #   名去掉前缀；Deploy workflow 的 bulk 映射仍以 GITHUB_OAUTH_CLIENT_ID /
-   #   GITHUB_OAUTH_CLIENT_SECRET 写入 Worker。
-   #   OAUTH_CLIENT_ID 是 variable —— client id 非敏感；OAUTH_CLIENT_SECRET 是 secret）
-   ```
-
-### 然后（两条路径相同）
-
-3. **登录并注册 GitHub App** —— 访问 `https://<your-worker>/dashboard`，用 GitHub 登录，走 **Register App**
+6. **登录并注册 GitHub App** —— 访问 `https://<your-worker>/dashboard`，用 GitHub 登录，走 **Register App**
    manifest 流程。它会在你的账号上创建 GitHub App（per-App webhook URL 形如
    `{origin}/webhook/<slug>`），把 PEM 与 webhook secret 加密存入 D1，并展示需要你在 GitHub
    侧设置的准确 webhook URL。
 
-4. **配置 App** —— 在该 App 的 dashboard Settings 页添加审查模型所需的 provider API key（BYOK，加密落
+7. **配置 App** —— 在该 App 的 dashboard Settings 页添加审查模型所需的 provider API key（BYOK，加密落
    D1）和模型链。缺这些的 App 审查会 fail-closed——见 [Per-App 配置](#per-app-配置)。
 
-5. **开启审查并提交 PR** —— 审查默认按 App 开启（dashboard 的 Pause/Resume 是唯一的审查开关；不存在部署级总闸），在安装了该 App 的仓库里开一个（或更新一个）PR：
+8. **开启审查并提交 PR** —— 审查默认按 App 开启（dashboard 的 Pause/Resume 是唯一的审查开关；不存在部署级总闸），在安装了该 App 的仓库里开一个（或更新一个）PR：
 
    审查在 sandbox 容器内运行，结果以单条评论出现在 PR 上（upsert——force-push 不会产生评论刷屏）。
 
@@ -142,7 +119,40 @@ flowchart LR
 - **Per-App 路由**：GitHub 把 webhook 送到 `POST /webhook/:appSlug`。Worker 解析 slug、用该 App
   解密出的 secret 验签，入队一条带 App 身份的审查任务。审查没有其他入口。
 - **Queue → Sandbox**：Cloudflare Queue consumer 在一次性 Sandbox 容器里 clone PR 并运行多席位 agent 会话——见 [Agent 运行时](#agent-运行时)。
-- **结果**：PR 上单条 upsert 评论（永不重复）+ 持久化到 D1 的 `mstar.review/v1` envelope（findings、所用模型、指纹）——这是后续复现统计与健康分析的数据层。
+- **用途受限的凭据**：Worker 从单一认证点铸造两份 installation grant，各自限定在一个仓库。Sandbox
+  总是拿到 `sandbox-read` grant（`contents: read`、`metadata: read`、`pull_requests: read`——最后一项
+  覆盖 `gh pr diff` 步骤，该步骤正是以此 token 运行），且 Worker 在使用前会校验*返回*的 capability，
+  越权或未限定范围的 token 会 fail-closed，永远到不了审查容器。GitHub 写操作走独立的 `review-write`
+  grant。
+- **权限**：App manifest 请求 `contents: write`、`metadata: read`、`pull_requests: write`、
+  `issues: write`、`checks: write`。`contents: write` 只为一个 Worker 专属用途存在——resolve 已被积极
+  验证的、属于 Inspector 自己的 review thread——不授予任何模型、push、merge 或代码写入权限。
+  `checks: write` 仅为 advisory review Check Run 存在。
+- **Advisory Check runs**：符合条件的审查会在被审 commit 上先出现一个进行中的 Check Run
+  （名为 `mstar-inspector review`），随后终态化为 `success`、`neutral` 或 `failure`。`success` 的含义是
+  审查**已发布**——它**绝不是**批准、merge 门禁或 `REQUEST_CHANGES` 等价物，App 也从不请求这些。
+  结论由持久化的发布证据决定，而非代码路径：确认正常发布 → 无论 engine verdict 一律 `success`；确认
+  降级发布 → `neutral`；执行失败或发布未确认 → `failure`。Check 失败从不阻塞或拖延审查本身。summary
+  会说明属于哪种情况，且不设置 `details_url`。分支保护始终**由用户控制**——本 App 不配置、不要求、
+  也不推荐任何 required status check。
+- **同名 Check 可能出现两次运行**：本地 attempt fencing 不是外部 exactly-once（RL-12）。若一次创建
+  attempt 未被确认——响应丢失，或 refusal 在请求发出后才落地——该 attempt 由 recovery **只读**结算：
+  采纳并终态化，绝不创建第二个 run。`external_id` 是关联字段，不是服务端幂等键，因此**同一 commit
+  的后一次 attempt**（带新 `external_id` 的新 generation）会创建自己的 run 而不是采纳前一次。GitHub
+  上会看到该 commit 的**两个 `mstar-inspector review` 运行**，**最新的适用 attempt** 才是权威——它携带
+  最新的持久化证据。重复运行不是重复审查，也绝不是重复发布的理由。
+- **addressed 不是 resolved**：finding 由类型化代码证据判定为 `addressed`；GitHub thread 只有在 Worker
+  证明 thread 属于自己（不透明的 Inspector 关联 + App 自身的认证身份）、复核了被审 HEAD 与当时检查的
+  确切对话、并从 GitHub 收到确认的 `isResolved` 之后才 `resolved`。失败、歧义与过期上下文会让该行
+  保持 open 且可见，而不是宣称已 resolve。
+- **崩溃安全的发布**：完整发布 payload 在任何 GitHub 变更之前先私密地暂存在 D1。若崩溃或 API 故障
+  打断了发送或随后的数据库落库，15 分钟 cron reconciler 会从该 journal 完成发布——或重试一次已授权
+  的 thread resolve——不重跑已付费的审查，带界重试并有可见的终态放弃状态。契约：
+  [`.mstar/specs/review-lifecycle.md`](.mstar/specs/review-lifecycle.md) §7。
+
+> 上述生命周期、凭据与恢复行为由实现的范围化行为测试与静态检查覆盖。线上 GitHub / GitHub App 行为
+> ——尤其是返回的 installation grant 与远端 thread resolution——**未在本仓库验证**：未授权任何线上
+> 范围化运行（spec §7.13）。
 
 ## Agent 运行时
 
@@ -169,12 +179,11 @@ flowchart LR
 ## 运维
 
 - **审查控制**：per-App `review_enabled`（dashboard 的 Pause/Resume）是唯一的审查开关——不存在部署级总闸。暂停的 App 仍返回 2xx 且零入队，webhook 保持健康。
-- **部署已自动化（本仓库）**：合并到 `main` 即运行 [Deploy workflow](.github/workflows/deploy.yml) —— secrets 注入、D1 迁移、
-  `wrangler deploy`、部署后冒烟与 image digest 记录。失败即标红停止（无自动回滚）；失败语义与手工回滚路径见
-  [`docs/deploy.md`](docs/deploy.md)。自托管自己的副本？你手动部署（或自建流水线）——见[路径 A](#路径-a--自托管定版副本)。
-- **发版已定版化**：发版通过合并 `release vX.Y.Z` PR 完成，自动打 tag 并发布带双语 changelog 与部署证据的 GitHub Release——见
-  [`docs/release.md`](docs/release.md) 与 [Releases 页面](https://github.com/btspoony/mstar-inspector/releases)。
-- **Secrets 清单、部署步骤、回滚、完整 Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md)。
+- **失败语义、回滚、secrets 清单、完整 Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md)。
+- **切定版发版** → [`docs/release.md`](docs/release.md) 与 [Releases 页面](https://github.com/btspoony/mstar-inspector/releases)。
+
+> 本仓库另有自己的 staging 与 production 实例，跑在自动部署与发版流水线之后。那套机制面向运营方，
+> 记录在 `docs/deploy.md` / `docs/release.md`；它不属于自托管部署的一部分。
 
 ## 本地开发
 
@@ -185,15 +194,16 @@ bun test
 ```
 
 - 本地 `wrangler dev` 的 secrets 放 `.dev.vars`（gitignored）——见 `.env.example`。
-- 审查 runner CLI（镜像内入口）：`bun run review --level <quick|default> --input <json-file>` —— 在 stdout 打印 `mstar.review/v1` envelope JSON。
-- Sandbox 冒烟：`bun run scripts/sandbox-smoke.ts`（需 `SMOKE_APP_ID` / `SMOKE_PRIVATE_KEY`；见文件头）。
+- 审查 runner CLI（镜像内入口）：`bun run review --level <quick|default|deep> --input <json-file>` —— 在 stdout 打印 `mstar.review/v1` envelope JSON。
+- Sandbox 冒烟：`bun run scripts/sandbox-smoke.ts`（需 `SMOKE_APP_ID` / `SMOKE_PRIVATE_KEY`；见文件头）——它铸造与 Worker 相同的仓库限定**只读** `sandbox-read` grant，返回 capability 越界即 fail-closed；完整 runbook 见 [`docs/deploy.md`](docs/deploy.md#sandbox-smoke)。
 
 ## 文档
 
 | 文档 | 内容 |
 |------|------|
-| [`docs/deploy.md`](docs/deploy.md) | 完整部署 runbook：Cloudflare 资源、D1 迁移、secrets 清单、部署步骤、Multi-App go-live checklist、回滚 |
+| [`docs/deploy.md`](docs/deploy.md) | 完整部署 runbook：Cloudflare 资源、D1 迁移、secrets 清单、手工参考步骤、Multi-App go-live checklist、回滚——以及本仓库自己的运营文档（staging/production 自动部署、`DEPLOYMENT_MODE`） |
 | [`docs/release.md`](docs/release.md) | 发版文档：切定版（片段 changelog → `release vX` PR → tag + GitHub Release）、首切 live 验收 checklist、失败与恢复路径 |
+| [`.mstar/specs/`](.mstar/specs/README.md) | 实现背后的行为 spec（如 [`review-lifecycle.md`](.mstar/specs/review-lifecycle.md)）——测试与文档引用的契约 |
 
 ## 许可
 
