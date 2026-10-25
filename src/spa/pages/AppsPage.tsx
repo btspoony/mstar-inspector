@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { t } from "../../i18n";
 import { Button } from "@/components/ui/button";
+import { StatusBadge as StatusPill } from "@/components/StatusBadge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
@@ -254,6 +255,11 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
   );
 }
 
+/**
+ * App status → the shared pill (components/StatusBadge). Only the app's own
+ * status semantics live here: which copy names the state and which tone
+ * carries it, both derived through the shared `isPaused` predicate.
+ */
 function StatusBadge({
   locale,
   status,
@@ -264,21 +270,14 @@ function StatusBadge({
   reviewEnabled: number | boolean;
 }) {
   const paused = isPaused({ status, review_enabled: reviewEnabled });
-  const kind = status === "disabled" ? "warn" : paused ? "warn" : "success";
   const label =
     status === "disabled"
       ? t(locale, "apps.status.disabled")
       : paused
         ? t(locale, "apps.status.paused")
         : t(locale, "apps.status.active");
-  const tone =
-    kind === "success"
-      ? "bg-(--badge-success-bg) text-(--badge-success-fg)"
-      : "bg-(--badge-warn-bg) text-(--badge-warn-fg)";
   return (
-    <span className={`inline-flex h-(--badge-height) items-center rounded-(--badge-radius) px-2 text-xs font-medium ${tone}`}>
-      {label}
-    </span>
+    <StatusPill tone={status === "disabled" || paused ? "warning" : "success"}>{label}</StatusPill>
   );
 }
 

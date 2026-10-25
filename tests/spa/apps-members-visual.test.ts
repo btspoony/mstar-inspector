@@ -27,6 +27,9 @@ const spaRoot = join(import.meta.dir, "../../src/spa");
 const appsPage = readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8");
 const membersPage = readFileSync(join(spaRoot, "pages/MembersPage.tsx"), "utf8");
 const tablePrimitive = readFileSync(join(spaRoot, "components/ui/table.tsx"), "utf8");
+// The pill moved out of the page into the shared primitive (plan 114 T1):
+// its shape/tone tokens are asserted where they now live.
+const statusBadgePrimitive = readFileSync(join(spaRoot, "components/StatusBadge.tsx"), "utf8");
 
 describe("AppsPage table reinforcement (AD-581)", () => {
   test("identity cell is the brand surface: slug primary line + AppID meta line", () => {
@@ -80,14 +83,14 @@ describe("AppsPage table reinforcement (AD-581)", () => {
 
   test("StatusBadge rides the v0.3 pill component tokens with semantic tones", () => {
     // Shape comes from the --badge-* component tokens (AD-574 pill exception).
-    expect(appsPage).toContain("h-(--badge-height)");
-    expect(appsPage).toContain("rounded-(--badge-radius)");
+    expect(statusBadgePrimitive).toContain("h-(--badge-height)");
+    expect(statusBadgePrimitive).toContain("rounded-(--badge-radius)");
     // Tones stay on the semantic success/warn badge vars (constraint #5).
-    expect(appsPage).toContain("bg-(--badge-success-bg)");
-    expect(appsPage).toContain("text-(--badge-success-fg)");
-    expect(appsPage).toContain("bg-(--badge-warn-bg)");
-    expect(appsPage).toContain("text-(--badge-warn-fg)");
-    // No hard-coded pill geometry left behind.
+    expect(statusBadgePrimitive).toContain("bg-(--badge-success-bg)");
+    expect(statusBadgePrimitive).toContain("text-(--badge-success-fg)");
+    expect(statusBadgePrimitive).toContain("bg-(--badge-warn-bg)");
+    expect(statusBadgePrimitive).toContain("text-(--badge-warn-fg)");
+    // No hard-coded pill geometry left behind in the page.
     expect(appsPage).not.toContain("rounded-full");
     expect(appsPage).not.toMatch(/\bh-5\b/);
   });
