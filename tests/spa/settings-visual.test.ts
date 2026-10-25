@@ -26,6 +26,7 @@ const spaRoot = join(import.meta.dir, "../../src/spa");
 const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "utf8");
 const settingsPage = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
+const pageHeader = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
 describe("SectionCard tier idiom (AD-591)", () => {
@@ -126,13 +127,16 @@ describe("settings section rhythm (AD-591)", () => {
 });
 
 describe("settings heading idiom (QC convergence)", () => {
-  test("the slug identity header rides heading-24 on the detail shell; no raw size utilities anywhere", () => {
-    // SUPERSEDE (App detail IA): the page h1 moved onto the AppDetailPage
-    // shell (identity header, heading-24, serving both tabs); the settings
-    // tab keeps the card-title heading-16 step only.
-    expect(detailPage).toContain("text-(length:--typo-heading-24-size)");
-    expect(detailPage).toContain("leading-(--typo-heading-24-line)");
-    expect(detailPage).toContain("tracking-(--typo-heading-24-tracking)");
+  test("the slug identity header rides PageHeader's heading-24 face on the detail shell; no raw size utilities anywhere", () => {
+    // SUPERSEDE (App detail IA): the identity header moved onto
+    // the AppDetailPage shell with the heading-24 face; that face now lives in
+    // the ONE PageHeader spelling and the shell composes it. The
+    // settings tab keeps the card-title heading-16 step only.
+    expect(pageHeader).toContain("text-(length:--typo-heading-24-size)");
+    expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
+    expect(pageHeader).toContain("tracking-(--typo-heading-24-tracking)");
+    expect(detailPage).toContain("<PageHeader");
+    expect(detailPage).toContain("title={slug}");
     // No raw Tailwind size utilities remain on either face.
     expect(detailPage).not.toContain("text-2xl");
     expect(detailPage).not.toContain("text-xl");
@@ -327,9 +331,10 @@ describe("chains panel faces (review deferrals)", () => {
       settingsPage.indexOf("function ChainsCard"),
       settingsPage.indexOf("function SeatsCard"),
     );
-    expect(chainsBody).toContain(
-      '<span className="font-semibold text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">{tab.id}</span>',
-    );
+    // The panel title now composes the shared SectionCardTitle
+    // instead of re-spelling the heading-16 utility chain at the site.
+    expect(chainsBody).toContain("<SectionCardTitle>{tab.id}</SectionCardTitle>");
+    expect(chainsBody).not.toContain("text-(length:--typo-heading-16-size)");
     // No bare 16px-inherit title face remains in the panel header.
     expect(chainsBody).not.toContain('<span className="font-medium">{tab.id}</span>');
   });

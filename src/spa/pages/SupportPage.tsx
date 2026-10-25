@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { t } from "../../i18n";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { DataTable, type DataTableColumn } from "@/components/DataTable";
+import { PageHeader } from "@/components/PageHeader";
+import { SectionCard, SectionCardTitle } from "@/components/SectionCard";
+import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { ErrorState } from "../components/state/ErrorState";
@@ -47,23 +49,27 @@ export function SupportPage({ boot }: { boot: SpaBoot }) {
 
   if (state === "loading") return <PageSkeleton locale={locale} kind="table" />;
 
+  const columns: DataTableColumn<SupportWorkspaceView["members"][number]>[] = [
+    {
+      header: t(locale, "support.tableLogin"),
+      cell: (member) => <span className="font-medium">{member.github_login}</span>,
+    },
+    {
+      header: t(locale, "support.tableRole"),
+      cell: (member) => t(locale, `members.role.${member.role}`),
+    },
+  ];
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-1.5">
-        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">
-          {t(locale, "support.heading")}
-        </h1>
-        <p className="text-sm text-muted-foreground">{t(locale, "support.readOnly")}</p>
-      </div>
+      <PageHeader title={t(locale, "support.heading")} description={t(locale, "support.readOnly")} />
       {state === "error" || view === null ? (
         <ErrorState locale={locale} onRetry={() => window.location.reload()} />
       ) : (
         <>
-          <Card className="max-w-lg">
+          <SectionCard tier="primary" className="max-w-lg">
             <CardHeader>
-              <CardTitle className="text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">
-                {view.workspace.name}
-              </CardTitle>
+              <SectionCardTitle>{view.workspace.name}</SectionCardTitle>
               <CardDescription>{view.workspace.slug}</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-1 text-sm">
@@ -75,13 +81,11 @@ export function SupportPage({ boot }: { boot: SpaBoot }) {
                 <span className="text-foreground tabular-nums">{view.workspace.created_at}</span>
               </span>
             </CardContent>
-          </Card>
+          </SectionCard>
           {view.grants.length > 0 ? (
-            <Card className="max-w-lg">
+            <SectionCard tier="secondary" className="max-w-lg">
               <CardHeader>
-                <CardTitle className="text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">
-                  {t(locale, "support.grantsHeading")}
-                </CardTitle>
+                <SectionCardTitle>{t(locale, "support.grantsHeading")}</SectionCardTitle>
               </CardHeader>
               <CardContent className="flex flex-col gap-2 text-sm">
                 {view.grants.map((grant: SupportGrantRow) => (
@@ -94,30 +98,9 @@ export function SupportPage({ boot }: { boot: SpaBoot }) {
                   </span>
                 ))}
               </CardContent>
-            </Card>
+            </SectionCard>
           ) : null}
-          <div className="overflow-hidden rounded-md border">
-            <Table>
-              <TableHeader className="bg-(--background-200)">
-                <TableRow className="hover:bg-inherit">
-                  <TableHead className="text-xs tracking-(--typo-label-12-tracking)">
-                    {t(locale, "support.tableLogin")}
-                  </TableHead>
-                  <TableHead className="text-xs tracking-(--typo-label-12-tracking)">
-                    {t(locale, "support.tableRole")}
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {view.members.map((member) => (
-                  <TableRow key={member.github_login}>
-                    <TableCell className="font-medium">{member.github_login}</TableCell>
-                    <TableCell>{t(locale, `members.role.${member.role}`)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+          <DataTable columns={columns} rows={view.members} rowKey={(member) => member.github_login} />
           <div>
             <Button asChild variant="ghost" size="sm">
               <a href="/dashboard/logout">{t(locale, "nav.logout")}</a>

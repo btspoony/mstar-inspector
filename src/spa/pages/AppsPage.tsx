@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { t } from "../../i18n";
 import { Button } from "@/components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { DataTable, type DataTableColumn } from "@/components/DataTable";
+import { PageHeader } from "@/components/PageHeader";
+import { StatusBadge } from "@/components/StatusBadge";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { EmptyState } from "../components/state/EmptyState";
@@ -10,14 +12,9 @@ import { PageSkeleton } from "../components/state/PageSkeleton";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import { spaClick } from "../spa-click";
-import { isPaused, parseApps, type AppsPayload } from "./data";
+import { appStatusPill, parseApps, type AppsPayload } from "./data";
 import { GitHubMark } from "./LoginPage";
 import { apiBase } from "../workspace-base";
-
-/** DESIGN.md Table: header band on background-200, headers at label-12
-    (12px; the primitive's font-medium supplies the 500 weight). */
-const TABLE_HEADER = "bg-(--background-200)";
-const TABLE_HEAD_LABEL = "text-xs tracking-(--typo-label-12-tracking)";
 
 /**
  * Create eligibility for the workspace the PATH addresses, recomputed per
@@ -121,14 +118,9 @@ export function AppsView({
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">
-          {t(locale, "apps.heading")}
-        </h1>
-        {/* One create-form instance on the page: while the empty state
-            carries the action, the header yields its slot to it. */}
-        {!appsEmpty ? createAction : null}
-      </div>
+      {/* One create-form instance on the page: while the empty state
+          carries the action, the header yields its slot to it. */}
+      <PageHeader title={t(locale, "apps.heading")} actions={appsEmpty ? null : createAction} />
       {state === "error" ? <ErrorState locale={locale} onRetry={onRetry} /> : null}
       {state === "ok" && payload ? (
         appsEmpty ? (
@@ -181,105 +173,84 @@ function CreateAppButton({
 
 /** One App row — exported so its links are asserted on rendered markup. */
 export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: AppsPayload }) {
+  const hrefOf = (slug: string): string => `${apiBase()}/apps/${slug}`;
+
+  const columns: DataTableColumn<AppsPayload["apps"][number]>[] = [
+    {
+      header: t(locale, "apps.tableName"),
+      // AD-581 identity cell: the App's brand surface. The list payload
+      // carries no GitHub profile fields, so the block is slug (primary line)
+      // + App id (meta line) — no avatar.
+      cell: (app) => (
+        <div className="flex flex-col gap-0.5">
+          <a
+            className="text-sm font-semibold text-foreground no-underline hover:underline"
+            href={hrefOf(app.slug)}
+            aria-label={t(locale, "apps.openAria", { slug: app.slug })}
+            onClick={(event) => spaClick(hrefOf(app.slug), event)}
+          >
+            {app.slug}
+          </a>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {t(locale, "apps.appId", { id: app.github_app_id })}
+          </span>
+        </div>
+      ),
+    },
+    {
+      header: t(locale, "apps.tableStatus"),
+      cell: (app) => {
+        const pill = appStatusPill(locale, app);
+        return <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>;
+      },
+    },
+    {
+      header: t(locale, "apps.tableHealth"),
+      cell: (app) => {
+        const latest = app.health.latest;
+        return (
+          <span className="text-muted-foreground tabular-nums">
+            {latest
+              ? t(locale, "apps.health.delivery", { time: formatRelativeTime(latest.created_at, locale) })
+              : t(locale, "apps.health.deliveryNever")}
+            {latest ? ` · ${deliveryOutcomeLabel(latest.outcome, locale)}` : ""}
+            {app.health.rejected24h > 0
+              ? ` · ${t(locale, "apps.health.rejected24h", { count: app.health.rejected24h })}`
+              : ""}
+          </span>
+        );
+      },
+    },
+    {
+      header: t(locale, "apps.tableCreator"),
+      cell: (app) => <span className="text-muted-foreground">{app.created_by}</span>,
+    },
+    {
+      header: t(locale, "apps.detail"),
+      align: "right",
+      // Visible destination: the row (and this link) open the App's detail
+      // page — one workflow from list to detail.
+      cell: (app) => (
+        <a
+          className="text-primary underline-offset-4 hover:underline"
+          href={hrefOf(app.slug)}
+          onClick={(event) => spaClick(hrefOf(app.slug), event)}
+        >
+          {t(locale, "apps.detail")}
+        </a>
+      ),
+    },
+  ];
+
   return (
-    <div className="overflow-hidden rounded-md border">
-      <Table>
-        <TableHeader className={TABLE_HEADER}>
-          <TableRow className="hover:bg-inherit">
-            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "apps.tableName")}</TableHead>
-            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "apps.tableStatus")}</TableHead>
-            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "apps.tableHealth")}</TableHead>
-            <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "apps.tableCreator")}</TableHead>
-            <TableHead className={`text-right ${TABLE_HEAD_LABEL}`}>{t(locale, "apps.detail")}</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {payload.apps.map((app) => {
-            const href = `${apiBase()}/apps/${app.slug}`;
-            const latest = app.health.latest;
-            return (
-              <TableRow
-                key={app.slug}
-                className="cursor-pointer"
-                onClick={(event) => spaClick(href, event)}
-              >
-                {/* AD-581 identity cell: the App's brand surface. The list
-                    payload carries no GitHub profile fields, so the block is
-                    slug (primary line) + App id (meta line) — no avatar. */}
-                <TableCell>
-                  <div className="flex flex-col gap-0.5">
-                    <a
-                      className="text-sm font-semibold text-foreground no-underline hover:underline"
-                      href={href}
-                      aria-label={t(locale, "apps.openAria", { slug: app.slug })}
-                      onClick={(event) => spaClick(href, event)}
-                    >
-                      {app.slug}
-                    </a>
-                    <span className="text-xs text-muted-foreground tabular-nums">
-                      {t(locale, "apps.appId", { id: app.github_app_id })}
-                    </span>
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <StatusBadge locale={locale} status={app.status} reviewEnabled={app.review_enabled} />
-                </TableCell>
-                <TableCell className="text-muted-foreground tabular-nums">
-                  {latest
-                    ? t(locale, "apps.health.delivery", { time: formatRelativeTime(latest.created_at, locale) })
-                    : t(locale, "apps.health.deliveryNever")}
-                  {latest ? ` · ${deliveryOutcomeLabel(latest.outcome, locale)}` : ""}
-                  {app.health.rejected24h > 0
-                    ? ` · ${t(locale, "apps.health.rejected24h", { count: app.health.rejected24h })}`
-                    : ""}
-                </TableCell>
-                <TableCell className="text-muted-foreground">{app.created_by}</TableCell>
-                <TableCell className="text-right">
-                  {/* Visible destination: the row (and this link) open the
-                      App's detail page — one workflow from list to detail. */}
-                  <a
-                    className="text-primary underline-offset-4 hover:underline"
-                    href={href}
-                    onClick={(event) => spaClick(href, event)}
-                  >
-                    {t(locale, "apps.detail")}
-                  </a>
-                </TableCell>
-              </TableRow>
-            );
-          })}
-        </TableBody>
-      </Table>
-    </div>
+    <DataTable
+      columns={columns}
+      rows={payload.apps}
+      rowKey={(app) => app.slug}
+      rowProps={(app) => ({
+        className: "cursor-pointer",
+        onClick: (event) => spaClick(hrefOf(app.slug), event),
+      })}
+    />
   );
 }
-
-function StatusBadge({
-  locale,
-  status,
-  reviewEnabled,
-}: {
-  locale: SpaBoot["locale"];
-  status: string;
-  reviewEnabled: number | boolean;
-}) {
-  const paused = isPaused({ status, review_enabled: reviewEnabled });
-  const kind = status === "disabled" ? "warn" : paused ? "warn" : "success";
-  const label =
-    status === "disabled"
-      ? t(locale, "apps.status.disabled")
-      : paused
-        ? t(locale, "apps.status.paused")
-        : t(locale, "apps.status.active");
-  const tone =
-    kind === "success"
-      ? "bg-(--badge-success-bg) text-(--badge-success-fg)"
-      : "bg-(--badge-warn-bg) text-(--badge-warn-fg)";
-  return (
-    <span className={`inline-flex h-(--badge-height) items-center rounded-(--badge-radius) px-2 text-xs font-medium ${tone}`}>
-      {label}
-    </span>
-  );
-}
-
-export { StatusBadge };

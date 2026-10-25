@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
-import { StatusBadge } from "./AppsPage";
+import { PageHeader } from "@/components/PageHeader";
+import { StatusBadge } from "@/components/StatusBadge";
 import { SettingsView } from "./SettingsPage";
 import { AppInsightsTab } from "./AppInsightsTab";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -18,6 +19,7 @@ import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import {
   appDetailSearchQuery,
+  appStatusPill,
   parseAppDetailSearch,
   parseModels,
   parseSettings,
@@ -25,6 +27,14 @@ import {
   type ModelOptionGroup,
   type SettingsPayload,
 } from "./data";
+
+/**
+ * The page-level line-tab trigger face (DESIGN.md ### Tabs) — every trigger on
+ * the shell bar spells it once. It stays at this consumption site by contract:
+ * `SectionCardTitle` is a card-title element, not a tab trigger.
+ */
+const PAGE_TAB_TRIGGER_CLASS =
+  "flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking) group-data-[orientation=horizontal]/tabs:after:bottom-[-2px]";
 
 /**
  * Page wayfinding link back to the Apps list. The href is the page's own API
@@ -328,6 +338,7 @@ export function AppDetailView({
   // A stale `?tab=insights` URL after a demotion resolves to settings —
   // the view never renders an insights face for a non-manager.
   const tab = canManage ? search.tab : "settings";
+  const pill = appStatusPill(locale, payload.app);
 
   function onTabChange(next: string): void {
     if (next !== "settings" && next !== "insights") return;
@@ -337,11 +348,17 @@ export function AppDetailView({
   return (
     <div className="flex flex-col gap-6">
       {/* Identity header — serves both tabs. */}
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">{slug}</h1>
-        <StatusBadge locale={locale} status={payload.app.status} reviewEnabled={payload.app.review_enabled} />
-        <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: payload.app.created_by })}</span>
-      </div>
+      <PageHeader
+        title={slug}
+        actions={
+          <div className="flex flex-wrap items-center gap-3">
+            <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
+            <span className="text-sm text-muted-foreground">
+              {t(locale, "apps.by", { login: payload.app.created_by })}
+            </span>
+          </div>
+        }
+      />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       <Tabs value={tab} onValueChange={onTabChange}>
         {/* Page-level tab face (DESIGN.md ### Tabs, line-tab idiom): the
@@ -356,7 +373,7 @@ export function AppDetailView({
         >
           <TabsTrigger
             value="settings"
-            className="flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking) group-data-[orientation=horizontal]/tabs:after:bottom-[-2px]"
+            className={PAGE_TAB_TRIGGER_CLASS}
           >
             {t(locale, "appDetail.tabSettings")}
           </TabsTrigger>
@@ -365,7 +382,7 @@ export function AppDetailView({
           {canManage ? (
             <TabsTrigger
               value="insights"
-              className="flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking) group-data-[orientation=horizontal]/tabs:after:bottom-[-2px]"
+              className={PAGE_TAB_TRIGGER_CLASS}
             >
               {t(locale, "appDetail.tabInsights")}
             </TabsTrigger>

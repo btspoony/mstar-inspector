@@ -3,7 +3,7 @@
  * Tested without a DOM runner.
  */
 
-import type { DictionaryKey } from "../../i18n";
+import { t, type DictionaryKey, type Locale } from "../../i18n";
 
 export type Role = "admin" | "member";
 
@@ -455,12 +455,33 @@ export function canInviteMembers(role: WorkspaceRole | null): boolean {
  * Paused = active but reviews switched off (one predicate for
  * both faces). The two wire representations of `review_enabled` — raw
  * integer on the apps list face (dashboard/index.ts), boolean on the
- * settings face (`!== 0` coercion) — are normalized here, so AppsPage's
- * StatusBadge and SettingsPage's OpsCard share one derivation.
+ * settings face (`!== 0` coercion) — are normalized here, so the App status
+ * pill and SettingsPage's OpsCard share one derivation.
  */
 export function isPaused(app: { status: string; review_enabled: number | boolean }): boolean {
   const enabled = typeof app.review_enabled === "boolean" ? app.review_enabled : app.review_enabled !== 0;
   return app.status === "active" && !enabled;
+}
+
+/**
+ * The App status pill's copy + tone, derived once for both faces that show it
+ * (the Apps list and the App detail shell). The face itself belongs to
+ * `components/StatusBadge`; only what a status MEANS lives here.
+ */
+export function appStatusPill(
+  locale: Locale,
+  app: { status: string; review_enabled: number | boolean },
+): { label: string; tone: "success" | "warning" } {
+  const paused = isPaused(app);
+  return {
+    label:
+      app.status === "disabled"
+        ? t(locale, "apps.status.disabled")
+        : paused
+          ? t(locale, "apps.status.paused")
+          : t(locale, "apps.status.active"),
+    tone: app.status === "disabled" || paused ? "warning" : "success",
+  };
 }
 
 export function parseInsightsSearch(search: string): InsightsSearch {

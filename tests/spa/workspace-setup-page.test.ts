@@ -34,6 +34,21 @@ describe("workspace creation page", () => {
     expect(source).not.toMatch(/<input[\s>]/);
   });
 
+  test("composes the page header and the shared card surface", () => {
+    // The page-title step and the two-tier card have ONE spelling each, and
+    // both live in the primitives; the invite row is the shared surface
+    // rather than a hand-assembled rounded box.
+    expect(source).toContain("<PageHeader");
+    expect(source).toContain("<SectionCard");
+    expect(source).toContain("<SectionCardTitle");
+    expect(source).not.toContain("text-(length:--typo-heading-24-size)");
+    // The card-title face is SectionCardTitle's, not a per-page chain. (The
+    // invite block's own <h2> stays a section heading: no primitive owns it.)
+    expect(source).not.toContain("CardTitle className=");
+    expect(source).not.toContain("bg-card");
+    expect(source).not.toContain("rounded-lg");
+  });
+
   test("copy is single-sourced through the dictionary in both locales", () => {
     const keys: DictionaryKey[] = [
       "workspace.setupHeading",

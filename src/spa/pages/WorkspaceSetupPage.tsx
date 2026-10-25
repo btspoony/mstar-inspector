@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { t, type DictionaryKey } from "../../i18n";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/components/PageHeader";
+import { SectionCard, SectionCardTitle } from "@/components/SectionCard";
+import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
@@ -115,11 +117,7 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-1.5">
-        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">
-          {t(locale, "workspace.setupHeading")}
-        </h1>
-      </div>
+      <PageHeader title={t(locale, "workspace.setupHeading")} />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       {/* The `self-hosted` first-account line: the boot carries `emptyInstance`
           only for the sign-in that created this instance's first account, so
@@ -138,32 +136,31 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
           <p className="text-sm text-muted-foreground">{t(locale, "workspace.invitesDescription")}</p>
           <ul className="flex flex-col gap-3">
             {boot.pendingInvites.map((invite) => (
-              <li
-                key={invite.inviteId}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card p-4"
-              >
-                <div className="flex flex-col gap-0.5">
-                  <p className="text-sm font-medium">{invite.workspaceRef}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {t(locale, "workspace.inviteMeta", {
-                      role: t(locale, `members.role.${invite.role}`),
-                      expires: formatRelativeTime(invite.expiresAt, locale),
-                    })}
-                  </p>
-                </div>
-                <Button onClick={() => void onAccept(invite)} disabled={acceptingId !== null}>
-                  {t(locale, "workspace.inviteAccept")}
-                </Button>
+              <li key={invite.inviteId}>
+                <SectionCard tier="secondary">
+                  <CardContent className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-col gap-0.5">
+                      <p className="text-sm font-medium">{invite.workspaceRef}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {t(locale, "workspace.inviteMeta", {
+                          role: t(locale, `members.role.${invite.role}`),
+                          expires: formatRelativeTime(invite.expiresAt, locale),
+                        })}
+                      </p>
+                    </div>
+                    <Button onClick={() => void onAccept(invite)} disabled={acceptingId !== null}>
+                      {t(locale, "workspace.inviteAccept")}
+                    </Button>
+                  </CardContent>
+                </SectionCard>
               </li>
             ))}
           </ul>
         </div>
       ) : null}
-      <Card className="max-w-lg">
+      <SectionCard tier="primary" className="max-w-lg">
         <CardHeader>
-          <CardTitle className="text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">
-            {t(locale, "workspace.setupHeading")}
-          </CardTitle>
+          <SectionCardTitle>{t(locale, "workspace.setupHeading")}</SectionCardTitle>
           <CardDescription>{t(locale, "workspace.setupDescription")}</CardDescription>
         </CardHeader>
         <CardContent>
@@ -186,7 +183,7 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
             </Button>
           </form>
         </CardContent>
-      </Card>
+      </SectionCard>
     </div>
   );
 }

@@ -1640,16 +1640,22 @@ describe("section-scoped op feedback", () => {
 });
 
 describe("settings header typography", () => {
-  test("app-slug heading rides the detail shell's heading-24 h1; no off-scale page heading remains (audit UI-45-08)", () => {
+  test("app-slug heading rides the detail shell's PageHeader; no off-scale page heading remains (audit UI-45-08)", () => {
     // SUPERSEDE (App detail IA): the slug heading moved onto the
-    // AppDetailPage shell as the identity header — the page-level h1 at the
-    // heading-24 token step, serving BOTH tabs. The settings tab carries no
-    // page heading of its own anymore.
+    // AppDetailPage shell as the identity header, and its face now lives in
+    // the one PageHeader spelling (heading-24 page title, serving BOTH tabs).
+    // The settings tab carries no page heading of its own anymore.
     const shell = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
+    const pageHeader = readFileSync(join(import.meta.dir, "../../src/spa/components/PageHeader.tsx"), "utf8");
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    expect(shell).toContain(
-      '<h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">{slug}</h1>',
+    expect(pageHeader).toContain(
+      '<h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">',
     );
+    // The shell composes that header with the slug; it no longer spells a
+    // heading of its own.
+    expect(shell).toContain("<PageHeader");
+    expect(shell).toContain("title={slug}");
+    expect(shell).not.toContain("<h1");
     // The off-scale 18px class no longer appears anywhere on either face.
     expect(shell).not.toContain("text-lg");
     expect(source).not.toContain("text-lg");
