@@ -14,6 +14,12 @@ export type SidebarModel = {
   brandHref: string;
   navLabel: string;
   items: ShellNavItem[];
+  /**
+   * Footer entry to the platform console. Present only for a `saas` boot whose
+   * viewer is a platform operator — the Worker combines both conjuncts into
+   * `SpaBoot.isOperator`, so this model never evaluates the allowlist.
+   */
+  operatorLink?: { href: string; label: string };
 };
 
 export type NavbarModel = {
@@ -93,6 +99,11 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
         current: isNavCurrent(href, pathname),
       };
     }),
+    // Footer entry, never a nav item: the console lives outside the SPA route
+    // table, and NAV_ITEMS order stays the workspace IA.
+    ...(boot.isOperator === true
+      ? { operatorLink: { href: "/_internal_admin", label: t(boot.locale, "nav.platformOperations") } }
+      : {}),
   };
 }
 

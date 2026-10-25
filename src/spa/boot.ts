@@ -34,6 +34,14 @@ export type SpaBoot = {
    */
   deploymentMode?: "self-hosted" | "saas";
   /**
+   * `true` = the viewer is a platform operator on a `saas` deployment — the
+   * only shape that mounts `/_internal_admin` (compass D8). Both conjuncts are
+   * resolved server-side (`isPlatformOperator` + the deployment mode), so the
+   * client never evaluates the allowlist. Always present on a served shell;
+   * `false` for an anonymous boot.
+   */
+  isOperator?: boolean;
+  /**
    * Absent or `true` = the caller may run the manifest Create flow. The server
    * sets `false` for a caller who is not owner/admin of the addressed
    * workspace, who would not be able to manage the App the flow creates
@@ -45,15 +53,18 @@ export type SpaBoot = {
   /**
    * `true` = this login may create a workspace now. `saas` allows one free
    * workspace per login, so it is `false` once the login holds a free
-   * membership; `self-hosted` always allows it. A UX mirror only: the creation
-   * route re-checks under the write. Absent = anonymous boot, no answer.
+   * membership; `self-hosted` always allows it. The operator's
+   * `workspace_creation_open` flag closes it for everyone. A UX mirror only:
+   * the creation route re-checks. Absent = anonymous boot, no answer.
    */
   canCreateWorkspace?: boolean;
   /**
    * Why {@link canCreateWorkspace} is `false`, for the disabled item's reason
-   * copy. `null` whenever creation is allowed; absent with the capability.
+   * copy: `flag` when the operator closed creation platform-wide, else
+   * `free_slot`. `null` whenever creation is allowed; absent with the
+   * capability.
    */
-  createWorkspaceBlockedReason?: "free_slot" | null;
+  createWorkspaceBlockedReason?: "free_slot" | "flag" | null;
   /**
    * `true` = this deployment carries more than one live workspace and the
    * current path names none, so no single workspace can be attributed. The

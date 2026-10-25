@@ -1,7 +1,8 @@
-import { LayoutGrid, Users } from "lucide-react";
+import { LayoutGrid, ShieldCheck, Users } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarHeader,
@@ -74,6 +75,22 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
+      {model.operatorLink ? (
+        <SidebarFooter className="border-t border-sidebar-border p-3">
+          <SidebarMenu>
+            <SidebarMenuItem>
+              {/* Full document navigation: the console is not a SPA route
+                  (no spaClick), and its own app re-checks authorization. */}
+              <SidebarMenuButton asChild tooltip={model.operatorLink.label}>
+                <a href={model.operatorLink.href}>
+                  <ShieldCheck />
+                  <span>{model.operatorLink.label}</span>
+                </a>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarFooter>
+      ) : null}
     </Sidebar>
   );
 }

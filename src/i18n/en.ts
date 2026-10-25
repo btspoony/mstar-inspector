@@ -24,6 +24,8 @@ export const en = {
     primary: "Primary navigation",
     apps: "Apps",
     members: "Members",
+    /** Sidebar-footer entry to the platform console (operators on `saas`). */
+    platformOperations: "Platform operations",
     /** Label of the OTHER locale — the toggle target (en shows 中文, zh_CN shows EN). */
     language: "中文",
     /** Theme toggle: icon-only button; state + action live in the aria copy. */
@@ -43,6 +45,11 @@ export const en = {
      */
     newWorkspaceBlockedFreeSlot:
       "You already belong to a free workspace — one per login. Delete it, or ask its owner to remove you, then create another.",
+    /**
+     * Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
+     * "flag"`): the operator closed workspace creation platform-wide.
+     */
+    newWorkspaceBlockedFlag: "Workspace creation is closed on this platform right now.",
   },
   common: {
     pageTitle: "{page} — {brand}",
@@ -75,6 +82,8 @@ export const en = {
       missingCode: "GitHub did not return an authorization code.",
       codeRejected: "GitHub rejected the authorization code.",
       profileFailed: "Could not read your GitHub profile.",
+      /** `signup_open` is off: an unknown login cannot create an account. */
+      signupClosed: "Sign-up is closed on this platform right now.",
     },
     loading: "Loading…",
     loadFailed: "Could not load this page.",

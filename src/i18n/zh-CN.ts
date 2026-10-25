@@ -14,6 +14,8 @@ export const zhCN: Dictionary = {
     primary: "主导航",
     apps: "应用",
     members: "成员",
+    /** 侧栏底部的平台运营入口（仅 saas 上的 operator 可见）。 */
+    platformOperations: "平台运营",
     /** 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
     language: "EN",
     /** 主题切换：仅图标的按钮；状态与动作在 aria 文案中表达。 */
@@ -29,6 +31,8 @@ export const zhCN: Dictionary = {
     /** 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "free_slot"`）。 */
     newWorkspaceBlockedFreeSlot:
       "你已属于一个免费工作区 — 每个账号限一个。请删除它，或请其所有者移除你，然后再创建新的工作区。",
+    /** 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "flag"`）：平台已关闭工作区创建。 */
+    newWorkspaceBlockedFlag: "平台当前已关闭工作区创建。",
   },
   common: {
     pageTitle: "{page} — {brand}",
@@ -58,6 +62,8 @@ export const zhCN: Dictionary = {
       missingCode: "GitHub 未返回授权码。",
       codeRejected: "GitHub 拒绝了授权码。",
       profileFailed: "无法读取你的 GitHub 资料。",
+      /** `signup_open` 关闭：未知账号无法创建账户。 */
+      signupClosed: "平台当前已关闭注册。",
     },
     loading: "加载中…",
     loadFailed: "无法加载此页面。",

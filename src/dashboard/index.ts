@@ -161,6 +161,7 @@ import {
   listActiveSupportGrants,
   listAuditEvents,
 } from "./operator-store";
+import { isFlagEnabled } from "../admin/flags";
 import {
   errorPage,
   forbiddenPage,
@@ -906,8 +907,12 @@ dashboardApp.use("*", async (c, next) => {
   return next();
 });
 
-/** Platform-operator allowlist membership — NOCASE, same parser as every login list. */
-function isPlatformOperator(env: Env, login: string): boolean {
+/**
+ * Platform-operator allowlist membership — NOCASE, same parser as every login
+ * list. The ONE allowlist predicate: the admin gate (`src/admin/gate.ts`)
+ * imports this rather than restating it.
+ */
+export function isPlatformOperator(env: Env, login: string): boolean {
   return parseLoginList(env.PLATFORM_OPERATORS).some(
     (entry) => entry.toLowerCase() === login.toLowerCase(),
   );
@@ -1012,6 +1017,15 @@ dashboardApp.get("/oauth/callback", async (c) => {
   // Not atomic with the insert below: two concurrent first sign-ins can both
   // read 0 and both claim "first account". Cosmetic sentence only, so no lock.
   const emptyInstance = deploymentMode === "self-hosted" && (await countUsers(db)) === 0;
+  // Signup flag (spec §3.1): closed means no NEW `users` row — a login that
+  // already has one signs in unchanged. Absent flag row = open. The refusal
+  // mints no session and writes nothing, so the state-expiry header set above
+  // is withdrawn, like the removal deny below.
+  if (!(await isFlagEnabled(db, "signup_open")) && (await getUserByLogin(db, user.login)) === null) {
+    logOAuthFailure("sign_in", "signup_closed", { login: user.login });
+    c.header("Set-Cookie", undefined);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.signupClosed"), requestLocale(c)), 403);
+  }
   const decision = await signInDashboardUser(db, user.login);
   if (decision.outcome === "deny") {
     // The only deny is a recorded removal, so the deny face is the removal
@@ -1069,6 +1083,14 @@ const WORKSPACE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 const WORKSPACE_ID_ATTEMPTS = 6;
 export const WORKSPACE_NAME_MAX_LENGTH = 80;
 
+/**
+ * The 409 body when the operator's `workspace_creation_open` flag is off
+ * (spec §3.1): creation is closed for EVERYONE, so the per-login free-slot copy
+ * would name the wrong cause.
+ */
+const WORKSPACE_CREATION_CLOSED_REFUSAL =
+  "This workspace was not created. Workspace creation is closed on this platform right now.";
+
 /** A fresh workspace id; 256 is divisible by 32, so the sampling is unbiased. */
 function createWorkspaceId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(22));
@@ -1097,6 +1119,12 @@ dashboardApp.post("/api/workspaces", async (c) => {
   // (spec §4 "always allowed"), so the rule and its read are skipped there.
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   try {
+    // Operator flag first: when creation is closed platform-wide the per-login
+    // free-slot answer is irrelevant, so its read is skipped. Absent flag row
+    // = open.
+    if (!(await isFlagEnabled(db, "workspace_creation_open"))) {
+      return c.text(WORKSPACE_CREATION_CLOSED_REFUSAL, 409);
+    }
     if (mode === "saas") {
       const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
       if (!freeSlotAvailable(freeCount)) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);

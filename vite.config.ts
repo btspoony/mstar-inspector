@@ -20,5 +20,14 @@ export default defineConfig({
     outDir: "../../dist/spa",
     emptyOutDir: true,
     assetsDir: "assets",
+    rollupOptions: {
+      // Two documents, one hashed `/assets` bucket (`base` stays "/"): the
+      // workspace shell and the hidden admin console. The console document is
+      // answered only by the gated admin sub-app (`src/admin/index.ts`).
+      input: {
+        main: path.resolve(spaRoot, "index.html"),
+        admin: path.resolve(spaRoot, "admin.html"),
+      },
+    },
   },
 });
