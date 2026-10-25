@@ -45,15 +45,18 @@ export type SpaBoot = {
   /**
    * `true` = this login may create a workspace now. `saas` allows one free
    * workspace per login, so it is `false` once the login holds a free
-   * membership; `self-hosted` always allows it. A UX mirror only: the creation
-   * route re-checks under the write. Absent = anonymous boot, no answer.
+   * membership; `self-hosted` always allows it. The operator's
+   * `workspace_creation_open` flag closes it for everyone. A UX mirror only:
+   * the creation route re-checks. Absent = anonymous boot, no answer.
    */
   canCreateWorkspace?: boolean;
   /**
    * Why {@link canCreateWorkspace} is `false`, for the disabled item's reason
-   * copy. `null` whenever creation is allowed; absent with the capability.
+   * copy: `flag` when the operator closed creation platform-wide, else
+   * `free_slot`. `null` whenever creation is allowed; absent with the
+   * capability.
    */
-  createWorkspaceBlockedReason?: "free_slot" | null;
+  createWorkspaceBlockedReason?: "free_slot" | "flag" | null;
   /**
    * `true` = this deployment carries more than one live workspace and the
    * current path names none, so no single workspace can be attributed. The

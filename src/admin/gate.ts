@@ -14,8 +14,9 @@
  */
 import type { Context } from "hono";
 import { getCookie } from "hono/cookie";
+import { isPlatformOperator } from "../dashboard/index";
 import { SESSION_COOKIE, readSessionValue } from "../dashboard/session";
-import { getUserByLogin, parseLoginList, type DashboardD1 } from "../dashboard/users";
+import { getUserByLogin, type DashboardD1 } from "../dashboard/users";
 import type { Env } from "../worker/env";
 
 export type AdminContext = Context<{ Bindings: Env }>;
@@ -33,10 +34,5 @@ export async function operatorLogin(c: AdminContext): Promise<string | null> {
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secret);
   if (!session) return null;
   if ((await getUserByLogin(db, session.login)) === null) return null;
-  // The same allowlist rule as `isPlatformOperator` (src/dashboard/index.ts —
-  // module-private there): comma-separated, trimmed, case-insensitive.
-  const allowlisted = parseLoginList(c.env.PLATFORM_OPERATORS).some(
-    (entry) => entry.toLowerCase() === session.login.toLowerCase(),
-  );
-  return allowlisted ? session.login : null;
+  return isPlatformOperator(c.env, session.login) ? session.login : null;
 }

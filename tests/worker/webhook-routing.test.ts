@@ -57,6 +57,8 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0011_webhook_deliveries.sql",
     "0022_app_trigger_mode.sql",
     "0026_workspaces.sql",
+    // 0033: the enqueue decision reads the `review_global` server flag.
+    "0033_platform_admin.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

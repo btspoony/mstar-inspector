@@ -29,6 +29,7 @@ import {
 } from "../dashboard/index";
 import { freeSlotAvailable } from "../dashboard/entitlement";
 import { countFreeMembershipsForLogin } from "../dashboard/workspace-store";
+import { isFlagEnabled } from "../admin/flags";
 import {
   FIRST_INSTANCE_COOKIE,
   SESSION_COOKIE,
@@ -211,18 +212,26 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     const landing = await signedInLanding(c.env, login);
     if (landing !== "/dashboard") return c.redirect(landing, 302);
   }
-  // The create-workspace capability the shell's top-bar menu mirrors: one free
-  // workspace per login, `saas` only. The creation route re-checks under its
-  // write, so this is copy, not authority. `self-hosted` resolves every
-  // workspace to `unlimited`, so creation is always allowed there and the
-  // free-membership count is never read (spec §4). A signed-in shell always has
-  // a store: `readShellAuth` denied otherwise.
-  const freeSlotTaken =
-    login !== null &&
-    deploymentMode === "saas" &&
-    !freeSlotAvailable(
-      await countFreeMembershipsForLogin((c.env as Env & { DB: DashboardD1 }).DB, login),
-    );
+  // The create-workspace capability the shell's top-bar menu mirrors. The
+  // operator's `workspace_creation_open` flag wins over the per-login free
+  // slot — it closes creation for EVERYONE, so the slot read is skipped while
+  // it is off — and `self-hosted` resolves every workspace to `unlimited`, so
+  // creation is otherwise always allowed there and the free-membership count is
+  // never read (spec §4). The creation route re-checks both, so this is copy,
+  // not authority. A signed-in shell always has a store: `readShellAuth` denied
+  // otherwise (hence the same narrow face it reads through).
+  const db = (c.env as Env & { DB?: DashboardD1 }).DB;
+  let createBlockedReason: SpaBoot["createWorkspaceBlockedReason"] = null;
+  if (login !== null && db !== undefined) {
+    if (!(await isFlagEnabled(db, "workspace_creation_open"))) {
+      createBlockedReason = "flag";
+    } else if (
+      deploymentMode === "saas" &&
+      !freeSlotAvailable(await countFreeMembershipsForLogin(db, login))
+    ) {
+      createBlockedReason = "free_slot";
+    }
+  }
   // The shell's Apps/brand links need the active workspace, and the shell
   // outlives the URL: a client-side navigation (spaClick → pushState) to a page
   // whose pathname names no workspace changes the pathname but not the boot, so
@@ -254,8 +263,8 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     ...(login === null
       ? {}
       : {
-          canCreateWorkspace: !freeSlotTaken,
-          createWorkspaceBlockedReason: freeSlotTaken ? "free_slot" : null,
+          canCreateWorkspace: createBlockedReason === null,
+          createWorkspaceBlockedReason: createBlockedReason,
         }),
     ...(supportRef === null
       ? extras.needsWorkspace === true

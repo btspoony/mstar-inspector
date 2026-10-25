@@ -43,6 +43,11 @@ export const en = {
      */
     newWorkspaceBlockedFreeSlot:
       "You already belong to a free workspace — one per login. Delete it, or ask its owner to remove you, then create another.",
+    /**
+     * Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
+     * "flag"`): the operator closed workspace creation platform-wide.
+     */
+    newWorkspaceBlockedFlag: "Workspace creation is closed on this platform right now.",
   },
   common: {
     pageTitle: "{page} — {brand}",

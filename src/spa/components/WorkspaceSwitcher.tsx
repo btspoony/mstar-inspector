@@ -37,6 +37,7 @@ type BlockedReason = NonNullable<SpaBoot["createWorkspaceBlockedReason"]>;
 /** One stated reason per boot block reason — never a generic "disabled". */
 const BLOCKED_REASON_KEY: Record<BlockedReason, DictionaryKey> = {
   free_slot: "nav.newWorkspaceBlockedFreeSlot",
+  flag: "nav.newWorkspaceBlockedFlag",
 };
 
 /**

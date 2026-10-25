@@ -29,6 +29,8 @@ export const zhCN: Dictionary = {
     /** 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "free_slot"`）。 */
     newWorkspaceBlockedFreeSlot:
       "你已属于一个免费工作区 — 每个账号限一个。请删除它，或请其所有者移除你，然后再创建新的工作区。",
+    /** 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "flag"`）：平台已关闭工作区创建。 */
+    newWorkspaceBlockedFlag: "平台当前已关闭工作区创建。",
   },
   common: {
     pageTitle: "{page} — {brand}",

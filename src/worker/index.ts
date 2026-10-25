@@ -34,6 +34,7 @@ import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp, dashboardTenantGate } from "../dashboard/index";
 import { adminApp } from "../admin/index";
+import { isFlagEnabled } from "../admin/flags";
 import { trailingSlashRedirect } from "./redirects";
 import { spaDispatch } from "./spa-dispatch";
 import { APP_VERSION } from "../version";
@@ -340,6 +341,18 @@ app.post("/webhook/:appSlug", async (c) => {
       "review_paused",
       `slug=${slug}`,
       "per-App webhook ignored with 2xx — app review paused (zero enqueue)",
+    );
+    return c.text("ignored", 200);
+  }
+  // Global review flag (spec §3.1, compass D21): OFF closes the ENQUEUE face
+  // for every App — same contract as the per-App pause above (2xx, zero
+  // enqueue) and deliberately NOT a dequeue-side check: work already queued
+  // keeps running. Absent flag row = enabled.
+  if (!(await isFlagEnabled(db, "review_global"))) {
+    webhookInfo(
+      "review_global_off",
+      `slug=${slug}`,
+      "per-App webhook ignored with 2xx — review_global flag off (zero enqueue)",
     );
     return c.text("ignored", 200);
   }

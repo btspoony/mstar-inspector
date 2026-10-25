@@ -69,6 +69,8 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0026_workspaces.sql",
     // 0028: the SPA boot reads pending invites.
     "0028_workspace_invites.sql",
+    // 0033: the SPA boot reads the `workspace_creation_open` server flag.
+    "0033_platform_admin.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

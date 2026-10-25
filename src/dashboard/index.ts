@@ -1083,6 +1083,14 @@ const WORKSPACE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 const WORKSPACE_ID_ATTEMPTS = 6;
 export const WORKSPACE_NAME_MAX_LENGTH = 80;
 
+/**
+ * The 409 body when the operator's `workspace_creation_open` flag is off
+ * (spec §3.1): creation is closed for EVERYONE, so the per-login free-slot copy
+ * would name the wrong cause.
+ */
+const WORKSPACE_CREATION_CLOSED_REFUSAL =
+  "This workspace was not created. Workspace creation is closed on this platform right now.";
+
 /** A fresh workspace id; 256 is divisible by 32, so the sampling is unbiased. */
 function createWorkspaceId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(22));
@@ -1111,6 +1119,12 @@ dashboardApp.post("/api/workspaces", async (c) => {
   // (spec §4 "always allowed"), so the rule and its read are skipped there.
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   try {
+    // Operator flag first: when creation is closed platform-wide the per-login
+    // free-slot answer is irrelevant, so its read is skipped. Absent flag row
+    // = open.
+    if (!(await isFlagEnabled(db, "workspace_creation_open"))) {
+      return c.text(WORKSPACE_CREATION_CLOSED_REFUSAL, 409);
+    }
     if (mode === "saas") {
       const freeCount = await countFreeMembershipsForLogin(db, user.github_login);
       if (!freeSlotAvailable(freeCount)) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);

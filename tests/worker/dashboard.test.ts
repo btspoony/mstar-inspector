@@ -2514,6 +2514,8 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0028_workspace_invites.sql",
   // 0031: workspace creation writes its `free` subscription row.
   "0031_plans_usage.sql",
+  // 0033: the OAuth callback and workspace creation read their server flag.
+  "0033_platform_admin.sql",
 ] as const;
 
 function createDashboardTestD1(
