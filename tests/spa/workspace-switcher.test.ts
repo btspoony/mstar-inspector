@@ -1,17 +1,21 @@
 /**
- * Workspace switcher (the workspace-identifier work, 2026-10) — the URL-only navigation contract.
+ * Workspace switcher (the workspace-identifier work, 2026-10; top-bar menu by
+ * plan 115) — the URL-only navigation contract and the control's surface.
  *
  * Picking another workspace must rewrite ONLY the workspace segment of the
  * current path and hand the new URL to the router. Executed proof, not source
  * shapes: one `pushState`, one synthetic `popstate`, zero requests, and no
  * write to the address bar, the cookie jar or the document.
+ *
+ * The menu's portalled rows (the current-row mark, the disabled item's reason)
+ * are unreachable from a static render; they are pinned on a mounted render in
+ * `shell-visual.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SidebarProvider } from "../../src/spa/components/ui/sidebar";
-import { AppSidebar } from "../../src/spa/components/AppSidebar";
-import { buildSidebarModel, buildWorkspaceSwitcherModel, renameWorkspaceMembership, storedSlugForRef } from "../../src/spa/shell";
+import { Layout } from "../../src/spa/Layout";
+import { buildWorkspaceSwitcherModel, renameWorkspaceMembership, storedSlugForRef } from "../../src/spa/shell";
 import { WorkspaceSwitcher, switchWorkspace } from "../../src/spa/components/WorkspaceSwitcher";
 import { commitWorkspaceRename } from "../../src/spa/pages/SettingsPage";
 import type { SpaBoot } from "../../src/spa/boot";
@@ -21,6 +25,10 @@ const boot: SpaBoot = {
   login: "octocat",
   name: "The Octocat",
   workspaceRef: "acme",
+  deploymentMode: "saas",
+  workspacePlan: "Free",
+  canCreateWorkspace: true,
+  createWorkspaceBlockedReason: null,
   memberships: [
     // `acme` was renamed away from its id; `ws_7d41` still answers to both.
     { id: "ws_acme", slug: "acme", name: "Acme", role: "owner" },
@@ -129,9 +137,15 @@ describe("workspace switcher — URL-only switch", () => {
 });
 
 describe("workspace switcher — the control's list", () => {
-  test("one membership is not a choice: no control at all", () => {
-    expect(buildWorkspaceSwitcherModel({ ...boot, memberships: [boot.memberships![0]!] }, "/dashboard/acme/apps")).toBeNull();
-    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps")).not.toBeNull();
+  test("one membership is still a list: the control renders", () => {
+    const model = buildWorkspaceSwitcherModel({ ...boot, memberships: [boot.memberships![0]!] }, "/dashboard/acme/apps");
+    expect(model?.options).toEqual([{ ref: "acme", name: "Acme" }]);
+    expect(model?.currentRef).toBe("acme");
+  });
+
+  test("no membership at all is not a choice: no control", () => {
+    expect(buildWorkspaceSwitcherModel({ ...boot, memberships: [] }, "/dashboard/acme/apps")).toBeNull();
+    expect(buildWorkspaceSwitcherModel({ locale: "en", login: null, name: null }, "/dashboard")).toBeNull();
   });
 
   test("marks the row a slug-addressed path names, and navigates to the slug", () => {
@@ -188,9 +202,10 @@ describe("workspace switcher — the control's list", () => {
   });
 
   test("no control on a path with no workspace segment to rewrite", () => {
-    // `/dashboard` is the post-login landing of a multi-workspace deployment: a
-    // control there would render and no-op every choice.
-    for (const pathname of ["/dashboard", "/dashboard/apps", "/dashboard/apps/thing", "/index.html"]) {
+    // `/dashboard` is the post-login landing of a multi-workspace deployment and
+    // `/index.html` the shell document addressed directly: a control there would
+    // render and no-op every choice.
+    for (const pathname of ["/dashboard", "/dashboard/apps", "/index.html"]) {
       expect(buildWorkspaceSwitcherModel(boot, pathname), pathname).toBeNull();
     }
   });
@@ -204,37 +219,55 @@ describe("workspace switcher — the control's list", () => {
   });
 });
 
+function renderSwitcher(boot: SpaBoot, pathname: string): string {
+  return renderToStaticMarkup(
+    createElement(WorkspaceSwitcher, { model: buildWorkspaceSwitcherModel(boot, pathname), boot }),
+  );
+}
+
 describe("workspace switcher — rendered surface", () => {
-  test("renders nothing for a login with one membership", () => {
-    const html = renderToStaticMarkup(
-      createElement(WorkspaceSwitcher, { model: buildWorkspaceSwitcherModel({ ...boot, memberships: [boot.memberships![0]!] }, "/dashboard/acme/apps") }),
-    );
-    expect(html).toBe("");
+  test("renders no control for a login with no membership", () => {
+    expect(renderSwitcher({ ...boot, memberships: [] }, "/dashboard/acme/apps")).toBe("");
   });
 
-  test("renders one labelled control listing the memberships (no href, so no navigation to bypass)", () => {
-    const html = renderToStaticMarkup(
-      createElement(WorkspaceSwitcher, { model: buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps") }),
-    );
+  test("renders one labelled menu trigger naming the current workspace (no href, so no navigation to bypass)", () => {
+    const html = renderSwitcher(boot, "/dashboard/acme/apps");
     expect(html).toContain('aria-label="Workspace"');
-    // The control is a Radix select trigger, never an anchor/form target.
-    expect(html).toContain("data-slot=\"select-trigger\"");
+    // The control is a Radix dropdown trigger, never an anchor/form target.
+    expect(html).toContain('data-slot="dropdown-menu-trigger"');
+    expect(html).toContain("Acme");
     expect(html).not.toContain("<form");
+    expect(html).not.toContain("<a ");
   });
 
-  test("a path naming an unlisted ref renders NO current row — never a stand-in value", () => {
+  test("the plan chip is a saas surface: rendered there, absent in self-hosted", () => {
+    // D15/D20: mode-gated only — the plan is member-visible data in `saas`
+    // whatever the tier, and `self-hosted` has no tier to show.
+    expect(renderSwitcher({ ...boot, deploymentMode: "saas" }, "/dashboard/acme/apps")).toContain("Free");
+    const selfHosted = renderSwitcher(
+      { ...boot, deploymentMode: "self-hosted", workspacePlan: "Unlimited" },
+      "/dashboard/acme/apps",
+    );
+    expect(selfHosted).toContain('aria-label="Workspace"');
+    expect(selfHosted).not.toContain("Unlimited");
+  });
+
+  test("no control renders on the root workbench", () => {
+    expect(renderSwitcher(boot, "/dashboard")).toBe("");
+  });
+
+  test("a path naming an unlisted ref names NO workspace — never a stand-in", () => {
     const model = buildWorkspaceSwitcherModel(boot, "/dashboard/gone/apps");
     expect(model?.currentRef).toBeNull();
-    const html = renderToStaticMarkup(createElement(WorkspaceSwitcher, { model }));
-    // Radix marks `data-placeholder` only for an empty value: its presence pins
-    // the honest empty trigger. A first-membership fallback would have made the
-    // trigger claim a workspace the URL does not name.
-    expect(html).toContain("data-placeholder");
-    // The normal case stays controlled on the row the path names.
-    const named = renderToStaticMarkup(
-      createElement(WorkspaceSwitcher, { model: buildWorkspaceSwitcherModel(boot, "/dashboard/acme/apps") }),
-    );
-    expect(named).not.toContain("data-placeholder");
+    // The trigger names no workspace the URL does not name; the control's own
+    // label stands in. The menu marks no row (pinned on the mounted menu in
+    // shell-visual.test.ts, where the portalled rows are reachable).
+    const html = renderToStaticMarkup(createElement(WorkspaceSwitcher, { model, boot }));
+    expect(html).toContain('aria-label="Workspace"');
+    expect(html).not.toContain("Acme");
+    expect(html).toContain(">Workspace<");
+    // No plan chip either: it qualifies a name, and this path names none.
+    expect(html).not.toContain("Free");
   });
 
   test("the option values are the stored slugs, so an id-addressed page switches to a readable ref", () => {
@@ -246,40 +279,22 @@ describe("workspace switcher — rendered surface", () => {
     expect(record.pushed).toEqual(["/dashboard/acme/apps"]);
   });
 
-  test("the shell mounts it beside the sidebar wordmark", () => {
+  test("the shell mounts it in the TOP BAR, not the sidebar header", () => {
     const pathname = "/dashboard/acme/apps";
     const html = renderToStaticMarkup(
-      createElement(
-        SidebarProvider,
-        { defaultOpen: true },
-        createElement(AppSidebar, {
-          model: buildSidebarModel(boot, pathname),
-          switcher: buildWorkspaceSwitcherModel(boot, pathname),
-        }),
-      ),
+      createElement(Layout, { boot, pathname, flash: null, children: createElement("p", null, "page") }),
     );
-    // The wordmark link comes first, then the switcher trigger — and both sit
-    // in the sidebar header, above the nav list (not inside it).
-    const headerStart = html.indexOf('data-slot="sidebar-header"');
-    const header = html.slice(headerStart, html.indexOf('data-slot="sidebar-content"'));
+    const headerStart = html.indexOf("<header");
+    const header = html.slice(headerStart, html.indexOf("</header>"));
     expect(headerStart).toBeGreaterThan(-1);
-    expect(header).toContain(`href="${buildSidebarModel(boot, pathname).brandHref}"`);
     expect(header).toContain('aria-label="Workspace"');
-    expect(header.indexOf('aria-label="Workspace"')).toBeGreaterThan(header.indexOf("href="));
-  });
-
-  test("no switcher in the shell on a path with no workspace segment", () => {
-    const html = renderToStaticMarkup(
-      createElement(
-        SidebarProvider,
-        { defaultOpen: true },
-        createElement(AppSidebar, {
-          model: buildSidebarModel(boot, "/dashboard"),
-          switcher: buildWorkspaceSwitcherModel(boot, "/dashboard"),
-        }),
-      ),
+    // The wordmark keeps the sidebar header to itself.
+    const sidebarHeader = html.slice(
+      html.indexOf('data-slot="sidebar-header"'),
+      html.indexOf('data-slot="sidebar-content"'),
     );
-    expect(html).not.toContain('aria-label="Workspace"');
+    expect(sidebarHeader).toContain("Morning Star Inspector");
+    expect(sidebarHeader).not.toContain('aria-label="Workspace"');
   });
 });
 

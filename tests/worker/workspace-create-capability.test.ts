@@ -78,4 +78,13 @@ describe("boot create-workspace capability", () => {
     expect(boot.canCreateWorkspace).toBe(true);
     expect(boot.createWorkspaceBlockedReason).toBeNull();
   });
+
+  test("the plan chip's data rides the boot: the resolved plan name, in both modes", async () => {
+    // The top bar renders this in `saas` only (D15/D20), but the payload keeps
+    // one shape (D16): the mode gates rendering, not the data. The seeded
+    // `default` workspace carries no subscription row here, so `saas` falls
+    // back to `free`, and `self-hosted` answers before any DB read.
+    expect((await bootFor("saas", true)).workspacePlan).toBe("Free");
+    expect((await bootFor("self-hosted", true)).workspacePlan).toBe("Unlimited");
+  });
 });

@@ -3924,7 +3924,7 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
     expect(payload.login).toBe("octocat");
   });
 
-  test("selecting the only workspace is a no-op: no control, no cookie, same bytes", async () => {
+  test("the only workspace is the control's one row: a pick changes no bytes and sets no cookie", async () => {
     // `octocat` in the default seed belongs to `default` alone — the
     // empty-choice case AC6 names.
     const env = withSpaAssets(makeDbEnv(seededDashboardD1()));
@@ -3938,9 +3938,12 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
     const boot = JSON.parse(
       /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(body)?.[1] ?? "{}",
     ) as Parameters<typeof buildWorkspaceSwitcherModel>[0];
-    // One membership: the shell offers no control, so the only possible
-    // "switch" cannot be initiated at all.
+    // One membership is still a LIST (plan 115): the menu names the workspace
+    // the shell is scoped to, and its only row is already current — so there is
+    // no other row to pick, which is what the byte/cookie assertions above pin.
     expect(boot.memberships).toHaveLength(1);
-    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/default/apps")).toBeNull();
+    const model = buildWorkspaceSwitcherModel(boot, "/dashboard/default/apps");
+    expect(model?.currentRef).toBe("default");
+    expect(model?.options).toEqual([{ ref: "default", name: "Default" }]);
   });
 });

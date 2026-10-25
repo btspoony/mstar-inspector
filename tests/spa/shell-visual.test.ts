@@ -24,6 +24,9 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { Window } from "happy-dom";
+import { t } from "../../src/i18n";
+import type { SpaBoot } from "../../src/spa/boot";
 
 const uiDir = join(import.meta.dir, "../../src/spa/components/ui");
 const spaRoot = join(import.meta.dir, "../../src/spa");
@@ -201,5 +204,150 @@ describe("sidebar hover hierarchy recipe (AD-622)", () => {
     // No translate / scale / shadow / ring / border on hover (AD-622): no
     // motion class may join the wordmark's hover face.
     expect(appSidebar).not.toMatch(hoverMotion);
+  });
+});
+
+/**
+ * 4. Top-bar workspace switcher (plan 115): the control left the sidebar header
+ *    for the navbar's left cluster. Its ROWS live in a Radix portal, so the
+ *    current-row mark and the disabled item's stated reason are only observable
+ *    on a mounted render — hence happy-dom here rather than a source pin.
+ *
+ *    The switcher module is imported after the browser globals exist: Radix (and
+ *    react-dom's client entry) capture DOM availability at module-evaluation
+ *    time, so a static import would leave the menu permanently closed. Static
+ *    imports cannot express that ordering — this is the support-notice pattern.
+ */
+describe("top-bar workspace switcher (mounted)", () => {
+  const boot: SpaBoot = {
+    locale: "en",
+    login: "octocat",
+    name: "The Octocat",
+    workspaceRef: "acme",
+    deploymentMode: "saas",
+    workspacePlan: "Free",
+    canCreateWorkspace: true,
+    createWorkspaceBlockedReason: null,
+    memberships: [
+      { id: "ws_acme", slug: "acme", name: "Acme", role: "owner" },
+      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member" },
+    ],
+  };
+
+  /** happy-dom globals a mounted React tree needs (support-notice precedent). */
+  function installDom(url: string) {
+    const win = new Window({ url });
+    const scope = globalThis as unknown as Record<string, unknown>;
+    const installed: Record<string, unknown> = {
+      window: win,
+      document: win.document,
+      navigator: win.navigator,
+      HTMLElement: win.HTMLElement,
+      Element: win.Element,
+      Node: win.Node,
+      Event: win.Event,
+      CustomEvent: (win as unknown as Record<string, unknown>).CustomEvent,
+      FocusEvent: (win as unknown as Record<string, unknown>).FocusEvent,
+      MouseEvent: win.MouseEvent,
+      KeyboardEvent: (win as unknown as Record<string, unknown>).KeyboardEvent,
+      PointerEvent: (win as unknown as Record<string, unknown>).PointerEvent,
+      HTMLInputElement: (win as unknown as Record<string, unknown>).HTMLInputElement,
+      MutationObserver: win.MutationObserver,
+      ResizeObserver: (win as unknown as Record<string, unknown>).ResizeObserver,
+      getComputedStyle: win.getComputedStyle.bind(win),
+      requestAnimationFrame: win.requestAnimationFrame.bind(win),
+      cancelAnimationFrame: win.cancelAnimationFrame.bind(win),
+      IS_REACT_ACT_ENVIRONMENT: true,
+    };
+    Object.assign(scope, installed);
+    return {
+      win,
+      cleanup: () => {
+        for (const key of Object.keys(installed)) delete scope[key];
+        win.close();
+      },
+    };
+  }
+
+  /** Mount the control and open its menu (Radix portals the rows). */
+  async function openMenu(pathname: string, overrides: Partial<typeof boot> = {}) {
+    const { win, cleanup: closeDom } = installDom(`http://localhost${pathname}`);
+    // Imported only once the browser globals exist: React DOM caches its
+    // `canUseDOM` answer at evaluation time, and so does Radix.
+    const { act, createElement } = await import("react");
+    const { createRoot } = await import("react-dom/client");
+    const { WorkspaceSwitcher } = await import("../../src/spa/components/WorkspaceSwitcher");
+    const { buildWorkspaceSwitcherModel } = await import("../../src/spa/shell");
+    const live = { ...boot, ...overrides };
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () =>
+      root.render(
+        createElement(WorkspaceSwitcher, { model: buildWorkspaceSwitcherModel(live, pathname), boot: live }),
+      ),
+    );
+    const trigger = container.querySelector('[data-slot="dropdown-menu-trigger"]');
+    // Radix opens on the primary-button pointerdown the trigger listens for.
+    await act(async () => {
+      trigger?.dispatchEvent(
+        new win.PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }),
+      );
+    });
+    const body = win.document.body;
+    return {
+      trigger,
+      body,
+      radios: [...body.querySelectorAll('[data-slot="dropdown-menu-radio-item"]')],
+      newWorkspaceItem: body.querySelector('[data-slot="dropdown-menu-item"]'),
+      cleanup: async () => {
+        await act(async () => root.unmount());
+        closeDom();
+      },
+    };
+  }
+
+  test("the menu lists every membership, marks the current row, and ends with the new-workspace item", async () => {
+    const { radios, newWorkspaceItem, body, cleanup } = await openMenu("/dashboard/acme/apps");
+    try {
+      expect(radios.map((row) => row.textContent)).toEqual(["Acme", "Side project"]);
+      // A radio group: the current workspace is a CHOSEN row.
+      expect(radios[0]?.getAttribute("aria-checked")).toBe("true");
+      expect(radios[1]?.getAttribute("aria-checked")).toBe("false");
+      expect(newWorkspaceItem?.textContent).toBe("New workspace");
+      expect(newWorkspaceItem?.getAttribute("aria-disabled")).toBeNull();
+      // The plan chip rides the trigger beside the workspace name.
+      expect(body.textContent).toContain("Free");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a path naming an unlisted ref marks NO row — never a stand-in", async () => {
+    const { radios, trigger, cleanup } = await openMenu("/dashboard/gone/apps");
+    try {
+      expect(radios.map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "false"]);
+      // The trigger names no workspace the URL does not name.
+      expect(trigger?.textContent).not.toContain("Acme");
+      expect(trigger?.textContent).toContain("Workspace");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("at the free-slot cap the new-workspace item is DISABLED and states the reason", async () => {
+    const { newWorkspaceItem, cleanup } = await openMenu("/dashboard/acme/apps", {
+      canCreateWorkspace: false,
+      createWorkspaceBlockedReason: "free_slot",
+    });
+    try {
+      // Disabled, not hidden: the user needs to know why, and the rule itself.
+      expect(newWorkspaceItem?.getAttribute("aria-disabled")).toBe("true");
+      expect(newWorkspaceItem?.getAttribute("data-disabled")).not.toBeNull();
+      expect(newWorkspaceItem?.textContent).toContain("New workspace");
+      expect(newWorkspaceItem?.textContent).toContain(t("en", "nav.newWorkspaceBlockedFreeSlot"));
+    } finally {
+      await cleanup();
+    }
   });
 });

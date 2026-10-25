@@ -277,8 +277,9 @@ export async function operatorSupportWorkspace(
 
 /**
  * The boot extras for one signed-in login: whether the login belongs to no
- * live workspace yet, the workspace ref the SHELL should navigate with, and
- * whether this login may run the App-creation flow.
+ * live workspace yet, the workspace ref the SHELL should navigate with, that
+ * workspace's plan name (the top bar's chip), and whether this login may run
+ * the App-creation flow.
  *
  * `requestedRef` is the workspace the request addresses — the `/:workspaceRef`
  * segment of the page that carries the shell. Creation is judged in THAT
@@ -302,6 +303,7 @@ export async function workspaceBoot(
   requestedRef?: string,
 ): Promise<{
   workspaceRef?: string;
+  workspacePlan?: string;
   canCreateApp?: boolean;
   needsWorkspace?: boolean;
   workspaceRequired?: boolean;
@@ -320,6 +322,12 @@ export async function workspaceBoot(
   if (access !== null) {
     return {
       workspaceRef: access.slug,
+      // The top bar's plan chip data, resolved on the SAME access read (no
+      // second fetch in the shell). The mode decides the value before any DB
+      // read, so `self-hosted` answers `Unlimited` for free.
+      workspacePlan: (
+        await resolveWorkspacePlan(db, access.id, deploymentModeOf(env.DEPLOYMENT_MODE))
+      ).name,
       // A new App lands in the addressed workspace, where a plain member has
       // no manage rights — so creation is owner/admin there.
       canCreateApp: canManageRole(access.role),

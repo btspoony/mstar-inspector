@@ -35,6 +35,8 @@ export const en = {
     signedInAs: "Signed in as {name}",
     /** Label of the shell's workspace switcher (the select itself shows names). */
     workspaceSwitcher: "Workspace",
+    /** The switcher menu's last row — the workspace-creation entry. */
+    newWorkspace: "New workspace",
     /**
      * Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
      * "free_slot"`): this login already holds its one free workspace.

@@ -24,6 +24,8 @@ export const zhCN: Dictionary = {
     logout: "退出登录",
     signedInAs: "已登录：{name}",
     workspaceSwitcher: "工作区",
+    /** 切换器菜单最后一行——创建工作区入口。 */
+    newWorkspace: "新建工作区",
     /** 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "free_slot"`）。 */
     newWorkspaceBlockedFreeSlot:
       "你已属于一个免费工作区 — 每个账号限一个。请删除它，或请其所有者移除你，然后再创建新的工作区。",

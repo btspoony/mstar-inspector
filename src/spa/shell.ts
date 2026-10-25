@@ -4,7 +4,7 @@
  */
 import { NAV_ITEMS, t, type Locale } from "../i18n";
 import type { SpaBoot } from "./boot";
-import { replaceWorkspaceRef, workspaceRefOf } from "./routes";
+import { workspaceRefOf } from "./routes";
 
 export type ShellNavItem = { href: string; label: string; current: boolean };
 
@@ -105,10 +105,9 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
  * or the readable `slug` (they are equal until an owner renames it) — so the
  * current row matches on both while the value shown and navigated to is always
  * the `slug` (a switch target must be the readable ref, never a stale one).
- * Null when the login belongs to at most one workspace — a one-entry select is
- * not a choice, so the shell renders no control at all — and null when the path
- * has no workspace segment to rewrite, where a control would render and then
- * no-op every choice.
+ * Null only when the login belongs to no workspace at all (an empty list is not
+ * a choice) and when the path has no workspace segment to rewrite, where a
+ * control would render and then no-op every choice.
  *
  * `currentRef` is the `slug` of the membership the pathname names, else null:
  * the path can carry an identifier this login no longer lists (a slug renamed
@@ -126,20 +125,13 @@ export function buildWorkspaceSwitcherModel(
   pathname: string,
 ): WorkspaceSwitcherModel | null {
   const memberships = boot.memberships ?? [];
-  if (memberships.length < 2) return null;
+  if (memberships.length === 0) return null;
   const options = memberships.map(({ slug, name }) => ({ ref: slug, name }));
+  const label = t(boot.locale, "nav.workspaceSwitcher");
   const pathRef = workspaceRefOf(pathname);
-  // ONE predicate for "this path can be switched": the path grammar the route
-  // matcher and the API base read, plus the rewrite the switch itself performs.
-  // A path outside either has no segment to rewrite, so the control would only
-  // no-op every choice.
-  if (pathRef === null || replaceWorkspaceRef(pathname, pathRef) === null) return null;
+  if (pathRef === null) return null;
   const current = memberships.find((m) => pathRef === m.id || pathRef === m.slug);
-  return {
-    label: t(boot.locale, "nav.workspaceSwitcher"),
-    currentRef: current?.slug ?? null,
-    options,
-  };
+  return { label, currentRef: current?.slug ?? null, options };
 }
 
 /**
