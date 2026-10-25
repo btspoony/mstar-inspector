@@ -10,12 +10,15 @@
  *
  * Expiry is a LAZY FLIP, never a timer: every invite write path runs
  * `UPDATE … SET status = 'expired' WHERE … expires_at <= ?` as its FIRST
- * statement, inside its own `db.batch`, and the reads keep the
- * `status = 'pending' AND expires_at > ?` predicate. A lapsed row therefore
- * reads `pending` until a write flips it, and the partial unique index
- * `workspace_invites_pending` only ever holds genuinely live invites — which
- * is what makes a replacement invite after expiry legal while a second invite
- * for a live pending row is still a UNIQUE violation.
+ * statement, inside its own `db.batch`, the reads keep the
+ * `status = 'pending' AND expires_at > ?` predicate, and the worker's
+ * scheduled sweep flips the rest in bulk ({@link expireLapsedInvites}). Reads
+ * never write, so a lapsed row keeps reading `pending` (while already being
+ * absent from every list and from the seat count) until a write or the sweep
+ * flips it. The partial unique index `workspace_invites_pending` only ever
+ * holds genuinely live invites — which is what makes a replacement invite
+ * after expiry legal while a second invite for a live pending row is still a
+ * UNIQUE violation.
  *
  * Module boundary (the `workspace-store` one): the `db` parameter is a
  * locally-declared narrow D1 face (types only). The single exception is the
@@ -120,11 +123,30 @@ function isUniqueConstraintError(err: unknown): boolean {
 }
 
 /**
- * The write-path flip (the ONLY producer of `expired`): every invite write
- * path runs it FIRST, in the same batch as its own write.
+ * The write-path flip: every invite write path runs it FIRST, in the same
+ * batch as its own write. The sweep's bulk flip ({@link expireLapsedInvites})
+ * is the other producer.
  */
 const FLIP_LAPSED_SQL = `UPDATE workspace_invites SET status = 'expired'
 WHERE workspace_id = ? AND status = 'pending' AND expires_at <= ?`;
+
+/**
+ * Flip every lapsed pending invite to `expired` — the scheduled sweep's entry
+ * point (I-000096). This is the write the members-page read used to perform:
+ * reads only filter, so a lapsed row keeps reading `pending` until the next
+ * sweep while the `expires_at > ?` predicate already keeps it out of every
+ * list and out of the seat count. Returns the flipped row count.
+ */
+export async function expireLapsedInvites(db: InviteStoreD1, now: string): Promise<number> {
+  const result = await db
+    .prepare(
+      `UPDATE workspace_invites SET status = 'expired'
+        WHERE status = 'pending' AND expires_at <= ?`,
+    )
+    .bind(now)
+    .run();
+  return result.meta.changes;
+}
 
 /** Live-invite read predicate — lazy expiry, so every read filters it. */
 const LIVE = `status = 'pending' AND expires_at > ?`;
@@ -237,21 +259,18 @@ export async function createInvite(
 }
 
 /**
- * The workspace's live pending invites, oldest first. This is the read that
- * precedes a create, so it flips lapsed rows first: the list never shows an
- * invite whose expiration has passed.
+ * The workspace's live pending invites, oldest first. A PURE READ (I-000096):
+ * lapsed rows are filtered out by the `expires_at > ?` predicate and left
+ * `pending` until the sweep flips them, so the members-page GET never writes.
  */
 export async function listPendingInvites(
   db: InviteStoreD1,
   workspaceId: string,
   now: string,
 ): Promise<WorkspaceInviteRow[]> {
-  // The flip runs as its own batch before the read: the narrow statement face
-  // the repo's D1 test double implements returns no SELECT rows through
-  // `batch()`, so the list statement stays a plain read. The predicate below
-  // filters lapsed rows anyway, so a row that expires between the two
-  // statements is never listed.
-  await db.batch([db.prepare(FLIP_LAPSED_SQL).bind(workspaceId, now)]);
+  // The predicate filters lapsed rows, so a row that expires between the sweep
+  // runs is never listed (and holds no seat) while its stored status is still
+  // `pending`.
   const { results } = await db
     .prepare(
       `SELECT ${INVITE_COLUMNS} FROM workspace_invites

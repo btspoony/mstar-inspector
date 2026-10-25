@@ -1040,5 +1040,8 @@ describe("workspace summary in the member payload", () => {
       .run(new Date(now.getTime() - 1_000).toISOString(), live.id);
     const lapsed = (await (await request(MEMBERS, "dana")).json()) as MembersBody;
     expect(lapsed.workspace.pendingInvites).toBe(0);
+    // The GET is a pure read: the flip belongs to the sweep, so the stored
+    // status is still `pending` after the page load.
+    expect(inviteStatus(db, live.id)).toBe("pending");
   });
 });

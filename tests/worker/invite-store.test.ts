@@ -26,6 +26,7 @@ import {
   revokeInvite,
 } from "../../src/dashboard/invite-store";
 import type { WorkspaceInviteRow } from "../../src/dashboard/invite-store";
+import { countMembersAndPendingInvites } from "../../src/dashboard/workspace-store";
 import { FreeWorkspaceSlotError } from "../../src/dashboard/entitlement";
 
 const WORKSPACE = "default";
@@ -88,6 +89,18 @@ function membershipCount(db: TestD1, login: string): number {
     )
     .get(WORKSPACE, login) as { n: number };
   return row.n;
+}
+
+/** The same migrated double, with every prepared statement recorded first. */
+function recordSql(db: TestD1, captured: string[]): TestD1 {
+  return {
+    prepare(query: string) {
+      captured.push(query);
+      return db.prepare(query);
+    },
+    batch: (statements) => db.batch(statements),
+    raw: db.raw,
+  };
 }
 
 describe("workspace_invites store", () => {
@@ -246,19 +259,37 @@ describe("workspace_invites store", () => {
     await expect(invite(db, "octocat")).rejects.toBeInstanceOf(InvitePendingExistsError);
   });
 
-  test("listPendingInvites flips lapsed rows as a write path", async () => {
+  test("listPendingInvites is a pure read: a lapsed invite is excluded and left pending", async () => {
     const db = createFixture("octocat", "hubot");
     const lapsed = await invite(db, "octocat", NOW, LATER);
     await invite(db, "hubot", NOW, LATER);
+    const captured: string[] = [];
+    const recording = recordSql(db, captured);
 
-    const live = await listPendingInvites(db, WORKSPACE, "2026-10-25T00:00:00.000Z");
+    const live = await listPendingInvites(recording, WORKSPACE, "2026-10-25T00:00:00.000Z");
     expect(live).toHaveLength(2);
 
-    const afterExpiry = await listPendingInvites(db, WORKSPACE, "2026-11-01T00:00:00.000Z");
+    const afterExpiry = await listPendingInvites(recording, WORKSPACE, "2026-11-01T00:00:00.000Z");
     expect(afterExpiry).toHaveLength(0);
-    // The lapsed row is terminal now, so it can never resurface as pending.
-    expect(rowOf(db, lapsed.id).status).toBe("expired");
-    expect(await listPendingInvites(db, WORKSPACE, NOW)).toHaveLength(0);
+    // The members-page GET performs no UPDATE (I-000096): the lapsed row keeps
+    // its stored status until the sweep (or another write path) flips it.
+    expect(captured.every((sql) => !/^\s*UPDATE\s/i.test(sql))).toBe(true);
+    expect(rowOf(db, lapsed.id).status).toBe("pending");
+    // Still `pending`, so a read before expiry lists both again.
+    expect(await listPendingInvites(db, WORKSPACE, NOW)).toHaveLength(2);
+  });
+
+  test("a lapsed pending invite holds no seat before the sweep flips it", async () => {
+    const db = createFixture("octocat");
+    const lapsed = await invite(db, "octocat", NOW, LATER);
+    const afterExpiry = "2026-11-01T00:00:00.000Z";
+
+    // Live → one seat. Lapsed with no write yet → none, which is what keeps
+    // the member cap correct during the sweep delay window.
+    expect(await countMembersAndPendingInvites(db, WORKSPACE, NOW)).toBe(1);
+    expect(rowOf(db, lapsed.id).status).toBe("pending");
+    expect(await countMembersAndPendingInvites(db, WORKSPACE, afterExpiry)).toBe(0);
+    expect(rowOf(db, lapsed.id).status).toBe("pending");
   });
 });
 

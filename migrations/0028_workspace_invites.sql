@@ -10,11 +10,11 @@
 --
 --   * status domain: 'pending' | 'accepted' | 'revoked' | 'expired'.
 --     'expired' is a LAZY-FLIP terminal state — never inserted directly. The
---     flip (every invite write path, in the same batch as its own write)
---     turns a lapsed 'pending' row into 'expired', and a lapsed row that no
---     write has reached yet still reads 'pending', so every read keeps the
---     `status = 'pending' AND expires_at > ?` predicate. There is no timer,
---     no background job and no cron.
+--     flip (every invite write path, in the same batch as its own write, plus
+--     the worker's scheduled sweep) turns a lapsed 'pending' row into
+--     'expired', and a lapsed row that neither has reached yet still reads
+--     'pending', so every read keeps the
+--     `status = 'pending' AND expires_at > ?` predicate. There is no timer.
 --   * role domain excludes 'owner': ownership is granted by workspace
 --     creation or by an explicit owner-only promote, never by an invite.
 --   * github_login carries COLLATE NOCASE, which governs both partial
