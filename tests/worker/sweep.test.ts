@@ -23,6 +23,7 @@ import {
   SWEEP_WEBHOOK_TIMEOUT_MS,
   SWEEP_WINDOW_HOURS,
   type SweepAlertFields,
+  type SweepInviteLapseFields,
   type SweepLog,
   type SweepRetentionFields,
   type SweepWarnFields,
@@ -37,7 +38,10 @@ const BASE = {
   head_sha: "0123456789abcdef0123456789abcdef01234567",
 };
 
-type WarnCall = { fields: SweepAlertFields | SweepWarnFields | SweepRetentionFields; msg?: string };
+type WarnCall = {
+  fields: SweepAlertFields | SweepWarnFields | SweepRetentionFields | SweepInviteLapseFields;
+  msg?: string;
+};
 
 function captureLog(): { log: SweepLog; calls: WarnCall[] } {
   const calls: WarnCall[] = [];
@@ -102,11 +106,62 @@ describe("runSweep", () => {
   test("counts review_failures with the trailing-24h window SQL", async () => {
     const captured: string[] = [];
     const result = await runSweep(recordingDb(captured));
-    expect(captured).toHaveLength(2);
+    expect(captured).toHaveLength(3);
     expect(captured[0]).toContain("DELETE FROM webhook_deliveries");
-    expect(captured[1]).toContain("FROM review_failures");
-    expect(captured[1]).toContain("created_at > datetime('now', '-24 hours')");
+    expect(captured[1]).toContain("UPDATE workspace_invites");
+    expect(captured[2]).toContain("FROM review_failures");
+    expect(captured[2]).toContain("created_at > datetime('now', '-24 hours')");
     expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+  });
+  test("flips lapsed pending invites and leaves live ones pending (real D1)", async () => {
+    const db = createMigratedTestD1();
+    const insert = (id: string, expiresAt: string): void => {
+      db.raw
+        .prepare(
+          `INSERT INTO workspace_invites
+             (id, workspace_id, github_login, role, status, invited_by,
+              created_at, expires_at, accepted_at)
+           VALUES (?, 'default', ?, 'member', 'pending', NULL, ?, ?, NULL)`,
+        )
+        .run(id, id, new Date().toISOString(), expiresAt);
+    };
+    // Ages are relative to the real clock — a hard-coded calendar date slides
+    // out of the comparison and turns this into a date bomb.
+    insert("lapsed", new Date(Date.now() - 60_000).toISOString());
+    insert("live", new Date(Date.now() + 60_000).toISOString());
+
+    const { log, calls } = captureLog();
+    const result = await runSweep(db, { log });
+    const statuses = db.raw
+      .query("SELECT id, status FROM workspace_invites ORDER BY id")
+      .all() as Array<{ id: string; status: string }>;
+    expect(statuses).toEqual([
+      { id: "lapsed", status: "expired" },
+      { id: "live", status: "pending" },
+    ]);
+    // A quiet flip logs nothing.
+    expect(calls).toHaveLength(0);
+    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+  });
+
+  test("the invite lapse failure degrades to a warn and the failure-sweep still runs", async () => {
+    const db = createMigratedTestD1();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { log, calls } = captureLog();
+    const wrapped: D1Like = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("UPDATE workspace_invites")) throw new Error("invites locked");
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const result = await runSweep(wrapped, { log });
+    expect(calls[0]!.fields).toMatchObject({
+      event: "invite_lapse_swept_failed",
+      detail: "invites locked",
+    });
+    expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: 6 });
+    expect(result).toEqual({ failures24h: 6, thresholdBreached: true, webhook: "absent" });
   });
   test("retention: DELETE shape (30-day window, 500-row cap, no bound params) + retention_swept log carries the deleted count", async () => {
     const captured: string[] = [];
@@ -142,7 +197,8 @@ describe("runSweep", () => {
     const result = await runSweep(db, { log });
     // The retention DELETE is parameter-free — no `?` placeholders to bind.
     expect(captured[0]).not.toContain("?");
-    expect(binds).toEqual([]);
+    // The only bound parameter in the run is the invite-lapse flip's ISO clock.
+    expect(binds).toHaveLength(1);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.fields).toEqual({ event: "retention_swept", deleted: 3 });
     expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });

@@ -170,6 +170,10 @@ describe("PUT /:workspaceRef/api/settings/slug", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ slug: "acme-labs" });
     expect(slugOf(db, "ws-acme")).toBe("acme-labs");
+    // The slug-write half of the cookie contract (I-000109): the response
+    // carries no Set-Cookie at all, so a workspace write cannot touch the
+    // session jar — not a refresh, not an expiry, not a workspace claim.
+    expect(res.headers.getSetCookie()).toEqual([]);
   });
 
   test("a reserved word is 409 slug_reserved and writes nothing", async () => {

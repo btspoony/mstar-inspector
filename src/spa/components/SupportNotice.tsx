@@ -4,6 +4,7 @@ import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
 import { parseSupportGrants, type SupportGrantRow } from "../pages/data";
+import { ErrorState } from "./state/ErrorState";
 import { PageNotice } from "../pages/PageNotice";
 
 /**
@@ -15,39 +16,72 @@ import { PageNotice } from "../pages/PageNotice";
  * can. The read is the same `/api/support/grants` face the operator's support
  * view uses, so a grant that lapses simply stops being listed.
  *
- * Keyed on the pathname, not just the base: the shell survives client-side
- * navigation, so re-reading on every route change is what lets a grant created
- * (or lapsed) mid-session reach a tab that is already open.
+ * The read happens once per workspace, not once per route: the shell survives
+ * client-side navigation, so a pathname-keyed effect re-read a notice that
+ * cannot change between pages of the same workspace. A failed read renders an
+ * inline error with a retry control instead of reading as "no active grants".
  *
  * Renders nothing for the operator's own support face (they already see their
  * grants there) and for a login with no workspace yet.
  */
+
+/**
+ * One read per workspace base (the workspace, not the page), shared by every
+ * mount that lands on it. A rejection is evicted so retry reads again.
+ */
+const reads = new Map<string, Promise<SupportGrantRow[] | null>>();
+
+function readGrants(base: string): Promise<SupportGrantRow[] | null> {
+  const cached = reads.get(base);
+  if (cached !== undefined) return cached;
+  const read = fetchJson(`${base}/api/support/grants`).then(parseSupportGrants);
+  reads.set(base, read);
+  void read.catch(() => {
+    if (reads.get(base) === read) reads.delete(base);
+  });
+  return read;
+}
+
 export function SupportNotice({ boot, pathname }: { boot: SpaBoot; pathname: string }) {
-  const [grants, setGrants] = useState<SupportGrantRow[]>([]);
+  const base = apiBase(pathname);
   const skip = boot.login === null || boot.supportOnly === true || boot.needsWorkspace === true;
+  const [grants, setGrants] = useState<SupportGrantRow[]>([]);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (skip) return;
-    // Clear first: a workspace switch (or a refetch that fails and is
-    // swallowed below) must not leave another workspace's notice on screen.
+    // Clear first: a workspace switch must not leave another workspace's
+    // notice on screen.
     setGrants([]);
-    const base = apiBase(pathname);
+    setFailed(false);
     let live = true;
-    void (async () => {
-      try {
-        const parsed = parseSupportGrants(await fetchJson(`${base}/api/support/grants`));
-        if (live && parsed !== null) setGrants(parsed);
-      } catch {
-        // A caller who cannot read the notice (403/404/redirect) sees none: the
-        // surface is informational, never a blocking gate.
-      }
-    })();
+    readGrants(base).then(
+      (parsed) => {
+        if (live) setGrants(parsed ?? []);
+      },
+      () => {
+        if (live) setFailed(true);
+      },
+    );
     return () => {
       live = false;
     };
-  }, [pathname, skip]);
+  }, [base, skip, attempt]);
 
-  if (skip || grants.length === 0) return null;
+  if (skip) return null;
+  if (failed) {
+    return (
+      <div className="mb-4">
+        <ErrorState
+          locale={boot.locale}
+          message={t(boot.locale, "support.noticeError")}
+          onRetry={() => setAttempt((count) => count + 1)}
+        />
+      </div>
+    );
+  }
+  if (grants.length === 0) return null;
   return (
     <div className="mb-4 flex flex-col gap-1">
       <PageNotice kind="warn" message={t(boot.locale, "support.noticeHeading")} />

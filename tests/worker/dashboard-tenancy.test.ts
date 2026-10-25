@@ -1217,6 +1217,60 @@ describe("App creation is owner/admin", () => {
     expect(mapping?.ws).toBe("ws-acme");
   });
 
+  test("a workspace DELETED mid-flow answers the named workspaceGone error, not a bare shell redirect", async () => {
+    // The concurrent delete: the callback's creation check and the commit both
+    // pass on a live workspace, and the retirement lands before the
+    // post-commit slug read that names the landing page. The flow must say so,
+    // not quietly drop the operator on `/dashboard`.
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-acme", "acme");
+    seedMembership(db, "ws-acme", seedUser(db, "dana", "member"), "owner");
+
+    const start = await post("dana", "/dashboard/acme/manifest/start", envFor(db));
+    expect(start.status).toBe(200);
+    const stateCookie =
+      start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
+    const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
+
+    // `getWorkspaceByRef`'s SELECT is unique to the post-commit landing read,
+    // so retiring the row here is exactly the mid-flow deletion.
+    const deletingDb: TestD1 = {
+      prepare(query: string) {
+        if (query.includes("FROM workspaces WHERE (slug = ?1 OR id = ?1)")) {
+          seed(
+            db,
+            "UPDATE workspaces SET deleted_at = ? WHERE id = 'ws-acme'",
+            new Date().toISOString(),
+          );
+        }
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+      raw: db.raw,
+    };
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    try {
+      const callback = await authedRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        "dana",
+        { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
+      ).then((request) => worker.fetch(request, envFor(deletingDb)));
+      expect(callback.status).toBe(409);
+      expect(callback.headers.get("Location")).toBeNull();
+      expect(await callback.text()).toContain(t("en", "manifest.error.workspaceGone"));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    // The App row was written before the workspace vanished: the named failure
+    // is about the missing landing page, not about a lost write.
+    const row = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM github_apps WHERE github_app_id = ?")
+      .get(CONVERSION.id) as { n: number };
+    expect(row.n).toBe(1);
+  });
+
   test("the boot's create capability follows the addressed workspace", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-acme", "acme");

@@ -280,6 +280,7 @@ export const zhCN: Dictionary = {
     /** 租户口径的常驻通知；不可关闭，不带任何操作。 */
     noticeHeading: "支持访问已生效",
     noticeLine: "{login} 可查看此工作区的成员，直至 {expires} —— {reason}",
+    noticeError: "无法检查支持访问状态。",
     noGrant: "当前没有生效的支持访问。",
   },
   settings: {
@@ -527,6 +528,8 @@ export const zhCN: Dictionary = {
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",
       workspaceRequired:
         "此部署有多个工作区，App 需要归属其中一个 — 请先进入某个工作区，再从那里创建 App。",
+      workspaceGone:
+        "创建此 App 的工作区已不存在，因此此 App 在此部署中没有可访问的工作区页面 — 请在 GitHub 上删除它，然后从仍存在的工作区重新开始创建流程。",
     },
   },
 };
