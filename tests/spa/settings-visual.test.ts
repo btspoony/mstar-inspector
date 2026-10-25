@@ -333,9 +333,8 @@ describe("chains panel faces (review deferrals)", () => {
     );
     // Plan 114 T3: the panel title now composes the shared SectionCardTitle
     // instead of re-spelling the heading-16 utility chain at the site.
-    expect(chainsBody).toContain(
-      '<span className="font-semibold text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">{tab.id}</span>',
-    );
+    expect(chainsBody).toContain("<SectionCardTitle>{tab.id}</SectionCardTitle>");
+    expect(chainsBody).not.toContain("text-(length:--typo-heading-16-size)");
     // No bare 16px-inherit title face remains in the panel header.
     expect(chainsBody).not.toContain('<span className="font-medium">{tab.id}</span>');
   });
