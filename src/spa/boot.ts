@@ -26,6 +26,14 @@ export type SpaBoot = {
    */
   workspaceRef?: string;
   /**
+   * The deployment shape (`DEPLOYMENT_MODE`), resolved by the Worker: `saas`
+   * or `self-hosted`. The SPA branches rendering on it (plan chip, members
+   * plan card) instead of inferring a shape or asking for a second fetch. The
+   * Worker sets it on every shell it serves; `EMPTY_BOOT` (no document) has
+   * none.
+   */
+  deploymentMode?: "self-hosted" | "saas";
+  /**
    * Absent or `true` = the caller may run the manifest Create flow. The server
    * sets `false` for a caller who is not owner/admin of the addressed
    * workspace, who would not be able to manage the App the flow creates
@@ -34,6 +42,18 @@ export type SpaBoot = {
    * one workspace, the role otherwise.
    */
   canCreateApp?: boolean;
+  /**
+   * `true` = this login may create a workspace now. `saas` allows one free
+   * workspace per login, so it is `false` once the login holds a free
+   * membership; `self-hosted` always allows it. A UX mirror only: the creation
+   * route re-checks under the write. Absent = anonymous boot, no answer.
+   */
+  canCreateWorkspace?: boolean;
+  /**
+   * Why {@link canCreateWorkspace} is `false`, for the disabled item's reason
+   * copy. `null` whenever creation is allowed; absent with the capability.
+   */
+  createWorkspaceBlockedReason?: "free_slot" | null;
   /**
    * `true` = this deployment carries more than one live workspace and the
    * current path names none, so no single workspace can be attributed. The
@@ -54,6 +74,13 @@ export type SpaBoot = {
     slug: string;
     name: string;
     role: "owner" | "admin" | "member";
+    /**
+     * This workspace's plan NAME (`Free` / `Pro` / `Unlimited`) — what the top
+     * bar's chip shows for whichever of these rows the URL names, so a switch
+     * needs no second boot. Carried in both modes (D16: the mode gates
+     * rendering, never the payload); `self-hosted` resolves `Unlimited`.
+     */
+    plan: string;
   }>;
   /**
    * The signed-in login's live pending workspace invitations — the invitee's

@@ -566,7 +566,7 @@ describe("the shell boot asks the gate's own classifier", () => {
       invitedBy: owner,
       now: new Date().toISOString(),
       expiresAt: new Date(Date.now() + DAY).toISOString(),
-    });
+    }, "saas");
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/apps", OPERATOR, { accept: "text/html" }),
       withSpaAssets(envFor(db)),

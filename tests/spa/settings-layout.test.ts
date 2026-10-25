@@ -2078,8 +2078,8 @@ describe("workspace slug control", () => {
     globalThis.fetch = (async () =>
       new Response('{"slug":"acme-labs"}', { status: 200 })) as unknown as typeof fetch;
     let live: SpaBoot["memberships"] = [
-      { id: "ws_acme", slug: "acme", name: "Acme", role: "owner" },
-      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member" },
+      { id: "ws_acme", slug: "acme", name: "Acme", role: "owner", plan: "Free" },
+      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member", plan: "Free" },
     ];
     const replaced: string[] = [];
     // A window face that survives the whole await: the commit reads
@@ -2103,7 +2103,13 @@ describe("workspace slug control", () => {
       });
       expect(outcome).toEqual({ kind: "success", message: t("en", "workspace.slugSaved") });
       // The slug moved only in the readable ref: the stable id is the same row.
-      expect(live?.[0]).toEqual({ id: "ws_acme", slug: "acme-labs", name: "Acme", role: "owner" });
+      expect(live?.[0]).toEqual({
+        id: "ws_acme",
+        slug: "acme-labs",
+        name: "Acme",
+        role: "owner",
+        plan: "Free",
+      });
       expect(replaced).toEqual(["/dashboard/acme-labs/apps/acme-app"]);
       const model = buildWorkspaceSwitcherModel(
         { ...adminBoot, memberships: live },

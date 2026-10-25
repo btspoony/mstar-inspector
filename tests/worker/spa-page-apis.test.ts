@@ -341,9 +341,11 @@ describe("SPA boot payload — workspace memberships (2026-10)", () => {
     // Ordering is by name; the soft-deleted workspace never becomes a switch
     // target. Both identifiers ride the row: `ws-acme` was renamed to `acme`,
     // so a path addressing either form must resolve to this same membership.
+    // `plan` rides each row in both modes (D16), `self-hosted` resolving the
+    // one plan every workspace has there.
     expect(boot.memberships).toEqual([
-      { id: "ws-acme", slug: "acme", name: "Acme", role: "owner" },
-      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member" },
+      { id: "ws-acme", slug: "acme", name: "Acme", role: "owner", plan: "Unlimited" },
+      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member", plan: "Unlimited" },
     ]);
   });
 

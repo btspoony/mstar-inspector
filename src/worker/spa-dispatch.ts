@@ -27,6 +27,8 @@ import {
   pendingInvitesForLogin,
   workspaceMembershipsForLogin,
 } from "../dashboard/index";
+import { freeSlotAvailable } from "../dashboard/entitlement";
+import { countFreeMembershipsForLogin } from "../dashboard/workspace-store";
 import {
   FIRST_INSTANCE_COOKIE,
   SESSION_COOKIE,
@@ -209,6 +211,18 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     const landing = await signedInLanding(c.env, login);
     if (landing !== "/dashboard") return c.redirect(landing, 302);
   }
+  // The create-workspace capability the shell's top-bar menu mirrors: one free
+  // workspace per login, `saas` only. The creation route re-checks under its
+  // write, so this is copy, not authority. `self-hosted` resolves every
+  // workspace to `unlimited`, so creation is always allowed there and the
+  // free-membership count is never read (spec §4). A signed-in shell always has
+  // a store: `readShellAuth` denied otherwise.
+  const freeSlotTaken =
+    login !== null &&
+    deploymentMode === "saas" &&
+    !freeSlotAvailable(
+      await countFreeMembershipsForLogin((c.env as Env & { DB: DashboardD1 }).DB, login),
+    );
   // The shell's Apps/brand links need the active workspace, and the shell
   // outlives the URL: a client-side navigation (spaClick → pushState) to a page
   // whose pathname names no workspace changes the pathname but not the boot, so
@@ -231,11 +245,18 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // Absent fields add nothing, so a ref-less boot keeps its JSON key order.
   const boot: SpaBoot = {
     ...auth.boot,
+    deploymentMode,
     ...(firstInstance ? { emptyInstance: true } : {}),
     ...(routeRef ?? supportRef ?? extras.workspaceRef) === undefined
       ? {}
       : { workspaceRef: routeRef ?? supportRef ?? extras.workspaceRef },
     ...(extras.canCreateApp === undefined ? {} : { canCreateApp: extras.canCreateApp }),
+    ...(login === null
+      ? {}
+      : {
+          canCreateWorkspace: !freeSlotTaken,
+          createWorkspaceBlockedReason: freeSlotTaken ? "free_slot" : null,
+        }),
     ...(supportRef === null
       ? extras.needsWorkspace === true
         ? { needsWorkspace: true }

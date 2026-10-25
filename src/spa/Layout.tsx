@@ -9,6 +9,7 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { t } from "../i18n";
 import type { SpaBoot } from "./boot";
 import { AppSidebar } from "./components/AppSidebar";
+import { WorkspaceSwitcher } from "./components/WorkspaceSwitcher";
 import { SupportNotice } from "./components/SupportNotice";
 import type { FlashKind } from "./flash";
 import { PageNotice } from "./pages/PageNotice";
@@ -81,30 +82,37 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
 
   return (
     <SidebarProvider defaultOpen>
-      <AppSidebar model={sidebar} switcher={switcher} />
+      <AppSidebar model={sidebar} />
       <SidebarInset>
         {/* v0.3 (DESIGN.md): navbar sits on background-200, one step above the
-            page canvas, matching the sidebar chrome layer. Control states
+            page canvas, matching the sidebar chrome layer. Two clusters: the
+            workspace switcher names what the whole shell is scoped to (left),
+            the account/locale/theme controls stay right. Control states
             (hover/active/focus-visible) come from the restyled ghost Button. */}
-        <header className="flex h-14 shrink-0 items-center justify-end gap-2 border-b border-border bg-(--background-200) px-4">
-          <Button type="button" variant="ghost" size="sm" onClick={toggleTheme} aria-label={t(boot.locale, "nav.themeToggleAria", { mode: t(boot.locale, theme === "dark" ? "nav.themeDark" : "nav.themeLight"), target: t(boot.locale, theme === "dark" ? "nav.themeLight" : "nav.themeDark") })}>
-            {/* Icon-only: the icon depicts the CURRENT mode; the aria-label carries the action. */}
-            {theme === "dark" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
-          </Button>
-          <form className="m-0" method="post" action="/dashboard/locale">
-            <input type="hidden" name="locale" value={navbar.languageTarget} />
-            <Button type="submit" variant="ghost" size="sm">
-              {navbar.languageLabel}
+        <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-(--background-200) px-4">
+          <div className="flex min-w-0 items-center gap-2">
+            <WorkspaceSwitcher model={switcher} boot={boot} />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="ghost" size="sm" onClick={toggleTheme} aria-label={t(boot.locale, "nav.themeToggleAria", { mode: t(boot.locale, theme === "dark" ? "nav.themeDark" : "nav.themeLight"), target: t(boot.locale, theme === "dark" ? "nav.themeLight" : "nav.themeDark") })}>
+              {/* Icon-only: the icon depicts the CURRENT mode; the aria-label carries the action. */}
+              {theme === "dark" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
             </Button>
-          </form>
-          {navbar.accountLabel ? (
-            <span className="hidden max-w-48 truncate text-sm text-muted-foreground sm:inline">{navbar.accountLabel}</span>
-          ) : null}
-          {boot.login ? (
-            <Button asChild variant="ghost" size="sm">
-              <a href="/dashboard/logout">{navbar.logoutLabel}</a>
-            </Button>
-          ) : null}
+            <form className="m-0" method="post" action="/dashboard/locale">
+              <input type="hidden" name="locale" value={navbar.languageTarget} />
+              <Button type="submit" variant="ghost" size="sm">
+                {navbar.languageLabel}
+              </Button>
+            </form>
+            {navbar.accountLabel ? (
+              <span className="hidden max-w-48 truncate text-sm text-muted-foreground sm:inline">{navbar.accountLabel}</span>
+            ) : null}
+            {boot.login ? (
+              <Button asChild variant="ghost" size="sm">
+                <a href="/dashboard/logout">{navbar.logoutLabel}</a>
+              </Button>
+            ) : null}
+          </div>
         </header>
         <div className="flex flex-1 flex-col p-4 md:p-6">
           {/* The undismissable support notice sits above every workspace page:

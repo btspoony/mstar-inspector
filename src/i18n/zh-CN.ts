@@ -24,6 +24,11 @@ export const zhCN: Dictionary = {
     logout: "退出登录",
     signedInAs: "已登录：{name}",
     workspaceSwitcher: "工作区",
+    /** 切换器菜单最后一行——创建工作区入口。 */
+    newWorkspace: "新建工作区",
+    /** 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "free_slot"`）。 */
+    newWorkspaceBlockedFreeSlot:
+      "你已属于一个免费工作区 — 每个账号限一个。请删除它，或请其所有者移除你，然后再创建新的工作区。",
   },
   common: {
     pageTitle: "{page} — {brand}",
@@ -181,6 +186,7 @@ export const zhCN: Dictionary = {
     slotsLeft: "还剩 {count} 个名额",
     slotsLeftOne: "只剩 {count} 个名额",
     noSeatsLeft: "名额已满",
+    noMemberLimit: "无上限",
     pendingInviteOne: "{count} 个待接受的邀请",
     pendingInvites: "{count} 个待接受的邀请",
     reviewAttemptsLabel: "本月审查次数",
@@ -232,6 +238,8 @@ export const zhCN: Dictionary = {
   workspace: {
     setupHeading: "创建工作区",
     setupDescription: "你还不属于任何工作区。创建后你将成为它的所有者，之后可以邀请队友。",
+    /** 切换器菜单里的创建弹窗：已有工作区的成员也可用，因此不复述「还没有工作区」。 */
+    createDialogDescription: "为它命名，你将成为其所有者——之后可以邀请队友。",
     /** `self-hosted` 空实例提示：本次登录创建了部署的第一个账号。 */
     emptyInstance: "本实例还没有任何账号。你的登录现在已是本实例的第一个账号——创建一个工作区即可开始。",
     nameLabel: "工作区名称",

@@ -474,8 +474,12 @@ describe("/dashboard routes", () => {
     expect(body).toContain('"login":"octocat"');
     // The identity block carries no top-level role any more: the workspace
     // role rides `memberships[]` (pinned here), and nothing else does.
-    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"owner"}]');
-    expect(body).toContain('{"locale":"en","login":"octocat","name":"octocat","workspaceRef":"default"');
+    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"owner","plan":"Unlimited"}]');
+    // Key order is part of the installed-document contract, and the deployment
+    // mode rides right after the identity fields.
+    expect(body).toContain(
+      '{"locale":"en","login":"octocat","name":"octocat","deploymentMode":"self-hosted","workspaceRef":"default"',
+    );
     // The legacy three-card home is retired: no SSR sections,
     // no manifest start form.
     expect(body).not.toContain("Model keys");
@@ -509,7 +513,7 @@ describe("/dashboard routes", () => {
     expect(member.status).toBe(200);
     const memberBody = await member.text();
     expect(memberBody).toContain('"login":"mallory"');
-    expect(memberBody).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member"}]');
+    expect(memberBody).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member","plan":"Unlimited"}]');
   });
 
   test("GET /dashboard with a tampered session cookie → 302 to login (treated as logged out)", async () => {
@@ -3647,6 +3651,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     db: DashboardD1 & { raw: Database },
     login: string,
     form: Record<string, string>,
+    mode: "saas" | "self-hosted" = "self-hosted",
   ): Promise<Response> {
     const session = await createSessionValue(login, null, SESSION_SECRET);
     return worker.fetch(
@@ -3659,7 +3664,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
         },
         body: new URLSearchParams(form),
       }),
-      makeDbEnv(db),
+      makeDbEnv(db, { DEPLOYMENT_MODE: mode }),
     );
   }
 
@@ -3749,7 +3754,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     db.raw.exec("DELETE FROM users");
     await createUser(db, { login: "deployer", role: "member" });
 
-    const first = await createWorkspaceRequest(db, "deployer", { name: "First" });
+    const first = await createWorkspaceRequest(db, "deployer", { name: "First" }, "saas");
     expect(first.status).toBe(201);
     const workspacesBefore = workspaceCount(db);
     const membersBefore = memberRowCount(db);
@@ -3759,13 +3764,29 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     // The second attempt — and an immediate retry — hit the free slot: the
     // identical plain-text 409 body, zero rows on any of the three tables.
     for (const name of ["Second", "Retry"]) {
-      const res = await createWorkspaceRequest(db, "deployer", { name });
+      const res = await createWorkspaceRequest(db, "deployer", { name }, "saas");
       expect(res.status, name).toBe(409);
       expect(await res.text(), name).toBe(FREE_SLOT_REFUSAL);
       expect(workspaceCount(db), name).toBe(workspacesBefore);
       expect(memberRowCount(db), name).toBe(membersBefore);
       expect(subscriptionRowCount(db), name).toBe(subscriptionsBefore);
     }
+  });
+
+  test("self-hosted allows a second workspace: nothing resolves to free there", async () => {
+    const db = createDashboardTestD1();
+    db.raw.exec("DELETE FROM users");
+    await createUser(db, { login: "deployer", role: "member" });
+
+    // The same fixture the saas guard refuses above; `self-hosted` is
+    // "always allowed" (spec §4), and the created workspace still records its
+    // free row because that row is what a saas switch would resolve.
+    expect((await createWorkspaceRequest(db, "deployer", { name: "First" })).status).toBe(201);
+    expect((await createWorkspaceRequest(db, "deployer", { name: "Second" })).status).toBe(201);
+    expect(subscriptionRowCount(db)).toBe(2);
+    expect(
+      db.raw.query("SELECT plan_id FROM workspace_subscriptions ORDER BY created_at").all(),
+    ).toEqual([{ plan_id: "free" }, { plan_id: "free" }]);
   });
 
   test("owning a pro workspace does not consume the free slot", async () => {
@@ -3789,7 +3810,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
       )
       .run(now, now);
 
-    const res = await createWorkspaceRequest(db, "deployer", { name: "Free one" });
+    const res = await createWorkspaceRequest(db, "deployer", { name: "Free one" }, "saas");
     expect(res.status).toBe(201);
     const plans = db.raw
       .query("SELECT plan_id FROM workspace_subscriptions ORDER BY plan_id")
@@ -3801,11 +3822,11 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     const db = createDashboardTestD1();
     db.raw.exec("DELETE FROM users");
     await createUser(db, { login: "deployer", role: "member" });
-    const first = await createWorkspaceRequest(db, "deployer", { name: "Workspace 1" });
+    const first = await createWorkspaceRequest(db, "deployer", { name: "Workspace 1" }, "saas");
     expect(first.status).toBe(201);
     const retired = (await first.json()) as { id: string };
 
-    const refused = await createWorkspaceRequest(db, "deployer", { name: "Workspace 2" });
+    const refused = await createWorkspaceRequest(db, "deployer", { name: "Workspace 2" }, "saas");
     expect(refused.status).toBe(409);
 
     // No production soft-delete face exists yet; the fixture retires the row
@@ -3815,7 +3836,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
       .prepare("UPDATE workspaces SET deleted_at = ? WHERE id = ?")
       .run(new Date().toISOString(), retired.id);
 
-    const res = await createWorkspaceRequest(db, "deployer", { name: "Replacement" });
+    const res = await createWorkspaceRequest(db, "deployer", { name: "Replacement" }, "saas");
     expect(res.status).toBe(201);
   });
 
@@ -3903,7 +3924,7 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
     expect(payload.login).toBe("octocat");
   });
 
-  test("selecting the only workspace is a no-op: no control, no cookie, same bytes", async () => {
+  test("the only workspace is the control's one row: a pick changes no bytes and sets no cookie", async () => {
     // `octocat` in the default seed belongs to `default` alone — the
     // empty-choice case AC6 names.
     const env = withSpaAssets(makeDbEnv(seededDashboardD1()));
@@ -3917,9 +3938,13 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
     const boot = JSON.parse(
       /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(body)?.[1] ?? "{}",
     ) as Parameters<typeof buildWorkspaceSwitcherModel>[0];
-    // One membership: the shell offers no control, so the only possible
-    // "switch" cannot be initiated at all.
+    // One membership is still a LIST: the menu names the workspace
+    // the shell is scoped to, and its only row is already current — so there is
+    // no other row to pick, which is what the byte/cookie assertions above pin.
     expect(boot.memberships).toHaveLength(1);
-    expect(buildWorkspaceSwitcherModel(boot, "/dashboard/default/apps")).toBeNull();
+    const model = buildWorkspaceSwitcherModel(boot, "/dashboard/default/apps");
+    expect(model?.currentRef).toBe("default");
+    expect(model?.options).toEqual([{ ref: "default", name: "Default" }]);
+    expect(model?.target).toBe("replace");
   });
 });

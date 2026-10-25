@@ -27,6 +27,7 @@
  * refuses with the entitlement's own cap error instead of copying either below.
  */
 
+import type { DeploymentMode } from "../worker/env";
 import {
   FREE_PLAN_ID,
   FreeWorkspaceSlotError,
@@ -191,16 +192,31 @@ const INVITE_COLUMNS = `id, workspace_id, github_login, role, status, invited_by
        created_at, expires_at, accepted_at`;
 
 /**
+ * The invite row insert without the seat condition. `createInvite` appends
+ * {@link SEAT_GUARD_SQL} only for a numeric seat limit: a NULL limit means no
+ * cap, and binding NULL into `?8` would make `count < NULL` evaluate to NULL,
+ * so the insert would write no row and mint a spurious refusal.
+ */
+const INVITE_INSERT_SQL = `INSERT INTO workspace_invites
+             (id, workspace_id, github_login, role, status, invited_by,
+              created_at, expires_at, accepted_at)
+           SELECT ?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, NULL`;
+
+/**
  * Create a pending invite. The flip runs first so a lapsed row stops blocking
  * the partial unique index; the insert then either succeeds, trips that index
  * (which surfaces as {@link InvitePendingExistsError}), or is refused by the
  * plan's seat cap.
  *
- * The cap is enforced BY the write: the insert carries {@link SEAT_GUARD_SQL},
- * so at the cap it writes no row and this throws {@link MemberCapError} — the
- * winner of a concurrent pair cannot push the workspace past its plan. The
+ * The cap is enforced BY the write: for a numeric limit the insert carries
+ * {@link SEAT_GUARD_SQL}, so at the cap it writes no row and this throws
+ * {@link MemberCapError} — the winner of a concurrent pair cannot push the
+ * workspace past its plan. A NULL limit means no cap: the insert then carries
+ * no seat condition at all, so the value never reaches the bind as NULL. The
  * plan is resolved here rather than passed in: the catalogue is static, and the
- * store is the one place that must know the limit it enforces.
+ * store is the one place that must know the limit it enforces. The mode is the
+ * caller's because this store cannot see the request env, and `self-hosted`
+ * resolves `unlimited` before reading the catalogue at all (spec §2).
  */
 export async function createInvite(
   db: InviteStoreD1,
@@ -212,6 +228,7 @@ export async function createInvite(
     now: string;
     expiresAt: string;
   },
+  mode: DeploymentMode,
 ): Promise<WorkspaceInviteRow> {
   const row: WorkspaceInviteRow = {
     id: crypto.randomUUID(),
@@ -224,37 +241,35 @@ export async function createInvite(
     expires_at: input.expiresAt,
     accepted_at: null,
   };
-  const plan = await resolveWorkspacePlan(db, input.workspaceId);
+  const limit = (await resolveWorkspacePlan(db, input.workspaceId, mode)).includedMembers;
+  const values: unknown[] = [
+    row.id,
+    row.workspace_id,
+    row.github_login,
+    row.role,
+    row.invited_by,
+    row.created_at,
+    row.expires_at,
+  ];
+  const insert =
+    limit === null
+      ? db.prepare(INVITE_INSERT_SQL).bind(...values)
+      : db
+          .prepare(`${INVITE_INSERT_SQL}\n            WHERE ${SEAT_GUARD_SQL}`)
+          .bind(...values, limit);
   let results: { results: unknown[]; meta: { changes: number; last_row_id: number } }[];
   try {
-    results = await db.batch([
-      db.prepare(FLIP_LAPSED_SQL).bind(input.workspaceId, input.now),
-      db
-        .prepare(
-          `INSERT INTO workspace_invites
-             (id, workspace_id, github_login, role, status, invited_by,
-              created_at, expires_at, accepted_at)
-           SELECT ?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, NULL
-            WHERE ${SEAT_GUARD_SQL}`,
-        )
-        .bind(
-          row.id,
-          row.workspace_id,
-          row.github_login,
-          row.role,
-          row.invited_by,
-          row.created_at,
-          row.expires_at,
-          plan.includedMembers,
-        ),
-    ]);
+    results = await db.batch([db.prepare(FLIP_LAPSED_SQL).bind(input.workspaceId, input.now), insert]);
   } catch (err) {
     if (isUniqueConstraintError(err)) throw new InvitePendingExistsError(input.login);
     throw err;
   }
   // The guard refused: no invite row was written (the flip above only ever
-  // expires already-lapsed rows, so it changed no seat).
-  if (results[1]!.meta.changes === 0) throw new MemberCapError(MEMBER_CAP_REFUSAL);
+  // expires already-lapsed rows, so it changed no seat). A null limit has no
+  // guard, so it can never reach this refusal.
+  if (limit !== null && results[1]!.meta.changes === 0) {
+    throw new MemberCapError(MEMBER_CAP_REFUSAL(limit));
+  }
   return row;
 }
 
@@ -398,12 +413,19 @@ export async function revokeInvite(
  * accepting login is a member of that workspace — so a refusal leaves the
  * invite pending and throws {@link FreeWorkspaceSlotError}. The route's read
  * stays fast-fail UX.
+ *
+ * The rule binds `saas` only (spec §3/§4): `self-hosted` resolves every
+ * workspace to `unlimited`, so nothing is on the free tier and the guard would
+ * only refuse an acceptance that must be allowed. The saas SQL text is
+ * unchanged; the self-hosted insert simply carries no slot condition (and so
+ * binds no free plan id).
  */
 export async function acceptInvite(
   db: InviteStoreD1,
   inviteId: string,
   login: string,
   now: string,
+  mode: DeploymentMode,
 ): Promise<AcceptInviteOutcome> {
   const invite = await db
     .prepare(`SELECT ${INVITE_COLUMNS} FROM workspace_invites WHERE id = ?`)
@@ -435,6 +457,8 @@ export async function acceptInvite(
     return { kind: "expired" };
   }
 
+  // `saas` keeps the guard's bytes exactly; self-hosted carries no condition.
+  const freeSlotCondition = mode === "saas" ? `\n            AND ${ACCEPT_FREE_SLOT_GUARD_SQL}` : "";
   await db.batch([
     db.prepare(FLIP_LAPSED_SQL).bind(invite.workspace_id, now),
     db
@@ -443,11 +467,10 @@ export async function acceptInvite(
          SELECT i.workspace_id, u.id, i.role, ?1
            FROM workspace_invites i
            JOIN users u ON u.github_login = ?2 COLLATE NOCASE
-          WHERE i.id = ?3 AND i.status = 'pending' AND i.expires_at > ?1
-            AND ${ACCEPT_FREE_SLOT_GUARD_SQL}
+          WHERE i.id = ?3 AND i.status = 'pending' AND i.expires_at > ?1${freeSlotCondition}
          ON CONFLICT DO NOTHING`,
       )
-      .bind(now, login, inviteId, FREE_PLAN_ID),
+      .bind(now, login, inviteId, ...(mode === "saas" ? [FREE_PLAN_ID] : [])),
     db
       .prepare(
         `UPDATE workspace_invites SET status = 'accepted', accepted_at = ?1

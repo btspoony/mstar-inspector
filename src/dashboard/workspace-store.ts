@@ -12,6 +12,7 @@
  * of copying either below.
  */
 
+import type { DeploymentMode } from "../worker/env";
 import {
   FREE_PLAN_ID,
   FREE_SLOT_REFUSAL,
@@ -453,6 +454,12 @@ const FREE_SLOT_GUARD_SQL = `(SELECT COUNT(*)
  * behind (a `batch` that committed cannot be rolled back after the fact, so
  * the guard has to be part of each statement rather than a check after it).
  *
+ * The rule binds `saas` only (spec §3/§4): `self-hosted` resolves every
+ * workspace to `unlimited`, so creation is always allowed there — the insert
+ * then carries no guard at all, while the `free` subscription row is still
+ * written unchanged (it records what SaaS would resolve). In `saas` the guard
+ * and its binds are untouched.
+ *
  * Returns false when the slug is already taken (the UNIQUE index is the final
  * word), so the caller can mint another id instead of 500ing. Throws
  * {@link FreeWorkspaceSlotError} when the guard refused.
@@ -466,6 +473,7 @@ export async function createWorkspace(
     githubLogin: string;
     createdAt: string;
   },
+  mode: DeploymentMode,
 ): Promise<boolean> {
   const binds = [
     input.id,
@@ -475,25 +483,31 @@ export async function createWorkspace(
     input.githubLogin,
     FREE_PLAN_ID,
   ] as const;
+  const guarded = mode === "saas";
+  const slotGuard = guarded ? ` WHERE ${FREE_SLOT_GUARD_SQL}` : "";
+  // Without the guard the workspace and membership inserts reference `?1`–`?4`
+  // only; the subscription still binds the plan id as `?6` (indexes 2 and 5
+  // stay bound but unused, as SQLite requires every index up to the highest).
+  const slotBinds: readonly unknown[] = guarded ? binds : binds.slice(0, 4);
   let results: { results: unknown[]; meta: { changes: number; last_row_id: number } }[];
   try {
     results = await db.batch([
       db
         .prepare(
           `INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
-           SELECT ?1, ?1, ?2, ?3, ?4, NULL WHERE ${FREE_SLOT_GUARD_SQL}`,
+           SELECT ?1, ?1, ?2, ?3, ?4, NULL${slotGuard}`,
         )
-        .bind(...binds),
+        .bind(...slotBinds),
       db
         .prepare(
           `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
-           SELECT ?1, ?3, 'owner', ?4 WHERE ${FREE_SLOT_GUARD_SQL}`,
+           SELECT ?1, ?3, 'owner', ?4${slotGuard}`,
         )
-        .bind(...binds),
+        .bind(...slotBinds),
       db
         .prepare(
           `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
-           SELECT ?1, ?6, 'active', ?4, ?4 WHERE ${FREE_SLOT_GUARD_SQL}`,
+           SELECT ?1, ?6, 'active', ?4, ?4${slotGuard}`,
         )
         .bind(...binds),
     ]);
@@ -503,7 +517,10 @@ export async function createWorkspace(
     throw err;
   }
   // The guard refused: every statement wrote zero rows, so nothing to undo.
-  if (results[1]!.meta.changes === 0) throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
+  // Self-hosted has no guard, so it can never reach this refusal.
+  if (guarded && results[1]!.meta.changes === 0) {
+    throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
+  }
   return results[0]!.meta.changes > 0;
 }
 

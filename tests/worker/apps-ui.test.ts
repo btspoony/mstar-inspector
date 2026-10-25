@@ -204,7 +204,7 @@ describe("the Apps page shell (workspace-scoped SPA route)", () => {
     expect(body).toContain("window.__BOOT__=");
     expect(body).toContain('"login":"hubot"');
     // The boot carries the workspace memberships (id + role), never users.role.
-    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member"}]');
+    expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member","plan":"Unlimited"}]');
   });
 
   test("the retired deployment-level /dashboard/apps answers 404", async () => {

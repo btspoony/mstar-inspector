@@ -29,7 +29,9 @@ function envFor(db: TestD1): Env {
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
     GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
-    DEPLOYMENT_MODE: "self-hosted",
+    // `saas`: the free slot this file's creation cases assert binds that mode
+    // only (self-hosted resolves every workspace to `unlimited`).
+    DEPLOYMENT_MODE: "saas",
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
     DB: db,
