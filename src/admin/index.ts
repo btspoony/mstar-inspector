@@ -11,6 +11,9 @@
  * (`./gate.ts`) — no mounted middleware stands in for it.
  */
 import { Hono } from "hono";
+import { resolveLocale } from "../i18n";
+import { injectSpaBoot } from "../spa/boot";
+import { ADMIN_PAGES } from "../spa/admin/pages";
 import type { Env } from "../worker/env";
 import { operatorLogin, type AdminContext } from "./gate";
 
@@ -28,7 +31,31 @@ async function readMe(c: AdminContext): Promise<Response> {
   return c.json({ login });
 }
 
-const ADMIN_ROUTES: readonly AdminRoute[] = [{ method: "get", path: "/api/me", handler: readMe }];
+/**
+ * The console document (`src/spa/admin.html`). `ASSETS` holds it and no other
+ * route serves it: spa-dispatch matches only `/index.html` and `/assets/*`, so
+ * this gated handler is the document's single entry point.
+ */
+async function serveDocument(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const document = await c.env.ASSETS?.fetch(new URL("/admin.html", c.req.url));
+  if (!document?.ok) return c.notFound();
+  // Minimal admin boot: identity and locale only. None of the workspace boot
+  // reads (memberships, invites, support redirects) run for this document.
+  const html = injectSpaBoot(await document.text(), {
+    locale: resolveLocale(c.req.raw),
+    login,
+    name: null,
+  });
+  return c.html(html, 200, { "cache-control": "private, no-store" });
+}
+
+const ADMIN_ROUTES: readonly AdminRoute[] = [
+  { method: "get", path: "/api/me", handler: readMe },
+  { method: "get", path: "/", handler: serveDocument },
+  ...ADMIN_PAGES.map((page) => ({ method: "get" as const, path: `/${page.id}`, handler: serveDocument })),
+];
 
 /** The admin sub-app. Exported as a mountable Hono instance for `src/worker/index.ts`. */
 export const adminApp = new Hono<{ Bindings: Env }>();

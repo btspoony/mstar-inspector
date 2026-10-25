@@ -112,6 +112,52 @@ describe("/_internal_admin on saas", () => {
   });
 });
 
+describe("the admin document", () => {
+  /** The boot the Worker injected into the document. */
+  function bootOf(html: string): Record<string, unknown> {
+    const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
+    if (json === undefined) throw new Error("no boot in the admin document");
+    return JSON.parse(json) as Record<string, unknown>;
+  }
+
+  test("an operator gets the console document, booted with their login only", async () => {
+    const env = envFor("saas");
+    const res = await get("/_internal_admin/flags", OPERATOR, env);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    // The namespace root is the same document (the mount's own "/" route).
+    expect((await get("/_internal_admin", OPERATOR, env)).status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.login).toBe(OPERATOR);
+    // Minimal admin boot: none of the workspace machinery rides along.
+    for (const key of ["memberships", "pendingInvites", "workspaceRef", "workspaceBoot"]) {
+      expect(boot).not.toHaveProperty(key);
+    }
+  });
+
+  test("a non-operator and an anonymous caller never see it", async () => {
+    const env = envFor("saas");
+    const unknown = await get("/not-a-route", null, env);
+    const unknownText = await unknown.text();
+    for (const login of [MEMBER, null]) {
+      const res = await get("/_internal_admin/flags", login, env);
+      expect(res.status).toBe(unknown.status);
+      expect(res.headers.get("location")).toBeNull();
+      expect(await res.text()).toBe(unknownText);
+    }
+  });
+
+  test("/admin.html is not served outside the gated admin route", async () => {
+    for (const mode of ["saas", "self-hosted"]) {
+      const env = envFor(mode);
+      const res = await get("/admin.html", OPERATOR, env);
+      const unknown = await get("/not-a-route", null, env);
+      expect(res.status).toBe(unknown.status);
+      expect(await res.text()).toBe(await unknown.text());
+    }
+  });
+});
+
 describe("/_internal_admin on self-hosted", () => {
   test("the route does not exist, even for an allowlisted login", async () => {
     const env = envFor("self-hosted");
