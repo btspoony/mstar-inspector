@@ -406,6 +406,13 @@ describe("invite creation member cap", () => {
     const res = await request(INVITES, "dana", { method: "POST", body: "login=ada" });
     expect(res.status).toBe(200);
     expect(pendingInvites(db)).toBe(1);
+
+    // Five live people now (four members + ada's pending row); the lapsed row
+    // is terminal and stays out of the count, so the next invite is refused.
+    const refused = await request(INVITES, "carol", { method: "POST", body: "login=erin" });
+    expect(refused.status).toBe(409);
+    expect(await refused.text()).toBe(MEMBER_CAP_REFUSAL);
+    expect(pendingInvites(db)).toBe(1);
   });
 
   test("a pro workspace is capped at five too", async () => {

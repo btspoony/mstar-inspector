@@ -1588,9 +1588,11 @@ describe("/dashboard manifest routes", () => {
   test("unbound D1: the creation gate does not 403 the callback into burning the hold (I-000090)", async () => {
     // The same resumable path, on a deployment whose D1 binding is lost
     // between start and callback. Storage is a configuration failure, not a
-    // permission answer: a `canCreateApp: false` here would 403 before the
-    // state/commit and expire the hold, and the App credentials exist ONLY in
-    // that hold — recovery would mean creating a second GitHub App.
+    // permission answer: a `canCreateApp: false` here would 403 the callback
+    // before the code exchange — no hold exists yet to expire; what burns is
+    // the single-use state cookie minted on the bound store at start (only the
+    // callback loses the binding). The App credentials exist ONLY in GitHub's
+    // conversion response — recovery would mean creating a second GitHub App.
     const env = baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
     const { session, state } = await startManifest();
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;

@@ -549,7 +549,7 @@ VALUES
 ```
 
 ```sh
-wrangler d1 execute mstar-inspector --remote \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production \
   --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','<reason>','<you>','$(date -u +%FT%TZ)','<ISO expiry>')"
 ```
 
@@ -562,7 +562,7 @@ control at all, and **revocation is an append-only write, not a delete**:
 # Close the window now: append a superseding row whose window is already over.
 # The old row is untouched history, so "revoked" stays distinguishable from
 # "lapsed" and the audit trail keeps both.
-wrangler d1 execute mstar-inspector --remote \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production \
   --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','revoked: <why>','<you>','$(date -u +%FT%TZ)','$(date -u +%FT%TZ)')"
 ```
 
@@ -621,7 +621,7 @@ could only have got a `default` membership from the replay, so the join on
    list is exactly the damage:
 
    ```sh
-   wrangler d1 execute mstar-inspector-db --remote \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production \
      --command "SELECT u.github_login, wm.role, wm.created_at, u.created_at AS signed_up_at FROM workspace_members wm JOIN users u ON u.id = wm.user_id WHERE wm.workspace_id = 'default' AND wm.created_at = '2026-10-21T00:00:00.000Z' AND u.created_at >= '2026-10-22T11:13:45.000Z'"
    ```
 
@@ -637,7 +637,7 @@ could only have got a `default` membership from the replay, so the join on
    they carry the same fixed stamp. The `users` rows themselves stay.
 
    ```sh
-   wrangler d1 execute mstar-inspector-db --remote \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production \
      --command "DELETE FROM workspace_members WHERE workspace_id = 'default' AND created_at = '2026-10-21T00:00:00.000Z' AND user_id IN (SELECT id FROM users WHERE created_at >= '2026-10-22T11:13:45.000Z')"
    ```
 
@@ -659,10 +659,15 @@ could only have got a `default` membership from the replay, so the join on
 
 Ordering note: run (1), then (2). There is no third step to order against. If
 the deployment has **not** yet applied `0030`, apply it first (`wrangler d1
-migrations apply`): until it has, the legitimate pre-cutover rows it would
-write are missing, and step (2) is still correct on its own predicate.
+migrations apply mstar-inspector-prod-db --remote --env production`): until it
+has, the legitimate pre-cutover rows it would write are missing, and step (2)
+is still correct on its own predicate.
 
 ### The FIRST application has the same blind spot
+
+**Scope: this subsection targets a staging copy or a self-hosted deployment
+tracking the branch — not the production upgrade path, so its commands use the
+staging binding (`mstar-inspector-db`).**
 
 The hand re-run above is not the only way `0030` can restore somebody. Its
 `NOT EXISTS` guard looks at live memberships only, so the **first** ledger
@@ -920,6 +925,10 @@ exist before the first deploy:
     change, not a casual follow-up.
 
 ### D1 migrations (forward-only)
+
+> **Staging database** — the commands below run against the staging DB
+> (`mstar-inspector-db`); a production apply uses
+> `mstar-inspector-prod-db --remote --env production`.
 
 The apply is **preceded by a pre-apply snapshot** — the restore point
 every `0024`/`0025` rollback refers to (§ Rollback). `0024` rebuilds
@@ -1265,6 +1274,13 @@ runs through the flows below instead of a staging domain.
 
 ### Pre-production verification (this Worker's real options)
 
+> **Staging environment** — the flows below run against the default (staging)
+> environment and the `mstar-inspector.42ch.dev` domain; the environment-free
+> `wrangler versions upload` and `wrangler versions deploy <version-id>@0%`
+> resolve the top-level config block. Production promotion is a separate path
+> with its own resources and approval (§ Production environment,
+> § Rollback (production)).
+
 **No versioned Preview URLs.** The Worker implements the `SandboxV1` Durable
 Object (container binding) — Cloudflare does NOT generate preview URLs for
 Workers implementing a DO (docs: Preview URLs → Limitations; verified live:
@@ -1306,6 +1322,13 @@ only via `wrangler deploy`).
 > `wrangler deploy` → smoke → digest record. The steps below are the manual
 > equivalent, kept as reference for local runs and for recovering from a
 > failed automated deploy.
+>
+> **Staging environment** — every command below targets the default (staging)
+> environment: the staging Worker `mstar-inspector`, the staging database
+> (`mstar-inspector-db`), and the `mstar-inspector.42ch.dev` domain. The
+> environment-free form in this section (`wrangler deployments list`) resolves
+> the top-level config block; production is a separate environment with its
+> own Worker, database and workflow (§ Production environment).
 
 Order lock (plan Clarify #5): code merge → `wrangler deploy` (the container
 image auto-rebuilds when the Dockerfile/build context changed) → post-deploy
@@ -1425,6 +1448,12 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > below are extra / local investigation steps, not the workflow smoke — for
 > local runs and for investigating a red run.
 >
+> **Staging environment** — the manual checks below read the staging database
+> (`mstar-inspector-db`) and the staging Worker `mstar-inspector`, which the
+> flag-free commands resolve. Investigating a red **production** run uses that
+> Worker's own resources — § Production red-run equivalents at the end of this
+> section.
+>
 > **URL permanence:** `/dashboard/apps` — and `/dashboard/apps/` —
 > are permanently retired → 301 `/dashboard`; do not re-introduce the path
 > (browsers cache the 301).
@@ -1469,6 +1498,25 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    `model` is the effective chain head selector, or NULL meaning the in-image
    default ran (§ Image pins and digest record).
 
+### Production red-run equivalents
+
+> **Production environment** — these commands read the production Worker
+> `mstar-inspector-production` and the production database
+> (`mstar-inspector-prod-db`), for investigating a red `deploy-prod.yml` run.
+> They are not the staging checks above.
+
+```bash
+wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
+  "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
+  "SELECT COUNT(*) AS n FROM review_failures"
+wrangler tail --env production
+```
+
+`review_failures` must be present and the count queryable. `wrangler tail
+--env production` streams the production Worker's log — the same evidence the
+staging checks read from a flag-free `wrangler tail`.
+
 ## Multi-App go-live
 
 > This section activates the multi-App platform on a deployed Worker — the
@@ -1502,7 +1550,8 @@ openssl rand -base64 32
 Set it as a **GitHub Secret** (`DASHBOARD_ENCRYPTION_KEY`) — the Deploy
 workflow injects it on the next deploy (never in git; `.dev.vars` for local
 `wrangler dev`). The manual `wrangler secret put` below is the local/fallback
-form:
+form: it targets the default (staging) environment, while production's value is
+set through the GitHub Secret above:
 
 ```bash
 wrangler secret put DASHBOARD_ENCRYPTION_KEY
@@ -1571,7 +1620,7 @@ and the settings model faces write and read.
    and webhook URL. Verify in D1 (grab the `id` — the R1 pin below needs
    it):
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT id, slug, name, status, created_by, created_at FROM github_apps ORDER BY created_at DESC LIMIT 1"
    ```
    Healthy — exactly one row (the App just committed; the query caps at
@@ -1633,9 +1682,9 @@ chain: an override referencing a provider with no configured key fails
 closed the same way (Bugbot 7aaf18f4).
 Per-role overrides (the seat references in `app_model_chain_seats`, 0017; the
 pre-`0017` `app_model_roles` rows were backfilled into named chains and are
-read-retired) are deliberately NOT
-column-reflected — pin those with the completed review + `wrangler tail`
-runner evidence, not the column.
+read-retired) are deliberately NOT column-reflected — pin those with the
+completed review + `wrangler tail --env production` runner evidence, not the
+column.
 
 1. **Configure the chain** — on the App's settings page, set **Model chain**
    to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
@@ -1648,7 +1697,7 @@ runner evidence, not the column.
 3. **Assert the column** — the review lands and the row records the chain
    head:
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT model, skill_version, reviewed_at FROM reviews WHERE app_id = '<app-id>' ORDER BY reviewed_at DESC LIMIT 1"
    ```
    `model` must equal the configured chain head (`ark-plan/deepseek-v4-flash`
@@ -1657,7 +1706,7 @@ runner evidence, not the column.
    `effectiveModelChain`). The triggering delivery is visible in the same
    window:
    ```bash
-   wrangler d1 execute mstar-inspector-db --remote --command \
+   wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
      "SELECT outcome, event_name, status_code, created_at FROM webhook_deliveries WHERE app_id = '<app-id>' ORDER BY created_at DESC LIMIT 1"
    ```
    `outcome` must be `ok` — the ok row records the webhook ACCEPTED
@@ -1668,17 +1717,23 @@ runner evidence, not the column.
 
 ### 5. Rollback (multi-App)
 
-Rollback is `wrangler rollback` (see § Rollback below) — there is no legacy
-face to repoint to; the per-App webhook URL on GitHub is unchanged by a
-Worker rollback.
+Rollback is `wrangler versions deploy --env production <version-id>@100%`
+(see ### Rollback (production) above) — it re-points production at an
+already-uploaded version and leaves the container image at whatever the last
+`wrangler deploy` pushed; there is no legacy face to repoint to, and the
+per-App webhook URL on GitHub is unchanged. `wrangler rollback` is acceptable
+only as a one-step shortcut for that same version-only re-point when the
+target is the immediately previous version and no container image changed;
+across a container-affecting release use the explicit version id (or the
+re-dispatch door).
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
   (the chain head is `0025`). The code-only precedent (0002 — new code
   tolerates the prior schema) covers additive migrations; `0024` and `0025`
   rebuilt tables, so pre-`0024` code does not run against the live schema and
   their rollback needs the pre-apply snapshot as well (§ D1 migrations,
-  § Rollback). The `0023` removal tombstones stay safe on a code rollback: a
-  version predating `removed_logins` simply ignores the table.
+  ### Rollback (production)). The `0023` removal tombstones stay safe on a code
+  rollback: a version predating `removed_logins` simply ignores the table.
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
@@ -1733,6 +1788,13 @@ Operationally that means:
 
 ## Rollback
 
+> **Staging environment** — the commands below target the staging Worker
+> `mstar-inspector` and the staging database (`mstar-inspector-db`);
+> production rollback is `### Rollback (production)`. The production **D1**
+> restore path is currently **undocumented**: this runbook records no
+> production `time-travel restore` command and no production bookmark
+> source, so that path is an open gap rather than a procedure.
+>
 > Rollback is a **manual human action** — the Deploy workflow never rolls
 > back automatically. A failed deploy stops red; the operator investigates
 > and, if needed, rolls back by hand.
@@ -1754,8 +1816,9 @@ Operationally that means:
   # Revert the code first (Worker rollback above), then restore the database
   # to the pre-apply snapshot recorded in § D1 migrations. Destructive and
   # in-place on a GA backend; prints an undo bookmark before it runs.
-  # (The `time-travel info` step in § D1 migrations decides this branch: it
-  # fails outright on an alpha database, which takes the alpha path below.)
+  # (The bookmark is the one printed by the staging `time-travel info` step in
+  # § D1 migrations. That step also decides this branch: it fails outright on
+  # an alpha database, which takes the alpha path below.)
   wrangler d1 time-travel restore mstar-inspector-db --bookmark=<pre-apply-bookmark>
   ```
   The bookmark is valid for 30 days after the apply and is the only restore
@@ -2084,7 +2147,7 @@ Monthly (or when the table grows noticeably), delete rows older than 30
 days:
 
 ```bash
-wrangler d1 execute mstar-inspector-db --remote --command \
+wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
   "DELETE FROM review_failures WHERE created_at < datetime('now','-30 days')"
 ```
 

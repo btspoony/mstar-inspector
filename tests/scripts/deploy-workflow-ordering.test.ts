@@ -188,6 +188,9 @@ const WORKFLOWS = [
     migrations: "Apply D1 migrations (remote)",
     refIdentity: "Assert checkout identity",
     refNeedles: ["HEAD_SHA"],
+    // Wording the moved-ref exit must carry; everything after the dash is a
+    // file-specific tail clause and stays unpinned.
+    redNeedles: ["checked-out HEAD", "!= run SHA"],
     // Staging's `wrangler deploy` IS the last version-creating step, so the
     // summary takes no separate serving outcome.
     serving: undefined,
@@ -197,13 +200,17 @@ const WORKFLOWS = [
     migrations: "Apply prod D1 migrations (remote)",
     refIdentity: "Assert tag identity",
     refNeedles: ["refs/tags/", "TAG_SHA"],
+    // Prod compares the TAG's commit with the run SHA (a separate checkout-head
+    // step exists, but it is not the step this case runs), so its exit must
+    // name the tag and the run it disagrees with — not the tail clause.
+    redNeedles: ["names", "but this run executes"],
     // Production re-deploys the deployment-shape version in a LATER step: the
     // summary must consume that outcome too (I-000071).
     serving: { id: "serving", name: "Deploy serving version (prod)" },
   },
 ] as const;
 
-for (const { file, migrations, refIdentity, refNeedles, serving } of WORKFLOWS) {
+for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving } of WORKFLOWS) {
   describe(`${file} gate ordering`, () => {
     const steps = parseWorkflow(file).jobs.deploy.steps as Step[];
     const deployCapable = steps
@@ -284,6 +291,10 @@ for (const { file, migrations, refIdentity, refNeedles, serving } of WORKFLOWS) 
       );
       expect(moved.code, `${file}: a moved ref must red\n${moved.out}`).toBe(1);
       expect(moved.out, `${file}: a moved ref must say why`).toContain("::error::");
+      // Exiting 1 with any other message must not satisfy this case.
+      for (const needle of redNeedles) {
+        expect(moved.out, `${file}: red must name the moved ref (${needle})`).toContain(needle);
+      }
     });
 
     test("no deploy command passes the retired tenant-mode var, and the shape var is the only one", () => {
