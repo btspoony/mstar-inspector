@@ -557,11 +557,41 @@ the pathname's workspace segment.
 var on the Worker. An empty/unset value means "no operators", which is the
 default and is safe: nobody gains access.
 
-### Opening a support window (no UI this iteration)
+### Opening a support window
 
-Grant creation is an explicit operator action against the store, never an HTTP
-route — there is no self-grant. Pick the window, then insert one row
-(`migrations/0029_operator_support.sql` owns the DDL):
+The console is the normal path. Sign in as a platform operator on a `saas`
+deployment and open `/_internal_admin/support-grants`: the form posts
+`{ workspaceId, operatorLogin, reason, ttlHours }` to
+`POST /_internal_admin/api/support-grants`, and each row's **Revoke** sends
+`DELETE /_internal_admin/api/support-grants/<id>`. Grant creation is therefore
+an audited HTTP write, not a store-only action: both requests append exactly one
+`audit_events` row carrying the grant's target `workspace_id`
+(`support.grant.create` / `support.grant.delete`). The console does not exist on
+`self-hosted` (it registers no route there), so on that deployment the
+break-glass SQL below remains the only path.
+
+While the row is live the workspace members see an undismissable notice (who,
+why, until when) and the operator sees only the read-only support face. There is
+no tenant-facing control at all. Ending the window early is the console's
+**Revoke**, which deletes the grant row(s) for that (workspace, operator) pair
+and appends one `support.grant.delete` audit row: a grant is time-boxed access,
+not history.
+
+Access is decided per request by **the newest append for that (workspace,
+operator) — the highest `rowid`** (`hasValidGrant`), which tests only that one
+row's `expires_at > now`. The members' notice read
+(`listActiveSupportGrants`) applies the same one-row-per-operator rule, so both
+reads agree, and a lapsed row stops matching exactly like no row at all.
+Revoking removes the whole pair, so an older append can never be revealed by a
+later delete.
+
+#### Break-glass: hand-written SQL
+
+Reach for this only when the console is unavailable — `self-hosted` (no console
+at all), an outage, or a row that must physically go (e.g. it holds a secret in
+`reason`). It is **outside the audited path**: no `audit_events` row is written,
+so record the action in the workspace's incident log yourself.
+`migrations/0029_operator_support.sql` owns the DDL.
 
 ```sql
 -- `id` is any UUID; `granted_by` is the creating operator's login (not a FK).
@@ -577,37 +607,18 @@ wrangler d1 execute mstar-inspector-prod-db --remote --env production \
   --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','<reason>','<you>','$(date -u +%FT%TZ)','<ISO expiry>')"
 ```
 
-While the row is live the workspace members see an undismissable notice (who,
-why, until when) and the operator sees only the read-only support face. Ending
-the window early is the same explicit store action — there is no tenant-facing
-control at all, and **revocation is an append-only write, not a delete**:
+Closing a window by hand is a delete of the same pair the console's Revoke
+removes:
 
 ```sh
-# Close the window now: append a superseding row whose window is already over.
-# The old row is untouched history, so "revoked" stays distinguishable from
-# "lapsed" and the audit trail keeps both.
 wrangler d1 execute mstar-inspector-prod-db --remote --env production \
-  --command "INSERT INTO support_grants (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at) VALUES ('$(uuidgen)','<workspace_id>','<operator>','revoked: <why>','<you>','$(date -u +%FT%TZ)','$(date -u +%FT%TZ)')"
+  --command "DELETE FROM support_grants WHERE workspace_id = '<workspace_id>' AND operator_login = '<operator>'"
 ```
 
-Access is decided per request by **the newest append for that (workspace,
-operator) — the highest `rowid`** (`hasValidGrant`), which tests only that one
-row's `expires_at > now`. The members' notice read
-(`listActiveSupportGrants`) applies the same one-row-per-operator rule, so both
-reads agree. A `now`-stamped row therefore ends the window on the next request
-even though the row it supersedes is still stored and still unexpired: that
-older row remains readable as history (and is why "revoked" stays
-distinguishable from "lapsed"). Reading every row instead and keeping any live
-one would leave the revoked grant granting. There is deliberately no store
-export for update or delete — `src/dashboard/operator-store.ts` exports the two
-appends and the reads only.
-
-The bare `DELETE FROM support_grants WHERE workspace_id = … AND operator_login
-= …` a previous version of this runbook showed is **outside the audited path**:
-it destroys the grant row, so the members' notice vanishes with no record that
-a window ever existed and revoked becomes indistinguishable from lapsed. Use it
-only as break-glass when a row must physically go (e.g. it holds a secret in
-`reason`), and record the action in the workspace's incident log yourself.
+A hand-written delete leaves no record that a window ever existed. Do not
+"revoke" by appending a row with a `now` stamp instead: the console's path is
+the delete above, and keeping two revocation idioms makes the ledger read
+differently depending on who acted.
 
 `audit_events` is append-only: no code path updates or deletes a row, and the
 migration declares no cascade. `owner`/`admin` read them through
