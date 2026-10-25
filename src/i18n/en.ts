@@ -312,6 +312,7 @@ export const en = {
     /** The tenant's always-on notice; not dismissible, carries no action. */
     noticeHeading: "Support access is active",
     noticeLine: "{login} can read this workspace's members until {expires} — {reason}",
+    noticeError: "Could not check for active support access.",
     noGrant: "No support access is active.",
   },
   settings: {

@@ -2115,29 +2115,17 @@ describe("workspace slug control", () => {
   });
 });
 
-describe("the tenant support notice carries no control", () => {
-  const noticeSource = readFileSync(join(import.meta.dir, "../../src/spa/components/SupportNotice.tsx"), "utf8");
-
-  test("it renders no interactive element and no dismissal handler", () => {
-    expect(noticeSource).not.toMatch(/<button|<input|<select|<form|onClick|onDismiss|onClose/i);
-  });
-
-  test("it emits only the read-only notice channel", () => {
-    // Every element it renders goes through `PageNotice` (text only); no other
-    // component is rendered, so there is no action affordance to dismiss it.
-    const rendered = noticeSource.match(/^\s*<([A-Z][\w]*)/gm)?.map((line) => line.trim()) ?? [];
-    expect(rendered).toEqual(["<PageNotice", "<PageNotice"]);
-  });
-
-  test("the SSR render of a member's shell is empty until grants arrive", () => {
+describe("the tenant support notice renders nothing until the client read", () => {
+  test("the SSR render of a member's shell is empty", () => {
     // The grants read is a `useEffect`, so the static markup carries nothing —
-    // the notice channel appears only with data, and still without a control.
+    // no grant line, no error and no retry. The render-time contract lives in
+    // tests/spa/support-notice.test.tsx (DOM mount).
     const markup = renderToStaticMarkup(
       createElement(SupportNotice, {
         boot: { login: "dana", locale: "en" } as SpaBoot,
         pathname: "/dashboard/acme/apps",
       }),
     );
-    expect(markup).not.toMatch(/<button|<form/i);
+    expect(markup).toBe("");
   });
 });

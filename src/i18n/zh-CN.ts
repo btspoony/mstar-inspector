@@ -280,6 +280,7 @@ export const zhCN: Dictionary = {
     /** 租户口径的常驻通知；不可关闭，不带任何操作。 */
     noticeHeading: "支持访问已生效",
     noticeLine: "{login} 可查看此工作区的成员，直至 {expires} —— {reason}",
+    noticeError: "无法检查支持访问状态。",
     noGrant: "当前没有生效的支持访问。",
   },
   settings: {
