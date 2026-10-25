@@ -35,6 +35,12 @@ export const en = {
     signedInAs: "Signed in as {name}",
     /** Label of the shell's workspace switcher (the select itself shows names). */
     workspaceSwitcher: "Workspace",
+    /**
+     * Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
+     * "free_slot"`): this login already holds its one free workspace.
+     */
+    newWorkspaceBlockedFreeSlot:
+      "You already belong to a free workspace — one per login. Delete it, or ask its owner to remove you, then create another.",
   },
   common: {
     pageTitle: "{page} — {brand}",
