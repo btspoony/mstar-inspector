@@ -1,6 +1,5 @@
 /**
- * `server_flags` and its consumers (plan 116 Task 2, spec operator-admin-surface
- * §3.1).
+ * `server_flags` and its consumers (spec operator-admin-surface §3.1).
  *
  * Pinned at the CONSUMER, not at the accessor alone: an absent row means
  * ENABLED (the behaviour the platform shipped with), and a stored `0` changes

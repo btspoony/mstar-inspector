@@ -1,5 +1,5 @@
 /**
- * Support-grant maintenance for `/_internal_admin` (plan 116 Task 5; spec
+ * Support-grant maintenance for `/_internal_admin` (spec
  * operator-admin-surface §3.4).
  *
  * A grant is the operator's time-boxed cross-workspace access aid, so the

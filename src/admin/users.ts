@@ -1,6 +1,5 @@
 /**
- * The user read for `/_internal_admin` (plan 116 Task 4; spec
- * operator-admin-surface §3.3).
+ * The user read for `/_internal_admin` (spec operator-admin-surface §3.3).
  *
  * ONE statement: the live-workspace count and the active support-grant count
  * are resolved in SQL, so the console never issues a per-row read. `isOperator`

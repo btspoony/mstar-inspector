@@ -1,6 +1,6 @@
 /**
  * Workspace reads and the plan assignment write for `/_internal_admin`
- * (plan 116 Task 3; spec operator-admin-surface §3.2 / §3.3).
+ * (spec operator-admin-surface §3.2 / §3.3).
  *
  * The list is ONE statement: live member count, pending invite count, owner
  * login, plan and creation stamp are all resolved in SQL, so the console never

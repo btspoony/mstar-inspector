@@ -1,6 +1,5 @@
 /**
- * The console's support-grant maintenance (plan 116 Task 5, spec
- * operator-admin-surface §3.4).
+ * The console's support-grant maintenance (spec operator-admin-surface §3.4).
  *
  * Pinned at the product seams rather than at SQL: a grant created through the
  * console is honoured by the EXISTING support classifier on the next workspace

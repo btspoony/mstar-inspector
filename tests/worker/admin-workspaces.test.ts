@@ -1,6 +1,6 @@
 /**
- * The console's workspace list and plan assignment (plan 116 Task 3, spec
- * operator-admin-surface §3.2 / §3.3).
+ * The console's workspace list and plan assignment (spec operator-admin-surface
+ * §3.2 / §3.3).
  *
  * Pinned at the product seams: the list's SQL-side counts and resolved plan,
  * the resolver answering differently after each assignment, the refusal paths

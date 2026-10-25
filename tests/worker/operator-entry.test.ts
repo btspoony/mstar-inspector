@@ -1,5 +1,5 @@
 /**
- * Entry visibility for the platform console (plan 116 Task 7, spec §5).
+ * Entry visibility for the platform console (spec §5).
  *
  * The boot carries ONE server-derived boolean: allowlist membership AND the
  * `saas` deployment shape. The shell reads that field only — a `self-hosted`

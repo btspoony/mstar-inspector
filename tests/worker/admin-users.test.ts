@@ -1,5 +1,5 @@
 /**
- * The console's user list (plan 116 Task 4, spec operator-admin-surface §3.3).
+ * The console's user list (spec operator-admin-surface §3.3).
  *
  * Pinned at the product seams: two users — one on the operator allowlist, one
  * holding a live support grant — with all five fields asserted, and the counts

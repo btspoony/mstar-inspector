@@ -1,5 +1,5 @@
 /**
- * AppSidebar — the platform-console footer entry (plan 116 Task 7).
+ * AppSidebar — the platform-console footer entry.
  *
  * Static render with the real SidebarProvider: the link exists only when the
  * model carries it, and it is a plain document link (the console is not a SPA
