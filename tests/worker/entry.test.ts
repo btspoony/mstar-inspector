@@ -164,9 +164,10 @@ describe("worker entry scheduled wiring", () => {
     } finally {
       defaultSweepLog.warn = originalWarn;
     }
-    expect(warnCalls).toHaveLength(2);
+    expect(warnCalls).toHaveLength(3);
     expect(warnCalls[0]!.fields.event).toBe("retention_swept_failed");
-    expect(warnCalls[1]!.fields.event).toBe("ops_sweep_failed");
-    expect(warnCalls[1]!.fields.detail).toContain("d1 down");
+    expect(warnCalls[1]!.fields.event).toBe("invite_lapse_swept_failed");
+    expect(warnCalls[2]!.fields.event).toBe("ops_sweep_failed");
+    expect(warnCalls[2]!.fields.detail).toContain("d1 down");
   });
 });
