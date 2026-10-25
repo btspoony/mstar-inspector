@@ -55,6 +55,13 @@ function createDb(): ReturnType<typeof createTestD1> {
     // and their pending invites, so this world carries both tables.
     "0027_workspace_backfill.sql",
     "0028_workspace_invites.sql",
+    // The shell boot reads the support-grant table, the plan catalogue +
+    // subscriptions and `server_flags`, so the dispatch face runs on the
+    // production shape.
+    "0029_operator_support.sql",
+    "0031_plans_usage.sql",
+    "0032_unlimited_plan.sql",
+    "0033_platform_admin.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

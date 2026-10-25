@@ -183,6 +183,13 @@ function createAppConfigD1(): TestD1 {
   const db = createPreProviderPoolD1();
   applyMigration(db, "0024_provider_multi_key.sql");
   applyMigration(db, "0025_provider_model_evidence.sql");
+  // 0029/0031–0033: SPA dispatch reads the support-grant table, the plan
+  // catalogue + subscriptions and `server_flags` while it builds the boot, so
+  // the shell route runs on the production shape.
+  applyMigration(db, "0029_operator_support.sql");
+  applyMigration(db, "0031_plans_usage.sql");
+  applyMigration(db, "0032_unlimited_plan.sql");
+  applyMigration(db, "0033_platform_admin.sql");
   return db;
 }
 

@@ -475,10 +475,11 @@ describe("/dashboard routes", () => {
     // The identity block carries no top-level role any more: the workspace
     // role rides `memberships[]` (pinned here), and nothing else does.
     expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"owner","plan":"Unlimited"}]');
-    // Key order is part of the installed-document contract, and the deployment
-    // mode rides right after the identity fields.
+    // Key order is part of the installed-document contract: the deployment
+    // mode rides right after the identity fields, then the server-derived
+    // operator flag, then the workspace ref and the create capabilities.
     expect(body).toContain(
-      '{"locale":"en","login":"octocat","name":"octocat","deploymentMode":"self-hosted","workspaceRef":"default"',
+      '{"locale":"en","login":"octocat","name":"octocat","deploymentMode":"self-hosted","isOperator":false,"workspaceRef":"default","canCreateApp":true',
     );
     // The legacy three-card home is retired: no SSR sections,
     // no manifest start form.
