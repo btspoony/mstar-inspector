@@ -480,6 +480,13 @@ export async function signedInLanding(env: Env, login: string): Promise<string> 
 }
 
 /**
+ * Where a committed App lands, or the named failure when its workspace no
+ * longer resolves (deleted mid-flow): a silent shell redirect would hide a
+ * written App behind a page that cannot show it.
+ */
+type ManifestSuccessTarget = { kind: "ok"; path: string } | { kind: "workspace_gone" };
+
+/**
  * The post-commit landing page. The manifest flow's own request carries no
  * workspace segment, so `scopedAppPath` cannot rewrite this target: the App's
  * onboarding page is named by the workspace the commit just mapped it into.
@@ -489,13 +496,18 @@ export async function signedInLanding(env: Env, login: string): Promise<string> 
  * state. A workspace renamed mid-flow therefore still lands on the right
  * onboarding page (and the App is in the right tenant either way, because the
  * mapping was written from the id). A workspace retired mid-flow resolves
- * nothing and falls back to the shell, which lands on a live route.
+ * nothing and answers the named `workspace_gone` failure — never a bare
+ * `/dashboard` redirect.
  */
-async function manifestSuccessTarget(env: Env, workspaceId: string, appSlug: string): Promise<string> {
+async function manifestSuccessTarget(
+  env: Env,
+  workspaceId: string,
+  appSlug: string,
+): Promise<ManifestSuccessTarget> {
   const db = dashboardD1(env);
   const workspace = db === null || workspaceId === "" ? null : await getWorkspaceByRef(db, workspaceId);
-  if (workspace === null) return DASHBOARD_SHELL_REDIRECT;
-  return `/dashboard/${workspace.slug}/apps/${appSlug}/onboarding`;
+  if (workspace === null) return { kind: "workspace_gone" };
+  return { kind: "ok", path: `/dashboard/${workspace.slug}/apps/${appSlug}/onboarding` };
 }
 
 function isSpaFetchPost(c: DashboardContext): boolean {
@@ -1285,7 +1297,15 @@ dashboardApp.get("/manifest/callback", async (c) => {
   switch (outcome.kind) {
     case "success": {
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
-      return c.redirect(await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug), 302);
+      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug);
+      if (target.kind === "workspace_gone") {
+        // The App row is written but its workspace is gone (deleted between the
+        // commit and this read): answer the named failure instead of a landing
+        // page that cannot show the App.
+        logManifestFailure("callback", "workspace_gone");
+        return c.html(manifestErrorPage(t(locale, "manifest.error.workspaceGone"), false, locale), 409);
+      }
+      return c.redirect(target.path, 302);
     }
     case "login_mismatch": {
       // Unreachable here (the hold is minted for this session) — same burn
@@ -1361,7 +1381,12 @@ dashboardApp.post("/manifest/commit", async (c) => {
       // Success: the hold is single-success — burned now that the row exists;
       // the operator lands on the App's onboarding page.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      return c.redirect(await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug), 302);
+      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug);
+      if (target.kind === "workspace_gone") {
+        logManifestFailure("commit", "workspace_gone");
+        return c.html(manifestErrorPage(t(locale, "manifest.error.workspaceGone"), false, locale), 409);
+      }
+      return c.redirect(target.path, 302);
     }
     case "login_mismatch": {
       // The hold is bound to the login that ran the callback: a different

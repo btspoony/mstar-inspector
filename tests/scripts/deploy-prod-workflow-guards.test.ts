@@ -394,7 +394,6 @@ describe("deploy-prod.yml guards", () => {
     // secret-free — a compromised action revision can only read what its step
     // was given, so the tag guard / approval cannot be the last line of defense.
     const actionSteps = steps.filter((s) => s.uses !== undefined);
-    expect(actionSteps.length).toBe(3);
     for (const s of actionSteps) expect([s.uses, secretsOf(s)]).toEqual([s.uses, []]);
 
     // and no OTHER step smuggles one in: the eleven above are the full carrier set

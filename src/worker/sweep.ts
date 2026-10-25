@@ -12,8 +12,9 @@
  *   table IS the signal, the DLQ is only its overflow destination.
  * - Guard-leak cleanup stays OUT of the sweep: the KV guard TTL is the leak
  *   upper bound (a wrong delete of a live guard is worse than a TTL leak).
- * - Read-only: the sweep queries D1 and emits logs / one optional webhook
- *   POST. It NEVER mutates queue messages, KV keys, or D1 rows.
+ * - Bounded janitor writes ride along (webhook_deliveries retention, the
+ *   invite lapse flip) beside one optional webhook POST; the rest is reads and
+ *   logs. It NEVER mutates queue messages or KV keys.
  *
  * Threshold semantics: PER-ATTEMPT rows — a DLQ'd message leaves up to 4
  * rows (one per delivery: 1 initial + max_retries = 3 retries), so `> 5`
@@ -24,6 +25,7 @@
 
 import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
+import { expireLapsedInvites } from "../dashboard/invite-store";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
@@ -91,6 +93,12 @@ export type SweepRetentionFields =
   | { event: "retention_swept_failed"; detail: string };
 
 /**
+ * Invite-lapse log fields (I-000096): the bulk flip that moved off the
+ * members-page read. Only the failure is logged — a quiet sweep says nothing.
+ */
+export type SweepInviteLapseFields = { event: "invite_lapse_swept_failed"; detail: string };
+
+/**
  * The sweep only ever warns: a quiet system logs nothing. A warn-only view
  * of the consumer log channel — the `msg` parameter type is derived from
  * `ConsumerLog["warn"]` so the call shape cannot drift; the field union is
@@ -99,7 +107,7 @@ export type SweepRetentionFields =
  */
 export type SweepLog = {
   warn: (
-    fields: SweepAlertFields | SweepWarnFields | SweepRetentionFields,
+    fields: SweepAlertFields | SweepWarnFields | SweepRetentionFields | SweepInviteLapseFields,
     msg?: Parameters<ConsumerLog["warn"]>[1],
   ) => void;
 };
@@ -168,6 +176,27 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
             : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
       },
       "webhook_deliveries retention sweep failed — continuing",
+    );
+  }
+  // Invite lapse (I-000096) moved here from the members-page read: a lapsed
+  // pending invite already holds no seat and is already unlisted, so the flip
+  // only makes the stored status catch up — at most one sweep interval late.
+  // Like retention, a failure degrades to a warn and NEVER breaks the
+  // failure-sweep path below.
+  try {
+    await expireLapsedInvites(db, new Date().toISOString());
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
+    log.warn(
+      {
+        event: "invite_lapse_swept_failed",
+        detail:
+          detail.length <= SWEEP_LOG_DETAIL_MAX
+            ? detail
+            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
+      },
+      "workspace invite lapse sweep failed — continuing",
     );
   }
   // The window modifier is built from SWEEP_WINDOW_HOURS (the constant is

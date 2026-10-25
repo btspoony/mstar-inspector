@@ -497,6 +497,30 @@ restores by hand.
   would silently restore.
 - **D1 migrations are forward-only** — roll back code, never the schema; a
   rollback after migrations applied would be a schema mismatch (§ Rollback).
+  The re-dispatch door above is not a data restore: it re-applies migrations
+  forward, so it cannot undo writes the new code made.
+- **D1 restore (production): accepted limitation.** This runbook publishes no
+  verified production `time-travel` restore command, because Time Travel
+  support for `mstar-inspector-prod-db` is unverified: it requires a
+  GA-backend database, and the backend cannot be read from a checkout
+  (`wrangler d1 info` no longer prints a usable `version` — § D1 migrations;
+  a checkout-scoped query of the production database fails with
+  `Authentication error [code: 10000]`). Treat the backend as UNKNOWN, never
+  as GA. The restore itself follows Cloudflare's official procedure,
+  `developers.cloudflare.com/d1/reference/time-travel/` — GA restore path,
+  destructive in place, bookmark lookups limited to the last 30 days.
+  **Before a risky deploy the operator must capture the current bookmark and
+  keep it with the deploy record**:
+  `wrangler d1 time-travel info mstar-inspector-prod-db --env production`
+  (or `--timestamp=<RFC3339>` from before the apply, for that point's
+  bookmark). Two outcomes are distinct: a confirmed `alpha` backend means
+  Time Travel does not exist for that database — skip the bookmark path and
+  use Cloudflare's export/restore guidance instead. Any UNKNOWN outcome
+  (authentication, network, or unparseable failure) establishes nothing
+  about support: it only means the backend cannot be determined from this
+  environment, so **stop the restore decision** until access or backend
+  verification is available — do not assert Time Travel is unavailable and
+  do not choose an alternative recovery path on that basis.
 - **Secrets/vars** — untouched by a version-only rollback; a re-dispatched older
   tag rewrites them from the `production` environment and that tag's config
   (previous bullet). Rotate explicitly when the rollback is
@@ -1791,9 +1815,10 @@ Operationally that means:
 > **Staging environment** — the commands below target the staging Worker
 > `mstar-inspector` and the staging database (`mstar-inspector-db`);
 > production rollback is `### Rollback (production)`. The production **D1**
-> restore path is currently **undocumented**: this runbook records no
-> production `time-travel restore` command and no production bookmark
-> source, so that path is an open gap rather than a procedure.
+> restore path is an accepted limitation there: the section names the bookmark
+> an operator must capture before a risky deploy and points at Cloudflare's
+> official Time Travel procedure, but it publishes no production restore
+> command verified against that database.
 >
 > Rollback is a **manual human action** — the Deploy workflow never rolls
 > back automatically. A failed deploy stops red; the operator investigates
@@ -1825,13 +1850,16 @@ Operationally that means:
   point for these migrations — without it, a pre-`0024` rollback is a
   credential-loss event for every App (the promoted rows are unreadable to the
   old code: three-segment AAD + real `key_id`).
-- **Legacy `alpha` backend** (or any **UNKNOWN** backend — fail closed, take
-  this path): Time Travel does not exist there, so the pre-apply snapshot is
-  the § D1 migrations **export file** instead of a bookmark. Restore by
-  importing it into a NEW database, repointing the D1 binding at it and
-  redeploying the pre-`0024` code — an alpha database cannot be restored in
-  place, and the two rebuilt credential tables are what make this migration
-  the one place where the distinction matters.
+- **Legacy `alpha` backend — or an UNKNOWN backend (fail closed).** A
+  confirmed `alpha` database has no Time Travel, so the pre-apply snapshot is
+  the § D1 migrations **export file** instead of a bookmark. An UNKNOWN
+  result from step 1a (auth, network or unparseable failure) says nothing
+  about Time Travel support: resolve it before choosing a restore path, and
+  use the export file as the interim restore point — it is valid on both
+  backends. Restore by importing it into a NEW database, repointing the D1
+  binding at it and redeploying the pre-`0024` code — an alpha database
+  cannot be restored in place, and the two rebuilt credential tables are
+  what make this migration the one place where the distinction matters.
   ```bash
   wrangler d1 create mstar-inspector-db-restored
   wrangler d1 execute mstar-inspector-db-restored --remote --file=pre-0025-snapshot.sql
