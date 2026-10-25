@@ -7,6 +7,7 @@
  * derives it from the same `isPlatformOperator` the gate uses, so the list can
  * never disagree with the authorization decision.
  */
+import { NEWEST_GRANT_APPEND } from "../dashboard/operator-store";
 import type { DashboardD1 } from "../dashboard/users";
 
 /** One `GET /_internal_admin/api/users` row as the statement returns it. */
@@ -24,6 +25,9 @@ export type AdminUserRow = {
  * count joins `workspaces` and drops it, like every other live read.
  * `support_grants.operator_login` is `COLLATE NOCASE`, so the grant count
  * matches a login case-insensitively, exactly as `hasValidGrant` does.
+ * A pair's window is its NEWEST append (`NEWEST_GRANT_APPEND`), so a newer
+ * expired row ends the count its predecessor would still claim — the same rule
+ * `hasValidGrant` and the console's grant list apply.
  */
 const LIST_USERS_SQL = `
   SELECT u.github_login AS login,
@@ -35,7 +39,8 @@ const LIST_USERS_SQL = `
          (SELECT COUNT(*)
             FROM support_grants g
            WHERE g.operator_login = u.github_login
-             AND g.expires_at > ?1) AS activeGrantCount
+             AND g.expires_at > ?1
+             AND ${NEWEST_GRANT_APPEND}) AS activeGrantCount
     FROM users u
    ORDER BY u.created_at DESC, u.github_login ASC`;
 

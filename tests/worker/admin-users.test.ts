@@ -49,14 +49,19 @@ function insertMember(db: TestD1, workspaceId: string, userId: string): void {
 }
 
 /** The grant's login is lowercased on purpose: the column is NOCASE. */
-function insertGrant(db: TestD1, operatorLogin: string, expiresAt: string): void {
+function insertGrant(
+  db: TestD1,
+  workspaceId: string,
+  operatorLogin: string,
+  expiresAt: string,
+): void {
   db.raw
     .prepare(
       `INSERT INTO support_grants
          (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at)
        VALUES (?, ?, ?, 'investigate', ?, ?, ?)`,
     )
-    .run(crypto.randomUUID(), "ws-live-1", operatorLogin.toLowerCase(), OPERATOR, STAMP, expiresAt);
+    .run(crypto.randomUUID(), workspaceId, operatorLogin.toLowerCase(), OPERATOR, STAMP, expiresAt);
 }
 
 function at(offsetMs: number): string {
@@ -120,9 +125,10 @@ describe("GET /_internal_admin/api/users", () => {
     insertMember(db, "ws-live-2", holderId);
     insertMember(db, "ws-deleted", holderId);
 
-    // One live grant and one lapsed grant: only the live one counts.
-    insertGrant(db, GRANT_HOLDER, at(DAY_MS));
-    insertGrant(db, GRANT_HOLDER, at(-DAY_MS));
+    // One live grant and one lapsed grant on another workspace: only the live
+    // window counts.
+    insertGrant(db, "ws-live-1", GRANT_HOLDER, at(DAY_MS));
+    insertGrant(db, "ws-live-2", GRANT_HOLDER, at(-DAY_MS));
 
     const users = await usersByLogin(db);
 
@@ -140,6 +146,34 @@ describe("GET /_internal_admin/api/users", () => {
       isOperator: false,
       activeGrantCount: 1,
     });
+  });
+
+  test("counts a duplicated (workspace, operator) pair once", async () => {
+    // Both appends are live; the pair's window is its newest row, so the user
+    // holds one grant, not two.
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertUser(db, GRANT_HOLDER);
+    insertWorkspace(db, "ws-live-1", null);
+    insertGrant(db, "ws-live-1", GRANT_HOLDER, at(DAY_MS));
+    insertGrant(db, "ws-live-1", GRANT_HOLDER, at(2 * DAY_MS));
+
+    const users = await usersByLogin(db);
+
+    expect(users.get(GRANT_HOLDER)?.activeGrantCount).toBe(1);
+  });
+
+  test("does not count an older live append that a newer expired row superseded", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertUser(db, GRANT_HOLDER);
+    insertWorkspace(db, "ws-live-1", null);
+    insertGrant(db, "ws-live-1", GRANT_HOLDER, at(DAY_MS));
+    insertGrant(db, "ws-live-1", GRANT_HOLDER, at(-DAY_MS));
+
+    const users = await usersByLogin(db);
+
+    expect(users.get(GRANT_HOLDER)?.activeGrantCount).toBe(0);
   });
 
   test("answers a non-operator with 404", async () => {

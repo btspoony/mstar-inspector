@@ -80,11 +80,11 @@ type OperatorStoreD1 = {
 const GRANT_COLUMNS = `id, workspace_id, operator_login, reason, granted_by, created_at, expires_at`;
 
 /**
- * The newest append for one (workspace, operator) — the ONE row both grant
- * reads judge. `rowid` is insertion order because `created_at` is
+ * The newest append for one (workspace, operator) — the ONE row every grant
+ * read judges. `rowid` is insertion order because `created_at` is
  * caller-supplied and may tie.
  */
-const NEWEST_APPEND = `g.rowid = (
+export const NEWEST_GRANT_APPEND = `g.rowid = (
             SELECT MAX(x.rowid) FROM support_grants x
              WHERE x.workspace_id = g.workspace_id
                AND x.operator_login = g.operator_login
@@ -205,7 +205,7 @@ export async function listActiveSupportGrants(
     .prepare(
       `SELECT ${GRANT_COLUMNS} FROM support_grants g
         WHERE g.workspace_id = ? AND g.expires_at > ?
-          AND ${NEWEST_APPEND}
+          AND ${NEWEST_GRANT_APPEND}
         ORDER BY expires_at DESC, id ASC`,
     )
     .bind(workspaceId, now)
@@ -227,7 +227,7 @@ export async function listAllActiveSupportGrants(
     .prepare(
       `SELECT ${GRANT_COLUMNS} FROM support_grants g
         WHERE g.expires_at > ?
-          AND ${NEWEST_APPEND}
+          AND ${NEWEST_GRANT_APPEND}
         ORDER BY expires_at DESC, id ASC`,
     )
     .bind(now)
