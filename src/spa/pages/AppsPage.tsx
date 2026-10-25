@@ -3,7 +3,7 @@ import { t } from "../../i18n";
 import { Button } from "@/components/ui/button";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { PageHeader } from "@/components/PageHeader";
-import { StatusBadge as StatusPill } from "@/components/StatusBadge";
+import { StatusBadge } from "@/components/StatusBadge";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { EmptyState } from "../components/state/EmptyState";
@@ -12,7 +12,7 @@ import { PageSkeleton } from "../components/state/PageSkeleton";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import { spaClick } from "../spa-click";
-import { isPaused, parseApps, type AppsPayload } from "./data";
+import { appStatusPill, parseApps, type AppsPayload } from "./data";
 import { GitHubMark } from "./LoginPage";
 import { apiBase } from "../workspace-base";
 
@@ -199,9 +199,10 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
     },
     {
       header: t(locale, "apps.tableStatus"),
-      cell: (app) => (
-        <StatusBadge locale={locale} status={app.status} reviewEnabled={app.review_enabled} />
-      ),
+      cell: (app) => {
+        const pill = appStatusPill(locale, app);
+        return <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>;
+      },
     },
     {
       header: t(locale, "apps.tableHealth"),
@@ -253,31 +254,3 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
     />
   );
 }
-
-/**
- * App status → the shared pill (components/StatusBadge). Only the app's own
- * status semantics live here: which copy names the state and which tone
- * carries it, both derived through the shared `isPaused` predicate.
- */
-function StatusBadge({
-  locale,
-  status,
-  reviewEnabled,
-}: {
-  locale: SpaBoot["locale"];
-  status: string;
-  reviewEnabled: number | boolean;
-}) {
-  const paused = isPaused({ status, review_enabled: reviewEnabled });
-  const label =
-    status === "disabled"
-      ? t(locale, "apps.status.disabled")
-      : paused
-        ? t(locale, "apps.status.paused")
-        : t(locale, "apps.status.active");
-  return (
-    <StatusPill tone={status === "disabled" || paused ? "warning" : "success"}>{label}</StatusPill>
-  );
-}
-
-export { StatusBadge };

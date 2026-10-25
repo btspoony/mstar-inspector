@@ -20,9 +20,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { t } from "../../src/i18n";
 import {
   appDetailSearchQuery,
   appInsightsSummaryUrl,
+  appStatusPill,
   parseAppDetailSearch,
   type InsightsSummary,
 } from "../../src/spa/pages/data";
@@ -147,6 +149,40 @@ describe("tab shell rendering (static SSR)", () => {
     expect(identity).not.toContain(">Insights</button>");
     // No insights panel markup anywhere on the face.
     expect(identity).not.toContain("Review health");
+  });
+
+  test("the identity status pill renders the shared primitive from the one derivation (plan 114 T3)", () => {
+    // The adapter that used to live in AppsPage is gone; the page and the
+    // list both read this one derivation, and the pill face is the shared
+    // component's token-backed tone.
+    const manage = renderDetail(managePayload, true);
+    expect(manage).toContain(t("en", "apps.status.active"));
+    expect(manage).toContain("bg-(--badge-success-bg)");
+    expect(appStatusPill("en", { status: "active", review_enabled: 0 })).toEqual({
+      label: t("en", "apps.status.paused"),
+      tone: "warning",
+    });
+    expect(appStatusPill("en", { status: "disabled", review_enabled: 1 })).toEqual({
+      label: t("en", "apps.status.disabled"),
+      tone: "warning",
+    });
+  });
+
+  test("the settings face still renders every section title it rendered before (no section dropped)", () => {
+    const manage = renderDetail(managePayload, true);
+    // The seven SectionCard titles, resolved through the dictionary — the
+    // heading/stat migration may not drop or rename a section.
+    for (const key of [
+      "settings.appInfo",
+      "settings.ops",
+      "settings.runtimeImage",
+      "settings.providers",
+      "settings.modelChains",
+      "settings.seats",
+      "workspace.slugHeading",
+    ] as const) {
+      expect(manage).toContain(t("en", key));
+    }
   });
 });
 
