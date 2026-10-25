@@ -602,6 +602,8 @@ export const en = {
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
       workspaceRequired:
         "This deployment has more than one workspace, so an App needs to know which it belongs to — open a workspace and create the App from there.",
+      workspaceGone:
+        "The workspace this App was created in no longer exists, so the App has no workspace page here — delete it on GitHub and start a new app-creation flow from a live workspace.",
     },
   },
 };
