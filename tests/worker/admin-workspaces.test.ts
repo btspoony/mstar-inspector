@@ -1,19 +1,25 @@
 /**
- * The console's workspace list (plan 116 Task 3, spec operator-admin-surface
- * §3.3).
+ * The console's workspace list and plan assignment (plan 116 Task 3, spec
+ * operator-admin-surface §3.2 / §3.3).
  *
- * Pinned at the product seam: the counts, the owner login and the resolved plan
- * all come from the one list statement, so a lapsed invite row still stored as
- * `pending` holds no seat and must not be counted.
+ * Pinned at the product seams: the list's SQL-side counts and resolved plan,
+ * the resolver answering differently after each assignment, the refusal paths
+ * writing nothing, and a downgrade that keeps every member while the existing
+ * invite seat guard starts refusing. The audit assertions hold the ledger
+ * contract: exactly one `platform_audit_events` row per successful change, none
+ * for a refused one.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
+import { MemberCapError, resolveWorkspacePlan } from "../../src/dashboard/entitlement";
+import { createInvite } from "../../src/dashboard/invite-store";
 
 const SESSION_SECRET = ["test", "workspace", "plan", "secret", "32-bytes"].join("-");
 const OPERATOR = "Support-Bot";
+const MEMBER = "regular-member";
 const STAMP = "2026-10-01T00:00:00.000Z";
 const DAY_MS = 86_400_000;
 
@@ -74,6 +80,40 @@ function insertSubscription(db: TestD1, workspaceId: string, planId: string): vo
        VALUES (?, ?, 'active', ?, ?)`,
     )
     .run(workspaceId, planId, STAMP, STAMP);
+}
+
+function count(db: TestD1, sql: string): number {
+  // The raw test handle returns a plain row object, like the other raw reads.
+  const row = db.raw.prepare(sql).get() as { n: number } | null;
+  return row?.n ?? 0;
+}
+
+function subscriptionOf(
+  db: TestD1,
+  workspaceId: string,
+): { plan_id: string; status: string; updated_at: string } | null {
+  return db.raw
+    .prepare(
+      "SELECT plan_id, status, updated_at FROM workspace_subscriptions WHERE workspace_id = ?",
+    )
+    .get(workspaceId) as { plan_id: string; status: string; updated_at: string } | null;
+}
+
+type AuditRow = {
+  action: string;
+  actor_login: string;
+  target_type: string;
+  target_id: string;
+  detail_json: string | null;
+};
+
+function auditRows(db: TestD1): AuditRow[] {
+  return db.raw
+    .prepare(
+      `SELECT action, actor_login, target_type, target_id, detail_json
+         FROM platform_audit_events ORDER BY rowid`,
+    )
+    .all() as AuditRow[];
 }
 
 function liveFromNow(): string {
@@ -196,5 +236,188 @@ describe("GET /_internal_admin/api/workspaces", () => {
         createdAt: "2026-10-01T00:00:00.000Z",
       },
     ]);
+  });
+});
+
+// --- the plan assignment ----------------------------------------------------
+
+describe("PATCH /_internal_admin/api/workspaces/:id/plan", () => {
+  test("assigning pro then unlimited changes what the workspace resolves to", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
+    expect(await resolveWorkspacePlan(db, "ws-alpha", "saas")).toMatchObject({
+      id: "free",
+      includedMembers: 5,
+    });
+
+    const pro = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-alpha/plan",
+      body: JSON.stringify({ planId: "pro" }),
+    });
+    expect(pro.status).toBe(200);
+    expect(await pro.json()).toEqual({ workspaceId: "ws-alpha", planId: "pro" });
+    expect(await resolveWorkspacePlan(db, "ws-alpha", "saas")).toMatchObject({
+      id: "pro",
+      includedMembers: 5,
+    });
+
+    const unlimited = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-alpha/plan",
+      body: JSON.stringify({ planId: "unlimited" }),
+    });
+    expect(unlimited.status).toBe(200);
+    expect(await resolveWorkspacePlan(db, "ws-alpha", "saas")).toMatchObject({
+      id: "unlimited",
+      includedMembers: null,
+    });
+
+    // One audit row per successful change, with the before/after pair.
+    expect(auditRows(db)).toEqual([
+      {
+        action: "workspace.plan.set",
+        actor_login: OPERATOR,
+        target_type: "workspace",
+        target_id: "ws-alpha",
+        detail_json: JSON.stringify({ before: "free", after: "pro" }),
+      },
+      {
+        action: "workspace.plan.set",
+        actor_login: OPERATOR,
+        target_type: "workspace",
+        target_id: "ws-alpha",
+        detail_json: JSON.stringify({ before: "pro", after: "unlimited" }),
+      },
+    ]);
+
+    const row = (await listOf(db)).find((workspace) => workspace.id === "ws-alpha");
+    expect(row?.planId).toBe("unlimited");
+  });
+
+  test("an unknown plan id is 400 and writes nothing", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
+    insertSubscription(db, "ws-alpha", "pro");
+
+    const res = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-alpha/plan",
+      body: JSON.stringify({ planId: "enterprise" }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: 'unknown planId "enterprise": the plans catalogue has no such row',
+    });
+    // Neither the subscription nor the ledger moved.
+    expect(subscriptionOf(db, "ws-alpha")).toEqual({
+      plan_id: "pro",
+      status: "active",
+      updated_at: STAMP,
+    });
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a malformed body and an unknown workspace are refusals with no write", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+
+    const malformed = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-alpha/plan",
+      body: JSON.stringify({ plan: "pro" }),
+    });
+    expect(malformed.status).toBe(400);
+
+    const unknownWorkspace = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-gone/plan",
+      body: JSON.stringify({ planId: "pro" }),
+    });
+    expect(unknownWorkspace.status).toBe(404);
+    expect(await unknownWorkspace.json()).toEqual({ error: "workspace not found" });
+
+    expect(count(db, "SELECT COUNT(*) AS n FROM workspace_subscriptions")).toBe(0);
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a downgrade below the member count succeeds, keeps members, blocks the next invite", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    const ownerId = insertUser(db, "alice");
+    insertWorkspace(db, { id: "ws-six", name: "Six", createdBy: ownerId, createdAt: STAMP });
+    insertMember(db, "ws-six", ownerId, "owner");
+    for (const login of ["m1", "m2", "m3", "m4", "m5"]) {
+      insertMember(db, "ws-six", insertUser(db, login), "member");
+    }
+    insertSubscription(db, "ws-six", "unlimited");
+
+    const res = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-six/plan",
+      body: JSON.stringify({ planId: "free" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await resolveWorkspacePlan(db, "ws-six", "saas")).toMatchObject({
+      id: "free",
+      includedMembers: 5,
+    });
+    // A downgrade never removes anyone.
+    expect(count(db, "SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = 'ws-six'")).toBe(
+      6,
+    );
+    expect(auditRows(db)).toEqual([
+      {
+        action: "workspace.plan.set",
+        actor_login: OPERATOR,
+        target_type: "workspace",
+        target_id: "ws-six",
+        detail_json: JSON.stringify({ before: "unlimited", after: "free" }),
+      },
+    ]);
+
+    // The existing invite seat guard is what blocks NEW invites.
+    const blockedInvite = createInvite(
+      db,
+      {
+        workspaceId: "ws-six",
+        login: "newcomer",
+        role: "member",
+        invitedBy: ownerId,
+        now: STAMP,
+        expiresAt: liveFromNow(),
+      },
+      "saas",
+    );
+    await expect(blockedInvite).rejects.toThrow(MemberCapError);
+    expect(count(db, "SELECT COUNT(*) AS n FROM workspace_invites WHERE workspace_id = 'ws-six'")).toBe(
+      0,
+    );
+  });
+});
+
+// --- authorization and registration ----------------------------------------
+
+describe("the workspace routes answer only an allowlisted operator on saas", () => {
+  test("a member, an unauthenticated caller and the self-hosted mode get 404 with no write", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertUser(db, MEMBER);
+    insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
+
+    const patch = { method: "PATCH" as const, path: "/api/workspaces/ws-alpha/plan" as const };
+
+    expect((await api(db, { ...patch, login: MEMBER, body: JSON.stringify({ planId: "pro" }) })).status).toBe(404);
+    expect((await api(db, { ...patch, login: null, body: JSON.stringify({ planId: "pro" }) })).status).toBe(404);
+    expect((await api(db, { ...patch, mode: "self-hosted", body: JSON.stringify({ planId: "pro" }) })).status).toBe(404);
+
+    expect((await api(db, { method: "GET", path: "/api/workspaces", login: MEMBER })).status).toBe(404);
+    expect((await api(db, { method: "GET", path: "/api/workspaces", login: null })).status).toBe(404);
+    expect((await api(db, { method: "GET", path: "/api/workspaces", mode: "self-hosted" })).status).toBe(404);
+
+    expect(count(db, "SELECT COUNT(*) AS n FROM workspace_subscriptions")).toBe(0);
+    expect(auditRows(db)).toEqual([]);
   });
 });

@@ -17,7 +17,7 @@ import { ADMIN_PAGES } from "../spa/admin/pages";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, isFlagEnabled, listFlags } from "./flags";
 import { operatorLogin, type AdminContext } from "./gate";
-import { listWorkspaces } from "./workspaces";
+import { listWorkspaces, setWorkspacePlan } from "./workspaces";
 
 /** One declaration row of this namespace's own route table. */
 type AdminRoute = {
@@ -101,6 +101,46 @@ async function readWorkspaces(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Assign one workspace's plan. An unknown plan id is a 400 with no write; a
+ * downgrade below the live member count is allowed and only blocks new invites
+ * (spec §3.2), so this handler never removes a member.
+ */
+async function assignPlan(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  let planId: unknown;
+  try {
+    const body = (await c.req.json()) as { planId?: unknown };
+    planId = body.planId;
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (typeof planId !== "string" || planId.length === 0) {
+    return c.json({ error: "body must be { planId: <id from the plans catalogue> }" }, 400);
+  }
+  const workspaceId = c.req.param("id");
+  if (!workspaceId) return c.notFound();
+  const outcome = await setWorkspacePlan(db, {
+    workspaceId,
+    planId,
+    actorLogin: login,
+    now: new Date().toISOString(),
+  });
+  if (outcome.kind === "unknown_plan") {
+    return c.json(
+      { error: `unknown planId ${JSON.stringify(planId)}: the plans catalogue has no such row` },
+      400,
+    );
+  }
+  if (outcome.kind === "unknown_workspace") {
+    return c.json({ error: "workspace not found" }, 404);
+  }
+  return c.json({ workspaceId, planId: outcome.planId });
+}
+
+/**
  * The console document (`src/spa/admin.html`). `ASSETS` holds it and no other
  * route serves it: spa-dispatch matches only `/index.html` and `/assets/*`, so
  * this gated handler is the document's single entry point.
@@ -125,6 +165,7 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/flags", handler: readFlags },
   { method: "patch", path: "/api/flags", handler: setFlag },
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
+  { method: "patch", path: "/api/workspaces/:id/plan", handler: assignPlan },
   { method: "get", path: "/", handler: serveDocument },
   ...ADMIN_PAGES.map((page) => ({ method: "get" as const, path: `/${page.id}`, handler: serveDocument })),
 ];
