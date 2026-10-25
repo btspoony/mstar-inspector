@@ -141,7 +141,10 @@ describe("v0.3 page face (A4/A5)", () => {
     expect(pageHeaderPrimitive).toContain("text-(length:--typo-heading-24-size)");
     expect(pageHeaderPrimitive).toContain("leading-(--typo-heading-24-line)");
     expect(pageHeaderPrimitive).toContain("tracking-(--typo-heading-24-tracking)");
-    for (const [name, source] of [["AppsPage", appsPage]] as const) {
+    for (const [name, source] of [
+      ["AppsPage", appsPage],
+      ["MembersPage", membersPage],
+    ] as const) {
       expect(source, name).toContain("<PageHeader");
       expect(source, name).not.toContain("text-(length:--typo-heading-24-size)");
     }
@@ -152,7 +155,10 @@ describe("v0.3 page face (A4/A5)", () => {
     // no table-header spelling of its own.
     expect(dataTablePrimitive).toContain("bg-(--background-200)");
     expect(dataTablePrimitive).toContain("text-xs tracking-(--typo-label-12-tracking)");
-    for (const [name, source] of [["AppsPage", appsPage]] as const) {
+    for (const [name, source] of [
+      ["AppsPage", appsPage],
+      ["MembersPage", membersPage],
+    ] as const) {
       expect(source, name).toContain("<DataTable");
       expect(source, name).not.toContain("bg-(--background-200)");
       expect(source, name).not.toContain("TABLE_HEAD_LABEL");

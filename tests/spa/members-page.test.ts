@@ -365,6 +365,20 @@ describe("workspace settings block", () => {
     expect(html).not.toContain("slots left");
   });
 
+  test("the plan label is whatever the workspace prop says (P2 mode split guard)", () => {
+    // The card renders `workspace.plan` verbatim — no client-side plan naming —
+    // so a later deployment/mode split only has to change the payload.
+    const html = renderToStaticMarkup(
+      createElement(WorkspacePanel, {
+        locale: "en",
+        workspace: { ...FREE, plan: { id: "team", name: "Team plan" } },
+        memberCount: 1,
+      }),
+    );
+    expect(html).toContain("Team plan");
+    expect(html).not.toContain(t("en", "members.planFreeHint"));
+  });
+
   test("a pending invite occupies a seat: 4 members + 1 pending reads No seats left", () => {
     const html = renderToStaticMarkup(
       createElement(WorkspacePanel, {
