@@ -578,3 +578,107 @@ describe("the shell boot asks the gate's own classifier", () => {
     expect(boot.pendingInvites?.map((invite) => invite.workspaceRef)).toEqual(["acme"]);
   });
 });
+
+describe("the shell boot reads the workspace facts once", () => {
+  /** Every statement the request prepares, in order. */
+  function recordingDb(db: TestD1): { observed: TestD1; statements: string[] } {
+    const statements: string[] = [];
+    const observed = {
+      ...db,
+      prepare(query: string) {
+        statements.push(query);
+        return db.prepare(query);
+      },
+    } as TestD1;
+    return { observed, statements };
+  }
+
+  /** The boot's own access join: the workspace row + role + login's users row. */
+  const ACCESS_JOIN = /FROM workspaces w\s+LEFT JOIN users u/;
+  /** A plain `workspaces` re-read by ref or as the sole workspace. */
+  const WORKSPACE_REREAD = /SELECT id, slug, name, created_at FROM workspaces/;
+  /** The classifier's member test, which the access join has already answered. */
+  const MEMBERSHIP_REREAD = /FROM workspace_members WHERE workspace_id = \? AND user_id = \?/;
+
+  function count(statements: string[], shape: RegExp): number {
+    return statements.filter((sql) => shape.test(sql)).length;
+  }
+
+  test("a granted operator's shell reads the access join once and the workspace row never again", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const { observed, statements } = recordingDb(db);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps", OPERATOR, { accept: "text/html" }),
+      withSpaAssets(envFor(observed)),
+    );
+    expect(res.status).toBe(200);
+    // Reinstating a second sole-vs-ref resolution (a second `workspaceBoot`, or
+    // `operatorSupportWorkspace` re-reading the workspace + role itself) raises
+    // both counts and fails here.
+    expect(count(statements, ACCESS_JOIN)).toBe(1);
+    expect(count(statements, WORKSPACE_REREAD)).toBe(0);
+    expect(count(statements, MEMBERSHIP_REREAD)).toBe(0);
+    // The behaviour the reads exist for is unchanged.
+    const boot = bootOf(await res.text());
+    expect(boot.supportOnly).toBe(true);
+    expect(boot.workspaceRef).toBe("acme");
+  });
+
+  /** The boot the served shell injected. */
+  function bootOf(html: string): SpaBoot {
+    const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
+    if (json === undefined) throw new Error("no injected SPA boot");
+    return JSON.parse(json) as SpaBoot;
+  }
+
+  test("a granted operator's bare /dashboard reuses the boot it already paid for", async () => {
+    // The sole-workspace shape: `/dashboard` names no ref, so the landing can
+    // only resolve through the deployment's single workspace.
+    const db = createMigratedTestD1();
+    seedUser(db, OPERATOR);
+    grant(db, "default", OPERATOR, DAY);
+    const { observed, statements } = recordingDb(db);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", OPERATOR, { accept: "text/html" }),
+      withSpaAssets(envFor(observed)),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    // The landing resolves from the boot extras — the same request must not
+    // re-run the sole-vs-ref resolution.
+    expect(count(statements, ACCESS_JOIN)).toBe(1);
+    expect(count(statements, WORKSPACE_REREAD)).toBe(0);
+  });
+
+  test("a non-grant non-member operator keeps the shell and its creation surface", async () => {
+    const { db } = fixture();
+    const { observed, statements } = recordingDb(db);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/apps", OPERATOR, { accept: "text/html" }),
+      withSpaAssets(envFor(observed)),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    // No grant: no support face. The grant probe is the classifier's own read,
+    // and the workspace facts still come from the single access join.
+    expect(boot.supportOnly).toBeUndefined();
+    expect(count(statements, ACCESS_JOIN)).toBe(1);
+    expect(count(statements, MEMBERSHIP_REREAD)).toBe(0);
+  });
+
+  test("the support view serves the scope's own workspace row", async () => {
+    const { db } = fixture();
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const { observed, statements } = recordingDb(db);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR),
+      withSpaAssets(envFor(observed)),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { workspace: { id: string; slug: string; name: string; created_at: string } };
+    expect(body.workspace.id).toBe("ws-acme");
+    // The scope middleware resolved this row; the route must not query it again.
+    expect(count(statements, WORKSPACE_REREAD)).toBe(1);
+  });
+});
