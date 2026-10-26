@@ -21,13 +21,46 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { SectionCard, SectionGroup } from "../../src/spa/components/SectionCard";
 import { PageNotice } from "../../src/spa/pages/PageNotice";
+import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
+import { withLocation } from "./browser-stub";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "utf8");
 const settingsPage = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
-const pageHeader = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
+
+/** A manage-face settings payload, so the detail shell renders its real body. */
+const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
+  can_manage: true,
+  app: {
+    slug: "demo",
+    github_app_id: 1,
+    status: "active",
+    review_enabled: true,
+    created_by: "mallory",
+    github_name: "Demo",
+    github_description: null,
+    github_html_url: "https://github.com/apps/demo",
+    github_avatar_url: null,
+    github_metadata_synced_at: null,
+    last_webhook_at: null,
+    sandbox_image_id: "omp",
+    review_trigger_mode: "every_push",
+  },
+  keys: [],
+  model_chain: null,
+  model_roles: {},
+  model_chains: [],
+  custom_providers: [],
+  configured_providers: [],
+  provider_catalog: [],
+  model_role_ids: [],
+  custom_provider_api_ids: [],
+  sandbox_images: [{ id: "omp", enabled: true }],
+  installations: [],
+  deliveries: [],
+});
 
 describe("SectionCard tier idiom (AD-591)", () => {
   test("the idiom is single-point: a hand-written wrapper composing ui/card, not a copy-in edit", () => {
@@ -127,23 +160,53 @@ describe("settings section rhythm (AD-591)", () => {
 });
 
 describe("settings heading idiom (QC convergence)", () => {
-  test("the slug identity header rides PageHeader's heading-24 face on the detail shell; no raw size utilities anywhere", () => {
-    // SUPERSEDE (App detail IA): the identity header moved onto
-    // the AppDetailPage shell with the heading-24 face; that face now lives in
-    // the ONE PageHeader spelling and the shell composes it. The
-    // settings tab keeps the card-title heading-16 step only.
-    expect(pageHeader).toContain("text-(length:--typo-heading-24-size)");
-    expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
-    expect(pageHeader).toContain("tracking-(--typo-heading-24-tracking)");
-    expect(detailPage).toContain("<PageHeader");
-    expect(detailPage).toContain("title={slug}");
-    // No raw Tailwind size utilities remain on either face.
-    expect(detailPage).not.toContain("text-2xl");
-    expect(detailPage).not.toContain("text-xl");
-    expect(detailPage).not.toContain("text-lg");
-    expect(settingsPage).not.toContain("text-2xl");
-    expect(settingsPage).not.toContain("text-xl");
-    expect(settingsPage).not.toContain("text-lg");
+  test("the slug identity header is the rendered heading-24 h1; no raw size utility appears on either face", () => {
+    // SUPERSEDE (App detail IA): the identity header moved onto the
+    // AppDetailPage shell with the heading-24 face; that face now lives in
+    // the ONE PageHeader spelling and the shell composes it. The settings tab
+    // keeps the card-title heading-16 step only — both facts are read off the
+    // rendered face here.
+    const shell = withLocation("/dashboard/apps/demo", () =>
+      renderToStaticMarkup(
+        createElement(AppDetailView, {
+          locale: "en",
+          slug: "demo",
+          storedSlug: "acme",
+          payload: detailPayload(),
+          groups: [],
+          notice: null,
+          search: { tab: "settings", window: "30", repo: "" },
+          onReload: async () => true,
+          onSearch: () => {},
+        }),
+      ),
+    );
+    // The identity header is the page's ONLY heading, and it carries the
+    // heading-24 trio with the slug as its content.
+    expect(shell.match(/<h1/g)).toHaveLength(1);
+    expect(shell.match(/--typo-heading-24-size/g)).toHaveLength(1);
+    expect(shell).toContain(
+      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">demo</h1>',
+    );
+    // Card titles ride the heading-16 step instead — the detail face never
+    // re-spells the page title at that size.
+    const cardTitles = [...shell.matchAll(/data-slot="card-title" class="([^"]*)"/g)].map(
+      (match) => match[1] ?? "",
+    );
+    expect(cardTitles.length).toBeGreaterThan(0);
+    for (const title of cardTitles) {
+      expect(title).toContain("text-(length:--typo-heading-16-size)");
+      expect(title).not.toContain("--typo-heading-24");
+    }
+    // No raw Tailwind size utility reaches either rendered face.
+    for (const [name, html] of [
+      ["AppDetailView", shell],
+      ["SettingsPage", settingsPage],
+    ] as const) {
+      for (const utility of ["text-2xl", "text-xl", "text-lg"]) {
+        expect(html, `${name} ${utility}`).not.toContain(utility);
+      }
+    }
   });
 
   test("re-parented card titles ride the heading-16 token step via SectionCardTitle", () => {

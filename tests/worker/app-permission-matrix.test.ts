@@ -6,8 +6,8 @@
  * add-template-provider / remove-custom-provider / key/delete / keys/verify,
  * plus the chain ops add-chain / remove-chain) and ops
  * (pause / resume / disable / enable / delete) — funnels through the SAME
- * server-side creator-or-admin gate (`canManageApp`,
- * src/dashboard/index.ts:952-954). This file locks that matrix as
+ * server-side creator-or-admin gate (`canManageApp` in src/dashboard/index.ts,
+ * `canManageRole` = workspace owner/admin). This file locks that matrix as
  * ONE systematic sweep: creator / admin / other / other-creator × every
  * write route → 200/403, with zero mutation and zero outbound network on
  * every deny path (the guard fires before any validation or store write).
@@ -123,6 +123,27 @@ function rawCount(db: TestD1, table: string): number {
   return row.n;
 }
 
+/** The config tables the write-route sweep may never touch on a deny path. */
+const MUTABLE_APP_TABLES = [
+  "app_provider_keys",
+  "app_provider_models",
+  "app_model_config",
+  "app_model_chains",
+  "app_model_chain_seats",
+  "app_custom_providers",
+] as const;
+
+/**
+ * The deny path's whole mutation contract in one place: the app row keeps its
+ * status and review switch, and none of the config tables gained a row. One
+ * list, so a new swept table cannot land in one sweep and not the other.
+ */
+function expectZeroAppMutations(db: TestD1): void {
+  expect(appStatus(db, "mallorys-app")).toBe("active");
+  expect(reviewEnabled(db, "mallorys-app")).toBe(1);
+  for (const table of MUTABLE_APP_TABLES) expect(rawCount(db, table), table).toBe(0);
+}
+
 type MatrixRoute = {
   name: string;
   path: string;
@@ -227,14 +248,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
     } finally {
       fetchSpy.mockRestore();
     }
-    expect(appStatus(db, "mallorys-app")).toBe("active");
-    expect(reviewEnabled(db, "mallorys-app")).toBe(1);
-    expect(rawCount(db, "app_provider_keys")).toBe(0);
-    expect(rawCount(db, "app_provider_models")).toBe(0);
-    expect(rawCount(db, "app_model_config")).toBe(0);
-    expect(rawCount(db, "app_model_chains")).toBe(0);
-    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
-    expect(rawCount(db, "app_custom_providers")).toBe(0);
+    expectZeroAppMutations(db);
   });
 
   for (const actor of ACTORS) {
@@ -268,14 +282,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
       if (!allowed) {
         // Zero mutation on every deny path: the app row is untouched and no
         // config table gained a row.
-        expect(appStatus(db, "mallorys-app")).toBe("active");
-        expect(reviewEnabled(db, "mallorys-app")).toBe(1);
-        expect(rawCount(db, "app_provider_keys")).toBe(0);
-        expect(rawCount(db, "app_provider_models")).toBe(0);
-        expect(rawCount(db, "app_model_config")).toBe(0);
-        expect(rawCount(db, "app_model_chains")).toBe(0);
-        expect(rawCount(db, "app_model_chain_seats")).toBe(0);
-        expect(rawCount(db, "app_custom_providers")).toBe(0);
+        expectZeroAppMutations(db);
       }
     });
   }
