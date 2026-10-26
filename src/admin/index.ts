@@ -17,7 +17,7 @@ import { resolveLocale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
 import { ADMIN_PAGES } from "../spa/admin/pages";
 import type { Env } from "../worker/env";
-import { isServerFlagKey, isFlagEnabled, listFlags } from "./flags";
+import { isServerFlagKey, listFlags } from "./flags";
 import { operatorLogin, type AdminContext } from "./gate";
 import { createSupportGrant, revokeSupportGrant } from "./support-grants";
 import { listUsers } from "./users";
@@ -51,6 +51,15 @@ async function readFlags(c: AdminContext): Promise<Response> {
  * transaction): either both land or neither does, so every successful write
  * appends exactly one `platform_audit_events` row and a failed write appends
  * none. `detail_json` carries the before/after pair the ledger read needs.
+ *
+ * The before-value is read INSIDE that batch, never by a separate statement: a
+ * batch fixes every bind at submit, so a value read outside it could be bound
+ * into a statement that commits after a concurrent toggle, recording a `before`
+ * that was never the stored state. The audit statement is therefore ordered
+ * BEFORE the upsert and computes `before` with a subquery against the
+ * not-yet-updated row (an absent row reads enabled, per the flag contract). A
+ * failed upsert still appends nothing — the transaction rolls the audit row
+ * back with it.
  */
 async function setFlag(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
@@ -69,9 +78,23 @@ async function setFlag(c: AdminContext): Promise<Response> {
   if (!isServerFlagKey(key) || typeof enabled !== "boolean") {
     return c.json({ error: "body must be { key: <server flag key>, enabled: <boolean> }" }, 400);
   }
-  const before = await isFlagEnabled(db, key);
   const now = new Date().toISOString();
   await db.batch([
+    db
+      .prepare(
+        `INSERT INTO platform_audit_events
+           (id, actor_login, action, target_type, target_id, detail_json, created_at)
+         SELECT ?, ?, 'flag.set', 'flag', ?,
+                json_object(
+                  'before',
+                  json(CASE WHEN COALESCE((SELECT enabled FROM server_flags WHERE key = ?), 1) = 1
+                            THEN 'true' ELSE 'false' END),
+                  'after',
+                  json(?)
+                ),
+                ?`,
+      )
+      .bind(crypto.randomUUID(), login, key, key, enabled ? "true" : "false", now),
     db
       .prepare(
         `INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES (?, ?, ?, ?)
@@ -81,13 +104,6 @@ async function setFlag(c: AdminContext): Promise<Response> {
            updated_by = excluded.updated_by`,
       )
       .bind(key, enabled ? 1 : 0, now, login),
-    db
-      .prepare(
-        `INSERT INTO platform_audit_events
-           (id, actor_login, action, target_type, target_id, detail_json, created_at)
-         VALUES (?, ?, 'flag.set', 'flag', ?, ?, ?)`,
-      )
-      .bind(crypto.randomUUID(), login, key, JSON.stringify({ before, after: enabled }), now),
   ]);
   return c.json({ key, enabled });
 }
