@@ -1,7 +1,7 @@
 ---
 module: review-runner-models
 date: 2026-08-31
-last_updated: 2026-10-16
+last_updated: 2026-10-26
 problem_type: best_practice
 category: best-practices
 severity: high
@@ -29,6 +29,13 @@ tags:
 omp SDK（`@oh-my-pi/pi-coding-agent`，版本以 `package.json` 为准）的自定义 provider 声明只有一条可用路：per-App BYOK 动态声明。多 App BYOK 产品面下，把 provider 烤进镜像不可扩展，而镜像也不再携带 `models.yml`：base 由源码内 registry（`src/contracts/sandbox-images.ts`）的 capability hosts 现场生成——**每次** review 都合成完整 models.yml（含零自定义 provider 的 App），没有 skip-synthesis 路径。
 
 ## Guidance（源码级核实的机制）
+
+> Provenance note: the `AL-23-1` / `SEC-01` markers and the `plan_id` frontmatter
+> field this document once carried are retired on purpose, not lost. Both are
+> local review-ledger ids that resolve only against that plan's own records, so a
+> reader outside it cannot follow them; the durable provenance here is the
+> document date plus the source citations below, which the reader can check
+> against the tree.
 
 1. **omp 无 include/merge 语义**：`ModelRegistry` 构造 `ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"))`，`ConfigFile` 单文件解析（.yml/.yaml fallback）。任何「增量片段/include 指令」方案不成立——必须**合成完整 models.yml**。
 2. **`getAgentDir()` = `PI_CODING_AGENT_DIR` 环境覆盖（模块加载时快照）**；`CreateAgentSessionOptions.agentDir` 是公开选项 → 合成目录通过它注入。**`agentDir` 与 runner input 的 `capabilityHosts` 均为必填**（shape guard 拒绝缺失/空数组/非有限数值）。

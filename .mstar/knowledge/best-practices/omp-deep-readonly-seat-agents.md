@@ -1,7 +1,7 @@
 ---
 module: review-runtime-omp
 date: 2026-08-29
-last_updated: 2026-10-16
+last_updated: 2026-10-26
 problem_type: best_practice
 category: best-practices
 severity: high

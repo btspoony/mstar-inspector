@@ -7,7 +7,7 @@ severity: medium
 date: 2026-08-26
 status: active
 created_at: 2026-08-26
-last_updated: 2026-10-14
+last_updated: 2026-10-26
 source: sandbox review pipeline
 verified: true
 ---

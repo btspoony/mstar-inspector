@@ -1,7 +1,7 @@
 ---
 module: dashboard / SPA-shell-on-Worker dispatch + i18n + provider-first settings
 date: 2026-09-02
-last_updated: 2026-09-04
+last_updated: 2026-10-26
 problem_type: best_practice
 category: best-practices
 severity: medium

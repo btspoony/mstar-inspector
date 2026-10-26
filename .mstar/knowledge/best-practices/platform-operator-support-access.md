@@ -13,7 +13,7 @@ tags:
   - audit
   - operator
   - least-privilege
-last_updated: 2026-10-22
+last_updated: 2026-10-26
 ---
 
 # Platform operator support access
