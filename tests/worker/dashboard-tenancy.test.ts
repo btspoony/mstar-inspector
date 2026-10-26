@@ -255,6 +255,20 @@ describe("the pre-workspace App face is retired", () => {
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
+  test("the settings page is classified as a workspace path before auth", async () => {
+    // A reserved-word segment alone (`/dashboard/settings`) is not a workspace;
+    // the <ref>/settings shape is, and answers the same pre-auth 302 as every
+    // other workspace page (never a 404 that would leak the route table).
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db));
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/acme/settings", { headers: { Accept: "text/html" } }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
   test("an anonymous request cannot tell an existing workspace from a missing one (no pre-auth oracle)", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db);

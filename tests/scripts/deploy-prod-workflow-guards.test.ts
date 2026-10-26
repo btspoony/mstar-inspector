@@ -344,6 +344,7 @@ describe("deploy-prod.yml guards", () => {
     expect(wf.jobs.deploy.env).toEqual({
       CLOUDFLARE_ACCOUNT_ID: "${{ vars.CLOUDFLARE_ACCOUNT_ID }}",
       OAUTH_CLIENT_ID: "${{ vars.OAUTH_CLIENT_ID }}",
+      PLATFORM_OPERATORS: "${{ vars.PLATFORM_OPERATORS }}",
     });
     expect(JSON.stringify(wf.jobs.deploy.env)).not.toContain("secrets.");
   });
@@ -1042,7 +1043,7 @@ describe("deploy-prod.yml guards", () => {
 
   test("deploy runs `wrangler deploy --env production`, tees deploy.log, records the Version ID", () => {
     expect(runsText).toContain(
-      'bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas" 2>&1 | tee deploy.log',
+      'bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas" --var "PLATFORM_OPERATORS:${PLATFORM_OPERATORS:-}" 2>&1 | tee deploy.log',
     );
     expect(runsText).toContain("Current Version ID:");
     expect(runsText).toContain("version_id.txt");

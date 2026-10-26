@@ -24,6 +24,7 @@ export const en = {
     primary: "Primary navigation",
     apps: "Apps",
     members: "Members",
+    settings: "Settings",
     /** Sidebar-footer entry to the platform console (operators on `saas`). */
     platformOperations: "Platform operations",
     /** Label of the OTHER locale — the toggle target (en shows 中文, zh_CN shows EN). */
@@ -273,6 +274,8 @@ export const en = {
    * into a first workspace besides accepting an invitation.
    */
   workspace: {
+    /** The `/dashboard/<ref>/settings` page title. */
+    settingsHeading: "Workspace settings",
     setupHeading: "Create a workspace",
     setupDescription:
       "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",

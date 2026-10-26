@@ -1683,7 +1683,6 @@ describe("settings header typography", () => {
         createElement(AppDetailView, {
           locale: "en",
           slug: "acme-app",
-          storedSlug: "acme",
           payload: detailPayload(),
           groups: [],
           notice: null,

@@ -10,6 +10,7 @@ import {
   buildSidebarModel,
   isNavCurrent,
   otherLocale,
+  workspaceMembershipForRef,
 } from "../../src/spa/shell";
 import { NAV_ITEMS, t } from "../../src/i18n";
 import { injectSpaBoot, SPA_BOOT_MARKER, type SpaBoot } from "../../src/spa/boot";
@@ -18,10 +19,11 @@ const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory" };
 const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat" };
 
 describe("shell models", () => {
-  test("nav order is Apps → Members (insights retired)", () => {
+  test("nav order is Apps → Members → Settings (insights retired)", () => {
     expect(NAV_ITEMS.map((item) => item.href)).toEqual([
       "/dashboard/apps",
       "/dashboard/members",
+      "/dashboard/settings",
     ]);
   });
 
@@ -29,11 +31,12 @@ describe("shell models", () => {
     // The Members page is readable by every workspace member; its in-page
     // actions carry the role gate. Nav visibility must not hide the entry.
     const sidebar = buildSidebarModel(member, "/dashboard/apps");
-    expect(sidebar.items.map((item) => item.label)).toEqual(["Apps", "Members"]);
+    expect(sidebar.items.map((item) => item.label)).toEqual(["Apps", "Members", "Settings"]);
     const scoped = buildSidebarModel(member, "/dashboard/acme/apps");
     expect(scoped.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
+      "/dashboard/acme/settings",
     ]);
     // The global insights page is retired: no sidebar entry renders for it.
     expect(sidebar.items.some((item) => item.href === "/dashboard/insights")).toBe(false);
@@ -44,8 +47,9 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
+      "/dashboard/acme/settings",
     ]);
-    expect(sidebar.items.map((item) => item.label)).toEqual(["应用", "成员"]);
+    expect(sidebar.items.map((item) => item.label)).toEqual(["应用", "成员", "设置"]);
   });
 
   test("navbar is slim: theme + Lang + account + logout only", () => {
@@ -111,6 +115,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
+      "/dashboard/acme/settings",
     ]);
     expect(sidebar.items.find((item) => item.href === "/dashboard/acme/apps")?.current).toBe(true);
     // The App detail page under the same workspace keeps the entry current.
@@ -127,6 +132,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
+      "/dashboard/acme/settings",
     ]);
     expect(sidebar.items.find((item) => item.href === "/dashboard/acme/members")?.current).toBe(true);
   });
@@ -136,6 +142,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
+      "/dashboard/acme/settings",
     ]);
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
   });
@@ -148,6 +155,7 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
+      "/dashboard/acme/settings",
     ]);
   });
 
@@ -157,7 +165,21 @@ describe("shell models", () => {
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/apps",
       "/dashboard/members",
+      "/dashboard/settings",
     ]);
+  });
+
+  test("workspaceMembershipForRef resolves by id or slug and carries the role", () => {
+    // The settings page gates the slug editor on this row's role, so the
+    // lookup must survive both addressing forms the URL may carry.
+    const boot: SpaBoot = {
+      ...member,
+      memberships: [{ id: "ws-1", slug: "acme", name: "Acme", role: "member", plan: "Free" }],
+    };
+    expect(workspaceMembershipForRef(boot, "ws-1")?.slug).toBe("acme");
+    expect(workspaceMembershipForRef(boot, "acme")?.role).toBe("member");
+    expect(workspaceMembershipForRef(boot, "ghost")).toBeNull();
+    expect(workspaceMembershipForRef(boot, null)).toBeNull();
   });
 });
 

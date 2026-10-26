@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
-import { SPA_PAGES, RESERVED_WORKSPACE_SLUGS, isSpaAssetPath, matchSpaRoute, wantsHtml } from "../../src/spa/routes";
+import { SPA_PAGES, RESERVED_WORKSPACE_SLUGS, isSpaAssetPath, matchSpaRoute, wantsHtml, workspaceRefOf } from "../../src/spa/routes";
 
 /** True when the matched route is workspace-scoped (legacy variants carry no field). */
 function isWorkspaceRoute(pathname: string): boolean {
@@ -15,8 +15,8 @@ function isWorkspaceRoute(pathname: string): boolean {
 }
 
 describe("SPA_PAGES enum", () => {
-  test("includes apps, members, login, app-detail (insights and home retired; settings folded into app-detail)", () => {
-    expect([...SPA_PAGES]).toEqual(["apps", "members", "login", "app-detail"]);
+  test("includes apps, members, settings, login, app-detail (insights and home retired)", () => {
+    expect([...SPA_PAGES]).toEqual(["apps", "members", "settings", "login", "app-detail"]);
   });
 });
 
@@ -31,6 +31,15 @@ describe("matchSpaRoute", () => {
       pathname: "/dashboard/acme/members",
       workspaceRef: "acme",
     });
+    // Settings is workspace-scoped for the same reason: the rename card
+    // writes under the path's workspace prefix.
+    expect(matchSpaRoute("/dashboard/settings")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/settings")).toEqual({
+      page: "settings",
+      pathname: "/dashboard/acme/settings",
+      workspaceRef: "acme",
+    });
+    expect(workspaceRefOf("/dashboard/acme/settings")).toBe("acme");
     expect(matchSpaRoute("/dashboard/login")).toEqual({ page: "login", pathname: "/dashboard/login" });
   });
 
