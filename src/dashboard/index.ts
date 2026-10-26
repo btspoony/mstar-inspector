@@ -674,12 +674,7 @@ function isRetiredAppPath(pathname: string): boolean {
 }
 
 /** The workspace ref a mount-pinned /dashboard path addresses, else null. */
-const WORKSPACE_SEGMENTS: Readonly<Record<string, true>> = {
-  apps: true,
-  members: true,
-  settings: true,
-  api: true,
-};
+const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(["apps", "members", "api"]);
 
 /**
  * Classify a mount-pinned /dashboard path into the workspace it addresses —
@@ -699,7 +694,7 @@ function classifyDashboardPath(pathname: string): { kind: "workspace"; ref: stri
     first !== undefined &&
     !RESERVED_WORKSPACE_SLUGS.has(first) &&
     second !== undefined &&
-    WORKSPACE_SEGMENTS[second] === true
+    WORKSPACE_SEGMENTS.has(second)
   ) {
     return { kind: "workspace", ref: first };
   }

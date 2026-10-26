@@ -539,7 +539,12 @@ describe("deploy-prod.yml guards", () => {
   test("the serving deploy binds the deployment shape, and the summary no longer reports a tenant mode", () => {
     const serving = steps.find((s) => s.name === "Deploy serving version (prod)")!;
     expect(serving).toBeDefined();
-    expect(serving.run).toContain('bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas"');
+    // The whole command, allowlist `--var` included: this step decides the
+    // final live version, so a dropped PLATFORM_OPERATORS suffix would ship a
+    // Worker whose console 404s for every configured operator.
+    expect(serving.run?.trim()).toBe(
+      'bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas" --var "PLATFORM_OPERATORS:${PLATFORM_OPERATORS:-}"',
+    );
     expect(serving.if).toBeUndefined();   // a skip leaves a bulk version serving
 
     // The tenant-mode evidence line died with the mode: the run summary has no

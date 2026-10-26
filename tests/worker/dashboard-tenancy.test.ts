@@ -255,15 +255,16 @@ describe("the pre-workspace App face is retired", () => {
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
-  test("the settings page is classified as a workspace path before auth", async () => {
-    // A reserved-word segment alone (`/dashboard/settings`) is not a workspace;
-    // the <ref>/settings shape is, and answers the same pre-auth 302 as every
-    // other workspace page (never a 404 that would leak the route table).
+  test("the settings page answers the same pre-auth login redirect as every SPA page", async () => {
+    // `/dashboard/<ref>/settings` is an enumerated SPA page, not a worker
+    // route: spa-dispatch serves it like any other page, and the anonymous
+    // answer is the session guard's 302 — never a 404 that would leak the
+    // route table. `withSpaAssets` is unnecessary: both the shell path and
+    // the unbound-assets path land on the same guard.
     const { db } = tenancyFixture();
-    const env = withSpaAssets(envFor(db));
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/acme/settings", { headers: { Accept: "text/html" } }),
-      env,
+      envFor(db),
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
