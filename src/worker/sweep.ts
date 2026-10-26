@@ -47,6 +47,9 @@ export const SWEEP_RETENTION_DAYS = 30;
 /** Retention row cap per run (PR #10): bounded work per 15-min sweep. */
 export const SWEEP_RETENTION_CAP = 500;
 
+/** Invite-lapse row cap per run (I-000096): same bounded-work rule as retention. */
+export const SWEEP_INVITE_LAPSE_CAP = 500;
+
 /**
  * The structured breach event — a JSON line on the consumer-derived log
  * channel (SweepLog below), also POSTed verbatim to the webhook.
@@ -130,6 +133,12 @@ export type SweepResult = {
   failures24h: number;
   thresholdBreached: boolean;
   /**
+   * Lapsed pending invites flipped to `expired` by this run, across every
+   * workspace; null when the flip itself failed (warn-logged, and the
+   * failure-sweep path below still ran).
+   */
+  invitesExpired: number | null;
+  /**
    * Webhook disposition: absent (unset), posted, failed (throw or non-2xx,
    * warn-logged), or not_attempted (no breach).
    */
@@ -181,10 +190,13 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // Invite lapse (I-000096) moved here from the members-page read: a lapsed
   // pending invite already holds no seat and is already unlisted, so the flip
   // only makes the stored status catch up — at most one sweep interval late.
-  // Like retention, a failure degrades to a warn and NEVER breaks the
+  // The statement is global and bounded at SWEEP_INVITE_LAPSE_CAP rows per run,
+  // so a larger backlog drains over successive runs instead of stalling one
+  // sweep. Like retention, a failure degrades to a warn and NEVER breaks the
   // failure-sweep path below.
+  let invitesExpired: number | null = null;
   try {
-    await expireLapsedInvites(db, new Date().toISOString());
+    invitesExpired = await expireLapsedInvites(db, new Date().toISOString(), SWEEP_INVITE_LAPSE_CAP);
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
@@ -211,7 +223,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   const failures24h = row?.n ?? 0;
   const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
   if (!thresholdBreached) {
-    return { failures24h, thresholdBreached, webhook: "not_attempted" };
+    return { failures24h, thresholdBreached, invitesExpired, webhook: "not_attempted" };
   }
 
   const alert: SweepAlertFields = {
@@ -222,7 +234,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   };
   log.warn(alert, "review failure threshold breached");
   if (!deps.alertUrl) {
-    return { failures24h, thresholdBreached, webhook: "absent" };
+    return { failures24h, thresholdBreached, invitesExpired, webhook: "absent" };
   }
 
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -239,7 +251,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       // below emits the warn and the "failed" disposition.
       throw new Error(`alert webhook POST returned HTTP ${response.status}`);
     }
-    return { failures24h, thresholdBreached, webhook: "posted" };
+    return { failures24h, thresholdBreached, invitesExpired, webhook: "posted" };
   } catch (error) {
     // Redact BEFORE truncate (repo convention: a secret straddling the cut
     // would leak a partial token) — ALERT_WEBHOOK_URL is secret-class and a
@@ -258,6 +270,6 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
       },
       "alert webhook POST failed — log-only alert stands",
     );
-    return { failures24h, thresholdBreached, webhook: "failed" };
+    return { failures24h, thresholdBreached, invitesExpired, webhook: "failed" };
   }
 }

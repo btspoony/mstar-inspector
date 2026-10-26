@@ -74,7 +74,6 @@ import {
   createWorkspace,
   deleteWorkspace,
   getMembership,
-  getSoleWorkspace,
   getSoleWorkspaceAccess,
   getWorkspaceAccessById,
   getWorkspaceAccessByRef,
@@ -83,8 +82,10 @@ import {
   listWorkspaceMembers,
   listWorkspaceMembershipOptions,
   setWorkspaceSlug,
+  type WorkspaceAccess,
   type WorkspaceMembershipOption,
   type WorkspaceRole,
+  type WorkspaceRow,
 } from "./workspace-store";
 import {
   ACCEPT_MEMBER_CAP_REFUSAL,
@@ -98,6 +99,7 @@ import {
   isFreeTierPlan,
   memberSlotAvailable,
   resolveWorkspacePlan,
+  resolveWorkspacePlans,
 } from "./entitlement";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
@@ -201,12 +203,17 @@ type WorkspacePrincipal =
  * `workspaceScope` then resolves the live workspace and the caller's principal
  * after the session and user row are known.
  */
-type DashboardVariables = {
+export type DashboardVariables = {
   tenant?: {
     /** The workspace segment the request named: an id or a slug. */
     ref: string;
     /** null until the workspace-scope middleware resolves the live row. */
     workspaceId: string | null;
+    /**
+     * The resolved `workspaces` row (id, slug, name, created_at), so a route
+     * reads the scope's own row instead of re-querying by the same ref.
+     */
+    workspaceRow?: WorkspaceRow;
     /** null until the workspace-scope middleware classifies the principal. */
     role: WorkspaceRole | null;
     /** null until the workspace-scope middleware classifies the caller. */
@@ -254,29 +261,48 @@ function scopedAppPath(c: DashboardContext, path: string): string {
  * classifier the gate uses ({@link classifyWorkspacePrincipal}), so the boot
  * and the request can never disagree about who the caller is.
  *
- * `workspaceRef` is the path's workspace segment when there is one, else the
- * deployment's sole workspace. An unbound store, an unknown ref, a membership,
- * a live invite, no grant and a lapsed grant all answer null — and the shell
- * then behaves exactly as before.
+ * Every fact the decision needs — the workspace row, the login's membership
+ * role and its users row — is already in {@link workspaceBoot}'s result, so
+ * this reads nothing of its own. An unresolved workspace, a membership, a live
+ * invite, no grant and a lapsed grant all answer null — and the shell then
+ * behaves exactly as before.
  */
 export async function operatorSupportWorkspace(
   env: Env,
-  login: string,
-  workspaceRef?: string,
+  boot: WorkspaceBoot,
 ): Promise<string | null> {
-  if (!isPlatformOperator(env, login)) return null;
+  const access = boot.access;
+  if (access === null || access === undefined || access.user === null) return null;
+  if (!isPlatformOperator(env, access.user.github_login)) return null;
   const db = dashboardD1(env);
   if (db === null) return null;
-  const workspace =
-    workspaceRef === undefined
-      ? await getSoleWorkspace(db)
-      : await getWorkspaceByRef(db, workspaceRef);
-  if (workspace === null) return null;
-  const user = await getUserByLogin(db, login);
-  if (user === null) return null;
-  const { principal } = await classifyWorkspacePrincipal(env, db, workspace, user, new Date().toISOString());
-  return principal === "operator-granted" ? workspace.slug : null;
+  const { principal } = await classifyWorkspacePrincipal(
+    env,
+    db,
+    access,
+    access.user,
+    new Date().toISOString(),
+    access.role,
+  );
+  return principal === "operator-granted" ? access.slug : null;
 }
+
+/**
+ * The boot result: the extras the SPA shell reads plus the ONE workspace-access
+ * resolution they were derived from.
+ */
+export type WorkspaceBoot = {
+  workspaceRef?: string;
+  canCreateApp?: boolean;
+  needsWorkspace?: boolean;
+  workspaceRequired?: boolean;
+  /**
+   * The resolved workspace row with the login's membership role and users row
+   * — the ONE read the boot's consumers share. `null` when no workspace
+   * resolved (unknown ref, several workspaces, unbound store).
+   */
+  access: WorkspaceAccess | null;
+};
 
 /**
  * The boot extras for one signed-in login: whether the login belongs to no
@@ -303,14 +329,9 @@ export async function workspaceBoot(
   env: Env,
   login: string,
   requestedRef?: string,
-): Promise<{
-  workspaceRef?: string;
-  canCreateApp?: boolean;
-  needsWorkspace?: boolean;
-  workspaceRequired?: boolean;
-}> {
+): Promise<WorkspaceBoot> {
   const db = dashboardD1(env);
-  if (db === null) return {};
+  if (db === null) return { access: null };
   const [access, memberships] = await Promise.all([
     requestedRef === undefined
       ? getSoleWorkspaceAccess(db, login)
@@ -319,9 +340,10 @@ export async function workspaceBoot(
   ]);
   // No live membership → no workspace to name: every workspace path 404s this
   // login, so the shell must offer creation instead.
-  if (memberships === 0) return { canCreateApp: false, needsWorkspace: true };
+  if (memberships === 0) return { access, canCreateApp: false, needsWorkspace: true };
   if (access !== null) {
     return {
+      access,
       workspaceRef: access.slug,
       // A new App lands in the addressed workspace, where a plain member has
       // no manage rights — so creation is owner/admin there.
@@ -332,9 +354,11 @@ export async function workspaceBoot(
   // boot names none, and the page's own guard has already answered (or will
   // answer) the outsider 404. Only the ref-less path can reach the "several
   // workspaces" state below.
-  if (requestedRef !== undefined) return { canCreateApp: false };
-  if ((await countLiveWorkspaces(db)) > 1) return { workspaceRequired: true, canCreateApp: false };
-  return { canCreateApp: false };
+  if (requestedRef !== undefined) return { access: null, canCreateApp: false };
+  if ((await countLiveWorkspaces(db)) > 1) {
+    return { access: null, workspaceRequired: true, canCreateApp: false };
+  }
+  return { access: null, canCreateApp: false };
 }
 
 /**
@@ -347,6 +371,10 @@ export async function workspaceBoot(
  * must read the plan of whichever workspace the URL then names. Both modes
  * carry it (D16: the mode gates rendering, never the payload) — `self-hosted`
  * resolves `Unlimited` before any DB read.
+ *
+ * The plans are resolved for the whole list at once ({@link resolveWorkspacePlans}),
+ * so the switcher costs one subscription read however many workspaces it names;
+ * resolving row by row would repeat that read per row.
  */
 export async function workspaceMembershipsForLogin(
   env: Env,
@@ -356,12 +384,12 @@ export async function workspaceMembershipsForLogin(
   if (db === null) return [];
   const rows = await listWorkspaceMembershipOptions(db, login);
   const mode = deploymentModeOf(env.DEPLOYMENT_MODE);
-  return Promise.all(
-    rows.map(async (row) => ({
-      ...row,
-      plan: (await resolveWorkspacePlan(db, row.id, mode)).name,
-    })),
+  const plans = await resolveWorkspacePlans(
+    db,
+    rows.map((row) => row.id),
+    mode,
   );
+  return rows.map((row) => ({ ...row, plan: plans.get(row.id)!.name }));
 }
 
 /**
@@ -481,10 +509,16 @@ function creationDeniedResponse(c: DashboardContext, message: string): Response 
  * order (`name`, then `id`) is stable, so the same login lands in the same
  * place. The switcher keeps offering every other membership from there.
  */
-export async function signedInLanding(env: Env, login: string): Promise<string> {
-  const boot = await workspaceBoot(env, login);
-  if (boot.workspaceRef !== undefined) return `/dashboard/${boot.workspaceRef}/apps`;
-  if (boot.needsWorkspace === true) return DASHBOARD_MOUNT;
+export async function signedInLanding(
+  env: Env,
+  login: string,
+  boot?: WorkspaceBoot,
+): Promise<string> {
+  // A caller that already booted this login for the same request (`/dashboard`
+  // in spa-dispatch) passes the result instead of paying the read twice.
+  const extras = boot ?? (await workspaceBoot(env, login));
+  if (extras.workspaceRef !== undefined) return `/dashboard/${extras.workspaceRef}/apps`;
+  if (extras.needsWorkspace === true) return DASHBOARD_MOUNT;
   const memberships = await workspaceMembershipsForLogin(env, login);
   const first = memberships[0];
   if (first !== undefined) return `/dashboard/${first.slug}/apps`;
@@ -802,15 +836,20 @@ dashboardApp.use("*", async (c, next) => {
  * then the operator allowlist — so an operator who is a member (or holds an
  * invite here) keeps that ordinary standing (AC1), and the shell can never
  * hand a listed operator an invitee's landing page.
+ *
+ * `knownRole` is the caller's membership role when a caller already holds it
+ * (the boot's access join), so the member test costs no second read; the gate
+ * passes nothing and reads it here.
  */
 async function classifyWorkspacePrincipal(
   env: Env,
   db: DashboardDb,
   workspace: { id: string },
-  user: DashboardUserRow,
+  user: { id: string; github_login: string },
   now: string,
+  knownRole?: WorkspaceRole | null,
 ): Promise<{ principal: WorkspacePrincipal; role: WorkspaceRole | null }> {
-  const role = await getMembership(db, workspace.id, user.id);
+  const role = knownRole === undefined ? await getMembership(db, workspace.id, user.id) : knownRole;
   if (role !== null) return { principal: "member", role };
   const invited = await getPendingInviteByLogin(db, workspace.id, user.github_login, now);
   if (invited !== null) return { principal: "invitee", role: null };
@@ -867,7 +906,7 @@ dashboardApp.use("*", async (c, next) => {
     ? await classifyWorkspacePrincipal(c.env, db, workspace, user, now)
     : { principal: "outsider" as const, role: null };
   if (role !== null && user) {
-    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role, principal });
+    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, workspaceRow: workspace, role, principal });
     c.set("workspaceScope", { workspaceId: workspace.id, role });
     return next();
   }
@@ -880,7 +919,7 @@ dashboardApp.use("*", async (c, next) => {
       action: "support.denied",
       now,
     });
-    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role: null, principal });
+    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, workspaceRow: workspace, role: null, principal });
     c.set("workspaceScope", null);
     return await tenantNotFound(c);
   }
@@ -894,7 +933,7 @@ dashboardApp.use("*", async (c, next) => {
       action: read ? "support.read" : "support.forbidden",
       now,
     });
-    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, role: null, principal });
+    c.set("tenant", { ref: tenant.ref, workspaceId: workspace.id, workspaceRow: workspace, role: null, principal });
     c.set("workspaceScope", null);
     if (!read) return c.json({ error: "forbidden" }, 403);
     return next();
@@ -902,6 +941,7 @@ dashboardApp.use("*", async (c, next) => {
   c.set("tenant", {
     ref: tenant.ref,
     workspaceId: workspace.id,
+    workspaceRow: workspace,
     role: null,
     principal,
   });
@@ -2121,7 +2161,9 @@ const supportWorkspaceRoute = async (c: DashboardContext) => {
       ? c.json({ error: "forbidden" }, 403)
       : await tenantNotFound(c);
   }
-  const workspace = await getWorkspaceByRef(db, tenant.ref);
+  // The scope middleware already resolved this workspace's row for the ref the
+  // request named, so the route reads its own scope instead of querying again.
+  const workspace = tenant.workspaceRow;
   const login = c.get("authUser")?.github_login;
   if (!workspace || login === undefined) return await tenantNotFound(c);
   const now = new Date().toISOString();
@@ -2273,15 +2315,19 @@ const workspaceSlugRoute = async (c: DashboardContext) => {
 // Clarify #6, architect-pinned POST action paths) ---
 //
 // The per-request guard above has already verified membership on every route
-// here; the route-local gate re-resolves the acting row per request (same
-// pattern as the members routes). List = every member; disable/enable/
-// soft-delete = the workspace owner/admin (invite-only team trust model).
+// here, and the route-local gate below reuses the row it resolved. List =
+// every member; disable/enable/soft-delete = the workspace owner/admin
+// (invite-only team trust model).
 // POSTs ride the existing session cookie (same discipline as the members
 // routes) — no new token scheme. Routes are the pinned action-path POSTs:
 // the zero-JS `<form method="post">` convention cannot emit a DELETE verb.
 
-/** Route-local member gate shared by every workspace App route. */
-async function requireMember(c: DashboardContext): Promise<
+/**
+ * Route-local member gate shared by every workspace App route. Exported so a
+ * test can drive the gate on a mount without the session guard (the only
+ * caller shape that takes the fallback read below).
+ */
+export async function requireMember(c: DashboardContext): Promise<
   | {
       ok: true;
       session: SessionPayload;
@@ -2297,7 +2343,10 @@ async function requireMember(c: DashboardContext): Promise<
   if (!session) return { ok: false, response: c.redirect("/dashboard/login", 302) };
   const db = dashboardD1(c.env);
   if (!db) return { ok: false, response: c.text("dashboard storage is not configured", 500) };
-  const user = await getUserByLogin(db, session.login);
+  // The session guard already resolved this row for the request and failed
+  // closed on a removed login, so reuse it. Only a mount without that
+  // middleware reads for itself.
+  const user = c.get("authUser") ?? (await getUserByLogin(db, session.login));
   // Fail closed: no row (removed between guard and here) → 403, the 403 view
   // carries zero membership data.
   if (!user) return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };

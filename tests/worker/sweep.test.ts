@@ -17,6 +17,7 @@ import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   runSweep,
   SWEEP_FAILURE_THRESHOLD,
+  SWEEP_INVITE_LAPSE_CAP,
   SWEEP_LOG_DETAIL_MAX,
   SWEEP_RETENTION_CAP,
   SWEEP_RETENTION_DAYS,
@@ -111,37 +112,188 @@ describe("runSweep", () => {
     expect(captured[1]).toContain("UPDATE workspace_invites");
     expect(captured[2]).toContain("FROM review_failures");
     expect(captured[2]).toContain("created_at > datetime('now', '-24 hours')");
-    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+    expect(result).toEqual({
+      failures24h: 0,
+      thresholdBreached: false,
+      invitesExpired: 0,
+      webhook: "not_attempted",
+    });
   });
-  test("flips lapsed pending invites and leaves live ones pending (real D1)", async () => {
+  test("flips lapsed pending invites in every workspace in one run, and flips none on the second", async () => {
     const db = createMigratedTestD1();
-    const insert = (id: string, expiresAt: string): void => {
+    db.raw
+      .query(`INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+              VALUES ('ws-2', 'ws-2', 'Second', NULL, '2026-10-21T00:00:00.000Z', NULL)`)
+      .run();
+    const insert = (id: string, workspaceId: string, expiresAt: string): void => {
       db.raw
         .prepare(
           `INSERT INTO workspace_invites
              (id, workspace_id, github_login, role, status, invited_by,
               created_at, expires_at, accepted_at)
-           VALUES (?, 'default', ?, 'member', 'pending', NULL, ?, ?, NULL)`,
+           VALUES (?, ?, ?, 'member', 'pending', NULL, ?, ?, NULL)`,
         )
-        .run(id, id, new Date().toISOString(), expiresAt);
+        .run(id, workspaceId, id, new Date().toISOString(), expiresAt);
     };
     // Ages are relative to the real clock — a hard-coded calendar date slides
     // out of the comparison and turns this into a date bomb.
-    insert("lapsed", new Date(Date.now() - 60_000).toISOString());
-    insert("live", new Date(Date.now() + 60_000).toISOString());
+    const lapsed = new Date(Date.now() - 60_000).toISOString();
+    insert("lapsed-default", "default", lapsed);
+    insert("lapsed-ws-2", "ws-2", lapsed);
 
     const { log, calls } = captureLog();
-    const result = await runSweep(db, { log });
-    const statuses = db.raw
-      .query("SELECT id, status FROM workspace_invites ORDER BY id")
-      .all() as Array<{ id: string; status: string }>;
-    expect(statuses).toEqual([
-      { id: "lapsed", status: "expired" },
-      { id: "live", status: "pending" },
+    const first = await runSweep(db, { log });
+    expect(db.raw.query("SELECT id, status FROM workspace_invites ORDER BY id").all()).toEqual([
+      { id: "lapsed-default", status: "expired" },
+      { id: "lapsed-ws-2", status: "expired" },
+    ]);
+    expect(first.invitesExpired).toBe(2);
+
+    const second = await runSweep(db, { log });
+    expect(second.invitesExpired).toBe(0);
+    expect(db.raw.query("SELECT id, status FROM workspace_invites ORDER BY id").all()).toEqual([
+      { id: "lapsed-default", status: "expired" },
+      { id: "lapsed-ws-2", status: "expired" },
     ]);
     // A quiet flip logs nothing.
     expect(calls).toHaveLength(0);
-    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+    expect(first).toEqual({
+      failures24h: 0,
+      thresholdBreached: false,
+      invitesExpired: 2,
+      webhook: "not_attempted",
+    });
+  });
+
+  test("a backlog larger than one run's cap drains across successive runs, losing nothing", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .query(`INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+              VALUES ('ws-2', 'ws-2', 'Second', NULL, '2026-10-21T00:00:00.000Z', NULL)`)
+      .run();
+    const lapsed = new Date(Date.now() - 60_000).toISOString();
+    const live = new Date(Date.now() + 60_000).toISOString();
+    const insert = db.raw.prepare(
+      `INSERT INTO workspace_invites
+         (id, workspace_id, github_login, role, status, invited_by,
+          created_at, expires_at, accepted_at)
+       VALUES (?, ?, ?, 'member', ?, NULL, ?, ?, NULL)`,
+    );
+    const backlog = SWEEP_INVITE_LAPSE_CAP + 2;
+    for (let i = 0; i < backlog; i++) {
+      // Spread across both workspaces: the flip is global, not workspace-scoped.
+      insert.run(`lapsed-${i}`, i % 2 === 0 ? "default" : "ws-2", `lapsed-${i}`, "pending", lapsed, lapsed);
+    }
+    // A live pending row and an already-accepted one must survive every run.
+    insert.run("live", "default", "live", "pending", live, live);
+    insert.run("accepted", "ws-2", "accepted", "accepted", lapsed, lapsed);
+
+    const { log, calls } = captureLog();
+    const first = await runSweep(db, { log });
+    expect(first.invitesExpired).toBe(SWEEP_INVITE_LAPSE_CAP);
+    const pendingAfterFirst = db.raw
+      .query("SELECT COUNT(*) AS n FROM workspace_invites WHERE status = 'pending' AND expires_at <= ?")
+      .get(lapsed) as { n: number };
+    expect(pendingAfterFirst.n).toBe(backlog - SWEEP_INVITE_LAPSE_CAP);
+
+    // The remainder is not stranded: the next run picks it up.
+    const second = await runSweep(db, { log });
+    expect(second.invitesExpired).toBe(backlog - SWEEP_INVITE_LAPSE_CAP);
+    const third = await runSweep(db, { log });
+    expect(third.invitesExpired).toBe(0);
+
+    // Nothing lost: every backlog row is `expired`, and the two non-lapsed
+    // rows kept their own status.
+    const rows = db.raw.query("SELECT status, COUNT(*) AS n FROM workspace_invites GROUP BY status").all() as Array<{
+      status: string;
+      n: number;
+    }>;
+    expect(Object.fromEntries(rows.map((row) => [row.status, row.n]))).toEqual({
+      expired: backlog,
+      pending: 1,
+      accepted: 1,
+    });
+    expect(db.raw.query("SELECT id FROM workspace_invites WHERE id = 'live' AND status = 'pending'").all()).toHaveLength(1);
+    // A bounded flip is still a quiet one: no warn line until a failure.
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a continuously-fed backlog still serves the OLDEST lapsed row first (no starvation)", async () => {
+    const db = createMigratedTestD1();
+    const insert = db.raw.prepare(
+      `INSERT INTO workspace_invites
+         (id, workspace_id, github_login, role, status, invited_by,
+          created_at, expires_at, accepted_at)
+       VALUES (?, 'default', ?, 'member', 'pending', NULL, ?, ?, NULL)`,
+    );
+    const ago = (minutes: number): string => new Date(Date.now() - minutes * 60_000).toISOString();
+    // The old row's login sorts LAST, so the login-ordered access path the
+    // candidates had before the ORDER BY would reach it only after the whole
+    // cohort — and a cap-sized inflow per run never gets that far.
+    const oldestExpiry = ago(10 * 24 * 60);
+    insert.run("oldest", "zzz-oldest", oldestExpiry, oldestExpiry);
+    /** A cap-sized cohort of newer lapsed rows, all sharing one expiry. */
+    const feed = (generation: number, minutesAgo: number): void => {
+      const expiry = ago(minutesAgo);
+      for (let i = 0; i < SWEEP_INVITE_LAPSE_CAP; i++) {
+        insert.run(`g${generation}-${String(i).padStart(4, "0")}`, `aaa-${generation}-${String(i).padStart(4, "0")}`, expiry, expiry);
+      }
+    };
+
+    feed(1, 5);
+    const expired = (): Array<{ id: string }> =>
+      db.raw.query("SELECT id FROM workspace_invites WHERE status = 'expired' ORDER BY expires_at, id").all() as Array<{
+        id: string;
+      }>;
+    const lapsedPending = (): number =>
+      (db.raw.query("SELECT COUNT(*) AS n FROM workspace_invites WHERE status = 'pending'").get() as { n: number }).n;
+
+    const first = await runSweep(db, { log: captureLog().log });
+    // The cap went to the oldest rows: the 10-day-old row, then the cohort in
+    // `id` order — NOT the login-ordered slice an unordered LIMIT returns.
+    expect(first.invitesExpired).toBe(SWEEP_INVITE_LAPSE_CAP);
+    expect(expired().slice(0, 2)).toEqual([{ id: "oldest" }, { id: "g1-0000" }]);
+    expect(expired()).toHaveLength(SWEEP_INVITE_LAPSE_CAP);
+    expect(lapsedPending()).toBe(1);
+
+    // Keep the inflow arriving at cap rate: the backlog must still drain, and
+    // the surviving leftover row is the NEWEST of the previous generation.
+    feed(2, 3);
+    const second = await runSweep(db, { log: captureLog().log });
+    expect(second.invitesExpired).toBe(SWEEP_INVITE_LAPSE_CAP);
+    expect(expired()).toContainEqual({ id: "g1-0499" });
+
+    feed(3, 1);
+    await runSweep(db, { log: captureLog().log });
+    expect(lapsedPending()).toBeLessThanOrEqual(SWEEP_INVITE_LAPSE_CAP);
+    expect(lapsedPending()).toBeGreaterThan(0);
+
+    // Stop feeding and drain: nothing is stranded, oldest row included.
+    let drained = 0;
+    for (let run = 0; run < 4; run++) drained += (await runSweep(db, { log: captureLog().log })).invitesExpired ?? 0;
+    expect(drained).toBeGreaterThan(0);
+    expect(lapsedPending()).toBe(0);
+    expect(db.raw.query("SELECT status FROM workspace_invites WHERE id = 'oldest'").get()).toEqual({
+      status: "expired",
+    });
+  });
+
+  test("leaves a live pending invite untouched (real D1)", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_invites
+           (id, workspace_id, github_login, role, status, invited_by,
+            created_at, expires_at, accepted_at)
+         VALUES ('live', 'default', 'live', 'member', 'pending', NULL, ?, ?, NULL)`,
+      )
+      .run(new Date().toISOString(), new Date(Date.now() + 60_000).toISOString());
+
+    const result = await runSweep(db, { log: captureLog().log });
+    expect(db.raw.query("SELECT id, status FROM workspace_invites").all()).toEqual([
+      { id: "live", status: "pending" },
+    ]);
+    expect(result.invitesExpired).toBe(0);
   });
 
   test("the invite lapse failure degrades to a warn and the failure-sweep still runs", async () => {
@@ -161,7 +313,12 @@ describe("runSweep", () => {
       detail: "invites locked",
     });
     expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: 6 });
-    expect(result).toEqual({ failures24h: 6, thresholdBreached: true, webhook: "absent" });
+    expect(result).toEqual({
+      failures24h: 6,
+      thresholdBreached: true,
+      invitesExpired: null,
+      webhook: "absent",
+    });
   });
   test("retention: DELETE shape (30-day window, 500-row cap, no bound params) + retention_swept log carries the deleted count", async () => {
     const captured: string[] = [];
@@ -197,11 +354,19 @@ describe("runSweep", () => {
     const result = await runSweep(db, { log });
     // The retention DELETE is parameter-free — no `?` placeholders to bind.
     expect(captured[0]).not.toContain("?");
-    // The only bound parameter in the run is the invite-lapse flip's ISO clock.
+    // The only bound statement in the run is the invite-lapse flip: its ISO
+    // clock plus the per-run row cap.
     expect(binds).toHaveLength(1);
+    expect(binds[0]).toHaveLength(2);
+    expect(binds[0]![1]).toBe(SWEEP_INVITE_LAPSE_CAP);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.fields).toEqual({ event: "retention_swept", deleted: 3 });
-    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+    expect(result).toEqual({
+      failures24h: 0,
+      thresholdBreached: false,
+      invitesExpired: 3,
+      webhook: "not_attempted",
+    });
   });
 
   test("retention deletes only rows older than 30 days (real D1)", async () => {
@@ -229,7 +394,12 @@ describe("runSweep", () => {
     const result = await runSweep(db, { log });
     const remaining = db.raw.query("SELECT id FROM webhook_deliveries ORDER BY id").all() as Array<{ id: string }>;
     expect(remaining.map((r) => r.id)).toEqual(["fresh"]);
-    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+    expect(result).toEqual({
+      failures24h: 0,
+      thresholdBreached: false,
+      invitesExpired: 0,
+      webhook: "not_attempted",
+    });
   });
 
   test("retention failure degrades to a warn and the failure-sweep still runs (breach alert fires)", async () => {
@@ -248,7 +418,12 @@ describe("runSweep", () => {
     const result = await runSweep(wrapped, { log });
     expect(calls[0]!.fields).toMatchObject({ event: "retention_swept_failed", detail: "retention table locked" });
     expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: 6 });
-    expect(result).toEqual({ failures24h: 6, thresholdBreached: true, webhook: "absent" });
+    expect(result).toEqual({
+      failures24h: 6,
+      thresholdBreached: true,
+      invitesExpired: 0,
+      webhook: "absent",
+    });
   });
 
   test("counts only in-window rows, across all stages (parse + runner/sandbox/pipeline)", async () => {
@@ -270,7 +445,12 @@ describe("runSweep", () => {
     const { log, calls } = captureLog();
 
     const result = await runSweep(db, { log });
-    expect(result).toEqual({ failures24h: 5, thresholdBreached: false, webhook: "not_attempted" });
+    expect(result).toEqual({
+      failures24h: 5,
+      thresholdBreached: false,
+      invitesExpired: 0,
+      webhook: "not_attempted",
+    });
     expect(calls).toHaveLength(0);
   });
 
@@ -281,7 +461,12 @@ describe("runSweep", () => {
     const fetchImpl = mock(() => Promise.resolve(new Response("ok")));
 
     const result = await runSweep(db, { log, fetchImpl: fetchImpl as unknown as typeof fetch });
-    expect(result).toEqual({ failures24h: 6, thresholdBreached: true, webhook: "absent" });
+    expect(result).toEqual({
+      failures24h: 6,
+      thresholdBreached: true,
+      invitesExpired: 0,
+      webhook: "absent",
+    });
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(calls).toHaveLength(1);
     expect(calls[0]!.fields).toEqual({

@@ -1396,3 +1396,45 @@ describe("migrations/0034_support_grant_indexes.sql (I-000167)", () => {
     ).toContain("SEARCH x USING COVERING INDEX support_grants_lookup (workspace_id=? AND operator_login=?)");
   });
 });
+
+describe("migrations/0035_workspace_invite_expiry_index.sql (I-000096)", () => {
+  /** The sweep's candidate SQL, copied from `expireLapsedInvites`'s subquery. */
+  const CANDIDATES = `SELECT id FROM workspace_invites
+     WHERE status = 'pending' AND expires_at <= ?
+     ORDER BY expires_at, id LIMIT ?`;
+
+  /** `EXPLAIN QUERY PLAN` detail lines, in the planner's order. */
+  function plan(db: TestD1, sql: string): string[] {
+    return (db.raw.query(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>).map((p) => p.detail);
+  }
+
+  function indexColumns(db: TestD1, index: string): string[] {
+    return (db.raw.query(`PRAGMA index_info(${index})`).all() as Array<{ name: string }>).map((c) => c.name);
+  }
+
+  test("indexes the pending set by the candidate order (expires_at, id)", () => {
+    const db = createMigratedTestD1();
+    expect(indexColumns(db, "workspace_invites_expiry")).toEqual(["expires_at", "id"]);
+    // Partial, like both 0028 indexes: only the live pending set is indexed.
+    const row = db.raw
+      .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'workspace_invites_expiry'")
+      .get() as { sql: string };
+    expect(row.sql).toContain("WHERE status = 'pending'");
+  });
+
+  test("the lapsed-candidate subquery seeks it with no sort over the pending set", () => {
+    const db = createMigratedTestD1();
+    const lines = plan(db, CANDIDATES);
+    expect(lines[0]).toBe("SEARCH workspace_invites USING COVERING INDEX workspace_invites_expiry (expires_at<?)");
+    // The trailing `id` index column is what keeps the ORDER BY out of a temp
+    // B-tree — a `(expires_at)`-only index would sort every candidate row.
+    expect(lines.join("\n")).not.toContain("TEMP B-TREE");
+  });
+
+  test("the update's own id lookup stays on the primary key", () => {
+    const db = createMigratedTestD1();
+    const lines = plan(db, `UPDATE workspace_invites SET status = 'expired' WHERE id IN (${CANDIDATES})`);
+    expect(lines).toContain("SEARCH workspace_invites USING COVERING INDEX sqlite_autoindex_workspace_invites_1 (id=?)");
+    expect(lines).toContain("SEARCH workspace_invites USING COVERING INDEX workspace_invites_expiry (expires_at<?)");
+  });
+});

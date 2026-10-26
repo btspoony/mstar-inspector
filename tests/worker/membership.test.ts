@@ -14,7 +14,8 @@ import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createInvite } from "../../src/dashboard/invite-store";
 import { signInDashboardUser } from "../../src/dashboard/users";
-import type { Env } from "../../src/worker/env";
+import { workspaceMembershipsForLogin } from "../../src/dashboard/index";
+import type { DeploymentMode, Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -1099,5 +1100,111 @@ describe("workspace summary in the member payload", () => {
     // The GET is a pure read: the flip belongs to the sweep, so the stored
     // status is still `pending` after the page load.
     expect(inviteStatus(db, live.id)).toBe("pending");
+  });
+});
+
+describe("the switcher resolves each plan once", () => {
+  /** The boot's subscription read — the one the per-row resolve repeated. */
+  const SUBSCRIPTION_READ = /FROM workspace_subscriptions/;
+  /** The `free` fallback read of the catalogue. */
+  const FREE_PLAN_READ = /FROM plans WHERE id = \?/;
+
+  /**
+   * The store plus every statement it prepared. Counting prepares is what makes
+   * a reinstated per-row resolve visible: the query text is the same either
+   * way, only the number of executions changes.
+   */
+  function recording(db: TestD1): { observed: TestD1; statements: string[] } {
+    const statements: string[] = [];
+    const observed = {
+      ...db,
+      prepare(query: string) {
+        statements.push(query);
+        return db.prepare(query);
+      },
+    } as TestD1;
+    return { observed, statements };
+  }
+
+  const countReads = (statements: string[], shape: RegExp): number =>
+    statements.filter((sql) => shape.test(sql)).length;
+
+  /**
+   * One login in three workspaces: two on `pro`, one with no subscription row
+   * at all (so it resolves to the seeded `free` plan). The two `pro` rows are
+   * what a per-row resolve pays twice for no new answer.
+   */
+  function mixedPlanWorld(): { db: TestD1; login: string } {
+    const db = createMigratedTestD1();
+    const login = "poly";
+    const userId = seedUser(db, login);
+    const now = new Date().toISOString();
+    for (const [id, subscription] of [
+      ["ws-a", "pro"],
+      ["ws-b", "pro"],
+      ["ws-c", null],
+    ] as const) {
+      seedWorkspace(db, id, id);
+      seedMembership(db, id, userId, "member");
+      if (subscription !== null) {
+        db.raw
+          .prepare(
+            "INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+          )
+          .run(id, subscription, now, now);
+      }
+    }
+    return { db, login };
+  }
+
+  function envIn(db: TestD1, mode: DeploymentMode): Env {
+    return {
+      REVIEW_QUEUE: { send: async () => {} },
+      IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
+      GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
+      GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+      DEPLOYMENT_MODE: mode,
+      DASHBOARD_SESSION_SECRET: SESSION_SECRET,
+      DB: db,
+    } as unknown as Env;
+  }
+
+  test("two workspaces on one plan cost ONE subscription read", async () => {
+    const { db, login } = mixedPlanWorld();
+    const { observed, statements } = recording(db);
+    const rows = await workspaceMembershipsForLogin(envIn(observed, "saas"), login);
+    // Reinstating the per-row resolve raises this to one read per membership.
+    expect(countReads(statements, SUBSCRIPTION_READ)).toBe(1);
+    expect(rows.map((row) => [row.id, row.plan])).toEqual([
+      ["ws-a", "Pro"],
+      ["ws-b", "Pro"],
+      ["ws-c", "Free"],
+    ]);
+  });
+
+  test("self-hosted reads no subscription at all and names Unlimited everywhere", async () => {
+    const { db, login } = mixedPlanWorld();
+    const { observed, statements } = recording(db);
+    const rows = await workspaceMembershipsForLogin(envIn(observed, "self-hosted"), login);
+    // The mode answers before any read: a subscription or catalogue query here
+    // would mean precedence slipped below the stored rows.
+    expect(countReads(statements, SUBSCRIPTION_READ)).toBe(0);
+    expect(countReads(statements, FREE_PLAN_READ)).toBe(0);
+    expect(rows.map((row) => row.plan)).toEqual(["Unlimited", "Unlimited", "Unlimited"]);
+  });
+
+  test("the payload is byte-identical to the per-row resolve it replaced", async () => {
+    const { db, login } = mixedPlanWorld();
+    const rows = await workspaceMembershipsForLogin(envIn(db, "saas"), login);
+    // The exact payload the per-row resolve emitted: same rows, same order, same
+    // four fields plus the plan NAME (never the plan id). Written out rather
+    // than recomputed, so a resolver change that leaks into the payload fails.
+    expect(JSON.stringify(rows)).toBe(
+      JSON.stringify([
+        { id: "ws-a", slug: "ws-a", name: "ws-a", role: "member", plan: "Pro" },
+        { id: "ws-b", slug: "ws-b", name: "ws-b", role: "member", plan: "Pro" },
+        { id: "ws-c", slug: "ws-c", name: "ws-c", role: "member", plan: "Free" },
+      ]),
+    );
   });
 });
