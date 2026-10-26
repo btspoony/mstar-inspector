@@ -3,6 +3,7 @@
 > **Status:** FROZEN 2026-10-25 — promoted at iteration close from the iteration package, after architect review, a three-seat plan QC and mandatory QA.
 > **SSOT:** This file — the `/_internal_admin` namespace, its authorization model, its four surfaces plus support-grant maintenance, and the platform audit split.
 > **Authority:** Delivered 2026-10-25; the code paths named below are the implementation references.
+> **Staged amendment (032-cleanup-sweep):** full copy of the frozen global spec plus ONE added §4 clause recording the audit-retention decision (compass D15, plan 119 Task 5). The global `{SPECS_DIR}` copy is frozen for this iteration and is not edited; PM promotes this copy at iteration-close.
 
 ## 1. Identity and authorization
 
@@ -116,6 +117,25 @@ always satisfies. Admin list reads are deliberately unaudited: audit rows
 attach to writes and to operator presence inside a tenant (the existing
 support-grant middleware already writes `support.read` / `support.denied`,
 `src/dashboard/index.ts:861-880`), not to platform-scope reads.
+
+### 4.1 Retention
+
+**Append-only, no pruning, retained indefinitely.** Neither table gains a delete
+path: `audit_events` has no `UPDATE` or `DELETE` statement by construction
+(`migrations/0029_operator_support.sql:19`), and `platform_audit_events` is
+written the same way — the operator surface exposes no route that would remove a
+row from either ledger. Retention is therefore a property of the schema, not a
+job that has to be scheduled and kept working.
+
+Revisit this decision when **row count or query latency becomes a problem** —
+whichever is observed first. Because both tables are indexed for the read that
+matters, the revisit starts from measured numbers, not from a fixed horizon:
+`audit_events` carries `audit_events_workspace ON audit_events (workspace_id,
+created_at)` for the per-workspace timeline its readers ask for, and
+`platform_audit_events` carries `platform_audit_events_created ON
+platform_audit_events (created_at)` for the platform timeline. Any future
+pruning or archival must land as an explicit schema and contract change here —
+never as an ad-hoc cleanup run against production data.
 
 ## 5. Entry point visibility
 
