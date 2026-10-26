@@ -1,7 +1,8 @@
 /**
  * Apps + Members visual-discipline pins (A4/A5, AD-581
- * table-reinforced form). Rendered contract — the page faces are asserted on
- * the markup the components emit, never on their source text.
+ * table-reinforced form). Faces are asserted on rendered markup; where
+ * rendering cannot observe the constraint (component ownership, raw colours
+ * in branches no fixture reaches) a narrowly scoped source pin covers it.
  *
  * 1. AD-581: the Apps list stays a semantic table — the identity cell is
  *    the brand surface (slug primary line + AppID meta line; the list
@@ -14,8 +15,8 @@
  * 3. A6: the new empty-state guidance keys exist atomically in both
  *    locales.
  *
- * Everything here is observed on rendered markup; the suites that own a
- * primitive's own face (PageHeader / DataTable / StatusBadge) pin it there.
+ * A primitive's own face (PageHeader / DataTable / StatusBadge) is pinned by
+ * the suite that owns it.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -352,12 +353,22 @@ describe("v0.3 page face (A4/A5)", () => {
     }
   });
 
-  test("the rendered full page emits no raw color literal", async () => {
-    // Page-level scope: the guard covers every region the old page-source scan
-    // covered — heading, workspace summary, invite form, tables, dialogs — not
-    // just a table subtree. `expectFullPageRegions` fails if a region goes
-    // missing, so the check cannot silently narrow back to one subtree.
-    // Members' regions exist only on a mounted tree (SSR shows the skeleton).
+  test("the page modules and their rendered full pages emit no raw color literal", async () => {
+    // Two guards, and neither replaces the other. The SOURCE scan below is
+    // branch-complete: it covers every page-owned face statically, including
+    // the ones no fixture here can reach (the creation-disabled notice at
+    // AppsPage.tsx:169, the Members confirmation dialog behind `pending`, the
+    // loading/error faces). The RENDER assertions cover what the selected
+    // loaded face actually emits, including anything a composed primitive
+    // emits that the page source never spells. A render-only guard passes a
+    // raw colour added to an unrendered branch; a source-only guard cannot see
+    // a primitive's output.
+    for (const [name, source] of Object.entries(PAGE_FACE_SOURCES)) {
+      expect(source, name).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    }
+    // Render side: `expectFullPageRegions` fails if a region goes missing, so
+    // the check cannot silently narrow back to one subtree. Members' regions
+    // exist only on a mounted tree (SSR shows the skeleton).
     for (const [name, html] of [
       ["AppsPage", renderAppsPage()],
       ["MembersPage", decoded(await mountMembersPage())],
