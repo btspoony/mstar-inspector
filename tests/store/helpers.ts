@@ -47,12 +47,18 @@ function applyMigration(db: Database, migrations: readonly string[]): void {
   }
 }
 
+/** Read one INTEGER scalar on the connection (SQLite change counters). */
+function counter(db: Database, sql: string): number {
+  const row = db.prepare(sql).values()[0];
+  return Number(row?.[0] ?? 0);
+}
+
 /**
  * Wrap a bun:sqlite statement in the narrow D1 statement face. bun:sqlite
  * takes bound parameters directly on get/all/run (no separate bind step), so
  * the wrapper buffers values from `bind()` and forwards them on execution.
  */
-function wrapStatement(stmt: Statement): D1StatementLike {
+function wrapStatement(db: Database, stmt: Statement): D1StatementLike {
   let bound: unknown[] = [];
   return {
     bind(...values: unknown[]): D1StatementLike {
@@ -74,8 +80,20 @@ function wrapStatement(stmt: Statement): D1StatementLike {
       // position), so a SELECT placed in a batch is readable there. bun:sqlite
       // `run()` discards them, so a row-returning statement goes through
       // `all()` — the shape callers rely on when a batch classifies a refusal.
+      // `changes()` reports the rows the statement modified (`1` when a guarded
+      // `INSERT … SELECT … RETURNING` matched, `0` when it did not); it is stale
+      // after a plain SELECT, so `total_changes()` tells a write from a read.
       if (stmt.columnNames.length > 0) {
-        return { results: stmt.all(...bound) as T[], meta: { changes: 0, last_row_id: 0 } };
+        const before = counter(db, "SELECT total_changes() AS n");
+        const results = stmt.all(...bound) as T[];
+        const wrote = counter(db, "SELECT total_changes() AS n") !== before;
+        return {
+          results,
+          meta: {
+            changes: wrote ? counter(db, "SELECT changes() AS n") : 0,
+            last_row_id: 0,
+          },
+        };
       }
       const info = stmt.run(...bound);
       return {
@@ -91,7 +109,7 @@ function wrapDb(db: Database): D1Like & { raw: Database } {
   return {
     raw: db,
     prepare(query: string): D1StatementLike {
-      return wrapStatement(db.prepare(query));
+      return wrapStatement(db, db.prepare(query));
     },
     /**
      * D1 `batch()` runs the statements sequentially as ONE transaction —
