@@ -3,12 +3,13 @@
  * and `audit_events` (migration 0029 is the DDL single source).
  *
  * The exports are the whole surface — two appends (`insertSupportGrant`,
- * `insertAuditEvent`), three listing reads (`listActiveSupportGrants`,
- * `listAllActiveSupportGrants`, `listAuditEvents`), the validity probe
- * (`hasValidGrant`) and ONE delete (`deleteSupportGrant`). A grant is a
- * time-boxed access aid, not history (spec operator-admin-surface §3.4), so
- * the operator console revokes it by deleting the row; `audit_events` stays
- * append-only by construction.
+ * `insertAuditEvent`), the console's PAIRED writes (`insertSupportGrantWithAudit`,
+ * `deleteSupportGrantWithAudit` — grant plus its audit row in ONE `batch`),
+ * three listing reads (`listActiveSupportGrants`, `listAllActiveSupportGrants`,
+ * `listAuditEvents`), the validity probe (`hasValidGrant`) and ONE delete
+ * (`deleteSupportGrant`). A grant is a time-boxed access aid, not history (spec
+ * operator-admin-surface §3.4), so the operator console revokes it by deleting
+ * the row; `audit_events` stays append-only by construction.
  *   * `support_grants` is the time-boxed, workspace-scoped window that lets a
  *     non-member platform operator read a workspace's identity fields and
  *     member list. Expiry is evaluated per request from the stored
@@ -62,7 +63,7 @@ export type AuditEventRow = {
   created_at: string;
 };
 
-/** Narrow D1 face: the four statements these two tables need. */
+/** Narrow D1 face: the statements these two tables need. */
 type OperatorStoreStatement = {
   bind(...values: unknown[]): OperatorStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -73,11 +74,44 @@ type OperatorStoreStatement = {
   }>;
 };
 
+/** One statement's result inside a `batch()` (order matches input). */
+type OperatorStoreBatchResult = {
+  results: unknown[];
+  meta: { changes: number; last_row_id: number };
+};
+
+/**
+ * `batch` is part of the face because a console grant write and its audit row
+ * are ONE transaction; a face without `batch` throws before any statement runs
+ * (nothing written), which is why the paired writes have no fallback.
+ */
 type OperatorStoreD1 = {
   prepare(query: string): OperatorStoreStatement;
+  batch(statements: OperatorStoreStatement[]): Promise<OperatorStoreBatchResult[]>;
 };
 
 const GRANT_COLUMNS = `id, workspace_id, operator_login, reason, granted_by, created_at, expires_at`;
+
+const GRANT_INSERT_SQL = `INSERT INTO support_grants
+   (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at)
+ VALUES (?, ?, ?, ?, ?, ?, ?)`;
+
+const AUDIT_INSERT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_login, action, created_at)
+   VALUES (?, ?, ?, ?, ?)`;
+
+/**
+ * The same audit append, with its workspace taken from the grant row inside the
+ * transaction — a batch fixes every bind at submit, so a prior statement's
+ * result cannot be bound here. Ordered BEFORE the paired DELETE: after it the
+ * subquery finds nothing and the append would be a silent no-op.
+ */
+const AUDIT_INSERT_FROM_GRANT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_login, action, created_at)
+ SELECT ?, g.workspace_id, ?, ?, ? FROM support_grants g WHERE g.id = ?`;
+
+/** The whole (workspace, operator) window, resolved from the row id in-SQL. */
+const GRANT_PAIR_DELETE_SQL = `DELETE FROM support_grants
+ WHERE workspace_id = (SELECT workspace_id FROM support_grants WHERE id = ?)
+   AND operator_login = (SELECT operator_login FROM support_grants WHERE id = ?)`;
 
 /**
  * The newest append for one (workspace, operator) — the ONE row every grant
@@ -147,11 +181,7 @@ export async function insertSupportGrant(
     expires_at: input.expiresAt,
   };
   await db
-    .prepare(
-      `INSERT INTO support_grants
-         (id, workspace_id, operator_login, reason, granted_by, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    )
+    .prepare(GRANT_INSERT_SQL)
     .bind(
       row.id,
       row.workspace_id,
@@ -166,8 +196,88 @@ export async function insertSupportGrant(
 }
 
 /**
+ * Record one grant AND its `support.grant.create` audit row in ONE `batch`
+ * (one transaction) — the console's create path.
+ *
+ * The pair is deliberately one call: a grant that lands without its audit row
+ * breaks the spec §4 invariant ("no admin action loses its audit trail"), and
+ * nothing outside the transaction can detect or undo it. A failed audit append
+ * aborts the batch, so the grant rolls back with it and the caller sees the
+ * same failure a failed write raises.
+ *
+ * The audit row is ordered SECOND here because its `workspace_id` is bound from
+ * the caller (`input.workspaceId`), not read back from the grant.
+ */
+export async function insertSupportGrantWithAudit(
+  db: OperatorStoreD1,
+  input: {
+    workspaceId: string;
+    operatorLogin: string;
+    reason: string;
+    grantedBy: string;
+    now: string;
+    expiresAt: string;
+  },
+): Promise<SupportGrantRow> {
+  const row: SupportGrantRow = {
+    id: crypto.randomUUID(),
+    workspace_id: input.workspaceId,
+    operator_login: input.operatorLogin,
+    reason: input.reason,
+    granted_by: input.grantedBy,
+    created_at: input.now,
+    expires_at: input.expiresAt,
+  };
+  await db.batch([
+    db
+      .prepare(GRANT_INSERT_SQL)
+      .bind(
+        row.id,
+        row.workspace_id,
+        row.operator_login,
+        row.reason,
+        row.granted_by,
+        row.created_at,
+        row.expires_at,
+      ),
+    db
+      .prepare(AUDIT_INSERT_SQL)
+      .bind(crypto.randomUUID(), row.workspace_id, input.grantedBy, "support.grant.create", input.now),
+  ]);
+  return row;
+}
+
+/**
+ * Remove one grant's whole (workspace, operator) window AND append its
+ * `support.grant.delete` audit row in ONE `batch` — the console's revoke path.
+ *
+ * Returns the removed row (rebuilt from the caller's `id` and the workspace the
+ * audit statement read back), or null when no such grant exists: the audit
+ * statement is a guarded `INSERT … SELECT` whose subquery finds nothing, so the
+ * batch writes nothing at all and the caller can tell "no such id" from "wrote".
+ *
+ * The audit statement is ordered FIRST — it reads `support_grants` to learn the
+ * workspace, which the DELETE behind it removes. Its `RETURNING workspace_id` is
+ * the existence proof for the batch, so no separate read is needed.
+ */
+export async function deleteSupportGrantWithAudit(
+  db: OperatorStoreD1,
+  input: { id: string; actorLogin: string; now: string },
+): Promise<{ workspaceId: string } | null> {
+  const results = await db.batch([
+    db
+      .prepare(`${AUDIT_INSERT_FROM_GRANT_SQL} RETURNING workspace_id`)
+      .bind(crypto.randomUUID(), input.actorLogin, "support.grant.delete", input.now, input.id),
+    db.prepare(GRANT_PAIR_DELETE_SQL).bind(input.id, input.id),
+  ]);
+  const appended = results[0]?.results[0] as { workspace_id: string } | undefined;
+  return appended === undefined ? null : { workspaceId: appended.workspace_id };
+}
+
+/**
  * Remove one grant by id and return the row it removed, or null when no such
- * row exists — the console's revoke path.
+ * row exists — the UNPAIRED delete. The console must not use it (an audit row
+ * would be a second, separate write); it uses `deleteSupportGrantWithAudit`.
  *
  * EVERY append for the same (workspace, operator) goes with it. The reads
  * judge the newest append for that pair, so deleting only the newest row would

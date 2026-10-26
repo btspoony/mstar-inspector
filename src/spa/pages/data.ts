@@ -3,6 +3,7 @@
  * Tested without a DOM runner.
  */
 
+import { FREE_SLOT_REFUSAL, WORKSPACE_CREATION_CLOSED_REFUSAL } from "../../dashboard/entitlement";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 
 export type Role = "admin" | "member";
@@ -1104,6 +1105,21 @@ export function inviteLoginNoticeKey(login: string): "notice.error.enterLogin" |
 
 /** The server's workspace slug grammar — mirrored so the input can refuse before the round trip. */
 export const WORKSPACE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{1,38}$/;
+
+/**
+ * Which localized copy a creation POST's 409 refusal reads as. The route
+ * answers two named bodies in English only (`FREE_SLOT_REFUSAL` /
+ * `WORKSPACE_CREATION_CLOSED_REFUSAL`), and the shell already states those two
+ * rules for the disabled menu row — so the same rule keeps one wording in both
+ * locales instead of a second English paragraph on a zh-CN page. `null` = an
+ * unrecognised refusal: the caller renders the server's own words.
+ */
+export function createWorkspaceRefusalKey(status: number, body: string): DictionaryKey | null {
+  if (status !== 409) return null;
+  if (body === FREE_SLOT_REFUSAL) return "nav.newWorkspaceBlockedFreeSlot";
+  if (body === WORKSPACE_CREATION_CLOSED_REFUSAL) return "nav.newWorkspaceBlockedFlag";
+  return null;
+}
 
 /**
  * How a `PUT …/api/settings/slug` refusal reads in the operator's locale.

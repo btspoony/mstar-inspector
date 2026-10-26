@@ -203,6 +203,14 @@ describe("GET /_internal_admin/api/workspaces", () => {
       createdAt: "2026-10-02T00:00:00.000Z",
     });
 
+    // The no-cap tier: its `included_members` is NULL, which must stay NULL.
+    insertWorkspace(db, {
+      id: "ws-gamma",
+      name: "Gamma",
+      createdAt: "2026-10-03T00:00:00.000Z",
+    });
+    insertSubscription(db, "ws-gamma", "unlimited");
+
     // `default` is seeded by migration 0026; newest-first puts it first.
     expect(await listOf(db)).toEqual([
       {
@@ -213,7 +221,21 @@ describe("GET /_internal_admin/api/workspaces", () => {
         memberCount: 0,
         pendingInviteCount: 0,
         planId: "free",
+        planName: "Free",
+        includedMembers: 5,
         createdAt: "2026-10-21T00:00:00.000Z",
+      },
+      {
+        id: "ws-gamma",
+        name: "Gamma",
+        slug: "ws-gamma",
+        ownerLogin: null,
+        memberCount: 0,
+        pendingInviteCount: 0,
+        planId: "unlimited",
+        planName: "Unlimited",
+        includedMembers: null,
+        createdAt: "2026-10-03T00:00:00.000Z",
       },
       {
         id: "ws-beta",
@@ -223,6 +245,8 @@ describe("GET /_internal_admin/api/workspaces", () => {
         memberCount: 0,
         pendingInviteCount: 0,
         planId: "free",
+        planName: "Free",
+        includedMembers: 5,
         createdAt: "2026-10-02T00:00:00.000Z",
       },
       {
@@ -233,9 +257,35 @@ describe("GET /_internal_admin/api/workspaces", () => {
         memberCount: 2,
         pendingInviteCount: 1,
         planId: "pro",
+        planName: "Pro",
+        includedMembers: 5,
         createdAt: "2026-10-01T00:00:00.000Z",
       },
     ]);
+  });
+
+  test("the seat cap is the catalogue's value, and NULL stays null", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
+    insertSubscription(db, "ws-alpha", "pro");
+    insertWorkspace(db, { id: "ws-gamma", name: "Gamma", createdAt: STAMP });
+    insertSubscription(db, "ws-gamma", "unlimited");
+
+    const rows = await listOf(db);
+    const catalogue = db.raw.prepare("SELECT id, included_members FROM plans").all() as Array<{
+      id: string;
+      included_members: number | null;
+    }>;
+    const capOf = (id: string) => catalogue.find((plan) => plan.id === id)?.included_members;
+
+    // An unlimited workspace reports no cap — it must never be serialised as 0.
+    expect(rows.find((row) => row.id === "ws-gamma")).toMatchObject({
+      planId: "unlimited",
+      includedMembers: null,
+    });
+    expect(rows.find((row) => row.id === "ws-alpha")?.includedMembers).toBe(capOf("pro"));
+    expect(capOf("unlimited")).toBeNull();
   });
 });
 

@@ -202,6 +202,31 @@ describe("POST /_internal_admin/api/support-grants", () => {
     expect(grantCount(db)).toBe(0);
     expect(auditRows(db)).toEqual([]);
   });
+
+  /**
+   * The grant write and its audit row are ONE transaction. A failing audit
+   * append must roll the grant back — a split write leaves the grant live with
+   * no audit row and this assertion fails.
+   */
+  test("a failed audit append leaves no live grant", async () => {
+    const db = fixture();
+    db.raw.exec(
+      `CREATE TRIGGER fail_grant_audit BEFORE INSERT ON audit_events
+       BEGIN SELECT RAISE(ABORT, 'audit append refused'); END;`,
+    );
+
+    const res = await api(db, { method: "POST", path: "/api/support-grants", body: CREATE({}) });
+    expect(res.status).toBe(500);
+
+    // Nothing landed: no grant, no audit row.
+    expect(grantCount(db)).toBe(0);
+    expect(auditRows(db)).toEqual([]);
+
+    // The unchanged classifier still answers an outsider 404, so no window
+    // opened behind the failed audit append.
+    db.raw.exec("DROP TRIGGER fail_grant_audit");
+    expect((await supportView(db)).status).toBe(404);
+  });
 });
 
 // --- revoke -----------------------------------------------------------------
@@ -237,6 +262,53 @@ describe("DELETE /_internal_admin/api/support-grants/:id", () => {
     const res = await api(db, { method: "DELETE", path: "/api/support-grants/no-such-id" });
     expect(res.status).toBe(404);
     expect(auditRows(db)).toEqual([]);
+  });
+
+  /**
+   * The revocation and its audit row are ONE transaction in BOTH directions. A
+   * refused audit append must roll the delete back: otherwise the grant is gone
+   * with nothing recording who revoked it — what a delete-then-audit split
+   * does, and this assertion fails on that shape.
+   */
+  test("a failed audit append rolls the revocation back — the window stays open", async () => {
+    const db = fixture();
+    const grant = await seedGrant(db, "ws-acme", DAY_MS);
+    db.raw.exec(
+      `CREATE TRIGGER fail_revoke_audit BEFORE INSERT ON audit_events
+       BEGIN SELECT RAISE(ABORT, 'audit append refused'); END;`,
+    );
+
+    const res = await api(db, { method: "DELETE", path: `/api/support-grants/${grant.id}` });
+    expect(res.status).toBe(500);
+
+    expect(auditRows(db)).toEqual([]);
+    expect(grantCount(db)).toBe(1);
+
+    db.raw.exec("DROP TRIGGER fail_revoke_audit");
+    expect((await supportView(db)).status).toBe(200);
+  });
+
+  /**
+   * The opposite direction: a refused delete must roll the audit row back, so
+   * no ledger row claims a revocation that did not happen.
+   */
+  test("a failed revocation leaves no audit row claiming one", async () => {
+    const db = fixture();
+    const grant = await seedGrant(db, "ws-acme", DAY_MS);
+    db.raw.exec(
+      `CREATE TRIGGER fail_grant_delete BEFORE DELETE ON support_grants
+       BEGIN SELECT RAISE(ABORT, 'grant delete refused'); END;`,
+    );
+
+    const res = await api(db, { method: "DELETE", path: `/api/support-grants/${grant.id}` });
+    expect(res.status).toBe(500);
+
+    // The window is still open and the ledger says nothing about it.
+    expect(grantCount(db)).toBe(1);
+    expect(auditRows(db)).toEqual([]);
+
+    db.raw.exec("DROP TRIGGER fail_grant_delete");
+    expect((await supportView(db)).status).toBe(200);
   });
 });
 

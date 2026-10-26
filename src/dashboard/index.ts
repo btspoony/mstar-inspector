@@ -93,6 +93,7 @@ import {
   INVITE_FREE_SLOT_REFUSAL,
   MEMBER_CAP_REFUSAL,
   MemberCapError,
+  WORKSPACE_CREATION_CLOSED_REFUSAL,
   freeSlotAvailable,
   isFreeTierPlan,
   memberSlotAvailable,
@@ -1083,14 +1084,6 @@ const WORKSPACE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 /** Bounded retries for the (astronomically unlikely) slug collision. */
 const WORKSPACE_ID_ATTEMPTS = 6;
 export const WORKSPACE_NAME_MAX_LENGTH = 80;
-
-/**
- * The 409 body when the operator's `workspace_creation_open` flag is off
- * (spec §3.1): creation is closed for EVERYONE, so the per-login free-slot copy
- * would name the wrong cause.
- */
-const WORKSPACE_CREATION_CLOSED_REFUSAL =
-  "This workspace was not created. Workspace creation is closed on this platform right now.";
 
 /** A fresh workspace id; 256 is divisible by 32, so the sampling is unbiased. */
 function createWorkspaceId(): string {

@@ -212,6 +212,12 @@ const FLAGS = [
   { key: "workspace_creation_open", enabled: false },
 ];
 
+/** The seats cell: column 4 of Workspace | Owner | Members | Seats | Plan | Created. */
+function seatsCell(surface: Surface, needle: string): string {
+  const cells = rowContaining(surface, needle)?.querySelectorAll("td") ?? [];
+  return cells[3]?.textContent ?? "";
+}
+
 const WORKSPACES = [
   {
     id: "ws_1",
@@ -221,6 +227,8 @@ const WORKSPACES = [
     memberCount: 3,
     pendingInviteCount: 1,
     planId: "free",
+    planName: "Free",
+    includedMembers: 5,
     createdAt: "2026-10-02T09:00:00.000Z",
   },
   {
@@ -230,7 +238,10 @@ const WORKSPACES = [
     ownerLogin: null,
     memberCount: 5,
     pendingInviteCount: 0,
-    planId: "pro",
+    planId: "unlimited",
+    planName: "Unlimited",
+    // NULL is no seat cap: the cell must read "—", never "5 / 0".
+    includedMembers: null,
     createdAt: "2026-09-18T09:00:00.000Z",
   },
 ];
@@ -340,7 +351,7 @@ describe("Workspaces screen", () => {
     await surface.close();
   });
 
-  test("rows show owner, counts, plan and creation date", async () => {
+  test("rows show owner, counts, seat headroom, plan name and creation date", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
     const acme = rowContaining(surface, "Acme");
     expect(acme?.textContent).toContain("ws_1");
@@ -348,20 +359,37 @@ describe("Workspaces screen", () => {
     expect(acme?.textContent).toContain("3");
     expect(acme?.textContent).toContain("1 pending");
     expect(acme?.textContent).toContain("2026-10-02");
-    expect(acme?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("free");
-    // An owner-less row reads as "—" rather than blank.
+    // The picker labels the tier with the catalogue's display name.
+    expect(acme?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Free");
+    // Headroom is used/cap, and an owner-less row reads "—" rather than blank.
+    expect(seatsCell(surface, "Acme")).toBe("3 / 5");
     expect(rowContaining(surface, "Guild")?.textContent).toContain("—");
     await surface.close();
   });
 
+  test("an unlimited seat cap renders as —, never 0", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
+    // Guild holds the NULL-cap tier at 5 members: "5 / 0" would be the defect.
+    expect(seatsCell(surface, "Guild")).toBe("—");
+    expect(surface.text()).not.toContain("/ 0");
+    await surface.close();
+  });
+
   test("the plan picker issues exactly one PATCH for the chosen plan", async () => {
-    const surface = await workspacesScreen((request) =>
-      request.method === "PATCH" ? json({ workspaceId: "ws_1", planId: "pro" }) : json({ workspaces: WORKSPACES }),
-    );
+    const after = { ...WORKSPACES[0]!, planId: "pro", planName: "Pro" };
+    let written = false;
+    const surface = await workspacesScreen((request) => {
+      if (request.method === "PATCH") {
+        written = true;
+        return json({ workspaceId: "ws_1", planId: "pro" });
+      }
+      // The accepted write re-reads, so the cap follows the server.
+      return json({ workspaces: written ? [after] : WORKSPACES });
+    });
     const row = rowContaining(surface, "Acme");
     const trigger = row?.querySelector('[data-slot="select-trigger"]') ?? null;
     await surface.openSelect(trigger);
-    const picked = await surface.pickOption("pro");
+    const picked = await surface.pickOption("Pro");
     expect(picked).not.toBeNull();
 
     const patches = surface.sent.filter((request) => request.method === "PATCH");
@@ -369,7 +397,7 @@ describe("Workspaces screen", () => {
     expect(patches[0]?.url).toBe("/_internal_admin/api/workspaces/ws_1/plan");
     expect(patches[0]?.body).toEqual({ planId: "pro" });
     // The accepted plan is what the row now shows.
-    expect(rowContaining(surface, "Acme")?.textContent).toContain("pro");
+    expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Pro");
     await surface.close();
   });
 });
@@ -439,12 +467,14 @@ describe("Support access screen", () => {
     await surface.close();
   });
 
-  test("rows name the operator, workspace, reason and expiry", async () => {
+  test("rows name the operator, workspace, reason and expiry in UTC", async () => {
     const surface = await supportScreen(respondWith(() => [GRANT]));
     const row = rowContaining(surface, "incident 42");
     expect(row?.textContent).toContain("ops");
     expect(row?.textContent).toContain("Acme");
-    expect(row?.textContent).toContain("2026-10-26 09:00");
+    // The stamp is UTC (the column is `toISOString`), so it says so — a bare
+    // `2026-10-26 09:00` reads as local time to an operator outside UTC.
+    expect(row?.textContent).toContain("2026-10-26 09:00 UTC");
     await surface.close();
   });
 

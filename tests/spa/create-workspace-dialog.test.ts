@@ -6,8 +6,8 @@
  * boot — an existing member landed back on their own workspace. The contract
  * now: menu → dialog → POST `/dashboard/api/workspaces` with the single name
  * field → navigation to the apps path the 201 names. The free-slot rule stays
- * the server's: a 409 renders its body verbatim, and a blocked boot opens no
- * dialog at all.
+ * the server's: a 409 renders as the shell's own localized reason copy, and a
+ * blocked boot opens no dialog at all.
  *
  * Mounted, because both the menu rows and the dialog live in Radix portals.
  * The switcher module is imported after the browser globals exist (React DOM
@@ -69,7 +69,7 @@ function installDom(url: string) {
   };
 }
 
-/** The refusal copy the server sends on a 409 — rendered verbatim, never re-worded. */
+/** The refusal copy the server sends on a 409 (English-only, both locales). */
 const FREE_SLOT_REFUSAL =
   "This workspace was not created. You already belong to a free workspace, and you can belong to only one at a time. Delete that workspace if you own it. If you do not, an owner or admin of that workspace must remove you. Then create this one.";
 
@@ -211,21 +211,94 @@ describe("create from the switcher menu", () => {
     }
   });
 
-  test("a 409 renders the server's refusal copy verbatim and stays on the dialog", async () => {
+  test("a 409 free-slot refusal renders the shell's own reason copy, not the English body", async () => {
     const surface = await openMenu(() => new Response(FREE_SLOT_REFUSAL, { status: 409 }));
     try {
       await surface.clickNewWorkspace();
       await surface.submit("Second one");
 
-      // The client never pre-judges the slot: it posted, and the server's own
-      // words are what the user reads.
+      // The client never pre-judges the slot: it posted, and the rule the
+      // server refused for is the rule the disabled menu row already states.
       expect(surface.posts).toHaveLength(1);
       expect(surface.dialog()).not.toBeNull();
-      expect(surface.dialog()?.textContent).toContain(FREE_SLOT_REFUSAL);
-      expect(surface.dialog()?.querySelector('[role="alert"]')?.textContent).toBe(FREE_SLOT_REFUSAL);
+      const copy = t("en", "nav.newWorkspaceBlockedFreeSlot");
+      expect(surface.dialog()?.querySelector('[role="alert"]')?.textContent).toBe(copy);
+      expect(surface.dialog()?.textContent).not.toContain(FREE_SLOT_REFUSAL);
       expect(surface.assigned).toEqual([]);
     } finally {
       await surface.cleanup();
+    }
+  });
+
+  test("a zh-CN shell states the free-slot refusal in Chinese", async () => {
+    const surface = await openMenu(() => new Response(FREE_SLOT_REFUSAL, { status: 409 }), {
+      locale: "zh_CN",
+    });
+    try {
+      await surface.clickNewWorkspace();
+      await surface.submit("Second one");
+
+      const copy = t("zh_CN", "nav.newWorkspaceBlockedFreeSlot");
+      expect(copy).not.toBe(t("en", "nav.newWorkspaceBlockedFreeSlot"));
+      expect(surface.dialog()?.querySelector('[role="alert"]')?.textContent).toBe(copy);
+      expect(surface.dialog()?.textContent).not.toContain(FREE_SLOT_REFUSAL);
+    } finally {
+      await surface.cleanup();
+    }
+  });
+
+  test("a creation-closed 409 reads as the closed-creation reason copy", async () => {
+    const closed =
+      "This workspace was not created. Workspace creation is closed on this platform right now.";
+    const surface = await openMenu(() => new Response(closed, { status: 409 }), { locale: "zh_CN" });
+    try {
+      await surface.clickNewWorkspace();
+      await surface.submit("First one");
+
+      expect(surface.dialog()?.querySelector('[role="alert"]')?.textContent).toBe(
+        t("zh_CN", "nav.newWorkspaceBlockedFlag"),
+      );
+    } finally {
+      await surface.cleanup();
+    }
+  });
+
+  test("an unrecognised 409 body still renders verbatim — the server's words are the copy", async () => {
+    const surface = await openMenu(() => new Response("Some other refusal.", { status: 409 }), {
+      locale: "zh_CN",
+    });
+    try {
+      await surface.clickNewWorkspace();
+      await surface.submit("Second one");
+
+      expect(surface.dialog()?.querySelector('[role="alert"]')?.textContent).toBe("Some other refusal.");
+    } finally {
+      await surface.cleanup();
+    }
+  });
+
+  test("a non-409 body never renders verbatim — it reads as the localized failure copy", async () => {
+    // Each of these bodies is NOT this dialog's copy: the 400 validation text,
+    // the 500 storage error, and the login page an expired session's fetch
+    // follows the 302 to. On a zh-CN page all three must read in Chinese
+    // (I-000161).
+    for (const [status, body] of [
+      [400, "name must be 2-80 characters"],
+      [500, "D1_ERROR: database is locked"],
+      [200, "<!doctype html><title>Sign in</title>"],
+    ] as const) {
+      const surface = await openMenu(() => new Response(body, { status }), { locale: "zh_CN" });
+      try {
+        await surface.clickNewWorkspace();
+        await surface.submit("Second one");
+
+        const alert = surface.dialog()?.querySelector('[role="alert"]')?.textContent;
+        expect(alert).toBe(t("zh_CN", "workspace.createFailed"));
+        expect(surface.dialog()?.textContent).not.toContain(body);
+        expect(surface.assigned).toEqual([]);
+      } finally {
+        await surface.cleanup();
+      }
     }
   });
 
@@ -234,7 +307,9 @@ describe("create from the switcher menu", () => {
     try {
       await surface.clickNewWorkspace();
       await surface.submit("Second one");
-      expect(surface.dialog()?.querySelector('[role="alert"]')?.textContent).toBe(FREE_SLOT_REFUSAL);
+      expect(surface.dialog()?.querySelector('[role="alert"]')?.textContent).toBe(
+        t("en", "nav.newWorkspaceBlockedFreeSlot"),
+      );
 
       await surface.cancel();
       expect(surface.dialog()).toBeNull();
