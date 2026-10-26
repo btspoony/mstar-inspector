@@ -37,7 +37,6 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
   "api",
   "oauth",
   "members",
-  "settings",
   "login",
   "logout",
   "manifest",

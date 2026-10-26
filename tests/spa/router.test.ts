@@ -112,6 +112,24 @@ describe("matchSpaRoute — workspace-scoped App pages", () => {
     }
   });
 
+  test("a workspace slugged settings keeps every workspace page (settings is not reserved)", () => {
+    // No unscoped `settings` route family exists, so the word needs no
+    // reservation: it names the workspace like any other slug.
+    expect(matchSpaRoute("/dashboard/settings/apps")).toEqual({
+      page: "apps",
+      pathname: "/dashboard/settings/apps",
+      workspaceRef: "settings",
+    });
+    expect(matchSpaRoute("/dashboard/settings/settings")).toEqual({
+      page: "settings",
+      pathname: "/dashboard/settings/settings",
+      workspaceRef: "settings",
+    });
+    expect(workspaceRefOf("/dashboard/settings/members")).toBe("settings");
+    // One segment after the mount matches nothing with or without the word.
+    expect(matchSpaRoute("/dashboard/settings")).toBeNull();
+  });
+
   test("workspace pages stop at the enumerated shapes (onboarding and deeper paths are Worker routes)", () => {
     expect(matchSpaRoute("/dashboard/acme/apps/acme-app/onboarding")).toBeNull();
     expect(matchSpaRoute("/dashboard/acme/apps/acme-app/settings/key/delete")).toBeNull();

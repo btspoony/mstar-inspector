@@ -805,11 +805,8 @@ the workspace. Three invariants carry that guarantee:
 | `/dashboard/<slug>/api/apps/<app>/…` | that App's API |
 | `/dashboard/apps…`, `/dashboard/api/apps…` | 404 |
 
-The reserved first segments (`apps`, `api`, `oauth`, `members`, `settings`,
-`login`, `logout`, `manifest`, `locale`, `healthz`) never name a workspace.
-`settings` became reserved with the workspace settings page; a workspace that
-was already renamed to `settings` before that change must be reached as
-`/dashboard/<id>/…` and renamed again, because a rename is not a redirect.
+The reserved first segments (`apps`, `api`, `oauth`, `members`, `login`,
+`logout`, `manifest`, `locale`, `healthz`) never name a workspace.
 
 ### App creation is workspace-scoped
 
