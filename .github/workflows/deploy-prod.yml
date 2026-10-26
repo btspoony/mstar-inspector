@@ -117,6 +117,7 @@ jobs:
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}   # account id is public — configured as a variable
       OAUTH_CLIENT_ID: ${{ vars.OAUTH_CLIENT_ID }}   # client id is not sensitive — configured as a variable
+      PLATFORM_OPERATORS: ${{ vars.PLATFORM_OPERATORS }}   # operator allowlist — logins are public identity
     steps:
       - name: Checkout deploy ref
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -311,7 +312,9 @@ jobs:
           # deployment (`saas`), so the empty-instance first-login story never
           # shows here. The value rides `--var` because `env.production` cannot
           # rely on `keep_vars` (see the serving deploy below).
-          bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas" 2>&1 | tee deploy.log
+          # PLATFORM_OPERATORS is the console allowlist; unset/empty means "no
+          # operators", the safe default, and it rides `--var` the same way.
+          bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas" --var "PLATFORM_OPERATORS:${PLATFORM_OPERATORS:-}" 2>&1 | tee deploy.log
           # The deploy command succeeded: record the SHA it shipped before the
           # (non-fatal) version-id extraction below.
           echo "deployed_sha=$GITHUB_SHA"
@@ -387,7 +390,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas"
+          bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas" --var "PLATFORM_OPERATORS:${PLATFORM_OPERATORS:-}"
 
       # Every `secret bulk` above creates AND immediately deploys a new Worker
       # version, so the id captured from the `wrangler deploy` log names a

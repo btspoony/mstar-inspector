@@ -184,6 +184,20 @@ export function renameWorkspaceMembership(
 }
 
 /**
+ * The live membership row a path ref names, or null when this login lists no
+ * such workspace. A segment may address the workspace by EITHER identifier
+ * (the stable `id` or the readable `slug`), which is why every caller that
+ * needs the row's role or stored slug resolves it here.
+ */
+export function workspaceMembershipForRef(
+  boot: SpaBoot,
+  ref: string | null,
+): NonNullable<SpaBoot["memberships"]>[number] | null {
+  if (ref === null) return null;
+  return (boot.memberships ?? []).find((m) => ref === m.id || ref === m.slug) ?? null;
+}
+
+/**
  * The workspace's STORED slug for a path ref — what the settings rename control
  * shows and saves. The membership list is authoritative (the path segment may
  * be the stable `id`, or a slug something else already renamed away from); the
@@ -191,8 +205,7 @@ export function renameWorkspaceMembership(
  */
 export function storedSlugForRef(boot: SpaBoot, ref: string | null): string {
   if (ref === null) return "";
-  const membership = (boot.memberships ?? []).find((m) => ref === m.id || ref === m.slug);
-  return membership?.slug ?? ref;
+  return workspaceMembershipForRef(boot, ref)?.slug ?? ref;
 }
 
 export function buildNavbarModel(boot: SpaBoot): NavbarModel {

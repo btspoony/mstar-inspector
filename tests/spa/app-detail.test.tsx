@@ -84,7 +84,6 @@ function renderDetail(payload: typeof identityPayload | typeof managePayload, ca
     createElement(AppDetailView, {
       locale: "en",
       slug: "demo",
-      storedSlug: "acme",
       payload,
       groups: [],
       notice: null,
@@ -168,9 +167,9 @@ describe("tab shell rendering (static SSR)", () => {
     });
   });
 
-  test("the settings face still renders every section title it rendered before (no section dropped)", () => {
+  test("the settings face renders its own section titles (workspace rename moved out)", () => {
     const manage = renderDetail(managePayload, true);
-    // The seven SectionCard titles, resolved through the dictionary — the
+    // The App-side SectionCard titles, resolved through the dictionary — the
     // heading/stat migration may not drop or rename a section.
     for (const key of [
       "settings.appInfo",
@@ -179,10 +178,12 @@ describe("tab shell rendering (static SSR)", () => {
       "settings.providers",
       "settings.modelChains",
       "settings.seats",
-      "workspace.slugHeading",
     ] as const) {
       expect(manage).toContain(t("en", key));
     }
+    // The workspace rename lives on /dashboard/<ref>/settings now; the App
+    // settings tab must not keep a second entry point to it.
+    expect(manage).not.toContain(t("en", "workspace.slugHeading"));
   });
 });
 

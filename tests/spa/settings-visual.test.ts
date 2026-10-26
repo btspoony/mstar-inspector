@@ -176,7 +176,6 @@ describe("settings heading idiom (QC convergence)", () => {
         createElement(AppDetailView, {
           locale: "en",
           slug: "demo",
-          storedSlug: "acme",
           payload: detailPayload(),
           groups: [],
           notice: null,

@@ -1,4 +1,4 @@
-import { LayoutGrid, ShieldCheck, Users } from "lucide-react";
+import { LayoutGrid, Settings, ShieldCheck, Users } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -14,7 +14,7 @@ import type { SidebarModel } from "../shell";
 import { spaClick } from "../spa-click";
 
 /** Keyed by the nav page segment — a workspace-scoped href carries a slug prefix. */
-const NAV_ICONS = { apps: LayoutGrid, members: Users } as const;
+const NAV_ICONS = { apps: LayoutGrid, members: Users, settings: Settings } as const;
 
 /**
  * Brand mark: the sidebar wordmark mark is the single source —
@@ -36,7 +36,7 @@ export function Logo() {
 
 export function AppSidebar({ model }: { model: SidebarModel }) {
   return (
-    <Sidebar collapsible="none" aria-label={model.navLabel}>
+    <Sidebar collapsible="none" className="h-svh" aria-label={model.navLabel}>
       <SidebarHeader className="border-b border-sidebar-border p-3">
         <a
           className="flex items-center gap-2 rounded-sm px-2 py-1 text-sidebar-foreground no-underline outline-none transition-[color,background-color] duration-(--duration-base) ease-(--ease-in-out) hover:bg-sidebar-accent/40 hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring"

@@ -8,6 +8,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { MembersPage } from "./pages/MembersPage";
 import { SupportPage } from "./pages/SupportPage";
 import { WorkspaceSetupPage } from "./pages/WorkspaceSetupPage";
+import { WorkspaceSettingsPage } from "./pages/WorkspaceSettingsPage";
 
 export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBoot }) {
   // A login with no workspace sees creation, not the workspace pages: its API
@@ -26,6 +27,8 @@ export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBo
       return <AppsPage boot={boot} />;
     case "members":
       return <MembersPage boot={boot} />;
+    case "settings":
+      return <WorkspaceSettingsPage boot={boot} />;
     case "login":
       return <LoginPage boot={boot} />;
     case "app-detail":

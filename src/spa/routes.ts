@@ -10,7 +10,7 @@
  * admits those paths and this matcher serves their shell. History fallback is
  * this matcher, not wrangler `not_found_handling`.
  */
-export const SPA_PAGES = ["apps", "members", "login", "app-detail"] as const;
+export const SPA_PAGES = ["apps", "members", "settings", "login", "app-detail"] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
 
@@ -22,6 +22,7 @@ export type SpaPageId = (typeof SPA_PAGES)[number];
 export type SpaRoute =
   | { page: "apps"; pathname: string; workspaceRef?: string }
   | { page: "members"; pathname: string; workspaceRef: string }
+  | { page: "settings"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
   | { page: "app-detail"; pathname: string; slug: string; workspaceRef?: string };
 
@@ -52,7 +53,7 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
  * it, so a page's prefix cannot disagree with its matched route.
  */
 export function workspaceRefOf(pathname: string): string | null {
-  const ref = /^\/dashboard\/([^/]+)\/(?:apps|members|api)(?:\/|$)/.exec(pathname)?.[1];
+  const ref = /^\/dashboard\/([^/]+)\/(?:apps|members|settings|api)(?:\/|$)/.exec(pathname)?.[1];
   return ref !== undefined && !RESERVED_WORKSPACE_SLUGS.has(ref) ? ref : null;
 }
 
@@ -71,6 +72,7 @@ export function replaceWorkspaceRef(pathname: string, nextRef: string): string |
 const APP_DETAIL_PATH = /^\/dashboard\/apps\/([^/]+)(?:\/settings)?$/;
 const WORKSPACE_APPS_PATH = /^\/dashboard\/([^/]+)\/apps$/;
 const WORKSPACE_MEMBERS_PATH = /^\/dashboard\/([^/]+)\/members$/;
+const WORKSPACE_SETTINGS_PATH = /^\/dashboard\/([^/]+)\/settings$/;
 const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/settings)?$/;
 
 /**
@@ -96,6 +98,7 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
   if (workspaceRef !== null) {
     if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceRef };
     if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceRef };
+    if (WORKSPACE_SETTINGS_PATH.test(pathname)) return { page: "settings", pathname, workspaceRef };
     const appSlug = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
     if (appSlug) return { page: "app-detail", pathname, slug: appSlug, workspaceRef };
     return null;

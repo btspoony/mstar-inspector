@@ -14,6 +14,7 @@ export const zhCN: Dictionary = {
     primary: "主导航",
     apps: "应用",
     members: "成员",
+    settings: "设置",
     /** 侧栏底部的平台运营入口（仅 saas 上的 operator 可见）。 */
     platformOperations: "平台运营",
     /** 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
@@ -242,6 +243,7 @@ export const zhCN: Dictionary = {
    * 登录不会自动加入工作区，除了接受邀请，这里是进入首个工作区的唯一路径。
    */
   workspace: {
+    settingsHeading: "工作区设置",
     setupHeading: "创建工作区",
     setupDescription: "你还不属于任何工作区。创建后你将成为它的所有者，之后可以邀请队友。",
     /** 切换器菜单里的创建弹窗：已有工作区的成员也可用，因此不复述「还没有工作区」。 */

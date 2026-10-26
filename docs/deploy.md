@@ -422,9 +422,12 @@ plan, and both rejected for now in favour of the applied approval gate.
 
 ### `env.production.vars` is the plain-var roster for production
 
-`wrangler.jsonc` `env.production.vars` holds the only production plain var,
-`DEPLOYMENT_MODE` (§ Deployment mode — `saas`, re-supplied on every deploy by
-both workflows). A value declared there cannot be a
+`wrangler.jsonc` `env.production.vars` holds the only production plain var
+declared in config, `DEPLOYMENT_MODE` (§ Deployment mode — `saas`,
+re-supplied on every deploy by both workflows). `PLATFORM_OPERATORS` is the
+other plain var, but it is not declared here: it is bound from the GitHub
+repository variable on every deploy (§ Platform operators). A value declared
+there cannot be a
 dashboard-managed plain var: wrangler accepts `keep_vars` only at the top level
 and **rejects it inside an environment block**
 (`Unexpected fields found in env.production field: "keep_vars"`), so an
@@ -552,10 +555,17 @@ redirects the bare `/dashboard` there whenever the gate would classify that
 login `operator-granted`, because the support view derives its API base from
 the pathname's workspace segment.
 
-`PLATFORM_OPERATORS` is not declared in `wrangler.jsonc`; set it with
-`wrangler deploy --var "PLATFORM_OPERATORS:<login>[,<login>]"` or as a plain
-var on the Worker. An empty/unset value means "no operators", which is the
-default and is safe: nobody gains access.
+`PLATFORM_OPERATORS` is not declared in `wrangler.jsonc` because it is not
+config: it is a **Worker var bound from the GitHub repository variable**
+`vars.PLATFORM_OPERATORS` (Settings → Secrets and variables → Actions →
+**Variables**), which is the single source of truth. Both the Deploy and the
+Prod release workflow already pass it unconditionally as
+`wrangler deploy --var "PLATFORM_OPERATORS:${PLATFORM_OPERATORS:-}"` on every
+deploy-capable step, so the value configured in GitHub is what the Worker
+carries after any deploy — a plain var hand-set on the Worker (dashboard or a
+one-off `wrangler deploy --var`) is overwritten by that command on every deploy
+and is therefore never the way to configure this. An empty/unset value means
+"no operators", which is the default and is safe: nobody gains access.
 
 ### Opening a support window
 
@@ -790,6 +800,7 @@ the workspace. Three invariants carry that guarantee:
 |---|---|
 | `/dashboard/<slug>/apps` | that workspace's Apps |
 | `/dashboard/<slug>/apps/<app>/settings` | that App's settings |
+| `/dashboard/<slug>/settings` | that workspace's settings (owner-only rename) |
 | `/dashboard/<slug>/api/apps` | that workspace's Apps API |
 | `/dashboard/<slug>/api/apps/<app>/…` | that App's API |
 | `/dashboard/apps…`, `/dashboard/api/apps…` | 404 |

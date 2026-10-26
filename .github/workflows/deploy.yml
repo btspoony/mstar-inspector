@@ -66,6 +66,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}   # account id is public — configured as a variable
       OAUTH_CLIENT_ID: ${{ vars.OAUTH_CLIENT_ID }}   # client id is not sensitive — configured as a variable
+      PLATFORM_OPERATORS: ${{ vars.PLATFORM_OPERATORS }}   # operator allowlist — logins are public identity
       OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
       DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
       DASHBOARD_ENCRYPTION_KEY: ${{ secrets.DASHBOARD_ENCRYPTION_KEY }}
@@ -167,7 +168,10 @@ jobs:
           # DEPLOYMENT_MODE is the deployment shape, not a rollout switch: the
           # staging instance is a SaaS deployment (`saas`), so the empty-instance
           # first-login story never shows here. See docs/deploy.md § Deployment mode.
-          bunx wrangler deploy --var "DEPLOYMENT_MODE:saas" 2>&1 | tee deploy.log
+          # PLATFORM_OPERATORS is the console allowlist: unset/empty means "no
+          # operators", the safe default. It must ride `--var` — the Worker
+          # reads it from its own `vars`, never from this job's environment.
+          bunx wrangler deploy --var "DEPLOYMENT_MODE:saas" --var "PLATFORM_OPERATORS:${PLATFORM_OPERATORS:-}" 2>&1 | tee deploy.log
           # The deploy command succeeded: this run's SHA is what it shipped.
           # The summary key is derived from this step's outcome in the
           # always-run summary step, never from the version-id capture below.

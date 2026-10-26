@@ -170,14 +170,11 @@ export function SettingsView({
   locale,
   payload,
   groups,
-  storedSlug,
   onReload,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
-  /** The workspace's stored slug — the rename control's current value. */
-  storedSlug: string;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const { app } = payload;
@@ -439,9 +436,6 @@ export function SettingsView({
               onOutcome={setChainsNotice}
             />
             <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
-            {/* Owner-only by the server's role check; the card is part of the
-                manage face because a non-manager never loads this tab. */}
-            <WorkspaceSlugCard locale={locale} storedSlug={storedSlug} />
           </SectionGroup>
         ) : null}
       </div>
