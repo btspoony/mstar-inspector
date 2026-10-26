@@ -9,7 +9,7 @@ applies_when:
   - "Persisting cloud PR reviews from mstar-harness"
   - "Implementing ArtifactStore kind review on D1"
   - "Adopting a new harness review contract (for example a new verdict or envelope field)"
-last_updated: 2026-10-18
+last_updated: 2026-10-26
 tags:
   - mstar-review-v1
   - artifact-store

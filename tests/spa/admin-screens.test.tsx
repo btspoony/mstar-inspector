@@ -3,70 +3,20 @@
  * empty and populated states, plus the writes they own — the flag toggle, the
  * per-row plan picker (exactly ONE PATCH) and the support-grant create/revoke.
  *
- * Mounted in happy-dom (support-notice / create-workspace precedents) because
- * the states live in effects and both controls are Radix widgets that only
- * answer real events. The screen modules are imported AFTER the browser globals
- * exist: React DOM and Radix read DOM availability at module-evaluation time.
+ * Mounted in happy-dom because the states live in effects and both controls
+ * are Radix widgets that only answer real events.
  */
 import { describe, expect, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
-import { Window, type Element as DomElement } from "happy-dom";
+import { createRoot } from "react-dom/client";
+import { type Element as DomElement, type Window } from "happy-dom";
+import { FlagsPage } from "../../src/spa/admin/FlagsPage";
+import { SupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
+import { UsersPage } from "../../src/spa/admin/UsersPage";
+import { WorkspacesPage } from "../../src/spa/admin/WorkspacesPage";
+import { installDom } from "./dom";
 
 const realFetch = globalThis.fetch;
-
-/**
- * Installs the browser globals a mounted console needs. The Radix Select
- * mounts a portalled listbox that reads form and element constructors, so the
- * set is wider than the dropdown-menu precedent's.
- */
-function installDom(url: string) {
-  const win = new Window({ url });
-  const scope = globalThis as unknown as Record<string, unknown>;
-  const dom = win as unknown as Record<string, unknown>;
-  const installed: Record<string, unknown> = {
-    window: win,
-    document: win.document,
-    navigator: win.navigator,
-    ...Object.fromEntries(
-      [
-        "HTMLElement",
-        "Element",
-        "Node",
-        "Event",
-        "CustomEvent",
-        "MouseEvent",
-        "KeyboardEvent",
-        "PointerEvent",
-        "FocusEvent",
-        "HTMLInputElement",
-        "HTMLFormElement",
-        "HTMLButtonElement",
-        "HTMLSelectElement",
-        "HTMLDivElement",
-        "HTMLSpanElement",
-        "SVGElement",
-        "DocumentFragment",
-        "Text",
-        "Document",
-        "NodeFilter",
-        "MutationObserver",
-        "ResizeObserver",
-      ].map((name) => [name, dom[name]]),
-    ),
-    getComputedStyle: win.getComputedStyle.bind(win),
-    requestAnimationFrame: win.requestAnimationFrame.bind(win),
-    cancelAnimationFrame: win.cancelAnimationFrame.bind(win),
-    IS_REACT_ACT_ENVIRONMENT: true,
-  };
-  Object.assign(scope, installed);
-  return {
-    win,
-    cleanup: () => {
-      for (const key of Object.keys(installed)) delete scope[key];
-      win.close();
-    },
-  };
-}
 
 type Sent = { url: string; method: string; body: unknown };
 type Respond = (request: Sent) => Response | Promise<Response>;
@@ -87,14 +37,8 @@ type Surface = {
   close: () => Promise<void>;
 };
 
-/**
- * Mount one screen with a stubbed console API and settle its first read.
- *
- * `create` runs only after the happy-dom globals exist: Radix's packages decide
- * DOM availability at module-evaluation time, so a screen imported earlier
- * mounts a select whose portal never opens.
- */
-async function mount(create: () => Promise<ReactElement>, respond: Respond): Promise<Surface> {
+/** Mount one screen with a stubbed console API and settle its first read. */
+async function mount(element: ReactElement, respond: Respond): Promise<Surface> {
   const { win, cleanup } = installDom("http://localhost/_internal_admin");
   const sent: Sent[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -107,13 +51,9 @@ async function mount(create: () => Promise<ReactElement>, respond: Respond): Pro
     return respond(request);
   }) as typeof fetch;
 
-  // Literal path, not a runtime choice: React DOM caches DOM availability at
-  // evaluation time, so this import has to follow the happy-dom globals.
-  const { createRoot } = await import("react-dom/client");
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
-  const element = await create();
   await act(async () => root.render(element));
   // One extra flush drains the read's own continuation (its .then setState).
   await act(async () => {});
@@ -171,31 +111,19 @@ async function mount(create: () => Promise<ReactElement>, respond: Respond): Pro
 }
 
 async function flagsScreen(respond: Respond): Promise<Surface> {
-  return mount(async () => {
-    const { FlagsPage } = await import("../../src/spa/admin/FlagsPage");
-    return createElement(FlagsPage);
-  }, respond);
+  return mount(createElement(FlagsPage), respond);
 }
 
 async function workspacesScreen(respond: Respond): Promise<Surface> {
-  return mount(async () => {
-    const { WorkspacesPage } = await import("../../src/spa/admin/WorkspacesPage");
-    return createElement(WorkspacesPage);
-  }, respond);
+  return mount(createElement(WorkspacesPage), respond);
 }
 
 async function usersScreen(respond: Respond): Promise<Surface> {
-  return mount(async () => {
-    const { UsersPage } = await import("../../src/spa/admin/UsersPage");
-    return createElement(UsersPage);
-  }, respond);
+  return mount(createElement(UsersPage), respond);
 }
 
 async function supportScreen(respond: Respond): Promise<Surface> {
-  return mount(async () => {
-    const { SupportGrantsPage } = await import("../../src/spa/admin/SupportGrantsPage");
-    return createElement(SupportGrantsPage);
-  }, respond);
+  return mount(createElement(SupportGrantsPage), respond);
 }
 
 const never = () => new Promise<Response>(() => {});

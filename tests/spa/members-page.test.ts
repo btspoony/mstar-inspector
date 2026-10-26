@@ -19,8 +19,9 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { act, createElement, useLayoutEffect, useRef } from "react";
-import { Window } from "happy-dom";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+import { installDom } from "./dom";
 import { t } from "../../src/i18n";
 import { FLASH_STORAGE_KEY, takeFlash } from "../../src/spa/flash";
 import { Layout } from "../../src/spa/Layout";
@@ -572,29 +573,9 @@ describe("workspace settings block", () => {
   });
 
   test("a mounted shell keeps the flash until the pathname changes", async () => {
-    const win = new Window({ url: "http://localhost/dashboard" });
-    const scope = globalThis as unknown as Record<string, unknown>;
-    const installed = {
-      window: win,
-      document: win.document,
-      navigator: win.navigator,
-      HTMLElement: win.HTMLElement,
-      Element: win.Element,
-      Node: win.Node,
-      Event: win.Event,
-      MutationObserver: win.MutationObserver,
-      requestAnimationFrame: win.requestAnimationFrame.bind(win),
-      cancelAnimationFrame: win.cancelAnimationFrame.bind(win),
-      IS_REACT_ACT_ENVIRONMENT: true,
-    };
-    Object.assign(scope, installed);
+    const { win, cleanup } = installDom("http://localhost/dashboard");
     const paints: string[] = [];
     try {
-      // The one module that must load AFTER the browser globals exist: React
-      // DOM caches `canUseDOM` at evaluation, so a static import here would
-      // take the server path. Every other module is a normal static import.
-      const { createRoot } = await import("react-dom/client");
-
       // Records every committed paint: layout effects run after the DOM
       // mutation and before the pathname-keyed flash-clear re-renders, so the
       // painted frames stay observable even though act() flushes effects on
@@ -636,8 +617,7 @@ describe("workspace settings block", () => {
       expect(paints.at(-1)!.split(line).length - 1).toBe(0);
       await act(async () => root.unmount());
     } finally {
-      for (const key of Object.keys(installed)) delete scope[key];
-      win.close();
+      cleanup();
     }
   });
 

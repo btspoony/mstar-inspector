@@ -1,7 +1,7 @@
 ---
 module: pipeline-perapp-credentials
 date: 2026-09-01
-last_updated: 2026-10-14
+last_updated: 2026-10-26
 problem_type: best_practice
 category: best-practices
 severity: high

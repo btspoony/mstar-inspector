@@ -950,9 +950,11 @@ covered:
 
 - **Outside-card section heading.** There is no primitive for a section title
   that sits directly on the page canvas. `WorkspaceSetupPage`'s invite block
-  spells the `heading-16` chain by hand, and `MembersPage`'s pending-invites
-  section spells a 16px `<h2>` (`text-base font-medium`). `SectionCardTitle`
-  is a card title; widening it is a separate change.
+  spells the `heading-16` chain by hand, and `MembersPage` spells the same
+  16px `<h2>` (`text-base font-medium`) in **two** sections: the workspace
+  summary (`members.workspaceHeading`) above its `StatGrid`, and the
+  pending-invites section (`members.pendingHeading`). `SectionCardTitle` is a
+  card title; widening it is a separate change.
 - **Login hero.** `LoginPage` keeps its centred `heading-32` card title — the
   rare hero step the type scale declares for wordmark-scale titles, not a page
   title.

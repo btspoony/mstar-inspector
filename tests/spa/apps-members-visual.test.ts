@@ -1,6 +1,8 @@
 /**
  * Apps + Members visual-discipline pins (A4/A5, AD-581
- * table-reinforced form). Source-scan contract — no DOM runner.
+ * table-reinforced form). Faces are asserted on rendered markup; where
+ * rendering cannot observe the constraint (component ownership, raw colours
+ * in branches no fixture reaches) a narrowly scoped source pin covers it.
  *
  * 1. AD-581: the Apps list stays a semantic table — the identity cell is
  *    the brand surface (slug primary line + AppID meta line; the list
@@ -12,73 +14,219 @@
  *    Table header (background-200 band + label-12 headers), zero raw hex.
  * 3. A6: the new empty-state guidance keys exist atomically in both
  *    locales.
+ *
+ * A primitive's own face (PageHeader / DataTable / StatusBadge) is pinned by
+ * the suite that owns it.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
+import { MembersPage, MembersTable } from "../../src/spa/pages/MembersPage";
+import type { AppsPayload } from "../../src/spa/pages/data";
 import { matchSpaRoute } from "../../src/spa/routes";
 import { withLocation } from "./browser-stub";
+import { installDom } from "./dom";
+
+const appRow = (overrides: Partial<AppsPayload["apps"][number]> = {}): AppsPayload["apps"][number] => ({
+  slug: "demo",
+  github_app_id: 1,
+  status: "active",
+  review_enabled: 1,
+  created_by: "mallory",
+  health: { latest: null, rejected24h: 0 },
+  ...overrides,
+});
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
-const appsPage = readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8");
-const membersPage = readFileSync(join(spaRoot, "pages/MembersPage.tsx"), "utf8");
-const tablePrimitive = readFileSync(join(spaRoot, "components/ui/table.tsx"), "utf8");
-// The pill moved out of the page into the shared primitive:
-// its shape/tone tokens are asserted where they now live.
-const statusBadgePrimitive = readFileSync(join(spaRoot, "components/StatusBadge.tsx"), "utf8");
-// The page face moved into the composition primitives — the
-// heading step and the table header face are asserted where they now live,
-// and the pages only compose them.
-const pageHeaderPrimitive = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf8");
-const dataTablePrimitive = readFileSync(join(spaRoot, "components/DataTable.tsx"), "utf8");
+
+/** The two page sources whose composition is a constraint of its own. */
+const PAGE_FACE_SOURCES = {
+  AppsPage: readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8"),
+  MembersPage: readFileSync(join(spaRoot, "pages/MembersPage.tsx"), "utf8"),
+};
+
+/** Markup with HTML entities decoded, so class-attribute text is searchable. */
+const decoded = (html: string): string => html.replaceAll("&amp;", "&").replaceAll("&quot;", '"');
+
+/** The Apps page's full loaded face: heading, Create control and the table. */
+const renderAppsPage = (): string =>
+  decoded(
+    withLocation("/dashboard/acme/apps", () =>
+      renderToStaticMarkup(
+        createElement(AppsView, {
+          locale: "en",
+          state: "ok",
+          payload: { viewer: { login: "mallory", role: "admin" }, apps: [appRow()] },
+          canCreate: true,
+          unavailableReason: "",
+          onRetry: () => {},
+        }),
+      ),
+    ),
+  );
+
+/** The Apps list table rendered from the real row component, under its own base. */
+const renderList = (apps: AppsPayload["apps"], pathname = "/dashboard/apps"): string =>
+  decoded(
+    withLocation(pathname, () =>
+      renderToStaticMarkup(
+        createElement(AppsList, {
+          locale: "en",
+          payload: { viewer: { login: "mallory", role: "admin" }, apps },
+        }),
+      ),
+    ),
+  );
+
+/** The Members table with the page's own loaded state supplied. */
+const renderMembers = (): string =>
+  decoded(
+    withLocation("/dashboard/acme", () =>
+      renderToStaticMarkup(
+        createElement(MembersTable, {
+          locale: "en",
+          members: [
+            { id: "m1", github_login: "mallory", role: "owner", created_at: "2026-01-01T00:00:00Z" },
+          ],
+          viewerLogin: "mallory",
+          memberRole: "owner",
+          canInvite: true,
+          onAction: () => {},
+        }),
+      ),
+    ),
+  );
+
+/** Class lists of every `th` / `td` the markup emits. */
+const classAttrs = (html: string, tag: "th" | "td"): string[] =>
+  [...html.matchAll(new RegExp(`<${tag} [^>]*class="([^"]*)"`, "g"))].map((match) => match[1] ?? "");
+
+/** The populated Members page fixture: workspace summary, invite form, tables. */
+const MEMBERS_PAGE_PAYLOAD = {
+  viewer: { role: "owner" },
+  members: [{ id: "m1", github_login: "mallory", role: "owner", created_at: "2026-01-01T00:00:00Z" }],
+  invites: [
+    {
+      id: "i1",
+      github_login: "hubot",
+      role: "member",
+      created_at: "2026-01-01T00:00:00Z",
+      expires_at: "2026-01-08T00:00:00Z",
+    },
+  ],
+  workspace: {
+    plan: { id: "free", name: "Free" },
+    memberLimit: 5,
+    reviewAttemptsThisMonth: 2,
+    pendingInvites: 1,
+  },
+};
+
+/**
+ * The Members page MOUNTED with the page's own loaded state supplied. SSR
+ * renders only its skeleton (the read lives in `useEffect`), so the workspace
+ * summary, invite form and tables exist exclusively on a mounted tree.
+ */
+async function mountMembersPage(
+  payload: typeof MEMBERS_PAGE_PAYLOAD = MEMBERS_PAGE_PAYLOAD,
+): Promise<string> {
+  const { win, cleanup } = installDom("http://localhost/dashboard/acme");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown) =>
+    new Response(
+      JSON.stringify(
+        String(input).endsWith("/invites")
+          ? { invites: payload.invites }
+          : {
+              viewer: payload.viewer,
+              members: payload.members,
+              workspace: payload.workspace,
+            },
+      ),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )) as unknown as typeof fetch;
+  try {
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(MembersPage, { boot: { locale: "en", login: "mallory", name: null } }));
+    });
+    const html = container.innerHTML;
+    await act(async () => root.unmount());
+    return html;
+  } finally {
+    globalThis.fetch = realFetch;
+    cleanup();
+  }
+}
+
+/**
+ * Every labelled region the old page-source scan covered, on the rendered
+ * full page. A test that narrows to one subtree drops a marker and fails.
+ */
+function expectFullPageRegions(name: string, html: string): void {
+  if (name === "AppsPage") {
+    for (const marker of [
+      t("en", "apps.heading"), // PageHeader title
+      t("en", "apps.create"), // header Create control
+      t("en", "apps.tableName"), // DataTable header band
+      t("en", "apps.detail"), // row action cell
+    ]) {
+      expect(html, `${name} ${marker}`).toContain(marker);
+    }
+    return;
+  }
+  for (const marker of [
+    t("en", "members.heading"), // PageHeader title
+    t("en", "members.workspaceHeading"), // workspace summary
+    t("en", "members.inviteButton"), // invite form
+    t("en", "members.tableLogin"), // member table
+    t("en", "members.pendingHeading"), // pending invites
+    t("en", "members.deleteWorkspace"), // owner delete entry
+  ]) {
+    expect(html, `${name} ${marker}`).toContain(marker);
+  }
+}
 
 describe("AppsPage table reinforcement (AD-581)", () => {
   test("identity cell is the brand surface: slug primary line + AppID meta line", () => {
-    expect(appsPage).toContain('className="text-sm font-semibold text-foreground no-underline hover:underline"');
-    expect(appsPage).toContain("text-xs text-muted-foreground tabular-nums");
-    expect(appsPage).toContain('{t(locale, "apps.appId", { id: app.github_app_id })}');
+    // The identity cell is the row's brand surface: a slug primary line and
+    // the AppID meta line under it — read off the emitted cell, not the page.
+    const cells = [...renderList([appRow()]).matchAll(/<td [^>]*>([\s\S]*?)<\/td>/g)];
+    const identity = cells[0]?.[1] ?? "";
+    expect(identity).toContain(
+      '<a class="text-sm font-semibold text-foreground no-underline hover:underline" href="/dashboard/apps/demo"',
+    );
+    expect(identity).toContain(">demo</a>");
+    expect(identity).toContain('<span class="text-xs text-muted-foreground tabular-nums">');
+    expect(identity).toContain(t("en", "apps.appId", { id: 1 }));
+    // No avatar channel exists: the payload carries no GitHub profile field,
+    // so the row's only image slot would have to come from somewhere else.
+    expect(identity).not.toContain("<img");
   });
 
   test("whole-row click and the visible detail anchor keep their channels", () => {
     // Rendered from the real row component under the two ACTUAL pathnames: the
     // emitted links are the page's own base, so a wrong base, a legacy target
     // under a workspace page, or a /settings deep link fails here.
-    const render = (pathname: string): string =>
-      withLocation(pathname, () =>
-        renderToStaticMarkup(
-          createElement(AppsList, {
-            locale: "en",
-            payload: {
-              viewer: { login: "mallory", role: "member" },
-              apps: [
-                {
-                  slug: "demo",
-                  github_app_id: 1,
-                  status: "active",
-                  review_enabled: 1,
-                  created_by: "mallory",
-                  health: { latest: null, rejected24h: 0 },
-                },
-              ],
-            },
-          }),
-        ),
-      );
+    const hrefs = (pathname: string) =>
+      [...renderList([appRow()], pathname).matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
     // Legacy Apps page: the historical detail path, identity link + anchor.
-    expect(
-      [...render("/dashboard/apps").matchAll(/href="([^"]+)"/g)].map((match) => match[1]),
-    ).toEqual(["/dashboard/apps/demo", "/dashboard/apps/demo"]);
+    expect(hrefs("/dashboard/apps")).toEqual(["/dashboard/apps/demo", "/dashboard/apps/demo"]);
     // Workspace Apps page: the workspace copy of the same route — the legacy
     // App family answers 404 under strict.
-    expect(
-      [...render("/dashboard/acme/apps").matchAll(/href="([^"]+)"/g)].map((match) => match[1]),
-    ).toEqual(["/dashboard/acme/apps/demo", "/dashboard/acme/apps/demo"]);
-    const scoped = render("/dashboard/acme/apps");
-    expect(scoped).toContain('class="text-primary underline-offset-4 hover:underline"');
+    expect(hrefs("/dashboard/acme/apps")).toEqual([
+      "/dashboard/acme/apps/demo",
+      "/dashboard/acme/apps/demo",
+    ]);
+    const scoped = renderList([appRow()], "/dashboard/acme/apps");
+    expect(scoped).toContain('<a class="text-primary underline-offset-4 hover:underline"');
     expect(scoped).not.toContain("/settings");
     // Row action copy is detail semantics in both locales.
     expect(scoped).toContain(">Detail<");
@@ -86,129 +234,197 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(t("zh_CN", "apps.detail")).toBe("详情");
   });
 
-  test("StatusBadge rides the v0.3 pill component tokens with semantic tones", () => {
-    // Shape comes from the --badge-* component tokens (AD-574 pill exception).
-    expect(statusBadgePrimitive).toContain("h-(--badge-height)");
-    expect(statusBadgePrimitive).toContain("rounded-(--badge-radius)");
-    // Tones stay on the semantic success/warn badge vars (constraint #5).
-    expect(statusBadgePrimitive).toContain("bg-(--badge-success-bg)");
-    expect(statusBadgePrimitive).toContain("text-(--badge-success-fg)");
-    expect(statusBadgePrimitive).toContain("bg-(--badge-warn-bg)");
-    expect(statusBadgePrimitive).toContain("text-(--badge-warn-fg)");
-    // No hard-coded pill geometry left behind in the page.
-    expect(appsPage).not.toContain("rounded-full");
-    expect(appsPage).not.toMatch(/\bh-5\b/);
+  test("the status pill rides the v0.3 pill component tokens with semantic tones", () => {
+    // Every pill the list emits, located by its rendered label.
+    const pillClass = (overrides: Partial<AppsPayload["apps"][number]>, label: string) =>
+      renderList([appRow(overrides)]).match(
+        new RegExp(`<span class="([^"]*)">${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</span>`),
+      )?.[1] ?? "";
+    for (const [overrides, label, tone] of [
+      [{ status: "active", review_enabled: 1 }, t("en", "apps.status.active"), "success"],
+      [{ status: "active", review_enabled: 0 }, t("en", "apps.status.paused"), "warn"],
+    ] as const) {
+      const classes = pillClass(overrides, label);
+      // Shape comes from the --badge-* component tokens (AD-574 pill exception).
+      expect(classes, label).toContain("h-(--badge-height)");
+      expect(classes, label).toContain("rounded-(--badge-radius)");
+      // Tones stay on the semantic badge vars (constraint #5).
+      expect(classes, label).toContain(`bg-(--badge-${tone}-bg)`);
+      expect(classes, label).toContain(`text-(--badge-${tone}-fg)`);
+    }
+    // The emitted pill is the only geometry source: no hard-coded pill
+    // survives anywhere in the row markup.
+    const emitted = [...renderList([appRow()]).matchAll(/class="([^"]*)"/g)]
+      .map((match) => match[1] ?? "")
+      .join(" ");
+    expect(emitted).not.toContain("rounded-full");
+    expect(emitted).not.toMatch(/\bh-5\b/);
   });
 
   test("row hover is the restyled primitive's tinted surface; header row opts out", () => {
     // ui/table.tsx carries hover:bg-muted on data rows. The page adds only its
-    // own clickable face through DataTable's rowProps; the header-band opt-out
-    // lives in the primitive (components/DataTable.test.tsx pins it there).
-    const html = withLocation("/dashboard/apps", () =>
-      renderToStaticMarkup(
-        createElement(AppsList, {
-          locale: "en",
-          payload: {
-            viewer: { login: "mallory", role: "member" },
-            apps: [
-              {
-                slug: "demo",
-                github_app_id: 1,
-                status: "active",
-                review_enabled: 1,
-                created_by: "mallory",
-                health: { latest: null, rejected24h: 0 },
-              },
-            ],
-          },
-        }),
-      ),
-    );
-    expect(html).toMatch(/<tr[^>]*class="[^"]*cursor-pointer/);
-    expect(html).toContain("hover:bg-inherit");
+    // own clickable face through DataTable's rowProps; the header row opts out
+    // of the tint (its own band is the surface).
+    const html = renderList([appRow()]);
+    const [headerRow = "", dataRow = ""] = [
+      ...html.matchAll(/<tr [^>]*class="([^"]*)"[^>]*>/g),
+    ].map((match) => match[1] ?? "");
+    expect(dataRow).toContain("hover:bg-muted");
+    expect(headerRow).toContain("hover:bg-inherit");
+    expect(dataRow).toContain("cursor-pointer");
   });
 
   test("the health cell keeps the shared outcome map and gains tabular figures", () => {
-    expect(appsPage).toContain("deliveryOutcomeLabel(latest.outcome, locale)");
-    expect(appsPage).toContain("text-muted-foreground tabular-nums");
+    // A landed delivery: the localized outcome label and the 24h rejection
+    // count ride the same muted, tabular cell.
+    const withDelivery = renderList([
+      appRow({
+        health: {
+          latest: {
+            event_name: "push",
+            outcome: "rejected",
+            status_code: 200,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+          rejected24h: 2,
+        },
+      }),
+    ]);
+    expect(withDelivery).toContain(t("en", "apps.health.outcome.rejected"));
+    expect(withDelivery).toContain(t("en", "apps.health.rejected24h", { count: 2 }));
+    expect(withDelivery).toContain('<span class="text-muted-foreground tabular-nums">');
+    // No delivery: the never-delivered copy, still through the one map.
+    expect(renderList([appRow()])).toContain(t("en", "apps.health.deliveryNever"));
   });
 });
 
 describe("v0.3 page face (A4/A5)", () => {
-  test("page titles ride the heading-24 token step", () => {
-    // ONE spelling of the page-title face, and it lives in PageHeader; a page
-    // that re-spells it would drift off the step this pins.
-    expect(pageHeaderPrimitive).toContain("text-(length:--typo-heading-24-size)");
-    expect(pageHeaderPrimitive).toContain("leading-(--typo-heading-24-line)");
-    expect(pageHeaderPrimitive).toContain("tracking-(--typo-heading-24-tracking)");
-    for (const [name, source] of [
-      ["AppsPage", appsPage],
-      ["MembersPage", membersPage],
+  test("each page title is ONE heading-24 h1 — the PageHeader face, never re-spelled", () => {
+    // Rendering alone cannot express OWNERSHIP: a page that inlines the same
+    // heading-24 triple emits byte-identical markup, so the render assertions
+    // below would still pass. The two source pins that follow make the
+    // composition itself the constraint — the page delegates to <PageHeader>
+    // and carries no spelling of the face to drift with.
+    const apps = renderAppsPage();
+    const members = decoded(
+      withLocation("/dashboard/acme", () =>
+        renderToStaticMarkup(
+          createElement(MembersPage, { boot: { locale: "en", login: "mallory", name: null } }),
+        ),
+      ),
+    );
+    for (const [name, html, heading] of [
+      ["AppsPage", apps, t("en", "apps.heading")],
+      ["MembersPage", members, t("en", "members.heading")],
     ] as const) {
-      expect(source, name).toContain("<PageHeader");
-      expect(source, name).not.toContain("text-(length:--typo-heading-24-size)");
+      // Exactly one element carries the heading-24 trio, and it is the h1.
+      expect(html.match(/--typo-heading-24-size/g), name).toHaveLength(1);
+      expect(html.match(/<h1/g), name).toHaveLength(1);
+      expect(html, name).toContain(
+        `<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">${heading}</h1>`,
+      );
+      // The face has exactly one home: the page composes PageHeader…
+      expect(PAGE_FACE_SOURCES[name]).toContain("<PageHeader");
+      // …and holds no second copy of the heading-24 triple.
+      expect(PAGE_FACE_SOURCES[name], name).not.toContain("--typo-heading-24");
     }
   });
 
   test("table header face: background-200 band + label-12 headers (DESIGN.md Table)", () => {
-    // The shell + header face is DataTable's; each page composes it and keeps
-    // no table-header spelling of its own.
-    expect(dataTablePrimitive).toContain("bg-(--background-200)");
-    expect(dataTablePrimitive).toContain("text-xs tracking-(--typo-label-12-tracking)");
-    for (const [name, source] of [
-      ["AppsPage", appsPage],
-      ["MembersPage", membersPage],
+    // Same ownership split as the page title: DataTable owns the shell and the
+    // band, each page only composes it. Rendering alone cannot tell a composed
+    // table from a hand-rolled one that emits the identical band, so the
+    // source pins forbid the second spelling explicitly.
+    for (const [name, html] of [
+      ["AppsPage", renderAppsPage()],
+      ["MembersPage", renderMembers()],
     ] as const) {
-      expect(source, name).toContain("<DataTable");
-      expect(source, name).not.toContain("bg-(--background-200)");
-      expect(source, name).not.toContain("TABLE_HEAD_LABEL");
+      expect(html.match(/<thead[^>]*class="([^"]*)"/)?.[1], name).toContain("bg-(--background-200)");
+      expect(html.match(/--background-200/g), name).toHaveLength(1);
+      const headers = classAttrs(html, "th");
+      expect(headers.length, name).toBeGreaterThan(0);
+      for (const header of headers) {
+        expect(header, name).toContain("text-xs tracking-(--typo-label-12-tracking)");
+      }
+      expect(PAGE_FACE_SOURCES[name]).toContain("<DataTable");
+      // No page re-spells the band or the label-12 header step.
+      expect(PAGE_FACE_SOURCES[name], name).not.toContain("--background-200");
+      expect(PAGE_FACE_SOURCES[name], name).not.toContain("--typo-label-12-tracking");
     }
   });
 
-  test("zero raw hex in both page sources", () => {
-    for (const [name, source] of [
-      ["AppsPage", appsPage],
-      ["MembersPage", membersPage],
-    ] as const) {
+  test("the page modules and their rendered full pages emit no raw color literal", async () => {
+    // Two guards, and neither replaces the other. The SOURCE scan below is
+    // branch-complete: it covers every page-owned face statically, including
+    // the ones no fixture here can reach (the creation-disabled notice at
+    // AppsPage.tsx:169, the Members confirmation dialog behind `pending`, the
+    // loading/error faces). The RENDER assertions cover what the selected
+    // loaded face actually emits, including anything a composed primitive
+    // emits that the page source never spells. A render-only guard passes a
+    // raw colour added to an unrendered branch; a source-only guard cannot see
+    // a primitive's output.
+    for (const [name, source] of Object.entries(PAGE_FACE_SOURCES)) {
       expect(source, name).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    }
+    // Render side: `expectFullPageRegions` fails if a region goes missing, so
+    // the check cannot silently narrow back to one subtree. Members' regions
+    // exist only on a mounted tree (SSR shows the skeleton).
+    for (const [name, html] of [
+      ["AppsPage", renderAppsPage()],
+      ["MembersPage", decoded(await mountMembersPage())],
+    ] as const) {
+      expectFullPageRegions(name, html);
+      expect(html, name).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+      expect(html, name).not.toContain("rgb(");
     }
   });
 });
 
 describe("table horizontal padding (D5/A3)", () => {
-  // The exact head/cell class literals (qc round 1, qc1-F-002): the
-  // retirement pin scans these strings only — a hypothetical future variant
-  // elsewhere in the file (px-2.5, sm:px-2) cannot false-fail it.
-  const headClassLiteral = tablePrimitive.match(/"(h-10 px-3[^"]*)"/)?.[1];
-  const cellClassLiteral = tablePrimitive.match(/"(px-3 py-2[^"]*)"/)?.[1];
-
   test("head and cell ride the spacing-3 horizontal step (12px); vertical untouched", () => {
-    // D5: one component-level raise benefits both Apps and Members tables.
-    expect(tablePrimitive).toContain("h-10 px-3");
-    expect(tablePrimitive).toContain("px-3 py-2");
-  });
-
-  test("head/cell class literals are locatable (pin integrity)", () => {
-    expect(headClassLiteral).toBeDefined();
-    expect(cellClassLiteral).toBeDefined();
-  });
-
-  test("the 8px horizontal step is retired from the head/cell class literals", () => {
-    // Standalone-token check inside the literals: a regen reverting the
-    // primitives to upstream px-2/p-2 still fails, while token variants
-    // (px-2.5, sm:px-2) do not count as the retired step.
-    for (const literal of [headClassLiteral, cellClassLiteral]) {
-      const tokens = (literal ?? "").split(/\s+/);
-      expect(tokens).toContain("px-3");
-      expect(tokens).not.toContain("px-2");
-      expect(tokens).not.toContain("p-2");
+    // D5: one component-level raise benefits both Apps and Members tables —
+    // asserted on the emitted th/td class lists of either table.
+    for (const [name, html] of [
+      ["AppsPage", renderList([appRow()])],
+      ["MembersPage", renderMembers()],
+    ] as const) {
+      const heads = classAttrs(html, "th");
+      const cells = classAttrs(html, "td");
+      expect(heads.length, name).toBeGreaterThan(0);
+      expect(cells.length, name).toBeGreaterThan(0);
+      for (const head of heads) expect(head.split(/\s+/), name).toContain("h-10");
+      for (const cell of cells) {
+        expect(cell.split(/\s+/), name).toContain("px-3");
+        expect(cell.split(/\s+/), name).toContain("py-2");
+      }
+      for (const head of heads) expect(head.split(/\s+/), name).toContain("px-3");
     }
-    expect((cellClassLiteral ?? "").split(/\s+/)).toContain("py-2");
+  });
+
+  test("the 8px horizontal step is retired from every emitted head/cell class", () => {
+    // Token-exact check: a regen reverting the primitives to upstream
+    // px-2/p-2 fails, while token variants (px-2.5, sm:px-2) are not the
+    // retired step.
+    for (const html of [renderList([appRow()]), renderMembers()]) {
+      for (const attr of [...classAttrs(html, "th"), ...classAttrs(html, "td")]) {
+        const tokens = attr.split(/\s+/);
+        expect(tokens).not.toContain("px-2");
+        expect(tokens).not.toContain("p-2");
+      }
+    }
   });
 
   test("checkbox flush-right exception survives the padding raise", () => {
-    // The pr-0 escape hatch exists on both head and cell (shadcn convention).
-    expect(tablePrimitive.match(/\[&:has\(\[role=checkbox\]\)\]:pr-0/g)?.length).toBe(2);
+    // The pr-0 escape hatch exists on both head and cell (shadcn convention),
+    // which the emitted markup shows on either table.
+    for (const html of [renderList([appRow()]), renderMembers()]) {
+      expect(classAttrs(html, "th").every((attr) => attr.includes("[&:has([role=checkbox])]:pr-0"))).toBe(
+        true,
+      );
+      expect(classAttrs(html, "td").every((attr) => attr.includes("[&:has([role=checkbox])]:pr-0"))).toBe(
+        true,
+      );
+    }
   });
 });
 
@@ -230,12 +446,69 @@ describe("empty-state copy (A6)", () => {
     }
   });
 
-  test("the retired single-line keys are gone from sources and dictionary", () => {
-    expect(appsPage).not.toContain('t(locale, "apps.empty")');
-    expect(membersPage).not.toContain('t(locale, "members.empty")');
-    // t() fails visible (returns the key) — the dictionary really dropped them.
+  test("the retired single-line keys are gone from the rendered faces and dictionary", () => {
+    // `t()` fails visible — it returns the key — so a page still asking for a
+    // retired key would print it. Neither empty face may carry one.
+    const apps = renderToStaticMarkup(
+      createElement(AppsView, {
+        locale: "en",
+        state: "ok",
+        payload: { viewer: { login: "mallory", role: "member" }, apps: [] },
+        canCreate: true,
+        unavailableReason: "",
+        onRetry: () => {},
+      }),
+    );
+    expect(apps).toContain(t("en", "apps.emptyTitle"));
+    expect(apps).not.toMatch(/apps\.empty\b/);
+    // The dictionary really dropped them.
     expect(isDictionaryKey("apps.empty")).toBe(false);
     expect(isDictionaryKey("members.empty")).toBe(false);
+  });
+
+  test("the empty member list renders the guidance, never the retired key", async () => {
+    // Mounted because the page's own state machine owns the empty branch: the
+    // loaded-ok face with zero members is what a real first paint shows.
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) =>
+      new Response(
+        JSON.stringify(
+          String(input).endsWith("/invites")
+            ? { invites: [] }
+            : {
+                viewer: { role: "owner" },
+                members: [],
+                workspace: {
+                  plan: { id: "free", name: "Free" },
+                  memberLimit: 5,
+                  reviewAttemptsThisMonth: 2,
+                  pendingInvites: 0,
+                },
+              },
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as unknown as typeof fetch;
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () => {
+        root.render(
+          createElement(MembersPage, { boot: { locale: "en", login: "mallory", name: null } }),
+        );
+      });
+      const html = container.innerHTML;
+      expect(html).toContain(t("en", "members.emptyTitle"));
+      expect(html).toContain(t("en", "members.emptyDescription"));
+      // The empty face offers no action slot: the invite form above is the path.
+      expect(html.match(/data-slot="empty-state"/g)).toHaveLength(1);
+      expect(html).not.toMatch(/members\.empty\b/);
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
   });
 });
 

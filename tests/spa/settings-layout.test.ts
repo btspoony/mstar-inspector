@@ -37,7 +37,7 @@ import type { SpaBoot } from "../../src/spa/boot";
 import { SupportNotice } from "../../src/spa/components/SupportNotice";
 import { slugFailureKey, WORKSPACE_SLUG_PATTERN } from "../../src/spa/pages/data";
 import type { DictionaryKey } from "../../src/i18n";
-import { AppDetailPage } from "../../src/spa/pages/AppDetailPage";
+import { AppDetailPage, AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import { withLocation } from "./browser-stub";
 
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
@@ -45,6 +45,38 @@ const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
 
 /** The detail page reads only locale/role from the boot for this face. */
 const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat", role: "admin" as const };
+
+/** A manage-face settings payload — the full settings tab body renders. */
+const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
+  can_manage: true,
+  app: {
+    slug: "acme-app",
+    github_app_id: 1,
+    status: "active",
+    review_enabled: true,
+    created_by: "octocat",
+    github_name: "Acme",
+    github_description: null,
+    github_html_url: "https://github.com/apps/acme",
+    github_avatar_url: null,
+    github_metadata_synced_at: null,
+    last_webhook_at: null,
+    sandbox_image_id: "omp",
+    review_trigger_mode: "every_push",
+  },
+  keys: [],
+  model_chain: null,
+  model_roles: {},
+  model_chains: [],
+  custom_providers: [],
+  configured_providers: [],
+  provider_catalog: [],
+  model_role_ids: [],
+  custom_provider_api_ids: [],
+  sandbox_images: [{ id: "omp", enabled: true }],
+  installations: [],
+  deliveries: [],
+});
 
 describe("settings layout", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -1640,25 +1672,52 @@ describe("section-scoped op feedback", () => {
 });
 
 describe("settings header typography", () => {
-  test("app-slug heading rides the detail shell's PageHeader; no off-scale page heading remains (audit UI-45-08)", () => {
+  test("app-slug heading is the rendered PageHeader h1; no off-scale page heading remains (audit UI-45-08)", () => {
     // SUPERSEDE (App detail IA): the slug heading moved onto the
     // AppDetailPage shell as the identity header, and its face now lives in
     // the one PageHeader spelling (heading-24 page title, serving BOTH tabs).
-    // The settings tab carries no page heading of its own anymore.
-    const shell = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
-    const pageHeader = readFileSync(join(import.meta.dir, "../../src/spa/components/PageHeader.tsx"), "utf8");
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    expect(pageHeader).toContain(
-      '<h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">',
+    // The settings tab carries no page heading of its own anymore — asserted
+    // on the rendered face, so a second heading or a re-spelled face fails.
+    const shell = withLocation("/dashboard/apps/acme-app", () =>
+      renderToStaticMarkup(
+        createElement(AppDetailView, {
+          locale: "en",
+          slug: "acme-app",
+          storedSlug: "acme",
+          payload: detailPayload(),
+          groups: [],
+          notice: null,
+          search: { tab: "settings", window: "30", repo: "" },
+          onReload: async () => true,
+          onSearch: () => {},
+        }),
+      ),
     );
-    // The shell composes that header with the slug; it no longer spells a
-    // heading of its own.
-    expect(shell).toContain("<PageHeader");
-    expect(shell).toContain("title={slug}");
-    expect(shell).not.toContain("<h1");
-    // The off-scale 18px class no longer appears anywhere on either face.
+    // Exactly one heading, and it is the heading-24 h1 carrying the slug.
+    expect(shell.match(/<h1/g)).toHaveLength(1);
+    expect(shell).toContain(
+      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">acme-app</h1>',
+    );
+    // Rendering alone cannot express OWNERSHIP — a shell inlining the same
+    // triple renders byte-identical markup — so the face's single home is
+    // pinned on source: PageHeader spells the triple, the shell composes
+    // <PageHeader>, and no page source carries a second copy.
+    const pageHeader = readFileSync(join(import.meta.dir, "../../src/spa/components/PageHeader.tsx"), "utf8");
+    expect(pageHeader).toContain("text-(length:--typo-heading-24-size)");
+    expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
+    expect(pageHeader).toContain("tracking-(--typo-heading-24-tracking)");
+    const shellSource = readFileSync(
+      join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"),
+      "utf8",
+    );
+    const tabSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(shellSource).toContain("<PageHeader");
+    expect(shellSource).not.toContain("--typo-heading-24");
+    expect(tabSource).not.toContain("--typo-heading-24");
+    // The off-scale 18px class no longer appears anywhere on the face: this
+    // render carries the FULL settings tab body, so the old page heading and
+    // every card behind it are observed at once.
     expect(shell).not.toContain("text-lg");
-    expect(source).not.toContain("text-lg");
   });
 });
 

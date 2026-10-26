@@ -18,8 +18,9 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { act, createElement } from "react";
-import { Window } from "happy-dom";
+import { createRoot } from "react-dom/client";
 import { SupportPage } from "../../src/spa/pages/SupportPage";
+import { installDom } from "./dom";
 
 const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SupportPage.tsx"), "utf8");
 const realFetch = globalThis.fetch;
@@ -34,36 +35,6 @@ const VIEW = {
   grants: [{ operator_login: "operator", reason: "incident 42", expires_at: "2026-11-01 00:00:00" }],
 };
 
-/** Installs the browser globals a mounted render needs (support-notice precedent). */
-function installDom(url: string) {
-  const win = new Window({ url });
-  const scope = globalThis as unknown as Record<string, unknown>;
-  const installed = {
-    window: win,
-    // The page derives its API base from `location.pathname`, so the location
-    // must ride the stub — not just `window`.
-    location: win.location,
-    document: win.document,
-    navigator: win.navigator,
-    HTMLElement: win.HTMLElement,
-    Element: win.Element,
-    Node: win.Node,
-    Event: win.Event,
-    MutationObserver: win.MutationObserver,
-    requestAnimationFrame: win.requestAnimationFrame.bind(win),
-    cancelAnimationFrame: win.cancelAnimationFrame.bind(win),
-    IS_REACT_ACT_ENVIRONMENT: true,
-  };
-  Object.assign(scope, installed);
-  return {
-    win,
-    cleanup: () => {
-      for (const key of Object.keys(installed)) delete scope[key];
-      win.close();
-    },
-  };
-}
-
 describe("support page", () => {
   test("issues exactly one read and renders the whole view with no control on it", async () => {
     const calls: string[] = [];
@@ -76,9 +47,6 @@ describe("support page", () => {
     }) as unknown as typeof fetch;
     const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps");
     try {
-      // Imported only once the browser globals exist: React DOM caches its
-      // `canUseDOM` answer at evaluation time.
-      const { createRoot } = await import("react-dom/client");
       const container = win.document.createElement("div");
       win.document.body.appendChild(container);
       const root = createRoot(container as unknown as Element);
@@ -112,7 +80,6 @@ describe("support page", () => {
     globalThis.fetch = (async () => new Response("boom", { status: 500 })) as unknown as typeof fetch;
     const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps");
     try {
-      const { createRoot } = await import("react-dom/client");
       const container = win.document.createElement("div");
       win.document.body.appendChild(container);
       const root = createRoot(container as unknown as Element);

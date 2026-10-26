@@ -18,7 +18,7 @@ related_components:
   - apps-store
   - consumer
   - worker
-last_updated: 2026-10-22
+last_updated: 2026-10-26
 ---
 
 # Workspace tenant attribution

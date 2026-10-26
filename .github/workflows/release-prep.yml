@@ -108,6 +108,9 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: bun run release:validate -- "v${VERSION}"
 
+      - name: Wrangler env parity (release sanity)
+        run: bun test tests/contracts/wrangler-env-parity.test.ts
+
       - name: Typecheck + build SPA (release sanity)
         run: |
           bun run typecheck
