@@ -34,13 +34,17 @@
 -- metadata-only: it builds the whole secondary structure — reading every row
 -- of `support_grants` and sorting it into a new B-tree — inside a write
 -- transaction, so SQLite's write lock blocks every other write until each
--- statement finishes. That cost is bearable here because `support_grants`
--- holds one row per grant action by a platform operator: the table is bounded
--- by the `PLATFORM_OPERATORS` allowlist and the workspaces those logins
--- support, not by tenant, user or review volume, so each build scans a handful
--- of rows and holds the lock for milliseconds. Must apply AFTER 0029 (the
--- indexed columns must exist). No row, no ordering and no consumer changes:
--- every reader's ORDER BY stays explicit.
+-- statement finishes. What that costs depends on the rows already stored:
+-- `insertSupportGrantWithAudit` always appends a fresh row with a new id
+-- instead of replacing the pair's previous grant, and an expired grant is
+-- only filtered out by readers, never deleted, so repeated grants accumulate
+-- superseded and expired rows. The `PLATFORM_OPERATORS` allowlist bounds who
+-- may append, not how many appends exist. Assumption, not a bound: this
+-- deployment's grant history stays small, in which case each build is cheap
+-- and its write block brief; the actual existing row count decides the scan
+-- work and how long writers wait. Must apply AFTER 0029 (the indexed columns
+-- must exist). No row, no ordering and no consumer changes: every reader's
+-- ORDER BY stays explicit.
 
 CREATE INDEX support_grants_operator_window
   ON support_grants (operator_login, expires_at, workspace_id);
