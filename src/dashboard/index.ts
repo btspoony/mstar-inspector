@@ -201,7 +201,7 @@ type WorkspacePrincipal =
  * `workspaceScope` then resolves the live workspace and the caller's principal
  * after the session and user row are known.
  */
-type DashboardVariables = {
+export type DashboardVariables = {
   tenant?: {
     /** The workspace segment the request named: an id or a slug. */
     ref: string;
@@ -2273,15 +2273,19 @@ const workspaceSlugRoute = async (c: DashboardContext) => {
 // Clarify #6, architect-pinned POST action paths) ---
 //
 // The per-request guard above has already verified membership on every route
-// here; the route-local gate re-resolves the acting row per request (same
-// pattern as the members routes). List = every member; disable/enable/
-// soft-delete = the workspace owner/admin (invite-only team trust model).
+// here, and the route-local gate below reuses the row it resolved. List =
+// every member; disable/enable/soft-delete = the workspace owner/admin
+// (invite-only team trust model).
 // POSTs ride the existing session cookie (same discipline as the members
 // routes) — no new token scheme. Routes are the pinned action-path POSTs:
 // the zero-JS `<form method="post">` convention cannot emit a DELETE verb.
 
-/** Route-local member gate shared by every workspace App route. */
-async function requireMember(c: DashboardContext): Promise<
+/**
+ * Route-local member gate shared by every workspace App route. Exported so a
+ * test can drive the gate on a mount without the session guard (the only
+ * caller shape that takes the fallback read below).
+ */
+export async function requireMember(c: DashboardContext): Promise<
   | {
       ok: true;
       session: SessionPayload;
@@ -2297,7 +2301,10 @@ async function requireMember(c: DashboardContext): Promise<
   if (!session) return { ok: false, response: c.redirect("/dashboard/login", 302) };
   const db = dashboardD1(c.env);
   if (!db) return { ok: false, response: c.text("dashboard storage is not configured", 500) };
-  const user = await getUserByLogin(db, session.login);
+  // The session guard already resolved this row for the request and failed
+  // closed on a removed login, so reuse it. Only a mount without that
+  // middleware reads for itself.
+  const user = c.get("authUser") ?? (await getUserByLogin(db, session.login));
   // Fail closed: no row (removed between guard and here) → 403, the 403 view
   // carries zero membership data.
   if (!user) return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
