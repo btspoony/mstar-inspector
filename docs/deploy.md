@@ -424,16 +424,15 @@ plan, and both rejected for now in favour of the applied approval gate.
 
 `wrangler.jsonc` `env.production.vars` holds the only production plain var
 declared in config, `DEPLOYMENT_MODE` (§ Deployment mode — `saas`,
-re-supplied on every deploy by both workflows). `PLATFORM_OPERATORS` is the
-other plain var, but it is not declared here: it is bound from the GitHub
-repository variable on every deploy (§ Platform operators). A value declared
-there cannot be a
-dashboard-managed plain var: wrangler accepts `keep_vars` only at the top level
+re-supplied on every deploy by both workflows); changing it means editing
+`env.production.vars` and redeploying. `PLATFORM_OPERATORS` is the other plain
+var, but it is neither declared here nor durable on the Worker: it is bound
+from the GitHub repository variable on every deploy (§ Platform operators), so
+a hand-set value is replaced by that command. No dashboard-set plain var
+survives either: wrangler accepts `keep_vars` only at the top level
 and **rejects it inside an environment block**
 (`Unexpected fields found in env.production field: "keep_vars"`), so an
 automated `wrangler deploy --env production` wipes dashboard-set plain vars.
-The value is therefore part of the config: changing it means editing
-`env.production.vars` and redeploying.
 The review tier `REVIEW_LEVEL` (`quick`/`default`/`deep`) is unset and
 configured nowhere, and the same `keep_vars` limitation applies to it: a
 `REVIEW_LEVEL` set on the production Worker from the dashboard is wiped by the
@@ -564,8 +563,12 @@ Prod release workflow already pass it unconditionally as
 deploy-capable step, so the value configured in GitHub is what the Worker
 carries after any deploy — a plain var hand-set on the Worker (dashboard or a
 one-off `wrangler deploy --var`) is overwritten by that command on every deploy
-and is therefore never the way to configure this. An empty/unset value means
-"no operators", which is the default and is safe: nobody gains access.
+and is therefore never the way to configure this. Production offers no second
+route either: `env.production` **rejects `keep_vars` inside an environment
+block**, so the next `wrangler deploy --env production` also wipes a value set
+on the production Worker from the dashboard (§ `env.production.vars` is the
+plain-var roster). An empty/unset value means "no operators", which is the
+default and is safe: nobody gains access.
 
 ### Opening a support window
 
@@ -800,13 +803,27 @@ the workspace. Three invariants carry that guarantee:
 |---|---|
 | `/dashboard/<slug>/apps` | that workspace's Apps |
 | `/dashboard/<slug>/apps/<app>/settings` | that App's settings |
+| `/dashboard/<slug>/members` | that workspace's members |
 | `/dashboard/<slug>/settings` | that workspace's settings (owner-only rename) |
 | `/dashboard/<slug>/api/apps` | that workspace's Apps API |
 | `/dashboard/<slug>/api/apps/<app>/…` | that App's API |
 | `/dashboard/apps…`, `/dashboard/api/apps…` | 404 |
 
+The workspace route family is the **second** segment that scopes a path to a
+workspace: `apps`, `members`, `settings`, `api` (one array,
+`WORKSPACE_FAMILY_SEGMENTS` in
+[`src/spa/routes.ts`](../src/spa/routes.ts), which both the SPA matcher and the
+Worker gate read). `apps`, `members` and `api` carry Worker routes below that
+prefix; `settings` is served by the shell alone (the workspace settings page),
+so the Worker's route-family gate admits exactly the other three.
+
 The reserved first segments (`apps`, `api`, `oauth`, `members`, `login`,
-`logout`, `manifest`, `locale`, `healthz`) never name a workspace.
+`logout`, `manifest`, `locale`, `healthz`) never name a workspace. That is a
+**different** list from the family above: the reserved words occupy the first
+segment, which is why `apps`, `api` and `members` can be both. `settings` is a
+family segment but **not** reserved — it names no first-segment route, so a
+workspace may take that slug and is then reached at `/dashboard/settings/apps`
+(§ App creation is workspace-scoped).
 
 ### App creation is workspace-scoped
 
