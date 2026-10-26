@@ -47,6 +47,9 @@ export const SWEEP_RETENTION_DAYS = 30;
 /** Retention row cap per run (PR #10): bounded work per 15-min sweep. */
 export const SWEEP_RETENTION_CAP = 500;
 
+/** Invite-lapse row cap per run (I-000096): same bounded-work rule as retention. */
+export const SWEEP_INVITE_LAPSE_CAP = 500;
+
 /**
  * The structured breach event — a JSON line on the consumer-derived log
  * channel (SweepLog below), also POSTed verbatim to the webhook.
@@ -187,13 +190,13 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // Invite lapse (I-000096) moved here from the members-page read: a lapsed
   // pending invite already holds no seat and is already unlisted, so the flip
   // only makes the stored status catch up — at most one sweep interval late.
-  // The statement is global and idempotent: one run flips every lapsed
-  // `pending` row in every workspace, and a second run flips none. Like
-  // retention, a failure degrades to a warn and NEVER breaks the
+  // The statement is global and bounded at SWEEP_INVITE_LAPSE_CAP rows per run,
+  // so a larger backlog drains over successive runs instead of stalling one
+  // sweep. Like retention, a failure degrades to a warn and NEVER breaks the
   // failure-sweep path below.
   let invitesExpired: number | null = null;
   try {
-    invitesExpired = await expireLapsedInvites(db, new Date().toISOString());
+    invitesExpired = await expireLapsedInvites(db, new Date().toISOString(), SWEEP_INVITE_LAPSE_CAP);
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);

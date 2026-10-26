@@ -17,6 +17,7 @@ import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   runSweep,
   SWEEP_FAILURE_THRESHOLD,
+  SWEEP_INVITE_LAPSE_CAP,
   SWEEP_LOG_DETAIL_MAX,
   SWEEP_RETENTION_CAP,
   SWEEP_RETENTION_DAYS,
@@ -164,6 +165,59 @@ describe("runSweep", () => {
     });
   });
 
+  test("a backlog larger than one run's cap drains across successive runs, losing nothing", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .query(`INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+              VALUES ('ws-2', 'ws-2', 'Second', NULL, '2026-10-21T00:00:00.000Z', NULL)`)
+      .run();
+    const lapsed = new Date(Date.now() - 60_000).toISOString();
+    const live = new Date(Date.now() + 60_000).toISOString();
+    const insert = db.raw.prepare(
+      `INSERT INTO workspace_invites
+         (id, workspace_id, github_login, role, status, invited_by,
+          created_at, expires_at, accepted_at)
+       VALUES (?, ?, ?, 'member', ?, NULL, ?, ?, NULL)`,
+    );
+    const backlog = SWEEP_INVITE_LAPSE_CAP + 2;
+    for (let i = 0; i < backlog; i++) {
+      // Spread across both workspaces: the flip is global, not workspace-scoped.
+      insert.run(`lapsed-${i}`, i % 2 === 0 ? "default" : "ws-2", `lapsed-${i}`, "pending", lapsed, lapsed);
+    }
+    // A live pending row and an already-accepted one must survive every run.
+    insert.run("live", "default", "live", "pending", live, live);
+    insert.run("accepted", "ws-2", "accepted", "accepted", lapsed, lapsed);
+
+    const { log, calls } = captureLog();
+    const first = await runSweep(db, { log });
+    expect(first.invitesExpired).toBe(SWEEP_INVITE_LAPSE_CAP);
+    const pendingAfterFirst = db.raw
+      .query("SELECT COUNT(*) AS n FROM workspace_invites WHERE status = 'pending' AND expires_at <= ?")
+      .get(lapsed) as { n: number };
+    expect(pendingAfterFirst.n).toBe(backlog - SWEEP_INVITE_LAPSE_CAP);
+
+    // The remainder is not stranded: the next run picks it up.
+    const second = await runSweep(db, { log });
+    expect(second.invitesExpired).toBe(backlog - SWEEP_INVITE_LAPSE_CAP);
+    const third = await runSweep(db, { log });
+    expect(third.invitesExpired).toBe(0);
+
+    // Nothing lost: every backlog row is `expired`, and the two non-lapsed
+    // rows kept their own status.
+    const rows = db.raw.query("SELECT status, COUNT(*) AS n FROM workspace_invites GROUP BY status").all() as Array<{
+      status: string;
+      n: number;
+    }>;
+    expect(Object.fromEntries(rows.map((row) => [row.status, row.n]))).toEqual({
+      expired: backlog,
+      pending: 1,
+      accepted: 1,
+    });
+    expect(db.raw.query("SELECT id FROM workspace_invites WHERE id = 'live' AND status = 'pending'").all()).toHaveLength(1);
+    // A bounded flip is still a quiet one: no warn line until a failure.
+    expect(calls).toHaveLength(0);
+  });
+
   test("leaves a live pending invite untouched (real D1)", async () => {
     const db = createMigratedTestD1();
     db.raw
@@ -240,8 +294,11 @@ describe("runSweep", () => {
     const result = await runSweep(db, { log });
     // The retention DELETE is parameter-free — no `?` placeholders to bind.
     expect(captured[0]).not.toContain("?");
-    // The only bound parameter in the run is the invite-lapse flip's ISO clock.
+    // The only bound statement in the run is the invite-lapse flip: its ISO
+    // clock plus the per-run row cap.
     expect(binds).toHaveLength(1);
+    expect(binds[0]).toHaveLength(2);
+    expect(binds[0]![1]).toBe(SWEEP_INVITE_LAPSE_CAP);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.fields).toEqual({ event: "retention_swept", deleted: 3 });
     expect(result).toEqual({

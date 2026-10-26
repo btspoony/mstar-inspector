@@ -55,6 +55,12 @@ const UNLIMITED_LIMITS: PlanLimits = {
 };
 
 /**
+ * Ids per subscription read: D1 refuses a statement binding more than 100
+ * parameters, and the read binds one placeholder per id.
+ */
+const PLAN_QUERY_CHUNK = 100;
+
+/**
  * The workspace's active plan limits, or the seeded `free` limits when it has
  * no active subscription row.
  *
@@ -87,10 +93,12 @@ export async function resolveWorkspacePlan(
  *   row. A missing `free` row means migration 0031 did not apply, so it throws
  *   instead of inventing limits.
  *
- * Known limit: the id set is bound one placeholder per workspace, and D1 caps a
- * query at 100 bound parameters. A login's membership list is bounded well below
- * that by the free-slot rule and the plan caps; a list that large would need the
- * resolve chunked.
+ * The id set is bound one placeholder per workspace and D1 caps a statement at
+ * 100 bound parameters, while a login's membership count is bounded by nothing:
+ * the free-slot rule and the plan caps limit paid memberships per workspace, not
+ * how many workspaces may invite one login. The subscription read is therefore
+ * chunked; every id is still resolved, so the switcher never silently loses a
+ * row.
  */
 export async function resolveWorkspacePlans(
   db: WorkspaceStoreD1,
@@ -104,19 +112,22 @@ export async function resolveWorkspacePlans(
     return resolved;
   }
 
-  const placeholders = workspaceIds.map(() => "?").join(", ");
-  const subscribed = await db
-    .prepare(
-      `SELECT s.workspace_id AS workspaceId, p.id AS id, p.name AS name, p.included_members AS includedMembers
-         FROM workspace_subscriptions s
-         JOIN plans p ON p.id = s.plan_id
-        WHERE s.workspace_id IN (${placeholders}) AND s.status = 'active'`,
-    )
-    .bind(...workspaceIds)
-    .all<PlanLimits & { workspaceId: string }>();
-  for (const row of subscribed.results) {
-    // Explicit fields: `workspaceId` is the key, not part of the limits.
-    resolved.set(row.workspaceId, { id: row.id, name: row.name, includedMembers: row.includedMembers });
+  for (let at = 0; at < workspaceIds.length; at += PLAN_QUERY_CHUNK) {
+    const chunk = workspaceIds.slice(at, at + PLAN_QUERY_CHUNK);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const subscribed = await db
+      .prepare(
+        `SELECT s.workspace_id AS workspaceId, p.id AS id, p.name AS name, p.included_members AS includedMembers
+           FROM workspace_subscriptions s
+           JOIN plans p ON p.id = s.plan_id
+          WHERE s.workspace_id IN (${placeholders}) AND s.status = 'active'`,
+      )
+      .bind(...chunk)
+      .all<PlanLimits & { workspaceId: string }>();
+    for (const row of subscribed.results) {
+      // Explicit fields: `workspaceId` is the key, not part of the limits.
+      resolved.set(row.workspaceId, { id: row.id, name: row.name, includedMembers: row.includedMembers });
+    }
   }
 
   let free: PlanLimits | null = null;

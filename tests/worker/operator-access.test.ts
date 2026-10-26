@@ -651,6 +651,27 @@ describe("the shell boot reads the workspace facts once", () => {
     expect(count(statements, WORKSPACE_REREAD)).toBe(0);
   });
 
+  test("a plain workspace member's bare /dashboard lands through the shared landing policy", async () => {
+    // A member, not an operator and holding no grant: the request reaches
+    // `signedInLanding` itself (the support redirect above absorbs the operator
+    // path), so this is the case that keeps the policy wired to the boot it
+    // already paid for.
+    const db = createMigratedTestD1();
+    const member = seedUser(db, "dana");
+    seedMembership(db, "default", member, "member");
+    const { observed, statements } = recordingDb(db);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard", "dana", { accept: "text/html" }),
+      withSpaAssets(envFor(observed)),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/default/apps");
+    // Reinstating a second `workspaceBoot` (the landing re-reading what the
+    // dispatch already resolved) raises this count and fails here.
+    expect(count(statements, ACCESS_JOIN)).toBe(1);
+    expect(count(statements, WORKSPACE_REREAD)).toBe(0);
+  });
+
   test("a non-grant non-member operator keeps the shell and its creation surface", async () => {
     const { db } = fixture();
     const { observed, statements } = recordingDb(db);

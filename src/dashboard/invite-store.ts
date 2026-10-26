@@ -12,10 +12,10 @@
  * `UPDATE … SET status = 'expired' WHERE … expires_at <= ?` as its FIRST
  * statement, inside its own `db.batch`, the reads keep the
  * `status = 'pending' AND expires_at > ?` predicate, and the worker's
- * scheduled sweep flips the rest in bulk ({@link expireLapsedInvites}). Reads
- * never write, so a lapsed row keeps reading `pending` (while already being
- * absent from every list and from the seat count) until a write or the sweep
- * flips it. The partial unique index `workspace_invites_pending` only ever
+ * scheduled sweep flips the rest in bounded batches ({@link expireLapsedInvites}).
+ * Reads never write, so a lapsed row keeps reading `pending` (while already
+ * being absent from every list and from the seat count) until a write or the
+ * sweep flips it. The partial unique index `workspace_invites_pending` only ever
  * holds genuinely live invites — which is what makes a replacement invite
  * after expiry legal while a second invite for a live pending row is still a
  * UNIQUE violation.
@@ -172,26 +172,32 @@ const FLIP_LAPSED_SQL = `UPDATE workspace_invites SET status = 'expired'
 WHERE workspace_id = ? AND status = 'pending' AND expires_at <= ?`;
 
 /**
- * Flip every lapsed pending invite to `expired` — the scheduled sweep's entry
- * point (I-000096). This is the write the members-page read used to perform:
- * reads only filter, so a lapsed row keeps reading `pending` until the next
- * sweep while the `expires_at > ?` predicate already keeps it out of every
- * list and out of the seat count.
+ * Flip at most `cap` lapsed pending invites to `expired` — the scheduled
+ * sweep's entry point (I-000096). This is the write the members-page read used
+ * to perform: reads only filter, so a lapsed row keeps reading `pending` until
+ * the next sweep while the `expires_at > ?` predicate already keeps it out of
+ * every list and out of the seat count.
  *
  * Global on purpose: no `workspace_id` filter, because the write-path flip
  * (FLIP_LAPSED_SQL) only reaches a workspace someone writes to — a workspace
- * nobody touches would keep its lapsed rows `pending` forever. Idempotent by
- * predicate (a second run over the same clock flips zero) and bounded by the
- * `status = 'pending'` partial-index set, so no LIMIT is needed. Returns the
- * flipped row count.
+ * nobody touches would keep its lapsed rows `pending` forever. The candidate
+ * set is bounded per run so one sweep never pays for an unbounded backlog: a
+ * larger backlog drains over successive runs, and the id subquery means the
+ * returned count is the rows this run really flipped.
  */
-export async function expireLapsedInvites(db: InviteStoreD1, now: string): Promise<number> {
+export async function expireLapsedInvites(
+  db: InviteStoreD1,
+  now: string,
+  cap: number,
+): Promise<number> {
   const result = await db
     .prepare(
       `UPDATE workspace_invites SET status = 'expired'
-        WHERE status = 'pending' AND expires_at <= ?`,
+        WHERE id IN (SELECT id FROM workspace_invites
+                      WHERE status = 'pending' AND expires_at <= ?
+                      LIMIT ?)`,
     )
-    .bind(now)
+    .bind(now, cap)
     .run();
   return result.meta.changes;
 }
