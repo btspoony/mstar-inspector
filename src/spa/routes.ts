@@ -31,6 +31,11 @@ export type SpaRoute =
  * set for the SPA matcher and the Worker's route-family gate
  * (`src/dashboard/index.ts`), so a reserved word can never be captured as a
  * workspace on either side of the bundle boundary.
+ *
+ * Reserved words occupy the FIRST segment after the mount; the route family
+ * below is the SECOND. The Worker admits three of the family's four members
+ * (`settings` has no Worker route under `/<ref>/`), so the two lists are not
+ * interchangeable — only the reserved set is shared verbatim.
  */
 export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
   "apps",
@@ -45,15 +50,26 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The non-reserved workspace ref (an id or a slug) a
- * `/dashboard/<ref>/{apps|members|api}…` path is scoped to, otherwise null —
- * the request-path ordering contract's step 1 grammar, mirrored by the Worker's
+ * The workspace route family: the SECOND path segment that scopes a page or a
+ * route to a workspace. ONE source for the SPA matcher below and the Worker's
+ * route-family gate (`src/dashboard/index.ts`), which derives from it.
+ */
+export const WORKSPACE_FAMILY_SEGMENTS = ["apps", "members", "settings", "api"] as const;
+
+/**
+ * The non-reserved workspace ref (an id or a slug) a `/dashboard/<ref>/<family
+ * segment>…` path is scoped to, otherwise null — the request-path ordering
+ * contract's step 1 grammar, mirrored by the Worker's
  * `classifyDashboardPath`. The ONE workspace-path grammar: the route matcher,
  * the API-base derivation (`workspace-base.ts`) and the sidebar links all read
  * it, so a page's prefix cannot disagree with its matched route.
  */
+const WORKSPACE_REF_PATH = new RegExp(
+  `^/dashboard/([^/]+)/(?:${WORKSPACE_FAMILY_SEGMENTS.join("|")})(?:/|$)`,
+);
+
 export function workspaceRefOf(pathname: string): string | null {
-  const ref = /^\/dashboard\/([^/]+)\/(?:apps|members|settings|api)(?:\/|$)/.exec(pathname)?.[1];
+  const ref = WORKSPACE_REF_PATH.exec(pathname)?.[1];
   return ref !== undefined && !RESERVED_WORKSPACE_SLUGS.has(ref) ? ref : null;
 }
 

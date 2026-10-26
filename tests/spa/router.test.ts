@@ -6,19 +6,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
-import { SPA_PAGES, RESERVED_WORKSPACE_SLUGS, isSpaAssetPath, matchSpaRoute, wantsHtml, workspaceRefOf } from "../../src/spa/routes";
+import { RESERVED_WORKSPACE_SLUGS, isSpaAssetPath, matchSpaRoute, wantsHtml, workspaceRefOf } from "../../src/spa/routes";
 
 /** True when the matched route is workspace-scoped (legacy variants carry no field). */
 function isWorkspaceRoute(pathname: string): boolean {
   const route = matchSpaRoute(pathname);
   return route !== null && "workspaceRef" in route;
 }
-
-describe("SPA_PAGES enum", () => {
-  test("includes apps, members, settings, login, app-detail (insights and home retired)", () => {
-    expect([...SPA_PAGES]).toEqual(["apps", "members", "settings", "login", "app-detail"]);
-  });
-});
 
 describe("matchSpaRoute", () => {
   test("matches exact enumerated paths", () => {

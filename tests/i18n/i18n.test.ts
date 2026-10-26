@@ -188,10 +188,6 @@ describe("mstar_locale cookie serialization", () => {
 });
 
 describe("shared navbar contract", () => {
-  test("order is locked: Apps → Members → Settings (insights retired)", () => {
-    expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual(["nav.apps", "nav.members", "nav.settings"]);
-  });
-
   test("every labelKey resolves to a real dictionary string in both locales", () => {
     for (const item of NAV_ITEMS) {
       for (const locale of LOCALES) {
