@@ -208,15 +208,16 @@ function resolveModuleTarget(specifier: string, fromFile: string): string {
  * import/require/re-export spelling. `import type` and an all-`type` named
  * clause are erased, so they are not runtime edges.
  *
- * The clause is matched as `[^;'"]` OR a complete double-quoted string: a
- * named clause may be quoted (`export { "Hono" as Hono } from "hono"`, the
- * ES2022 arbitrary-module-namespace spelling), and a quote-blind class ended
- * the clause there and dropped the edge silently.
+ * The clause is matched as `[^;'"]` OR a complete quoted string in either
+ * delimiter: a named clause may be quoted (`export { "Hono" as Hono } from
+ * "hono"` / `export { 'Hono' as Hono } from "hono"`, the ES2022 arbitrary
+ * module-namespace spelling), and a quote-blind class ended the clause there
+ * and dropped the edge silently.
  */
 function runtimeSpecifiers(source: string): string[] {
   const specs: string[] = [];
   for (const [, modifier, clause = "", specifier = ""] of source.matchAll(
-    /\b(?:import|export)\s+(type\s+)?((?:[^;'"]|"[^"]*")*?)from\s*["']([^"']+)["']/g,
+    /\b(?:import|export)\s+(type\s+)?((?:[^;'"]|"[^"]*"|'[^']*')*?)from\s*["']([^"']+)["']/g,
   )) {
     const named = clause.match(/\{([\s\S]*)\}/)?.[1];
     // Only the `type ` keyword erases a specifier, and it can never sit inside
@@ -335,6 +336,7 @@ describe("in-image module graph — the image ships packages/runner/src plus the
     // A quoted export name is the same runtime edge: the quote-blind clause
     // class ended at the `"` and dropped it silently.
     expect(runtimeSpecifiers('export { "Hono" as Hono } from "hono";')).toEqual(["hono"]);
+    expect(runtimeSpecifiers("export { 'Hono' as Hono } from 'hono';")).toEqual(["hono"]);
     expect(runtimeSpecifiers('import { "default" as Hono } from "hono";')).toEqual(["hono"]);
     expect(runtimeSpecifiers('export type { T } from "hono";')).toEqual([]);
     expect(runtimeSpecifiers('import type { T } from "hono";')).toEqual([]);
@@ -342,5 +344,11 @@ describe("in-image module graph — the image ships packages/runner/src plus the
     expect(runtimeSpecifiers('export { type T } from "hono";')).toEqual([]);
     expect(runtimeSpecifiers('export { "type" as T } from "hono";')).toEqual(["hono"]);
     expect(runtimeSpecifiers('export { a } from "./credential-key";')).toEqual(["./credential-key"]);
+    // Relative targets stay captured, in either delimiter — they are excluded
+    // by the admission check above, never by dropping the edge here.
+    expect(runtimeSpecifiers("export { x } from './local';")).toEqual(["./local"]);
+    expect(runtimeSpecifiers('export { "Hono" as Hono } from "../../../src/worker/index";')).toEqual([
+      "../../../src/worker/index",
+    ]);
   });
 });
