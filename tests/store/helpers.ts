@@ -70,6 +70,13 @@ function wrapStatement(stmt: Statement): D1StatementLike {
       results: T[];
       meta: { changes: number; last_row_id: number };
     }> {
+      // D1 returns a statement's ROWS in its `D1Result` (`batch()` position for
+      // position), so a SELECT placed in a batch is readable there. bun:sqlite
+      // `run()` discards them, so a row-returning statement goes through
+      // `all()` — the shape callers rely on when a batch classifies a refusal.
+      if (stmt.columnNames.length > 0) {
+        return { results: stmt.all(...bound) as T[], meta: { changes: 0, last_row_id: 0 } };
+      }
       const info = stmt.run(...bound);
       return {
         results: [] as T[],

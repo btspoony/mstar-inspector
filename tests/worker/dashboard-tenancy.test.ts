@@ -14,8 +14,10 @@
  * workspace here is explicit, which keeps the role matrix readable.
  */
 import { describe, expect, test } from "bun:test";
+import { Hono } from "hono";
 import type { ReactElement } from "react";
 import worker from "../../src/worker/index";
+import { requireMember, type DashboardVariables } from "../../src/dashboard/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -1334,6 +1336,74 @@ describe("App creation is owner/admin", () => {
     // The shell names the missing input, so the disabled Create control can
     // explain itself instead of vanishing.
     expect(boot.workspaceRequired).toBe(true);
+  });
+});
+
+describe("the route-local member gate", () => {
+  /**
+   * Every statement the request prepares, in order. The session guard and
+   * `requireMember` both read the caller's `users` row, so the count of
+   * `users` lookups is the read the request actually pays twice.
+   */
+  function recordingDb(db: TestD1): { observed: TestD1; statements: string[] } {
+    const statements: string[] = [];
+    const observed = {
+      ...db,
+      prepare(query: string) {
+        statements.push(query);
+        return db.prepare(query);
+      },
+    } as TestD1;
+    return { observed, statements };
+  }
+
+  const USER_READ = /FROM users WHERE github_login/;
+
+  test("a workspace route reads the users row once per request", async () => {
+    const { db } = tenancyFixture();
+    const { observed, statements } = recordingDb(db);
+    const res = await worker.fetch(
+      await authedRequest("/dashboard/acme/api/apps", "mallory"),
+      envFor(observed),
+    );
+    // The route still answers with the caller's own identity and workspace.
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { viewer: { login: string }; apps: Array<{ slug: string }> };
+    expect(body.viewer.login).toBe("mallory");
+    expect(body.apps.map((app) => app.slug)).toEqual(["acme-app"]);
+    // The guard already read this row; the gate must not read it again.
+    expect(statements.filter((sql) => USER_READ.test(sql))).toHaveLength(1);
+  });
+
+  test("a mount without the session guard still resolves the user", async () => {
+    // The fallback half: no guard ran, so `authUser` is absent from the
+    // context and the gate reads the row for itself. A mount that skipped
+    // that read would answer `undefined` instead of the caller.
+    const db = createMigratedTestD1();
+    seedUser(db, "mallory", "member");
+    const { observed, statements } = recordingDb(db);
+    const bare = new Hono<{ Bindings: Env; Variables: DashboardVariables }>();
+    // The workspace-scope verdict without the guard that usually precedes it.
+    bare.use("*", async (c, next) => {
+      c.set("tenant", { ref: "default", workspaceId: "default", role: "owner", principal: "member" });
+      c.set("workspaceScope", { workspaceId: "default", role: "owner" });
+      await next();
+    });
+    bare.get("/gate", async (c) => {
+      const gate = await requireMember(c);
+      if (!gate.ok) return gate.response;
+      return c.json({ login: gate.user.github_login, role: gate.scope.role });
+    });
+    const session = await createSessionValue("mallory", null, SESSION_SECRET);
+    const res = await bare.fetch(
+      new Request("https://worker.local/gate", {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      envFor(observed),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ login: "mallory", role: "owner" });
+    expect(statements.filter((sql) => USER_READ.test(sql))).toHaveLength(1);
   });
 });
 

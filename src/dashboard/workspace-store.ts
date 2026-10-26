@@ -140,31 +140,53 @@ export async function getWorkspaceMember(
 }
 
 /**
- * The deployment's single live workspace, or null when it does not carry
- * exactly one. Route-level resolution for requests that name no workspace.
- * It confers no tenant — the store takes ownership as a caller input.
+ * One workspace plus the login's role and users-row identity — ONE read,
+ * because the SPA shell boot needs the slug, the support classifier needs the
+ * id + role + login's own row, and the manifest gate needs the id and role.
  */
-export async function getSoleWorkspace(db: WorkspaceStoreD1): Promise<WorkspaceRow | null> {
-  const rows = await db
-    .prepare(`SELECT id, slug, name, created_at FROM workspaces WHERE deleted_at IS NULL LIMIT 2`)
-    .all<WorkspaceRow>();
-  return rows.results.length === 1 ? rows.results[0]! : null;
+export type WorkspaceAccess = {
+  id: string;
+  slug: string;
+  role: WorkspaceRole | null;
+  /** The login's `users` row identity; null when the login has no row. */
+  user: { id: string; github_login: string } | null;
+};
+
+/** The access join's row shape (the login's users row may be absent). */
+type WorkspaceAccessRow = {
+  id: string;
+  slug: string;
+  role: WorkspaceRole | null;
+  user_id: string | null;
+  user_login: string | null;
+};
+
+function workspaceAccessOf(row: WorkspaceAccessRow): WorkspaceAccess {
+  return {
+    id: row.id,
+    slug: row.slug,
+    role: row.role,
+    user:
+      row.user_id === null || row.user_login === null
+        ? null
+        : { id: row.user_id, github_login: row.user_login },
+  };
 }
 
 /**
- * The sole live workspace's id + slug plus the login's role inside it — ONE
- * read, because the SPA shell boot needs the slug, and the manifest gate needs
- * the id and the role. Null under the same predicate as
- * {@link getSoleWorkspace}; a login with no users row or no membership resolves
- * `role: null` (not a member), never an error.
+ * The sole live workspace's id + slug plus the login's role and users row
+ * inside it. Null when the deployment does not carry exactly one live
+ * workspace; a login with no users row resolves `role: null` and
+ * `user: null` (not a member), never an error.
  */
 export async function getSoleWorkspaceAccess(
   db: WorkspaceStoreD1,
   login: string,
-): Promise<{ id: string; slug: string; role: WorkspaceRole | null } | null> {
+): Promise<WorkspaceAccess | null> {
   const rows = await db
     .prepare(
-      `SELECT w.id AS id, w.slug AS slug, wm.role AS role
+      `SELECT w.id AS id, w.slug AS slug, wm.role AS role,
+              u.id AS user_id, u.github_login AS user_login
          FROM workspaces w
          LEFT JOIN users u ON u.github_login = ? COLLATE NOCASE
          LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = u.id
@@ -172,9 +194,9 @@ export async function getSoleWorkspaceAccess(
         LIMIT 2`,
     )
     .bind(login)
-    .all<{ id: string; slug: string; role: WorkspaceRole | null }>();
+    .all<WorkspaceAccessRow>();
   const row = rows.results.length === 1 ? rows.results[0]! : null;
-  return row === null ? null : { id: row.id, slug: row.slug, role: row.role };
+  return row === null ? null : workspaceAccessOf(row);
 }
 
 /**
@@ -188,18 +210,19 @@ export async function getWorkspaceAccessById(
   db: WorkspaceStoreD1,
   workspaceId: string,
   login: string,
-): Promise<{ id: string; slug: string; role: WorkspaceRole | null } | null> {
+): Promise<WorkspaceAccess | null> {
   const row = await db
     .prepare(
-      `SELECT w.id AS id, w.slug AS slug, wm.role AS role
+      `SELECT w.id AS id, w.slug AS slug, wm.role AS role,
+              u.id AS user_id, u.github_login AS user_login
          FROM workspaces w
          LEFT JOIN users u ON u.github_login = ?2 COLLATE NOCASE
          LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = u.id
         WHERE w.id = ?1 AND w.deleted_at IS NULL`,
     )
     .bind(workspaceId, login)
-    .first<{ id: string; slug: string; role: WorkspaceRole | null }>();
-  return row === null ? null : { id: row.id, slug: row.slug, role: row.role };
+    .first<WorkspaceAccessRow>();
+  return row === null ? null : workspaceAccessOf(row);
 }
 
 /**
@@ -214,10 +237,11 @@ export async function getWorkspaceAccessByRef(
   db: WorkspaceStoreD1,
   ref: string,
   login: string,
-): Promise<{ id: string; slug: string; role: WorkspaceRole | null } | null> {
+): Promise<WorkspaceAccess | null> {
   const rows = await db
     .prepare(
-      `SELECT w.id AS id, w.slug AS slug, wm.role AS role
+      `SELECT w.id AS id, w.slug AS slug, wm.role AS role,
+              u.id AS user_id, u.github_login AS user_login
          FROM workspaces w
          LEFT JOIN users u ON u.github_login = ?2 COLLATE NOCASE
          LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = u.id
@@ -225,20 +249,20 @@ export async function getWorkspaceAccessByRef(
         LIMIT 2`,
     )
     .bind(ref, login)
-    .all<{ id: string; slug: string; role: WorkspaceRole | null }>();
+    .all<WorkspaceAccessRow>();
   if (rows.results.length > 1) {
     console.warn(JSON.stringify({ event: "workspace_ref_ambiguous", ref }));
     return null;
   }
   const row = rows.results[0];
-  return row === undefined ? null : { id: row.id, slug: row.slug, role: row.role };
+  return row === undefined ? null : workspaceAccessOf(row);
 }
 
 /**
  * How many live workspaces the DEPLOYMENT carries — the fact that decides
  * whether a request which names no workspace can still be attributed: exactly
- * one resolves through {@link getSoleWorkspace}, more than one has no answer at
- * all. Soft-deleted workspaces do not count.
+ * one resolves through {@link getSoleWorkspaceAccess}, more than one has no
+ * answer at all. Soft-deleted workspaces do not count.
  */
 export async function countLiveWorkspaces(db: WorkspaceStoreD1): Promise<number> {
   const row = await db

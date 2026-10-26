@@ -203,6 +203,40 @@ function resolveModuleTarget(specifier: string, fromFile: string): string {
   return candidates.find((candidate) => existsSync(candidate)) ?? base;
 }
 
+/**
+ * Runtime (non-erased) module specifiers in one source text, in every
+ * import/require/re-export spelling. `import type` and an all-`type` named
+ * clause are erased, so they are not runtime edges.
+ *
+ * The clause is matched as `[^;'"]` OR a complete quoted string in either
+ * delimiter: a named clause may be quoted (`export { "Hono" as Hono } from
+ * "hono"` / `export { 'Hono' as Hono } from "hono"`, the ES2022 arbitrary
+ * module-namespace spelling), and a quote-blind class ended the clause there
+ * and dropped the edge silently.
+ */
+function runtimeSpecifiers(source: string): string[] {
+  const specs: string[] = [];
+  for (const [, modifier, clause = "", specifier = ""] of source.matchAll(
+    /\b(?:import|export)\s+(type\s+)?((?:[^;'"]|"[^"]*"|'[^']*')*?)from\s*["']([^"']+)["']/g,
+  )) {
+    const named = clause.match(/\{([\s\S]*)\}/)?.[1];
+    // Only the `type ` keyword erases a specifier, and it can never sit inside
+    // a quoted name — so a comma-split of a quoted name still yields a
+    // non-`type` item and the edge is recorded rather than dropped.
+    const specifiers = named?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
+    const typeOnly =
+      modifier !== undefined ||
+      (specifiers.length > 0 && specifiers.every((s) => /^type\s/.test(s)));
+    if (!typeOnly) specs.push(specifier);
+  }
+  for (const [, specifier = ""] of source.matchAll(
+    /\b(?:import|require)\s*\(?\s*["']([^"']+)["']/g,
+  )) {
+    specs.push(specifier);
+  }
+  return specs;
+}
+
 describe("in-image module graph — the image ships packages/runner/src plus the shared package only", () => {
   const copySources = dockerfileCopySources(readFileSync(OMP_DOCKERFILE, "utf8"));
   const admittedShared = admittedSharedFiles(copySources);
@@ -286,23 +320,35 @@ describe("in-image module graph — the image ships packages/runner/src plus the
       }
     };
     for (const file of admittedShared) {
-      const source = stripComments(readFileSync(file, "utf8"));
-      for (const [, modifier, clause = "", specifier = ""] of source.matchAll(
-        /\bimport\s+(type\s+)?([^;'"]*?)from\s*["']([^"']+)["']/g,
-      )) {
-        const named = clause.match(/\{([\s\S]*)\}/)?.[1];
-        const specifiers = named?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
-        const typeOnly =
-          modifier !== undefined ||
-          (specifiers.length > 0 && specifiers.every((s) => /^type\s/.test(s)));
-        if (!typeOnly) check(file, specifier);
-      }
-      for (const [, specifier = ""] of source.matchAll(
-        /\b(?:import|require)\s*\(?\s*["']([^"']+)["']/g,
-      )) {
+      for (const specifier of runtimeSpecifiers(stripComments(readFileSync(file, "utf8")))) {
         check(file, specifier);
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  test("negative control — the scan flags a re-exported bare specifier", () => {
+    // The pre-fix scan matched `import … from` only, so `export … from` — the
+    // exact spelling that adds a runtime edge — passed unseen.
+    expect(runtimeSpecifiers('import { a } from "hono";')).toEqual(["hono"]);
+    expect(runtimeSpecifiers('export { a } from "hono";')).toEqual(["hono"]);
+    expect(runtimeSpecifiers('export * from "hono";')).toEqual(["hono"]);
+    // A quoted export name is the same runtime edge: the quote-blind clause
+    // class ended at the `"` and dropped it silently.
+    expect(runtimeSpecifiers('export { "Hono" as Hono } from "hono";')).toEqual(["hono"]);
+    expect(runtimeSpecifiers("export { 'Hono' as Hono } from 'hono';")).toEqual(["hono"]);
+    expect(runtimeSpecifiers('import { "default" as Hono } from "hono";')).toEqual(["hono"]);
+    expect(runtimeSpecifiers('export type { T } from "hono";')).toEqual([]);
+    expect(runtimeSpecifiers('import type { T } from "hono";')).toEqual([]);
+    // A quoted name is never a `type` marker, so it stays a runtime edge.
+    expect(runtimeSpecifiers('export { type T } from "hono";')).toEqual([]);
+    expect(runtimeSpecifiers('export { "type" as T } from "hono";')).toEqual(["hono"]);
+    expect(runtimeSpecifiers('export { a } from "./credential-key";')).toEqual(["./credential-key"]);
+    // Relative targets stay captured, in either delimiter — they are excluded
+    // by the admission check above, never by dropping the edge here.
+    expect(runtimeSpecifiers("export { x } from './local';")).toEqual(["./local"]);
+    expect(runtimeSpecifiers('export { "Hono" as Hono } from "../../../src/worker/index";')).toEqual([
+      "../../../src/worker/index",
+    ]);
   });
 });

@@ -12,10 +12,10 @@
  * `UPDATE … SET status = 'expired' WHERE … expires_at <= ?` as its FIRST
  * statement, inside its own `db.batch`, the reads keep the
  * `status = 'pending' AND expires_at > ?` predicate, and the worker's
- * scheduled sweep flips the rest in bulk ({@link expireLapsedInvites}). Reads
- * never write, so a lapsed row keeps reading `pending` (while already being
- * absent from every list and from the seat count) until a write or the sweep
- * flips it. The partial unique index `workspace_invites_pending` only ever
+ * scheduled sweep flips the rest in bounded batches ({@link expireLapsedInvites}).
+ * Reads never write, so a lapsed row keeps reading `pending` (while already
+ * being absent from every list and from the seat count) until a write or the
+ * sweep flips it. The partial unique index `workspace_invites_pending` only ever
  * holds genuinely live invites — which is what makes a replacement invite
  * after expiry legal while a second invite for a live pending row is still a
  * UNIQUE violation.
@@ -128,6 +128,42 @@ function isUniqueConstraintError(err: unknown): boolean {
 }
 
 /**
+ * Bind one statement by NAME: its `:name` tokens become D1's `?N` placeholders,
+ * numbered in first-appearance order, and the values follow that same order.
+ * Each guard therefore carries its own values, and appending or reordering a
+ * guard cannot shift another guard's parameter — no statement's position is
+ * derived from the order conditions were pushed.
+ *
+ * A token with no supplied value throws instead of binding NULL: the guards
+ * that must disappear on an unlimited plan are OMITTED from the SQL text (and
+ * their value from the map), never bound as NULL — `count < NULL` evaluates to
+ * NULL, which would refuse every write.
+ */
+function bindNamed(
+  statement: string,
+  values: Record<string, unknown>,
+): { sql: string; bindings: unknown[] } {
+  const order: string[] = [];
+  const sql = statement.replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (_token, name: string) => {
+    let at = order.indexOf(name);
+    if (at === -1) {
+      order.push(name);
+      at = order.length - 1;
+    }
+    return `?${at + 1}`;
+  });
+  return {
+    sql,
+    bindings: order.map((name) => {
+      if (!(name in values)) {
+        throw new Error(`invite-store: no value supplied for the :${name} bind`);
+      }
+      return values[name];
+    }),
+  };
+}
+
+/**
  * The write-path flip: every invite write path runs it FIRST, in the same
  * batch as its own write. The sweep's bulk flip ({@link expireLapsedInvites})
  * is the other producer.
@@ -136,19 +172,42 @@ const FLIP_LAPSED_SQL = `UPDATE workspace_invites SET status = 'expired'
 WHERE workspace_id = ? AND status = 'pending' AND expires_at <= ?`;
 
 /**
- * Flip every lapsed pending invite to `expired` — the scheduled sweep's entry
- * point (I-000096). This is the write the members-page read used to perform:
- * reads only filter, so a lapsed row keeps reading `pending` until the next
- * sweep while the `expires_at > ?` predicate already keeps it out of every
- * list and out of the seat count. Returns the flipped row count.
+ * Flip at most `cap` lapsed pending invites to `expired` — the scheduled
+ * sweep's entry point (I-000096). This is the write the members-page read used
+ * to perform: reads only filter, so a lapsed row keeps reading `pending` until
+ * the next sweep while the `expires_at > ?` predicate already keeps it out of
+ * every list and out of the seat count.
+ *
+ * Global on purpose: no `workspace_id` filter, because the write-path flip
+ * (FLIP_LAPSED_SQL) only reaches a workspace someone writes to — a workspace
+ * nobody touches would keep its lapsed rows `pending` forever. The candidate
+ * set is bounded per run so one sweep never pays for an unbounded backlog: a
+ * larger backlog drains over successive runs, and the id subquery means the
+ * returned count is the rows this run really flipped.
+ *
+ * The candidate order is `expires_at, id`, not the planner's default: a bare
+ * LIMIT picks whichever rows the access path happens to reach first, so a
+ * steady inflow of newly lapsed rows could keep re-filling the cap and
+ * postpone an older lapsed row forever. Oldest-first makes each run drain
+ * from the front of the backlog, and `id` breaks equal-expiry ties
+ * deterministically. `workspace_invites_expiry` (migration 0035) keys the
+ * partial pending set by exactly this order, so the ordering is a bounded
+ * index seek rather than a sort over the whole pending set.
  */
-export async function expireLapsedInvites(db: InviteStoreD1, now: string): Promise<number> {
+export async function expireLapsedInvites(
+  db: InviteStoreD1,
+  now: string,
+  cap: number,
+): Promise<number> {
   const result = await db
     .prepare(
       `UPDATE workspace_invites SET status = 'expired'
-        WHERE status = 'pending' AND expires_at <= ?`,
+        WHERE id IN (SELECT id FROM workspace_invites
+                      WHERE status = 'pending' AND expires_at <= ?
+                      ORDER BY expires_at, id
+                      LIMIT ?)`,
     )
-    .bind(now)
+    .bind(now, cap)
     .run();
   return result.meta.changes;
 }
@@ -161,36 +220,37 @@ const LIVE = `status = 'pending' AND expires_at > ?`;
  * pending invites below the plan's included seats. Re-reading the count inside
  * the insert is what closes the read-then-write window — two concurrent creates
  * both pass the route's fast-fail read, and the second one's condition is false,
- * so its batch writes no invite row. Parameters: `?2` the workspace, `?6` the
- * stamp the flip above used (so a lapsed row is already `expired` and holds no
- * seat), `?8` the plan's included members.
+ * so its batch writes no invite row. Its `:workspaceId` / `:now` tokens are the
+ * same ones the insert above binds, so the guard reuses them by NAME instead of
+ * relying on a positional `?N`. It appears only for a numeric limit, and
+ * `:limit` is only ever bound by that numeric path (see `bindNamed`).
  */
 const SEAT_GUARD_SQL = `(SELECT
-        (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?2)
+        (SELECT COUNT(*) FROM workspace_members WHERE workspace_id = :workspaceId)
       + (SELECT COUNT(*) FROM workspace_invites
-          WHERE workspace_id = ?2 AND status = 'pending' AND expires_at > ?6)) < ?8`;
+          WHERE workspace_id = :workspaceId AND status = 'pending' AND expires_at > :now)) < :limit`;
 
 /**
- * The acceptance's free-slot guard (SF-1), as a SQL condition the membership
- * insert carries: the row may only be written when the TARGET workspace is on a
- * paid plan, or the accepting login holds no live free membership yet — the
- * same join rule as `countFreeMembershipsForLogin`. Re-reading it inside the
- * insert is what closes the read-then-write window the route gate leaves open.
- * Parameters: `?4` the free plan id; `?2` the accepting login; `i` is the
- * invite row.
+ * The acceptance's free-slot ALLOW predicate, as a SQL condition the membership
+ * insert carries: true only when the TARGET workspace is on a paid plan, or the
+ * accepting login holds no live free membership yet — the same join rule as
+ * `countFreeMembershipsForLogin`. Re-reading it inside the insert is what closes
+ * the read-then-write window the route gate leaves open. Its `:login` token is
+ * the insert above's own; `:freePlanId` is bound only by the `saas` path that
+ * appends this condition. `i` is the invite row.
  */
 const ACCEPT_FREE_SLOT_GUARD_SQL = `(EXISTS (
         SELECT 1 FROM workspace_subscriptions ts
          WHERE ts.workspace_id = i.workspace_id AND ts.status = 'active'
-           AND ts.plan_id <> ?4)
+           AND ts.plan_id <> :freePlanId)
       OR (SELECT COUNT(*) FROM workspace_members m
             JOIN users mu ON mu.id = m.user_id
             JOIN workspaces w ON w.id = m.workspace_id
             LEFT JOIN workspace_subscriptions s
                    ON s.workspace_id = w.id AND s.status = 'active'
-           WHERE mu.github_login = ?2 COLLATE NOCASE
+           WHERE mu.github_login = :login COLLATE NOCASE
              AND w.deleted_at IS NULL
-             AND (s.plan_id IS NULL OR s.plan_id = ?4)) < 1)`;
+             AND (s.plan_id IS NULL OR s.plan_id = :freePlanId)) < 1)`;
 
 /**
  * The acceptance's seat condition, as a SQL condition its membership insert
@@ -209,14 +269,14 @@ const ACCEPT_FREE_SLOT_GUARD_SQL = `(EXISTS (
  * reach the cap the rest refuse `member_cap` and stay pending. Refusing every
  * conversion instead would strand invites that were legitimately issued.
  *
- * Parameters: the workspace comes from the insert's own `i` row. `?5` is the
- * limit: a numeric limit only exists in `saas`, where the free-slot guard
- * above has already bound `?4` (`resolveWorkspacePlan` answers `unlimited` for
- * `self-hosted` before reading the catalogue).
+ * The workspace comes from the insert's own `i` row. `:limit` is bound only by
+ * the numeric-limit path that appends this condition: an unlimited plan omits
+ * the condition instead of binding NULL (`count < NULL` is NULL, so it would
+ * refuse every acceptance).
  */
 const ACCEPT_SEAT_GUARD_SQL = `(SELECT COUNT(*)
         FROM workspace_members am
-       WHERE am.workspace_id = i.workspace_id) < ?5`;
+       WHERE am.workspace_id = i.workspace_id) < :limit`;
 
 const INVITE_COLUMNS = `id, workspace_id, github_login, role, status, invited_by,
        created_at, expires_at, accepted_at`;
@@ -224,13 +284,14 @@ const INVITE_COLUMNS = `id, workspace_id, github_login, role, status, invited_by
 /**
  * The invite row insert without the seat condition. `createInvite` appends
  * {@link SEAT_GUARD_SQL} only for a numeric seat limit: a NULL limit means no
- * cap, and binding NULL into `?8` would make `count < NULL` evaluate to NULL,
- * so the insert would write no row and mint a spurious refusal.
+ * cap, and binding NULL into `:limit` would make `count < NULL` evaluate to
+ * NULL, so the insert would write no row and mint a spurious refusal.
  */
 const INVITE_INSERT_SQL = `INSERT INTO workspace_invites
              (id, workspace_id, github_login, role, status, invited_by,
               created_at, expires_at, accepted_at)
-           SELECT ?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, NULL`;
+           SELECT :id, :workspaceId, :login, :role, 'pending', :invitedBy,
+                  :now, :expiresAt, NULL`;
 
 /**
  * Create a pending invite. The flip runs first so a lapsed row stops blocking
@@ -272,24 +333,25 @@ export async function createInvite(
     accepted_at: null,
   };
   const limit = (await resolveWorkspacePlan(db, input.workspaceId, mode)).includedMembers;
-  const values: unknown[] = [
-    row.id,
-    row.workspace_id,
-    row.github_login,
-    row.role,
-    row.invited_by,
-    row.created_at,
-    row.expires_at,
-  ];
-  const insert =
-    limit === null
-      ? db.prepare(INVITE_INSERT_SQL).bind(...values)
-      : db
-          .prepare(`${INVITE_INSERT_SQL}\n            WHERE ${SEAT_GUARD_SQL}`)
-          .bind(...values, limit);
+  const values: Record<string, unknown> = {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    login: row.github_login,
+    role: row.role,
+    invitedBy: row.invited_by,
+    now: row.created_at,
+    expiresAt: row.expires_at,
+  };
+  // The seat condition is appended (and only then is `:limit` supplied): an
+  // unlimited plan omits it entirely rather than binding NULL into it.
+  const guarded = limit === null ? INVITE_INSERT_SQL : `${INVITE_INSERT_SQL}\n            WHERE ${SEAT_GUARD_SQL}`;
+  const insert = bindNamed(guarded, limit === null ? values : { ...values, limit });
   let results: { results: unknown[]; meta: { changes: number; last_row_id: number } }[];
   try {
-    results = await db.batch([db.prepare(FLIP_LAPSED_SQL).bind(input.workspaceId, input.now), insert]);
+    results = await db.batch([
+      db.prepare(FLIP_LAPSED_SQL).bind(input.workspaceId, input.now),
+      db.prepare(insert.sql).bind(...insert.bindings),
+    ]);
   } catch (err) {
     if (isUniqueConstraintError(err)) throw new InvitePendingExistsError(input.login);
     throw err;
@@ -449,6 +511,14 @@ export async function revokeInvite(
  * binding NULL would make `count < NULL` evaluate to NULL and refuse every
  * acceptance on an unlimited plan.
  *
+ * WHICH guard blocked is decided by a classifier SELECT appended to the SAME
+ * batch, so the answer is read off the transaction snapshot the insert's guards
+ * themselves evaluated — there is no window between the refusal and its
+ * classification, which a per-batch re-read cannot promise. When both predicates
+ * refuse the free-slot class wins (`I-000169`): its recovery is the one the
+ * invitee can perform alone, while `member_cap`'s plan-upgrade copy misleads a
+ * login that also holds a free workspace.
+ *
  * The free slot is enforced BY the write too: the membership insert carries
  * {@link ACCEPT_FREE_SLOT_GUARD_SQL}, and the invite is only consumed when the
  * accepting login is a member of that workspace — so a refusal leaves the
@@ -499,33 +569,64 @@ export async function acceptInvite(
     return { kind: "expired" };
   }
 
-  // Conditions append in the order their parameters are bound: the free-slot
-  // guard binds `?4` (saas only), the seat guard binds `?5` (numeric limit
-  // only). Both are OMITTED, never bound as NULL, when inert.
+  // Both guards append their own NAME tokens; `bindNamed` numbers each
+  // statement's placeholders from the text itself, so neither guard's parameter
+  // position depends on which conditions are present. A condition that is inert
+  // is OMITTED from the SQL (and its value from the map), never bound as NULL:
+  // `count < NULL` is NULL, which would refuse every acceptance.
+  //
+  // This literal's order IS the refusal precedence (free slot, then seat), used
+  // by both the insert's AND chain and the classifier's CASE below — so
+  // precedence is stated once here instead of falling out of a push sequence.
   const limit = (await resolveWorkspacePlan(db, invite.workspace_id, mode)).includedMembers;
-  const bindings: unknown[] = [now, login, inviteId];
-  const conditions: string[] = [];
-  if (mode === "saas") {
-    conditions.push(ACCEPT_FREE_SLOT_GUARD_SQL);
-    bindings.push(FREE_PLAN_ID);
-  }
-  if (limit !== null) {
-    conditions.push(ACCEPT_SEAT_GUARD_SQL);
-    bindings.push(limit);
-  }
-  const guard = conditions.map((condition) => `\n            AND ${condition}`).join("");
-  await db.batch([
-    db.prepare(FLIP_LAPSED_SQL).bind(invite.workspace_id, now),
-    db
-      .prepare(
-        `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
-         SELECT i.workspace_id, u.id, i.role, ?1
+  const conditions = [
+    mode === "saas"
+      ? { allow: ACCEPT_FREE_SLOT_GUARD_SQL, refusal: "free_slot" as const, binds: { freePlanId: FREE_PLAN_ID } }
+      : null,
+    limit !== null
+      ? { allow: ACCEPT_SEAT_GUARD_SQL, refusal: "member_cap" as const, binds: { limit } }
+      : null,
+  ].filter((condition) => condition !== null);
+  const bindings: Record<string, unknown> = { now, login, inviteId };
+  for (const condition of conditions) Object.assign(bindings, condition.binds);
+  const guard = conditions.map((condition) => `\n            AND ${condition.allow}`).join("");
+
+  // The refusal classifier runs INSIDE the same batch, so it evaluates both
+  // allow predicates on the transaction snapshot the insert's own guards read —
+  // no window between the refusal and its classification. Precedence when both
+  // refuse is the free-slot class: it is the one the invitee can clear alone,
+  // and `member_cap`'s plan-upgrade copy would mislead a login that also holds a
+  // free workspace. The trailing ELSE is the residual (a blocker cleared
+  // concurrently): it keeps the free-slot copy, whose last instruction ("then
+  // accept this invite") is exactly what the retry then succeeds at.
+  //
+  // Only a numeric limit brings a second possible class, so an unlimited plan
+  // needs no classifier — the free-slot refusal is already the throw below.
+  const classified =
+    limit === null
+      ? null
+      : bindNamed(
+          `SELECT CASE${conditions
+            .map((condition) => `\n         WHEN NOT ${condition.allow} THEN '${condition.refusal}'`)
+            .join("")}
+         ELSE 'free_slot'
+       END AS blockedBy
+  FROM workspace_invites i WHERE i.id = :inviteId`,
+          bindings,
+        );
+  const insert = bindNamed(
+    `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
+         SELECT i.workspace_id, u.id, i.role, :now
            FROM workspace_invites i
-           JOIN users u ON u.github_login = ?2 COLLATE NOCASE
-          WHERE i.id = ?3 AND i.status = 'pending' AND i.expires_at > ?1${guard}
+           JOIN users u ON u.github_login = :login COLLATE NOCASE
+          WHERE i.id = :inviteId AND i.status = 'pending' AND i.expires_at > :now${guard}
          ON CONFLICT DO NOTHING`,
-      )
-      .bind(...bindings),
+    bindings,
+  );
+
+  const statements = [
+    db.prepare(FLIP_LAPSED_SQL).bind(invite.workspace_id, now),
+    db.prepare(insert.sql).bind(...insert.bindings),
     db
       .prepare(
         `UPDATE workspace_invites SET status = 'accepted', accepted_at = ?1
@@ -536,7 +637,9 @@ export async function acceptInvite(
                            AND u.github_login = ?3 COLLATE NOCASE)`,
       )
       .bind(now, inviteId, login),
-  ]);
+    ...(classified === null ? [] : [db.prepare(classified.sql).bind(...classified.bindings)]),
+  ];
+  const results = await db.batch(statements);
 
   // Classify by re-read: a membership row proves the batch admitted (or had
   // already admitted) this login; a terminal row means it lost the race.
@@ -553,27 +656,13 @@ export async function acceptInvite(
   }
   // Still pending with no membership written: a guard inside the insert
   // refused, and statement (3) only consumes the invite for an admitted login,
-  // so the invite stays pending either way.
-  //
-  // Which guard? The re-read is needed only because both refusals leave the
-  // same state on a free target, where both conditions are present. A taken
-  // seat answers first: it is the blocker an operator cannot clear by freeing
-  // the invitee's own slot. The count is the guard's own predicate re-read, so
-  // it can only disagree under a concurrent membership write — where both
-  // answers are true and the refusal (and its zero writes) is identical.
-  if (limit !== null && (await memberCountOf(db, invite.workspace_id)) >= limit) {
-    return { kind: "member_cap", limit };
+  // so the invite stays pending either way. WHICH guard is whatever the batch's
+  // own classifier reported — the same snapshot the guards evaluated.
+  if (classified !== null && limit !== null) {
+    const row = results[statements.length - 1]!.results[0] as { blockedBy?: string } | undefined;
+    if (row?.blockedBy === "member_cap") return { kind: "member_cap", limit };
   }
   throw new FreeWorkspaceSlotError(INVITE_FREE_SLOT_REFUSAL);
-}
-
-/** The target workspace's member rows — the count the acceptance guard reads. */
-async function memberCountOf(db: InviteStoreD1, workspaceId: string): Promise<number> {
-  const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = ?`)
-    .bind(workspaceId)
-    .first<{ n: number }>();
-  return row?.n ?? 0;
 }
 
 /** The login's role in one workspace, or null when they are not a member. */

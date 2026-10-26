@@ -348,6 +348,37 @@ function flagRowCount(db: TestD1): number {
   return row?.n ?? 0;
 }
 
+/**
+ * A competing writer that commits the moment the handler submits its batch —
+ * i.e. after any pre-batch read the handler performed, and before the batch's
+ * own statements run. The flag row is written raw (never through the wrapped
+ * face), so the interleave cannot re-enter the handler.
+ */
+function withCompetingToggle(
+  db: TestD1,
+  key: ServerFlagKey,
+  enabled: 0 | 1,
+): { db: TestD1; fired: () => boolean } {
+  let fired = false;
+  const wrapped: TestD1 = {
+    raw: db.raw,
+    prepare: (query: string) => db.prepare(query),
+    batch: async (statements) => {
+      if (!fired) {
+        fired = true;
+        db.raw
+          .prepare(
+            `INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES (?, ?, ?, 'competitor')
+             ON CONFLICT (key) DO UPDATE SET enabled = excluded.enabled`,
+          )
+          .run(key, enabled, new Date().toISOString());
+      }
+      return db.batch(statements);
+    },
+  };
+  return { db: wrapped, fired: () => fired };
+}
+
 async function flagsApi(
   db: TestD1,
   init: {
@@ -458,6 +489,52 @@ describe("GET/PATCH /_internal_admin/api/flags", () => {
     }
     expect(flagRowCount(db)).toBe(0);
     expect(auditRows(db)).toHaveLength(0);
+  });
+
+  /**
+   * The audit's `before` must be the state the upsert actually overwrote, not
+   * what a separate pre-read saw. A competing writer commits between the two
+   * (`withCompetingToggle`), so an implementation that reads `before` OUTSIDE
+   * the batch records the pre-competition value and this assertion fails.
+   */
+  test("the audit before-value is read inside the batch: a competing toggle in between cannot make it stale", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    setFlagRow(db, "signup_open", 0); // stored state entering the request
+
+    const competing = withCompetingToggle(db, "signup_open", 1); // the value at write time
+    const res = await flagsApi(competing.db, {
+      method: "PATCH",
+      body: JSON.stringify({ key: "signup_open", enabled: false }),
+    });
+    expect(res.status).toBe(200);
+    expect(competing.fired()).toBe(true);
+
+    const rows = auditRows(db);
+    expect(rows).toHaveLength(1);
+    // The batch overwrote `1` — so `before` is true, not the pre-competition 0.
+    expect(JSON.parse(rows[0]!.detail_json ?? "null")).toEqual({ before: true, after: false });
+  });
+
+  /**
+   * One transaction: a failing flag upsert rolls the audit row back. A split
+   * write leaves the audit row behind and this assertion fails.
+   */
+  test("a failed flag upsert appends no audit row", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    db.raw.exec(
+      `CREATE TRIGGER fail_flag_upsert BEFORE INSERT ON server_flags
+       BEGIN SELECT RAISE(ABORT, 'flag upsert refused'); END;`,
+    );
+
+    const res = await flagsApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ key: "signup_open", enabled: false }),
+    });
+    expect(res.status).toBe(500);
+    expect(flagRowCount(db)).toBe(0);
+    expect(auditRows(db)).toEqual([]);
   });
 
   test("a non-operator, an anonymous caller and self-hosted get the 404 with zero writes", async () => {

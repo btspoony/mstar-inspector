@@ -3,70 +3,20 @@
  * empty and populated states, plus the writes they own — the flag toggle, the
  * per-row plan picker (exactly ONE PATCH) and the support-grant create/revoke.
  *
- * Mounted in happy-dom (support-notice / create-workspace precedents) because
- * the states live in effects and both controls are Radix widgets that only
- * answer real events. The screen modules are imported AFTER the browser globals
- * exist: React DOM and Radix read DOM availability at module-evaluation time.
+ * Mounted in happy-dom because the states live in effects and both controls
+ * are Radix widgets that only answer real events.
  */
 import { describe, expect, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
-import { Window, type Element as DomElement } from "happy-dom";
+import { createRoot } from "react-dom/client";
+import { type Element as DomElement, type Window } from "happy-dom";
+import { FlagsPage } from "../../src/spa/admin/FlagsPage";
+import { SupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
+import { UsersPage } from "../../src/spa/admin/UsersPage";
+import { WorkspacesPage } from "../../src/spa/admin/WorkspacesPage";
+import { installDom } from "./dom";
 
 const realFetch = globalThis.fetch;
-
-/**
- * Installs the browser globals a mounted console needs. The Radix Select
- * mounts a portalled listbox that reads form and element constructors, so the
- * set is wider than the dropdown-menu precedent's.
- */
-function installDom(url: string) {
-  const win = new Window({ url });
-  const scope = globalThis as unknown as Record<string, unknown>;
-  const dom = win as unknown as Record<string, unknown>;
-  const installed: Record<string, unknown> = {
-    window: win,
-    document: win.document,
-    navigator: win.navigator,
-    ...Object.fromEntries(
-      [
-        "HTMLElement",
-        "Element",
-        "Node",
-        "Event",
-        "CustomEvent",
-        "MouseEvent",
-        "KeyboardEvent",
-        "PointerEvent",
-        "FocusEvent",
-        "HTMLInputElement",
-        "HTMLFormElement",
-        "HTMLButtonElement",
-        "HTMLSelectElement",
-        "HTMLDivElement",
-        "HTMLSpanElement",
-        "SVGElement",
-        "DocumentFragment",
-        "Text",
-        "Document",
-        "NodeFilter",
-        "MutationObserver",
-        "ResizeObserver",
-      ].map((name) => [name, dom[name]]),
-    ),
-    getComputedStyle: win.getComputedStyle.bind(win),
-    requestAnimationFrame: win.requestAnimationFrame.bind(win),
-    cancelAnimationFrame: win.cancelAnimationFrame.bind(win),
-    IS_REACT_ACT_ENVIRONMENT: true,
-  };
-  Object.assign(scope, installed);
-  return {
-    win,
-    cleanup: () => {
-      for (const key of Object.keys(installed)) delete scope[key];
-      win.close();
-    },
-  };
-}
 
 type Sent = { url: string; method: string; body: unknown };
 type Respond = (request: Sent) => Response | Promise<Response>;
@@ -87,14 +37,8 @@ type Surface = {
   close: () => Promise<void>;
 };
 
-/**
- * Mount one screen with a stubbed console API and settle its first read.
- *
- * `create` runs only after the happy-dom globals exist: Radix's packages decide
- * DOM availability at module-evaluation time, so a screen imported earlier
- * mounts a select whose portal never opens.
- */
-async function mount(create: () => Promise<ReactElement>, respond: Respond): Promise<Surface> {
+/** Mount one screen with a stubbed console API and settle its first read. */
+async function mount(element: ReactElement, respond: Respond): Promise<Surface> {
   const { win, cleanup } = installDom("http://localhost/_internal_admin");
   const sent: Sent[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -107,13 +51,9 @@ async function mount(create: () => Promise<ReactElement>, respond: Respond): Pro
     return respond(request);
   }) as typeof fetch;
 
-  // Literal path, not a runtime choice: React DOM caches DOM availability at
-  // evaluation time, so this import has to follow the happy-dom globals.
-  const { createRoot } = await import("react-dom/client");
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
-  const element = await create();
   await act(async () => root.render(element));
   // One extra flush drains the read's own continuation (its .then setState).
   await act(async () => {});
@@ -171,31 +111,19 @@ async function mount(create: () => Promise<ReactElement>, respond: Respond): Pro
 }
 
 async function flagsScreen(respond: Respond): Promise<Surface> {
-  return mount(async () => {
-    const { FlagsPage } = await import("../../src/spa/admin/FlagsPage");
-    return createElement(FlagsPage);
-  }, respond);
+  return mount(createElement(FlagsPage), respond);
 }
 
 async function workspacesScreen(respond: Respond): Promise<Surface> {
-  return mount(async () => {
-    const { WorkspacesPage } = await import("../../src/spa/admin/WorkspacesPage");
-    return createElement(WorkspacesPage);
-  }, respond);
+  return mount(createElement(WorkspacesPage), respond);
 }
 
 async function usersScreen(respond: Respond): Promise<Surface> {
-  return mount(async () => {
-    const { UsersPage } = await import("../../src/spa/admin/UsersPage");
-    return createElement(UsersPage);
-  }, respond);
+  return mount(createElement(UsersPage), respond);
 }
 
 async function supportScreen(respond: Respond): Promise<Surface> {
-  return mount(async () => {
-    const { SupportGrantsPage } = await import("../../src/spa/admin/SupportGrantsPage");
-    return createElement(SupportGrantsPage);
-  }, respond);
+  return mount(createElement(SupportGrantsPage), respond);
 }
 
 const never = () => new Promise<Response>(() => {});
@@ -212,6 +140,12 @@ const FLAGS = [
   { key: "workspace_creation_open", enabled: false },
 ];
 
+/** The seats cell: column 4 of Workspace | Owner | Members | Seats | Plan | Created. */
+function seatsCell(surface: Surface, needle: string): string {
+  const cells = rowContaining(surface, needle)?.querySelectorAll("td") ?? [];
+  return cells[3]?.textContent ?? "";
+}
+
 const WORKSPACES = [
   {
     id: "ws_1",
@@ -221,6 +155,8 @@ const WORKSPACES = [
     memberCount: 3,
     pendingInviteCount: 1,
     planId: "free",
+    planName: "Free",
+    includedMembers: 5,
     createdAt: "2026-10-02T09:00:00.000Z",
   },
   {
@@ -230,7 +166,10 @@ const WORKSPACES = [
     ownerLogin: null,
     memberCount: 5,
     pendingInviteCount: 0,
-    planId: "pro",
+    planId: "unlimited",
+    planName: "Unlimited",
+    // NULL is no seat cap: the cell must read "—", never "5 / 0".
+    includedMembers: null,
     createdAt: "2026-09-18T09:00:00.000Z",
   },
 ];
@@ -340,7 +279,7 @@ describe("Workspaces screen", () => {
     await surface.close();
   });
 
-  test("rows show owner, counts, plan and creation date", async () => {
+  test("rows show owner, counts, seat headroom, plan name and creation date", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
     const acme = rowContaining(surface, "Acme");
     expect(acme?.textContent).toContain("ws_1");
@@ -348,20 +287,37 @@ describe("Workspaces screen", () => {
     expect(acme?.textContent).toContain("3");
     expect(acme?.textContent).toContain("1 pending");
     expect(acme?.textContent).toContain("2026-10-02");
-    expect(acme?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("free");
-    // An owner-less row reads as "—" rather than blank.
+    // The picker labels the tier with the catalogue's display name.
+    expect(acme?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Free");
+    // Headroom is used/cap, and an owner-less row reads "—" rather than blank.
+    expect(seatsCell(surface, "Acme")).toBe("3 / 5");
     expect(rowContaining(surface, "Guild")?.textContent).toContain("—");
     await surface.close();
   });
 
+  test("an unlimited seat cap renders as —, never 0", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
+    // Guild holds the NULL-cap tier at 5 members: "5 / 0" would be the defect.
+    expect(seatsCell(surface, "Guild")).toBe("—");
+    expect(surface.text()).not.toContain("/ 0");
+    await surface.close();
+  });
+
   test("the plan picker issues exactly one PATCH for the chosen plan", async () => {
-    const surface = await workspacesScreen((request) =>
-      request.method === "PATCH" ? json({ workspaceId: "ws_1", planId: "pro" }) : json({ workspaces: WORKSPACES }),
-    );
+    const after = { ...WORKSPACES[0]!, planId: "pro", planName: "Pro" };
+    let written = false;
+    const surface = await workspacesScreen((request) => {
+      if (request.method === "PATCH") {
+        written = true;
+        return json({ workspaceId: "ws_1", planId: "pro" });
+      }
+      // The accepted write re-reads, so the cap follows the server.
+      return json({ workspaces: written ? [after] : WORKSPACES });
+    });
     const row = rowContaining(surface, "Acme");
     const trigger = row?.querySelector('[data-slot="select-trigger"]') ?? null;
     await surface.openSelect(trigger);
-    const picked = await surface.pickOption("pro");
+    const picked = await surface.pickOption("Pro");
     expect(picked).not.toBeNull();
 
     const patches = surface.sent.filter((request) => request.method === "PATCH");
@@ -369,7 +325,7 @@ describe("Workspaces screen", () => {
     expect(patches[0]?.url).toBe("/_internal_admin/api/workspaces/ws_1/plan");
     expect(patches[0]?.body).toEqual({ planId: "pro" });
     // The accepted plan is what the row now shows.
-    expect(rowContaining(surface, "Acme")?.textContent).toContain("pro");
+    expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Pro");
     await surface.close();
   });
 });
@@ -439,12 +395,14 @@ describe("Support access screen", () => {
     await surface.close();
   });
 
-  test("rows name the operator, workspace, reason and expiry", async () => {
+  test("rows name the operator, workspace, reason and expiry in UTC", async () => {
     const surface = await supportScreen(respondWith(() => [GRANT]));
     const row = rowContaining(surface, "incident 42");
     expect(row?.textContent).toContain("ops");
     expect(row?.textContent).toContain("Acme");
-    expect(row?.textContent).toContain("2026-10-26 09:00");
+    // The stamp is UTC (the column is `toISOString`), so it says so — a bare
+    // `2026-10-26 09:00` reads as local time to an operator outside UTC.
+    expect(row?.textContent).toContain("2026-10-26 09:00 UTC");
     await surface.close();
   });
 

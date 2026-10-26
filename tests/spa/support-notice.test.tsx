@@ -11,8 +11,10 @@
  */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
-import { Window } from "happy-dom";
+import type { Window } from "happy-dom";
+import { createRoot } from "react-dom/client";
 import { SupportNotice } from "../../src/spa/components/SupportNotice";
+import { installDom } from "./dom";
 
 const GRANT = {
   operator_login: "octocat",
@@ -28,38 +30,8 @@ const grantsBody = () =>
     headers: { "Content-Type": "application/json" },
   });
 
-/** Installs the browser globals a mounted render needs (members-page precedent). */
-function installDom(url: string) {
-  const win = new Window({ url });
-  const scope = globalThis as unknown as Record<string, unknown>;
-  const installed = {
-    window: win,
-    document: win.document,
-    navigator: win.navigator,
-    HTMLElement: win.HTMLElement,
-    Element: win.Element,
-    Node: win.Node,
-    Event: win.Event,
-    MutationObserver: win.MutationObserver,
-    requestAnimationFrame: win.requestAnimationFrame.bind(win),
-    cancelAnimationFrame: win.cancelAnimationFrame.bind(win),
-    IS_REACT_ACT_ENVIRONMENT: true,
-  };
-  Object.assign(scope, installed);
-  return {
-    win,
-    cleanup: () => {
-      for (const key of Object.keys(installed)) delete scope[key];
-      win.close();
-    },
-  };
-}
-
 /** Mounts the notice and returns the render + unmount drivers. */
 async function mountNotice(win: Window) {
-  // Imported only once the browser globals exist: React DOM caches its
-  // `canUseDOM` answer at evaluation time.
-  const { createRoot } = await import("react-dom/client");
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
   // happy-dom's element is structurally the DOM Element React DOM accepts.

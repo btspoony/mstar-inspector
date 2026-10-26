@@ -27,6 +27,7 @@ import {
   workspaceBoot,
   pendingInvitesForLogin,
   workspaceMembershipsForLogin,
+  type WorkspaceBoot,
 } from "../dashboard/index";
 import { freeSlotAvailable } from "../dashboard/entitlement";
 import { countFreeMembershipsForLogin } from "../dashboard/workspace-store";
@@ -181,13 +182,15 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   // The signed-in login of a sidebar-bearing shell; null on the login page and
   // for an anonymous boot (those take no workspace read at all).
   const login = auth.boot.login !== null && route?.page !== "login" ? auth.boot.login : null;
-  const extras = login === null ? {} : await workspaceBoot(c.env, login, routeRef);
+  const extras: WorkspaceBoot =
+    login === null ? { access: null } : await workspaceBoot(c.env, login, routeRef);
   // The operator's landing must name the workspace too: the support face reads
   // `/api/support/workspace` off the pathname's workspace segment, and the bare
   // `/dashboard` carries none (root route unregistered → 404). The SAME
   // classifier the workspace gate uses answers it, so the shell cannot call an
-  // invitee (or a member) a support visitor.
-  const supportRef = login === null ? null : await operatorSupportWorkspace(c.env, login, routeRef);
+  // invitee (or a member) a support visitor. It reads the boot's own resolution
+  // — one sole-vs-ref lookup serves both.
+  const supportRef = extras.access === null ? null : await operatorSupportWorkspace(c.env, extras);
   // Two independent lists behind the same login gate, so they share ONE round
   // trip — neither reads the other and both key on the login alone.
   // The invitee's discovery surface: every live pending invitation for this
@@ -209,8 +212,10 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
     // route — because the root workbench has no workspace segment (its data
     // reads all hang off one) and `/dashboard/apps` is retired (404).
     // ONE landing policy (`signedInLanding`), shared with the OAuth callback
-    // and the login bounce, so the root path cannot disagree with sign-in.
-    const landing = await signedInLanding(c.env, login);
+    // and the login bounce, so the root path cannot disagree with sign-in. The
+    // extras above ARE that policy's input for this same request, so they are
+    // passed in rather than read a second time.
+    const landing = await signedInLanding(c.env, login, extras);
     if (landing !== "/dashboard") return c.redirect(landing, 302);
   }
   // The create-workspace capability the shell's top-bar menu mirrors. The

@@ -14,6 +14,7 @@ import {
   freeSlotAvailable,
   memberSlotAvailable,
   resolveWorkspacePlan,
+  resolveWorkspacePlans,
 } from "../../src/dashboard/entitlement";
 import { countFreeMembershipsForLogin, createWorkspace } from "../../src/dashboard/workspace-store";
 import { createInvite } from "../../src/dashboard/invite-store";
@@ -303,6 +304,75 @@ describe("refusals", () => {
   test("the member-cap copy names the plan's actual seat limit", () => {
     expect(MEMBER_CAP_REFUSAL(5)).toContain("already has 5 people");
     expect(MEMBER_CAP_REFUSAL(20)).toContain("already has 20 people");
+  });
+});
+
+describe("resolveWorkspacePlans — a membership list larger than one D1 statement", () => {
+  /**
+   * A membership list is bounded by nothing: the free-slot rule and the plan
+   * caps limit paid memberships per workspace, not how many workspaces may
+   * invite one login. D1 refuses a statement binding more than 100 parameters,
+   * so the subscription read must be chunked — and every row must still come
+   * back, otherwise the switcher silently loses a workspace.
+   */
+  /** Records each prepared statement's text and how many values it bound. */
+  function countingDb(db: TestD1): { observed: TestD1; bindCounts: Array<{ sql: string; binds: number }> } {
+    const bindCounts: Array<{ sql: string; binds: number }> = [];
+    const observed = {
+      ...db,
+      prepare(query: string) {
+        const stmt = db.prepare(query);
+        return {
+          bind(...values: unknown[]) {
+            bindCounts.push({ sql: query, binds: values.length });
+            return stmt.bind(...values);
+          },
+          first: () => stmt.first(),
+          all: () => stmt.all(),
+          run: () => stmt.run(),
+        };
+      },
+    } as TestD1;
+    return { observed, bindCounts };
+  }
+
+  test("resolves all 101 memberships across two reads and never binds over the cap", async () => {
+    const db = createMigratedTestD1();
+    const userId = "user-multi";
+    db.raw
+      .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, 'multi', 'member', ?)")
+      .run(userId, TS);
+    const ids: string[] = [];
+    for (let i = 0; i < 101; i++) {
+      const id = `ws-${String(i).padStart(3, "0")}`;
+      seedWorkspace(db, id);
+      seedMembership(db, id, userId);
+      ids.push(id);
+    }
+    // Two plan groups spanning the chunk boundary: ids 000-059 and the last one
+    // are `pro`, the rest fall back to `free` — so a chunk that dropped its
+    // results, or one that over-reported `pro`, fails below.
+    const proIds = [...ids.slice(0, 60), ids[100]!];
+    for (const id of proIds) seedSubscription(db, id, "pro");
+
+    const { observed, bindCounts } = countingDb(db);
+    const plans = await resolveWorkspacePlans(observed, ids, "saas");
+
+    // Nothing truncated: every membership keeps its row, with its own plan.
+    expect(plans.size).toBe(101);
+    expect([...plans.keys()].sort()).toEqual([...ids].sort());
+    for (const id of ids) {
+      expect(plans.get(id)?.id).toBe(proIds.includes(id) ? "pro" : "free");
+    }
+
+    // Chunked: no statement binds over D1's 100-parameter cap, and the ids went
+    // out as two subscription reads rather than one over-cap statement.
+    const subscriptionReads = bindCounts.filter((entry) => entry.sql.includes("FROM workspace_subscriptions"));
+    expect(subscriptionReads.map((entry) => entry.binds)).toEqual([100, 1]);
+    expect(Math.max(...bindCounts.map((entry) => entry.binds))).toBeLessThanOrEqual(100);
+    // The free fallback stays ONE read however many ids need it.
+    expect(bindCounts.filter((entry) => entry.sql.includes("FROM plans WHERE id = ?"))).toHaveLength(1);
+    db.raw.close();
   });
 });
 

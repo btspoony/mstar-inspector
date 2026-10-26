@@ -410,13 +410,6 @@ describe("seat limit (store level)", () => {
       .run(WORKSPACE, planId, NOW, NOW);
   }
 
-  /** The one invite insert the store prepared, so the shape can be inspected. */
-  function insertSql(captured: string[]): string {
-    const sql = captured.find((query) => /^\s*INSERT INTO workspace_invites/i.test(query));
-    if (sql === undefined) throw new Error("createInvite prepared no invite insert");
-    return sql;
-  }
-
   /** The workspace's member rows — the count the acceptance guard reads. */
   function memberCount(db: TestD1): number {
     const row = db.raw
@@ -436,30 +429,26 @@ describe("seat limit (store level)", () => {
   test("a five-seat plan refuses at five, names that limit and writes nothing", async () => {
     const db = createFixture("newcomer");
     seedMembers(db, 5);
-    const captured: string[] = [];
 
-    await expect(invite(recordSql(db, captured), "newcomer")).rejects.toThrow(
-      MEMBER_CAP_REFUSAL(5),
-    );
+    // The insert carries the seat condition for a numeric limit, so the
+    // refusal is the write's own: no invite row lands at all.
+    await expect(invite(db, "newcomer")).rejects.toThrow(MEMBER_CAP_REFUSAL(5));
 
     expect(statuses(db)).toEqual([]);
-    // The numeric path keeps the seat condition, bound as ?8.
-    expect(insertSql(captured)).toContain("?8");
   });
 
   test("a null limit writes the invite past the five-seat cap, with no seat condition", async () => {
     const db = createFixture("newcomer");
     seedMembers(db, 6);
     subscribe(db, "unlimited");
-    const captured: string[] = [];
 
-    const created = await invite(recordSql(db, captured), "newcomer");
+    // Binding the absent limit as NULL would make `count < NULL` evaluate to
+    // NULL and write no row, so this invite landing IS the proof that the
+    // unlimited insert carries no seat condition.
+    const created = await invite(db, "newcomer");
 
     expect(created.status).toBe("pending");
     expect(statuses(db)).toEqual(["pending"]);
-    // A NULL bound into ?8 would make `count < ?8` evaluate to NULL and write
-    // no row, so the unlimited insert must not carry the condition at all.
-    expect(insertSql(captured)).not.toContain("?8");
   });
 
   test("a pending invite at limit minus one converts into the last seat", async () => {
@@ -512,6 +501,28 @@ describe("seat limit (store level)", () => {
     });
     expect(memberCount(db)).toBe(7);
     expect(rowOf(db, pending.id).status).toBe("accepted");
+  });
+
+  test("both guards refusing reports the free-slot class, not member_cap", async () => {
+    const db = createFixture("newcomer");
+    subscribe(db, "unlimited");
+    seedMembers(db, 5);
+    // The invitee ALSO holds a live free workspace, so the target's free plan
+    // refuses the free slot as well as the taken seat.
+    seedMembership(db, "ws-elsewhere", "newcomer", "free");
+    const pending = await invite(db, "newcomer");
+    downgrade(db, "free");
+
+    // Precedence: the class the invitee can clear alone wins. `member_cap` here
+    // would name a plan upgrade for a login the free-slot rule still refuses.
+    await expect(acceptInvite(db, pending.id, "newcomer", NOW, "saas")).rejects.toBeInstanceOf(
+      FreeWorkspaceSlotError,
+    );
+    expect(memberCount(db)).toBe(5);
+    // No membership was admitted here; the login's only membership is the
+    // free workspace the guard read.
+    expect(membershipCount(db, "newcomer")).toBe(0);
+    expect(rowOf(db, pending.id).status).toBe("pending");
   });
 
   test("a downgrade that strands pending invites stops successive accepts exactly at the new cap", async () => {

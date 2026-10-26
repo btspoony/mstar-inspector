@@ -28,6 +28,9 @@ export type AdminWorkspaceRow = {
   memberCount: number;
   pendingInviteCount: number;
   planId: string;
+  planName: string;
+  /** The seat cap; NULL is no cap at all, never `0` (migration 0031's contract). */
+  includedMembers: number | null;
   createdAt: string;
 };
 
@@ -57,14 +60,17 @@ const LIST_SQL = `
          (SELECT COUNT(*) FROM workspace_invites i
            WHERE i.workspace_id = w.id
              AND i.status = 'pending' AND i.expires_at > ?1) AS pendingInviteCount,
-         COALESCE(s.plan_id, ?2) AS planId
+         COALESCE(s.plan_id, ?2) AS planId,
+         p.name AS planName,
+         p.included_members AS includedMembers
     FROM workspaces w
     LEFT JOIN workspace_subscriptions s
            ON s.workspace_id = w.id AND s.status = 'active'
+    LEFT JOIN plans p ON p.id = COALESCE(s.plan_id, ?2)
    WHERE w.deleted_at IS NULL
    ORDER BY w.created_at DESC, w.id ASC`;
 
-/** Live workspaces with their SQL-side counts, owner and resolved plan. */
+/** Live workspaces with their SQL-side counts, owner and resolved plan limits. */
 export async function listWorkspaces(db: DashboardD1, now: string): Promise<AdminWorkspaceRow[]> {
   const rows = await db.prepare(LIST_SQL).bind(now, FREE_PLAN_ID).all<AdminWorkspaceRow>();
   return rows.results;
