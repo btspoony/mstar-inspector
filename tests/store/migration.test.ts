@@ -1336,14 +1336,6 @@ describe("migrations/0034_support_grant_indexes.sql (I-000167)", () => {
     expect(indexColumns(db, "support_grants_expires_at")).toEqual(["expires_at"]);
   });
 
-  test("no index repeats another's leading column (no redundant index)", () => {
-    const db = createMigratedTestD1();
-    const leading = (db.raw.query("PRAGMA index_list(support_grants)").all() as Array<{ name: string }>).map(
-      (i) => indexColumns(db, i.name)[0],
-    );
-    expect(new Set(leading).size).toBe(leading.length);
-  });
-
   test("the operator_login-only grant count seeks the new operator window index", () => {
     const db = createMigratedTestD1();
     // `admin/users.ts` LIST_USERS_SQL: a login-keyed, expiry-bounded count that

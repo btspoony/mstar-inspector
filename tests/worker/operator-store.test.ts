@@ -11,13 +11,14 @@
  *   - a grant on W1 answers false on W2 (the lookup is workspace-keyed);
  *   - the notice read lists only unexpired rows of that one workspace;
  *   - audit inserts come back newest first, bounded by `limit`;
- *   - revocation deletes the whole (workspace, operator) window, so no older
- *     append can come back to life.
+ *   - revocation deletes the whole (workspace, operator) window and appends its
+ *     `support.grant.delete` audit row in the same batch, so no older append can
+ *     come back to life.
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import {
-  deleteSupportGrant,
+  deleteSupportGrantWithAudit,
   hasValidGrant,
   insertAuditEvent,
   insertSupportGrant,
@@ -241,16 +242,20 @@ describe("listAllActiveSupportGrants", () => {
   });
 });
 
-describe("deleteSupportGrant", () => {
-  test("removes the whole (workspace, operator) window, never hands it back to an older row", async () => {
+describe("deleteSupportGrantWithAudit", () => {
+  test("removes the whole (workspace, operator) window, never hands it back to an older row, and audits it", async () => {
     const db = createFixture();
     await grant(db, W1, LATER);
     const newest = await grant(db, W1, "2026-11-05T00:00:00.000Z");
     await grant(db, W2, LATER);
     expect(await hasValidGrant(db, W1, OPERATOR, NOW)).toBe(true);
 
-    const removed = await deleteSupportGrant(db, newest.id);
-    expect(removed?.id).toBe(newest.id);
+    const removed = await deleteSupportGrantWithAudit(db, {
+      id: newest.id,
+      actorLogin: "deploy-operator",
+      now: NOW,
+    });
+    expect(removed).toEqual({ workspaceId: W1 });
 
     // Not "the previous append is live again" — the window is closed.
     expect(await hasValidGrant(db, W1, OPERATOR, NOW)).toBe(false);
@@ -261,10 +266,17 @@ describe("deleteSupportGrant", () => {
     expect(remaining.n).toBe(0);
     // The other workspace's grant is untouched.
     expect(await hasValidGrant(db, W2, OPERATOR, NOW)).toBe(true);
+    // The revoke is audited: exactly one delete row, on the grant's workspace.
+    expect(
+      (await listAuditEvents(db, W1, 10)).map((row) => [row.action, row.workspace_id, row.actor_login]),
+    ).toEqual([["support.grant.delete", W1, "deploy-operator"]]);
 
-    // An id that is not there removes nothing.
-    expect(await deleteSupportGrant(db, "no-such-grant")).toBeNull();
+    // An id that is not there removes nothing — and audits nothing.
+    expect(
+      await deleteSupportGrantWithAudit(db, { id: "no-such-grant", actorLogin: "deploy-operator", now: NOW }),
+    ).toBeNull();
     expect(await hasValidGrant(db, W2, OPERATOR, NOW)).toBe(true);
+    expect(await listAuditEvents(db, W2, 10)).toEqual([]);
   });
 });
 
