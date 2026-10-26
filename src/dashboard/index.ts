@@ -99,6 +99,7 @@ import {
   isFreeTierPlan,
   memberSlotAvailable,
   resolveWorkspacePlan,
+  resolveWorkspacePlans,
 } from "./entitlement";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
@@ -370,6 +371,10 @@ export async function workspaceBoot(
  * must read the plan of whichever workspace the URL then names. Both modes
  * carry it (D16: the mode gates rendering, never the payload) — `self-hosted`
  * resolves `Unlimited` before any DB read.
+ *
+ * The plans are resolved for the whole list at once ({@link resolveWorkspacePlans}),
+ * so the switcher costs one subscription read however many workspaces it names;
+ * resolving row by row would repeat that read per row.
  */
 export async function workspaceMembershipsForLogin(
   env: Env,
@@ -379,12 +384,12 @@ export async function workspaceMembershipsForLogin(
   if (db === null) return [];
   const rows = await listWorkspaceMembershipOptions(db, login);
   const mode = deploymentModeOf(env.DEPLOYMENT_MODE);
-  return Promise.all(
-    rows.map(async (row) => ({
-      ...row,
-      plan: (await resolveWorkspacePlan(db, row.id, mode)).name,
-    })),
+  const plans = await resolveWorkspacePlans(
+    db,
+    rows.map((row) => row.id),
+    mode,
   );
+  return rows.map((row) => ({ ...row, plan: plans.get(row.id)!.name }));
 }
 
 /**

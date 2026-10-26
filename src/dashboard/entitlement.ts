@@ -58,43 +58,83 @@ const UNLIMITED_LIMITS: PlanLimits = {
  * The workspace's active plan limits, or the seeded `free` limits when it has
  * no active subscription row.
  *
- * The mode decides FIRST: `self-hosted` is `unlimited` for every workspace,
- * including the ones holding an `active free` row (every workspace created
- * today does, so conditioning on "no subscription" would leave existing
- * deployments capped — spec §4). The row stays truthful for a switch back to
- * `saas`; only resolution ignores it.
- *
- * A missing `free` row means migration 0031 did not apply, so it throws
- * instead of inventing limits.
+ * The single-workspace form of {@link resolveWorkspacePlans} — the shell boot
+ * resolves a whole membership list, so the precedence below lives there, once,
+ * and this form adds no second copy of it.
  */
 export async function resolveWorkspacePlan(
   db: WorkspaceStoreD1,
   workspaceId: string,
   mode: DeploymentMode,
 ): Promise<PlanLimits> {
-  if (mode === "self-hosted") return UNLIMITED_LIMITS;
+  return (await resolveWorkspacePlans(db, [workspaceId], mode)).get(workspaceId)!;
+}
+
+/**
+ * The plan limits each of `workspaceIds` resolves to, keyed by workspace id.
+ *
+ * One subscription read answers the whole list, and one `free` catalogue read
+ * answers every workspace without an active row, so a membership list of N
+ * workspaces costs two reads instead of 2N. The precedence is the contract and
+ * is stated only here:
+ *
+ * - The mode decides FIRST: `self-hosted` is `unlimited` for every workspace,
+ *   including the ones holding an `active free` row (every workspace created
+ *   today does, so conditioning on "no subscription" would leave existing
+ *   deployments capped — spec §4), and it answers before any read at all. The
+ *   row stays truthful for a switch back to `saas`; only resolution ignores it.
+ * - An active subscription row wins; absence falls back to the seeded `free`
+ *   row. A missing `free` row means migration 0031 did not apply, so it throws
+ *   instead of inventing limits.
+ *
+ * Known limit: the id set is bound one placeholder per workspace, and D1 caps a
+ * query at 100 bound parameters. A login's membership list is bounded well below
+ * that by the free-slot rule and the plan caps; a list that large would need the
+ * resolve chunked.
+ */
+export async function resolveWorkspacePlans(
+  db: WorkspaceStoreD1,
+  workspaceIds: readonly string[],
+  mode: DeploymentMode,
+): Promise<Map<string, PlanLimits>> {
+  const resolved = new Map<string, PlanLimits>();
+  if (workspaceIds.length === 0) return resolved;
+  if (mode === "self-hosted") {
+    for (const id of workspaceIds) resolved.set(id, UNLIMITED_LIMITS);
+    return resolved;
+  }
+
+  const placeholders = workspaceIds.map(() => "?").join(", ");
   const subscribed = await db
     .prepare(
-      `SELECT p.id AS id, p.name AS name, p.included_members AS includedMembers
+      `SELECT s.workspace_id AS workspaceId, p.id AS id, p.name AS name, p.included_members AS includedMembers
          FROM workspace_subscriptions s
          JOIN plans p ON p.id = s.plan_id
-        WHERE s.workspace_id = ? AND s.status = 'active'`,
+        WHERE s.workspace_id IN (${placeholders}) AND s.status = 'active'`,
     )
-    .bind(workspaceId)
-    .first<PlanLimits>();
-  if (subscribed) return subscribed;
-
-  const free = await db
-    .prepare(
-      `SELECT id AS id, name AS name, included_members AS includedMembers
-         FROM plans WHERE id = ?`,
-    )
-    .bind(FREE_PLAN_ID)
-    .first<PlanLimits>();
-  if (!free) {
-    throw new Error("plans is missing the seeded 'free' row; apply migration 0031_plans_usage.sql");
+    .bind(...workspaceIds)
+    .all<PlanLimits & { workspaceId: string }>();
+  for (const row of subscribed.results) {
+    // Explicit fields: `workspaceId` is the key, not part of the limits.
+    resolved.set(row.workspaceId, { id: row.id, name: row.name, includedMembers: row.includedMembers });
   }
-  return free;
+
+  let free: PlanLimits | null = null;
+  for (const id of workspaceIds) {
+    if (resolved.has(id)) continue;
+    free ??= await db
+      .prepare(
+        `SELECT id AS id, name AS name, included_members AS includedMembers
+           FROM plans WHERE id = ?`,
+      )
+      .bind(FREE_PLAN_ID)
+      .first<PlanLimits>();
+    if (free === null) {
+      throw new Error("plans is missing the seeded 'free' row; apply migration 0031_plans_usage.sql");
+    }
+    resolved.set(id, free);
+  }
+  return resolved;
 }
 
 /** One free workspace per login, so the second free membership is the last. */
