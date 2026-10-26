@@ -688,11 +688,13 @@ const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
 
 /**
  * Classify a mount-pinned /dashboard path into the workspace it addresses —
- * step 1 of the request-path ordering contract, mirrored by `workspaceRefOf` in
- * `src/spa/routes.ts`. A workspace path is `/<ref>/{apps|members|api}…` with a
- * non-reserved ref. A reserved first segment is never a workspace, so
- * `:workspaceRef` cannot capture a real route (`/apps`, `/api/apps`, `/login`,
- * `/members`, …).
+ * step 1 of the request-path ordering contract. Both sides read the ONE family
+ * export (`WORKSPACE_FAMILY_SEGMENTS` in `src/spa/routes.ts`): the SPA's
+ * `workspaceRefOf` builds its alternation from it, and `WORKSPACE_SEGMENTS`
+ * above is its derivation, not a second list. The family has four members; this
+ * gate admits three because `settings` is an SPA page path with no Worker route.
+ * A reserved first segment is never a workspace, so `:workspaceRef` cannot
+ * capture a real route (`/apps`, `/api/apps`, `/login`, `/members`, …).
  */
 function classifyDashboardPath(pathname: string): { kind: "workspace"; ref: string } | { kind: "other" } {
   const relative =
