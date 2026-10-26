@@ -17,34 +17,68 @@ import { AdminWriteError, readWorkspaces, setPlan, useLoaded, type WorkspaceRow 
 import { ConsolePath, Screen } from "./screen";
 
 /**
- * The plan ids the picker offers, in tier order.
+ * The plans the picker offers, in tier order, with the catalogue's display
+ * names.
  * shortcut: mirrored from `plans` (migrations 0031/0032) — no admin read
- * exposes the catalogue. A row whose stored plan is not listed still renders
- * and keeps it (see `planOptions`); add a `GET /api/plans` read when a tier
- * ships without a UI change.
+ * exposes the catalogue. The row's own plan leads with the server's `planName`
+ * (see `planOptions`), so a stored plan outside this list still renders and
+ * keeps it. Add a `GET /api/plans` read when a tier ships without a UI change.
  */
-const PLAN_IDS = ["free", "pro", "unlimited"];
+const PLANS: readonly { id: string; name: string }[] = [
+  { id: "free", name: "Free" },
+  { id: "pro", name: "Pro" },
+  { id: "unlimited", name: "Unlimited" },
+];
+
+/**
+ * The options the picker shows: the row's own plan first (carrying the name the
+ * server resolved, so a stored plan outside `PLANS` is never mislabelled), then
+ * the rest of the catalogue.
+ */
+function planOptions(row: WorkspaceRow): readonly { id: string; name: string }[] {
+  return [
+    { id: row.planId, name: row.planName },
+    ...PLANS.filter((plan) => plan.id !== row.planId),
+  ];
+}
+
+/**
+ * `<used> / <cap>` seat headroom. A NULL cap is unlimited, which is `—`; it
+ * must never render as `0` (migration 0031: NULL means no limit).
+ */
+function seatHeadroom(row: WorkspaceRow): string {
+  return row.includedMembers === null ? "—" : `${row.memberCount} / ${row.includedMembers}`;
+}
 
 export function WorkspacesPage() {
   const { state, reload, update } = useLoaded(readWorkspaces);
   const [busy, setBusy] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
 
-  async function changePlan(row: WorkspaceRow, planId: string) {
-    if (planId === row.planId) return;
-    const previous = row.planId;
-    setBusy(row.id);
+  async function changePlan(target: WorkspaceRow, planId: string) {
+    if (planId === target.planId) return;
+    const previousId = target.planId;
+    const previousName = target.planName;
+    setBusy(target.id);
     setRefusal(null);
     // Optimistic: a controlled picker has to show the choice while the one
-    // PATCH is in flight; a refusal below puts the stored plan back.
-    const apply = (id: string) =>
-      update((workspaces) => workspaces.map((item) => (item.id === row.id ? { ...item, planId: id } : item)));
-    apply(planId);
+    // PATCH is in flight, and the label has to move with the id or the row's
+    // own option would keep the old name. The seat cap is the server's answer,
+    // so the accepted write re-reads instead of guessing it; a refusal puts
+    // the stored pair back.
+    const apply = (id: string, name: string) =>
+      update((workspaces) =>
+        workspaces.map((item) => (item.id === target.id ? { ...item, planId: id, planName: name } : item)),
+      );
+    apply(planId, PLANS.find((plan) => plan.id === planId)?.name ?? planId);
     try {
-      await setPlan(row.id, planId);
+      await setPlan(target.id, planId);
+      reload();
     } catch (error) {
-      apply(previous);
-      setRefusal(error instanceof AdminWriteError ? error.message : `Could not change the plan for ${row.name}.`);
+      apply(previousId, previousName);
+      setRefusal(
+        error instanceof AdminWriteError ? error.message : `Could not change the plan for ${target.name}.`,
+      );
     } finally {
       setBusy(null);
     }
@@ -73,18 +107,27 @@ export function WorkspacesPage() {
       ),
     },
     {
+      header: "Seats",
+      align: "right",
+      cell: (row) => <span className="text-sm tabular-nums">{seatHeadroom(row)}</span>,
+    },
+    {
       header: "Plan",
       cell: (row) => (
-        <Select value={row.planId} disabled={busy !== null} onValueChange={(planId) => void changePlan(row, planId)}>
+        <Select
+          value={row.planId}
+          disabled={busy !== null}
+          onValueChange={(planId) => void changePlan(row, planId)}
+        >
           <SelectTrigger size="sm" aria-label={`Plan for ${row.name}`}>
-            <SelectValue />
+            <SelectValue>{row.planName}</SelectValue>
           </SelectTrigger>
           <SelectContent>
-            {/* The row's own plan leads, so a stored plan outside PLAN_IDS
-                still has an option and the picker never misreports it. */}
-            {[row.planId, ...PLAN_IDS.filter((id) => id !== row.planId)].map((id) => (
-              <SelectItem key={id} value={id}>
-                {id}
+            {/* The row's own plan leads with the server's name, so a stored
+                plan outside PLANS still has a labelled option. */}
+            {planOptions(row).map((plan) => (
+              <SelectItem key={plan.id} value={plan.id}>
+                {plan.name}
               </SelectItem>
             ))}
           </SelectContent>

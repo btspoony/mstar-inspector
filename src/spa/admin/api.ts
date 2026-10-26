@@ -28,6 +28,9 @@ export type WorkspaceRow = {
   memberCount: number;
   pendingInviteCount: number;
   planId: string;
+  planName: string;
+  /** The seat cap; NULL means unlimited and must never render as `0`. */
+  includedMembers: number | null;
   createdAt: string;
 };
 
@@ -87,6 +90,14 @@ function num(row: Json, key: string): number {
   return value;
 }
 
+/** A quota column where NULL is a real value (no cap), not a missing number. */
+function maybeNum(row: Json, key: string): number | null {
+  const value = row[key];
+  if (value === null) return null;
+  if (typeof value !== "number") throw new Error(`admin API: ${key} is not a number`);
+  return value;
+}
+
 function bool(row: Json, key: string): boolean {
   const value = row[key];
   if (typeof value !== "boolean") throw new Error(`admin API: ${key} is not a boolean`);
@@ -108,6 +119,8 @@ export async function readWorkspaces(): Promise<WorkspaceRow[]> {
     memberCount: num(row, "memberCount"),
     pendingInviteCount: num(row, "pendingInviteCount"),
     planId: text(row, "planId"),
+    planName: text(row, "planName"),
+    includedMembers: maybeNum(row, "includedMembers"),
     createdAt: text(row, "createdAt"),
   }));
 }

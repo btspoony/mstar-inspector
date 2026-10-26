@@ -94,7 +94,9 @@ async function setFlag(c: AdminContext): Promise<Response> {
 
 /**
  * Every live workspace with its SQL-side counts, owner login and resolved
- * plan — one statement, so the console never fans out a read per row.
+ * plan — one statement, so the console never fans out a read per row. The
+ * plan's display name and seat cap ride along: `includedMembers` is NULL for
+ * the no-cap tier and must stay NULL (never `0`).
  */
 async function readWorkspaces(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
