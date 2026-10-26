@@ -24,9 +24,13 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Window } from "happy-dom";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { t } from "../../src/i18n";
 import type { SpaBoot } from "../../src/spa/boot";
+import { WorkspaceSwitcher } from "../../src/spa/components/WorkspaceSwitcher";
+import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
+import { installDom } from "./dom";
 
 const uiDir = join(import.meta.dir, "../../src/spa/components/ui");
 const spaRoot = join(import.meta.dir, "../../src/spa");
@@ -233,50 +237,9 @@ describe("top-bar workspace switcher (mounted)", () => {
     ],
   };
 
-  /** happy-dom globals a mounted React tree needs (support-notice precedent). */
-  function installDom(url: string) {
-    const win = new Window({ url });
-    const scope = globalThis as unknown as Record<string, unknown>;
-    const installed: Record<string, unknown> = {
-      window: win,
-      document: win.document,
-      navigator: win.navigator,
-      HTMLElement: win.HTMLElement,
-      Element: win.Element,
-      Node: win.Node,
-      Event: win.Event,
-      CustomEvent: (win as unknown as Record<string, unknown>).CustomEvent,
-      FocusEvent: (win as unknown as Record<string, unknown>).FocusEvent,
-      MouseEvent: win.MouseEvent,
-      KeyboardEvent: (win as unknown as Record<string, unknown>).KeyboardEvent,
-      PointerEvent: (win as unknown as Record<string, unknown>).PointerEvent,
-      HTMLInputElement: (win as unknown as Record<string, unknown>).HTMLInputElement,
-      MutationObserver: win.MutationObserver,
-      ResizeObserver: (win as unknown as Record<string, unknown>).ResizeObserver,
-      getComputedStyle: win.getComputedStyle.bind(win),
-      requestAnimationFrame: win.requestAnimationFrame.bind(win),
-      cancelAnimationFrame: win.cancelAnimationFrame.bind(win),
-      IS_REACT_ACT_ENVIRONMENT: true,
-    };
-    Object.assign(scope, installed);
-    return {
-      win,
-      cleanup: () => {
-        for (const key of Object.keys(installed)) delete scope[key];
-        win.close();
-      },
-    };
-  }
-
   /** Mount the control and open its menu (Radix portals the rows). */
   async function openMenu(pathname: string, overrides: Partial<typeof boot> = {}) {
     const { win, cleanup: closeDom } = installDom(`http://localhost${pathname}`);
-    // Imported only once the browser globals exist: React DOM caches its
-    // `canUseDOM` answer at evaluation time, and so does Radix.
-    const { act, createElement } = await import("react");
-    const { createRoot } = await import("react-dom/client");
-    const { WorkspaceSwitcher } = await import("../../src/spa/components/WorkspaceSwitcher");
-    const { buildWorkspaceSwitcherModel } = await import("../../src/spa/shell");
     const live = { ...boot, ...overrides };
     const container = win.document.createElement("div");
     win.document.body.appendChild(container);
