@@ -3,7 +3,7 @@
 > **Status:** FROZEN 2026-10-25 — promoted at iteration close from the iteration package, after architect review, a three-seat plan QC and mandatory QA.
 > **SSOT:** This file — the `/_internal_admin` namespace, its authorization model, its four surfaces plus support-grant maintenance, and the platform audit split.
 > **Authority:** Delivered 2026-10-25; the code paths named below are the implementation references.
-> **Staged amendment (032-cleanup-sweep):** full copy of the frozen global spec plus ONE added §4 clause recording the audit-retention decision (compass D15, plan 119 Task 5). The global `{SPECS_DIR}` copy is frozen for this iteration and is not edited; PM promotes this copy at iteration-close.
+> **Amendment 2026-10-26:** §4.1 records the audit-retention decision. The rest of this document is unchanged from the 2026-10-25 freeze.
 
 ## 1. Identity and authorization
 
