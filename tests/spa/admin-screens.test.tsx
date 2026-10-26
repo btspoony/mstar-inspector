@@ -467,12 +467,14 @@ describe("Support access screen", () => {
     await surface.close();
   });
 
-  test("rows name the operator, workspace, reason and expiry", async () => {
+  test("rows name the operator, workspace, reason and expiry in UTC", async () => {
     const surface = await supportScreen(respondWith(() => [GRANT]));
     const row = rowContaining(surface, "incident 42");
     expect(row?.textContent).toContain("ops");
     expect(row?.textContent).toContain("Acme");
-    expect(row?.textContent).toContain("2026-10-26 09:00");
+    // The stamp is UTC (the column is `toISOString`), so it says so — a bare
+    // `2026-10-26 09:00` reads as local time to an operator outside UTC.
+    expect(row?.textContent).toContain("2026-10-26 09:00 UTC");
     await surface.close();
   });
 

@@ -122,6 +122,16 @@ export const FREE_SLOT_REFUSAL =
   "This workspace was not created. You already belong to a free workspace, and you can belong to only one at a time. Delete that workspace if you own it. If you do not, an owner or admin of that workspace must remove you. Then create this one.";
 
 /**
+ * The Product copy for a creation the operator's `workspace_creation_open`
+ * flag closed (spec §3.1), verbatim: creation is closed for EVERYONE, so the
+ * per-login free-slot copy would name the wrong cause. It is the second 409
+ * body the creation route can answer, and the SPA edge identifies it by this
+ * same constant (never by a copied literal).
+ */
+export const WORKSPACE_CREATION_CLOSED_REFUSAL =
+  "This workspace was not created. Workspace creation is closed on this platform right now.";
+
+/**
  * The Product copy for an acceptance that exceeds the free slot, verbatim
  * (§ Invite acceptance). Same refusal class, different body: an acceptance
  * leaves the invite pending instead of creating a workspace.

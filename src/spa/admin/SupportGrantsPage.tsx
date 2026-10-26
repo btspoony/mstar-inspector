@@ -34,9 +34,14 @@ async function readSupportPage(): Promise<{ grants: GrantRow[]; workspaces: Work
   return { grants, workspaces };
 }
 
-/** A grant's window, to the minute — the part of an ISO stamp an operator reads. */
+/**
+ * A grant's window, to the minute — the part of an ISO stamp an operator reads.
+ * The stamp is UTC (`toISOString`), and the console renders no other
+ * time-converted stamp, so the marker is spelled out (I-000164): a bare
+ * `2026-11-01 09:00` reads as local time to an operator outside UTC.
+ */
 function windowStamp(iso: string): string {
-  return iso.slice(0, 16).replace("T", " ");
+  return `${iso.slice(0, 16).replace("T", " ")} UTC`;
 }
 
 export function SupportGrantsPage() {
