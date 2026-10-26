@@ -255,19 +255,21 @@ describe("the pre-workspace App face is retired", () => {
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
-  test("the settings page answers the same pre-auth login redirect as every SPA page", async () => {
+  test("the workspace settings page serves the shell scoped to its workspace", async () => {
     // `/dashboard/<ref>/settings` is an enumerated SPA page, not a worker
-    // route: spa-dispatch serves it like any other page, and the anonymous
-    // answer is the session guard's 302 — never a 404 that would leak the
-    // route table. `withSpaAssets` is unnecessary: both the shell path and
-    // the unbound-assets path land on the same guard.
+    // route, so the only thing that serves it is `spaDispatch`'s workspace
+    // grammar. The status is the discriminating assertion: drop `settings`
+    // from `WORKSPACE_FAMILY_SEGMENTS` and the path matches no SPA route and
+    // no worker route, so it falls through to a 404. `workspaceRef` alone
+    // would not fail — the boot falls back to the login's sole membership.
     const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db));
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/acme/settings", { headers: { Accept: "text/html" } }),
-      envFor(db),
+      await authedRequest("/dashboard/acme/settings", "dana", { accept: "text/html" }),
+      env,
     );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(res.status).toBe(200);
+    expect(bootOf(await res.text()).workspaceRef).toBe("acme");
   });
 
   test("an anonymous request cannot tell an existing workspace from a missing one (no pre-auth oracle)", async () => {
