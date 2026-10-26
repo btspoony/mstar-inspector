@@ -176,7 +176,14 @@ WHERE workspace_id = ? AND status = 'pending' AND expires_at <= ?`;
  * point (I-000096). This is the write the members-page read used to perform:
  * reads only filter, so a lapsed row keeps reading `pending` until the next
  * sweep while the `expires_at > ?` predicate already keeps it out of every
- * list and out of the seat count. Returns the flipped row count.
+ * list and out of the seat count.
+ *
+ * Global on purpose: no `workspace_id` filter, because the write-path flip
+ * (FLIP_LAPSED_SQL) only reaches a workspace someone writes to — a workspace
+ * nobody touches would keep its lapsed rows `pending` forever. Idempotent by
+ * predicate (a second run over the same clock flips zero) and bounded by the
+ * `status = 'pending'` partial-index set, so no LIMIT is needed. Returns the
+ * flipped row count.
  */
 export async function expireLapsedInvites(db: InviteStoreD1, now: string): Promise<number> {
   const result = await db

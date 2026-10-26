@@ -111,37 +111,75 @@ describe("runSweep", () => {
     expect(captured[1]).toContain("UPDATE workspace_invites");
     expect(captured[2]).toContain("FROM review_failures");
     expect(captured[2]).toContain("created_at > datetime('now', '-24 hours')");
-    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+    expect(result).toEqual({
+      failures24h: 0,
+      thresholdBreached: false,
+      invitesExpired: 0,
+      webhook: "not_attempted",
+    });
   });
-  test("flips lapsed pending invites and leaves live ones pending (real D1)", async () => {
+  test("flips lapsed pending invites in every workspace in one run, and flips none on the second", async () => {
     const db = createMigratedTestD1();
-    const insert = (id: string, expiresAt: string): void => {
+    db.raw
+      .query(`INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
+              VALUES ('ws-2', 'ws-2', 'Second', NULL, '2026-10-21T00:00:00.000Z', NULL)`)
+      .run();
+    const insert = (id: string, workspaceId: string, expiresAt: string): void => {
       db.raw
         .prepare(
           `INSERT INTO workspace_invites
              (id, workspace_id, github_login, role, status, invited_by,
               created_at, expires_at, accepted_at)
-           VALUES (?, 'default', ?, 'member', 'pending', NULL, ?, ?, NULL)`,
+           VALUES (?, ?, ?, 'member', 'pending', NULL, ?, ?, NULL)`,
         )
-        .run(id, id, new Date().toISOString(), expiresAt);
+        .run(id, workspaceId, id, new Date().toISOString(), expiresAt);
     };
     // Ages are relative to the real clock — a hard-coded calendar date slides
     // out of the comparison and turns this into a date bomb.
-    insert("lapsed", new Date(Date.now() - 60_000).toISOString());
-    insert("live", new Date(Date.now() + 60_000).toISOString());
+    const lapsed = new Date(Date.now() - 60_000).toISOString();
+    insert("lapsed-default", "default", lapsed);
+    insert("lapsed-ws-2", "ws-2", lapsed);
 
     const { log, calls } = captureLog();
-    const result = await runSweep(db, { log });
-    const statuses = db.raw
-      .query("SELECT id, status FROM workspace_invites ORDER BY id")
-      .all() as Array<{ id: string; status: string }>;
-    expect(statuses).toEqual([
-      { id: "lapsed", status: "expired" },
-      { id: "live", status: "pending" },
+    const first = await runSweep(db, { log });
+    expect(db.raw.query("SELECT id, status FROM workspace_invites ORDER BY id").all()).toEqual([
+      { id: "lapsed-default", status: "expired" },
+      { id: "lapsed-ws-2", status: "expired" },
+    ]);
+    expect(first.invitesExpired).toBe(2);
+
+    const second = await runSweep(db, { log });
+    expect(second.invitesExpired).toBe(0);
+    expect(db.raw.query("SELECT id, status FROM workspace_invites ORDER BY id").all()).toEqual([
+      { id: "lapsed-default", status: "expired" },
+      { id: "lapsed-ws-2", status: "expired" },
     ]);
     // A quiet flip logs nothing.
     expect(calls).toHaveLength(0);
-    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+    expect(first).toEqual({
+      failures24h: 0,
+      thresholdBreached: false,
+      invitesExpired: 2,
+      webhook: "not_attempted",
+    });
+  });
+
+  test("leaves a live pending invite untouched (real D1)", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_invites
+           (id, workspace_id, github_login, role, status, invited_by,
+            created_at, expires_at, accepted_at)
+         VALUES ('live', 'default', 'live', 'member', 'pending', NULL, ?, ?, NULL)`,
+      )
+      .run(new Date().toISOString(), new Date(Date.now() + 60_000).toISOString());
+
+    const result = await runSweep(db, { log: captureLog().log });
+    expect(db.raw.query("SELECT id, status FROM workspace_invites").all()).toEqual([
+      { id: "live", status: "pending" },
+    ]);
+    expect(result.invitesExpired).toBe(0);
   });
 
   test("the invite lapse failure degrades to a warn and the failure-sweep still runs", async () => {
@@ -161,7 +199,12 @@ describe("runSweep", () => {
       detail: "invites locked",
     });
     expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: 6 });
-    expect(result).toEqual({ failures24h: 6, thresholdBreached: true, webhook: "absent" });
+    expect(result).toEqual({
+      failures24h: 6,
+      thresholdBreached: true,
+      invitesExpired: null,
+      webhook: "absent",
+    });
   });
   test("retention: DELETE shape (30-day window, 500-row cap, no bound params) + retention_swept log carries the deleted count", async () => {
     const captured: string[] = [];
@@ -201,7 +244,12 @@ describe("runSweep", () => {
     expect(binds).toHaveLength(1);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.fields).toEqual({ event: "retention_swept", deleted: 3 });
-    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+    expect(result).toEqual({
+      failures24h: 0,
+      thresholdBreached: false,
+      invitesExpired: 3,
+      webhook: "not_attempted",
+    });
   });
 
   test("retention deletes only rows older than 30 days (real D1)", async () => {
@@ -229,7 +277,12 @@ describe("runSweep", () => {
     const result = await runSweep(db, { log });
     const remaining = db.raw.query("SELECT id FROM webhook_deliveries ORDER BY id").all() as Array<{ id: string }>;
     expect(remaining.map((r) => r.id)).toEqual(["fresh"]);
-    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+    expect(result).toEqual({
+      failures24h: 0,
+      thresholdBreached: false,
+      invitesExpired: 0,
+      webhook: "not_attempted",
+    });
   });
 
   test("retention failure degrades to a warn and the failure-sweep still runs (breach alert fires)", async () => {
@@ -248,7 +301,12 @@ describe("runSweep", () => {
     const result = await runSweep(wrapped, { log });
     expect(calls[0]!.fields).toMatchObject({ event: "retention_swept_failed", detail: "retention table locked" });
     expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: 6 });
-    expect(result).toEqual({ failures24h: 6, thresholdBreached: true, webhook: "absent" });
+    expect(result).toEqual({
+      failures24h: 6,
+      thresholdBreached: true,
+      invitesExpired: 0,
+      webhook: "absent",
+    });
   });
 
   test("counts only in-window rows, across all stages (parse + runner/sandbox/pipeline)", async () => {
@@ -270,7 +328,12 @@ describe("runSweep", () => {
     const { log, calls } = captureLog();
 
     const result = await runSweep(db, { log });
-    expect(result).toEqual({ failures24h: 5, thresholdBreached: false, webhook: "not_attempted" });
+    expect(result).toEqual({
+      failures24h: 5,
+      thresholdBreached: false,
+      invitesExpired: 0,
+      webhook: "not_attempted",
+    });
     expect(calls).toHaveLength(0);
   });
 
@@ -281,7 +344,12 @@ describe("runSweep", () => {
     const fetchImpl = mock(() => Promise.resolve(new Response("ok")));
 
     const result = await runSweep(db, { log, fetchImpl: fetchImpl as unknown as typeof fetch });
-    expect(result).toEqual({ failures24h: 6, thresholdBreached: true, webhook: "absent" });
+    expect(result).toEqual({
+      failures24h: 6,
+      thresholdBreached: true,
+      invitesExpired: 0,
+      webhook: "absent",
+    });
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(calls).toHaveLength(1);
     expect(calls[0]!.fields).toEqual({
