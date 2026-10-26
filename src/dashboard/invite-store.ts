@@ -184,6 +184,15 @@ WHERE workspace_id = ? AND status = 'pending' AND expires_at <= ?`;
  * set is bounded per run so one sweep never pays for an unbounded backlog: a
  * larger backlog drains over successive runs, and the id subquery means the
  * returned count is the rows this run really flipped.
+ *
+ * The candidate order is `expires_at, id`, not the planner's default: a bare
+ * LIMIT picks whichever rows the access path happens to reach first, so a
+ * steady inflow of newly lapsed rows could keep re-filling the cap and
+ * postpone an older lapsed row forever. Oldest-first makes each run drain
+ * from the front of the backlog, and `id` breaks equal-expiry ties
+ * deterministically. `workspace_invites_expiry` (migration 0035) keys the
+ * partial pending set by exactly this order, so the ordering is a bounded
+ * index seek rather than a sort over the whole pending set.
  */
 export async function expireLapsedInvites(
   db: InviteStoreD1,
@@ -195,6 +204,7 @@ export async function expireLapsedInvites(
       `UPDATE workspace_invites SET status = 'expired'
         WHERE id IN (SELECT id FROM workspace_invites
                       WHERE status = 'pending' AND expires_at <= ?
+                      ORDER BY expires_at, id
                       LIMIT ?)`,
     )
     .bind(now, cap)

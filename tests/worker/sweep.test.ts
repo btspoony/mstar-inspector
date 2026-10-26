@@ -218,6 +218,66 @@ describe("runSweep", () => {
     expect(calls).toHaveLength(0);
   });
 
+  test("a continuously-fed backlog still serves the OLDEST lapsed row first (no starvation)", async () => {
+    const db = createMigratedTestD1();
+    const insert = db.raw.prepare(
+      `INSERT INTO workspace_invites
+         (id, workspace_id, github_login, role, status, invited_by,
+          created_at, expires_at, accepted_at)
+       VALUES (?, 'default', ?, 'member', 'pending', NULL, ?, ?, NULL)`,
+    );
+    const ago = (minutes: number): string => new Date(Date.now() - minutes * 60_000).toISOString();
+    // The old row's login sorts LAST, so the login-ordered access path the
+    // candidates had before the ORDER BY would reach it only after the whole
+    // cohort — and a cap-sized inflow per run never gets that far.
+    const oldestExpiry = ago(10 * 24 * 60);
+    insert.run("oldest", "zzz-oldest", oldestExpiry, oldestExpiry);
+    /** A cap-sized cohort of newer lapsed rows, all sharing one expiry. */
+    const feed = (generation: number, minutesAgo: number): void => {
+      const expiry = ago(minutesAgo);
+      for (let i = 0; i < SWEEP_INVITE_LAPSE_CAP; i++) {
+        insert.run(`g${generation}-${String(i).padStart(4, "0")}`, `aaa-${generation}-${String(i).padStart(4, "0")}`, expiry, expiry);
+      }
+    };
+
+    feed(1, 5);
+    const expired = (): Array<{ id: string }> =>
+      db.raw.query("SELECT id FROM workspace_invites WHERE status = 'expired' ORDER BY expires_at, id").all() as Array<{
+        id: string;
+      }>;
+    const lapsedPending = (): number =>
+      (db.raw.query("SELECT COUNT(*) AS n FROM workspace_invites WHERE status = 'pending'").get() as { n: number }).n;
+
+    const first = await runSweep(db, { log: captureLog().log });
+    // The cap went to the oldest rows: the 10-day-old row, then the cohort in
+    // `id` order — NOT the login-ordered slice an unordered LIMIT returns.
+    expect(first.invitesExpired).toBe(SWEEP_INVITE_LAPSE_CAP);
+    expect(expired().slice(0, 2)).toEqual([{ id: "oldest" }, { id: "g1-0000" }]);
+    expect(expired()).toHaveLength(SWEEP_INVITE_LAPSE_CAP);
+    expect(lapsedPending()).toBe(1);
+
+    // Keep the inflow arriving at cap rate: the backlog must still drain, and
+    // the surviving leftover row is the NEWEST of the previous generation.
+    feed(2, 3);
+    const second = await runSweep(db, { log: captureLog().log });
+    expect(second.invitesExpired).toBe(SWEEP_INVITE_LAPSE_CAP);
+    expect(expired()).toContainEqual({ id: "g1-0499" });
+
+    feed(3, 1);
+    await runSweep(db, { log: captureLog().log });
+    expect(lapsedPending()).toBeLessThanOrEqual(SWEEP_INVITE_LAPSE_CAP);
+    expect(lapsedPending()).toBeGreaterThan(0);
+
+    // Stop feeding and drain: nothing is stranded, oldest row included.
+    let drained = 0;
+    for (let run = 0; run < 4; run++) drained += (await runSweep(db, { log: captureLog().log })).invitesExpired ?? 0;
+    expect(drained).toBeGreaterThan(0);
+    expect(lapsedPending()).toBe(0);
+    expect(db.raw.query("SELECT status FROM workspace_invites WHERE id = 'oldest'").get()).toEqual({
+      status: "expired",
+    });
+  });
+
   test("leaves a live pending invite untouched (real D1)", async () => {
     const db = createMigratedTestD1();
     db.raw
