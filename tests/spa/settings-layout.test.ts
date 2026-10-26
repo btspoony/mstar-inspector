@@ -1698,6 +1698,22 @@ describe("settings header typography", () => {
     expect(shell).toContain(
       '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">acme-app</h1>',
     );
+    // Rendering alone cannot express OWNERSHIP — a shell inlining the same
+    // triple renders byte-identical markup — so the face's single home is
+    // pinned on source: PageHeader spells the triple, the shell composes
+    // <PageHeader>, and no page source carries a second copy.
+    const pageHeader = readFileSync(join(import.meta.dir, "../../src/spa/components/PageHeader.tsx"), "utf8");
+    expect(pageHeader).toContain("text-(length:--typo-heading-24-size)");
+    expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
+    expect(pageHeader).toContain("tracking-(--typo-heading-24-tracking)");
+    const shellSource = readFileSync(
+      join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"),
+      "utf8",
+    );
+    const tabSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(shellSource).toContain("<PageHeader");
+    expect(shellSource).not.toContain("--typo-heading-24");
+    expect(tabSource).not.toContain("--typo-heading-24");
     // The off-scale 18px class no longer appears anywhere on the face: this
     // render carries the FULL settings tab body, so the old page heading and
     // every card behind it are observed at once.

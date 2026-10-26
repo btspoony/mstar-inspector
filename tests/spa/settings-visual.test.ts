@@ -28,6 +28,7 @@ const spaRoot = join(import.meta.dir, "../../src/spa");
 const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "utf8");
 const settingsPage = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
+const pageHeader = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
 /** A manage-face settings payload, so the detail shell renders its real body. */
@@ -164,8 +165,12 @@ describe("settings heading idiom (QC convergence)", () => {
     // SUPERSEDE (App detail IA): the identity header moved onto the
     // AppDetailPage shell with the heading-24 face; that face now lives in
     // the ONE PageHeader spelling and the shell composes it. The settings tab
-    // keeps the card-title heading-16 step only — both facts are read off the
-    // rendered face here.
+    // keeps the card-title heading-16 step only.
+    //
+    // Rendering alone cannot express OWNERSHIP: a shell that inlines the same
+    // heading-24 triple renders byte-identical markup. The source pins below
+    // are what keep the face single-homed — the shell composes <PageHeader>
+    // and PageHeader is the only file spelling the triple.
     const shell = withLocation("/dashboard/apps/demo", () =>
       renderToStaticMarkup(
         createElement(AppDetailView, {
@@ -188,6 +193,15 @@ describe("settings heading idiom (QC convergence)", () => {
     expect(shell).toContain(
       '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">demo</h1>',
     );
+    // Ownership: the triple is spelled once, in PageHeader, and the shell
+    // composes it rather than re-spelling it.
+    expect(pageHeader).toContain("text-(length:--typo-heading-24-size)");
+    expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
+    expect(pageHeader).toContain("tracking-(--typo-heading-24-tracking)");
+    expect(detailPage).toContain("<PageHeader");
+    expect(detailPage).toContain("title={slug}");
+    expect(detailPage).not.toContain("--typo-heading-24");
+    expect(settingsPage).not.toContain("--typo-heading-24");
     // Card titles ride the heading-16 step instead — the detail face never
     // re-spells the page title at that size.
     const cardTitles = [...shell.matchAll(/data-slot="card-title" class="([^"]*)"/g)].map(

@@ -18,6 +18,8 @@
  * primitive's own face (PageHeader / DataTable / StatusBadge) pin it there.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -39,8 +41,33 @@ const appRow = (overrides: Partial<AppsPayload["apps"][number]> = {}): AppsPaylo
   ...overrides,
 });
 
+const spaRoot = join(import.meta.dir, "../../src/spa");
+
+/** The two page sources whose composition is a constraint of its own. */
+const PAGE_FACE_SOURCES = {
+  AppsPage: readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8"),
+  MembersPage: readFileSync(join(spaRoot, "pages/MembersPage.tsx"), "utf8"),
+};
+
 /** Markup with HTML entities decoded, so class-attribute text is searchable. */
 const decoded = (html: string): string => html.replaceAll("&amp;", "&").replaceAll("&quot;", '"');
+
+/** The Apps page's full loaded face: heading, Create control and the table. */
+const renderAppsPage = (): string =>
+  decoded(
+    withLocation("/dashboard/acme/apps", () =>
+      renderToStaticMarkup(
+        createElement(AppsView, {
+          locale: "en",
+          state: "ok",
+          payload: { viewer: { login: "mallory", role: "admin" }, apps: [appRow()] },
+          canCreate: true,
+          unavailableReason: "",
+          onRetry: () => {},
+        }),
+      ),
+    ),
+  );
 
 /** The Apps list table rendered from the real row component, under its own base. */
 const renderList = (apps: AppsPayload["apps"], pathname = "/dashboard/apps"): string =>
@@ -77,6 +104,94 @@ const renderMembers = (): string =>
 /** Class lists of every `th` / `td` the markup emits. */
 const classAttrs = (html: string, tag: "th" | "td"): string[] =>
   [...html.matchAll(new RegExp(`<${tag} [^>]*class="([^"]*)"`, "g"))].map((match) => match[1] ?? "");
+
+/** The populated Members page fixture: workspace summary, invite form, tables. */
+const MEMBERS_PAGE_PAYLOAD = {
+  viewer: { role: "owner" },
+  members: [{ id: "m1", github_login: "mallory", role: "owner", created_at: "2026-01-01T00:00:00Z" }],
+  invites: [
+    {
+      id: "i1",
+      github_login: "hubot",
+      role: "member",
+      created_at: "2026-01-01T00:00:00Z",
+      expires_at: "2026-01-08T00:00:00Z",
+    },
+  ],
+  workspace: {
+    plan: { id: "free", name: "Free" },
+    memberLimit: 5,
+    reviewAttemptsThisMonth: 2,
+    pendingInvites: 1,
+  },
+};
+
+/**
+ * The Members page MOUNTED with the page's own loaded state supplied. SSR
+ * renders only its skeleton (the read lives in `useEffect`), so the workspace
+ * summary, invite form and tables exist exclusively on a mounted tree.
+ */
+async function mountMembersPage(
+  payload: typeof MEMBERS_PAGE_PAYLOAD = MEMBERS_PAGE_PAYLOAD,
+): Promise<string> {
+  const { win, cleanup } = installDom("http://localhost/dashboard/acme");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown) =>
+    new Response(
+      JSON.stringify(
+        String(input).endsWith("/invites")
+          ? { invites: payload.invites }
+          : {
+              viewer: payload.viewer,
+              members: payload.members,
+              workspace: payload.workspace,
+            },
+      ),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )) as unknown as typeof fetch;
+  try {
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(MembersPage, { boot: { locale: "en", login: "mallory", name: null } }));
+    });
+    const html = container.innerHTML;
+    await act(async () => root.unmount());
+    return html;
+  } finally {
+    globalThis.fetch = realFetch;
+    cleanup();
+  }
+}
+
+/**
+ * Every labelled region the old page-source scan covered, on the rendered
+ * full page. A test that narrows to one subtree drops a marker and fails.
+ */
+function expectFullPageRegions(name: string, html: string): void {
+  if (name === "AppsPage") {
+    for (const marker of [
+      t("en", "apps.heading"), // PageHeader title
+      t("en", "apps.create"), // header Create control
+      t("en", "apps.tableName"), // DataTable header band
+      t("en", "apps.detail"), // row action cell
+    ]) {
+      expect(html, `${name} ${marker}`).toContain(marker);
+    }
+    return;
+  }
+  for (const marker of [
+    t("en", "members.heading"), // PageHeader title
+    t("en", "members.workspaceHeading"), // workspace summary
+    t("en", "members.inviteButton"), // invite form
+    t("en", "members.tableLogin"), // member table
+    t("en", "members.pendingHeading"), // pending invites
+    t("en", "members.deleteWorkspace"), // owner delete entry
+  ]) {
+    expect(html, `${name} ${marker}`).toContain(marker);
+  }
+}
 
 describe("AppsPage table reinforcement (AD-581)", () => {
   test("identity cell is the brand surface: slug primary line + AppID meta line", () => {
@@ -184,21 +299,12 @@ describe("AppsPage table reinforcement (AD-581)", () => {
 
 describe("v0.3 page face (A4/A5)", () => {
   test("each page title is ONE heading-24 h1 — the PageHeader face, never re-spelled", () => {
-    // ONE spelling of the page-title face: exactly one element in the page
-    // markup carries the heading-24 trio, and it is the h1. A page that
-    // re-spelled the face lower down, or grew a second heading, fails here.
-    const apps = decoded(
-      renderToStaticMarkup(
-        createElement(AppsView, {
-          locale: "en",
-          state: "ok",
-          payload: { viewer: { login: "mallory", role: "member" }, apps: [appRow()] },
-          canCreate: true,
-          unavailableReason: "",
-          onRetry: () => {},
-        }),
-      ),
-    );
+    // Rendering alone cannot express OWNERSHIP: a page that inlines the same
+    // heading-24 triple emits byte-identical markup, so the render assertions
+    // below would still pass. The two source pins that follow make the
+    // composition itself the constraint — the page delegates to <PageHeader>
+    // and carries no spelling of the face to drift with.
+    const apps = renderAppsPage();
     const members = decoded(
       withLocation("/dashboard/acme", () =>
         renderToStaticMarkup(
@@ -210,19 +316,26 @@ describe("v0.3 page face (A4/A5)", () => {
       ["AppsPage", apps, t("en", "apps.heading")],
       ["MembersPage", members, t("en", "members.heading")],
     ] as const) {
+      // Exactly one element carries the heading-24 trio, and it is the h1.
       expect(html.match(/--typo-heading-24-size/g), name).toHaveLength(1);
       expect(html.match(/<h1/g), name).toHaveLength(1);
       expect(html, name).toContain(
         `<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">${heading}</h1>`,
       );
+      // The face has exactly one home: the page composes PageHeader…
+      expect(PAGE_FACE_SOURCES[name]).toContain("<PageHeader");
+      // …and holds no second copy of the heading-24 triple.
+      expect(PAGE_FACE_SOURCES[name], name).not.toContain("--typo-heading-24");
     }
   });
 
   test("table header face: background-200 band + label-12 headers (DESIGN.md Table)", () => {
-    // The shell + header face is DataTable's; each page composes it and keeps
-    // no second header band of its own — one band, every header on label-12.
+    // Same ownership split as the page title: DataTable owns the shell and the
+    // band, each page only composes it. Rendering alone cannot tell a composed
+    // table from a hand-rolled one that emits the identical band, so the
+    // source pins forbid the second spelling explicitly.
     for (const [name, html] of [
-      ["AppsPage", renderList([appRow()])],
+      ["AppsPage", renderAppsPage()],
       ["MembersPage", renderMembers()],
     ] as const) {
       expect(html.match(/<thead[^>]*class="([^"]*)"/)?.[1], name).toContain("bg-(--background-200)");
@@ -232,14 +345,24 @@ describe("v0.3 page face (A4/A5)", () => {
       for (const header of headers) {
         expect(header, name).toContain("text-xs tracking-(--typo-label-12-tracking)");
       }
+      expect(PAGE_FACE_SOURCES[name]).toContain("<DataTable");
+      // No page re-spells the band or the label-12 header step.
+      expect(PAGE_FACE_SOURCES[name], name).not.toContain("--background-200");
+      expect(PAGE_FACE_SOURCES[name], name).not.toContain("--typo-label-12-tracking");
     }
   });
 
-  test("the rendered pages emit no raw color literal", () => {
+  test("the rendered full page emits no raw color literal", async () => {
+    // Page-level scope: the guard covers every region the old page-source scan
+    // covered — heading, workspace summary, invite form, tables, dialogs — not
+    // just a table subtree. `expectFullPageRegions` fails if a region goes
+    // missing, so the check cannot silently narrow back to one subtree.
+    // Members' regions exist only on a mounted tree (SSR shows the skeleton).
     for (const [name, html] of [
-      ["AppsPage", renderList([appRow()])],
-      ["MembersPage", renderMembers()],
+      ["AppsPage", renderAppsPage()],
+      ["MembersPage", decoded(await mountMembersPage())],
     ] as const) {
+      expectFullPageRegions(name, html);
       expect(html, name).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
       expect(html, name).not.toContain("rgb(");
     }
