@@ -277,6 +277,31 @@ describe("create from the switcher menu", () => {
     }
   });
 
+  test("a non-409 body never renders verbatim — it reads as the localized failure copy", async () => {
+    // Each of these bodies is NOT this dialog's copy: the 400 validation text,
+    // the 500 storage error, and the login page an expired session's fetch
+    // follows the 302 to. On a zh-CN page all three must read in Chinese
+    // (I-000161).
+    for (const [status, body] of [
+      [400, "name must be 2-80 characters"],
+      [500, "D1_ERROR: database is locked"],
+      [200, "<!doctype html><title>Sign in</title>"],
+    ] as const) {
+      const surface = await openMenu(() => new Response(body, { status }), { locale: "zh_CN" });
+      try {
+        await surface.clickNewWorkspace();
+        await surface.submit("Second one");
+
+        const alert = surface.dialog()?.querySelector('[role="alert"]')?.textContent;
+        expect(alert).toBe(t("zh_CN", "workspace.createFailed"));
+        expect(surface.dialog()?.textContent).not.toContain(body);
+        expect(surface.assigned).toEqual([]);
+      } finally {
+        await surface.cleanup();
+      }
+    }
+  });
+
   test("Cancel after a 409 closes clean: the reopened dialog has no name and no stale refusal", async () => {
     const surface = await openMenu(() => new Response(FREE_SLOT_REFUSAL, { status: 409 }));
     try {

@@ -11,8 +11,9 @@
  * The free-slot rule stays the server's (compass D5): the client posts and
  * nothing here pre-judges the slot. The server states a 409 in English only,
  * so its two named reasons are mapped at this edge onto the reason copy the
- * shell already localizes (I-000161); an unrecognised refusal still renders
- * the server's own words verbatim.
+ * shell already localizes (I-000161); an unrecognised 409 body still renders
+ * the server's own words verbatim. Every other status renders the localized
+ * failure copy — a non-409 body is not this dialog's copy.
  */
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
@@ -81,14 +82,16 @@ export function CreateWorkspaceDialog({
       }
       // 409 is the server's free-slot / creation-closed refusal. Its two named
       // bodies are English-only, so they read as the shell's own reason copy in
-      // the dialog's locale; anything else IS the copy the user must read and
-      // renders verbatim.
+      // the dialog's locale. An unrecognised 409 body IS the copy the user must
+      // read and renders verbatim — but only a 409 may: a 400 validation body,
+      // a 500 storage error, or the login page an expired session lands on is
+      // not localized copy for this dialog (I-000161).
       const key = createWorkspaceRefusalKey(status, body);
       if (key !== null) {
         setError(t(locale, key));
         return;
       }
-      setError(body.trim() !== "" ? body : t(locale, "workspace.createFailed"));
+      setError(status === 409 && body.trim() !== "" ? body : t(locale, "workspace.createFailed"));
     } catch {
       setError(t(locale, "workspace.createFailed"));
     } finally {
