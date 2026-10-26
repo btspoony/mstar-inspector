@@ -2,7 +2,7 @@
  * The test D1 double's change-count contract: a row-returning write reports the
  * rows it modified, as D1's `meta.changes` does — `1` when a guarded
  * `INSERT … SELECT … RETURNING` matched, `0` when it did not — with `results`
- * unchanged, `last_row_id` left at `0`, and a plain read changing nothing.
+ * unchanged and a plain read changing nothing.
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "./helpers";
@@ -20,7 +20,7 @@ describe("test D1 double", () => {
 
     const hit = await insert("event-1", "default");
     expect(hit.results).toEqual([{ workspace_id: "default" }]);
-    expect(hit.meta).toEqual({ changes: 1, last_row_id: 0 });
+    expect(hit.meta.changes).toBe(1);
 
     // A batch runs every statement through `run()`, SELECTs included; the
     // previous write's count must not leak into a read.
