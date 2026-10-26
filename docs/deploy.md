@@ -424,8 +424,10 @@ plan, and both rejected for now in favour of the applied approval gate.
 
 `wrangler.jsonc` `env.production.vars` holds the only production plain var
 declared in config, `DEPLOYMENT_MODE` (§ Deployment mode — `saas`,
-re-supplied on every deploy by both workflows); changing it means editing
-`env.production.vars` and redeploying. `PLATFORM_OPERATORS` is the other plain
+re-supplied on every deploy by both workflows, so the `--var` there wins);
+changing it means editing `env.production.vars` **and** the
+`--var "DEPLOYMENT_MODE:…"` in both workflows, then redeploying.
+`PLATFORM_OPERATORS` is the other plain
 var, but it is neither declared here nor durable on the Worker: it is bound
 from the GitHub repository variable on every deploy (§ Platform operators), so
 a hand-set value is replaced by that command. No dashboard-set plain var
