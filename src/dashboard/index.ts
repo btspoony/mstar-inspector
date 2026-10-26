@@ -178,7 +178,7 @@ import {
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
 import { isLocale, resolveLocale, serializeLocaleCookie, t, type DictionaryKey, type Locale } from "../i18n";
-import { RESERVED_WORKSPACE_SLUGS, wantsHtml } from "../spa/routes";
+import { RESERVED_WORKSPACE_SLUGS, WORKSPACE_FAMILY_SEGMENTS, wantsHtml } from "../spa/routes";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
 
 /**
@@ -673,16 +673,28 @@ function isRetiredAppPath(pathname: string): boolean {
   return first === "apps" || (first === "api" && second === "apps");
 }
 
-/** The workspace ref a mount-pinned /dashboard path addresses, else null. */
-const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(["apps", "members", "api"]);
+/**
+ * The workspace ref a mount-pinned /dashboard path addresses, else null.
+ *
+ * Derived from the ONE SPA family (`WORKSPACE_FAMILY_SEGMENTS`) so a new
+ * segment cannot drift across the bundle boundary. `settings` is excluded
+ * because no Worker route lives at `/<ref>/settings` — admitting it would route
+ * a page path through this gate. This exclusion list IS the gate's admission
+ * list: a new SPA-only segment has to be excluded here too.
+ */
+const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
+  WORKSPACE_FAMILY_SEGMENTS.filter((segment) => segment !== "settings"),
+);
 
 /**
  * Classify a mount-pinned /dashboard path into the workspace it addresses —
- * step 1 of the request-path ordering contract, mirrored by `workspaceRefOf` in
- * `src/spa/routes.ts`. A workspace path is `/<ref>/{apps|members|api}…` with a
- * non-reserved ref. A reserved first segment is never a workspace, so
- * `:workspaceRef` cannot capture a real route (`/apps`, `/api/apps`, `/login`,
- * `/members`, …).
+ * step 1 of the request-path ordering contract. Both sides read the ONE family
+ * export (`WORKSPACE_FAMILY_SEGMENTS` in `src/spa/routes.ts`): the SPA's
+ * `workspaceRefOf` builds its alternation from it, and `WORKSPACE_SEGMENTS`
+ * above is its derivation, not a second list. The family has four members; this
+ * gate admits three because `settings` is an SPA page path with no Worker route.
+ * A reserved first segment is never a workspace, so `:workspaceRef` cannot
+ * capture a real route (`/apps`, `/api/apps`, `/login`, `/members`, …).
  */
 function classifyDashboardPath(pathname: string): { kind: "workspace"; ref: string } | { kind: "other" } {
   const relative =

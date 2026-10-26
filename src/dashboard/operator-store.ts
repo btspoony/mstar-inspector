@@ -6,10 +6,10 @@
  * `insertAuditEvent`), the console's PAIRED writes (`insertSupportGrantWithAudit`,
  * `deleteSupportGrantWithAudit` — grant plus its audit row in ONE `batch`),
  * three listing reads (`listActiveSupportGrants`, `listAllActiveSupportGrants`,
- * `listAuditEvents`), the validity probe (`hasValidGrant`) and ONE delete
- * (`deleteSupportGrant`). A grant is a time-boxed access aid, not history (spec
- * operator-admin-surface §3.4), so the operator console revokes it by deleting
- * the row; `audit_events` stays append-only by construction.
+ * `listAuditEvents`), and the validity probe (`hasValidGrant`). A grant is a
+ * time-boxed access aid, not history (spec operator-admin-surface §3.4), so the
+ * operator console revokes it by deleting the row; `audit_events` stays
+ * append-only by construction.
  *   * `support_grants` is the time-boxed, workspace-scoped window that lets a
  *     non-member platform operator read a workspace's identity fields and
  *     member list. Expiry is evaluated per request from the stored
@@ -18,7 +18,7 @@
  *     Both reads judge ONE row per (workspace, operator): the newest by
  *     `rowid` (insertion order), so an appended row can end a window its
  *     predecessor still claims. The console's revocation deletes the whole
- *     pair (see `deleteSupportGrant`), so it can never reveal an older row.
+ *     pair (see `deleteSupportGrantWithAudit`), so it can never reveal an older row.
  *   * `audit_events` records the operator access attempt in the workspace gate
  *     (`support.read` | `support.forbidden` | `support.denied`), one row per
  *     operator request, and the console's grant maintenance
@@ -272,32 +272,6 @@ export async function deleteSupportGrantWithAudit(
   ]);
   const appended = results[0]?.results[0] as { workspace_id: string } | undefined;
   return appended === undefined ? null : { workspaceId: appended.workspace_id };
-}
-
-/**
- * Remove one grant by id and return the row it removed, or null when no such
- * row exists — the UNPAIRED delete. The console must not use it (an audit row
- * would be a second, separate write); it uses `deleteSupportGrantWithAudit`.
- *
- * EVERY append for the same (workspace, operator) goes with it. The reads
- * judge the newest append for that pair, so deleting only the newest row would
- * hand the window back to the row it superseded: a revocation that silently
- * restores access. The pair, not the row, is the window.
- */
-export async function deleteSupportGrant(
-  db: OperatorStoreD1,
-  id: string,
-): Promise<SupportGrantRow | null> {
-  const row = await db
-    .prepare(`SELECT ${GRANT_COLUMNS} FROM support_grants WHERE id = ?`)
-    .bind(id)
-    .first<SupportGrantRow>();
-  if (row === null) return null;
-  await db
-    .prepare("DELETE FROM support_grants WHERE workspace_id = ? AND operator_login = ?")
-    .bind(row.workspace_id, row.operator_login)
-    .run();
-  return row;
 }
 
 /**

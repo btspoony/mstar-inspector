@@ -1,8 +1,9 @@
 /**
  * Workspace settings (`/dashboard/<ref>/settings`): the workspace-level
  * controls that used to be reachable only from the App settings view. Today
- * that is the readable URL (slug) rename; the card itself is shared with the
- * App settings view, and the server stays the SSOT for who may write it.
+ * that is the readable URL (slug) rename; the card was moved out of the App
+ * settings view and this page is its only entry point, and the server stays
+ * the SSOT for who may write it.
  */
 import { t } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";

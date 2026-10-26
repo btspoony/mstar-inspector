@@ -30,10 +30,21 @@
 -- Both indexes inherit `operator_login`'s COLLATE NOCASE (0029), because a
 -- column's collation travels with it into an index.
 --
--- Metadata-only: CREATE INDEX builds the secondary structure without
--- rewriting the table, so it is safe over a live DB with existing rows. Must
--- apply AFTER 0029 (the indexed columns must exist). No row, no ordering and
--- no consumer changes: every reader's ORDER BY stays explicit.
+-- `CREATE INDEX` adds no column and rewrites no table row, but it is not
+-- metadata-only: it builds the whole secondary structure — reading every row
+-- of `support_grants` and sorting it into a new B-tree — inside a write
+-- transaction, so SQLite's write lock blocks every other write until each
+-- statement finishes. What that costs depends on the rows already stored:
+-- `insertSupportGrantWithAudit` always appends a fresh row with a new id
+-- instead of replacing the pair's previous grant, and an expired grant is
+-- only filtered out by readers, never deleted, so repeated grants accumulate
+-- superseded and expired rows. The `PLATFORM_OPERATORS` allowlist bounds who
+-- may append, not how many appends exist. Assumption, not a bound: this
+-- deployment's grant history stays small, in which case each build is cheap
+-- and its write block brief; the actual existing row count decides the scan
+-- work and how long writers wait. Must apply AFTER 0029 (the indexed columns
+-- must exist). No row, no ordering and no consumer changes: every reader's
+-- ORDER BY stays explicit.
 
 CREATE INDEX support_grants_operator_window
   ON support_grants (operator_login, expires_at, workspace_id);
