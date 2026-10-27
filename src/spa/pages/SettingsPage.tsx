@@ -718,7 +718,7 @@ function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
  * The payload carries registry ids only — never image-local configuration
  * or secrets.
  */
-function RuntimeHarnessCard({
+export function RuntimeHarnessCard({
   locale,
   payload,
   onSettings,
