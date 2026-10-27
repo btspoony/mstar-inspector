@@ -633,6 +633,137 @@ export const en = {
         "The workspace this App was created in no longer exists, so the App has no workspace page here — delete it on GitHub and start a new app-creation flow from a live workspace.",
     },
   },
+  /**
+   * Platform console (`/_internal_admin`) — the operator surface. Bilingual
+   * through the same locale cookie as the workspace shell: `main.tsx` reads
+   * `boot.locale`, every screen takes it as a prop, and page copy resolves
+   * via `t(locale, …)`. These keys are operator-facing and never reuse the
+   * tenant-facing `support.*` copy.
+   */
+  admin: {
+    /** The document `<title>` — substituted server-side in `serveDocument`. */
+    documentTitle: "Morning Star — Platform operations",
+    /** The header/nav shell of `src/spa/admin/main.tsx`. */
+    header: {
+      title: "Platform operations",
+      /** Shown under the title when the boot carries no login. */
+      signedOut: "signed out",
+      /** Link back to the operator's own workspace shell. */
+      dashboardLink: "Workspace dashboard",
+    },
+    /** The four console nav labels — `pages.ts` routes by `labelKey`. */
+    nav: {
+      flags: "Server flags",
+      workspaces: "Workspaces",
+      users: "Users",
+      supportGrants: "Support access",
+    },
+    /** Server flags page. */
+    flags: {
+      description:
+        "Platform-wide switches. A change applies to the next request and appends one audit row.",
+      loadFailed: "Could not load the server flags.",
+      emptyTitle: "No flags",
+      emptyDescription: "This server exposes no platform switch.",
+      flagColumn: "Flag",
+      effectColumn: "Effect when off",
+      stateColumn: "State",
+      /** State renders as ON/OFF in both locales (compass D9). */
+      stateOn: "ON",
+      stateOff: "OFF",
+      /** The note under the review_global key (spec §3.1). */
+      reviewGlobalNote: "Queued work is not cancelled.",
+      noDocumentedEffect: "No documented effect.",
+      /** What each flag governs while it is off, keyed by flag key. */
+      effectReviewGlobal: "No new review is enqueued. The per-App pause switch is unchanged.",
+      effectSignupOpen:
+        "An unknown GitHub login cannot sign in for the first time. Existing accounts are unaffected.",
+      effectWorkspaceCreationOpen:
+        "No workspace can be created, the operator's own included.",
+      /** Write confirmation dialog — {flag}, {from} and {to} (ON/OFF) are interpolated. */
+      confirmTitle: "Turn {flag} from {from} to {to}?",
+      confirmButton: "Confirm",
+      cancelButton: "Cancel",
+      /** Inline confirmation next to the row right after a successful write. */
+      saved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      toggleFailed: "Could not change {flag}.",
+      /** Toggle accessible name: "{flag} {state}" with the ON/OFF state. */
+      stateAria: "{flag} {state}",
+    },
+    /** Workspaces page. */
+    workspaces: {
+      description:
+        "Every live workspace. A plan change never removes a member; a downgrade only blocks new invites.",
+      loadFailed: "Could not load the workspace list.",
+      emptyTitle: "No workspaces",
+      emptyDescription: "This deployment has no live workspace yet.",
+      workspaceColumn: "Workspace",
+      ownerColumn: "Owner",
+      membersColumn: "Members",
+      /** {count} = pending invite count (rendered only when > 0). */
+      pendingInvites: "{count} pending",
+      seatsColumn: "Seats",
+      planColumn: "Plan",
+      createdColumn: "Created",
+      /** Fallback when the plan write fails with an unrecognised error. */
+      planChangeFailed: "Could not change the plan for {name}.",
+      /** The plan picker's accessible name. */
+      planAria: "Plan for {name}",
+    },
+    /** Users page. */
+    users: {
+      description:
+        "Every account on this platform. Read-only: operator status comes from the allowlist, support access from the grant list.",
+      loadFailed: "Could not load the user list.",
+      emptyTitle: "No users",
+      emptyDescription: "Nobody has signed in to this platform yet.",
+      githubColumn: "GitHub",
+      firstSeenColumn: "First seen",
+      workspacesColumn: "Workspaces",
+      identityColumn: "Identity",
+      identityOperator: "Operator",
+      /** {count} = the login's live grant count. */
+      identitySupport: "Support ({count})",
+      identityUser: "User",
+    },
+    /**
+     * Client-side table search (Workspaces, Users): one input filters the
+     * already-loaded rows; the counter reads "shown / total".
+     */
+    search: {
+      placeholder: "Search",
+      /** {shown} = matching rows, {total} = loaded rows. */
+      counter: "{shown} / {total}",
+      emptyTitle: "No matches",
+      emptyDescription: "No row matches the current search.",
+    },
+    /** Support grants page — list heads and the create form. */
+    supportGrants: {
+      description:
+        "Time-boxed cross-workspace access. Creating and revoking a grant each append one audit row.",
+      loadFailed: "Could not load the support grants.",
+      /** Fallback when a write fails with an unrecognised error. */
+      createFailed: "Could not create the support grant.",
+      revokeFailed: "Could not revoke the support grant.",
+      newWindowTitle: "New support window",
+      workspaceLabel: "Workspace",
+      workspacePlaceholder: "Select a workspace",
+      operatorLabel: "Operator login",
+      operatorPlaceholder: "octocat",
+      reasonLabel: "Reason",
+      reasonPlaceholder: "incident 42",
+      hoursLabel: "Hours",
+      submit: "Grant access",
+      operatorColumn: "Operator",
+      workspaceColumn: "Workspace",
+      reasonColumn: "Reason",
+      expiresColumn: "Expires",
+      revokeAction: "Revoke",
+      emptyTitle: "No open support windows",
+      emptyDescription: "No operator holds cross-workspace access right now.",
+    },
+  },
 };
 
 /** The dictionary shape — derived from en, the source of truth. */
