@@ -275,6 +275,24 @@ describe("Flags screen", () => {
     await surface.close();
   });
 
+  test("a non-AdminWriteError failure names the flag, not a literal {flag}", async () => {
+    const surface = await flagsScreen((request) => {
+      if (request.method === "PATCH") throw new Error("network down");
+      return json({ flags: FLAGS });
+    });
+    const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
+    await surface.click(toggle);
+    const confirm = [...surface.win.document.querySelectorAll("button")].find(
+      (node) => node.textContent === "Confirm",
+    );
+    await surface.click(confirm as unknown as DomElement);
+
+    const alert = surface.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Could not change review_global.");
+    expect(alert?.textContent).not.toContain("{flag}");
+    await surface.close();
+  });
+
   test("Escape closes the dialog without a write", async () => {
     const surface = await flagsScreen(() => json({ flags: FLAGS }));
     const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;

@@ -9,7 +9,8 @@
  * the note the spec requires: turning it off stops new enqueues and does not
  * cancel queued work.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -47,6 +48,13 @@ export function FlagsPage({ locale }: { locale: Locale }) {
   const [savedKey, setSavedKey] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
 
+  /** The "Saved." note is short-lived; the timer clears on change and unmount. */
+  useEffect(() => {
+    if (savedKey === null) return;
+    const timer = setTimeout(() => setSavedKey(null), 3000);
+    return () => clearTimeout(timer);
+  }, [savedKey]);
+
   async function toggle({ key, enabled }: PendingWrite) {
     setBusyKey(key);
     setSavedKey(null);
@@ -57,7 +65,7 @@ export function FlagsPage({ locale }: { locale: Locale }) {
       setSavedKey(key);
     } catch (error) {
       setRefusal(
-        error instanceof AdminWriteError ? error.message : t(locale, "admin.flags.toggleFailed", { key }),
+        error instanceof AdminWriteError ? error.message : t(locale, "admin.flags.toggleFailed", { flag: key }),
       );
     } finally {
       setBusyKey(null);
@@ -80,9 +88,7 @@ export function FlagsPage({ locale }: { locale: Locale }) {
       header: t(locale, "admin.flags.effectColumn"),
       cell: (row) => (
         <span className="text-sm text-muted-foreground">
-          {row.key in EFFECT_KEYS
-            ? t(locale, EFFECT_KEYS[row.key])
-            : t(locale, "admin.flags.noDocumentedEffect")}
+          {t(locale, EFFECT_KEYS[row.key] ?? "admin.flags.noDocumentedEffect")}
         </span>
       ),
     },
@@ -153,23 +159,17 @@ export function FlagsPage({ locale }: { locale: Locale }) {
                 })}
               </DialogTitle>
               <DialogDescription>
-                {pending.key in EFFECT_KEYS
-                  ? t(locale, EFFECT_KEYS[pending.key])
-                  : t(locale, "admin.flags.noDocumentedEffect")}
+                {t(locale, EFFECT_KEYS[pending.key] ?? "admin.flags.noDocumentedEffect")}
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
               {/* Cancel first: Radix focuses the first focusable node, so Escape-or-cancel stays the default. */}
-              <button
-                type="button"
-                className="inline-flex h-8 items-center justify-center rounded-md border px-3 text-sm"
-                onClick={() => setPending(null)}
-              >
+              <Button type="button" variant="outline" size="sm" onClick={() => setPending(null)}>
                 {t(locale, "admin.flags.cancelButton")}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                className="inline-flex h-8 items-center justify-center rounded-md bg-primary px-3 text-sm text-primary-foreground"
+                size="sm"
                 disabled={busyKey !== null}
                 onClick={() => {
                   const write = pending;
@@ -178,7 +178,7 @@ export function FlagsPage({ locale }: { locale: Locale }) {
                 }}
               >
                 {t(locale, "admin.flags.confirmButton")}
-              </button>
+              </Button>
             </DialogFooter>
           </DialogContent>
         ) : null}
