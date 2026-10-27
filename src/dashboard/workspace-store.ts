@@ -493,6 +493,26 @@ export async function createWorkspace(
 }
 
 /**
+ * Rename one workspace — the label the top-bar switcher shows. ONE guarded
+ * UPDATE: a row retired between the caller's resolution and this write changes
+ * nothing and answers null, the same 404 an unknown ref gets. `name` carries no
+ * uniqueness guard, so there is no conflict branch, and `RETURNING` is the row
+ * this write produced rather than a second read that could disagree with it.
+ */
+const SET_NAME_SQL = `UPDATE workspaces SET name = ?1
+   WHERE id = ?2 AND deleted_at IS NULL
+  RETURNING id, slug, name, created_at`;
+
+export async function setWorkspaceName(
+  db: WorkspaceStoreD1,
+  workspaceId: string,
+  name: string,
+): Promise<WorkspaceRow | null> {
+  const { results } = await db.prepare(SET_NAME_SQL).bind(name, workspaceId).run<WorkspaceRow>();
+  return results[0] ?? null;
+}
+
+/**
  * Retire one workspace as ONE `batch`: stamp `deleted_at`, cancel the active
  * subscription, drop every membership and revoke the pending invites. The row
  * itself is never hard-deleted — every live read filters `deleted_at IS NULL`,

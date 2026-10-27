@@ -81,6 +81,7 @@ import {
   getWorkspaceMember,
   listWorkspaceMembers,
   listWorkspaceMembershipOptions,
+  setWorkspaceName,
   type WorkspaceAccess,
   type WorkspaceMembershipOption,
   type WorkspaceRole,
@@ -2262,6 +2263,48 @@ const auditListRoute = async (c: DashboardContext) => {
   });
 };
 
+// --- Workspace settings: the owner-editable name ---
+//
+// The name is the label the top-bar switcher shows; a workspace's URL is its
+// immutable id, so a rename never moves a page. It stays OWNER-only (unlike the
+// App settings family's owner-or-admin): one label is what every teammate sees.
+const workspaceNameRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (member.scope.role !== "owner") {
+    // Same split as the members family: a navigation gets the rendered denial,
+    // a fetch the bare status the SPA parses.
+    return wantsHtml(c.req.header("Accept") ?? null)
+      ? c.html(forbiddenPage(member.session.login, requestLocale(c)), 403)
+      : c.json({ error: "forbidden" }, 403);
+  }
+  let name = "";
+  try {
+    const body = (await c.req.json()) as { name?: unknown };
+    name = typeof body.name === "string" ? body.name.trim() : "";
+  } catch {
+    // malformed body → the shape gates' 400, never a 500
+  }
+  if (name.length === 0) {
+    return c.json({ key: "workspace.nameRequired", message: t("en", "workspace.nameRequired") }, 400);
+  }
+  if (name.length > WORKSPACE_NAME_MAX_LENGTH) {
+    return c.json(
+      {
+        key: "workspace.nameTooLong",
+        params: { max: WORKSPACE_NAME_MAX_LENGTH },
+        message: t("en", "workspace.nameTooLong", { max: WORKSPACE_NAME_MAX_LENGTH }),
+      },
+      400,
+    );
+  }
+  const row = await setWorkspaceName(member.db, member.scope.workspaceId, name);
+  // A row retired between the member gate and the UPDATE is the same 404 an
+  // unknown ref gets.
+  if (row === null) return await tenantNotFound(c);
+  return c.json({ name: row.name });
+};
+
 // --- Apps list + per-App management (spec § Multi-App 契约,
 // Clarify #6, architect-pinned POST action paths) ---
 //
@@ -4058,6 +4101,11 @@ for (const route of APP_ROUTES) {
   if (route.method === "get") dashboardApp.get(path, workspaceOnly(route.handler));
   else dashboardApp.post(path, workspaceOnly(route.handler));
 }
+
+// The workspace settings family is workspace-only and PUT-shaped (the table
+// above carries GET/POST only): the name is the workspace's own label, so there
+// is no deployment-level copy to register.
+dashboardApp.put("/:workspaceRef/api/settings/name", workspaceOnly(workspaceNameRoute));
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
 // not a wired route above is a placeholder submit and must never succeed —

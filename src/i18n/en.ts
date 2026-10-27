@@ -309,6 +309,13 @@ export const en = {
     inviteAcceptFailed: "Could not accept the invitation — try again.",
     /** The owner-only gate on `/dashboard/<ref>/settings`. */
     settingsOwnerOnly: "Only the workspace owner can change these settings.",
+    /** The owner's name card — the label the top-bar switcher shows. */
+    nameHeading: "Workspace name",
+    nameDescription:
+      "The label in the top-bar workspace switcher. This workspace's URL is its id and does not change.",
+    nameSave: "Save name",
+    nameSaved: "Workspace name updated.",
+    nameFailed: "Could not change the workspace name — try again.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the

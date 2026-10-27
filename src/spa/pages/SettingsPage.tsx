@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
@@ -27,11 +27,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
-import { postForm } from "../api";
+import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
+import { workspaceRefOf } from "../routes";
 import { apiBase } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
+import { useRenameMembership } from "../workspace-memberships";
 import {
   activeChainTabId,
   configuredKeySlot,
@@ -861,6 +863,104 @@ function OpsCard({
           <NoticeRegion notice={notice} />
         </div>
         <HealthBody locale={locale} payload={payload} />
+      </CardContent>
+    </SectionCard>
+  );
+}
+
+/** Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
+const NAME_MAX_LENGTH = 80;
+
+/**
+ * The rename's ONE save pipeline: PUT the name and, on success, patch the live
+ * membership list the top-bar switcher reads (`option.name`), so the label
+ * changes without a reload. The URL is the workspace's immutable `id`, so
+ * nothing navigates and no history entry changes.
+ */
+export async function submitWorkspaceName(
+  name: string,
+  locale: SpaBoot["locale"],
+  rename: (ref: string | null, name: string) => void,
+): Promise<OpNotice> {
+  let status: number;
+  let body: string;
+  try {
+    ({ status, body } = await putJson(`${apiBase()}/api/settings/name`, { name }));
+  } catch {
+    // Nothing landed, so nothing to patch: the list stays as it is.
+    return { kind: "error", message: t(locale, "workspace.nameFailed") };
+  }
+  const outcome = settingsOpOutcome(locale, status, body, t(locale, "workspace.nameSaved"));
+  // Only a landed write relabels the switcher; a refusal leaves the list alone.
+  if (outcome.kind === "success") rename(workspaceRefOf(window.location.pathname), name);
+  return outcome;
+}
+
+/**
+ * Renames the workspace — owner-only, enforced by the server (the page gates
+ * on the role before rendering it). Its value is the workspace's STORED name,
+ * resolved through the live membership list, so a value captured at mount
+ * cannot go stale. The card has no path to rewrite: the URL is the id.
+ */
+export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["locale"]; storedName: string }) {
+  // Only what the operator has typed is local; the display falls back to the
+  // stored name, so an external change lands without a mount-time copy.
+  const [draft, setDraft] = useState<string | null>(null);
+  const name = draft ?? storedName;
+  // Card-local channel: an op outcome never rides the page-level notice.
+  const [nameNotice, setNameNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
+  const renameMembership = useRenameMembership();
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    const next = name.trim();
+    if (next.length === 0) {
+      setNameNotice({ kind: "error", message: t(locale, "workspace.nameRequired") });
+      return;
+    }
+    if (next.length > NAME_MAX_LENGTH) {
+      setNameNotice({ kind: "error", message: t(locale, "workspace.nameTooLong", { max: NAME_MAX_LENGTH }) });
+      return;
+    }
+    setBusy(true);
+    try {
+      const outcome = await submitWorkspaceName(next, locale, renameMembership);
+      if (outcome.kind === "success") setDraft(null);
+      setNameNotice(outcome);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SectionCard tier="secondary">
+      <CardHeader>
+        <SectionCardTitle>{t(locale, "workspace.nameHeading")}</SectionCardTitle>
+        <CardDescription>{t(locale, "workspace.nameDescription")}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium" htmlFor="workspace-name">
+              {t(locale, "workspace.nameLabel")}
+            </label>
+            <Input
+              id="workspace-name"
+              className="w-64"
+              autoComplete="off"
+              value={name}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+          </div>
+          <Button type="submit" disabled={busy}>
+            {t(locale, "workspace.nameSave")}
+          </Button>
+        </form>
+        <div className="mt-3">
+          <NoticeRegion notice={nameNotice} />
+        </div>
       </CardContent>
     </SectionCard>
   );

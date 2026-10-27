@@ -267,6 +267,12 @@ export const zhCN: Dictionary = {
     inviteAcceptFailed: "接受邀请失败，请重试。",
     /** `/dashboard/<ref>/settings` 的所有者专属门禁。 */
     settingsOwnerOnly: "只有工作区所有者可以修改这些设置。",
+    /** 所有者的名称卡片——顶部切换器显示的名称。 */
+    nameHeading: "工作区名称",
+    nameDescription: "顶部工作区切换器显示的名称。此工作区的网址是其 id，不会改变。",
+    nameSave: "保存名称",
+    nameSaved: "工作区名称已更新。",
+    nameFailed: "修改工作区名称失败，请重试。",
   },
   /**
    * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
