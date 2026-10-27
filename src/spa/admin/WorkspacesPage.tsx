@@ -9,7 +9,7 @@
  */
 import { useState } from "react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { t } from "../../i18n";
+import { t, type DictionaryKey } from "../../i18n";
 import type { Locale } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
@@ -20,28 +20,39 @@ import { ConsolePath, Screen } from "./screen";
 import { TableSearch } from "./TableSearch";
 
 /**
- * The plans the picker offers, in tier order, with the catalogue's display
- * names.
- * shortcut: mirrored from `plans` (migrations 0031/0032) — no admin read
- * exposes the catalogue. The row's own plan leads with the server's `planName`
- * (see `planOptions`), so a stored plan outside this list still renders and
- * keeps it. Add a `GET /api/plans` read when a tier ships without a UI change.
+ * The plan ids the picker offers, in tier order — the wire values mirrored
+ * from `plans` (migrations 0031/0032); no admin read exposes the catalogue.
+ * The row's own plan leads with the server's `planName` (see `planOptions`),
+ * so a stored plan outside this list still renders and keeps it. Add a
+ * `GET /api/plans` read when a tier ships without a UI change.
  */
-const PLANS: readonly { id: string; name: string }[] = [
-  { id: "free", name: "Free" },
-  { id: "pro", name: "Pro" },
-  { id: "unlimited", name: "Unlimited" },
-];
+const PLAN_IDS = ["free", "pro", "unlimited"] as const;
+
+/** Display-name dictionary keys, keyed by the wire plan id. */
+const PLAN_LABEL_KEYS: Record<(typeof PLAN_IDS)[number], DictionaryKey> = {
+  free: "admin.workspaces.planFree",
+  pro: "admin.workspaces.planPro",
+  unlimited: "admin.workspaces.planUnlimited",
+};
+
+/** The picker's label for a catalogue plan; an unknown id renders as-is. */
+function planLabel(locale: Locale, planId: string): string {
+  const key = (PLAN_LABEL_KEYS as Record<string, DictionaryKey>)[planId];
+  return key ? t(locale, key) : planId;
+}
 
 /**
  * The options the picker shows: the row's own plan first (carrying the name the
- * server resolved, so a stored plan outside `PLANS` is never mislabelled), then
- * the rest of the catalogue.
+ * server resolved, so a stored plan outside `PLAN_IDS` is never mislabelled),
+ * then the rest of the catalogue with localised labels.
  */
-function planOptions(row: WorkspaceRow): readonly { id: string; name: string }[] {
+function planOptions(row: WorkspaceRow, locale: Locale): readonly { id: string; name: string }[] {
   return [
     { id: row.planId, name: row.planName },
-    ...PLANS.filter((plan) => plan.id !== row.planId),
+    ...PLAN_IDS.filter((planId) => planId !== row.planId).map((planId) => ({
+      id: planId,
+      name: planLabel(locale, planId),
+    })),
   ];
 }
 
@@ -75,16 +86,19 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
       update((workspaces) =>
         workspaces.map((item) => (item.id === target.id ? { ...item, planId: id, planName: name } : item)),
       );
-    apply(planId, PLANS.find((plan) => plan.id === planId)?.name ?? planId);
+    apply(planId, planLabel(locale, planId));
     try {
       await setPlan(target.id, planId);
       reload();
     } catch (error) {
       apply(previousId, previousName);
+      // The generic failure message stays primary; the server's own `{error}`
+      // text rides along as secondary detail, never the only copy.
+      const generic = t(locale, "admin.workspaces.planChangeFailed", { name: target.name });
       setRefusal(
-        error instanceof AdminWriteError ? error.message : t(locale, "admin.workspaces.planChangeFailed", {
-          name: target.name,
-        }),
+        error instanceof AdminWriteError
+          ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+          : generic,
       );
     } finally {
       setBusy(null);
@@ -133,8 +147,8 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
           </SelectTrigger>
           <SelectContent>
             {/* The row's own plan leads with the server's name, so a stored
-                plan outside PLANS still has a labelled option. */}
-            {planOptions(row).map((plan) => (
+                plan outside PLAN_IDS still has a labelled option. */}
+            {planOptions(row, locale).map((plan) => (
               <SelectItem key={plan.id} value={plan.id}>
                 {plan.name}
               </SelectItem>

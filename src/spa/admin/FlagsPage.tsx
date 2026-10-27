@@ -64,8 +64,12 @@ export function FlagsPage({ locale }: { locale: Locale }) {
       update((flags) => flags.map((flag) => (flag.key === key ? { ...flag, enabled } : flag)));
       setSavedKey(key);
     } catch (error) {
+      // Generic message primary, the server's `{error}` text as secondary detail.
+      const generic = t(locale, "admin.flags.toggleFailed", { flag: key });
       setRefusal(
-        error instanceof AdminWriteError ? error.message : t(locale, "admin.flags.toggleFailed", { flag: key }),
+        error instanceof AdminWriteError
+          ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+          : generic,
       );
     } finally {
       setBusyKey(null);

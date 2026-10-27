@@ -73,7 +73,13 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
       setReason("");
       reload();
     } catch (error) {
-      setRefusal(error instanceof AdminWriteError ? error.message : t(locale, "admin.supportGrants.createFailed"));
+      // Generic message primary, the server's `{error}` text as secondary detail.
+      const generic = t(locale, "admin.supportGrants.createFailed");
+      setRefusal(
+        error instanceof AdminWriteError
+          ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+          : generic,
+      );
     } finally {
       setCreating(false);
     }
@@ -86,7 +92,13 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
       await revokeGrant(grant.id);
       update((page) => ({ ...page, grants: page.grants.filter((item) => item.id !== grant.id) }));
     } catch (error) {
-      setRefusal(error instanceof AdminWriteError ? error.message : t(locale, "admin.supportGrants.revokeFailed"));
+      // Generic message primary, the server's `{error}` text as secondary detail.
+      const generic = t(locale, "admin.supportGrants.revokeFailed");
+      setRefusal(
+        error instanceof AdminWriteError
+          ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+          : generic,
+      );
     } finally {
       setRevokingIds((previous) => {
         const next = new Set(previous);
