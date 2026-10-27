@@ -16,39 +16,45 @@
     <!--SPA_BOOT-->
     <style>
       /* Console chrome only — the workspace shell's Layout is deliberately not
-         reused, so this document carries its own minimal frame. Tokens come
-         from tokens.css (imported by ./admin/main.tsx). */
+         reused, so this document carries its own minimal frame. Spacing and
+         typography ride the same tokens the shipped primitives use
+         (DESIGN.md: page gutter spacing-6, card padding spacing-6, the
+         PageHeader heading-24 title face); colours stay on the existing vars. */
       body {
         font-family: "Geist Sans", system-ui, sans-serif;
       }
       .admin {
         max-width: 1100px;
         margin: 0 auto;
-        padding: 24px;
+        padding: var(--spacing-6) var(--spacing-4);
       }
       .admin-header {
         display: flex;
         align-items: baseline;
         justify-content: space-between;
-        gap: 16px;
+        gap: var(--spacing-4);
         border-bottom: 1px solid var(--gray-alpha-200);
-        padding-bottom: 12px;
+        padding-bottom: var(--spacing-3);
       }
       .admin-header h1 {
         margin: 0;
-        font-size: 20px;
+        /* PageHeader heading-24 face (24/600/1.25/-0.01em). */
+        font-size: var(--typo-heading-24-size);
+        font-weight: var(--typo-heading-24-weight);
+        line-height: var(--typo-heading-24-line);
+        letter-spacing: var(--typo-heading-24-tracking);
       }
       .admin-nav {
         display: flex;
-        gap: 4px;
-        margin: 16px 0 24px;
+        gap: var(--spacing-1);
+        margin: var(--spacing-4) 0 var(--spacing-6);
         flex-wrap: wrap;
       }
       .admin-nav a {
         color: var(--gray-800);
         text-decoration: none;
-        padding: 6px 10px;
-        border-radius: 6px;
+        padding: var(--spacing-2) var(--spacing-3);
+        border-radius: var(--rounded-sm);
       }
       .admin-nav a[aria-current="page"] {
         background: var(--gray-alpha-200);
@@ -56,13 +62,15 @@
       }
       .admin-main {
         border: 1px solid var(--gray-alpha-200);
-        border-radius: 8px;
-        padding: 16px;
+        border-radius: var(--rounded-sm);
+        /* Card default padding (DESIGN.md Spacing & Layout). */
+        padding: var(--spacing-6);
       }
       .muted {
         color: var(--gray-700);
-        font-size: 13px;
-        margin: 4px 0 0;
+        font-size: var(--typo-copy-14-size);
+        line-height: var(--typo-copy-14-line);
+        margin: var(--spacing-1) 0 0;
       }
     </style>
   </head>
