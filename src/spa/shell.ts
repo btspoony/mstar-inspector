@@ -77,7 +77,7 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
   // workspace to name) → the login's own first membership, the same target the
   // landing uses, so no entry points at the retired `/dashboard/apps` family.
   const workspaceRef =
-    workspaceRefOf(pathname) ?? boot.workspaceRef ?? boot.memberships?.[0]?.slug ?? null;
+    workspaceRefOf(pathname) ?? boot.workspaceRef ?? boot.memberships?.[0]?.id ?? null;
   // No workspace yet → every nav target would 404; the shell keeps its
   // wordmark and drops the entries (creation surface). An operator under a
   // support grant gets the same treatment: its one page is the support view,
@@ -113,9 +113,9 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
  * path's workspace marked.
  *
  * A path segment addresses a workspace by EITHER identifier — the stable `id`
- * or the readable `slug` (they are equal until an owner renames it) — so the
- * current row matches on both while the value shown and navigated to is always
- * the `slug` (a switch target must be the readable ref, never a stale one).
+ * or the readable `slug` (they are equal until a platform operator sets one) —
+ * so the current row matches on both while the value shown and navigated to is
+ * always the `id` (a switch target never depends on a value someone can change).
  * Null only when the login belongs to no workspace at all: an empty list is not
  * a choice.
  *
@@ -125,9 +125,9 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
  * rewrite — there the control is a NAVIGATOR and a pick opens that workspace's
  * Apps page.
  *
- * `currentRef` is the `slug` of the membership the pathname names, else null:
- * the path can carry an identifier this login no longer lists (a slug renamed
- * away, a revoked membership), or name no workspace at all. Then the control
+ * `currentRef` is the `id` of the membership the pathname names, else null:
+ * the path can carry an identifier this login no longer lists (a renamed slug,
+ * a revoked membership), or name no workspace at all. Then the control
  * marks NO row — a wrong current row is worse than none, so there is no
  * fallback to the first membership.
  *
@@ -150,14 +150,14 @@ export function buildWorkspaceSwitcherModel(
 ): WorkspaceSwitcherModel | null {
   const memberships = boot.memberships ?? [];
   if (memberships.length === 0) return null;
-  const options = memberships.map(({ slug, name }) => ({ ref: slug, name }));
+  const options = memberships.map(({ id, name }) => ({ ref: id, name }));
   const label = t(boot.locale, "nav.workspaceSwitcher");
   const pathRef = workspaceRefOf(pathname);
   const current =
     pathRef === null ? undefined : memberships.find((m) => pathRef === m.id || pathRef === m.slug);
   return {
     label,
-    currentRef: current?.slug ?? null,
+    currentRef: current?.id ?? null,
     currentPlan: current?.plan,
     target: pathRef === null ? "apps" : "replace",
     options,
@@ -165,29 +165,10 @@ export function buildWorkspaceSwitcherModel(
 }
 
 /**
- * The membership list after one workspace's slug changed. The path segment
- * names a workspace by EITHER identifier (the same predicate the switcher and
- * {@link storedSlugForRef} use), and `id` never changes — so a renamed row is
- * addressed by whatever the page carried. Returns the list unchanged for a ref
- * this login does not list, and for the absent list.
- *
- * The boot is a per-document snapshot, so without this patch the switcher keeps
- * offering the retired slug (a 404, since a rename is not a redirect) and the
- * current row goes empty after the rename navigates to the new one.
- */
-export function renameWorkspaceMembership(
-  memberships: SpaBoot["memberships"],
-  ref: string | null,
-  slug: string,
-): SpaBoot["memberships"] {
-  return memberships?.map((m) => (ref === m.id || ref === m.slug ? { ...m, slug } : m));
-}
-
-/**
  * The live membership row a path ref names, or null when this login lists no
  * such workspace. A segment may address the workspace by EITHER identifier
  * (the stable `id` or the readable `slug`), which is why every caller that
- * needs the row's role or stored slug resolves it here.
+ * needs the row's role resolves it here.
  */
 export function workspaceMembershipForRef(
   boot: SpaBoot,
@@ -195,17 +176,6 @@ export function workspaceMembershipForRef(
 ): NonNullable<SpaBoot["memberships"]>[number] | null {
   if (ref === null) return null;
   return (boot.memberships ?? []).find((m) => ref === m.id || ref === m.slug) ?? null;
-}
-
-/**
- * The workspace's STORED slug for a path ref — what the settings rename control
- * shows and saves. The membership list is authoritative (the path segment may
- * be the stable `id`, or a slug something else already renamed away from); the
- * segment is only the fallback for a ref this login does not list.
- */
-export function storedSlugForRef(boot: SpaBoot, ref: string | null): string {
-  if (ref === null) return "";
-  return workspaceMembershipForRef(boot, ref)?.slug ?? ref;
 }
 
 export function buildNavbarModel(boot: SpaBoot): NavbarModel {

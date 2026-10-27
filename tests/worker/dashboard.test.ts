@@ -793,7 +793,30 @@ describe("/dashboard/locale", () => {
     expect(setCookie[0]).toContain("HttpOnly");
     expect(setCookie[0]).toContain("Secure");
     expect(setCookie[0]).toContain("SameSite=Lax");
-    expect(setCookie[0]).toContain("Path=/dashboard");
+    expect(setCookie[0]).toContain("Path=/");
+  });
+
+  test("POST from the platform console Referer → 302 back + exact widened Set-Cookie (Path=/)", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/_internal_admin/users",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/_internal_admin/users");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    // Exact value: widened Path=/ lets the console send mstar_locale back.
+    expect(setCookie[0]).toBe(
+      `${LOCALE_COOKIE}=zh_CN; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=31536000`,
+    );
   });
 
   test("POST with off-origin absolute Referer → 302 to /dashboard (no open redirect), cookie set", async () => {
@@ -956,7 +979,7 @@ describe("/dashboard/locale", () => {
     const setCookie = res.headers.getSetCookie();
     expect(setCookie).toHaveLength(1);
     expect(setCookie[0]).toContain(`${LOCALE_COOKIE}=zh_CN`);
-    expect(setCookie[0]).toContain("Path=/dashboard");
+    expect(setCookie[0]).toContain("Path=/");
   });
 
   test("POST with a row-less session still sets mstar_locale (membership-exempt)", async () => {
@@ -3832,9 +3855,9 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
     const refused = await createWorkspaceRequest(db, "deployer", { name: "Workspace 2" }, "saas");
     expect(refused.status).toBe(409);
 
-    // No production soft-delete face exists yet; the fixture retires the row
-    // exactly as `workspace-slug.test.ts` models a retired workspace. Its
-    // subscription row stays — a retired tenant is not a home.
+    // No production soft-delete face exists yet; the fixture retires the row by
+    // stamping `deleted_at` directly. Its subscription row stays — a retired
+    // tenant is not a home.
     db.raw
       .prepare("UPDATE workspaces SET deleted_at = ? WHERE id = ?")
       .run(new Date().toISOString(), retired.id);
@@ -3891,13 +3914,14 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
 
     const before = "/dashboard/default/apps";
     // The path the switcher itself would push — the same rewrite it hands the
-    // router, so this is the real navigation and not a hand-written URL.
-    const after = replaceWorkspaceRef(before, "beta");
-    expect(after).toBe("/dashboard/beta/apps");
+    // router, so this is the real navigation and not a hand-written URL. The
+    // picked ref is the option value, which is the row's stable id.
+    const after = replaceWorkspaceRef(before, "ws_beta");
+    expect(after).toBe("/dashboard/ws_beta/apps");
 
     for (const [ref, path] of [
       ["default", before],
-      ["beta", after as string],
+      ["ws_beta", after as string],
     ] as const) {
       const res = await htmlGet(path, jar, env);
       expect(res.status, ref).toBe(200);
@@ -3906,8 +3930,9 @@ describe("workspace switch leaves the session untouched (workspace URL identifie
       expect(res.headers.getSetCookie(), ref).toEqual([]);
       const body = await res.text();
       // The document really was resolved for the asked-for workspace, and the
-      // boot's switcher list offers BOTH workspaces (by their stored slug) — so
-      // a switch was available on this very page.
+      // boot's switcher list offers BOTH workspaces — so a switch was available
+      // on this very page. Each row still carries its readable slug beside the
+      // id, because the path-matching predicate accepts either form.
       expect(body, ref).toContain(`"workspaceRef":"${ref}"`);
       expect(body, ref).toContain('"slug":"beta"');
       expect(body, ref).toContain('"slug":"default"');

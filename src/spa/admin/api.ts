@@ -149,7 +149,11 @@ export async function readGrants(): Promise<GrantRow[]> {
   }));
 }
 
-/** A refused console write: the status and the server's own message. */
+/**
+ * A refused console write: the status and the server's own message. Pages
+ * render a localised generic failure as the primary notice and interpolate
+ * `message` as secondary detail (`admin.refusalDetail`), never verbatim alone.
+ */
 export class AdminWriteError extends Error {
   readonly status: number;
 
@@ -198,6 +202,10 @@ export function setFlag(key: string, enabled: boolean): Promise<void> {
 
 export function setPlan(workspaceId: string, planId: string): Promise<void> {
   return write("PATCH", `/workspaces/${encodeURIComponent(workspaceId)}/plan`, { planId });
+}
+
+export function setWorkspaceSlug(workspaceId: string, slug: string): Promise<void> {
+  return write("PATCH", `/workspaces/${encodeURIComponent(workspaceId)}/slug`, { slug });
 }
 
 export type GrantInput = {

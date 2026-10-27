@@ -176,13 +176,13 @@ describe("resolveLocale decision matrix", () => {
 });
 
 describe("mstar_locale cookie serialization", () => {
-  test("attribute set mirrors session.ts conventions with Path=/dashboard", () => {
+  test("attribute set mirrors session.ts conventions with Path=/ (console shares the cookie)", () => {
     const value = serializeLocaleCookie("zh_CN");
     expect(value).toContain(`${LOCALE_COOKIE}=zh_CN`);
     expect(value).toContain("HttpOnly");
     expect(value).toContain("Secure");
     expect(value).toContain("SameSite=Lax");
-    expect(value).toContain("Path=/dashboard");
+    expect(value).toContain("Path=/");
     expect(value).toContain("Max-Age=");
   });
 });

@@ -29,12 +29,11 @@ import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
 import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
-import { navigate } from "../router";
-import { useRenameMembership } from "../workspace-memberships";
-import { replaceWorkspaceRef, workspaceRefOf } from "../routes";
+import { workspaceRefOf } from "../routes";
 import { apiBase } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
+import { useRenameMembership } from "../workspace-memberships";
 import {
   activeChainTabId,
   configuredKeySlot,
@@ -49,9 +48,7 @@ import {
   seatRoleValues,
   seatSelectValue,
   selectedCatalogProvider,
-  slugFailureKey,
   splitModelChain,
-  WORKSPACE_SLUG_PATTERN,
   type CatalogProvider,
   type ChainTab,
   type ConfiguredProvider,
@@ -871,85 +868,67 @@ function OpsCard({
   );
 }
 
-/**
- * Land a successful rename: patch the live membership list, then point the
- * current page at the new ref. The patch comes FIRST — the navigate dispatches
- * the popstate that re-renders the shell, and a switcher still built from the
- * retired slug would render a dead option and an empty current row.
- *
- * The page keeps its own path, and REPLACES rather than pushes, because the old
- * ref answers 404 (a rename is not a redirect) — Back must not return to it.
- */
-export function commitWorkspaceRename(slug: string, rename: (ref: string | null, slug: string) => void): void {
-  const pathname = window.location.pathname;
-  rename(workspaceRefOf(pathname), slug);
-  const href = replaceWorkspaceRef(pathname, slug);
-  if (href !== null) navigate(href, { replace: true });
-}
+/** Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
+const NAME_MAX_LENGTH = 80;
 
 /**
- * The rename's ONE save pipeline: PUT the slug, resolve the refusal, and on
- * success land it ({@link commitWorkspaceRename}). Extracted like
- * `submitTriggerMode` so a test can execute the real save for the real page
- * context instead of supplying a path of its own.
+ * The rename's ONE save pipeline: PUT the name and, on success, patch the live
+ * membership list the top-bar switcher reads (`option.name`), so the label
+ * changes without a reload. The URL is the workspace's immutable `id`, so
+ * nothing navigates and no history entry changes.
  */
-export async function submitWorkspaceSlug(
-  slug: string,
+export async function submitWorkspaceName(
+  name: string,
   locale: SpaBoot["locale"],
-  rename: (ref: string | null, slug: string) => void,
+  rename: (ref: string | null, name: string) => void,
 ): Promise<OpNotice> {
   let status: number;
   let body: string;
   try {
-    ({ status, body } = await putJson(`${apiBase()}/api/settings/slug`, { slug }));
+    ({ status, body } = await putJson(`${apiBase()}/api/settings/name`, { name }));
   } catch {
-    // Nothing landed, so nothing to commit: the list and the path stay put.
-    return { kind: "error", message: t(locale, "workspace.slugFailed") };
+    // Nothing landed, so nothing to patch: the list stays as it is.
+    return { kind: "error", message: t(locale, "workspace.nameFailed") };
   }
-  if (status >= 400) {
-    return { kind: "error", message: t(locale, slugFailureKey(status, body)) };
-  }
-  commitWorkspaceRename(slug, rename);
-  return { kind: "success", message: t(locale, "workspace.slugSaved") };
+  const outcome = settingsOpOutcome(locale, status, body, t(locale, "workspace.nameSaved"));
+  // Only a landed write relabels the switcher; a refusal leaves the list alone.
+  if (outcome.kind === "success") rename(workspaceRefOf(window.location.pathname), name);
+  return outcome;
 }
 
 /**
- * Renames the workspace's readable URL (the workspace-identifier work, 2026-10)
- * — owner-only, enforced by the server. Its value is the workspace's STORED
- * slug, resolved through the live membership list: the address bar's segment
- * may be the stable id, and a rename happens in place, so a value captured at
- * mount would save the old slug again. A rename is not a redirect (the
- * workspace-rename decision, 2026-10 — the old ref answers 404 afterwards), so
- * the page REPLACES its history entry instead of pushing one: Back must not
- * return to a dead ref.
+ * Renames the workspace — owner-only, enforced by the server (the page gates
+ * on the role before rendering it). Its value is the workspace's STORED name,
+ * resolved through the live membership list, so a value captured at mount
+ * cannot go stale. The card has no path to rewrite: the URL is the id.
  */
-export function WorkspaceSlugCard({ locale, storedSlug }: { locale: SpaBoot["locale"]; storedSlug: string }) {
+export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["locale"]; storedName: string }) {
   // Only what the operator has typed is local; the display falls back to the
-  // stored slug, so an external change (the rename this card just made) lands
-  // without a mount-time copy going stale.
+  // stored name, so an external change lands without a mount-time copy.
   const [draft, setDraft] = useState<string | null>(null);
-  const slug = draft ?? storedSlug;
+  const name = draft ?? storedName;
   // Card-local channel: an op outcome never rides the page-level notice.
-  const [slugNotice, setSlugNotice] = useState<OpNotice | null>(null);
+  const [nameNotice, setNameNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
   const renameMembership = useRenameMembership();
 
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy) return; // in-flight guard — no double submit
-    const next = slug.trim();
-    if (!WORKSPACE_SLUG_PATTERN.test(next)) {
-      setSlugNotice({ kind: "error", message: t(locale, "workspace.slugInvalid") });
+    const next = name.trim();
+    if (next.length === 0) {
+      setNameNotice({ kind: "error", message: t(locale, "workspace.nameRequired") });
+      return;
+    }
+    if (next.length > NAME_MAX_LENGTH) {
+      setNameNotice({ kind: "error", message: t(locale, "workspace.nameTooLong", { max: NAME_MAX_LENGTH }) });
       return;
     }
     setBusy(true);
     try {
-      // The pipeline patches the live list BEFORE navigating: the switcher
-      // would otherwise keep offering the retired slug (a 404, since a rename
-      // is not a redirect) and show no current row on the new path.
-      const outcome = await submitWorkspaceSlug(next, locale, renameMembership);
+      const outcome = await submitWorkspaceName(next, locale, renameMembership);
       if (outcome.kind === "success") setDraft(null);
-      setSlugNotice(outcome);
+      setNameNotice(outcome);
     } finally {
       setBusy(false);
     }
@@ -958,30 +937,29 @@ export function WorkspaceSlugCard({ locale, storedSlug }: { locale: SpaBoot["loc
   return (
     <SectionCard tier="secondary">
       <CardHeader>
-        <SectionCardTitle>{t(locale, "workspace.slugHeading")}</SectionCardTitle>
-        <CardDescription>{t(locale, "workspace.slugDescription")}</CardDescription>
+        <SectionCardTitle>{t(locale, "workspace.nameHeading")}</SectionCardTitle>
+        <CardDescription>{t(locale, "workspace.nameDescription")}</CardDescription>
       </CardHeader>
       <CardContent>
         <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="workspace-slug">
-              {t(locale, "workspace.slugLabel")}
+            <label className="text-sm font-medium" htmlFor="workspace-name">
+              {t(locale, "workspace.nameLabel")}
             </label>
             <Input
-              id="workspace-slug"
+              id="workspace-name"
               className="w-64"
               autoComplete="off"
-              spellCheck={false}
-              value={slug}
+              value={name}
               onChange={(event) => setDraft(event.target.value)}
             />
           </div>
           <Button type="submit" disabled={busy}>
-            {t(locale, "workspace.slugSave")}
+            {t(locale, "workspace.nameSave")}
           </Button>
         </form>
         <div className="mt-3">
-          <NoticeRegion notice={slugNotice} />
+          <NoticeRegion notice={nameNotice} />
         </div>
       </CardContent>
     </SectionCard>

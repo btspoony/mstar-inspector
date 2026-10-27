@@ -14,7 +14,8 @@
  * `resolveLocale(request)` is a pure function with exactly two call sites
  * (SPA entry + legacy app). The cookie serializer mirrors the session.ts
  * attribute set (HttpOnly; Secure; SameSite=Lax) but scopes Path to
- * /dashboard — the locale preference only needs to ride dashboard pages.
+ * / — the platform console (/_internal_admin) shares this cookie with
+ * the dashboard shell for its locale switch.
  */
 export const LOCALE_COOKIE = "mstar_locale";
 
@@ -57,8 +58,9 @@ export function resolveLocale(request: Request): Locale {
 /**
  * Set-Cookie value for the locale preference. Attribute set mirrors
  * session.ts serializeCookie (HttpOnly; Secure; SameSite=Lax) with
- * Path=/dashboard — the toggle only renders inside the dashboard shell.
+ * Path=/ — the toggle renders in both the dashboard shell and the
+ * platform console (/_internal_admin).
  */
 export function serializeLocaleCookie(locale: Locale, maxAgeSec = LOCALE_MAX_AGE_SEC): string {
-  return `${LOCALE_COOKIE}=${locale}; HttpOnly; Secure; SameSite=Lax; Path=/dashboard; Max-Age=${maxAgeSec}`;
+  return `${LOCALE_COOKIE}=${locale}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeSec}`;
 }

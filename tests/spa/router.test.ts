@@ -25,8 +25,8 @@ describe("matchSpaRoute", () => {
       pathname: "/dashboard/acme/members",
       workspaceRef: "acme",
     });
-    // Settings is workspace-scoped for the same reason: the rename card
-    // writes under the path's workspace prefix.
+    // Settings is workspace-scoped for the same reason: the workspace controls
+    // read the role of the path's own workspace.
     expect(matchSpaRoute("/dashboard/settings")).toBeNull();
     expect(matchSpaRoute("/dashboard/acme/settings")).toEqual({
       page: "settings",

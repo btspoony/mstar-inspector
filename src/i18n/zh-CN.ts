@@ -265,19 +265,14 @@ export const zhCN: Dictionary = {
     inviteExpired: "该邀请已过期。",
     inviteGone: "该邀请已失效——可能已被撤回。",
     inviteAcceptFailed: "接受邀请失败，请重试。",
-    /** 工作区 URL（slug）改名——设置表单与拒绝文案。 */
-    slugHeading: "工作区 URL",
-    slugDescription:
-      "该工作区控制台 URL 中的可读片段。仅小写字母、数字与连字符——不能是保留字，也不能是其他工作区的 id。",
-    slugLabel: "Slug",
-    slugSave: "保存 slug",
-    slugSaved: "工作区 URL 已更新——旧 slug 不再可用。",
-    slugInvalid: "请使用 2–39 位小写字母、数字或连字符，并以字母或数字开头。",
-    slugReserved: "该词是控制台保留字，请换一个 slug。",
-    slugTaken: "其他工作区已使用该 slug，请换一个。",
-    slugIsWorkspaceId: "该值已是另一个工作区的 id，请换一个 slug。",
-    slugForbidden: "只有工作区所有者可以修改它的 URL。",
-    slugFailed: "修改工作区 URL 失败，请重试。",
+    /** `/dashboard/<ref>/settings` 的所有者专属门禁。 */
+    settingsOwnerOnly: "只有工作区所有者可以修改这些设置。",
+    /** 所有者的名称卡片——顶部切换器显示的名称。 */
+    nameHeading: "工作区名称",
+    nameDescription: "顶部工作区切换器显示的名称。此工作区的网址是其 id，不会改变。",
+    nameSave: "保存名称",
+    nameSaved: "工作区名称已更新。",
+    nameFailed: "修改工作区名称失败，请重试。",
   },
   /**
    * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
@@ -546,6 +541,152 @@ export const zhCN: Dictionary = {
         "此部署有多个工作区，App 需要归属其中一个 — 请先进入某个工作区，再从那里创建 App。",
       workspaceGone:
         "创建此 App 的工作区已不存在，因此此 App 在此部署中没有可访问的工作区页面 — 请在 GitHub 上删除它，然后从仍存在的工作区重新开始创建流程。",
+    },
+  },
+  /**
+   * 平台控制台（`/_internal_admin`）—— 运维界面。与工作区外壳共用同一个
+   * locale cookie 实现双语：`main.tsx` 读取 `boot.locale`，每个页面组件接收
+   * locale prop，页面文案通过 `t(locale, …)` 解析。这些键面向运维，绝不复用
+   * 面向租户的 `support.*` 文案。
+   */
+  admin: {
+    /** 文档 `<title>` —— 由 `serveDocument` 在服务端替换。 */
+    documentTitle: "Morning Star — 平台运营",
+    header: {
+      title: "平台运营",
+      /** boot 未携带登录名时显示在标题下方。 */
+      signedOut: "已退出登录",
+      /** 返回运维自己的工作区外壳。 */
+      dashboardLink: "工作区控制台",
+    },
+    /** 控制台四个导航标签 —— `pages.ts` 通过 `labelKey` 路由。 */
+    nav: {
+      flags: "服务器开关",
+      workspaces: "工作区",
+      users: "用户",
+      supportGrants: "支持访问",
+    },
+    /**
+     * 控制台写入被服务器拒绝：页面的通用失败文案为主，服务器自身的
+     * `{error}` 文本作为次要细节附带展示（PageNotice 的单条 message
+     * 字符串同时承载两者）。
+     */
+    refusalDetail: "服务器返回：{detail}",
+    /** 服务器开关页。 */
+    flags: {
+      description: "平台级开关。更改对下一个请求生效，并追加一条审计记录。",
+      loadFailed: "无法加载服务器开关。",
+      emptyTitle: "没有开关",
+      emptyDescription: "此服务器没有暴露任何平台开关。",
+      flagColumn: "开关",
+      effectColumn: "关闭时的影响",
+      stateColumn: "状态",
+      /** 两个语言环境都渲染为 ON/OFF（compass D9）。 */
+      stateOn: "ON",
+      stateOff: "OFF",
+      /** review_global 键下方的说明（spec §3.1）。 */
+      reviewGlobalNote: "已排队的任务不会被取消。",
+      noDocumentedEffect: "没有记录在案的影响。",
+      /** 每个开关关闭时影响什么，按开关键索引。 */
+      effectReviewGlobal: "不再排队新的审查。每个 App 的暂停开关不受影响。",
+      effectSignupOpen: "未知的 GitHub 登录无法首次登录，已有账号不受影响。",
+      effectWorkspaceCreationOpen: "任何工作区都无法创建，运维自己的也不例外。",
+      /** 写入确认对话框 — {flag}、{from}、{to}（ON/OFF）为插值。 */
+      confirmTitle: "将 {flag} 从 {from} 切换为 {to}？",
+      confirmButton: "确认",
+      cancelButton: "取消",
+      /** 写入成功后行内显示的简短确认。 */
+      saved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      toggleFailed: "无法更改 {flag}。",
+      /** 开关的可访问名称：“{flag} {state}”，state 为 ON/OFF。 */
+      stateAria: "{flag} {state}",
+    },
+    /** 工作区页。 */
+    workspaces: {
+      description: "所有在线工作区。更改套餐不会移除成员；降级只阻止新的邀请。",
+      loadFailed: "无法加载工作区列表。",
+      emptyTitle: "没有工作区",
+      emptyDescription: "此部署还没有任何在线工作区。",
+      workspaceColumn: "工作区",
+      ownerColumn: "所有者",
+      membersColumn: "成员",
+      /** {count} = 待处理邀请数（仅大于 0 时渲染）。 */
+      pendingInvites: "{count} 个待处理邀请",
+      seatsColumn: "席位",
+      planColumn: "套餐",
+      createdColumn: "创建时间",
+      /** 套餐写入失败且错误无法识别时的兜底文案。 */
+      planChangeFailed: "无法更改 {name} 的套餐。",
+      /** 套餐选择器的可访问名称。 */
+      planAria: "{name} 的套餐",
+      /** 套餐选择器中的目录标签，按线上套餐 id 索引。 */
+      planFree: "免费版",
+      planPro: "专业版",
+      planUnlimited: "无限版",
+      /** 打开 slug 对话框的行操作。 */
+      slugAction: "编辑 slug",
+      /** 行操作的可访问名称。 */
+      slugAria: "编辑 {name} 的 slug",
+      slugDialogTitle: "工作区 URL slug",
+      slugDialogDescription:
+        "此工作区控制台 URL 的可读部分。2–39 个小写字母、数字或连字符，以字母或数字开头。所有者已无法修改此项。",
+      slugLabel: "Slug",
+      slugSave: "保存 slug",
+      cancelAction: "取消",
+      /** slug 写入失败且错误无法识别时的兜底文案。 */
+      slugChangeFailed: "无法更改 {name} 的 slug。",
+    },
+    /** 用户页。 */
+    users: {
+      description:
+        "此平台上的所有账号。只读：运营身份来自白名单，支持访问来自授权列表。",
+      loadFailed: "无法加载用户列表。",
+      emptyTitle: "没有用户",
+      emptyDescription: "还没有人登录过此平台。",
+      githubColumn: "GitHub",
+      firstSeenColumn: "首次登录",
+      workspacesColumn: "工作区",
+      identityColumn: "身份",
+      identityOperator: "运营",
+      /** {count} = 该登录名下的有效授权数。 */
+      identitySupport: "支持（{count}）",
+      identityUser: "用户",
+    },
+    /**
+     * 客户端表格搜索（工作区、用户）：一个输入框过滤已加载的行；
+     * 计数器显示“已显示 / 总数”。
+     */
+    search: {
+      placeholder: "搜索",
+      /** {shown} = 匹配行数，{total} = 已加载行数。 */
+      counter: "{shown} / {total}",
+      emptyTitle: "无匹配结果",
+      emptyDescription: "没有符合当前搜索的行。",
+    },
+    /** 支持授权页 —— 列表表头与创建表单。 */
+    supportGrants: {
+      description: "限时的跨工作区访问。创建和撤销授权各追加一条审计记录。",
+      loadFailed: "无法加载支持授权。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      createFailed: "无法创建支持授权。",
+      revokeFailed: "无法撤销支持授权。",
+      newWindowTitle: "新建支持窗口",
+      workspaceLabel: "工作区",
+      workspacePlaceholder: "选择一个工作区",
+      operatorLabel: "运营登录名",
+      operatorPlaceholder: "octocat",
+      reasonLabel: "原因",
+      reasonPlaceholder: "incident 42",
+      hoursLabel: "小时",
+      submit: "授予访问",
+      operatorColumn: "运营",
+      workspaceColumn: "工作区",
+      reasonColumn: "原因",
+      expiresColumn: "过期时间",
+      revokeAction: "撤销",
+      emptyTitle: "没有开放的支持窗口",
+      emptyDescription: "当前没有任何运营持有跨工作区访问。",
     },
   },
 };

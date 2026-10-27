@@ -95,7 +95,8 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
     },
     /** Type into a controlled input the way React's value tracker expects. */
     async type(selector: string, value: string) {
-      const input = container.querySelector(selector);
+      // A Radix dialog portals outside the mount container, so fall back to the document.
+      const input = container.querySelector(selector) ?? win.document.querySelector(selector);
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
         setValue?.call(input, value);
@@ -110,24 +111,27 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
   };
 }
 
-async function flagsScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(FlagsPage), respond);
+async function flagsScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(FlagsPage, { locale }), respond);
 }
 
-async function workspacesScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(WorkspacesPage), respond);
+async function workspacesScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(WorkspacesPage, { locale }), respond);
 }
 
-async function usersScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(UsersPage), respond);
+async function usersScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(UsersPage, { locale }), respond);
 }
 
-async function supportScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(SupportGrantsPage), respond);
+async function supportScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(SupportGrantsPage, { locale }), respond);
 }
 
 const never = () => new Promise<Response>(() => {});
 const failed = () => new Response("boom", { status: 500 });
+
+/** A held-response latch: the test resolves it when the in-flight write may land. */
+type Gate = { promise: Promise<Response>; resolve: (value: Response) => void };
 
 /** The table row that carries `needle`, so a control is located by its row. */
 function rowContaining(surface: Surface, needle: string): DomElement | null {
@@ -202,6 +206,8 @@ const GRANT = {
   expires_at: "2026-10-26T09:00:00.000Z",
 };
 
+const GRANT2 = { ...GRANT, id: "g2", operator_login: "yuki", reason: "incident 43" };
+
 describe("Flags screen", () => {
   test("loading renders the table skeleton", async () => {
     const surface = await flagsScreen(never);
@@ -228,32 +234,96 @@ describe("Flags screen", () => {
     await surface.close();
   });
 
-  test("rows show each flag, its effect and its state", async () => {
+  test("rows show each flag, its effect and its state as ON/OFF", async () => {
     const surface = await flagsScreen(() => json({ flags: FLAGS }));
     expect(surface.text()).toContain("review_global");
     expect(surface.text()).toContain("signup_open");
     expect(surface.text()).toContain("workspace_creation_open");
     // The spec's cancellation note belongs to review_global only.
     expect(surface.text()).toContain("Queued work is not cancelled.");
-    expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("On");
+    expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("ON");
     expect(
       rowContaining(surface, "workspace_creation_open")?.querySelector('[data-slot="toggle"]')?.textContent,
-    ).toBe("Off");
+    ).toBe("OFF");
     await surface.close();
   });
 
-  test("a toggle writes exactly one PATCH and applies the new value", async () => {
+  test("a toggle asks first: control click opens the dialog without a request", async () => {
+    const surface = await flagsScreen(() => json({ flags: FLAGS }));
+    const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
+    await surface.click(toggle);
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
+    const dialog = surface.win.document.querySelector('[role="alertdialog"]');
+    expect(dialog?.textContent).toContain("Turn review_global from ON to OFF?");
+    expect(dialog?.textContent).toContain("No new review is enqueued.");
+    await surface.close();
+  });
+
+  test("confirm fires exactly one PATCH with {key, enabled} and shows ON/OFF plus saved", async () => {
     const surface = await flagsScreen((request) =>
       request.method === "PATCH" ? json({ key: "review_global", enabled: false }) : json({ flags: FLAGS }),
     );
     const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
     await surface.click(toggle);
+    const confirm = [...surface.win.document.querySelectorAll("button")].find(
+      (node) => node.textContent === "Confirm",
+    );
+    await surface.click(confirm as unknown as DomElement);
 
     const patches = surface.sent.filter((request) => request.method === "PATCH");
     expect(patches).toHaveLength(1);
     expect(patches[0]?.url).toBe("/_internal_admin/api/flags");
     expect(patches[0]?.body).toEqual({ key: "review_global", enabled: false });
-    expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("Off");
+    const row = rowContaining(surface, "review_global");
+    expect(row?.querySelector('[data-slot="toggle"]')?.textContent).toBe("OFF");
+    expect(row?.textContent).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("a non-AdminWriteError failure names the flag, not a literal {flag}", async () => {
+    const surface = await flagsScreen((request) => {
+      if (request.method === "PATCH") throw new Error("network down");
+      return json({ flags: FLAGS });
+    });
+    const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
+    await surface.click(toggle);
+    const confirm = [...surface.win.document.querySelectorAll("button")].find(
+      (node) => node.textContent === "Confirm",
+    );
+    await surface.click(confirm as unknown as DomElement);
+
+    const alert = surface.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Could not change review_global.");
+    expect(alert?.textContent).not.toContain("{flag}");
+    await surface.close();
+  });
+
+  test("Escape closes the dialog without a write", async () => {
+    const surface = await flagsScreen(() => json({ flags: FLAGS }));
+    const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
+    await surface.click(toggle);
+    expect(surface.win.document.querySelector('[role="alertdialog"]')).not.toBeNull();
+
+    await act(async () => {
+      surface.win.document.dispatchEvent(new surface.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await act(async () => {});
+    expect(surface.win.document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
+    await surface.close();
+  });
+
+  test("a zh_CN render shows Chinese copy and ON/OFF state", async () => {
+    const surface = await flagsScreen(() => json({ flags: FLAGS }), "zh_CN");
+    expect(surface.text()).toContain("服务器开关");
+    expect(surface.text()).toContain("关闭时的影响");
+    expect(surface.text()).not.toContain("Effect when off");
+    const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
+    await surface.click(toggle);
+    const dialog = surface.win.document.querySelector('[role="alertdialog"]');
+    expect(dialog?.textContent).toContain("将 review_global 从 ON 切换为 OFF？");
+    expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("ON");
     await surface.close();
   });
 });
@@ -328,6 +398,190 @@ describe("Workspaces screen", () => {
     expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Pro");
     await surface.close();
   });
+
+  test("search filters the loaded rows and shows the N / M counter", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
+    expect(surface.text()).toContain("2 / 2");
+    // "guild" matches the name (and the slug) but not the other row.
+    await surface.type('input[type="search"]', "guild");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(surface.text()).toContain("Guild");
+    expect(surface.text()).not.toContain("Acme");
+    expect(surface.text()).toContain("1 / 2");
+    // A query matching only the owner login keeps the matching row.
+    await surface.type('input[type="search"]', "octocat");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(surface.text()).toContain("Acme");
+    expect(surface.text()).toContain("1 / 2");
+    await surface.close();
+  });
+
+  test("a non-matching search shows the shared empty state, not the page one", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
+    await surface.type('input[type="search"]', "zzz");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No matches");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).not.toContain("No workspaces");
+    await surface.close();
+  });
+
+  test("an empty list with no query still shows the page empty state", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: [] }));
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No workspaces");
+    await surface.close();
+  });
+
+  test("a zh_CN render shows Chinese copy for the page and the search control", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }), "zh_CN");
+    expect(surface.text()).toContain("所有在线工作区。");
+    const input = surface.container.querySelector('input[type="search"]');
+    expect(input?.getAttribute("placeholder")).toBe("搜索");
+    expect(surface.text()).toContain("2 / 2");
+    await surface.type('input[type="search"]', "zzz");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("无匹配结果");
+    await surface.close();
+  });
+
+  test("a plan id outside the catalogue keeps the server's name", async () => {
+    const legacy = [{ ...WORKSPACES[0]!, planId: "legacy-tier", planName: "Legacy Tier" }];
+    const surface = await workspacesScreen(() => json({ workspaces: legacy }), "zh_CN");
+    const trigger = rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]') ?? null;
+    await surface.openSelect(trigger);
+    const labels = [...surface.win.document.querySelectorAll('[role="option"]')].map(
+      (node) => node.textContent,
+    );
+    // Only the unknown id falls back to the server-provided English name.
+    expect(labels).toContain("Legacy Tier");
+    expect(labels).toContain("专业版");
+    expect(labels).toContain("无限版");
+    await surface.close();
+  });
+
+  test("a zh_CN render localises the plan picker's catalogue labels", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }), "zh_CN");
+    const trigger = rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]') ?? null;
+    // The selected row's own plan renders the zh catalogue label, not the server's English name.
+    expect(trigger?.textContent).toBe("免费版");
+    await surface.openSelect(trigger);
+    const labels = [...surface.win.document.querySelectorAll('[role="option"]')].map(
+      (node) => node.textContent,
+    );
+    // The row's own option is the zh catalogue label; the rest of the catalogue is Chinese too.
+    expect(labels).toContain("免费版");
+    expect(labels).toContain("专业版");
+    expect(labels).toContain("无限版");
+    await surface.close();
+  });
+
+  test("a refused plan change in zh_CN keeps a localised primary message with the server detail secondary", async () => {
+    const surface = await workspacesScreen(
+      (request) =>
+        request.method === "PATCH"
+          ? json({ error: "seat limit reached" }, 403)
+          : json({ workspaces: WORKSPACES }),
+      "zh_CN",
+    );
+    const row = rowContaining(surface, "Acme");
+    await surface.openSelect(row?.querySelector('[data-slot="select-trigger"]') ?? null);
+    await surface.pickOption("专业版");
+
+    const alert = surface.container.querySelector('[role="alert"]');
+    // The generic zh failure is primary; the server's English `{error}` is detail only.
+    expect(alert?.textContent).toContain("无法更改 Acme 的套餐。");
+    expect(alert?.textContent).toContain("服务器返回：seat limit reached");
+    // The refused optimistic change is rolled back.
+    expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("免费版");
+    await surface.close();
+  });
+
+  test("the slug dialog starts at the current slug, submits one PATCH and updates the row", async () => {
+    const after = { ...WORKSPACES[0]!, slug: "acme-hq" };
+    let written = false;
+    const surface = await workspacesScreen((request) => {
+      if (request.method === "PATCH") {
+        written = true;
+        return json({ workspaceId: "ws_1", slug: "acme-hq" });
+      }
+      return json({ workspaces: written ? [after, WORKSPACES[1]!] : WORKSPACES });
+    });
+    expect(rowContaining(surface, "Acme")?.textContent).toContain("acme");
+
+    const action = [...surface.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Edit slug",
+    );
+    await surface.click(action ?? null);
+    // The dialog opens with the row's current slug, and opening it writes nothing.
+    const input = surface.win.document.querySelector('[data-slot="dialog-content"] input') as DomElement | null;
+    expect((input as unknown as HTMLInputElement | null)?.value).toBe("acme");
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
+
+    await surface.type('[data-slot="dialog-content"] input', "acme-hq");
+    await act(async () => {
+      surface.win.document
+        .querySelector('[data-slot="dialog-content"] form')
+        ?.dispatchEvent(new surface.win.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await act(async () => {});
+
+    const patches = surface.sent.filter((request) => request.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.url).toBe("/_internal_admin/api/workspaces/ws_1/slug");
+    expect(patches[0]?.body).toEqual({ slug: "acme-hq" });
+    // The dialog closes and the row shows the accepted slug.
+    expect(surface.win.document.querySelector('[data-slot="dialog-content"]')).toBeNull();
+    expect(rowContaining(surface, "Acme")?.textContent).toContain("acme-hq");
+    await surface.close();
+  });
+
+  test("the save button is disabled while the draft equals the stored slug", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
+    const action = [...surface.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Edit slug",
+    );
+    await surface.click(action ?? null);
+
+    const save = () =>
+      [...surface.win.document.querySelectorAll('[data-slot="dialog-content"] button')].find(
+        (button) => button.textContent === "Save slug",
+      ) as unknown as HTMLButtonElement | undefined;
+    // The dialog opens prefilled, so an unchanged submit would write an audit
+    // row with identical before/after.
+    expect(save()?.disabled).toBe(true);
+    await surface.type('[data-slot="dialog-content"] input', "acme-hq");
+    expect(save()?.disabled).toBe(false);
+    await surface.type('[data-slot="dialog-content"] input', "acme");
+    expect(save()?.disabled).toBe(true);
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
+    await surface.close();
+  });
+
+  test("a refused slug write keeps the dialog open with the localised primary message", async () => {
+    const surface = await workspacesScreen(
+      (request) => (request.method === "PATCH" ? json({ error: "slug is reserved" }, 409) : json({ workspaces: WORKSPACES })),
+      "zh_CN",
+    );
+    const action = [...surface.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "编辑 slug",
+    );
+    await surface.click(action ?? null);
+    await surface.type('[data-slot="dialog-content"] input', "members");
+    await act(async () => {
+      surface.win.document
+        .querySelector('[data-slot="dialog-content"] form')
+        ?.dispatchEvent(new surface.win.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await act(async () => {});
+
+    const dialog = surface.win.document.querySelector('[data-slot="dialog-content"]');
+    expect(dialog).not.toBeNull();
+    // The refusal must live INSIDE the dialog: the modal overlay covers the
+    // page-level notice, so a page notice is unreadable while it stays open.
+    const alert = dialog?.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("无法更改 Acme 的 slug。");
+    expect(alert?.textContent).toContain("服务器返回：slug is reserved");
+    expect(surface.container.querySelector('[role="alert"]')).toBeNull();
+    expect(rowContaining(surface, "Acme")?.textContent).toContain("acme");
+    await surface.close();
+  });
 });
 
 describe("Users screen", () => {
@@ -358,6 +612,37 @@ describe("Users screen", () => {
     expect(rowContaining(surface, "octocat")?.textContent).toContain("2026-08-26");
     expect(rowContaining(surface, "ops")?.textContent).toContain("Support (2)");
     expect(rowContaining(surface, "yuki")?.textContent).toContain("User");
+    await surface.close();
+  });
+
+  test("search filters on the GitHub login with the N / M counter", async () => {
+    const surface = await usersScreen(() => json({ users: USERS }));
+    expect(surface.text()).toContain("3 / 3");
+    await surface.type('input[type="search"]', "yuki");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(surface.text()).toContain("1 / 3");
+    // Case-insensitive: the query matches the login in another case.
+    await surface.type('input[type="search"]', "OCTO");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(rowContaining(surface, "octocat")).not.toBeNull();
+    await surface.close();
+  });
+
+  test("a non-matching search shows the shared empty state", async () => {
+    const surface = await usersScreen(() => json({ users: USERS }));
+    await surface.type('input[type="search"]', "zzz");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No matches");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).not.toContain("No users");
+    await surface.close();
+  });
+
+  test("a zh_CN render shows Chinese copy for the page and the search control", async () => {
+    const surface = await usersScreen(() => json({ users: USERS }), "zh_CN");
+    expect(surface.text()).toContain("此平台上的所有账号。");
+    const input = surface.container.querySelector('input[type="search"]');
+    expect(input?.getAttribute("placeholder")).toBe("搜索");
+    await surface.type('input[type="search"]', "yuki");
+    expect(surface.text()).toContain("1 / 3");
     await surface.close();
   });
 });
@@ -453,6 +738,110 @@ describe("Support access screen", () => {
     expect(deletes[0]?.url).toBe("/_internal_admin/api/support-grants/g1");
     expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain(
       "No open support windows",
+    );
+    await surface.close();
+  });
+
+  test("the form renders inside CardContent under a CardHeader title", async () => {
+    const surface = await supportScreen(respondWith(() => []));
+    const header = surface.container.querySelector('[data-slot="card-header"]');
+    expect(header?.textContent).toContain("New support window");
+    const content = surface.container.querySelector('[data-slot="card-content"]');
+    expect(content).not.toBeNull();
+    expect(content?.querySelector("#grant-operator")).not.toBeNull();
+    await surface.close();
+  });
+
+  test("revoking one row leaves the other revoke buttons enabled", async () => {
+    const deleteGate = Promise.withResolvers<Response>();
+    const surface = await supportScreen((request) => {
+      if (request.method === "DELETE") return deleteGate.promise;
+      return json(
+        request.url.endsWith("/support-grants") ? { grants: [GRANT, GRANT2] } : { workspaces: WORKSPACES },
+      );
+    });
+
+    const inFlightButton = rowContaining(surface, "incident 42")?.querySelector("button");
+    await surface.click(inFlightButton ?? null);
+    expect(inFlightButton?.disabled).toBe(true);
+
+    const otherButton = rowContaining(surface, "incident 43")?.querySelector("button");
+    expect(otherButton?.disabled).toBe(false);
+
+    deleteGate.resolve(json({ id: GRANT.id, workspaceId: GRANT.workspace_id }));
+    await act(async () => {});
+    expect(rowContaining(surface, "incident 42")).toBeNull();
+    await surface.close();
+  });
+
+  test("a second submit while the create flies sends no second POST", async () => {
+    const createGate = Promise.withResolvers<Response>();
+    const surface = await supportScreen((request) => {
+      if (request.method === "POST") return createGate.promise;
+      return json(
+        request.url.endsWith("/support-grants") ? { grants: [] } : { workspaces: WORKSPACES },
+      );
+    });
+
+    await surface.openSelect(surface.container.querySelector("#grant-workspace"));
+    await surface.pickOption("Acme");
+    await surface.type("#grant-operator", "ops");
+    await surface.type("#grant-reason", "incident 42");
+    const submitButton = surface.container.querySelector("button[type=submit]");
+
+    await surface.click(submitButton ?? null);
+    expect((submitButton as unknown as HTMLButtonElement | null)?.disabled).toBe(true);
+    await surface.click(submitButton ?? null);
+    expect(surface.sent.filter((request) => request.method === "POST")).toHaveLength(1);
+
+    createGate.resolve(json({ grant: GRANT }, 201));
+    await act(async () => {});
+    expect((submitButton as unknown as HTMLButtonElement | null)?.disabled).toBe(false);
+    await surface.close();
+  });
+
+  test("two concurrent revokes keep both rows disabled independently", async () => {
+    const gates = new Map<string, Gate>();
+    const surface = await supportScreen((request) => {
+      if (request.method === "DELETE") {
+        const gate = Promise.withResolvers<Response>();
+        gates.set(request.url, gate);
+        return gate.promise;
+      }
+      return json(
+        request.url.endsWith("/support-grants") ? { grants: [GRANT, GRANT2] } : { workspaces: WORKSPACES },
+      );
+    });
+
+    const firstButton = rowContaining(surface, "incident 42")?.querySelector("button");
+    const secondButton = rowContaining(surface, "incident 43")?.querySelector("button");
+    await surface.click(firstButton ?? null);
+    await surface.click(secondButton ?? null);
+    expect(firstButton?.disabled).toBe(true);
+    expect(secondButton?.disabled).toBe(true);
+
+    gates.get("/_internal_admin/api/support-grants/g1")?.resolve(json({ id: GRANT.id, workspaceId: GRANT.workspace_id }));
+    await act(async () => {});
+    expect(rowContaining(surface, "incident 42")).toBeNull();
+    // Row B is still flying: its freshly rendered button stays disabled.
+    expect(rowContaining(surface, "incident 43")?.querySelector("button")?.disabled).toBe(true);
+
+    gates.get("/_internal_admin/api/support-grants/g2")?.resolve(json({ id: GRANT2.id, workspaceId: GRANT2.workspace_id }));
+    await act(async () => {});
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain(
+      "No open support windows",
+    );
+    await surface.close();
+  });
+
+  test("a zh_CN render shows the page's dictionary copy", async () => {
+    const surface = await supportScreen(respondWith(() => []), "zh_CN");
+    expect(surface.text()).toContain("支持访问");
+    expect(surface.container.querySelector('[data-slot="card-header"]')?.textContent).toContain("新建支持窗口");
+    expect(surface.container.querySelector('[data-slot="card-content"] #grant-operator')).not.toBeNull();
+    expect(surface.container.querySelector("button[type=submit]")?.textContent).toContain("授予访问");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain(
+      "没有开放的支持窗口",
     );
     await surface.close();
   });

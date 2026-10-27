@@ -13,15 +13,16 @@
 import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
-import { resolveLocale } from "../i18n";
+import { resolveLocale, t, type Locale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
 import { ADMIN_PAGES } from "../spa/admin/pages";
+import { RESERVED_WORKSPACE_SLUGS } from "../spa/routes";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, listFlags } from "./flags";
 import { operatorLogin, type AdminContext } from "./gate";
 import { createSupportGrant, revokeSupportGrant } from "./support-grants";
 import { listUsers } from "./users";
-import { listWorkspaces, setWorkspacePlan } from "./workspaces";
+import { WORKSPACE_SLUG_PATTERN, listWorkspaces, setWorkspacePlan, setWorkspaceSlug } from "./workspaces";
 
 /** One declaration row of this namespace's own route table. */
 type AdminRoute = {
@@ -179,6 +180,53 @@ async function assignPlan(c: AdminContext): Promise<Response> {
 }
 
 /**
+ * Set one workspace's slug. Slug authoring is a platform decision: the value is
+ * the readable part of a workspace URL that the owner can no longer edit, so it
+ * carries the same grammar, reserved-word and collision rules the deleted owner
+ * route enforced. The store's guarded write and its audit row are ONE `batch`.
+ */
+async function setSlug(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  let slug: unknown;
+  try {
+    const body = (await c.req.json()) as { slug?: unknown };
+    slug = body.slug;
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (typeof slug !== "string" || !WORKSPACE_SLUG_PATTERN.test(slug)) {
+    return c.json(
+      { error: "body must be { slug: 2-39 lowercase letters, digits or hyphens, starting with a letter or digit }" },
+      400,
+    );
+  }
+  if (RESERVED_WORKSPACE_SLUGS.has(slug)) {
+    return c.json({ error: `slug ${JSON.stringify(slug)} is reserved by the dashboard` }, 409);
+  }
+  const workspaceId = c.req.param("id");
+  if (!workspaceId) return c.notFound();
+  const outcome = await setWorkspaceSlug(db, {
+    workspaceId,
+    slug,
+    actorLogin: login,
+    now: new Date().toISOString(),
+  });
+  if (outcome.kind === "slug_taken") {
+    return c.json({ error: `another workspace already uses the slug ${JSON.stringify(slug)}` }, 409);
+  }
+  if (outcome.kind === "slug_is_workspace_id") {
+    return c.json({ error: `slug ${JSON.stringify(slug)} is another workspace's id` }, 409);
+  }
+  if (outcome.kind === "unknown_workspace") {
+    return c.json({ error: "workspace not found" }, 404);
+  }
+  return c.json({ workspaceId, slug: outcome.slug });
+}
+
+/**
  * Every open support window across workspaces — one statement, newest append
  * per (workspace, operator), expired rows excluded. The console's list reads
  * are deliberately unaudited (spec §4): audit rows attach to writes.
@@ -287,12 +335,42 @@ async function serveDocument(c: AdminContext): Promise<Response> {
   if (!document?.ok) return c.notFound();
   // Minimal admin boot: identity and locale only. None of the workspace boot
   // reads (memberships, invites, support redirects) run for this document.
-  const html = injectSpaBoot(await document.text(), {
-    locale: resolveLocale(c.req.raw),
-    login,
-    name: null,
-  });
+  const locale = resolveLocale(c.req.raw);
+  const html = localizeDocument(
+    injectSpaBoot(await document.text(), {
+      locale,
+      login,
+      name: null,
+    }),
+    locale,
+  );
   return c.html(html, 200, { "cache-control": "private, no-store" });
+}
+
+/**
+ * Server-side locale substitution on the console document (compass D15): the
+ * handler already holds the document text and the resolved locale, so
+ * `<html lang>` (BCP 47: `zh_CN` → `zh-CN`) and the `<title>` are replaced
+ * here — no second document route, no client-side attribute write. The title
+ * comes from `admin.documentTitle`; it is escaped even though dictionary
+ * values are plain text by contract. Both anchors must be present: a silent
+ * no-op would ship an English document to a zh_CN operator, so a template
+ * drift throws into the serveDocument error path instead.
+ */
+export function localizeDocument(html: string, locale: Locale): string {
+  const lang = locale === "zh_CN" ? "zh-CN" : "en";
+  const title = t(locale, "admin.documentTitle")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;");
+  if (!html.includes('<html lang="en">')) {
+    throw new Error("admin document is missing the `<html lang=\"en\">` locale anchor");
+  }
+  if (!/<title>[^<]*<\/title>/.test(html)) {
+    throw new Error("admin document is missing the `<title>` locale anchor");
+  }
+  return html
+    .replace('<html lang="en">', `<html lang="${lang}">`)
+    .replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`);
 }
 
 const ADMIN_ROUTES: readonly AdminRoute[] = [
@@ -302,6 +380,7 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
   { method: "get", path: "/api/users", handler: readUsers },
   { method: "patch", path: "/api/workspaces/:id/plan", handler: assignPlan },
+  { method: "patch", path: "/api/workspaces/:id/slug", handler: setSlug },
   { method: "get", path: "/api/support-grants", handler: readSupportGrants },
   { method: "post", path: "/api/support-grants", handler: createGrant },
   { method: "delete", path: "/api/support-grants/:id", handler: revokeGrant },
