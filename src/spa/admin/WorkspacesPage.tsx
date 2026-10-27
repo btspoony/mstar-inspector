@@ -22,8 +22,9 @@ import { TableSearch } from "./TableSearch";
 /**
  * The plan ids the picker offers, in tier order — the wire values mirrored
  * from `plans` (migrations 0031/0032); no admin read exposes the catalogue.
- * The row's own plan leads with the server's `planName` (see `planOptions`),
- * so a stored plan outside this list still renders and keeps it. Add a
+ * The row's own plan leads with its localised catalogue label (see
+ * `planOptions`), falling back to the server's `planName` only when the
+ * stored plan is outside this list, so it still renders and keeps it. Add a
  * `GET /api/plans` read when a tier ships without a UI change.
  */
 const PLAN_IDS = ["free", "pro", "unlimited"] as const;
@@ -35,20 +36,20 @@ const PLAN_LABEL_KEYS: Record<(typeof PLAN_IDS)[number], DictionaryKey> = {
   unlimited: "admin.workspaces.planUnlimited",
 };
 
-/** The picker's label for a catalogue plan; an unknown id renders as-is. */
-function planLabel(locale: Locale, planId: string): string {
+/** The picker's label for a catalogue plan; an unknown id renders `fallback`. */
+function planLabel(locale: Locale, planId: string, fallback: string = planId): string {
   const key = (PLAN_LABEL_KEYS as Record<string, DictionaryKey>)[planId];
-  return key ? t(locale, key) : planId;
+  return key ? t(locale, key) : fallback;
 }
 
 /**
- * The options the picker shows: the row's own plan first (carrying the name the
- * server resolved, so a stored plan outside `PLAN_IDS` is never mislabelled),
+ * The options the picker shows: the row's own plan first (localised, falling
+ * back to the server's name only for a stored plan outside `PLAN_IDS`),
  * then the rest of the catalogue with localised labels.
  */
 function planOptions(row: WorkspaceRow, locale: Locale): readonly { id: string; name: string }[] {
   return [
-    { id: row.planId, name: row.planName },
+    { id: row.planId, name: planLabel(locale, row.planId, row.planName) },
     ...PLAN_IDS.filter((planId) => planId !== row.planId).map((planId) => ({
       id: planId,
       name: planLabel(locale, planId),
@@ -143,11 +144,11 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
           onValueChange={(planId) => void changePlan(row, planId)}
         >
           <SelectTrigger size="sm" aria-label={t(locale, "admin.workspaces.planAria", { name: row.name })}>
-            <SelectValue>{row.planName}</SelectValue>
+            <SelectValue>{planLabel(locale, row.planId, row.planName)}</SelectValue>
           </SelectTrigger>
           <SelectContent>
-            {/* The row's own plan leads with the server's name, so a stored
-                plan outside PLAN_IDS still has a labelled option. */}
+            {/* The row's own plan leads, localised; only an id outside
+                PLAN_IDS keeps the server's name. */}
             {planOptions(row, locale).map((plan) => (
               <SelectItem key={plan.id} value={plan.id}>
                 {plan.name}
