@@ -22,7 +22,7 @@ const OPERATOR_KEY = OPERATOR.toLowerCase();
 /** A signed-in account that is NOT on the allowlist. */
 const MEMBER = "regular-member";
 
-const ADMIN_HTML = `<!doctype html><html><head><!--SPA_BOOT--></head><body>admin console</body></html>`;
+const ADMIN_HTML = `<!doctype html><html lang="en"><head><!--SPA_BOOT--><title>Morning Star — Platform operations</title></head><body>admin console</body></html>`;
 
 /**
  * The deployed `dist/spa` bucket, restricted to the admin document. Any other

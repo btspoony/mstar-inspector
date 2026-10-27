@@ -387,62 +387,6 @@ type WorkspaceStoreWriteD1 = {
   >;
 };
 
-/** Why a slug write was refused: a guard hit, or the target row is gone. */
-export type WorkspaceSlugConflict = "slug_taken" | "slug_is_workspace_id" | "workspace_not_found";
-
-/**
- * The rename: both guards live in the UPDATE's own WHERE, so the statement is
- * atomic by construction — a guard hit changes no row (`changes === 0`), which
- * is what a two-statement pre-check batch cannot promise. The guards are the
- * pinned pair: no OTHER workspace may carry the slug in any case, and the value
- * may not be any workspace's id (that would make the path ref ambiguous). The
- * TARGET must still be live — a workspace soft-deleted between the caller's
- * resolution and this statement is a vanished row, not a rename.
- */
-const SET_SLUG_SQL = `UPDATE workspaces SET slug = ?1
-   WHERE id = ?2
-     AND deleted_at IS NULL
-     AND NOT EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2)
-     AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2)`;
-
-/** Which guard matched, read once after a refused write (index order = precedence). */
-const SLUG_CONFLICT_SQL = `SELECT
-     EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2) AS slug_taken,
-     EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2) AS id_taken`;
-
-/**
- * Rename one workspace's slug. Returns the conflict that refused the write, or
- * null when it landed. A concurrent write that slipped past the guards is
- * caught by the UNIQUE index and maps to `slug_taken`, never a 500.
- */
-export async function setWorkspaceSlug(
-  db: WorkspaceStoreD1,
-  workspaceId: string,
-  slug: string,
-): Promise<WorkspaceSlugConflict | null> {
-  let changes: number;
-  try {
-    changes = (await db.prepare(SET_SLUG_SQL).bind(slug, workspaceId).run()).meta.changes;
-  } catch (err) {
-    // Pinned to the D1 driver's message, the only conflict signal it exposes:
-    // if that wording drifts this falls through to a 500 (visible, not a wrong
-    // 409). Re-check when the D1 face starts carrying a structured error code.
-    if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) return "slug_taken";
-    throw err;
-  }
-  if (changes > 0) return null;
-  const guard = await db
-    .prepare(SLUG_CONFLICT_SQL)
-    .bind(slug, workspaceId)
-    .first<{ slug_taken: number; id_taken: number }>();
-  if (guard?.slug_taken) return "slug_taken";
-  if (guard?.id_taken) return "slug_is_workspace_id";
-  // Neither guard matched, so the WHERE's `id = ?2 AND deleted_at IS NULL` hit
-  // no live row: the workspace was soft-deleted between the caller's resolution
-  // and this statement. A vanished row is the 404 family, not a conflict.
-  return "workspace_not_found";
-}
-
 /**
  * The free-slot guard, as a SQL condition every insert of the creation batch
  * carries: "this login holds no live free membership yet". Re-reading it inside
@@ -546,6 +490,26 @@ export async function createWorkspace(
     throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
   }
   return results[0]!.meta.changes > 0;
+}
+
+/**
+ * Rename one workspace — the label the top-bar switcher shows. ONE guarded
+ * UPDATE: a row retired between the caller's resolution and this write changes
+ * nothing and answers null, the same 404 an unknown ref gets. `name` carries no
+ * uniqueness guard, so there is no conflict branch, and `RETURNING` is the row
+ * this write produced rather than a second read that could disagree with it.
+ */
+const SET_NAME_SQL = `UPDATE workspaces SET name = ?1
+   WHERE id = ?2 AND deleted_at IS NULL
+  RETURNING id, slug, name, created_at`;
+
+export async function setWorkspaceName(
+  db: WorkspaceStoreD1,
+  workspaceId: string,
+  name: string,
+): Promise<WorkspaceRow | null> {
+  const { results } = await db.prepare(SET_NAME_SQL).bind(name, workspaceId).run<WorkspaceRow>();
+  return results[0] ?? null;
 }
 
 /**

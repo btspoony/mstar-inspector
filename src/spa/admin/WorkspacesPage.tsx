@@ -1,13 +1,27 @@
 /**
  * Workspaces — every live tenant with its SQL-side counts, owner and resolved
- * plan (spec §3.3), and a plan picker per row that writes one `PATCH
- * /api/workspaces/:id/plan` (spec §3.2).
+ * plan (spec §3.3), a plan picker per row that writes one `PATCH
+ * /api/workspaces/:id/plan` (spec §3.2), and a slug editor that writes one
+ * `PATCH /api/workspaces/:id/slug`.
  *
  * A downgrade below the live member count is legal and this screen never
  * touches a membership: the server's seat guard only blocks NEW invites, which
- * is what the page description says.
+ * is what the page description says. The slug is platform-authored here — the
+ * owner can rename the label (name) but not the readable URL segment — so the
+ * server owns its grammar, reserved words and both collision guards; this
+ * dialog only carries the value.
  */
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { t, type DictionaryKey } from "../../i18n";
 import type { Locale } from "../../i18n";
@@ -15,7 +29,14 @@ import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
 import { EmptyState } from "../components/state/EmptyState";
 import { PageNotice } from "../pages/PageNotice";
-import { AdminWriteError, readWorkspaces, setPlan, useLoaded, type WorkspaceRow } from "./api";
+import {
+  AdminWriteError,
+  readWorkspaces,
+  setPlan,
+  setWorkspaceSlug,
+  useLoaded,
+  type WorkspaceRow,
+} from "./api";
 import { ConsolePath, Screen } from "./screen";
 import { TableSearch } from "./TableSearch";
 
@@ -71,6 +92,12 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
   const [refusal, setRefusal] = useState<string | null>(null);
   /** Client-side filter over the loaded rows — no URL state, no request. */
   const [search, setSearch] = useState("");
+  /** The row whose slug dialog is open, plus the value being typed. */
+  const [slugTarget, setSlugTarget] = useState<WorkspaceRow | null>(null);
+  const [slugDraft, setSlugDraft] = useState("");
+  /** The slug refusal belongs to the dialog, not the page: Radix's modal
+   * overlay covers the page notice while the dialog stays open. */
+  const [slugRefusal, setSlugRefusal] = useState<string | null>(null);
 
   async function changePlan(target: WorkspaceRow, planId: string) {
     if (planId === target.planId) return;
@@ -106,13 +133,62 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
     }
   }
 
+  /**
+   * Submit the dialog's slug. The row is patched in place on success (the read
+   * endpoint's row carries `slug`), and the dialog closes; a refusal keeps it
+   * open with the server's own message as secondary detail so the operator can
+   * correct the value without retyping it.
+   */
+  async function submitSlug(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const target = slugTarget;
+    if (!target) return;
+    setBusy(target.id);
+    setSlugRefusal(null);
+    try {
+      await setWorkspaceSlug(target.id, slugDraft.trim());
+      update((workspaces) =>
+        workspaces.map((item) =>
+          item.id === target.id ? { ...item, slug: slugDraft.trim() } : item,
+        ),
+      );
+      setSlugTarget(null);
+    } catch (error) {
+      const generic = t(locale, "admin.workspaces.slugChangeFailed", { name: target.name });
+      setSlugRefusal(
+        error instanceof AdminWriteError
+          ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+          : generic,
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const columns: DataTableColumn<WorkspaceRow>[] = [
     {
       header: t(locale, "admin.workspaces.workspaceColumn"),
       cell: (row) => (
-        <div className="flex flex-col gap-0.5">
+        <div className="flex flex-col gap-1">
           <span className="text-sm font-medium">{row.name}</span>
-          <code className="text-xs text-muted-foreground">{row.id}</code>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="text-xs text-muted-foreground">{row.slug}</code>
+            <span className="text-xs text-muted-foreground">{row.id}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              disabled={busy !== null}
+              aria-label={t(locale, "admin.workspaces.slugAria", { name: row.name })}
+              onClick={() => {
+                setSlugTarget(row);
+                setSlugDraft(row.slug);
+                setSlugRefusal(null);
+              }}
+            >
+              {t(locale, "admin.workspaces.slugAction")}
+            </Button>
+          </div>
         </div>
       ),
     },
@@ -211,6 +287,51 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
           );
         }}
       </Screen>
+      <Dialog
+        open={slugTarget !== null}
+        onOpenChange={(open) => (open ? undefined : setSlugTarget(null))}
+      >
+        {slugTarget ? (
+          <DialogContent showCloseButton={false}>
+            <form className="flex flex-col gap-4" onSubmit={(event) => void submitSlug(event)}>
+              <DialogHeader>
+                <DialogTitle>
+                  {t(locale, "admin.workspaces.slugDialogTitle", { name: slugTarget.name })}
+                </DialogTitle>
+                <DialogDescription>{t(locale, "admin.workspaces.slugDialogDescription")}</DialogDescription>
+              </DialogHeader>
+              <label className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium">{t(locale, "admin.workspaces.slugLabel")}</span>
+                <Input
+                  value={slugDraft}
+                  onChange={(event) => setSlugDraft(event.target.value)}
+                  autoFocus
+                />
+              </label>
+              {/* Inside the dialog: the modal overlay covers the page notice. */}
+              {slugRefusal ? <PageNotice kind="error" message={slugRefusal} /> : null}
+              <DialogFooter>
+                <Button type="button" variant="outline" size="sm" onClick={() => setSlugTarget(null)}>
+                  {t(locale, "admin.workspaces.cancelAction")}
+                </Button>
+                <Button
+                  type="submit"
+                  size="sm"
+                  // An unchanged draft would write a no-op UPDATE plus an audit
+                  // row with identical before/after.
+                  disabled={
+                    busy !== null ||
+                    slugDraft.trim().length === 0 ||
+                    slugDraft.trim() === slugTarget.slug
+                  }
+                >
+                  {t(locale, "admin.workspaces.slugSave")}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        ) : null}
+      </Dialog>
     </section>
   );
 }

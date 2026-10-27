@@ -556,6 +556,31 @@ describe("the shell boot asks the gate's own classifier", () => {
     expect(boot.workspaceRef).toBe("default");
   });
 
+  test("a granted operator's support landing names the workspace ID, not its slug", async () => {
+    // ONE live workspace whose id differs from its readable slug: the landing
+    // and the boot must both emit the id, so a later slug change cannot stale
+    // the URL. 0026's seeded `default` row is retired first (it is the sole
+    // workspace, which is the shape this landing needs).
+    const db = createMigratedTestD1();
+    seedUser(db, OPERATOR);
+    seed(db, "DELETE FROM workspaces");
+    seedWorkspace(db, "ws-acme", "acme");
+    grant(db, "ws-acme", OPERATOR, DAY);
+    const env = withSpaAssets(envFor(db));
+    const landing = await worker.fetch(
+      await authedRequest("/dashboard", OPERATOR, { accept: "text/html" }),
+      env,
+    );
+    expect(landing.status).toBe(302);
+    expect(landing.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
+    const shell = await worker.fetch(
+      await authedRequest("/dashboard/ws-acme/apps", OPERATOR, { accept: "text/html" }),
+      env,
+    );
+    expect(shell.status).toBe(200);
+    expect(bootOf(await shell.text()).workspaceRef).toBe("ws-acme");
+  });
+
   test("a listed operator holding a live invite here is an invitee, not a support visitor", async () => {
     const { db, owner } = fixture();
     grant(db, "ws-acme", OPERATOR, DAY);
@@ -575,7 +600,9 @@ describe("the shell boot asks the gate's own classifier", () => {
     // The gate classifies `invitee` (the grant is intentionally inert), so the
     // shell must not replace the acceptance surface with the support face.
     expect(boot.supportOnly).toBeUndefined();
-    expect(boot.pendingInvites?.map((invite) => invite.workspaceRef)).toEqual(["acme"]);
+    // Discovery names the workspace by its ID — the ref the accept POST takes
+    // and the ref the shell links to.
+    expect(boot.pendingInvites?.map((invite) => invite.workspaceRef)).toEqual(["ws-acme"]);
   });
 });
 

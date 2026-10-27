@@ -1,5 +1,5 @@
 /**
- * The console's locale plumbing (task 1 of plan 122): `main.tsx` reads
+ * The console's locale plumbing: `main.tsx` reads
  * `boot.locale`, renders the header/nav shell through `t(locale, …)`, and
  * threads the locale into every screen.
  *
@@ -8,7 +8,7 @@
  *   `boot.locale` reaches the page with no SPA locale state.
  * - The header switch is the same zero-JS form as the workspace shell: it
  *   POSTs `/dashboard/locale` with a hidden input set to the OTHER locale.
- *   (The POST's Set-Cookie/302 contract is Task 2's worker test.)
+ *   (The POST's Set-Cookie/302 contract is covered by the worker test.)
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { act, createElement } from "react";

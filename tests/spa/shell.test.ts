@@ -149,13 +149,31 @@ describe("shell models", () => {
 
   test("the boot ref still scopes a pathname that names no workspace", () => {
     // `/dashboard/apps` is the legacy page; on a strict deployment the boot's
-    // server-resolved slug carries the workspace into both nav targets.
+    // server-resolved ref (the workspace id) carries the workspace into both
+    // nav targets.
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "acme" }, "/dashboard/apps");
     expect(sidebar.brandHref).toBe("/dashboard/acme/apps");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
+    ]);
+  });
+
+  test("with no boot ref the login's first membership supplies the id, not its slug", () => {
+    // A multi-workspace deployment injects no `workspaceRef`; the fallback must
+    // emit the row's id, the same ref every other emission site uses.
+    const sidebar = buildSidebarModel(
+      {
+        ...admin,
+        memberships: [{ id: "ws_acme", slug: "acme", name: "Acme", role: "owner", plan: "Free" }],
+      },
+      "/dashboard/apps",
+    );
+    expect(sidebar.items.map((item) => item.href)).toEqual([
+      "/dashboard/ws_acme/apps",
+      "/dashboard/ws_acme/members",
+      "/dashboard/ws_acme/settings",
     ]);
   });
 
@@ -170,8 +188,8 @@ describe("shell models", () => {
   });
 
   test("workspaceMembershipForRef resolves by id or slug and carries the role", () => {
-    // The settings page gates the slug editor on this row's role, so the
-    // lookup must survive both addressing forms the URL may carry.
+    // The settings page gates the name card on this row's role, so the lookup
+    // must survive both addressing forms the URL may carry.
     const boot: SpaBoot = {
       ...member,
       memberships: [{ id: "ws-1", slug: "acme", name: "Acme", role: "member", plan: "Free" }],

@@ -265,19 +265,14 @@ export const zhCN: Dictionary = {
     inviteExpired: "该邀请已过期。",
     inviteGone: "该邀请已失效——可能已被撤回。",
     inviteAcceptFailed: "接受邀请失败，请重试。",
-    /** 工作区 URL（slug）改名——设置表单与拒绝文案。 */
-    slugHeading: "工作区 URL",
-    slugDescription:
-      "该工作区控制台 URL 中的可读片段。仅小写字母、数字与连字符——不能是保留字，也不能是其他工作区的 id。",
-    slugLabel: "Slug",
-    slugSave: "保存 slug",
-    slugSaved: "工作区 URL 已更新——旧 slug 不再可用。",
-    slugInvalid: "请使用 2–39 位小写字母、数字或连字符，并以字母或数字开头。",
-    slugReserved: "该词是控制台保留字，请换一个 slug。",
-    slugTaken: "其他工作区已使用该 slug，请换一个。",
-    slugIsWorkspaceId: "该值已是另一个工作区的 id，请换一个 slug。",
-    slugForbidden: "只有工作区所有者可以修改它的 URL。",
-    slugFailed: "修改工作区 URL 失败，请重试。",
+    /** `/dashboard/<ref>/settings` 的所有者专属门禁。 */
+    settingsOwnerOnly: "只有工作区所有者可以修改这些设置。",
+    /** 所有者的名称卡片——顶部切换器显示的名称。 */
+    nameHeading: "工作区名称",
+    nameDescription: "顶部工作区切换器显示的名称。此工作区的网址是其 id，不会改变。",
+    nameSave: "保存名称",
+    nameSaved: "工作区名称已更新。",
+    nameFailed: "修改工作区名称失败，请重试。",
   },
   /**
    * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
@@ -629,6 +624,18 @@ export const zhCN: Dictionary = {
       planFree: "免费版",
       planPro: "专业版",
       planUnlimited: "无限版",
+      /** 打开 slug 对话框的行操作。 */
+      slugAction: "编辑 slug",
+      /** 行操作的可访问名称。 */
+      slugAria: "编辑 {name} 的 slug",
+      slugDialogTitle: "工作区 URL slug",
+      slugDialogDescription:
+        "此工作区控制台 URL 的可读部分。2–39 个小写字母、数字或连字符，以字母或数字开头。所有者已无法修改此项。",
+      slugLabel: "Slug",
+      slugSave: "保存 slug",
+      cancelAction: "取消",
+      /** slug 写入失败且错误无法识别时的兜底文案。 */
+      slugChangeFailed: "无法更改 {name} 的 slug。",
     },
     /** 用户页。 */
     users: {

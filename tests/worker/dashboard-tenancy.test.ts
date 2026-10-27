@@ -4,8 +4,8 @@
  * There is exactly one route family: the workspace named by the first path
  * segment. The retired pre-workspace App family answers 404, and authorization
  * is decided by the actor's workspace role. The routing gate only CLASSIFIES
- * the slug — the workspace row and the membership are resolved after the
- * session/user read, so an anonymous request learns nothing about slug
+ * the ref segment — the workspace row and the membership are resolved after the
+ * session/user read, so an anonymous request learns nothing about workspace
  * existence (pinned below).
  *
  * The fixture runs against the full migration set (the store helper walks
@@ -32,6 +32,7 @@ import {
   readManifestStateValue,
 } from "../../src/dashboard/manifest";
 import { apiBase } from "../../src/spa/workspace-base";
+import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import type { SpaBoot } from "../../src/spa/boot";
 import { RESERVED_WORKSPACE_SLUGS } from "../../src/spa/routes";
 import { t } from "../../src/i18n";
@@ -276,12 +277,12 @@ describe("the pre-workspace App face is retired", () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
     // `acme` exists, `ghost` does not. Both must answer the same 302 to login:
-    // the gate classifies the slug without a D1 read, and the workspace row is
+    // the gate classifies the ref without a D1 read, and the workspace row is
     // only resolved after the session + user read.
     const answers: Array<{ status: number; location: string | null; body: string }> = [];
-    for (const slug of ["acme", "ghost"]) {
+    for (const ref of ["acme", "ghost"]) {
       const res = await worker.fetch(
-        new Request(`https://worker.local/dashboard/${slug}/api/apps`),
+        new Request(`https://worker.local/dashboard/${ref}/api/apps`),
         env,
       );
       answers.push({
@@ -360,7 +361,7 @@ describe("workspace paths serve", () => {
     expect(res.status).toBe(404);
   });
 
-  test("an unknown workspace slug answers 404", async () => {
+  test("an unknown workspace ref answers 404", async () => {
     const { db } = tenancyFixture();
     const res = await worker.fetch(
       await authedRequest("/dashboard/ghost/api/apps", "octocat"),
@@ -850,7 +851,8 @@ describe("the post-authentication landing is the workspace Apps page", () => {
       withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps");
+    // The emitted ref is the workspace ID, never the mutable slug.
+    expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
     expect(res.headers.get("Location")).not.toBe("/dashboard/apps");
   });
 
@@ -864,17 +866,97 @@ describe("the post-authentication landing is the workspace Apps page", () => {
       withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
 
     // The shell that redirect lands on still offers both workspaces.
     const shell = await worker.fetch(
-      await authedRequest("/dashboard/acme/apps", "dana", { accept: "text/html" }),
+      await authedRequest("/dashboard/ws-acme/apps", "dana", { accept: "text/html" }),
       withSpaAssets(envFor(db)),
     );
     expect(shell.status).toBe(200);
     const boot = bootOf(await shell.text());
     expect(boot.memberships?.map((m) => m.slug).sort()).toEqual(["acme", "other"]);
-    expect(boot.workspaceRef).toBe("acme");
+    expect(boot.workspaceRef).toBe("ws-acme");
+  });
+});
+
+describe("a workspace URL never carries a mutable value", () => {
+  test("a ref-less shell boot names the sole workspace by id", async () => {
+    // `/index.html` carries no workspace segment, so the boot's ref comes from
+    // the server-resolved sole workspace — and that value is the id, never the
+    // readable slug a platform operator can rewrite.
+    const db = createMigratedTestD1();
+    seed(db, "DELETE FROM workspaces");
+    seedWorkspace(db, "ws-acme", "acme");
+    seedMembership(db, "ws-acme", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      await authedRequest("/index.html", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db)),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceRef).toBe("ws-acme");
+    // The sidebar follows that ref, so no nav target carries the slug.
+    const hrefs = await renderMembersHrefs(boot, "/index.html");
+    expect(hrefs).toContain("/dashboard/ws-acme/apps");
+    expect(hrefs).not.toContain("/dashboard/acme/apps");
+  });
+
+  test("a rewritten slug stops addressing the workspace, while the id keeps working", async () => {
+    // A platform operator rewrites `ws-acme`'s slug from `acme` to `acme-labs`
+    // after the links went out. The resolver matches only the CURRENT slug or
+    // the id — there is no alias history — so a link built from the retired
+    // slug must answer the tenant 404. That is why every emitted URL names the
+    // id, which the write never touches.
+    const { db } = tenancyFixture();
+    const env = withSpaAssets(envFor(db));
+    const members = async (ref: string) =>
+      worker.fetch(await authedRequest(`/dashboard/${ref}/api/members`, "dana"), env);
+
+    // Before the rewrite the readable slug addresses this workspace.
+    expect((await members("acme")).status).toBe(200);
+
+    seed(db, "UPDATE workspaces SET slug = 'acme-labs' WHERE id = 'ws-acme'");
+
+    // Both live identifiers reach the INTENDED tenant (its own member list,
+    // not merely some live workspace).
+    for (const ref of ["acme-labs", "ws-acme"]) {
+      const res = await members(ref);
+      expect(res.status, ref).toBe(200);
+      const body = (await res.json()) as {
+        viewer: { login: string; role: string };
+        members: Array<{ github_login: string }>;
+      };
+      expect(body.viewer, ref).toEqual({ login: "dana", role: "owner" });
+      expect(body.members.map((row) => row.github_login).sort(), ref).toEqual([
+        "carol",
+        "dana",
+        "mallory",
+        "octocat",
+      ]);
+    }
+
+    // The retired slug is not an alias: it names no workspace at all.
+    expect((await members("acme")).status).toBe(404);
+
+    // What the shell EMITS names the id, which the rewrite never touched.
+    const shell = await worker.fetch(
+      await authedRequest("/dashboard/ws-acme/apps", "dana", { accept: "text/html" }),
+      env,
+    );
+    expect(shell.status).toBe(200);
+    expect(
+      buildWorkspaceSwitcherModel(bootOf(await shell.text()), "/dashboard/ws-acme/apps")?.options.map(
+        (option) => option.ref,
+      ),
+    ).toEqual(["ws-acme"]);
+    // The landing redirect is id-based too, so nothing emits the rewritten slug.
+    const landing = await worker.fetch(
+      await authedRequest("/dashboard", "dana", { accept: "text/html" }),
+      env,
+    );
+    expect(landing.status).toBe(302);
+    expect(landing.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
   });
 });
 
@@ -939,14 +1021,16 @@ describe("a login with no workspace gets the creation surface", () => {
     expect(res.status).toBe(201);
     // The 201 names the landing: with 0026's `default` workspace already
     // present, sole-workspace resolution cannot pick the new one out, so
-    // `/dashboard` would strand the creator on a slug-less shell.
-    const created = (await res.json()) as { slug: string; appsPath: string };
-    expect(created.appsPath).toBe(`/dashboard/${created.slug}/apps`);
+    // `/dashboard` would strand the creator on a workspace-less shell. The
+    // landing is the new workspace's ID — the same ref every other emission
+    // site uses.
+    const created = (await res.json()) as { id: string; appsPath: string };
+    expect(created.appsPath).toBe(`/dashboard/${created.id}/apps`);
 
     // The new membership is real: the login now reaches that workspace's own
     // pages (the outsider 404 is gone) and the boot no longer offers creation.
     const shell = await worker.fetch(
-      await authedRequest(`/dashboard/${created.slug}/apps`, "newcomer", {
+      await authedRequest(`/dashboard/${created.id}/apps`, "newcomer", {
         accept: "text/html",
       }),
       withSpaAssets(envFor(db)),
@@ -954,9 +1038,9 @@ describe("a login with no workspace gets the creation surface", () => {
     expect(shell.status).toBe(200);
     const boot = bootOf(await shell.text());
     expect(boot.needsWorkspace).toBeUndefined();
-    expect(boot.workspaceRef).toBe(created.slug);
+    expect(boot.workspaceRef).toBe(created.id);
     const api = await worker.fetch(
-      await authedRequest(`/dashboard/${created.slug}/api/members`, "newcomer"),
+      await authedRequest(`/dashboard/${created.id}/api/members`, "newcomer"),
       envFor(db),
     );
     expect(api.status).toBe(200);
@@ -1155,7 +1239,7 @@ describe("App creation is owner/admin", () => {
         { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
       ).then((request) => worker.fetch(request, env));
       expect(callback.status).toBe(302);
-      expect(callback.headers.get("Location")).toBe("/dashboard/other/apps/mstar-inspector-dana/onboarding");
+      expect(callback.headers.get("Location")).toBe("/dashboard/ws-other/apps/mstar-inspector-dana/onboarding");
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1186,12 +1270,13 @@ describe("App creation is owner/admin", () => {
     expect(siblingRead.headers.get("Location")).toBeNull();
   });
 
-  test("a workspace RENAMED mid-flow still receives the App (the flow binds the stable id, not the slug)", async () => {
+  test("a workspace whose slug changes mid-flow still receives the App (the flow binds the stable id)", async () => {
     // F-001: the state/hold must not carry a mutable identity. Start in `acme`,
-    // rename it to `acme-renamed` before GitHub redirects back, and — the worse
-    // half of the same bug — let a NEW workspace take the freed `acme` slug. A
-    // slug-bound flow would attribute the App to that stranger; the id-bound
-    // flow must still land it in the original workspace.
+    // have a platform operator rewrite its slug to `acme-renamed` before GitHub
+    // redirects back, and — the worse half of the same bug — let a NEW
+    // workspace take the freed `acme` slug. A slug-bound flow would attribute
+    // the App to that stranger; the id-bound flow must still land it in the
+    // original workspace.
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-acme", "acme");
     seedWorkspace(db, "ws-other", "other");
@@ -1206,7 +1291,7 @@ describe("App creation is owner/admin", () => {
     const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
     expect((await readManifestStateValue(state, state, SESSION_SECRET))?.workspaceId).toBe("ws-acme");
 
-    // The rename, plus a squatter on the freed slug.
+    // The slug rewrite, plus a squatter on the freed slug.
     seed(db, "UPDATE workspaces SET slug = 'acme-renamed' WHERE id = 'ws-acme'");
     seedWorkspace(db, "ws-squatter", "acme");
     seedMembership(db, "ws-squatter", seedUser(db, "mallory", "member"), "owner");
@@ -1220,10 +1305,10 @@ describe("App creation is owner/admin", () => {
         { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
       ).then((request) => worker.fetch(request, env));
       expect(callback.status).toBe(302);
-      // The redirect names the workspace's CURRENT slug (resolved after the
-      // write), never the stale one the flow started with.
+      // The redirect names the workspace's stable ID — not the slug the flow
+      // started with, and not the one a squatter has since taken.
       expect(callback.headers.get("Location")).toBe(
-        "/dashboard/acme-renamed/apps/mstar-inspector-dana/onboarding",
+        "/dashboard/ws-acme/apps/mstar-inspector-dana/onboarding",
       );
     } finally {
       globalThis.fetch = realFetch;
