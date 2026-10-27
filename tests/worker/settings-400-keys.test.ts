@@ -200,8 +200,8 @@ describe("settings 400 key transport", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
-      key: "settings.error.sandboxImageUnknown",
-      message: "Unknown or disabled sandbox image — nothing was stored.",
+      key: "settings.error.runtimeHarnessUnknown",
+      message: "Unknown or disabled runtime harness — nothing was stored.",
     });
   });
 

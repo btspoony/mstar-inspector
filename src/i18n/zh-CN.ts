@@ -401,7 +401,7 @@ export const zhCN: Dictionary = {
       templateApiUnsupported: "{api} 不是受支持的 API 协议 — 未存储任何内容。",
       templateNoModels: "该 provider 模板没有任何模型 id — 未存储任何内容。",
       templateMaterializeMax: "此 App 已达到 {limit} 个自定义 provider 的上限 — 请先移除一个再物化新模板（更新现有声明不受限制）。未存储任何内容。",
-      sandboxImageUnknown: "未知或已停用的沙盒镜像 — 未存储任何内容。",
+      runtimeHarnessUnknown: "未知或已停用的运行时 harness — 未存储任何内容。",
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
     },

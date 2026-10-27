@@ -2764,7 +2764,7 @@ const SETTINGS_400_KEYS = {
   templateApiUnsupported: "settings.error.templateApiUnsupported",
   templateNoModels: "settings.error.templateNoModels",
   templateMaterializeMax: "settings.error.templateMaterializeMax",
-  sandboxImageUnknown: "settings.error.sandboxImageUnknown",
+  runtimeHarnessUnknown: "settings.error.runtimeHarnessUnknown",
   triggerModeUnknown: "settings.error.triggerModeUnknown",
   unknownOperation: "settings.error.unknownOperation",
 } as const satisfies Record<string, DictionaryKey>;
@@ -3824,7 +3824,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const imageId = typeof form.sandbox_image_id === "string" ? form.sandbox_image_id.trim() : "";
     const image = getSandboxImage(imageId);
     if (!image || !image.enabled) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.sandboxImageUnknown);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.runtimeHarnessUnknown);
     }
     try {
       await createAppsStore(gate.db).setSandboxImage(gate.app.id, image.id);

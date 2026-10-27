@@ -478,7 +478,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
     for (const imageId of ["no-such-image", "", "ark-plan"]) {
       const res = await postForm(SETTINGS, "mallory", env, { op: "save-sandbox-image", sandbox_image_id: imageId });
       expect(res.status).toBe(400);
-      expect(await res.text()).toContain("Unknown or disabled sandbox image");
+      expect(await res.text()).toContain("Unknown or disabled runtime harness");
     }
     // The refusals store nothing: the row keeps the migration default.
     expect(db.raw.query("SELECT sandbox_image_id FROM github_apps WHERE id = ?").get(app.id)).toEqual({

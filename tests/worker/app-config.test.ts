@@ -2570,7 +2570,7 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
         sandbox_image_id: imageId,
       });
       expect(res.status).toBe(400);
-      expect(await res.text()).toContain("Unknown or disabled sandbox image");
+      expect(await res.text()).toContain("Unknown or disabled runtime harness");
     }
     const row = db.raw
       .query("SELECT sandbox_image_id, updated_at FROM github_apps WHERE id = ?")
