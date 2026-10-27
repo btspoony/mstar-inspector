@@ -18,9 +18,8 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Layout } from "../../src/spa/Layout";
-import { buildWorkspaceSwitcherModel, renameWorkspaceMembership, storedSlugForRef } from "../../src/spa/shell";
+import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import { WorkspaceSwitcher, switchWorkspace } from "../../src/spa/components/WorkspaceSwitcher";
-import { commitWorkspaceRename } from "../../src/spa/pages/SettingsPage";
 import type { SpaBoot } from "../../src/spa/boot";
 
 const boot: SpaBoot = {
@@ -171,32 +170,6 @@ describe("workspace switcher — the control's list", () => {
     const model = buildWorkspaceSwitcherModel(boot, "/dashboard/ws_acme/apps");
     expect(model?.currentRef).toBe("ws_acme");
     expect(model?.options.map((option) => option.ref)).toEqual(["ws_acme", "ws_7d41"]);
-  });
-
-  test("an in-page slug rename leaves the emitted refs on the stable id", () => {
-    // The switcher addresses every row by its id, so a slug rename rewrites no
-    // option value; the patched row is still the one a legacy slug names.
-    let live = boot.memberships;
-    const rec = withBrowser("/dashboard/acme/apps", "", () => {
-      commitWorkspaceRename("acme-labs", (ref, slug) => {
-        live = renameWorkspaceMembership(live, ref, slug);
-      });
-    });
-    // The page stays on its own path under the new ref, as a replace (the old
-    // ref answers 404 — Back must not return to it).
-    expect(rec.replaced).toEqual(["/dashboard/acme-labs/apps"]);
-    expect(rec.pushed).toEqual([]);
-    const model = buildWorkspaceSwitcherModel({ ...boot, memberships: live }, "/dashboard/acme-labs/apps");
-    expect(model?.options.map((option) => option.ref)).toEqual(["ws_acme", "ws_7d41"]);
-    expect(model?.currentRef).toBe("ws_acme");
-    // The rename moved the readable ref only: the stable id is untouched.
-    expect(live?.[0]).toEqual({
-      id: "ws_acme",
-      slug: "acme-labs",
-      name: "Acme",
-      role: "owner",
-      plan: "Free",
-    });
   });
 
   test("a path holding a just-renamed old slug shows no current row — never the first option", () => {
@@ -360,25 +333,5 @@ describe("workspace switcher — the plan chip follows the URL", () => {
     const html = renderSwitcher(boot, "/dashboard/ws_7d41/apps");
     expect(html).toContain("Unlimited");
     expect(html).not.toContain("Free");
-  });
-});
-
-describe("slug card value — the stored slug, not the path segment", () => {
-  test("resolves the membership's stored slug through either identifier", () => {
-    // `acme` is a readable slug whose id is `ws_acme`; `ws_7d41` was never
-    // renamed, so both forms name the same stored value.
-    expect(storedSlugForRef(boot, "ws_acme")).toBe("acme");
-    expect(storedSlugForRef(boot, "acme")).toBe("acme");
-    expect(storedSlugForRef(boot, "ws_7d41")).toBe("ws_7d41");
-  });
-
-  test("after this page's own rename the new segment is the stored value", () => {
-    // The boot still carries the pre-rename row, so the new segment falls
-    // through to the fallback — the value the field must show, not the old slug.
-    expect(storedSlugForRef(boot, "acme-labs")).toBe("acme-labs");
-  });
-
-  test("no workspace segment → no value to show", () => {
-    expect(storedSlugForRef(boot, null)).toBe("");
   });
 });

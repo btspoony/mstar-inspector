@@ -26,17 +26,11 @@ import {
   AppInfoCard,
   DraftChainPanel,
   ProviderConfigForm,
-  WorkspaceSlugCard,
   draftChainTabLabel,
   githubAppSettingsUrl,
-  submitWorkspaceSlug,
 } from "../../src/spa/pages/SettingsPage";
-import { replaceWorkspaceRef } from "../../src/spa/routes";
-import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import type { SpaBoot } from "../../src/spa/boot";
 import { SupportNotice } from "../../src/spa/components/SupportNotice";
-import { slugFailureKey, WORKSPACE_SLUG_PATTERN } from "../../src/spa/pages/data";
-import type { DictionaryKey } from "../../src/i18n";
 import { AppDetailPage, AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import { withLocation } from "./browser-stub";
 
@@ -2033,156 +2027,6 @@ describe("runtime image row tightness", () => {
     );
     expect(row).toContain("SelectTrigger");
     expect(row).toContain("settings.saveRuntimeImage");
-  });
-});
-
-/**
- * The workspace-identifier work's settings control (2026-10): the workspace
- * segment is renamed in place, so the page keeps its own path under the new
- * ref, and every refusal the route emits resolves through its machine-readable
- * value rather than the copy.
- */
-describe("workspace slug control", () => {
-  test("the rename rewrites only the workspace segment and keeps the rest", () => {
-    expect(replaceWorkspaceRef("/dashboard/acme/members", "acme-labs")).toBe(
-      "/dashboard/acme-labs/members",
-    );
-    expect(replaceWorkspaceRef("/dashboard/ws_abc24/apps/thing/insights", "acme")).toBe(
-      "/dashboard/acme/apps/thing/insights",
-    );
-    expect(replaceWorkspaceRef("/dashboard/acme-labs/members", "acme")).toBe(
-      "/dashboard/acme/members",
-    );
-    expect(replaceWorkspaceRef("/login", "acme")).toBeNull();
-  });
-
-  test("every 409 code and the 400 key resolve to their own copy", () => {
-    const cases: Array<[number, string, string]> = [
-      [409, '{"code":"slug_reserved","message":"x"}', "workspace.slugReserved"],
-      [409, '{"code":"slug_taken","message":"x"}', "workspace.slugTaken"],
-      [409, '{"code":"slug_is_workspace_id","message":"x"}', "workspace.slugIsWorkspaceId"],
-      [400, '{"key":"workspace.slugInvalid","message":"x"}', "workspace.slugInvalid"],
-      [403, "forbidden", "workspace.slugForbidden"],
-      [500, "boom", "workspace.slugFailed"],
-    ];
-    for (const [status, body, key] of cases) {
-      expect(slugFailureKey(status, body), `${status} ${body}`).toBe(key as DictionaryKey);
-    }
-    // The three conflicts are distinct: a shared copy would hide the difference
-    // between "taken" and "that is another workspace's id".
-    expect(new Set(cases.slice(0, 3).map(([, , key]) => key)).size).toBe(3);
-  });
-
-  test("the client shape gate mirrors the server's grammar", () => {
-    for (const ok of ["ab", "acme", "acme-labs", "a0", "x".repeat(39)]) {
-      expect(WORKSPACE_SLUG_PATTERN.test(ok), ok).toBe(true);
-    }
-    for (const bad of ["a", "Acme", "-acme", "acme_1", "acme labs", "x".repeat(40), ""]) {
-      expect(WORKSPACE_SLUG_PATTERN.test(bad), bad).toBe(false);
-    }
-  });
-
-  test("the owner's control renders on the settings page with its own region", () => {
-    const html = withLocation("/dashboard/acme/apps/acme-app", () =>
-      renderToStaticMarkup(createElement(WorkspaceSlugCard, { locale: "en", storedSlug: "acme" })),
-    );
-    expect(html).toContain(t("en", "workspace.slugHeading"));
-    expect(html).toContain(t("en", "workspace.slugSave"));
-    // Prefilled with the STORED slug, so a save is a rename of the current
-    // workspace rather than a guess.
-    expect(html).toContain('value="acme"');
-    expect(html).toContain(`id="workspace-slug"`);
-  });
-
-  test("the input shows the stored slug, not the path segment", () => {
-    // `ws_acme` is the stable id in the address bar; the readable slug is
-    // `acme-labs`. A mount-time copy of the segment would show — and then
-    // re-save — the wrong value.
-    const html = withLocation("/dashboard/ws_acme/apps/acme-app", () =>
-      renderToStaticMarkup(createElement(WorkspaceSlugCard, { locale: "en", storedSlug: "acme-labs" })),
-    );
-    expect(html).toContain('value="acme-labs"');
-    expect(html).not.toContain('value="ws_acme"');
-  });
-
-  test("a refusal never rewrites the typed slug, the list or the path", async () => {
-    // The save posts the trimmed value verbatim and renders the refusal in
-    // place: a suffixing control would need a second mutation path, and a
-    // refusal that still committed would leave the switcher on a slug the
-    // server rejected.
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response('{"code":"slug_taken","message":"x"}', { status: 409 })) as unknown as typeof fetch;
-    const renames: string[] = [];
-    try {
-      // `withLocation` installs and removes the window face itself; the await
-      // stays inside it so `putJson`'s redirect handling sees the same window.
-      const outcome = await withLocation("/dashboard/acme/apps/acme-app", async () =>
-        submitWorkspaceSlug("acme-labs", "en", (ref, slug) => renames.push(`${ref}>${slug}`)),
-      );
-      expect(outcome).toEqual({ kind: "error", message: t("en", "workspace.slugTaken") });
-      expect(renames).toEqual([]);
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-  });
-
-  test("a successful save patches the stale boot's list before the page moves", async () => {
-    // The boot (`acme`) is a per-document snapshot the rename never refreshes.
-    // The REAL save pipeline runs: the list the switcher reads must carry the
-    // new slug by the time the path names it — otherwise the switcher offers
-    // `acme` (a 404 — a rename is not a redirect) and marks no row current.
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async () =>
-      new Response('{"slug":"acme-labs"}', { status: 200 })) as unknown as typeof fetch;
-    let live: SpaBoot["memberships"] = [
-      { id: "ws_acme", slug: "acme", name: "Acme", role: "owner", plan: "Free" },
-      { id: "ws_7d41", slug: "ws_7d41", name: "Side project", role: "member", plan: "Free" },
-    ];
-    const replaced: string[] = [];
-    // A window face that survives the whole await: the commit reads
-    // `location.pathname` after the response lands.
-    const scope = globalThis as Record<string, unknown>;
-    const saved = { window: scope.window, PopStateEvent: scope.PopStateEvent };
-    scope.window = {
-      location: { pathname: "/dashboard/acme/apps/acme-app", search: "", hash: "" },
-      history: { replaceState: (_s: unknown, _t: string, url: string) => replaced.push(url) },
-      dispatchEvent: () => true,
-    };
-    scope.PopStateEvent = class {
-      type: string;
-      constructor(type: string) {
-        this.type = type;
-      }
-    };
-    try {
-      const outcome = await submitWorkspaceSlug("acme-labs", "en", (ref, slug) => {
-        live = live?.map((m) => (ref === m.id || ref === m.slug ? { ...m, slug } : m));
-      });
-      expect(outcome).toEqual({ kind: "success", message: t("en", "workspace.slugSaved") });
-      // The slug moved only in the readable ref: the stable id is the same row.
-      expect(live?.[0]).toEqual({
-        id: "ws_acme",
-        slug: "acme-labs",
-        name: "Acme",
-        role: "owner",
-        plan: "Free",
-      });
-      expect(replaced).toEqual(["/dashboard/acme-labs/apps/acme-app"]);
-      const model = buildWorkspaceSwitcherModel(
-        { ...adminBoot, memberships: live },
-        "/dashboard/acme-labs/apps/acme-app",
-      );
-      // The switcher emits the stable id, which the rename never touched.
-      expect(model?.options.map((option) => option.ref)).toEqual(["ws_acme", "ws_7d41"]);
-      expect(model?.currentRef).toBe("ws_acme");
-    } finally {
-      globalThis.fetch = realFetch;
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete scope[key];
-        else scope[key] = value;
-      }
-    }
   });
 });
 

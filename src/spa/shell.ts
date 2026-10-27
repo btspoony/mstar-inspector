@@ -165,29 +165,10 @@ export function buildWorkspaceSwitcherModel(
 }
 
 /**
- * The membership list after one workspace's slug changed. The path segment
- * names a workspace by EITHER identifier (the same predicate the switcher and
- * {@link storedSlugForRef} use), and `id` never changes — so a renamed row is
- * addressed by whatever the page carried. Returns the list unchanged for a ref
- * this login does not list, and for the absent list.
- *
- * The boot is a per-document snapshot, so without this patch the switcher keeps
- * offering the retired slug (a 404, since a rename is not a redirect) and the
- * current row goes empty after the rename navigates to the new one.
- */
-export function renameWorkspaceMembership(
-  memberships: SpaBoot["memberships"],
-  ref: string | null,
-  slug: string,
-): SpaBoot["memberships"] {
-  return memberships?.map((m) => (ref === m.id || ref === m.slug ? { ...m, slug } : m));
-}
-
-/**
  * The live membership row a path ref names, or null when this login lists no
  * such workspace. A segment may address the workspace by EITHER identifier
  * (the stable `id` or the readable `slug`), which is why every caller that
- * needs the row's role or stored slug resolves it here.
+ * needs the row's role resolves it here.
  */
 export function workspaceMembershipForRef(
   boot: SpaBoot,
@@ -195,17 +176,6 @@ export function workspaceMembershipForRef(
 ): NonNullable<SpaBoot["memberships"]>[number] | null {
   if (ref === null) return null;
   return (boot.memberships ?? []).find((m) => ref === m.id || ref === m.slug) ?? null;
-}
-
-/**
- * The workspace's STORED slug for a path ref — what the settings rename control
- * shows and saves. The membership list is authoritative (the path segment may
- * be the stable `id`, or a slug something else already renamed away from); the
- * segment is only the fallback for a ref this login does not list.
- */
-export function storedSlugForRef(boot: SpaBoot, ref: string | null): string {
-  if (ref === null) return "";
-  return workspaceMembershipForRef(boot, ref)?.slug ?? ref;
 }
 
 export function buildNavbarModel(boot: SpaBoot): NavbarModel {

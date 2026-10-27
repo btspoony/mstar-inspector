@@ -181,9 +181,9 @@ describe("tab shell rendering (static SSR)", () => {
     ] as const) {
       expect(manage).toContain(t("en", key));
     }
-    // The workspace rename lives on /dashboard/<ref>/settings now; the App
-    // settings tab must not keep a second entry point to it.
-    expect(manage).not.toContain(t("en", "workspace.slugHeading"));
+    // The workspace settings live on /dashboard/<ref>/settings; the App
+    // settings tab must not keep a second entry point to them.
+    expect(manage).not.toContain(t("en", "workspace.settingsHeading"));
   });
 });
 

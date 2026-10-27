@@ -61,8 +61,7 @@ function LoginChrome({ children }: { children: ReactNode }) {
 
 function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
   const sidebar = buildSidebarModel(boot, pathname);
-  // The LIVE list, not the boot's snapshot: an in-page rename patches it, and
-  // a switcher built from the frozen boot would keep offering the retired slug.
+  // The shell reads the shared membership list, not a second boot copy.
   const memberships = useLiveMemberships(boot);
   const switcher = buildWorkspaceSwitcherModel({ ...boot, memberships }, pathname);
   const navbar = buildNavbarModel(boot);

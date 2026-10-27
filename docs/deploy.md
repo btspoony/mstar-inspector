@@ -806,7 +806,7 @@ the workspace. Three invariants carry that guarantee:
 | `/dashboard/<slug>/apps` | that workspace's Apps |
 | `/dashboard/<slug>/apps/<app>/settings` | that App's settings |
 | `/dashboard/<slug>/members` | that workspace's members |
-| `/dashboard/<slug>/settings` | that workspace's settings (owner-only rename) |
+| `/dashboard/<slug>/settings` | that workspace's settings (owner-only) |
 | `/dashboard/<slug>/api/apps` | that workspace's Apps API |
 | `/dashboard/<slug>/api/apps/<app>/…` | that App's API |
 | `/dashboard/apps…`, `/dashboard/api/apps…` | 404 |

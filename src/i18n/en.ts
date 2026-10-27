@@ -307,19 +307,8 @@ export const en = {
     inviteExpired: "This invitation has expired.",
     inviteGone: "This invitation is no longer pending — it may have been revoked.",
     inviteAcceptFailed: "Could not accept the invitation — try again.",
-    /** Workspace URL (slug) rename — the settings control and its refusal faces. */
-    slugHeading: "Workspace URL",
-    slugDescription:
-      "The readable part of this workspace's dashboard URL. Lowercase letters, digits and hyphens — not a reserved word, not another workspace's id.",
-    slugLabel: "Slug",
-    slugSave: "Save slug",
-    slugSaved: "Workspace URL updated — the old slug no longer works.",
-    slugInvalid: "Use 2–39 lowercase letters, digits or hyphens, starting with a letter or digit.",
-    slugReserved: "That word is reserved by the dashboard — pick another slug.",
-    slugTaken: "Another workspace already uses that slug — pick another one.",
-    slugIsWorkspaceId: "That value is another workspace's id — pick another slug.",
-    slugForbidden: "Only the workspace owner can change its URL.",
-    slugFailed: "Could not change the workspace URL — try again.",
+    /** The owner-only gate on `/dashboard/<ref>/settings`. */
+    settingsOwnerOnly: "Only the workspace owner can change these settings.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the
