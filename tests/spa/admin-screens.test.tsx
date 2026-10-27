@@ -95,7 +95,8 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
     },
     /** Type into a controlled input the way React's value tracker expects. */
     async type(selector: string, value: string) {
-      const input = container.querySelector(selector);
+      // A Radix dialog portals outside the mount container, so fall back to the document.
+      const input = container.querySelector(selector) ?? win.document.querySelector(selector);
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
         setValue?.call(input, value);
@@ -489,6 +490,70 @@ describe("Workspaces screen", () => {
     expect(alert?.textContent).toContain("服务器返回：seat limit reached");
     // The refused optimistic change is rolled back.
     expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("免费版");
+    await surface.close();
+  });
+
+  test("the slug dialog starts at the current slug, submits one PATCH and updates the row", async () => {
+    const after = { ...WORKSPACES[0]!, slug: "acme-hq" };
+    let written = false;
+    const surface = await workspacesScreen((request) => {
+      if (request.method === "PATCH") {
+        written = true;
+        return json({ workspaceId: "ws_1", slug: "acme-hq" });
+      }
+      return json({ workspaces: written ? [after, WORKSPACES[1]!] : WORKSPACES });
+    });
+    expect(rowContaining(surface, "Acme")?.textContent).toContain("acme");
+
+    const action = [...surface.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Edit slug",
+    );
+    await surface.click(action ?? null);
+    // The dialog opens with the row's current slug, and opening it writes nothing.
+    const input = surface.win.document.querySelector('[data-slot="dialog-content"] input') as DomElement | null;
+    expect((input as unknown as HTMLInputElement | null)?.value).toBe("acme");
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
+
+    await surface.type('[data-slot="dialog-content"] input', "acme-hq");
+    await act(async () => {
+      surface.win.document
+        .querySelector('[data-slot="dialog-content"] form')
+        ?.dispatchEvent(new surface.win.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await act(async () => {});
+
+    const patches = surface.sent.filter((request) => request.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.url).toBe("/_internal_admin/api/workspaces/ws_1/slug");
+    expect(patches[0]?.body).toEqual({ slug: "acme-hq" });
+    // The dialog closes and the row shows the accepted slug.
+    expect(surface.win.document.querySelector('[data-slot="dialog-content"]')).toBeNull();
+    expect(rowContaining(surface, "Acme")?.textContent).toContain("acme-hq");
+    await surface.close();
+  });
+
+  test("a refused slug write keeps the dialog open with the localised primary message", async () => {
+    const surface = await workspacesScreen(
+      (request) => (request.method === "PATCH" ? json({ error: "slug is reserved" }, 409) : json({ workspaces: WORKSPACES })),
+      "zh_CN",
+    );
+    const action = [...surface.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "编辑 slug",
+    );
+    await surface.click(action ?? null);
+    await surface.type('[data-slot="dialog-content"] input', "members");
+    await act(async () => {
+      surface.win.document
+        .querySelector('[data-slot="dialog-content"] form')
+        ?.dispatchEvent(new surface.win.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await act(async () => {});
+
+    expect(surface.win.document.querySelector('[data-slot="dialog-content"]')).not.toBeNull();
+    const alert = surface.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("无法更改 Acme 的 slug。");
+    expect(alert?.textContent).toContain("服务器返回：slug is reserved");
+    expect(rowContaining(surface, "Acme")?.textContent).toContain("acme");
     await surface.close();
   });
 });

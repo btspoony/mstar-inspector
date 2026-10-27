@@ -204,6 +204,10 @@ export function setPlan(workspaceId: string, planId: string): Promise<void> {
   return write("PATCH", `/workspaces/${encodeURIComponent(workspaceId)}/plan`, { planId });
 }
 
+export function setWorkspaceSlug(workspaceId: string, slug: string): Promise<void> {
+  return write("PATCH", `/workspaces/${encodeURIComponent(workspaceId)}/slug`, { slug });
+}
+
 export type GrantInput = {
   workspaceId: string;
   operatorLogin: string;

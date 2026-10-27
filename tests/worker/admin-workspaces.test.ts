@@ -37,14 +37,14 @@ function insertUser(db: TestD1, login: string): string {
 
 function insertWorkspace(
   db: TestD1,
-  row: { id: string; name: string; createdAt: string; createdBy?: string | null },
+  row: { id: string; name: string; createdAt: string; createdBy?: string | null; slug?: string },
 ): void {
   db.raw
     .prepare(
       `INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at)
        VALUES (?, ?, ?, ?, ?, NULL)`,
     )
-    .run(row.id, row.id, row.name, row.createdBy ?? null, row.createdAt);
+    .run(row.id, row.slug ?? row.id, row.name, row.createdBy ?? null, row.createdAt);
 }
 
 function insertMember(
@@ -448,6 +448,123 @@ describe("PATCH /_internal_admin/api/workspaces/:id/plan", () => {
   });
 });
 
+// --- the slug authoring -----------------------------------------------------
+
+/** The stored slug of a workspace row, read raw. */
+function slugOf(db: TestD1, workspaceId: string): string | null {
+  const row = db.raw
+    .prepare("SELECT slug FROM workspaces WHERE id = ?")
+    .get(workspaceId) as { slug: string } | null;
+  return row?.slug ?? null;
+}
+
+describe("PATCH /_internal_admin/api/workspaces/:id/slug", () => {
+  test("200 renames the slug and appends one audit row with the before/after pair", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
+
+    const res = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-alpha/slug",
+      body: JSON.stringify({ slug: "acme-hq" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ workspaceId: "ws-alpha", slug: "acme-hq" });
+    expect(slugOf(db, "ws-alpha")).toBe("acme-hq");
+    expect(auditRows(db)).toEqual([
+      {
+        action: "workspace.slug.set",
+        actor_login: OPERATOR,
+        target_type: "workspace",
+        target_id: "ws-alpha",
+        detail_json: JSON.stringify({ before: "ws-alpha", after: "acme-hq" }),
+      },
+    ]);
+    expect((await listOf(db)).find((row) => row.id === "ws-alpha")?.slug).toBe("acme-hq");
+  });
+
+  test("an invalid shape is 400 and writes nothing", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
+
+    for (const body of [{}, { slug: "" }, { slug: "A" }, { slug: "-acme" }, { slug: "acme_hq" }, { slug: "a".repeat(40) }]) {
+      const res = await api(db, {
+        method: "PATCH",
+        path: "/api/workspaces/ws-alpha/slug",
+        body: JSON.stringify(body),
+      });
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+    expect(slugOf(db, "ws-alpha")).toBe("ws-alpha");
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a reserved word is 409 and writes nothing", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
+
+    const res = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-alpha/slug",
+      body: JSON.stringify({ slug: "members" }),
+    });
+    expect(res.status).toBe(409);
+    // The refusal body is the admin API's `{ error }` shape.
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("reserved");
+    expect(slugOf(db, "ws-alpha")).toBe("ws-alpha");
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a slug another workspace holds is 409, case-insensitively", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
+    insertWorkspace(db, { id: "ws-beta", name: "Beta", createdAt: STAMP, slug: "taken-one" });
+
+    const res = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-alpha/slug",
+      body: JSON.stringify({ slug: "taken-one" }),
+    });
+    expect(res.status).toBe(409);
+    expect(slugOf(db, "ws-alpha")).toBe("ws-alpha");
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a slug equal to another workspace's id is 409", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+    insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
+    insertWorkspace(db, { id: "ws-beta", name: "Beta", createdAt: STAMP, slug: "beta-hq" });
+
+    const res = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-beta/slug",
+      body: JSON.stringify({ slug: "ws-alpha" }),
+    });
+    expect(res.status).toBe(409);
+    expect(slugOf(db, "ws-beta")).toBe("beta-hq");
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("an unknown workspace id is 404 with no write", async () => {
+    const db = createMigratedTestD1();
+    insertUser(db, OPERATOR);
+
+    const res = await api(db, {
+      method: "PATCH",
+      path: "/api/workspaces/ws-ghost/slug",
+      body: JSON.stringify({ slug: "acme-hq" }),
+    });
+    expect(res.status).toBe(404);
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
 // --- authorization and registration ----------------------------------------
 
 describe("the workspace routes answer only an allowlisted operator on saas", () => {
@@ -458,10 +575,17 @@ describe("the workspace routes answer only an allowlisted operator on saas", () 
     insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
 
     const patch = { method: "PATCH" as const, path: "/api/workspaces/ws-alpha/plan" as const };
+    const slugPatch = { method: "PATCH" as const, path: "/api/workspaces/ws-alpha/slug" as const };
+    const slugBody = JSON.stringify({ slug: "acme-hq" });
 
     expect((await api(db, { ...patch, login: MEMBER, body: JSON.stringify({ planId: "pro" }) })).status).toBe(404);
     expect((await api(db, { ...patch, login: null, body: JSON.stringify({ planId: "pro" }) })).status).toBe(404);
     expect((await api(db, { ...patch, mode: "self-hosted", body: JSON.stringify({ planId: "pro" }) })).status).toBe(404);
+
+    expect((await api(db, { ...slugPatch, login: MEMBER, body: slugBody })).status).toBe(404);
+    expect((await api(db, { ...slugPatch, login: null, body: slugBody })).status).toBe(404);
+    expect((await api(db, { ...slugPatch, mode: "self-hosted", body: slugBody })).status).toBe(404);
+    expect(slugOf(db, "ws-alpha")).toBe("ws-alpha");
 
     expect((await api(db, { method: "GET", path: "/api/workspaces", login: MEMBER })).status).toBe(404);
     expect((await api(db, { method: "GET", path: "/api/workspaces", login: null })).status).toBe(404);

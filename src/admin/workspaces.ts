@@ -17,7 +17,7 @@
  * appends no audit row and a successful one appends exactly one.
  */
 import { FREE_PLAN_ID, resolveWorkspacePlan } from "../dashboard/entitlement";
-import type { DashboardD1 } from "../dashboard/users";
+import type { DashboardD1, DashboardD1BatchResult } from "../dashboard/users";
 
 /** One `GET /_internal_admin/api/workspaces` row (spec §3.3). */
 export type AdminWorkspaceRow = {
@@ -104,6 +104,105 @@ const AUDIT_INSERT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   VALUES (?1, ?2, 'workspace.plan.set', 'workspace', ?3, ?4, ?5)`;
+
+/**
+ * The workspace slug grammar, 2–39 lowercase letters/digits/hyphens starting
+ * with a letter or digit — the rule the deleted owner route enforced before
+ * slug authoring moved here.
+ */
+export const WORKSPACE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{1,38}$/;
+
+/**
+ * Outcome of {@link setWorkspaceSlug}. `unknown_workspace` writes nothing; the
+ * two conflicts are the store's own guards, and the route turns each into a
+ * distinct 409 so the operator can tell them apart.
+ */
+export type SetWorkspaceSlugOutcome =
+  | { kind: "ok"; slug: string }
+  | { kind: "slug_taken" }
+  | { kind: "slug_is_workspace_id" }
+  | { kind: "unknown_workspace" };
+
+/**
+ * Both guards live in the UPDATE's own WHERE, so the statement is atomic: no
+ * OTHER workspace may carry the slug in any case, and the value may not be any
+ * workspace's id (that would make `getWorkspaceByRef` see two rows and answer
+ * null). The TARGET must still be live.
+ */
+const SLUG_UPDATE_SQL = `UPDATE workspaces SET slug = ?1
+   WHERE id = ?2
+     AND deleted_at IS NULL
+     AND NOT EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2)
+     AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2)`;
+
+/**
+ * The ledger row carries the before/after pair and rides the same batch as the
+ * UPDATE. It is declared FIRST and guarded by the UPDATE's own predicate: a
+ * fixed bind cannot read the old value after the write, and the two statements
+ * see the same rows inside one transaction, so the ledger row lands exactly
+ * when the write does — a refused or vanished target appends nothing.
+ */
+const SLUG_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  SELECT ?1, ?2, 'workspace.slug.set', 'workspace', ?3,
+         json_object('before', (SELECT slug FROM workspaces WHERE id = ?3), 'after', ?4),
+         ?5
+   WHERE EXISTS (
+     SELECT 1 FROM workspaces
+      WHERE id = ?3
+        AND deleted_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM workspaces WHERE slug = ?4 COLLATE NOCASE AND id <> ?3)
+        AND NOT EXISTS (SELECT 1 FROM workspaces WHERE id = ?4 AND id <> ?3)
+   )`;
+
+/** Which guard matched, read once after a refused write (index order = precedence). */
+const SLUG_CONFLICT_SQL = `SELECT
+     EXISTS (SELECT 1 FROM workspaces WHERE slug = ?1 COLLATE NOCASE AND id <> ?2) AS slug_taken,
+     EXISTS (SELECT 1 FROM workspaces WHERE id = ?1 AND id <> ?2) AS id_taken`;
+
+/**
+ * Rename one workspace's slug. The guarded UPDATE and its audit row are ONE
+ * `batch` (one D1 transaction), so an accepted write appends exactly one ledger
+ * row and a refused one appends none. A concurrent write that slipped past the
+ * guards lands on the slug UNIQUE index, which maps to `slug_taken` rather than
+ * a 500.
+ */
+export async function setWorkspaceSlug(
+  db: DashboardD1,
+  input: { workspaceId: string; slug: string; actorLogin: string; now: string },
+): Promise<SetWorkspaceSlugOutcome> {
+  let results: DashboardD1BatchResult[];
+  try {
+    results = await db.batch([
+      // The audit row runs FIRST so its `before` subquery still reads the old
+      // slug; its guard is the UPDATE's own predicate, so both statements agree.
+      db
+        .prepare(SLUG_AUDIT_SQL)
+        .bind(crypto.randomUUID(), input.actorLogin, input.workspaceId, input.slug, input.now),
+      db.prepare(SLUG_UPDATE_SQL).bind(input.slug, input.workspaceId),
+    ]);
+  } catch (err) {
+    // Pinned to the D1 driver's message, the only conflict signal it exposes:
+    // if that wording drifts this falls through to a 500 (visible, not a wrong
+    // 409). Re-check when the D1 face starts carrying a structured error code.
+    if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) {
+      return { kind: "slug_taken" };
+    }
+    throw err;
+  }
+  if ((results[1]?.meta.changes ?? 0) > 0) return { kind: "ok", slug: input.slug };
+
+  const guard = await db
+    .prepare(SLUG_CONFLICT_SQL)
+    .bind(input.slug, input.workspaceId)
+    .first<{ slug_taken: number; id_taken: number }>();
+  if (guard?.slug_taken) return { kind: "slug_taken" };
+  if (guard?.id_taken) return { kind: "slug_is_workspace_id" };
+  // Neither guard matched, so the WHERE's live-row condition hit nothing: the
+  // workspace is gone.
+  return { kind: "unknown_workspace" };
+}
 
 /**
  * Assign one workspace's plan (spec §3.2).

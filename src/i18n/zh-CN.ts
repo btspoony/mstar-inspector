@@ -624,6 +624,18 @@ export const zhCN: Dictionary = {
       planFree: "免费版",
       planPro: "专业版",
       planUnlimited: "无限版",
+      /** 打开 slug 对话框的行操作。 */
+      slugAction: "编辑 slug",
+      /** 行操作的可访问名称。 */
+      slugAria: "编辑 {name} 的 slug",
+      slugDialogTitle: "工作区 URL slug",
+      slugDialogDescription:
+        "此工作区控制台 URL 的可读部分。2–39 个小写字母、数字或连字符，以字母或数字开头。所有者已无法修改此项。",
+      slugLabel: "Slug",
+      slugSave: "保存 slug",
+      cancelAction: "取消",
+      /** slug 写入失败且错误无法识别时的兜底文案。 */
+      slugChangeFailed: "无法更改 {name} 的 slug。",
     },
     /** 用户页。 */
     users: {

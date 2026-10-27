@@ -716,6 +716,18 @@ export const en = {
       planFree: "Free",
       planPro: "Pro",
       planUnlimited: "Unlimited",
+      /** Row action that opens the slug dialog. */
+      slugAction: "Edit slug",
+      /** The row action's accessible name. */
+      slugAria: "Edit the slug of {name}",
+      slugDialogTitle: "Workspace URL slug",
+      slugDialogDescription:
+        "The readable part of this workspace's dashboard URL. Lowercase letters, digits and hyphens, 2–39 characters, starting with a letter or digit. The owner can no longer change it.",
+      slugLabel: "Slug",
+      slugSave: "Save slug",
+      cancelAction: "Cancel",
+      /** Fallback when the slug write fails with an unrecognised error. */
+      slugChangeFailed: "Could not change the slug for {name}.",
     },
     /** Users page. */
     users: {
