@@ -122,8 +122,8 @@ async function usersScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Pro
   return mount(createElement(UsersPage, { locale }), respond);
 }
 
-async function supportScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(SupportGrantsPage, { locale: "en" }), respond);
+async function supportScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(SupportGrantsPage, { locale }), respond);
 }
 
 const never = () => new Promise<Response>(() => {});
@@ -201,6 +201,8 @@ const GRANT = {
   created_at: "2026-10-25T09:00:00.000Z",
   expires_at: "2026-10-26T09:00:00.000Z",
 };
+
+const GRANT2 = { ...GRANT, id: "g2", operator_login: "yuki", reason: "incident 43" };
 
 describe("Flags screen", () => {
   test("loading renders the table skeleton", async () => {
@@ -590,6 +592,50 @@ describe("Support access screen", () => {
     expect(deletes[0]?.url).toBe("/_internal_admin/api/support-grants/g1");
     expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain(
       "No open support windows",
+    );
+    await surface.close();
+  });
+
+  test("the form renders inside CardContent under a CardHeader title", async () => {
+    const surface = await supportScreen(respondWith(() => []));
+    const header = surface.container.querySelector('[data-slot="card-header"]');
+    expect(header?.textContent).toContain("New support window");
+    const content = surface.container.querySelector('[data-slot="card-content"]');
+    expect(content).not.toBeNull();
+    expect(content?.querySelector("#grant-operator")).not.toBeNull();
+    await surface.close();
+  });
+
+  test("revoking one row leaves the other revoke buttons enabled", async () => {
+    const deleteGate = Promise.withResolvers<Response>();
+    const surface = await supportScreen((request) => {
+      if (request.method === "DELETE") return deleteGate.promise;
+      return json(
+        request.url.endsWith("/support-grants") ? { grants: [GRANT, GRANT2] } : { workspaces: WORKSPACES },
+      );
+    });
+
+    const inFlightButton = rowContaining(surface, "incident 42")?.querySelector("button");
+    await surface.click(inFlightButton ?? null);
+    expect(inFlightButton?.disabled).toBe(true);
+
+    const otherButton = rowContaining(surface, "incident 43")?.querySelector("button");
+    expect(otherButton?.disabled).toBe(false);
+
+    deleteGate.resolve(json({ id: GRANT.id, workspaceId: GRANT.workspace_id }));
+    await act(async () => {});
+    expect(rowContaining(surface, "incident 42")).toBeNull();
+    await surface.close();
+  });
+
+  test("a zh_CN render shows the page's dictionary copy", async () => {
+    const surface = await supportScreen(respondWith(() => []), "zh_CN");
+    expect(surface.text()).toContain("支持访问");
+    expect(surface.container.querySelector('[data-slot="card-header"]')?.textContent).toContain("新建支持窗口");
+    expect(surface.container.querySelector('[data-slot="card-content"] #grant-operator')).not.toBeNull();
+    expect(surface.container.querySelector("button[type=submit]")?.textContent).toContain("授予访问");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain(
+      "没有开放的支持窗口",
     );
     await surface.close();
   });

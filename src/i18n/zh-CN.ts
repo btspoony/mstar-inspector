@@ -651,6 +651,9 @@ export const zhCN: Dictionary = {
     supportGrants: {
       description: "限时的跨工作区访问。创建和撤销授权各追加一条审计记录。",
       loadFailed: "无法加载支持授权。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      createFailed: "无法创建支持授权。",
+      revokeFailed: "无法撤销支持授权。",
       newWindowTitle: "新建支持窗口",
       workspaceLabel: "工作区",
       workspacePlaceholder: "选择一个工作区",

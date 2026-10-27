@@ -743,6 +743,9 @@ export const en = {
       description:
         "Time-boxed cross-workspace access. Creating and revoking a grant each append one audit row.",
       loadFailed: "Could not load the support grants.",
+      /** Fallback when a write fails with an unrecognised error. */
+      createFailed: "Could not create the support grant.",
+      revokeFailed: "Could not revoke the support grant.",
       newWindowTitle: "New support window",
       workspaceLabel: "Workspace",
       workspacePlaceholder: "Select a workspace",
