@@ -172,9 +172,11 @@ describe("workspace switcher — the control's list", () => {
     expect(model?.options.map((option) => option.ref)).toEqual(["ws_acme", "ws_7d41"]);
   });
 
-  test("a path holding a just-renamed old slug shows no current row — never the first option", () => {
-    // The workspace was renamed `acme` → `acme-labs`; a tab still on the old
-    // slug names nothing this login lists, so no row may claim to be current.
+  test("a path naming a slug the operator has since changed shows no current row — never the first option", () => {
+    // Platform-side slug authoring changed `acme` → `acme-labs`; a tab still on
+    // the old slug names nothing this login lists, so no row may claim to be
+    // current. The options stay the stable ids, which the slug change never
+    // touched.
     const renamed: SpaBoot = {
       ...boot,
       memberships: [
@@ -187,6 +189,8 @@ describe("workspace switcher — the control's list", () => {
     // The control still renders: the path is switchable, only the current row
     // is unknown.
     expect(model?.options.map((option) => option.ref)).toEqual(["ws_acme", "ws_7d41"]);
+    // The id addressed the same row all along, so that path stays current.
+    expect(buildWorkspaceSwitcherModel(renamed, "/dashboard/ws_acme/apps")?.currentRef).toBe("ws_acme");
   });
 
   test("a path with no workspace segment is a navigator, not a rewriter", () => {

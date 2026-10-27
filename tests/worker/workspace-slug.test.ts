@@ -1,8 +1,10 @@
 /**
  * The workspace-identifier work (2026-10) — the owner-facing slug rename is
  * gone. A workspace's URL is emitted from its immutable `id`, so no owner-side
- * route may rewrite the path segment any more: every role gets the same 404 the
- * catch-all answers, and no row changes.
+ * route may rewrite the path segment any more: `PUT …/api/settings/slug` is
+ * absent from the route table, every role gets the catch-all 404, and no row
+ * changes. The owner's remaining edit is the label (`…/api/settings/name`),
+ * which changes no path — covered in `workspace-name.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
