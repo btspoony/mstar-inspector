@@ -546,7 +546,7 @@ export const en = {
       "The provider and every key in its pool are removed. To free one slot only, remove that key's own row. Chains referencing its models fail on save.",
     runtimeHarness: "Runtime harness",
     runtimeHarnessCopy:
-      "The runtime harness (omp) mounted into the sandbox image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked in.",
+      "The {id} runtime harness mounted into the sandbox image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked in.",
     runtimeHarnessValue: "This App's reviews run under the {id} runtime harness.",
     saveRuntimeHarness: "Save runtime harness",
     /**

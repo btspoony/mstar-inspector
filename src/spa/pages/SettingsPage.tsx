@@ -731,7 +731,7 @@ export function RuntimeHarnessCard({
     <SectionCard tier="secondary">
       <CardHeader>
         <SectionCardTitle>{t(locale, "settings.runtimeHarness")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.runtimeHarnessCopy")}</CardDescription>
+        <CardDescription>{t(locale, "settings.runtimeHarnessCopy", { id: payload.app.sandbox_image_id })}</CardDescription>
       </CardHeader>
       <CardContent>
         {payload.can_manage ? (

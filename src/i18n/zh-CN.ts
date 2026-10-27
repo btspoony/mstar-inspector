@@ -471,7 +471,7 @@ export const zhCN: Dictionary = {
       "该 provider 及其密钥池中的全部密钥都将被移除。若只想腾出一个槽位，请移除该密钥所在的行。引用其模型的链在保存时会校验失败。",
     runtimeHarness: "运行时 harness",
     runtimeHarnessCopy:
-      "执行此 App 审查的沙盒镜像中挂载的运行时 harness（omp）。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
+      "执行此 App 审查的沙盒镜像中挂载的 {id} 运行时 harness。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
     runtimeHarnessValue: "此 App 的审查运行在 {id} 运行时 harness 上。",
     saveRuntimeHarness: "保存运行时 harness",
     // GitHub 身份卡。{name}/{id}/{time} 为同步的资料名、数字 App id
