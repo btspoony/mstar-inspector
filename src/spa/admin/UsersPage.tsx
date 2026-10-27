@@ -10,6 +10,7 @@ import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState } from "../components/state/EmptyState";
+import type { Locale } from "../../i18n";
 import { readUsers, useLoaded, type UserRow } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
@@ -31,7 +32,7 @@ const columns: DataTableColumn<UserRow>[] = [
   },
 ];
 
-export function UsersPage() {
+export function UsersPage({ locale }: { locale: Locale }) {
   const { state, reload } = useLoaded(readUsers);
 
   return (
@@ -41,7 +42,7 @@ export function UsersPage() {
         description="Every account on this platform. Read-only: operator status comes from the allowlist, support access from the grant list."
         actions={<ConsolePath page="users" />}
       />
-      <Screen state={state} failed="Could not load the user list." onRetry={reload}>
+      <Screen state={state} failed="Could not load the user list." onRetry={reload} locale={locale}>
         {(users) => (
           <DataTable
             columns={columns}

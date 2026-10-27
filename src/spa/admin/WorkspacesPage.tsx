@@ -9,6 +9,7 @@
  */
 import { useState } from "react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import type { Locale } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
 import { EmptyState } from "../components/state/EmptyState";
@@ -50,7 +51,7 @@ function seatHeadroom(row: WorkspaceRow): string {
   return row.includedMembers === null ? "—" : `${row.memberCount} / ${row.includedMembers}`;
 }
 
-export function WorkspacesPage() {
+export function WorkspacesPage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readWorkspaces);
   const [busy, setBusy] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -144,7 +145,7 @@ export function WorkspacesPage() {
         description="Every live workspace. A plan change never removes a member; a downgrade only blocks new invites."
         actions={<ConsolePath page="workspaces" />}
       />
-      <Screen state={state} failed="Could not load the workspace list." onRetry={reload}>
+      <Screen state={state} failed="Could not load the workspace list." onRetry={reload} locale={locale}>
         {(workspaces) => (
           <div className="flex flex-col gap-4">
             {refusal ? <PageNotice kind="error" message={refusal} /> : null}

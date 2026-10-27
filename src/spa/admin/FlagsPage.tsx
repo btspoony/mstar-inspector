@@ -8,6 +8,7 @@
  */
 import { useState } from "react";
 import { Toggle } from "@/components/ui/toggle";
+import type { Locale } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
 import { EmptyState } from "../components/state/EmptyState";
@@ -22,7 +23,7 @@ const EFFECTS: Record<string, string> = {
   workspace_creation_open: "No workspace can be created, the operator's own included.",
 };
 
-export function FlagsPage() {
+export function FlagsPage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readFlags);
   const [busy, setBusy] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -82,7 +83,7 @@ export function FlagsPage() {
         description="Platform-wide switches. A change applies to the next request and appends one audit row."
         actions={<ConsolePath page="flags" />}
       />
-      <Screen state={state} failed="Could not load the server flags." onRetry={reload}>
+      <Screen state={state} failed="Could not load the server flags." onRetry={reload} locale={locale}>
         {(flags) => (
           <div className="flex flex-col gap-4">
             {refusal ? <PageNotice kind="error" message={refusal} /> : null}

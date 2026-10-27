@@ -111,19 +111,19 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
 }
 
 async function flagsScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(FlagsPage), respond);
+  return mount(createElement(FlagsPage, { locale: "en" }), respond);
 }
 
 async function workspacesScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(WorkspacesPage), respond);
+  return mount(createElement(WorkspacesPage, { locale: "en" }), respond);
 }
 
 async function usersScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(UsersPage), respond);
+  return mount(createElement(UsersPage, { locale: "en" }), respond);
 }
 
 async function supportScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(SupportGrantsPage), respond);
+  return mount(createElement(SupportGrantsPage, { locale: "en" }), respond);
 }
 
 const never = () => new Promise<Response>(() => {});

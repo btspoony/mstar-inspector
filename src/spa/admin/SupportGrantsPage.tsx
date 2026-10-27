@@ -11,6 +11,7 @@ import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import type { Locale } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
@@ -44,7 +45,7 @@ function windowStamp(iso: string): string {
   return `${iso.slice(0, 16).replace("T", " ")} UTC`;
 }
 
-export function SupportGrantsPage() {
+export function SupportGrantsPage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readSupportPage);
   const [workspaceId, setWorkspaceId] = useState("");
   const [operatorLogin, setOperatorLogin] = useState("");
@@ -94,7 +95,7 @@ export function SupportGrantsPage() {
         description="Time-boxed cross-workspace access. Creating and revoking a grant each append one audit row."
         actions={<ConsolePath page="support-grants" />}
       />
-      <Screen state={state} failed="Could not load the support grants." onRetry={reload}>
+      <Screen state={state} failed="Could not load the support grants." onRetry={reload} locale={locale}>
         {({ grants, workspaces }) => {
           const workspaceName = (id: string) => workspaces.find((row) => row.id === id)?.name ?? id;
           const columns: DataTableColumn<GrantRow>[] = [

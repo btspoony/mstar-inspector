@@ -13,7 +13,7 @@
 import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
-import { resolveLocale } from "../i18n";
+import { resolveLocale, t, type Locale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
 import { ADMIN_PAGES } from "../spa/admin/pages";
 import type { Env } from "../worker/env";
@@ -287,12 +287,34 @@ async function serveDocument(c: AdminContext): Promise<Response> {
   if (!document?.ok) return c.notFound();
   // Minimal admin boot: identity and locale only. None of the workspace boot
   // reads (memberships, invites, support redirects) run for this document.
-  const html = injectSpaBoot(await document.text(), {
-    locale: resolveLocale(c.req.raw),
-    login,
-    name: null,
-  });
+  const locale = resolveLocale(c.req.raw);
+  const html = localizeDocument(
+    injectSpaBoot(await document.text(), {
+      locale,
+      login,
+      name: null,
+    }),
+    locale,
+  );
   return c.html(html, 200, { "cache-control": "private, no-store" });
+}
+
+/**
+ * Server-side locale substitution on the console document (compass D15): the
+ * handler already holds the document text and the resolved locale, so
+ * `<html lang>` (BCP 47: `zh_CN` → `zh-CN`) and the `<title>` are replaced
+ * here — no second document route, no client-side attribute write. The title
+ * comes from `admin.documentTitle`; it is escaped even though dictionary
+ * values are plain text by contract.
+ */
+function localizeDocument(html: string, locale: Locale): string {
+  const lang = locale === "zh_CN" ? "zh-CN" : "en";
+  const title = t(locale, "admin.documentTitle")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;");
+  return html
+    .replace('<html lang="en">', `<html lang="${lang}">`)
+    .replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`);
 }
 
 const ADMIN_ROUTES: readonly AdminRoute[] = [
