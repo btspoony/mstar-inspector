@@ -680,6 +680,16 @@ export const en = {
         "An unknown GitHub login cannot sign in for the first time. Existing accounts are unaffected.",
       effectWorkspaceCreationOpen:
         "No workspace can be created, the operator's own included.",
+      /** Write confirmation dialog — {flag}, {from} and {to} (ON/OFF) are interpolated. */
+      confirmTitle: "Turn {flag} from {from} to {to}?",
+      confirmButton: "Confirm",
+      cancelButton: "Cancel",
+      /** Inline confirmation next to the row right after a successful write. */
+      saved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      toggleFailed: "Could not change {flag}.",
+      /** Toggle accessible name: "{flag} {state}" with the ON/OFF state. */
+      stateAria: "{flag} {state}",
     },
     /** Workspaces page. */
     workspaces: {

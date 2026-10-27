@@ -110,8 +110,8 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
   };
 }
 
-async function flagsScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(FlagsPage, { locale: "en" }), respond);
+async function flagsScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(FlagsPage, { locale }), respond);
 }
 
 async function workspacesScreen(respond: Respond): Promise<Surface> {
@@ -228,32 +228,78 @@ describe("Flags screen", () => {
     await surface.close();
   });
 
-  test("rows show each flag, its effect and its state", async () => {
+  test("rows show each flag, its effect and its state as ON/OFF", async () => {
     const surface = await flagsScreen(() => json({ flags: FLAGS }));
     expect(surface.text()).toContain("review_global");
     expect(surface.text()).toContain("signup_open");
     expect(surface.text()).toContain("workspace_creation_open");
     // The spec's cancellation note belongs to review_global only.
     expect(surface.text()).toContain("Queued work is not cancelled.");
-    expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("On");
+    expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("ON");
     expect(
       rowContaining(surface, "workspace_creation_open")?.querySelector('[data-slot="toggle"]')?.textContent,
-    ).toBe("Off");
+    ).toBe("OFF");
     await surface.close();
   });
 
-  test("a toggle writes exactly one PATCH and applies the new value", async () => {
+  test("a toggle asks first: control click opens the dialog without a request", async () => {
+    const surface = await flagsScreen(() => json({ flags: FLAGS }));
+    const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
+    await surface.click(toggle);
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
+    const dialog = surface.win.document.querySelector('[role="alertdialog"]');
+    expect(dialog?.textContent).toContain("Turn review_global from ON to OFF?");
+    expect(dialog?.textContent).toContain("No new review is enqueued.");
+    await surface.close();
+  });
+
+  test("confirm fires exactly one PATCH with {key, enabled} and shows ON/OFF plus saved", async () => {
     const surface = await flagsScreen((request) =>
       request.method === "PATCH" ? json({ key: "review_global", enabled: false }) : json({ flags: FLAGS }),
     );
     const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
     await surface.click(toggle);
+    const confirm = [...surface.win.document.querySelectorAll("button")].find(
+      (node) => node.textContent === "Confirm",
+    );
+    await surface.click(confirm as unknown as DomElement);
 
     const patches = surface.sent.filter((request) => request.method === "PATCH");
     expect(patches).toHaveLength(1);
     expect(patches[0]?.url).toBe("/_internal_admin/api/flags");
     expect(patches[0]?.body).toEqual({ key: "review_global", enabled: false });
-    expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("Off");
+    const row = rowContaining(surface, "review_global");
+    expect(row?.querySelector('[data-slot="toggle"]')?.textContent).toBe("OFF");
+    expect(row?.textContent).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("Escape closes the dialog without a write", async () => {
+    const surface = await flagsScreen(() => json({ flags: FLAGS }));
+    const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
+    await surface.click(toggle);
+    expect(surface.win.document.querySelector('[role="alertdialog"]')).not.toBeNull();
+
+    await act(async () => {
+      surface.win.document.dispatchEvent(new surface.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await act(async () => {});
+    expect(surface.win.document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
+    await surface.close();
+  });
+
+  test("a zh_CN render shows Chinese copy and ON/OFF state", async () => {
+    const surface = await flagsScreen(() => json({ flags: FLAGS }), "zh_CN");
+    expect(surface.text()).toContain("服务器开关");
+    expect(surface.text()).toContain("关闭时的影响");
+    expect(surface.text()).not.toContain("Effect when off");
+    const toggle = rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null;
+    await surface.click(toggle);
+    const dialog = surface.win.document.querySelector('[role="alertdialog"]');
+    expect(dialog?.textContent).toContain("将 review_global 从 ON 切换为 OFF？");
+    expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("ON");
     await surface.close();
   });
 });

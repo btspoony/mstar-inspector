@@ -590,6 +590,16 @@ export const zhCN: Dictionary = {
       effectReviewGlobal: "不再排队新的审查。每个 App 的暂停开关不受影响。",
       effectSignupOpen: "未知的 GitHub 登录无法首次登录，已有账号不受影响。",
       effectWorkspaceCreationOpen: "任何工作区都无法创建，运维自己的也不例外。",
+      /** 写入确认对话框 — {flag}、{from}、{to}（ON/OFF）为插值。 */
+      confirmTitle: "将 {flag} 从 {from} 切换为 {to}？",
+      confirmButton: "确认",
+      cancelButton: "取消",
+      /** 写入成功后行内显示的简短确认。 */
+      saved: "已保存。",
+      /** 写入失败且错误无法识别时的兜底文案。 */
+      toggleFailed: "无法更改 {flag}。",
+      /** 开关的可访问名称：“{flag} {state}”，state 为 ON/OFF。 */
+      stateAria: "{flag} {state}",
     },
     /** 工作区页。 */
     workspaces: {
