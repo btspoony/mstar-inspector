@@ -52,14 +52,16 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
   const [operatorLogin, setOperatorLogin] = useState("");
   const [reason, setReason] = useState("");
   const [ttlHours, setTtlHours] = useState("24");
-  // The grant currently being revoked — creation and revocation stay
-  // independent, so only this row's button disables while its write flies.
-  const [revokingId, setRevokingId] = useState<string | null>(null);
+  // In-flight writes stay independent: the submit button guards only on the
+  // create, and each revoke row guards on its own id — one never blocks the other.
+  const [creating, setCreating] = useState(false);
+  const [revokingIds, setRevokingIds] = useState<ReadonlySet<string>>(new Set());
   const [refusal, setRefusal] = useState<string | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setRefusal(null);
+    setCreating(true);
     try {
       await createGrant({
         workspaceId,
@@ -72,11 +74,13 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
       reload();
     } catch (error) {
       setRefusal(error instanceof AdminWriteError ? error.message : t(locale, "admin.supportGrants.createFailed"));
+    } finally {
+      setCreating(false);
     }
   }
 
   async function revoke(grant: GrantRow) {
-    setRevokingId(grant.id);
+    setRevokingIds((previous) => new Set(previous).add(grant.id));
     setRefusal(null);
     try {
       await revokeGrant(grant.id);
@@ -84,7 +88,11 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
     } catch (error) {
       setRefusal(error instanceof AdminWriteError ? error.message : t(locale, "admin.supportGrants.revokeFailed"));
     } finally {
-      setRevokingId(null);
+      setRevokingIds((previous) => {
+        const next = new Set(previous);
+        next.delete(grant.id);
+        return next;
+      });
     }
   }
 
@@ -122,7 +130,7 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={revokingId === row.id}
+                  disabled={revokingIds.has(row.id)}
                   onClick={() => void revoke(row)}
                 >
                   {t(locale, "admin.supportGrants.revokeAction")}
@@ -186,7 +194,7 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
                       />
                     </label>
                     <div className="sm:col-span-2">
-                      <Button type="submit" size="sm" disabled={workspaceId === ""}>
+                      <Button type="submit" size="sm" disabled={creating || workspaceId === ""}>
                         {t(locale, "admin.supportGrants.submit")}
                       </Button>
                     </div>

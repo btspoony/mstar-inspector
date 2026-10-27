@@ -129,6 +129,9 @@ async function supportScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): P
 const never = () => new Promise<Response>(() => {});
 const failed = () => new Response("boom", { status: 500 });
 
+/** A held-response latch: the test resolves it when the in-flight write may land. */
+type Gate = { promise: Promise<Response>; resolve: (value: Response) => void };
+
 /** The table row that carries `needle`, so a control is located by its row. */
 function rowContaining(surface: Surface, needle: string): DomElement | null {
   return [...surface.container.querySelectorAll("tr")].find((row) => row.textContent?.includes(needle)) ?? null;
@@ -625,6 +628,66 @@ describe("Support access screen", () => {
     deleteGate.resolve(json({ id: GRANT.id, workspaceId: GRANT.workspace_id }));
     await act(async () => {});
     expect(rowContaining(surface, "incident 42")).toBeNull();
+    await surface.close();
+  });
+
+  test("a second submit while the create flies sends no second POST", async () => {
+    const createGate = Promise.withResolvers<Response>();
+    const surface = await supportScreen((request) => {
+      if (request.method === "POST") return createGate.promise;
+      return json(
+        request.url.endsWith("/support-grants") ? { grants: [] } : { workspaces: WORKSPACES },
+      );
+    });
+
+    await surface.openSelect(surface.container.querySelector("#grant-workspace"));
+    await surface.pickOption("Acme");
+    await surface.type("#grant-operator", "ops");
+    await surface.type("#grant-reason", "incident 42");
+    const submitButton = surface.container.querySelector("button[type=submit]");
+
+    await surface.click(submitButton ?? null);
+    expect((submitButton as unknown as HTMLButtonElement | null)?.disabled).toBe(true);
+    await surface.click(submitButton ?? null);
+    expect(surface.sent.filter((request) => request.method === "POST")).toHaveLength(1);
+
+    createGate.resolve(json({ grant: GRANT }, 201));
+    await act(async () => {});
+    expect((submitButton as unknown as HTMLButtonElement | null)?.disabled).toBe(false);
+    await surface.close();
+  });
+
+  test("two concurrent revokes keep both rows disabled independently", async () => {
+    const gates = new Map<string, Gate>();
+    const surface = await supportScreen((request) => {
+      if (request.method === "DELETE") {
+        const gate = Promise.withResolvers<Response>();
+        gates.set(request.url, gate);
+        return gate.promise;
+      }
+      return json(
+        request.url.endsWith("/support-grants") ? { grants: [GRANT, GRANT2] } : { workspaces: WORKSPACES },
+      );
+    });
+
+    const firstButton = rowContaining(surface, "incident 42")?.querySelector("button");
+    const secondButton = rowContaining(surface, "incident 43")?.querySelector("button");
+    await surface.click(firstButton ?? null);
+    await surface.click(secondButton ?? null);
+    expect(firstButton?.disabled).toBe(true);
+    expect(secondButton?.disabled).toBe(true);
+
+    gates.get("/_internal_admin/api/support-grants/g1")?.resolve(json({ id: GRANT.id, workspaceId: GRANT.workspace_id }));
+    await act(async () => {});
+    expect(rowContaining(surface, "incident 42")).toBeNull();
+    // Row B is still flying: its freshly rendered button stays disabled.
+    expect(rowContaining(surface, "incident 43")?.querySelector("button")?.disabled).toBe(true);
+
+    gates.get("/_internal_admin/api/support-grants/g2")?.resolve(json({ id: GRANT2.id, workspaceId: GRANT2.workspace_id }));
+    await act(async () => {});
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain(
+      "No open support windows",
+    );
     await surface.close();
   });
 
