@@ -1,5 +1,5 @@
 /**
- * The workspace-name card (plan 123 task 3).
+ * The workspace-name card.
  *
  * Mounted, because the contract lives across two surfaces: the card submits
  * `PUT /dashboard/<id>/api/settings/name` and the top-bar switcher — rendered by

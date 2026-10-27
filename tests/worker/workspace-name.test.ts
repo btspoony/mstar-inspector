@@ -1,5 +1,5 @@
 /**
- * The workspace-name rename (plan 123 task 3) — the owner's label edit.
+ * The workspace-name rename — the owner's label edit.
  *
  * A workspace's URL is its immutable `id`, so this write changes no path: the
  * route refuses every non-owner, answers the outsider/unknown-ref 404, and

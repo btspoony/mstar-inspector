@@ -902,35 +902,54 @@ describe("a workspace URL never carries a mutable value", () => {
     expect(hrefs).not.toContain("/dashboard/acme/apps");
   });
 
-  test("a slug the console rewrites still serves the same workspace, while the emitted ref is the id", async () => {
+  test("a rewritten slug stops addressing the workspace, while the id keeps working", async () => {
     // A platform operator rewrites `ws-acme`'s slug from `acme` to `acme-labs`
-    // after the links went out. The slug branch of the resolver keeps the old
-    // URL working; everything the Worker EMITS names the id, which the write
-    // never touched.
+    // after the links went out. The resolver matches only the CURRENT slug or
+    // the id — there is no alias history — so a link built from the retired
+    // slug must answer the tenant 404. That is why every emitted URL names the
+    // id, which the write never touches.
     const { db } = tenancyFixture();
-    seed(db, "UPDATE workspaces SET slug = 'acme-labs' WHERE id = 'ws-acme'");
     const env = withSpaAssets(envFor(db));
+    const members = async (ref: string) =>
+      worker.fetch(await authedRequest(`/dashboard/${ref}/api/members`, "dana"), env);
 
-    for (const ref of ["acme", "acme-labs", "ws-acme"]) {
-      const shell = await worker.fetch(
-        await authedRequest(`/dashboard/${ref}/apps`, "dana", { accept: "text/html" }),
-        env,
-      );
-      expect(shell.status, ref).toBe(200);
-      const boot = bootOf(await shell.text());
-      // Every addressed form resolves the SAME workspace. A workspace-scoped
-      // pathname still wins the boot's own ref (path-derived, unchanged), and
-      // the row it names rides both identifiers.
-      expect(boot.workspaceRef, ref).toBe(ref);
-      const row = boot.memberships?.find((m) => m.id === "ws-acme");
-      expect(row?.slug, ref).toBe("acme-labs");
-      // What the shell EMITS for that row is the id.
-      expect(
-        buildWorkspaceSwitcherModel(boot, `/dashboard/${ref}/apps`)?.options.map((option) => option.ref),
-        ref,
-      ).toEqual(["ws-acme"]);
+    // Before the rewrite the readable slug addresses this workspace.
+    expect((await members("acme")).status).toBe(200);
+
+    seed(db, "UPDATE workspaces SET slug = 'acme-labs' WHERE id = 'ws-acme'");
+
+    // Both live identifiers reach the INTENDED tenant (its own member list,
+    // not merely some live workspace).
+    for (const ref of ["acme-labs", "ws-acme"]) {
+      const res = await members(ref);
+      expect(res.status, ref).toBe(200);
+      const body = (await res.json()) as {
+        viewer: { login: string; role: string };
+        members: Array<{ github_login: string }>;
+      };
+      expect(body.viewer, ref).toEqual({ login: "dana", role: "owner" });
+      expect(body.members.map((row) => row.github_login).sort(), ref).toEqual([
+        "carol",
+        "dana",
+        "mallory",
+        "octocat",
+      ]);
     }
 
+    // The retired slug is not an alias: it names no workspace at all.
+    expect((await members("acme")).status).toBe(404);
+
+    // What the shell EMITS names the id, which the rewrite never touched.
+    const shell = await worker.fetch(
+      await authedRequest("/dashboard/ws-acme/apps", "dana", { accept: "text/html" }),
+      env,
+    );
+    expect(shell.status).toBe(200);
+    expect(
+      buildWorkspaceSwitcherModel(bootOf(await shell.text()), "/dashboard/ws-acme/apps")?.options.map(
+        (option) => option.ref,
+      ),
+    ).toEqual(["ws-acme"]);
     // The landing redirect is id-based too, so nothing emits the rewritten slug.
     const landing = await worker.fetch(
       await authedRequest("/dashboard", "dana", { accept: "text/html" }),
