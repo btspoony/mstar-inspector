@@ -80,9 +80,9 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
   }
 
   return (
-    <SidebarProvider defaultOpen className="h-svh overflow-hidden">
+    <SidebarProvider defaultOpen className="h-svh overflow-hidden print:h-auto print:overflow-visible">
       <AppSidebar model={sidebar} />
-      <SidebarInset className="h-svh overflow-hidden">
+      <SidebarInset className="h-svh overflow-hidden print:h-auto print:overflow-visible">
         {/* v0.3 (DESIGN.md): navbar sits on background-200, one step above the
             page canvas, matching the sidebar chrome layer. Two clusters: the
             workspace switcher names what the whole shell is scoped to (left),
@@ -113,7 +113,7 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
             ) : null}
           </div>
         </header>
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4 md:p-6">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4 md:p-6 print:overflow-visible">
           {/* The undismissable support notice sits above every workspace page:
               the tenant must see an active operator grant on any screen, and it
               carries no control (AC4). */}

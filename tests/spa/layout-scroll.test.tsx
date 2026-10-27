@@ -53,6 +53,18 @@ describe("dashboard shell scroll contract (SSR)", () => {
     expect(tagOf(html, "sidebar-inset", "main")).not.toContain("overflow-y-auto");
   });
 
+  test("provider and inset unwrap for print", () => {
+    expect(tagOf(html, "sidebar-wrapper")).toContain("print:h-auto");
+    expect(tagOf(html, "sidebar-wrapper")).toContain("print:overflow-visible");
+    expect(tagOf(html, "sidebar-inset", "main")).toContain("print:h-auto");
+    expect(tagOf(html, "sidebar-inset", "main")).toContain("print:overflow-visible");
+  });
+
+  test("the content wrapper stops clipping when printed", () => {
+    const scrollers = [...html.matchAll(/class="([^"]*overflow-y-auto[^"]*)"/g)].map((m) => m[1]);
+    expect(scrollers[0]).toContain("print:overflow-visible");
+  });
+
   test("the sidebar column stays in flow, height-ridden on the wrapper", () => {
     const sidebar = tagOf(html, "sidebar");
     expect(sidebar).toContain("h-full");
