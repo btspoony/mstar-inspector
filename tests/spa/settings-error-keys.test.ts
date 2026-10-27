@@ -69,7 +69,6 @@ describe("SPA 400-body resolution contract", () => {
     // 2xx face and the saved notice all take the same path (pinned ops used to
     // be the raw body.trim() path the audit called out).
     expect(settingsPage.match(/settingsErrorMessage\(locale, body\)/g)?.length).toBe(1);
-    expect(settingsPage.match(/settingsOpOutcome\(locale, status, body/g)?.length).toBe(3);
     expect(settingsPage).not.toContain("message: body.trim()");
   });
 

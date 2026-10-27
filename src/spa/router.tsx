@@ -11,16 +11,10 @@ export function matchRoute(pathname: string): ClientRoute {
   return matchSpaRoute(pathname) ?? { page: "unknown", pathname };
 }
 
-/**
- * Push (or, with `replace`, overwrite) one in-app location and notify the
- * router. `replace` is for a navigation that leaves a DEAD history entry
- * behind — a workspace slug rename retires the old ref (it answers 404), so
- * Back must not return to it.
- */
-export function navigate(href: string, options: { replace?: boolean } = {}): void {
+/** Push one in-app location and notify the router. */
+export function navigate(href: string): void {
   if (window.location.pathname === href && window.location.search === "") return;
-  if (options.replace) window.history.replaceState(null, "", href);
-  else window.history.pushState(null, "", href);
+  window.history.pushState(null, "", href);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 

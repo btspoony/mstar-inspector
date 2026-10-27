@@ -113,6 +113,70 @@ describe("workspace name card", () => {
     }
   });
 
+  test("a 409 refusal leaves the switcher at the stored name and writes no history entry", async () => {
+    const { win, cleanup } = installDom(`http://localhost${PATH}`);
+    const replaces: unknown[][] = [];
+    const pushes: unknown[][] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "PUT") {
+        return new Response(JSON.stringify({ message: "name taken" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ grants: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    (win.history as unknown as Record<string, unknown>).replaceState = (...args: unknown[]) => {
+      replaces.push(args);
+    };
+    (win.history as unknown as Record<string, unknown>).pushState = (...args: unknown[]) => {
+      pushes.push(args);
+    };
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () =>
+        root.render(
+          createElement(Layout, {
+            boot,
+            pathname: PATH,
+            flash: null,
+            children: createElement(WorkspaceSettingsPage, { boot }),
+          }),
+        ),
+      );
+
+      const input = win.document.querySelector("#workspace-name") as unknown as HTMLInputElement;
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(input, "Taken Name");
+        input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      const form = input.closest("form");
+      await act(async () => {
+        form?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+
+      // Nothing landed: the switcher keeps the stored name and no history moves.
+      expect(container.querySelector('[data-slot="dropdown-menu-trigger"]')?.textContent).toContain("Acme");
+      expect(container.textContent).not.toContain("Taken Name");
+      expect(container.textContent).toContain("name taken");
+      expect(win.location.pathname).toBe(PATH);
+      expect(replaces).toEqual([]);
+      expect(pushes).toEqual([]);
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
   test("zh-CN renders the card in Chinese", () => {
     const html = withLocation(PATH, () =>
       renderToStaticMarkup(
