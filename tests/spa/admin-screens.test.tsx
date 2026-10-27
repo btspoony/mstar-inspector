@@ -114,12 +114,12 @@ async function flagsScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Pro
   return mount(createElement(FlagsPage, { locale }), respond);
 }
 
-async function workspacesScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(WorkspacesPage, { locale: "en" }), respond);
+async function workspacesScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(WorkspacesPage, { locale }), respond);
 }
 
-async function usersScreen(respond: Respond): Promise<Surface> {
-  return mount(createElement(UsersPage, { locale: "en" }), respond);
+async function usersScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(UsersPage, { locale }), respond);
 }
 
 async function supportScreen(respond: Respond): Promise<Surface> {
@@ -374,6 +374,48 @@ describe("Workspaces screen", () => {
     expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Pro");
     await surface.close();
   });
+
+  test("search filters the loaded rows and shows the N / M counter", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
+    expect(surface.text()).toContain("2 / 2");
+    // "guild" matches the name (and the slug) but not the other row.
+    await surface.type('input[type="search"]', "guild");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(surface.text()).toContain("Guild");
+    expect(surface.text()).not.toContain("Acme");
+    expect(surface.text()).toContain("1 / 2");
+    // A query matching only the owner login keeps the matching row.
+    await surface.type('input[type="search"]', "octocat");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(surface.text()).toContain("Acme");
+    expect(surface.text()).toContain("1 / 2");
+    await surface.close();
+  });
+
+  test("a non-matching search shows the shared empty state, not the page one", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
+    await surface.type('input[type="search"]', "zzz");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No matches");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).not.toContain("No workspaces");
+    await surface.close();
+  });
+
+  test("an empty list with no query still shows the page empty state", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: [] }));
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No workspaces");
+    await surface.close();
+  });
+
+  test("a zh_CN render shows Chinese copy for the page and the search control", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }), "zh_CN");
+    expect(surface.text()).toContain("所有在线工作区。");
+    const input = surface.container.querySelector('input[type="search"]');
+    expect(input?.getAttribute("placeholder")).toBe("搜索");
+    expect(surface.text()).toContain("2 / 2");
+    await surface.type('input[type="search"]', "zzz");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("无匹配结果");
+    await surface.close();
+  });
 });
 
 describe("Users screen", () => {
@@ -404,6 +446,37 @@ describe("Users screen", () => {
     expect(rowContaining(surface, "octocat")?.textContent).toContain("2026-08-26");
     expect(rowContaining(surface, "ops")?.textContent).toContain("Support (2)");
     expect(rowContaining(surface, "yuki")?.textContent).toContain("User");
+    await surface.close();
+  });
+
+  test("search filters on the GitHub login with the N / M counter", async () => {
+    const surface = await usersScreen(() => json({ users: USERS }));
+    expect(surface.text()).toContain("3 / 3");
+    await surface.type('input[type="search"]', "yuki");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(surface.text()).toContain("1 / 3");
+    // Case-insensitive: the query matches the login in another case.
+    await surface.type('input[type="search"]', "OCTO");
+    expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(rowContaining(surface, "octocat")).not.toBeNull();
+    await surface.close();
+  });
+
+  test("a non-matching search shows the shared empty state", async () => {
+    const surface = await usersScreen(() => json({ users: USERS }));
+    await surface.type('input[type="search"]', "zzz");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("No matches");
+    expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).not.toContain("No users");
+    await surface.close();
+  });
+
+  test("a zh_CN render shows Chinese copy for the page and the search control", async () => {
+    const surface = await usersScreen(() => json({ users: USERS }), "zh_CN");
+    expect(surface.text()).toContain("此平台上的所有账号。");
+    const input = surface.container.querySelector('input[type="search"]');
+    expect(input?.getAttribute("placeholder")).toBe("搜索");
+    await surface.type('input[type="search"]', "yuki");
+    expect(surface.text()).toContain("1 / 3");
     await surface.close();
   });
 });

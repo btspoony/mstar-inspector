@@ -706,6 +706,10 @@ export const en = {
       seatsColumn: "Seats",
       planColumn: "Plan",
       createdColumn: "Created",
+      /** Fallback when the plan write fails with an unrecognised error. */
+      planChangeFailed: "Could not change the plan for {name}.",
+      /** The plan picker's accessible name. */
+      planAria: "Plan for {name}",
     },
     /** Users page. */
     users: {
@@ -722,6 +726,17 @@ export const en = {
       /** {count} = the login's live grant count. */
       identitySupport: "Support ({count})",
       identityUser: "User",
+    },
+    /**
+     * Client-side table search (Workspaces, Users): one input filters the
+     * already-loaded rows; the counter reads "shown / total".
+     */
+    search: {
+      placeholder: "Search",
+      /** {shown} = matching rows, {total} = loaded rows. */
+      counter: "{shown} / {total}",
+      emptyTitle: "No matches",
+      emptyDescription: "No row matches the current search.",
     },
     /** Support grants page — list heads and the create form. */
     supportGrants: {

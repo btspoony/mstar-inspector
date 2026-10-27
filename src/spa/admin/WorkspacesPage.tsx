@@ -9,6 +9,7 @@
  */
 import { useState } from "react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { t } from "../../i18n";
 import type { Locale } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
@@ -16,6 +17,7 @@ import { EmptyState } from "../components/state/EmptyState";
 import { PageNotice } from "../pages/PageNotice";
 import { AdminWriteError, readWorkspaces, setPlan, useLoaded, type WorkspaceRow } from "./api";
 import { ConsolePath, Screen } from "./screen";
+import { TableSearch } from "./TableSearch";
 
 /**
  * The plans the picker offers, in tier order, with the catalogue's display
@@ -55,6 +57,8 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readWorkspaces);
   const [busy, setBusy] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
+  /** Client-side filter over the loaded rows — no URL state, no request. */
+  const [search, setSearch] = useState("");
 
   async function changePlan(target: WorkspaceRow, planId: string) {
     if (planId === target.planId) return;
@@ -78,7 +82,9 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
     } catch (error) {
       apply(previousId, previousName);
       setRefusal(
-        error instanceof AdminWriteError ? error.message : `Could not change the plan for ${target.name}.`,
+        error instanceof AdminWriteError ? error.message : t(locale, "admin.workspaces.planChangeFailed", {
+          name: target.name,
+        }),
       );
     } finally {
       setBusy(null);
@@ -87,7 +93,7 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
 
   const columns: DataTableColumn<WorkspaceRow>[] = [
     {
-      header: "Workspace",
+      header: t(locale, "admin.workspaces.workspaceColumn"),
       cell: (row) => (
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-medium">{row.name}</span>
@@ -95,32 +101,34 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
         </div>
       ),
     },
-    { header: "Owner", cell: (row) => <span className="text-sm">{row.ownerLogin ?? "—"}</span> },
+    { header: t(locale, "admin.workspaces.ownerColumn"), cell: (row) => <span className="text-sm">{row.ownerLogin ?? "—"}</span> },
     {
-      header: "Members",
+      header: t(locale, "admin.workspaces.membersColumn"),
       cell: (row) => (
         <div className="flex flex-col gap-0.5">
           <span className="text-sm">{row.memberCount}</span>
           {row.pendingInviteCount > 0 ? (
-            <span className="text-xs text-muted-foreground">{row.pendingInviteCount} pending</span>
+            <span className="text-xs text-muted-foreground">
+              {t(locale, "admin.workspaces.pendingInvites", { count: row.pendingInviteCount })}
+            </span>
           ) : null}
         </div>
       ),
     },
     {
-      header: "Seats",
+      header: t(locale, "admin.workspaces.seatsColumn"),
       align: "right",
       cell: (row) => <span className="text-sm tabular-nums">{seatHeadroom(row)}</span>,
     },
     {
-      header: "Plan",
+      header: t(locale, "admin.workspaces.planColumn"),
       cell: (row) => (
         <Select
           value={row.planId}
           disabled={busy !== null}
           onValueChange={(planId) => void changePlan(row, planId)}
         >
-          <SelectTrigger size="sm" aria-label={`Plan for ${row.name}`}>
+          <SelectTrigger size="sm" aria-label={t(locale, "admin.workspaces.planAria", { name: row.name })}>
             <SelectValue>{row.planName}</SelectValue>
           </SelectTrigger>
           <SelectContent>
@@ -135,28 +143,58 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
         </Select>
       ),
     },
-    { header: "Created", cell: (row) => <span className="text-sm">{row.createdAt.slice(0, 10)}</span> },
+    { header: t(locale, "admin.workspaces.createdColumn"), cell: (row) => <span className="text-sm">{row.createdAt.slice(0, 10)}</span> },
   ];
 
   return (
     <section className="flex flex-col gap-6">
       <PageHeader
-        title="Workspaces"
-        description="Every live workspace. A plan change never removes a member; a downgrade only blocks new invites."
+        title={t(locale, "admin.nav.workspaces")}
+        description={t(locale, "admin.workspaces.description")}
         actions={<ConsolePath page="workspaces" />}
       />
-      <Screen state={state} failed="Could not load the workspace list." onRetry={reload} locale={locale}>
-        {(workspaces) => (
-          <div className="flex flex-col gap-4">
-            {refusal ? <PageNotice kind="error" message={refusal} /> : null}
-            <DataTable
-              columns={columns}
-              rows={workspaces}
-              rowKey={(row) => row.id}
-              empty={<EmptyState title="No workspaces" description="This deployment has no live workspace yet." />}
-            />
-          </div>
-        )}
+      <Screen state={state} failed={t(locale, "admin.workspaces.loadFailed")} onRetry={reload} locale={locale}>
+        {(workspaces) => {
+          const query = search.trim().toLowerCase();
+          const filtered = query
+            ? workspaces.filter((row) =>
+                [row.name, row.id, row.slug, row.ownerLogin ?? ""].some((field) =>
+                  field.toLowerCase().includes(query),
+                ),
+              )
+            : workspaces;
+          return (
+            <div className="flex flex-col gap-4">
+              <TableSearch
+                locale={locale}
+                value={search}
+                onChange={setSearch}
+                shown={filtered.length}
+                total={workspaces.length}
+                placeholderKey="admin.search.placeholder"
+              />
+              {refusal ? <PageNotice kind="error" message={refusal} /> : null}
+              <DataTable
+                columns={columns}
+                rows={filtered}
+                rowKey={(row) => row.id}
+                empty={
+                  query ? (
+                    <EmptyState
+                      title={t(locale, "admin.search.emptyTitle")}
+                      description={t(locale, "admin.search.emptyDescription")}
+                    />
+                  ) : (
+                    <EmptyState
+                      title={t(locale, "admin.workspaces.emptyTitle")}
+                      description={t(locale, "admin.workspaces.emptyDescription")}
+                    />
+                  )
+                }
+              />
+            </div>
+          );
+        }}
       </Screen>
     </section>
   );

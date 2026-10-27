@@ -615,6 +615,10 @@ export const zhCN: Dictionary = {
       seatsColumn: "席位",
       planColumn: "套餐",
       createdColumn: "创建时间",
+      /** 套餐写入失败且错误无法识别时的兜底文案。 */
+      planChangeFailed: "无法更改 {name} 的套餐。",
+      /** 套餐选择器的可访问名称。 */
+      planAria: "{name} 的套餐",
     },
     /** 用户页。 */
     users: {
@@ -631,6 +635,17 @@ export const zhCN: Dictionary = {
       /** {count} = 该登录名下的有效授权数。 */
       identitySupport: "支持（{count}）",
       identityUser: "用户",
+    },
+    /**
+     * 客户端表格搜索（工作区、用户）：一个输入框过滤已加载的行；
+     * 计数器显示“已显示 / 总数”。
+     */
+    search: {
+      placeholder: "搜索",
+      /** {shown} = 匹配行数，{total} = 已加载行数。 */
+      counter: "{shown} / {total}",
+      emptyTitle: "无匹配结果",
+      emptyDescription: "没有符合当前搜索的行。",
     },
     /** 支持授权页 —— 列表表头与创建表单。 */
     supportGrants: {
