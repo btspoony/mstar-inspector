@@ -16,6 +16,8 @@ import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { MemberCapError, resolveWorkspacePlan } from "../../src/dashboard/entitlement";
 import { createInvite } from "../../src/dashboard/invite-store";
+import { setWorkspaceSlug } from "../../src/admin/workspaces";
+import type { DashboardD1 } from "../../src/dashboard/users";
 
 const SESSION_SECRET = ["test", "workspace", "plan", "secret", "32-bytes"].join("-");
 const OPERATOR = "Support-Bot";
@@ -564,6 +566,30 @@ describe("PATCH /_internal_admin/api/workspaces/:id/slug", () => {
     });
     expect(res.status).toBe(404);
     expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a driver UNIQUE violation maps to slug_taken, any other driver error is rethrown", async () => {
+    // A concurrent writer can slip past the UPDATE's WHERE guards; the slug
+    // index is the last line. Its message is the only conflict signal D1
+    // exposes, so the mapping is pinned here — wording drift must fail this
+    // test instead of turning into a 500 in production.
+    const failingBatch = (message: string): DashboardD1 =>
+      ({
+        // The statements are built before `batch` runs; only the batch throws.
+        prepare: () => ({ bind: () => ({}) }),
+        batch: async () => {
+          throw new Error(message);
+        },
+      }) as unknown as DashboardD1;
+    const input = { workspaceId: "ws-alpha", slug: "acme-hq", actorLogin: OPERATOR, now: STAMP };
+
+    expect(
+      await setWorkspaceSlug(failingBatch("D1_ERROR: UNIQUE constraint failed: workspaces.slug"), input),
+    ).toEqual({ kind: "slug_taken" });
+    // Any other driver failure is a failure, never a refusal.
+    await expect(setWorkspaceSlug(failingBatch("D1_ERROR: network unavailable"), input)).rejects.toThrow(
+      "network unavailable",
+    );
   });
 });
 

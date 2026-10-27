@@ -314,7 +314,17 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
                 <Button type="button" variant="outline" size="sm" onClick={() => setSlugTarget(null)}>
                   {t(locale, "admin.workspaces.cancelAction")}
                 </Button>
-                <Button type="submit" size="sm" disabled={busy !== null || slugDraft.trim().length === 0}>
+                <Button
+                  type="submit"
+                  size="sm"
+                  // An unchanged draft would write a no-op UPDATE plus an audit
+                  // row with identical before/after.
+                  disabled={
+                    busy !== null ||
+                    slugDraft.trim().length === 0 ||
+                    slugDraft.trim() === slugTarget.slug
+                  }
+                >
                   {t(locale, "admin.workspaces.slugSave")}
                 </Button>
               </DialogFooter>

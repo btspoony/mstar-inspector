@@ -118,6 +118,8 @@ describe("PUT /dashboard/<ref>/api/settings/name", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ name: "Acme Labs" });
     expect(nameOf(db, "ws-acme")).toBe("Acme Labs");
+    // A workspace write never touches the session jar.
+    expect(res.headers.getSetCookie()).toEqual([]);
     // The path segment is the id and never changes with the name.
     expect(nameOf(db, "beta")).toBe("beta-x");
   });

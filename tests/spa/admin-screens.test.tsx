@@ -532,6 +532,28 @@ describe("Workspaces screen", () => {
     await surface.close();
   });
 
+  test("the save button is disabled while the draft equals the stored slug", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
+    const action = [...surface.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Edit slug",
+    );
+    await surface.click(action ?? null);
+
+    const save = () =>
+      [...surface.win.document.querySelectorAll('[data-slot="dialog-content"] button')].find(
+        (button) => button.textContent === "Save slug",
+      ) as unknown as HTMLButtonElement | undefined;
+    // The dialog opens prefilled, so an unchanged submit would write an audit
+    // row with identical before/after.
+    expect(save()?.disabled).toBe(true);
+    await surface.type('[data-slot="dialog-content"] input', "acme-hq");
+    expect(save()?.disabled).toBe(false);
+    await surface.type('[data-slot="dialog-content"] input', "acme");
+    expect(save()?.disabled).toBe(true);
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
+    await surface.close();
+  });
+
   test("a refused slug write keeps the dialog open with the localised primary message", async () => {
     const surface = await workspacesScreen(
       (request) => (request.method === "PATCH" ? json({ error: "slug is reserved" }, 409) : json({ workspaces: WORKSPACES })),
