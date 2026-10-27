@@ -1210,8 +1210,9 @@ dashboardApp.post("/api/workspaces", async (c) => {
 //
 // POST /dashboard/locale — the navbar [EN/中文] toggle target. Body is
 // JSON or form-encoded `{ locale }`; valid ids are the two Locale values.
-// Writes the mstar_locale cookie (HttpOnly, SameSite=Lax, Path=/dashboard
-// — the session.ts attribute set scoped to the dashboard) and 302s back to
+// Writes the mstar_locale cookie (HttpOnly, SameSite=Lax, Path=/
+// — the session.ts attribute set, widened so the platform console
+// /_internal_admin sends the cookie back too) and 302s back to
 // a Referer-derived target sanitized by safeLocaleRedirect (anything
 // off-origin, protocol-relative, empty, or missing → /dashboard). Invalid
 // locale → 400, no cookie.

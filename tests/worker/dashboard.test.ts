@@ -793,7 +793,30 @@ describe("/dashboard/locale", () => {
     expect(setCookie[0]).toContain("HttpOnly");
     expect(setCookie[0]).toContain("Secure");
     expect(setCookie[0]).toContain("SameSite=Lax");
-    expect(setCookie[0]).toContain("Path=/dashboard");
+    expect(setCookie[0]).toContain("Path=/");
+  });
+
+  test("POST from the platform console Referer → 302 back + exact widened Set-Cookie (Path=/)", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/_internal_admin/users",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/_internal_admin/users");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    // Exact value: widened Path=/ lets the console send mstar_locale back.
+    expect(setCookie[0]).toBe(
+      `${LOCALE_COOKIE}=zh_CN; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=31536000`,
+    );
   });
 
   test("POST with off-origin absolute Referer → 302 to /dashboard (no open redirect), cookie set", async () => {
@@ -956,7 +979,7 @@ describe("/dashboard/locale", () => {
     const setCookie = res.headers.getSetCookie();
     expect(setCookie).toHaveLength(1);
     expect(setCookie[0]).toContain(`${LOCALE_COOKIE}=zh_CN`);
-    expect(setCookie[0]).toContain("Path=/dashboard");
+    expect(setCookie[0]).toContain("Path=/");
   });
 
   test("POST with a row-less session still sets mstar_locale (membership-exempt)", async () => {
