@@ -174,7 +174,7 @@ describe("tab shell rendering (static SSR)", () => {
     for (const key of [
       "settings.appInfo",
       "settings.ops",
-      "settings.runtimeImage",
+      "settings.runtimeHarness",
       "settings.providers",
       "settings.modelChains",
       "settings.seats",

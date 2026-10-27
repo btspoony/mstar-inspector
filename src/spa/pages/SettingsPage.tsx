@@ -264,7 +264,7 @@ export function SettingsView({
     if (status >= 400) {
       let reason = "unexpected";
       // (CARRY-2): the eligibility rejection additionally carries
-      // the keyed face — prefer the mapped key so the runtime-image cause
+      // the keyed face — prefer the mapped key so the runtime-harness cause
       // renders in the operator's locale; reason-only 400s keep the
       // existing verify copy.
       let keyed: DictionaryKey | undefined;
@@ -410,7 +410,7 @@ export function SettingsView({
 
         {payload.can_manage ? (
           <SectionGroup label={t(locale, "settings.group.configuration")}>
-            <RuntimeImageCard locale={locale} payload={payload} onSettings={submitSettings} />
+            <RuntimeHarnessCard locale={locale} payload={payload} onSettings={submitSettings} />
 
             <ProvidersCard
               locale={locale}
@@ -710,14 +710,15 @@ function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
 }
 
 /**
- * Runtime image: the App's sandbox runtime-image selection (manage face
- * only — the identity-only non-manager payload carries no sandbox_image_id).
+ * Runtime harness: the App's runtime-harness selection (the harness mounted
+ * into the sandbox image — manage face only; the identity-only non-manager
+ * payload carries no sandbox_image_id).
  * Managers get the shadcn selector over the enabled registry entries (one
  * `omp` option for now) and save through op=save-sandbox-image.
  * The payload carries registry ids only — never image-local configuration
  * or secrets.
  */
-function RuntimeImageCard({
+export function RuntimeHarnessCard({
   locale,
   payload,
   onSettings,
@@ -729,15 +730,15 @@ function RuntimeImageCard({
   return (
     <SectionCard tier="secondary">
       <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.runtimeImage")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.runtimeImageCopy")}</CardDescription>
+        <SectionCardTitle>{t(locale, "settings.runtimeHarness")}</SectionCardTitle>
+        <CardDescription>{t(locale, "settings.runtimeHarnessCopy", { id: payload.app.sandbox_image_id })}</CardDescription>
       </CardHeader>
       <CardContent>
         {payload.can_manage ? (
-          <RuntimeImageEditor locale={locale} payload={payload} onSettings={onSettings} />
+          <RuntimeHarnessEditor locale={locale} payload={payload} onSettings={onSettings} />
         ) : (
           <p className="text-sm text-muted-foreground">
-            {t(locale, "settings.runtimeImageValue", { id: payload.app.sandbox_image_id })}
+            {t(locale, "settings.runtimeHarnessValue", { id: payload.app.sandbox_image_id })}
           </p>
         )}
       </CardContent>
@@ -745,7 +746,7 @@ function RuntimeImageCard({
   );
 }
 
-function RuntimeImageEditor({
+function RuntimeHarnessEditor({
   locale,
   payload,
   onSettings,
@@ -781,7 +782,7 @@ function RuntimeImageEditor({
             the button wrapping below cleanly on narrow screens. */}
         <div className="w-fit max-w-xs">
           <Select value={selected} onValueChange={setSelected}>
-            <SelectTrigger aria-label={t(locale, "settings.runtimeImage")}>
+            <SelectTrigger aria-label={t(locale, "settings.runtimeHarness")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -794,7 +795,7 @@ function RuntimeImageEditor({
           </Select>
         </div>
         <Button type="button" disabled={busy} onClick={() => void save()}>
-          {t(locale, "settings.saveRuntimeImage")}
+          {t(locale, "settings.saveRuntimeHarness")}
         </Button>
       </div>
       <NoticeRegion notice={notice} />
@@ -1037,7 +1038,7 @@ const REVIEW_TRIGGER_MODE_LABEL_KEYS: Record<ReviewTriggerMode, DictionaryKey> =
  * saves on selection through the pinned-ops POST family (body `mode`), so a
  * keyed 400 (`settings.error.triggerModeUnknown`) resolves localized via the
  * shared resolver and the awaited background reload lands the stored value.
- * The selection mirrors the payload (the RuntimeImageEditor discipline): a
+ * The selection mirrors the payload (the RuntimeHarnessEditor discipline): a
  * failed save reverts to the stored mode once the reload lands. Radix's
  * empty-string deselect (clicking the active segment) is not a mode and
  * never reaches the wire.

@@ -2552,7 +2552,7 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
       sandbox_image_id: "omp",
     });
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Saved the omp runtime image for mallorys-app");
+    expect(await res.text()).toContain("Saved the omp runtime harness for mallorys-app");
     const row = db.raw
       .query("SELECT sandbox_image_id, updated_at FROM github_apps WHERE id = ?")
       .get(app.id) as { sandbox_image_id: string; updated_at: string };
@@ -2570,7 +2570,7 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
         sandbox_image_id: imageId,
       });
       expect(res.status).toBe(400);
-      expect(await res.text()).toContain("Unknown or disabled sandbox image");
+      expect(await res.text()).toContain("Unknown or disabled runtime harness");
     }
     const row = db.raw
       .query("SELECT sandbox_image_id, updated_at FROM github_apps WHERE id = ?")

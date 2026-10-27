@@ -356,7 +356,7 @@ export const zhCN: Dictionary = {
     error: {
       providerRequired: "请为密钥选择一个 provider。",
       providerUnknown: "{provider} 不是受支持的 provider — 请从列表中选择。",
-      providerUnavailableOnImage: "{provider} 在此 App 选定的运行时镜像（{image}）上不可用 — 未存储任何内容。",
+      providerUnavailableOnHarness: "{provider} 在此 App 选定的运行时 harness（{image}）上不可用 — 未存储任何内容。",
       apiKeyRequired: "请输入要存储的 API 密钥。",
       apiKeyTooLong: "该 API 密钥过长（{count} 个字符）— 密钥上限为 {limit} 个字符。未存储任何内容。",
       apiKeyCommandPrefix:
@@ -401,7 +401,7 @@ export const zhCN: Dictionary = {
       templateApiUnsupported: "{api} 不是受支持的 API 协议 — 未存储任何内容。",
       templateNoModels: "该 provider 模板没有任何模型 id — 未存储任何内容。",
       templateMaterializeMax: "此 App 已达到 {limit} 个自定义 provider 的上限 — 请先移除一个再物化新模板（更新现有声明不受限制）。未存储任何内容。",
-      sandboxImageUnknown: "未知或已停用的沙盒镜像 — 未存储任何内容。",
+      runtimeHarnessUnknown: "未知或已停用的运行时 harness — 未存储任何内容。",
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
     },
@@ -433,15 +433,15 @@ export const zhCN: Dictionary = {
       "此 App 已配置的模型提供方 — 存储的密钥仅显示掩码尾号，自定义声明显示其 Base URL 与模型。添加模型提供方从目录选择开始；密钥仅在验证成功后存储。",
     noConfiguredProviders: "尚未配置任何模型提供方 — 请使用「添加模型提供方」进行配置。在验证提供方密钥之前，审查将失败关闭。",
     addProvider: "添加模型提供方",
-    addProviderCopy: "从目录中选择一个模型提供方 — 选中后显示其配置要求。在 App 运行时镜像上不可用的条目会被标记且无法保存；目录外的提供方请使用下方的自定义声明。",
+    addProviderCopy: "从目录中选择一个模型提供方 — 选中后显示其配置要求。在 App 运行时 harness 上不可用的条目会被标记且无法保存；目录外的提供方请使用下方的自定义声明。",
     catalogProvenance:
       "{count} 个提供方，来自已提交的 models.dev 快照并编译进应用 — 在提交密钥验证之前不会联系任何提供方。",
     catalogBuiltin: "常用提供方",
     catalogTemplate: "目录模板",
-    eligibilityBuiltin: "可与 {image} 运行时镜像配合使用 — 该提供方作为内置提供方运行。",
-    eligibilityTemplate: "物化后可与 {image} 运行时镜像配合使用 — 账户 id 与密钥将保存为自定义提供方声明。",
+    eligibilityBuiltin: "可与 {image} 运行时 harness 配合使用 — 该提供方作为内置提供方运行。",
+    eligibilityTemplate: "物化后可与 {image} 运行时 harness 配合使用 — 账户 id 与密钥将保存为自定义提供方声明。",
     eligibilityUnavailable:
-      "无法在 {image} 运行时镜像上使用 — 该条目仅为目录展示，无法为此 App 配置。可切换 App 的运行时镜像，或改用自定义声明。",
+      "无法在 {image} 运行时 harness 上使用 — 该条目仅为目录展示，无法为此 App 配置。可切换 App 的运行时 harness，或改用自定义声明。",
     eligibilityUnavailableShort: "{image} 上不可用",
     configureProvider: "配置 {label}",
     customEntry: "自定义",
@@ -469,11 +469,11 @@ export const zhCN: Dictionary = {
     confirmRemoveCustomTitle: "移除 provider {provider}？",
     confirmRemoveCustomBody:
       "该 provider 及其密钥池中的全部密钥都将被移除。若只想腾出一个槽位，请移除该密钥所在的行。引用其模型的链在保存时会校验失败。",
-    runtimeImage: "运行时镜像",
-    runtimeImageCopy:
-      "执行此 App 审查的沙盒运行时镜像。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
-    runtimeImageValue: "此 App 的审查运行在 {id} 运行时镜像上。",
-    saveRuntimeImage: "保存运行时镜像",
+    runtimeHarness: "运行时 harness",
+    runtimeHarnessCopy:
+      "执行此 App 审查的沙盒镜像中挂载的 {id} 运行时 harness。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
+    runtimeHarnessValue: "此 App 的审查运行在 {id} 运行时 harness 上。",
+    saveRuntimeHarness: "保存运行时 harness",
     // GitHub 身份卡。{name}/{id}/{time} 为同步的资料名、数字 App id
     // 与相对同步时间（formatRelativeTime 输出）— 服务端字段可空、逐项降级，
     // 每个键仅在其值存在时渲染。

@@ -412,8 +412,8 @@ export const en = {
     error: {
       providerRequired: "Pick a provider for the key.",
       providerUnknown: "{provider} is not a supported provider — pick one from the list.",
-      providerUnavailableOnImage:
-        "{provider} is not available under this App's selected runtime image ({image}) — nothing was stored.",
+      providerUnavailableOnHarness:
+        "{provider} is not available under this App's selected runtime harness ({image}) — nothing was stored.",
       apiKeyRequired: "Enter an API key to store.",
       apiKeyTooLong:
         "That API key is too long ({count} characters) — keys are limited to {limit} characters. Nothing was stored.",
@@ -470,7 +470,7 @@ export const en = {
       templateNoModels: "This provider template has no model ids — nothing was stored.",
       templateMaterializeMax:
         "This App already has the maximum of {limit} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.",
-      sandboxImageUnknown: "Unknown or disabled sandbox image — nothing was stored.",
+      runtimeHarnessUnknown: "Unknown or disabled runtime harness — nothing was stored.",
       triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
     },
@@ -505,17 +505,17 @@ export const en = {
       "No providers configured yet — use Add Provider to configure one. Reviews fail closed until a provider key is verified.",
     addProvider: "Add provider",
     addProviderCopy:
-      "Pick a catalog provider — its configuration requirements appear once selected. Entries unusable on the App's runtime image are marked and can't be saved; providers outside the catalog use the custom declaration below.",
+      "Pick a catalog provider — its configuration requirements appear once selected. Entries unusable under the App's runtime harness are marked and can't be saved; providers outside the catalog use the custom declaration below.",
     catalogProvenance:
       "{count} providers from the committed models.dev snapshot, compiled into the app — no provider is contacted until you submit a key for verification.",
     catalogBuiltin: "Common providers",
     catalogTemplate: "Catalog templates",
-    eligibilityBuiltin: "Works on the {image} runtime image — this provider runs as a built-in.",
+    eligibilityBuiltin: "Works under the {image} runtime harness — this provider runs as a built-in.",
     eligibilityTemplate:
-      "Works on the {image} runtime image after materialization — your account id and key are saved as a custom provider declaration.",
+      "Works under the {image} runtime harness after materialization — your account id and key are saved as a custom provider declaration.",
     eligibilityUnavailable:
-      "Not usable on the {image} runtime image — the entry stays listed for discovery but cannot be configured for this App. Switch the App's runtime image or use a custom declaration instead.",
-    eligibilityUnavailableShort: "unavailable on {image}",
+      "Not usable under the {image} runtime harness — the entry stays listed for discovery but cannot be configured for this App. Switch the App's runtime harness or use a custom declaration instead.",
+    eligibilityUnavailableShort: "unavailable under {image}",
     configureProvider: "Configure {label}",
     customEntry: "Custom",
     customEntryCopy: "Declare a non-built-in provider — id, base URL, model ids, and key.",
@@ -544,11 +544,11 @@ export const en = {
     confirmRemoveCustomTitle: "Remove provider {provider}?",
     confirmRemoveCustomBody:
       "The provider and every key in its pool are removed. To free one slot only, remove that key's own row. Chains referencing its models fail on save.",
-    runtimeImage: "Runtime image",
-    runtimeImageCopy:
-      "The sandbox runtime image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked into an image.",
-    runtimeImageValue: "This App's reviews run on the {id} runtime image.",
-    saveRuntimeImage: "Save runtime image",
+    runtimeHarness: "Runtime harness",
+    runtimeHarnessCopy:
+      "The {id} runtime harness mounted into the sandbox image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked in.",
+    runtimeHarnessValue: "This App's reviews run under the {id} runtime harness.",
+    saveRuntimeHarness: "Save runtime harness",
     /**
      * GitHub identity card. `{name}`/`{id}`/`{time}` carry the
      * synced profile name, the numeric App id, and a relative synced-at time

@@ -560,7 +560,7 @@ describe("success redirects stay in the workspace route family", () => {
     const res = await worker.fetch(request, env);
     expect(res.status).toBe(200);
     expect(res.headers.get("Location")).toBeNull();
-    expect(await res.text()).toContain("Saved the omp runtime image for acme-app.");
+    expect(await res.text()).toContain("Saved the omp runtime harness for acme-app.");
   });
 
   test("a native settings post on the retired deployment path answers 404 in the workspace family", async () => {
