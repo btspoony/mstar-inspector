@@ -19,10 +19,10 @@ export type SpaBoot = {
   login: string | null;
   name: string | null;
   /**
-   * The workspace ref (its slug) the boot was resolved for: the path's own
-   * segment when it has one, else the deployment's sole live workspace. Absent
-   * on a multi-workspace deployment whose page names none. A workspace-scoped
-   * pathname always wins.
+   * The workspace ref (its stable `id`) the boot was resolved for: the path's
+   * own segment when it has one, else the deployment's sole live workspace.
+   * Absent on a multi-workspace deployment whose page names none. A
+   * workspace-scoped pathname always wins.
    */
   workspaceRef?: string;
   /**
@@ -73,12 +73,13 @@ export type SpaBoot = {
   workspaceRequired?: boolean;
   /**
    * The signed-in login's live workspace memberships — the switcher's list and
-   * the settings slug card's stored value. A path segment may address the
+   * the settings name card's stored value. A path segment may address the
    * workspace by EITHER identifier, so both ride the payload: `id` (stable) and
-   * `slug` (the readable segment, equal to `id` until renamed). The switcher
-   * matches the current row on either and rewrites the path to `slug`; `role`
-   * decides nav visibility (the Members entry is for every workspace member).
-   * Empty/absent for a login in no workspace, which renders no switcher.
+   * `slug` (readable, equal to `id` until a platform operator sets one). The
+   * switcher matches the current row on either and rewrites the path to `id`;
+   * `role` decides nav visibility (the Members entry is for every workspace
+   * member). Empty/absent for a login in no workspace, which renders no
+   * switcher.
    */
   memberships?: Array<{
     id: string;

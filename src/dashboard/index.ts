@@ -256,7 +256,7 @@ function scopedAppPath(c: DashboardContext, path: string): string {
 }
 
 /**
- * The workspace slug a platform operator is visiting under a live support
+ * The workspace ref a platform operator is visiting under a live support
  * grant, or null when this login is not such a visitor: the shell asks the ONE
  * classifier the gate uses ({@link classifyWorkspacePrincipal}), so the boot
  * and the request can never disagree about who the caller is.
@@ -284,7 +284,7 @@ export async function operatorSupportWorkspace(
     new Date().toISOString(),
     access.role,
   );
-  return principal === "operator-granted" ? access.slug : null;
+  return principal === "operator-granted" ? access.id : null;
 }
 
 /**
@@ -344,7 +344,7 @@ export async function workspaceBoot(
   if (access !== null) {
     return {
       access,
-      workspaceRef: access.slug,
+      workspaceRef: access.id,
       // A new App lands in the addressed workspace, where a plain member has
       // no manage rights — so creation is owner/admin there.
       canCreateApp: canManageRole(access.role),
@@ -424,7 +424,7 @@ export async function pendingInvitesForLogin(
  * the caller's rights is wrong; the request is missing a target).
  */
 type CreationTarget =
-  /** `workspaceRef` is the workspace's CURRENT slug — URLs only, never identity. */
+  /** `workspaceRef` is the workspace's stable id — URLs only, never identity. */
   | { kind: "ok"; workspaceId: string; workspaceRef: string }
   | { kind: "denied" }
   | { kind: "workspace_required" }
@@ -456,7 +456,7 @@ async function resolveCreationTarget(
   // A ref that resolved to a workspace the caller is not a member of has
   // `role: null` — not a creator there either.
   if (!canManageRole(access.role)) return { kind: "denied" };
-  return { kind: "ok", workspaceId: access.id, workspaceRef: access.slug };
+  return { kind: "ok", workspaceId: access.id, workspaceRef: access.id };
 }
 
 /**
@@ -521,7 +521,7 @@ export async function signedInLanding(
   if (extras.needsWorkspace === true) return DASHBOARD_MOUNT;
   const memberships = await workspaceMembershipsForLogin(env, login);
   const first = memberships[0];
-  if (first !== undefined) return `/dashboard/${first.slug}/apps`;
+  if (first !== undefined) return `/dashboard/${first.id}/apps`;
   // A login that belongs to no workspace is the EXPECTED landing on the
   // creation surface, not a configuration fault; only a member the deployment
   // cannot place is the operator-facing dead end.
@@ -541,9 +541,9 @@ type ManifestSuccessTarget = { kind: "ok"; path: string } | { kind: "workspace_g
  * workspace segment, so `scopedAppPath` cannot rewrite this target: the App's
  * onboarding page is named by the workspace the commit just mapped it into.
  *
- * The URL needs the workspace's CURRENT slug, while the flow carried the stable
- * id — so the slug is resolved HERE, after the write, not carried through the
- * state. A workspace renamed mid-flow therefore still lands on the right
+ * The URL names the workspace by its stable id, which the flow already carried
+ * — the row is resolved HERE, after the write, only to prove the workspace
+ * still exists. A workspace renamed mid-flow therefore still lands on the right
  * onboarding page (and the App is in the right tenant either way, because the
  * mapping was written from the id). A workspace retired mid-flow resolves
  * nothing and answers the named `workspace_gone` failure — never a bare
@@ -557,7 +557,7 @@ async function manifestSuccessTarget(
   const db = dashboardD1(env);
   const workspace = db === null || workspaceId === "" ? null : await getWorkspaceByRef(db, workspaceId);
   if (workspace === null) return { kind: "workspace_gone" };
-  return { kind: "ok", path: `/dashboard/${workspace.slug}/apps/${appSlug}/onboarding` };
+  return { kind: "ok", path: `/dashboard/${workspace.id}/apps/${appSlug}/onboarding` };
 }
 
 function isSpaFetchPost(c: DashboardContext): boolean {

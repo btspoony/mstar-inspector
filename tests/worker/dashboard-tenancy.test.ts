@@ -32,6 +32,7 @@ import {
   readManifestStateValue,
 } from "../../src/dashboard/manifest";
 import { apiBase } from "../../src/spa/workspace-base";
+import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import type { SpaBoot } from "../../src/spa/boot";
 import { RESERVED_WORKSPACE_SLUGS } from "../../src/spa/routes";
 import { t } from "../../src/i18n";
@@ -850,7 +851,8 @@ describe("the post-authentication landing is the workspace Apps page", () => {
       withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps");
+    // The emitted ref is the workspace ID, never the mutable slug.
+    expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
     expect(res.headers.get("Location")).not.toBe("/dashboard/apps");
   });
 
@@ -864,17 +866,77 @@ describe("the post-authentication landing is the workspace Apps page", () => {
       withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/acme/apps");
+    expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
 
     // The shell that redirect lands on still offers both workspaces.
     const shell = await worker.fetch(
-      await authedRequest("/dashboard/acme/apps", "dana", { accept: "text/html" }),
+      await authedRequest("/dashboard/ws-acme/apps", "dana", { accept: "text/html" }),
       withSpaAssets(envFor(db)),
     );
     expect(shell.status).toBe(200);
     const boot = bootOf(await shell.text());
     expect(boot.memberships?.map((m) => m.slug).sort()).toEqual(["acme", "other"]);
-    expect(boot.workspaceRef).toBe("acme");
+    expect(boot.workspaceRef).toBe("ws-acme");
+  });
+});
+
+describe("a workspace URL never carries a value its owner can change", () => {
+  test("a ref-less shell boot names the sole workspace by id", async () => {
+    // `/index.html` carries no workspace segment, so the boot's ref comes from
+    // the server-resolved sole workspace — and that value is the id, never the
+    // readable slug a platform operator can change.
+    const db = createMigratedTestD1();
+    seed(db, "DELETE FROM workspaces");
+    seedWorkspace(db, "ws-acme", "acme");
+    seedMembership(db, "ws-acme", seedUser(db, "octocat", "admin"), "owner");
+    const res = await worker.fetch(
+      await authedRequest("/index.html", "octocat", { accept: "text/html" }),
+      withSpaAssets(envFor(db)),
+    );
+    expect(res.status).toBe(200);
+    const boot = bootOf(await res.text());
+    expect(boot.workspaceRef).toBe("ws-acme");
+    // The sidebar follows that ref, so no nav target carries the slug.
+    const hrefs = await renderMembersHrefs(boot, "/index.html");
+    expect(hrefs).toContain("/dashboard/ws-acme/apps");
+    expect(hrefs).not.toContain("/dashboard/acme/apps");
+  });
+
+  test("a renamed slug still serves the same workspace, while the emitted ref is the id", async () => {
+    // `ws-acme` is renamed from `acme` to `acme-labs` after the links went out.
+    // The slug branch of the resolver keeps the old URL working; everything the
+    // Worker EMITS names the id, which the rename never touched.
+    const { db } = tenancyFixture();
+    seed(db, "UPDATE workspaces SET slug = 'acme-labs' WHERE id = 'ws-acme'");
+    const env = withSpaAssets(envFor(db));
+
+    for (const ref of ["acme", "acme-labs", "ws-acme"]) {
+      const shell = await worker.fetch(
+        await authedRequest(`/dashboard/${ref}/apps`, "dana", { accept: "text/html" }),
+        env,
+      );
+      expect(shell.status, ref).toBe(200);
+      const boot = bootOf(await shell.text());
+      // Every addressed form resolves the SAME workspace. A workspace-scoped
+      // pathname still wins the boot's own ref (path-derived, unchanged), and
+      // the row it names rides both identifiers.
+      expect(boot.workspaceRef, ref).toBe(ref);
+      const row = boot.memberships?.find((m) => m.id === "ws-acme");
+      expect(row?.slug, ref).toBe("acme-labs");
+      // What the shell EMITS for that row is the id.
+      expect(
+        buildWorkspaceSwitcherModel(boot, `/dashboard/${ref}/apps`)?.options.map((option) => option.ref),
+        ref,
+      ).toEqual(["ws-acme"]);
+    }
+
+    // The landing redirect is id-based too, so nothing emits the renamed slug.
+    const landing = await worker.fetch(
+      await authedRequest("/dashboard", "dana", { accept: "text/html" }),
+      env,
+    );
+    expect(landing.status).toBe(302);
+    expect(landing.headers.get("Location")).toBe("/dashboard/ws-acme/apps");
   });
 });
 
@@ -1155,7 +1217,7 @@ describe("App creation is owner/admin", () => {
         { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
       ).then((request) => worker.fetch(request, env));
       expect(callback.status).toBe(302);
-      expect(callback.headers.get("Location")).toBe("/dashboard/other/apps/mstar-inspector-dana/onboarding");
+      expect(callback.headers.get("Location")).toBe("/dashboard/ws-other/apps/mstar-inspector-dana/onboarding");
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1220,10 +1282,10 @@ describe("App creation is owner/admin", () => {
         { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
       ).then((request) => worker.fetch(request, env));
       expect(callback.status).toBe(302);
-      // The redirect names the workspace's CURRENT slug (resolved after the
-      // write), never the stale one the flow started with.
+      // The redirect names the workspace's stable ID — not the slug the flow
+      // started with, and not the one a squatter has since taken.
       expect(callback.headers.get("Location")).toBe(
-        "/dashboard/acme-renamed/apps/mstar-inspector-dana/onboarding",
+        "/dashboard/ws-acme/apps/mstar-inspector-dana/onboarding",
       );
     } finally {
       globalThis.fetch = realFetch;

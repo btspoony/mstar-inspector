@@ -2173,8 +2173,9 @@ describe("workspace slug control", () => {
         { ...adminBoot, memberships: live },
         "/dashboard/acme-labs/apps/acme-app",
       );
-      expect(model?.options.map((option) => option.ref)).toEqual(["acme-labs", "ws_7d41"]);
-      expect(model?.currentRef).toBe("acme-labs");
+      // The switcher emits the stable id, which the rename never touched.
+      expect(model?.options.map((option) => option.ref)).toEqual(["ws_acme", "ws_7d41"]);
+      expect(model?.currentRef).toBe("ws_acme");
     } finally {
       globalThis.fetch = realFetch;
       for (const [key, value] of Object.entries(saved)) {

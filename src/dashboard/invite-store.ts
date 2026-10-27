@@ -461,7 +461,7 @@ export async function listInviteDiscoveryForLogin(
 ): Promise<Array<{ inviteId: string; workspaceRef: string; role: InviteRole; expiresAt: string }>> {
   const { results } = await db
     .prepare(
-      `SELECT i.id AS inviteId, w.slug AS workspaceRef, i.role AS role, i.expires_at AS expiresAt
+      `SELECT i.id AS inviteId, w.id AS workspaceRef, i.role AS role, i.expires_at AS expiresAt
          FROM workspace_invites i JOIN workspaces w ON w.id = i.workspace_id
         WHERE i.github_login = ? COLLATE NOCASE AND i.${LIVE} AND w.deleted_at IS NULL
         ORDER BY i.created_at ASC, i.id ASC`,
