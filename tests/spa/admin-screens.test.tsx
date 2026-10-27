@@ -549,10 +549,14 @@ describe("Workspaces screen", () => {
     });
     await act(async () => {});
 
-    expect(surface.win.document.querySelector('[data-slot="dialog-content"]')).not.toBeNull();
-    const alert = surface.container.querySelector('[role="alert"]');
+    const dialog = surface.win.document.querySelector('[data-slot="dialog-content"]');
+    expect(dialog).not.toBeNull();
+    // The refusal must live INSIDE the dialog: the modal overlay covers the
+    // page-level notice, so a page notice is unreadable while it stays open.
+    const alert = dialog?.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("无法更改 Acme 的 slug。");
     expect(alert?.textContent).toContain("服务器返回：slug is reserved");
+    expect(surface.container.querySelector('[role="alert"]')).toBeNull();
     expect(rowContaining(surface, "Acme")?.textContent).toContain("acme");
     await surface.close();
   });

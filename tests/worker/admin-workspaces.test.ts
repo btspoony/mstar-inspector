@@ -523,7 +523,9 @@ describe("PATCH /_internal_admin/api/workspaces/:id/slug", () => {
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);
     insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
-    insertWorkspace(db, { id: "ws-beta", name: "Beta", createdAt: STAMP, slug: "taken-one" });
+    // Stored mixed-case by direct insert: the grammar is lowercase-only, so a
+    // case-differing attempt is the only way to reach the COLLATE NOCASE guard.
+    insertWorkspace(db, { id: "ws-beta", name: "Beta", createdAt: STAMP, slug: "Taken-One" });
 
     const res = await api(db, {
       method: "PATCH",

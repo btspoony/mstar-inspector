@@ -95,6 +95,9 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
   /** The row whose slug dialog is open, plus the value being typed. */
   const [slugTarget, setSlugTarget] = useState<WorkspaceRow | null>(null);
   const [slugDraft, setSlugDraft] = useState("");
+  /** The slug refusal belongs to the dialog, not the page: Radix's modal
+   * overlay covers the page notice while the dialog stays open. */
+  const [slugRefusal, setSlugRefusal] = useState<string | null>(null);
 
   async function changePlan(target: WorkspaceRow, planId: string) {
     if (planId === target.planId) return;
@@ -141,7 +144,7 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
     const target = slugTarget;
     if (!target) return;
     setBusy(target.id);
-    setRefusal(null);
+    setSlugRefusal(null);
     try {
       await setWorkspaceSlug(target.id, slugDraft.trim());
       update((workspaces) =>
@@ -152,7 +155,7 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
       setSlugTarget(null);
     } catch (error) {
       const generic = t(locale, "admin.workspaces.slugChangeFailed", { name: target.name });
-      setRefusal(
+      setSlugRefusal(
         error instanceof AdminWriteError
           ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
           : generic,
@@ -180,7 +183,7 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
               onClick={() => {
                 setSlugTarget(row);
                 setSlugDraft(row.slug);
-                setRefusal(null);
+                setSlugRefusal(null);
               }}
             >
               {t(locale, "admin.workspaces.slugAction")}
@@ -305,6 +308,8 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
                   autoFocus
                 />
               </label>
+              {/* Inside the dialog: the modal overlay covers the page notice. */}
+              {slugRefusal ? <PageNotice kind="error" message={slugRefusal} /> : null}
               <DialogFooter>
                 <Button type="button" variant="outline" size="sm" onClick={() => setSlugTarget(null)}>
                   {t(locale, "admin.workspaces.cancelAction")}
