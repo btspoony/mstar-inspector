@@ -305,13 +305,21 @@ async function serveDocument(c: AdminContext): Promise<Response> {
  * `<html lang>` (BCP 47: `zh_CN` → `zh-CN`) and the `<title>` are replaced
  * here — no second document route, no client-side attribute write. The title
  * comes from `admin.documentTitle`; it is escaped even though dictionary
- * values are plain text by contract.
+ * values are plain text by contract. Both anchors must be present: a silent
+ * no-op would ship an English document to a zh_CN operator, so a template
+ * drift throws into the serveDocument error path instead.
  */
-function localizeDocument(html: string, locale: Locale): string {
+export function localizeDocument(html: string, locale: Locale): string {
   const lang = locale === "zh_CN" ? "zh-CN" : "en";
   const title = t(locale, "admin.documentTitle")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;");
+  if (!html.includes('<html lang="en">')) {
+    throw new Error("admin document is missing the `<html lang=\"en\">` locale anchor");
+  }
+  if (!/<title>[^<]*<\/title>/.test(html)) {
+    throw new Error("admin document is missing the `<title>` locale anchor");
+  }
   return html
     .replace('<html lang="en">', `<html lang="${lang}">`)
     .replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`);
