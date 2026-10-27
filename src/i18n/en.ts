@@ -658,6 +658,12 @@ export const en = {
       users: "Users",
       supportGrants: "Support access",
     },
+    /**
+     * A refused console write: the page's generic failure message stays
+     * primary and the server's own `{error}` text rides along as secondary
+     * detail (PageNotice's single message string carries both).
+     */
+    refusalDetail: "Server: {detail}",
     /** Server flags page. */
     flags: {
       description:
@@ -710,6 +716,10 @@ export const en = {
       planChangeFailed: "Could not change the plan for {name}.",
       /** The plan picker's accessible name. */
       planAria: "Plan for {name}",
+      /** The plan picker's catalogue labels, keyed by the wire plan id. */
+      planFree: "Free",
+      planPro: "Pro",
+      planUnlimited: "Unlimited",
     },
     /** Users page. */
     users: {

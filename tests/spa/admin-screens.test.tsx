@@ -439,6 +439,58 @@ describe("Workspaces screen", () => {
     expect(surface.container.querySelector('[data-slot="empty-state"]')?.textContent).toContain("无匹配结果");
     await surface.close();
   });
+
+  test("a plan id outside the catalogue keeps the server's name", async () => {
+    const legacy = [{ ...WORKSPACES[0]!, planId: "legacy-tier", planName: "Legacy Tier" }];
+    const surface = await workspacesScreen(() => json({ workspaces: legacy }), "zh_CN");
+    const trigger = rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]') ?? null;
+    await surface.openSelect(trigger);
+    const labels = [...surface.win.document.querySelectorAll('[role="option"]')].map(
+      (node) => node.textContent,
+    );
+    // Only the unknown id falls back to the server-provided English name.
+    expect(labels).toContain("Legacy Tier");
+    expect(labels).toContain("专业版");
+    expect(labels).toContain("无限版");
+    await surface.close();
+  });
+
+  test("a zh_CN render localises the plan picker's catalogue labels", async () => {
+    const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }), "zh_CN");
+    const trigger = rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]') ?? null;
+    // The selected row's own plan renders the zh catalogue label, not the server's English name.
+    expect(trigger?.textContent).toBe("免费版");
+    await surface.openSelect(trigger);
+    const labels = [...surface.win.document.querySelectorAll('[role="option"]')].map(
+      (node) => node.textContent,
+    );
+    // The row's own option is the zh catalogue label; the rest of the catalogue is Chinese too.
+    expect(labels).toContain("免费版");
+    expect(labels).toContain("专业版");
+    expect(labels).toContain("无限版");
+    await surface.close();
+  });
+
+  test("a refused plan change in zh_CN keeps a localised primary message with the server detail secondary", async () => {
+    const surface = await workspacesScreen(
+      (request) =>
+        request.method === "PATCH"
+          ? json({ error: "seat limit reached" }, 403)
+          : json({ workspaces: WORKSPACES }),
+      "zh_CN",
+    );
+    const row = rowContaining(surface, "Acme");
+    await surface.openSelect(row?.querySelector('[data-slot="select-trigger"]') ?? null);
+    await surface.pickOption("专业版");
+
+    const alert = surface.container.querySelector('[role="alert"]');
+    // The generic zh failure is primary; the server's English `{error}` is detail only.
+    expect(alert?.textContent).toContain("无法更改 Acme 的套餐。");
+    expect(alert?.textContent).toContain("服务器返回：seat limit reached");
+    // The refused optimistic change is rolled back.
+    expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("免费版");
+    await surface.close();
+  });
 });
 
 describe("Users screen", () => {

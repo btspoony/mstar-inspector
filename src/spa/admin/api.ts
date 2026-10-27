@@ -149,7 +149,11 @@ export async function readGrants(): Promise<GrantRow[]> {
   }));
 }
 
-/** A refused console write: the status and the server's own message. */
+/**
+ * A refused console write: the status and the server's own message. Pages
+ * render a localised generic failure as the primary notice and interpolate
+ * `message` as secondary detail (`admin.refusalDetail`), never verbatim alone.
+ */
 export class AdminWriteError extends Error {
   readonly status: number;
 

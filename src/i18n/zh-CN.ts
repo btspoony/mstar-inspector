@@ -571,6 +571,12 @@ export const zhCN: Dictionary = {
       users: "用户",
       supportGrants: "支持访问",
     },
+    /**
+     * 控制台写入被服务器拒绝：页面的通用失败文案为主，服务器自身的
+     * `{error}` 文本作为次要细节附带展示（PageNotice 的单条 message
+     * 字符串同时承载两者）。
+     */
+    refusalDetail: "服务器返回：{detail}",
     /** 服务器开关页。 */
     flags: {
       description: "平台级开关。更改对下一个请求生效，并追加一条审计记录。",
@@ -619,6 +625,10 @@ export const zhCN: Dictionary = {
       planChangeFailed: "无法更改 {name} 的套餐。",
       /** 套餐选择器的可访问名称。 */
       planAria: "{name} 的套餐",
+      /** 套餐选择器中的目录标签，按线上套餐 id 索引。 */
+      planFree: "免费版",
+      planPro: "专业版",
+      planUnlimited: "无限版",
     },
     /** 用户页。 */
     users: {
