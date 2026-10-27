@@ -1,5 +1,5 @@
 /**
- * The console document's server-side locale substitution (plan 122, task 1):
+ * The console document's server-side locale substitution:
  * `serveDocument` resolves the locale from the `mstar_locale` cookie and
  * rewrites `<html lang>` (BCP 47: `zh_CN` → `zh-CN`) and the `<title>` (from
  * `admin.documentTitle`) before serving. No second document route, no

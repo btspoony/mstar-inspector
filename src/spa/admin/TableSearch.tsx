@@ -1,5 +1,5 @@
 /**
- * Client-side table filter (plan 122 task 4): one search input above a
+ * Client-side table filter: one search input above a
  * DataTable plus the "shown / total" counter. The page owns the query state
  * and the filtering — this renders the controls only. No URL state, no
  * request: the filter runs over the already-loaded rows.

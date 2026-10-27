@@ -1,8 +1,8 @@
 /**
- * Binds the server-side locale substitution to the real console document
- * (plan 122, QC seat 3): `localizeDocument` must throw when the template
- * drifts, and must land both substitutions on the actual
- * `src/spa/admin.html` — not on a hand-written mirror of the anchors.
+ * Binds the server-side locale substitution to the real console document:
+ * `localizeDocument` must throw when the template drifts, and must land
+ * both substitutions on the actual `src/spa/admin.html` — not on a
+ * hand-written mirror of the anchors.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
