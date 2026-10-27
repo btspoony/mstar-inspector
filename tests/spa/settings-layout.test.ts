@@ -143,7 +143,7 @@ describe("settings dropdowns", () => {
   });
 });
 
-describe("runtime image selector", () => {
+describe("runtime harness selector", () => {
   test("managers get a shadcn selector saved through op=save-sandbox-image; other members read-only", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // The editor posts the op with the selected registry id.
@@ -155,19 +155,19 @@ describe("runtime image selector", () => {
     expect(source).toContain("SelectTrigger");
     expect(source).toContain("SelectItem");
     // Read-only detail for non-managers, never the editor.
-    expect(source).toContain("settings.runtimeImageValue");
+    expect(source).toContain("settings.runtimeHarnessValue");
     expect(source).toContain("payload.app.sandbox_image_id");
   });
 
-  test("runtime image copy is dictionary-backed in both locales", () => {
-    expect(t("en", "settings.runtimeImage")).toBe("Runtime image");
-    expect(t("zh_CN", "settings.runtimeImage")).toBe("运行时镜像");
-    expect(t("en", "settings.runtimeImageCopy")).toContain("run time");
-    expect(t("zh_CN", "settings.runtimeImageCopy")).toContain("运行时");
-    expect(t("en", "settings.runtimeImageValue", { id: "omp" })).toContain("omp");
-    expect(t("zh_CN", "settings.runtimeImageValue", { id: "omp" })).toContain("omp");
-    expect(t("en", "settings.saveRuntimeImage")).toBe("Save runtime image");
-    expect(t("zh_CN", "settings.saveRuntimeImage")).toBe("保存运行时镜像");
+  test("runtime harness copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.runtimeHarness")).toBe("Runtime harness");
+    expect(t("zh_CN", "settings.runtimeHarness")).toBe("运行时 harness");
+    expect(t("en", "settings.runtimeHarnessCopy")).toContain("run time");
+    expect(t("zh_CN", "settings.runtimeHarnessCopy")).toContain("运行时");
+    expect(t("en", "settings.runtimeHarnessValue", { id: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.runtimeHarnessValue", { id: "omp" })).toContain("omp");
+    expect(t("en", "settings.saveRuntimeHarness")).toBe("Save runtime harness");
+    expect(t("zh_CN", "settings.saveRuntimeHarness")).toBe("保存运行时 harness");
   });
 });
 
@@ -342,7 +342,7 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
 });
 
 describe("catalog provenance + eligibility messaging", () => {
-  test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime image", () => {
+  test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime harness", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Provenance: the catalog is generated, pinned metadata — not a live query.
     expect(source).toContain("settings.catalogProvenance");
@@ -480,7 +480,7 @@ describe("provider combobox", () => {
     expect(full).toContain('aria-selected="true"');
     // The unavailable catalog row stays listed and marked, with the suffix.
     expect(full).toContain('aria-disabled="true"');
-    expect(full).toContain("unavailable on omp");
+    expect(full).toContain("unavailable under omp");
     const narrowed = panel("gem", "gemini");
     // Narrowed to matching entries only — the common group keeps just Gemini
     // (one of the frozen 5), the catalog group only the unavailable marked
@@ -489,7 +489,7 @@ describe("provider combobox", () => {
     expect(narrowed).toContain('aria-selected="true"');
     expect(narrowed).toContain("Gemini Image");
     expect(narrowed).toContain('aria-disabled="true"');
-    expect(narrowed).toContain("unavailable on omp");
+    expect(narrowed).toContain("unavailable under omp");
     expect(narrowed).not.toContain("Anthropic");
     expect(narrowed).not.toContain("OpenAI");
     expect(narrowed).not.toContain("Copilot");
@@ -516,7 +516,7 @@ describe("provider combobox", () => {
       }),
     );
     expect(out).toContain('aria-disabled="true"');
-    expect(out).toContain("unavailable on omp");
+    expect(out).toContain("unavailable under omp");
     expect(out.indexOf("Common providers")).toBeGreaterThan(-1);
     expect(out.indexOf("Catalog templates")).toBeGreaterThan(out.indexOf("Common providers"));
   });
@@ -1409,7 +1409,7 @@ describe("App workflow boundaries", () => {
     expect(source).toContain('t(locale, "settings.recentDeliveriesCopy")');
     // Selects without a visible label get an accessible name (DESIGN.md L2
     // label audit) — the runtime-image selector and the chain model picker.
-    expect(source).toContain('aria-label={t(locale, "settings.runtimeImage")}');
+    expect(source).toContain('aria-label={t(locale, "settings.runtimeHarness")}');
     expect(source).toContain('aria-label={t(locale, "settings.modelChainField")}');
   });
 
@@ -1498,7 +1498,7 @@ describe("section-scoped op feedback", () => {
     expect(t("zh_CN", "common.loadFailed")).toContain("无法加载");
   });
 
-  test("each card owns an inline notice region: runtime image, providers, chains, seats, ops", () => {
+  test("each card owns an inline notice region: runtime harness, providers, chains, seats, ops", () => {
     const source = settingsSource();
     // The shared local region component wraps PageNotice, so every region
     // inherits the banner's alert/status roles and notice tokens (WCAG
@@ -1507,7 +1507,7 @@ describe("section-scoped op feedback", () => {
     expect(source).toContain("return <PageNotice kind={notice.kind} message={notice.message} />;");
     // Runtime image: region inside the editor, next to the save trigger.
     const runtimeBody = source.slice(
-      source.indexOf("function RuntimeImageEditor"),
+      source.indexOf("function RuntimeHarnessEditor"),
       source.indexOf("function OpsCard"),
     );
     expect(runtimeBody).toContain("<NoticeRegion notice={notice} />");
@@ -1638,7 +1638,7 @@ describe("section-scoped op feedback", () => {
     // One guard per form: the trigger disables while its own POST is in
     // flight (the confirm dialog's pre-existing disabled={busy} guard stays).
     const runtimeBody = source.slice(
-      source.indexOf("function RuntimeImageEditor"),
+      source.indexOf("function RuntimeHarnessEditor"),
       source.indexOf("function OpsCard"),
     );
     expect(runtimeBody).toContain("disabled={busy}");
@@ -2007,14 +2007,14 @@ describe("GitHub App settings link wiring (AD-623)", () => {
   });
 });
 
-describe("runtime image row tightness", () => {
+describe("runtime harness row tightness", () => {
   test("select shell is content-adaptive; save button sits in the same flex-wrap row", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // User-reported regression: the wrapper reserved min-w-64 (256px) while the
     // trigger only rendered short option content — a perceived gap between the
     // select and its save button. The shell must stay content-adaptive.
     const runtimeBody = source.slice(
-      source.indexOf("function RuntimeImageEditor"),
+      source.indexOf("function RuntimeHarnessEditor"),
       source.indexOf("function OpsCard"),
     );
     expect(runtimeBody).toContain('<div className="w-fit max-w-xs">');
@@ -2026,7 +2026,7 @@ describe("runtime image row tightness", () => {
       runtimeBody.indexOf("<NoticeRegion"),
     );
     expect(row).toContain("SelectTrigger");
-    expect(row).toContain("settings.saveRuntimeImage");
+    expect(row).toContain("settings.saveRuntimeHarness");
   });
 });
 

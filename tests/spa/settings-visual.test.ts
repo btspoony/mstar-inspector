@@ -7,7 +7,7 @@
  *    the copy-in ui/card.tsx); the page picks a tier through the prop and
  *    never hand-assembles tier classNames. Tier 1 = identity/status zone
  *    (slug row + AppInfo + Ops/Health), Tier 2 = configuration zone
- *    (RuntimeImage from T1; Providers/Chains/Seats joined in T2).
+ *    (RuntimeHarness from T1; Providers/Chains/Seats joined in T2).
  * 2. v0.3 face: page/panel headings ride the heading-24/20 token steps
  * (QC idiom convergence), card titles ride heading-16, group
  *    eyebrows separate the two zones at the spacing-8 rhythm.
@@ -123,7 +123,7 @@ describe("settings section rhythm (AD-591)", () => {
     expect(settingsPage).not.toContain("gray-alpha-500");
   });
 
-  test("identity/status cards re-parent onto the Tier 1 surface; runtime image onto Tier 2", () => {
+  test("identity/status cards re-parent onto the Tier 1 surface; runtime harness onto Tier 2", () => {
     const cardBlock = (start: string, end: string) => {
       const from = settingsPage.indexOf(start);
       expect(from, start).toBeGreaterThan(-1);
@@ -132,7 +132,7 @@ describe("settings section rhythm (AD-591)", () => {
     expect(cardBlock("export function AppInfoCard", "function HealthBody")).toContain(
       '<SectionCard tier="primary">',
     );
-    expect(cardBlock("function RuntimeImageCard", "function RuntimeImageEditor")).toContain(
+    expect(cardBlock("function RuntimeHarnessCard", "function RuntimeHarnessEditor")).toContain(
       '<SectionCard tier="secondary">',
     );
     expect(cardBlock("function OpsCard", "function ProvidersCard")).toContain(
@@ -155,7 +155,7 @@ describe("settings section rhythm (AD-591)", () => {
     const managePos = settingsPage.indexOf("{payload.can_manage ? (");
     expect(managePos).toBeGreaterThan(appInfoPos);
     expect(managePos).toBeLessThan(configurationPos);
-    const runtimePos = settingsPage.indexOf("<RuntimeImageCard");
+    const runtimePos = settingsPage.indexOf("<RuntimeHarnessCard");
     expect(runtimePos).toBeGreaterThan(configurationPos);
   });
 });
@@ -227,7 +227,7 @@ describe("settings heading idiom (QC convergence)", () => {
     expect(sectionCard).toContain("leading-(--typo-heading-16-line)");
     expect(sectionCard).toContain("tracking-(--typo-heading-16-tracking)");
     // Each re-parented card consumes the upgraded title (the T1 wave re-parented
-    // identity/status + runtime image; T2 added providers/chains/seats — pinned
+    // identity/status + runtime harness; T2 added providers/chains/seats — pinned
     // in the T2 describe below). End anchors use the file's cardBlock
     // next-declaration pattern so prose near a signature can't break the pin.
     const cardBlock = (start: string, end: string) => {
@@ -237,7 +237,7 @@ describe("settings heading idiom (QC convergence)", () => {
     };
     for (const [card, next] of [
       ["export function AppInfoCard", "function HealthBody"],
-      ["function RuntimeImageCard", "function RuntimeImageEditor"],
+      ["function RuntimeHarnessCard", "function RuntimeHarnessEditor"],
       ["function OpsCard", "function ProvidersCard"],
     ] as const) {
       expect(cardBlock(card, next), card).toContain("<SectionCardTitle>");
@@ -273,7 +273,7 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
   test("the three configuration cards ride the Tier 2 surface through the prop, not hand-assembled faces", () => {
     // The page never spells tier classes (the T1 single-point pin above); the
     // three manage-face configuration cards re-parent exactly like the
-    // runtime image card did — one prop, zero per-block className assembly.
+    // runtime harness card did — one prop, zero per-block className assembly.
     expect(cardBlock("function ProvidersCard", "function ConfiguredKeyRow")).toContain(
       '<SectionCard tier="secondary">',
     );

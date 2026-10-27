@@ -112,9 +112,9 @@ describe("settings 400 key transport", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
-      key: "settings.error.providerUnavailableOnImage",
+      key: "settings.error.providerUnavailableOnHarness",
       message:
-        "anthropic is not available under this App's selected runtime image (legacy-runtime) — nothing was stored.",
+        "anthropic is not available under this App's selected runtime harness (legacy-runtime) — nothing was stored.",
       params: { provider: "anthropic", image: "legacy-runtime" },
     });
   });
@@ -335,9 +335,9 @@ describe("CARRY-2: verify-route eligibility rejection gains the keyed face", () 
     expect(await res.json()).toEqual({
       ok: false,
       reason: "unsupported_provider",
-      key: "settings.error.providerUnavailableOnImage",
+      key: "settings.error.providerUnavailableOnHarness",
       message:
-        "anthropic is not available under this App's selected runtime image (legacy-runtime) — nothing was stored.",
+        "anthropic is not available under this App's selected runtime harness (legacy-runtime) — nothing was stored.",
       params: { provider: "anthropic", image: "legacy-runtime" },
     });
   });

@@ -454,7 +454,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
     const env = makeEnv(db);
     const ok = await postForm(SETTINGS, "mallory", env, { op: "save-sandbox-image", sandbox_image_id: "omp" });
     expect(ok.status).toBe(200);
-    expect(await ok.text()).toContain("Saved the omp runtime image");
+    expect(await ok.text()).toContain("Saved the omp runtime harness");
     expect(db.raw.query("SELECT sandbox_image_id FROM github_apps WHERE id = ?").get(app.id)).toEqual({
       sandbox_image_id: "omp",
     });
@@ -615,9 +615,9 @@ describe("Server-side eligibility precheck (fail-closed)", () => {
     expect(await res.json()).toEqual({
       ok: false,
       reason: "unsupported_provider",
-      key: "settings.error.providerUnavailableOnImage",
+      key: "settings.error.providerUnavailableOnHarness",
       message:
-        "anthropic is not available under this App's selected runtime image (legacy-runtime) — nothing was stored.",
+        "anthropic is not available under this App's selected runtime harness (legacy-runtime) — nothing was stored.",
       params: { provider: "anthropic", image: "legacy-runtime" },
     });
     expect(fetchSpy).not.toHaveBeenCalled();

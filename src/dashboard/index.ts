@@ -2722,7 +2722,7 @@ function settingsRemoveResponse(
 const SETTINGS_400_KEYS = {
   providerRequired: "settings.error.providerRequired",
   providerUnknown: "settings.error.providerUnknown",
-  providerUnavailableOnImage: "settings.error.providerUnavailableOnImage",
+  providerUnavailableOnHarness: "settings.error.providerUnavailableOnHarness",
   apiKeyRequired: "settings.error.apiKeyRequired",
   apiKeyTooLong: "settings.error.apiKeyTooLong",
   apiKeyCommandPrefix: "settings.error.apiKeyCommandPrefix",
@@ -2963,8 +2963,8 @@ const appSettingsRoute = async (c: DashboardContext) => {
         review_enabled: app.review_enabled !== 0,
         created_by: app.created_by,
         last_webhook_at: app.last_webhook_at ?? null,
-        // (spec § Technical interfaces): the App's selected sandbox
-        // runtime image — read-only on BOTH faces (registry id only, never
+        // (spec § Technical interfaces): the App's selected runtime
+        // harness — read-only on BOTH faces (registry id only, never
         // image-local configuration or secrets).
         sandbox_image_id: app.sandbox_image_id,
         // The App's review trigger mode (spec review-trigger-policy §2,
@@ -3019,7 +3019,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const customKeys = await store.listCustomProviderKeys(gate.app.id);
     const keyRows = [...maskedKeys, ...customKeys];
     // (spec § Provider configuration contract): eligibility is judged
-    // against the App's SELECTED runtime image, never an inferred filter. The
+    // against the App's SELECTED runtime harness, never an inferred filter. The
     // registry entry's runtime kind is the contract: an omp-selected App
     // consumes builtin entries via env names and materializes templates
     // through the custom-provider machinery; any other runtime would leave
@@ -3146,7 +3146,7 @@ const appModelsRoute = async (c: DashboardContext) => {
  * SPA add-key path: verify the as-typed key, then store. Failure
  * is 400 JSON with a structured reason (invalid_key / unreachable / unexpected /
  * unsupported_provider) and ZERO writes. The key is never logged or returned.
- * An App whose selected runtime image is not omp (unknown id
+ * An App whose selected runtime harness is not omp (unknown id
  * included — fail-closed) is refused with unsupported_provider before any
  * probe, mirroring the display face's eligibility gate.
  */
@@ -3181,14 +3181,14 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
   // (isOmpRuntimeImage). Unknown image id → not omp → 400. The precheck
   // reuses the existing closed reason enum (no new value;
   // CARRY-2 adds the optional keyed face so the SPA renders the
-  // runtime-image copy in the operator's locale); zero writes.
+  // runtime-harness copy in the operator's locale); zero writes.
   if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
     return c.json(
       {
         ok: false,
         reason: "unsupported_provider" as const,
-        key: SETTINGS_400_KEYS.providerUnavailableOnImage,
-        message: t("en", SETTINGS_400_KEYS.providerUnavailableOnImage, {
+        key: SETTINGS_400_KEYS.providerUnavailableOnHarness,
+        message: t("en", SETTINGS_400_KEYS.providerUnavailableOnHarness, {
           provider,
           image: gate.app.sandbox_image_id,
         }),
@@ -3231,8 +3231,8 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
  * The settings POST: the operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
  * other id — the allowlist is the plan's Global Constraint) + the
- * selected-image eligibility precheck (a selected image whose
- * runtime is not omp — unknown id included, fail-closed — is a 400 with zero
+ * selected-image eligibility precheck (a selected image whose harness
+ * is not omp — unknown id included, fail-closed — is a 400 with zero
  * writes, the same gate the display face stamps into provider_catalog) +
  * non-empty key
  * of at most MAX_PROVIDER_KEY_LENGTH characters (input bounds — an
@@ -3257,7 +3257,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
  * grammar, https-only baseUrl, three-form api enum, model_ids 1..32 × ≤128,
  * key required ≤4096) is a 400 with zero writes; the key is encrypted
  * inside the store and never echoed. save-sandbox-image = the
- * App's sandbox runtime-image selection: only ENABLED
+ * App's runtime-harness selection (mounted into the sandbox image): only ENABLED
  * src/contracts/sandbox-images.ts registry ids are storable (unknown or
  * disabled → 400, nothing stored). The settings page is
  * SPA-owned — 2xx = the SPA refetches the JSON face, 4xx/5xx = the reason
@@ -3284,13 +3284,13 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         : settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerUnknown, { provider });
     }
     // Fail-closed server-side precheck: the App's selected
-    // runtime image must carry an omp runtime for ANY provider key to be
+    // runtime harness must be omp for ANY provider key to be
     // eligible — the same gate the settings display face stamps into
     // provider_catalog (isOmpRuntimeImage). Unknown image id → not omp →
     // 400, zero writes. Plain-text family (native/legacy surface only — the
     // SPA's add-key path is verify-first via /keys/verify).
     if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerUnavailableOnImage, {
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerUnavailableOnHarness, {
         provider,
         image: gate.app.sandbox_image_id,
       });
@@ -3832,7 +3832,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       logSettingsFailure("save_sandbox_image", gate.app.id, err);
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, gate.app.slug, `Saved the ${image.id} runtime image for ${gate.app.slug}.`);
+    return settingsPostResponse(c, gate.app.slug, `Saved the ${image.id} runtime harness for ${gate.app.slug}.`);
   }
   // Review fold-in: an unknown op is a validation failure like any
   // other — 400 with the reason.

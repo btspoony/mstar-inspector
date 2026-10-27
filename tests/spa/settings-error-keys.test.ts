@@ -41,15 +41,15 @@ describe("settings.error dictionary faces", () => {
     expect(t("zh_CN", "settings.error.roleFieldsMissing", { roles: "a, b" })).toContain("席位字段缺失");
   });
 
-  test("the Cloudflare slot and the CARRY-2 runtime-image copy exist in both locales", () => {
+  test("the Cloudflare slot and the CARRY-2 runtime-harness copy exist in both locales", () => {
     expect(t("en", "settings.error.accountIdRequired")).toContain("Cloudflare account id");
     expect(t("zh_CN", "settings.error.accountIdRequired")).toContain("Cloudflare 账户 id");
     const image = "omp";
-    expect(t("en", "settings.error.providerUnavailableOnImage", { provider: "ark", image })).toContain(
-      "not available under this App's selected runtime image (omp)",
+    expect(t("en", "settings.error.providerUnavailableOnHarness", { provider: "ark", image })).toContain(
+      "not available under this App's selected runtime harness (omp)",
     );
-    expect(t("zh_CN", "settings.error.providerUnavailableOnImage", { provider: "ark", image })).toContain(
-      "运行时镜像（omp）上不可用",
+    expect(t("zh_CN", "settings.error.providerUnavailableOnHarness", { provider: "ark", image })).toContain(
+      "运行时 harness（omp）上不可用",
     );
   });
 });
