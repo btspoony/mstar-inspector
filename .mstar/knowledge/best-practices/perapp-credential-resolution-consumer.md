@@ -33,4 +33,4 @@ Any queue consumer that must act as one of N stored identities; any webhook endp
 
 ## Examples
 
-- `src/pipeline/consumer.ts` (`resolveCommenter`, `resolveAppConfig`, per-App env assembly); `src/worker/index.ts` (`POST /webhook/:appSlug`); `src/worker/webhooks.ts` (secret-keyed verifier cache); `tests/pipeline/app-credential-resolution.test.ts` (sibling-secret isolation, disabled-mid-flight, legacy byte-compat).
+- `src/pipeline/consumer.ts` (`resolveCommenter`, `resolveAppConfig`, per-App env assembly); `src/worker/index.ts` (`POST /webhook/:webhookPath`); `src/worker/webhooks.ts` (secret-keyed verifier cache); `tests/pipeline/app-credential-resolution.test.ts` (sibling-secret isolation, disabled-mid-flight, legacy byte-compat).

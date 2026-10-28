@@ -20,7 +20,7 @@ session inside an isolated Cloudflare Sandbox container, posts its result as a
 single upserted comment on the PR, and stores structured findings in D1 for
 later analysis.
 
-- **Multi-App from one deployment** — register any number of GitHub Apps through the dashboard; each gets its own slug, encrypted credentials, BYOK provider keys, and model chain
+- **Multi-App from one deployment** — register any number of GitHub Apps through the dashboard; each gets its own opaque webhook path, encrypted credentials, BYOK provider keys, and model chain
 - **Isolated execution** — every review runs in a one-shot Cloudflare Sandbox container (clone → review → destroy), with no secrets baked into the image
 - **Structured results** — reviews emit a `mstar.review/v1` envelope (verdict + classified findings) stored in D1, so dedup, recurrence, and health analytics are possible later
 - **Retained finding lifecycle** — unresolved findings survive across rounds: each round re-verifies them against the current code and discussion, reports the outcome in the same overall comment, and automatically resolves only the Inspector-owned review threads it can prove are its own and positively fixed (a finding's *addressed* disposition is never equated with a *resolved* GitHub thread)
@@ -32,7 +32,7 @@ later analysis.
 ```mermaid
 flowchart LR
     D["Dashboard SPA<br/>register Apps · BYOK keys · model chain"] -->|"encrypted per-App credentials"| DB[("D1 store")]
-    GH["GitHub webhook<br/>POST /webhook/:appSlug"] --> WH["verify signature<br/>with that App's secret"]
+    GH["GitHub webhook<br/>POST /webhook/:webhookPath"] --> WH["verify signature<br/>with that App's secret"]
     WH --> Q[("Queue")]
     Q --> CO["Consumer"]
     CO --> SB["Sandbox container<br/>clone → multi-seat agent review"]
@@ -43,7 +43,7 @@ flowchart LR
 One deployment serves any number of GitHub Apps. Each App is registered
 through the dashboard and brings its own encrypted credentials, provider keys
 (BYOK) and model chain, stored in D1 — there are no shared review credentials
-at the deployment level. Incoming webhooks are routed per App slug, reviews
+at the deployment level. Incoming webhooks are routed per App webhook path, reviews
 run one-at-a-time in one-shot Sandbox containers, and every result is stored
 structurally (`mstar.review/v1`) in D1 for dedup, recurrence and health
 analytics.
@@ -109,7 +109,7 @@ Deploy a pinned release to your own Cloudflare account:
    person in creates a workspace and becomes its owner — see
    [`docs/deploy.md`](docs/deploy.md) § 6.
 
-6. **Sign in and register a GitHub App** — visit `https://<your-worker>/dashboard`, sign in with GitHub, and follow the **Register App** manifest flow. It creates the GitHub App on your account with a per-App webhook URL of the form `{origin}/webhook/<slug>`, stores the PEM and webhook secret encrypted in D1, and shows you the exact webhook URL to set.
+6. **Sign in and register a GitHub App** — visit `https://<your-worker>/dashboard`, sign in with GitHub, and follow the **Register App** manifest flow. It creates the GitHub App on your account with a per-App webhook URL of the form `{origin}/webhook/<webhookPath>` (an opaque random value minted per App, not the GitHub slug), stores the PEM and webhook secret encrypted in D1, and shows you the exact webhook URL to set.
 
 7. **Configure the App** — on the dashboard Settings page for the App, add the provider API key(s) the review model needs (BYOK, encrypted in D1) and a model chain. An App without these fails its reviews closed — see [Per-App configuration](#per-app-configuration).
 
@@ -119,7 +119,7 @@ Deploy a pinned release to your own Cloudflare account:
 
 ## How reviews work
 
-- **Per-App routing**: GitHub delivers webhooks to `POST /webhook/:appSlug`. The Worker resolves the slug, verifies the signature with that App's own decrypted secret, and enqueues a review job tagged with the App's identity. There is no other review entry point.
+- **Per-App routing**: GitHub delivers webhooks to `POST /webhook/:webhookPath`. The Worker resolves the webhook path, verifies the signature with that App's own decrypted secret, and enqueues a review job tagged with the App's identity. There is no other review entry point.
 - **Queue → Sandbox**: a Cloudflare Queue consumer clones the PR inside a one-shot Sandbox container and runs a multi-seat agent session — see [Agent runtimes](#agent-runtimes).
 - **Purpose-scoped credentials**: the Worker mints two installation grants from one auth point, each restricted to the one repository. The Sandbox always receives the `sandbox-read` grant (`contents: read`, `metadata: read`, `pull_requests: read` — the last covers the `gh pr diff` step, which runs with exactly this token) and the Worker asserts the *returned* capabilities before use, so a broader or unscoped token fails closed and never reaches a review container. GitHub writes ride a separate `review-write` grant.
 - **Permissions**: the App manifest requests `contents: write`, `metadata: read`, `pull_requests: write`, `issues: write`, `checks: write`. `contents: write` exists for exactly one Worker-only purpose — resolving positively verified, Inspector-owned review threads — and grants no model, push, merge or code-write authority. `checks: write` exists for the advisory review Check Run only.
@@ -144,7 +144,7 @@ plugin; which coding agent executes them is pluggable:
 
 ## Per-App configuration
 
-Everything a review needs is configured **per App** on the dashboard Settings page (`/dashboard/apps/<slug>/settings`) — there are no deployment-level provider keys or model-chain knobs to leak between Apps.
+Everything a review needs is configured **per App** on the dashboard Settings page (`/dashboard/apps/<appId>/settings`, the numeric GitHub App ID) — there are no deployment-level provider keys or model-chain knobs to leak between Apps.
 
 - **Provider keys (BYOK)** — encrypted in D1, injected into the review container only from the App's own config, through a fixed provider allowlist (Anthropic, OpenAI, Gemini, Ark, OpenRouter, Groq, and more — the dashboard shows the full list). Custom providers can be declared on the same page.
 - **Model chain** — comma-separated model selectors, first = primary, rest = fallback. This is the only chain source.
