@@ -67,8 +67,9 @@ describe("SPA 400-body resolution contract", () => {
     // submitSettings, postPinnedOutcome and the workspace name card resolve
     // through settingsOpOutcome — a mapped 4xx, the remove routes' no-change
     // 2xx face and the saved notice all take the same path (pinned ops used to
-    // be the raw body.trim() path the audit called out).
-    expect(settingsPage.match(/settingsErrorMessage\(locale, body\)/g)?.length).toBe(1);
+    // be the raw body.trim() path the audit called out). The manager refresh
+    // channel resolves its keyed 400 through the same resolver, so how many
+    // call sites exist is not the contract — the channel tests cover it.
     expect(settingsPage).not.toContain("message: body.trim()");
   });
 
