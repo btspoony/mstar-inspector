@@ -80,7 +80,7 @@ async function seededDb(): Promise<TestD1> {
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, 'checks-test', ?, 'checks-test', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
