@@ -9,8 +9,10 @@
 --   github_description        App description (nullable upstream too);
 --   github_html_url           the App's GitHub settings-page URL (the
 --                             `html_url` of GET /app — the info-card link);
---   github_avatar_url         owner avatar URL (rendered by <img> directly —
---                             no image proxy in this plan);
+--   github_avatar_url         the App's own logo (its bot account's avatar,
+--                             read from GET /users/{slug}[bot] — GET /app has
+--                             no logo field, and the owner's avatar is the
+--                             owner's image, not the App's);
 --   github_metadata_synced_at last successful sync, SQLite datetime('now')
 --                             UTC TEXT — the 0008 last_webhook_at precedent
 --                             (NULL = never synced; the settings read path's

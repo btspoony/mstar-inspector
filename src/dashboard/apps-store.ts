@@ -135,7 +135,7 @@ export type GithubAppRow = {
   github_description: string | null;
   /** Cached GitHub App settings-page URL (migration 0019); NULL = never synced. */
   github_html_url: string | null;
-  /** Cached owner avatar URL (migration 0019); NULL = never synced. */
+  /** Cached App logo URL (the bot account's avatar, migration 0019/0036); NULL = never synced. */
   github_avatar_url: string | null;
   /**
    * GitHub's own App slug (migration 0036), cached from `GET /app`; NULL =
