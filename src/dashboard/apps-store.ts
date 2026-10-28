@@ -23,9 +23,14 @@
  * through IN-list queries (deliverySummaries) — so it needs a narrower face.
  *
  * Semantics (route call sites rely on these):
- *   - getAppBySlug / getAppById return the row REGARDLESS of status or
- *     deleted_at — callers (webhook route, consumer) filter active + not
- *     deleted per the Multi-App contract.
+ *   - getAppByWebhookPath / getAppByGithubId / getAppById return the row
+ *     REGARDLESS of status or deleted_at — callers (webhook route, consumer)
+ *     filter active + not deleted per the Multi-App contract.
+ *   - The two App identities are distinct columns (migration 0036):
+ *     `webhook_path` is OUR opaque webhook route key and keeps its stored
+ *     values, so live GitHub webhook URLs never break; `github_slug` is
+ *     GitHub's own mutable slug, cached by saveGithubMetadata and the only
+ *     source of the `<slug>[bot]` mention login.
  *   - listApps is the dashboard-list face: non-deleted rows, newest first.
  *   - setAppStatus refuses soft-deleted rows (a deleted app can never be
  *     re-activated) and returns whether a row changed.
@@ -52,10 +57,11 @@
  *     timestamp (L5: the per-webhook frequency of this touch must not churn
  *     the operator timestamp, and the commenter fingerprint ignores
  *     both columns, so the cache cannot be thrashed by it either).
- *   - saveGithubMetadata (migration 0019) is the SINGLE writer for
+ *   - saveGithubMetadata (migrations 0019/0036) is the SINGLE writer for
  *     the cached GitHub profile columns (github_name / github_description /
- *     github_html_url / github_avatar_url + github_metadata_synced_at):
- *     writes ONLY those five, never updated_at (the touchLastWebhook
+ *     github_html_url / github_avatar_url / github_slug +
+ *     github_metadata_synced_at):
+ *     writes ONLY those six, never updated_at (the touchLastWebhook
  *     machine-trigger precedent — the settings read path's lazy 24h TTL
  *     refresh is the only caller), and refuses soft-deleted rows exactly
  *     like setAppStatus.
@@ -82,16 +88,21 @@
  *     convention); createApp ids are caller-supplied UUIDs (the reviews.id
  *     caller-UUID convention — review pin: secretbox AAD rowKey MUST
  *     equal the row PK, so the caller generates the id before encrypting).
- *   - UNIQUE / FK violations throw (fail-loud): duplicate slug,
+ *   - UNIQUE / FK violations throw (fail-loud): duplicate webhook_path,
  *     github_app_id, or (app_id, installation_id) pairs, and unknown app
  *     references are caller-visible errors, never swallowed.
  */
 import { getSandboxImage } from "../contracts/sandbox-images";
 
-/** A row of `github_apps` (D1 column names, snake_case; migration 0004). */
+/** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
   id: string;
-  slug: string;
+  /**
+   * OUR webhook route key (migration 0036 renamed `slug`): opaque to GitHub
+   * and to the review pipeline, UNIQUE NOT NULL. The rename kept every stored
+   * value, so live `/webhooks/{webhook_path}` URLs still resolve.
+   */
+  webhook_path: string;
   github_app_id: number;
   name: string;
   /** secretbox envelope of the App PEM — opaque, never decrypted here. */
@@ -125,6 +136,13 @@ export type GithubAppRow = {
   github_html_url: string | null;
   /** Cached owner avatar URL (migration 0019); NULL = never synced. */
   github_avatar_url: string | null;
+  /**
+   * GitHub's own App slug (migration 0036), cached from `GET /app`; NULL =
+   * never synced. Mutable upstream and NOT derivable from `name`, which is why
+   * it is its own column: the `<github_slug>[bot]` mention login and the
+   * dashboard links read it, while `webhook_path` stays our route key.
+   */
+  github_slug: string | null;
   /**
    * Last successful GitHub metadata sync (migration 0019, datetime('now')
    * UTC — the last_webhook_at TEXT convention); NULL = never synced. The
@@ -181,7 +199,16 @@ export type CreateAppInput = {
    * unknowable and the row undecryptable.
    */
   id: string;
-  slug: string;
+  /**
+   * OUR webhook route key (migration 0036 renamed `slug` to `webhook_path`).
+   * Callers mint it; GitHub never sees it as an identity.
+   */
+  webhookPath: string;
+  /**
+   * GitHub's App slug, when the caller already knows it. NULL is the honest
+   * default ("never synced") — the first metadata sync fills it.
+   */
+  githubSlug: string | null;
   githubAppId: number;
   name: string;
   /** secretbox envelope of the App PEM (AAD `github_apps.private_key_enc:<id>`). */
@@ -205,7 +232,7 @@ export type UpsertInstallationInput = {
 };
 
 /**
- * The GitHub profile fields cached by migration 0019 — the input
+ * The GitHub profile fields cached by migrations 0019/0036 — the input
  * (and result) shape of the single metadata write entry `saveGithubMetadata`.
  * src/dashboard/github-app-metadata.ts builds it from `GET /app`'s public
  * profile; the settings read path persists it verbatim. Field names mirror
@@ -216,6 +243,7 @@ export type GithubAppMetadataInput = {
   githubDescription: string | null;
   githubHtmlUrl: string | null;
   githubAvatarUrl: string | null;
+  githubSlug: string | null;
 };
 
 /**
@@ -337,7 +365,8 @@ type AppsStoreD1 = {
  */
 export const APP_READ_SQL = {
   getAppById: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
-  getAppBySlug: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.slug = ?`,
+  getAppByWebhookPath: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.webhook_path = ?`,
+  getAppByGithubId: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
   listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
 
@@ -405,8 +434,8 @@ export function createAppsStore(db: AppsStoreD1) {
      * never exists without an owner. sandbox_image_id is omitted: the
      * migration 0018 DDL default materializes every new row onto the
      * registry's default image ('omp') — the store face for changing it is
-     * setSandboxImage. UNIQUE violations on slug
-     * or github_app_id throw — the route layer pre-resolves the slug at
+     * setSandboxImage. UNIQUE violations on webhook_path
+     * or github_app_id throw — the route layer pre-resolves the webhook path at
      * start, and a commit-time race burns the hold (409) instead of
      * remapping (the manifest registered the webhook URL with GitHub).
      */
@@ -426,13 +455,14 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `INSERT INTO github_apps
-               (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+               (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
                 created_by, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
           )
           .bind(
             id,
-            input.slug,
+            input.webhookPath,
+            input.githubSlug,
             input.githubAppId,
             input.name,
             input.privateKeyEnc,
@@ -451,13 +481,25 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * By slug; resolves soft-deleted and disabled App rows too (callers
-     * filter), but NOT an App whose workspace is soft-deleted.
+     * By webhook path (migration 0036's name for `slug`); resolves
+     * soft-deleted and disabled App rows too (callers filter), but NOT an App
+     * whose workspace is soft-deleted.
      */
-    async getAppBySlug(slug: string): Promise<GithubAppTenantRow | null> {
+    async getAppByWebhookPath(webhookPath: string): Promise<GithubAppTenantRow | null> {
       return db
-        .prepare(APP_READ_SQL.getAppBySlug)
-        .bind(slug)
+        .prepare(APP_READ_SQL.getAppByWebhookPath)
+        .bind(webhookPath)
+        .first<GithubAppTenantRow>();
+    },
+
+    /**
+     * By GitHub's numeric App id; same guards as getAppById (soft-deleted and
+     * disabled rows resolve, a soft-deleted workspace does not).
+     */
+    async getAppByGithubId(githubAppId: number): Promise<GithubAppTenantRow | null> {
+      return db
+        .prepare(APP_READ_SQL.getAppByGithubId)
+        .bind(githubAppId)
         .first<GithubAppTenantRow>();
     },
 
@@ -609,10 +651,10 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Persist one fetched GitHub profile (migration 0019) — the
+     * Persist one fetched GitHub profile (migrations 0019/0036) — the
      * SINGLE writer for the github_* metadata columns (the settings read
      * path's lazy 24h TTL refresh; no cron/queue retry exists by plan lock).
-     * Writes ONLY the five new columns — deliberately NOT updated_at, which
+     * Writes ONLY the six new columns — deliberately NOT updated_at, which
      * stays the operator-mutation timestamp (the touchLastWebhook L5
      * precedent: this write is machine-triggered, at most once per App per
      * TTL window). Refuses soft-deleted rows exactly like setAppStatus.
@@ -623,7 +665,7 @@ export function createAppsStore(db: AppsStoreD1) {
         .prepare(
           `UPDATE github_apps
            SET github_name = ?, github_description = ?, github_html_url = ?,
-               github_avatar_url = ?, github_metadata_synced_at = datetime('now')
+               github_avatar_url = ?, github_slug = ?, github_metadata_synced_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(
@@ -631,6 +673,7 @@ export function createAppsStore(db: AppsStoreD1) {
           metadata.githubDescription,
           metadata.githubHtmlUrl,
           metadata.githubAvatarUrl,
+          metadata.githubSlug,
           id,
         )
         .run();

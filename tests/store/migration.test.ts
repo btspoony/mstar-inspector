@@ -9,15 +9,27 @@
  *   - head_sha is NOT NULL — an empty sha cannot be inserted
  *   - 0002 adds reviews.envelope: TEXT, nullable (M1 rows), CHECK
  *     json_valid for v1 rows
+ *   - 0036 renames github_apps.slug to webhook_path (values preserved) and
+ *     adds the nullable, uniquely indexed github_slug
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createMigratedTestD1, createTestD1 } from "./helpers";
 import type { TestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
+
+/**
+ * The App route-key column of THIS fixture's shape. Migration 0036 renamed
+ * `slug` to `webhook_path`, and the describes below seed both the pre- and
+ * post-0036 schema, so a raw INSERT cannot hard-code either name.
+ */
+function appPathColumn(db: TestD1): "slug" | "webhook_path" {
+  const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>;
+  return columns.some((c) => c.name === "webhook_path") ? "webhook_path" : "slug";
+}
 
 const REVIEW = {
   id: "review-1",
@@ -152,7 +164,7 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
     }
     db.raw
       .prepare(
-        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
            created_by, status, deleted_at, created_at, updated_at)
          VALUES ('app-1', 'acmes-app', 1001, 'acmes-app', 'enc', 'enc', 'mallory', 'active', NULL,
            datetime('now'), datetime('now'))`,
@@ -196,7 +208,7 @@ describe("migrations/0008_github_apps_ops.sql", () => {
   function insertPre0008App(db: ReturnType<typeof createTestD1>): void {
     db.raw
       .prepare(
-        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
            created_by, status, deleted_at, created_at, updated_at)
          VALUES ('app-1', 'acmes-app', 1001, 'acmes-app', 'enc', 'enc', 'mallory', 'active', NULL,
            datetime('now'), datetime('now'))`,
@@ -222,13 +234,13 @@ describe("migrations/0008_github_apps_ops.sql", () => {
     // 0002/0005 precedent) — the live row survives untouched.
     expect(() => applyMigrationFile(db, "0008_github_apps_ops.sql")).not.toThrow();
     const row = db.raw
-      .query("SELECT slug, status, review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'")
-      .get() as { slug: string; status: string; review_enabled: number; last_webhook_at: string | null };
+      .query(`SELECT ${appPathColumn(db)} AS webhook_path, status, review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'`)
+      .get() as { webhook_path: string; status: string; review_enabled: number; last_webhook_at: string | null };
     // Existing rows materialize to the resume default (L5: every App known
     // before the migration stays reviewing), last delivery never seen.
     expect(row.review_enabled).toBe(1);
     expect(row.last_webhook_at).toBeNull();
-    expect(row.slug).toBe("acmes-app");
+    expect(row.webhook_path).toBe("acmes-app");
     expect(row.status).toBe("active");
     const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(count.n).toBe(1);
@@ -283,7 +295,7 @@ describe("migrations/0009_app_model_roles.sql", () => {
   function insertApp(db: ReturnType<typeof createTestD1>, id: string, githubAppId = 1001): void {
     db.raw
       .prepare(
-        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
            created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', NULL,
            datetime('now'), datetime('now'))`,
@@ -498,7 +510,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
   function insertApp(db: TestD1, id: string): void {
     db.raw
       .prepare(
-        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
            created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, 1001, ?, 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
       )
@@ -926,7 +938,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
   function insertApp(db: TestD1, id: string, githubAppId = 1001): void {
     db.raw
       .prepare(
-        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
            created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', NULL,
            datetime('now'), datetime('now'))`,
@@ -1091,7 +1103,7 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
   function insertApp(db: TestD1, id: string, opts: { githubAppId?: number; deleted?: boolean } = {}): void {
     db.raw
       .prepare(
-        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
            created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active',
            ${opts.deleted ? "datetime('now', '-1 hour')" : "NULL"},
@@ -1174,7 +1186,12 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
       .get() as { sandbox_image_id: string };
     expect(row.sandbox_image_id).toBe("omp");
     expect(() =>
-      db.raw.prepare("INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status, sandbox_image_id, created_at, updated_at) VALUES ('app-null', 'app-null', 1002, 'app-null', 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))").run(),
+      db.raw
+        .prepare(
+          `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status, sandbox_image_id, created_at, updated_at)
+           VALUES ('app-null', 'app-null', 1002, 'app-null', 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
+        )
+        .run(),
     ).toThrow(/NOT NULL constraint failed/);
     expect(() =>
       db.raw.prepare("UPDATE github_apps SET sandbox_image_id = NULL WHERE id = 'app-1'").run(),
@@ -1202,7 +1219,7 @@ describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
   function insertApp(db: TestD1, id: string, opts: { githubAppId?: number; deleted?: boolean } = {}): void {
     db.raw
       .prepare(
-        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
            created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active',
            ${opts.deleted ? "datetime('now', '-1 hour')" : "NULL"},
@@ -1428,5 +1445,104 @@ describe("migrations/0035_workspace_invite_expiry_index.sql (I-000096)", () => {
     const lines = plan(db, `UPDATE workspace_invites SET status = 'expired' WHERE id IN (${CANDIDATES})`);
     expect(lines).toContain("SEARCH workspace_invites USING COVERING INDEX sqlite_autoindex_workspace_invites_1 (id=?)");
     expect(lines).toContain("SEARCH workspace_invites USING COVERING INDEX workspace_invites_expiry (expires_at<?)");
+  });
+});
+
+describe("migrations/0036_app_identity.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** The pre-0036 shape: the 0001–0035 chain, i.e. what production runs today. */
+  function createPre0036Db(): TestD1 {
+    // createTestD1 already applied the 0001/0002 base shape, so the chain here
+    // starts at 0003 and stops before the migration under test.
+    const db = createTestD1();
+    const names = readdirSync(MIGRATIONS_DIR)
+      .filter((name) => name.endsWith(".sql") && name >= "0003" && name < "0036")
+      .sort();
+    for (const name of names) applyMigrationFile(db, name);
+    return db;
+  }
+
+  /**
+   * One live row, seeded by whichever name this shape carries: `createPre0036Db`
+   * still has `slug`, the fully migrated shape has `webhook_path`.
+   */
+  function insertApp(db: TestD1, id: string, path: string, githubAppId: number): void {
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
+      )
+      .run(id, path, githubAppId, path);
+  }
+
+  test("renames slug to webhook_path and keeps every stored value (live webhook URLs stay valid)", () => {
+    const db = createPre0036Db();
+    insertApp(db, "app-1", "acmes-app", 1001);
+    insertApp(db, "app-2", "widgets-app", 1002);
+
+    expect(() => applyMigrationFile(db, "0036_app_identity.sql")).not.toThrow();
+
+    // The values are the point: a rename that dropped or rewrote them would
+    // break every webhook URL GitHub already has registered.
+    const rows = db.raw
+      .query("SELECT id, webhook_path FROM github_apps ORDER BY id")
+      .all() as Array<{ id: string; webhook_path: string }>;
+    expect(rows).toEqual([
+      { id: "app-1", webhook_path: "acmes-app" },
+      { id: "app-2", webhook_path: "widgets-app" },
+    ]);
+    const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).not.toContain("slug");
+  });
+
+  test("the rename carries NOT NULL and UNIQUE onto webhook_path (no table rebuild)", () => {
+    const db = createMigratedTestD1();
+    const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    expect(cols.find((c) => c.name === "webhook_path")!.notnull).toBe(1);
+    insertApp(db, "app-1", "taken", 2001);
+    expect(() => insertApp(db, "app-2", "taken", 2002)).toThrow(
+      /UNIQUE constraint failed: github_apps.webhook_path/,
+    );
+  });
+
+  test("github_slug is nullable TEXT with a unique index", () => {
+    const db = createMigratedTestD1();
+    const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const col = cols.find((c) => c.name === "github_slug");
+    expect(col).toBeDefined();
+    expect(col!.type).toBe("TEXT");
+    expect(col!.notnull).toBe(0);
+    expect(col!.dflt_value).toBeNull();
+    expect(db.raw.query("PRAGMA index_info(github_apps_github_slug)").all()).toEqual([
+      expect.objectContaining({ name: "github_slug" }),
+    ]);
+  });
+
+  test("several rows may hold a NULL github_slug (never synced), but a duplicate non-NULL slug is refused", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1", "one", 3001);
+    insertApp(db, "app-2", "two", 3002);
+    // Both legacy rows migrated as "never synced" and must coexist.
+    const nulls = db.raw.query("SELECT COUNT(*) AS n FROM github_apps WHERE github_slug IS NULL").get() as { n: number };
+    expect(nulls.n).toBe(2);
+
+    db.raw.prepare("UPDATE github_apps SET github_slug = 'acme-inspector' WHERE id = 'app-1'").run();
+    // GitHub's slug identifies ONE App deployment-wide, so it is unique.
+    expect(() =>
+      db.raw.prepare("UPDATE github_apps SET github_slug = 'acme-inspector' WHERE id = 'app-2'").run(),
+    ).toThrow(/UNIQUE constraint failed/);
   });
 });
