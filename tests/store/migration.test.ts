@@ -11,6 +11,8 @@
  *     json_valid for v1 rows
  *   - 0036 renames github_apps.slug to webhook_path (values preserved) and
  *     adds the nullable, deliberately UNINDEXED github_slug cache
+ *   - 0037 adds the nullable github_metadata_attempted_at marker that bounds
+ *     an unsynced App's re-attempt to one fetch per TTL window
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
@@ -1547,5 +1549,46 @@ describe("migrations/0036_app_identity.sql", () => {
     ).not.toThrow();
     const shared = db.raw.query("SELECT COUNT(*) AS n FROM github_apps WHERE github_slug = 'acme-inspector'").get() as { n: number };
     expect(shared.n).toBe(2);
+  });
+});
+
+describe("migrations/0037_github_metadata_attempt.sql", () => {
+  test("github_metadata_attempted_at is a nullable TEXT column with no default", () => {
+    const db = createMigratedTestD1();
+    const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const col = cols.find((c) => c.name === "github_metadata_attempted_at");
+    expect(col).toBeDefined();
+    expect(col!.type).toBe("TEXT");
+    expect(col!.notnull).toBe(0);
+    expect(col!.dflt_value).toBeNull();
+  });
+
+  test("existing rows read NULL (never attempted) and the column round-trips the datetime TEXT form", () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES ('app-1', 'attempt-app', 4001, 'attempt-app', 'enc', 'enc', 'mallory', 'active', NULL,
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+    // The ADD COLUMN is metadata-only: the live row survives and reads NULL,
+    // which the read path treats as stale (one attempt after the deploy).
+    const before = db.raw
+      .query("SELECT github_metadata_attempted_at FROM github_apps WHERE id = 'app-1'")
+      .get() as { github_metadata_attempted_at: string | null };
+    expect(before.github_metadata_attempted_at).toBeNull();
+
+    db.raw.prepare("UPDATE github_apps SET github_metadata_attempted_at = datetime('now') WHERE id = 'app-1'").run();
+    const after = db.raw
+      .query("SELECT github_metadata_attempted_at FROM github_apps WHERE id = 'app-1'")
+      .get() as { github_metadata_attempted_at: string };
+    expect(after.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 });

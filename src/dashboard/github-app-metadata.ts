@@ -66,11 +66,14 @@ const enc = new TextEncoder();
 
 /**
  * Lazy-refresh budget (AD-531 lock): a cached profile is served as-is
- * for 24h since `github_metadata_synced_at`; past that (or when the column is
- * NULL — never synced) the settings read path refreshes once. This bounds the
- * egress to ≤1 fetch per request; ≤1/App/day once a sync succeeds and, with
- * the zero-retry fetch discipline below, is the whole refresh-policy surface
- * — no cron/queue exists.
+ * for 24h since `github_metadata_synced_at`; past that the settings read path
+ * refreshes once. A row whose `github_slug` is still NULL (never synced) is
+ * stale regardless of that timestamp, bounded instead by
+ * `github_metadata_attempted_at` (migration 0037) — so an App that cannot sync
+ * costs one fetch per TTL window, never one per read. `force: true` (the
+ * manager's manual refresh) bypasses both bounds. Together with the zero-retry
+ * fetch discipline below this is the whole refresh-policy surface: ≤1 fetch per
+ * request, ≤1/App/TTL — no cron/queue exists.
  */
 export const GITHUB_METADATA_TTL_MS = 24 * 60 * 60 * 1000;
 

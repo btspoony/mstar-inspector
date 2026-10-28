@@ -179,6 +179,8 @@ type CachedColumns = {
   github_html_url: string | null;
   github_avatar_url: string | null;
   github_metadata_synced_at: string | null;
+  github_metadata_attempted_at: string | null;
+  github_slug: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -186,7 +188,7 @@ type CachedColumns = {
 const cachedColumns = (db: TestD1, appId: string): CachedColumns =>
   db.raw
     .query(
-      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, created_at, updated_at FROM github_apps WHERE id = ?",
+      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, github_metadata_attempted_at, github_slug, created_at, updated_at FROM github_apps WHERE id = ?",
     )
     .get(appId) as CachedColumns;
 
@@ -319,7 +321,93 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(body.app.github_html_url).toBeNull();
     expect(body.app.github_avatar_url).toBeNull();
     expect(body.app.github_metadata_synced_at).toBeNull();
-    expect(cachedColumns(db, appId).github_metadata_synced_at).toBeNull();
+    const row = cachedColumns(db, appId);
+    expect(row.github_metadata_synced_at).toBeNull();
+    // This row still caches a slug, so it has no NULL-slug re-attempt to
+    // floor: the marker stays untouched and only the profile columns are
+    // involved. The operator timestamp holds (machine write).
+    expect(row.github_metadata_attempted_at).toBeNull();
+    expect(row.updated_at).toBe(row.created_at);
+  });
+
+  test("a permanently failing upstream costs ONE fetch across two settings reads (migration 0037)", async () => {
+    // The 404/401/403 case: nothing is ever written to the profile columns, so
+    // without an attempt marker the NULL-slug rule re-fetches on every read —
+    // one `/app` call plus up to the 5 s timeout per open, for every member.
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    db.raw.query("UPDATE github_apps SET github_slug = NULL WHERE id = ?").run(appId);
+    const { calls } = stubFetch(
+      () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } }),
+    );
+    const env = makeEnv(db);
+
+    expect((await getSettings("mallory", env)).status).toBe(200);
+    expect((await getSettings("hubot", env)).status).toBe(200);
+
+    expect(calls).toHaveLength(1);
+    const row = cachedColumns(db, appId);
+    expect(row.github_slug).toBeNull();
+    expect(row.github_metadata_synced_at).toBeNull();
+    expect(row.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  test("the attempt marker expires with the TTL: a later read fetches again", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    db.raw
+      .query(
+        `UPDATE github_apps SET github_slug = NULL,
+           github_metadata_attempted_at = datetime('now', '-25 hours') WHERE id = ?`,
+      )
+      .run(appId);
+    const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
+
+    const res = await getSettings("mallory", makeEnv(db));
+
+    expect(res.status).toBe(200);
+    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app", BOT_USER_URL]);
+    expect(cachedColumns(db, appId).github_slug).toBe("acme-inspector");
+  });
+
+  test("a successful payload WITHOUT a slug stamps the attempt and does not loop", async () => {
+    // The degraded-payload case: the profile persists (so synced_at is fresh)
+    // while the slug stays NULL, which is the re-attempt trigger. Without the
+    // marker every read would fetch again.
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    db.raw.query("UPDATE github_apps SET github_slug = NULL WHERE id = ?").run(appId);
+    // Neither `slug` nor a derivable html_url: both slug sources degrade.
+    const { calls } = stubFetch(githubStub({ name: "Acme Inspector" }));
+    const env = makeEnv(db);
+
+    expect((await getSettings("mallory", env)).status).toBe(200);
+    expect(calls).toHaveLength(1); // GET /app only — no slug, so no bot lookup
+    const row = cachedColumns(db, appId);
+    expect(row.github_name).toBe("Acme Inspector");
+    expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(row.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+    expect((await getSettings("hubot", env)).status).toBe(200);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("force ignores the attempt marker: the manager's refresh always asks GitHub", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    db.raw
+      .query(
+        `UPDATE github_apps SET github_slug = NULL,
+           github_metadata_attempted_at = datetime('now') WHERE id = ?`,
+      )
+      .run(appId);
+    const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
+
+    const res = await postRefresh("mallory", makeEnv(db));
+
+    expect(res.status).toBe(200);
+    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app", BOT_USER_URL]);
+    expect(cachedColumns(db, appId).github_slug).toBe("acme-inspector");
   });
 
   test("envelope-level decrypt failure (Task-1 review handoff) → swallowed, 200 with the manage face intact", async () => {

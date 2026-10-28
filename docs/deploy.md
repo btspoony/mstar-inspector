@@ -1097,7 +1097,10 @@ mention at all** until its metadata is synced once:
 1. Open each App's settings page once, or press **Refresh from GitHub** on that
    card (`POST /api/apps/{githubAppId}/refresh-metadata`). Either one syncs the
    App: a row whose `github_slug` is still NULL counts as unsynced even inside
-   the read path's 24h metadata TTL, so opening the page does fetch.
+   the read path's 24h metadata TTL, so opening the page does fetch. A failed
+   sync is retried by the read path at most once per TTL window
+   (`github_metadata_attempted_at`, migration `0037`) — **Refresh from GitHub**
+   is the immediate retry.
 2. Apps on `manual` trigger mode review on the mention only: until step 1
    they will **not** review at all. Every other mode keeps working through
    its `pull_request` trigger in the meantime.

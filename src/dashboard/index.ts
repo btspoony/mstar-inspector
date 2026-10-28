@@ -2877,8 +2877,15 @@ function settingsMembershipFailResponse(
  * column with no backfill, so a row that predates it carries a non-NULL
  * `github_metadata_synced_at` from 0019 with no slug; treating that as fresh
  * would leave the App's bot mention dead forever behind a documented "open the
- * settings page" remedy that fetches nothing. `force: true` is the manager's
- * manual refresh and always calls GitHub.
+ * settings page" remedy that fetches nothing.
+ *
+ * That exception needs its own floor, or an App that can never sync (deleted
+ * upstream → 404, rotated key → 401, suspended → 403, slug-less payload) would
+ * be re-fetched on EVERY settings read, by every member, paying up to the 5 s
+ * timeout each time. `github_metadata_attempted_at` (migration 0037) is that
+ * floor: the NULL-slug branch re-attempts at most once per TTL window, and
+ * every attempt that persists no slug stamps it. `force: true` is the
+ * manager's manual refresh and bypasses both bounds, always calling GitHub.
  *
  * The caller-visible contract differs by entry point, so the RESULT says what
  * happened instead of the failure being swallowed here:
@@ -2906,10 +2913,33 @@ async function refreshGithubMetadata(
   encryptionKey: string | undefined,
   options: { force: boolean },
 ): Promise<GithubMetadataRefresh> {
-  if (!options.force && app.github_slug !== null && !isGithubMetadataStale(app.github_metadata_synced_at)) {
-    return { status: "fresh", row: app };
+  if (!options.force) {
+    // A synced row is bounded by its profile TTL; an unsynced one (NULL slug)
+    // by its last ATTEMPT. The attempt marker, not synced_at, decides there:
+    // a row that never synced has synced_at NULL, so OR-ing it in would make
+    // every permanently failing App stale on every read — the very loop the
+    // marker exists to close.
+    const stale = isGithubMetadataStale(
+      app.github_slug === null ? app.github_metadata_attempted_at : app.github_metadata_synced_at,
+    );
+    if (!stale) return { status: "fresh", row: app };
   }
   if (!encryptionKey) return { status: "skipped", row: app };
+  /**
+   * Record that a fetch attempt left no cached slug (migration 0037). Pure
+   * bookkeeping for the next read's bound, so it never enters this function's
+   * result: a store rejection here is logged and swallowed rather than turned
+   * into a 500 on a fail-open read. A persisted slug needs no marker — the
+   * 0019 synced_at already records the success.
+   */
+  const markAttempt = async (stillUnsynced: boolean): Promise<void> => {
+    if (!stillUnsynced) return;
+    try {
+      await apps.touchGithubMetadataAttempt(app.id);
+    } catch (err) {
+      logSettingsFailure("github_metadata_attempt", app.id, err);
+    }
+  };
   try {
     const decryptedPem = await createSecretbox(encryptionKey).decryptSecret(
       app.private_key_enc,
@@ -2923,13 +2953,19 @@ async function refreshGithubMetadata(
       console.warn(
         JSON.stringify({ event: "dashboard_settings", stage: "github_metadata_fetch", app_id: app.id }),
       );
+      await markAttempt(app.github_slug === null);
       return { status: "failed", row: app };
     }
     await apps.saveGithubMetadata(app.id, result.metadata);
-    return { status: "refreshed", row: (await apps.getAppById(app.id)) ?? app };
+    const row = (await apps.getAppById(app.id)) ?? app;
+    // A payload that yields no slug persists the profile but leaves the
+    // re-attempt trigger hot; the marker keeps it from looping.
+    await markAttempt(row.github_slug === null);
+    return { status: "refreshed", row };
   } catch (err) {
     // The failure stays observable, secret-free; the cached columns serve as-is.
     logSettingsFailure("github_metadata_refresh", app.id, err);
+    await markAttempt(app.github_slug === null);
     return { status: "failed", row: app };
   }
 }

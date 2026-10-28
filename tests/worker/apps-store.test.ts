@@ -983,3 +983,33 @@ describe("saveGithubMetadata (migrations 0019/0036)", () => {
     expect(await store(db).saveGithubMetadata(crypto.randomUUID(), METADATA)).toBe(false);
   });
 });
+
+describe("touchGithubMetadataAttempt (migration 0037)", () => {
+  test("stamps only github_metadata_attempted_at — never the profile columns or updated_at", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    db.raw.prepare("UPDATE github_apps SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(app.id);
+
+    await store(db).touchGithubMetadataAttempt(app.id);
+
+    const row = await store(db).getAppById(app.id);
+    expect(row!.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(row!.github_metadata_synced_at).toBeNull();
+    expect(row!.github_name).toBeNull();
+    expect(row!.github_slug).toBeNull();
+    expect(row!.updated_at).toBe("2000-01-01 00:00:00");
+  });
+
+  test("an unknown or soft-deleted id is a silent no-op", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    expect(await store(db).softDeleteApp(app.id)).toBe(true);
+
+    // The attempt already happened upstream; refusing to record it would
+    // re-open the per-read fetch loop. Neither call may throw.
+    await store(db).touchGithubMetadataAttempt(app.id);
+    await store(db).touchGithubMetadataAttempt(crypto.randomUUID());
+
+    expect((await store(db).getAppById(app.id))!.github_metadata_attempted_at).toBeNull();
+  });
+});

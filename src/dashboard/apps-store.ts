@@ -66,6 +66,12 @@
  *     refresh is the only caller), refuses soft-deleted rows exactly
  *     like setAppStatus, and COALESCE-preserves github_slug so a degraded
  *     fetch cannot clear the cached bot-mention target.
+ *   - touchGithubMetadataAttempt (migration 0037) is the SINGLE writer of
+ *     github_metadata_attempted_at, stamped after a fetch attempt that
+ *     persisted no slug (a failure or a slug-less payload) — never
+ *     updated_at. Together with the 0036 NULL-slug staleness rule it bounds
+ *     an unsyncable App to one fetch per TTL window instead of one per
+ *     settings read.
  *   - listInstallations is the install-health read face for the settings
  *     panel: this App's installations, most recently seen
  *     first.
@@ -152,6 +158,13 @@ export type GithubAppRow = {
    * settings read path's lazy 24h TTL refresh keys off this column.
    */
   github_metadata_synced_at: string | null;
+  /**
+   * Last metadata fetch ATTEMPT that persisted no slug (migration 0037) —
+   * failure, or a successful payload without one. The read path's NULL-slug
+   * re-attempt keys off it so a permanently failing App costs at most one
+   * fetch per TTL instead of one per settings read.
+   */
+  github_metadata_attempted_at: string | null;
   /**
    * Selected sandbox runtime image (migration 0018): a registry id from
    * src/contracts/sandbox-images.ts, default 'omp'. The value domain (only
@@ -689,6 +702,26 @@ export function createAppsStore(db: AppsStoreD1) {
         )
         .run();
       return res.meta.changes > 0;
+    },
+
+    /**
+     * Stamp `github_metadata_attempted_at` (migration 0037) after a fetch
+     * attempt that persisted no slug — the ONLY writer of that column, and,
+     * like saveGithubMetadata and touchLastWebhook, deliberately NOT
+     * updated_at. The read path's NULL-slug re-attempt reads it, so an App
+     * that can never sync (deleted upstream, rotated key, slug-less payload)
+     * costs at most one fetch per TTL instead of one per settings read. An
+     * unknown or soft-deleted id is a silent no-op: the attempt already
+     * happened, and refusing to record it would re-open the loop.
+     */
+    async touchGithubMetadataAttempt(id: string): Promise<void> {
+      await db
+        .prepare(
+          `UPDATE github_apps SET github_metadata_attempted_at = datetime('now')
+           WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .bind(id)
+        .run();
     },
 
     /**
