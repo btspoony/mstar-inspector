@@ -129,10 +129,16 @@ export const MENTION_MISS_REASON = "comment body does not mention the App bot";
  * It is NOT a trigger and never decides an outcome — the per-App route uses it
  * only to explain an otherwise silent ignore, because with no slug
  * `bodyMentionsApp` can never match and the App looks healthy while its mention
- * trigger is dead. The check runs `bodyMentionsApp` over the login runs the
- * body actually contains, so the grammar (boundaries, ASCII folding) stays
- * single-sourced: `@acme[bot]` yields the run `acme`, which matches exactly as
- * it would once the slug is known.
+ * trigger is dead.
+ *
+ * There is no target login here: the login run following each `@` IS the
+ * candidate, so the grammar reduces to the LOGIN_CONTINUATION boundary pair
+ * over the ORIGINAL body — the same rule bodyMentionsApp applies around its
+ * slug (`@acme[bot]` yields the standalone run `acme`). Decided inline in one
+ * pass: the runs never overlap, so the scan is linear in the body. Handing
+ * each run to bodyMentionsApp would rescan from the first `@` per token
+ * (quadratic — 17.6 s on a 160 KB body, reachable before the thread/bot/actor
+ * gates while the App is unsynced).
  */
 export function payloadMentionsALogin(rawBody: string): boolean {
   const parsed = parseBody(rawBody);
@@ -144,7 +150,14 @@ export function payloadMentionsALogin(rawBody: string): boolean {
   while (i !== -1) {
     let end = i + 1;
     while (end < body.length && LOGIN_CONTINUATION.test(body[end]!)) end++;
-    if (end > i + 1 && bodyMentionsApp(body, body.slice(i + 1, end))) return true;
+    // A non-empty login run whose leading boundary is outside the
+    // continuation set (body start counts as outside) — this is what rejects
+    // the email-shaped `name@host`. The trailing boundary needs no check: the
+    // loop above only stops at a non-continuation character or the body end,
+    // so the character after the run is outside the set by construction.
+    if (end > i + 1 && !LOGIN_CONTINUATION.test(i > 0 ? body[i - 1]! : "")) {
+      return true;
+    }
     i = body.indexOf("@", i + 1);
   }
   return false;

@@ -2872,8 +2872,13 @@ function settingsMembershipFailResponse(
  * the createApp convention) → mint App JWT → GET /app → persist.
  *
  * `force: false` is the settings read path's lazy 24h-TTL refresh (AD-531): a
- * fresh cache is served as-is. `force: true` is the manager's manual refresh
- * and always calls GitHub.
+ * fresh cache is served as-is — EXCEPT while `github_slug` is still NULL, which
+ * is "never synced" regardless of the TTL timestamp. Migration 0036 added the
+ * column with no backfill, so a row that predates it carries a non-NULL
+ * `github_metadata_synced_at` from 0019 with no slug; treating that as fresh
+ * would leave the App's bot mention dead forever behind a documented "open the
+ * settings page" remedy that fetches nothing. `force: true` is the manager's
+ * manual refresh and always calls GitHub.
  *
  * The caller-visible contract differs by entry point, so the RESULT says what
  * happened instead of the failure being swallowed here:
@@ -2901,7 +2906,7 @@ async function refreshGithubMetadata(
   encryptionKey: string | undefined,
   options: { force: boolean },
 ): Promise<GithubMetadataRefresh> {
-  if (!options.force && !isGithubMetadataStale(app.github_metadata_synced_at)) {
+  if (!options.force && app.github_slug !== null && !isGithubMetadataStale(app.github_metadata_synced_at)) {
     return { status: "fresh", row: app };
   }
   if (!encryptionKey) return { status: "skipped", row: app };

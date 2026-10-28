@@ -1094,9 +1094,10 @@ backfill** — the GitHub-side slug is only knowable from GitHub. So right
 after the deploy, every App that predates this change answers to **no
 mention at all** until its metadata is synced once:
 
-1. Open each App's settings page once — the read path's 24h-TTL refresh fills
-   `github_slug` — or press **Refresh from GitHub** on that card
-   (`POST /api/apps/{githubAppId}/refresh-metadata`) to force it immediately.
+1. Open each App's settings page once, or press **Refresh from GitHub** on that
+   card (`POST /api/apps/{githubAppId}/refresh-metadata`). Either one syncs the
+   App: a row whose `github_slug` is still NULL counts as unsynced even inside
+   the read path's 24h metadata TTL, so opening the page does fetch.
 2. Apps on `manual` trigger mode review on the mention only: until step 1
    they will **not** review at all. Every other mode keeps working through
    its `pull_request` trigger in the meantime.
@@ -1104,7 +1105,11 @@ mention at all** until its metadata is synced once:
    `webhook_path=` and `app_id=`) while an App is still unsynced: it means a
    comment mentioned a login, but that App's `github_slug` is NULL, so the
    delivery was ignored. The delivery row still reads `ignored` — the warn is
-   the only signal, so grep it after the roll-out window.
+   the only signal. Read it from the Worker's live log with
+   `wrangler tail --env production` (grep for `mention_unresolved`), or from
+   Workers Logs in the dashboard, which is persisted for this deployment
+   (`observability.logs.persist` in `wrangler.jsonc`) and is limited only by
+   the plan's retention window.
 
 ### Secrets and vars inventory
 

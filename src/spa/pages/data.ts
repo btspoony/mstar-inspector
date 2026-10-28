@@ -386,9 +386,11 @@ export type SettingsAppMeta = {
   created_by: string;
   last_webhook_at: string | null;
   /**
-   * The local webhook path segment — the manager identity card composes the
-   * delivery URL from it (a webhook repoint needs that URL); members never see
-   * it.
+   * The local webhook path segment (never a GitHub fact). It rides BOTH
+   * payload faces — the member face returns it too, and parseSettings requires
+   * it either way — because it is part of the App's identity set. Only the
+   * MANAGER identity card composes the delivery URL from it (a webhook repoint
+   * needs that URL).
    */
   webhook_path: string;
   /** The App's selected sandbox runtime image (registry id). */

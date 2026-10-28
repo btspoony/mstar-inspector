@@ -262,6 +262,29 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(calls).toHaveLength(0);
   });
 
+  test("TTL hit but NULL github_slug: an unsynced row still refreshes and persists the slug", async () => {
+    // The migration-0036 upgrade case: 0019 already stamped
+    // github_metadata_synced_at, so the row is "fresh" while github_slug stays
+    // NULL and the bot mention is dead. Opening the settings page is the
+    // documented remedy, so it MUST fetch exactly once here.
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    seedCache(db, appId, "datetime('now', '-1 hours')");
+    db.raw.query("UPDATE github_apps SET github_slug = NULL WHERE id = ?").run(appId);
+    const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
+
+    const res = await getSettings("mallory", makeEnv(db));
+
+    expect(res.status).toBe(200);
+    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app", BOT_USER_URL]);
+    const body = (await res.json()) as { app: Record<string, unknown> };
+    expect(body.app.github_slug).toBe("acme-inspector");
+    const row = db.raw.query("SELECT github_slug FROM github_apps WHERE id = ?").get(appId) as {
+      github_slug: string | null;
+    };
+    expect(row.github_slug).toBe("acme-inspector");
+  });
+
   test("TTL expired: past 24h the refresh runs once and the response carries the update", async () => {
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
