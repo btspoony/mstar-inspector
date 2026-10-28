@@ -117,11 +117,11 @@ function seedApp(db: TestD1, id: string, seed: AppSeed = {}): void {
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, review_enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, ?, ?, datetime('now'), datetime('now'))`,
+       VALUES (?, ?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, ?, ?, datetime('now'), datetime('now'))`,
     )
-    .run(id, `reconcile-${id}`, githubAppId, `reconcile-${id}`, status, deletedAt, reviewEnabled);
+    .run(id, `reconcile-${id}`, `reconcile-${id}`, githubAppId, `reconcile-${id}`, status, deletedAt, reviewEnabled);
   if (install) {
     db.raw
       .prepare(
@@ -268,11 +268,11 @@ async function seedRealApp(db: TestD1, id: string, githubAppId: number): Promise
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, review_enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'enc-secret', 'tester', 'active', NULL, 1, datetime('now'), datetime('now'))`,
+       VALUES (?, ?, ?, ?, ?, ?, 'enc-secret', 'tester', 'active', NULL, 1, datetime('now'), datetime('now'))`,
     )
-    .run(id, `reconcile-${id}`, githubAppId, `reconcile-${id}`, encrypted);
+    .run(id, `reconcile-${id}`, `reconcile-${id}`, githubAppId, `reconcile-${id}`, encrypted);
   db.raw
     .prepare(
       `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)

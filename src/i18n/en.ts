@@ -473,6 +473,8 @@ export const en = {
       runtimeHarnessUnknown: "Unknown or disabled runtime harness — nothing was stored.",
       triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
+      githubMetadataRefreshFailed:
+        "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
     },
     ops: "Operations",
     opsCopy: "Pause ignores deliveries with 2xx; disable answers 404; delete is a soft-delete — all fail closed.",

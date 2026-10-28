@@ -1473,7 +1473,7 @@ describe("/dashboard manifest routes", () => {
     // route table lands (Task 4), so the page is rendered through that key.
     const landing = await worker.fetch(
       dashboardRequest(
-        `/dashboard/default/apps/${startWebhookPath}/onboarding`,
+        `/dashboard/default/apps/${CONVERSION.id}/onboarding`,
         `${SESSION_COOKIE}=${session}`,
       ),
       env,
@@ -2138,7 +2138,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(decryptedPem).not.toBe(normalizePrivateKey(FAKE_PEM));
     // Landing HTML: GitHub slug + webhook URL + numeric id; never the secrets.
     const landing = await worker.fetch(
-      dashboardRequest(`/dashboard/default/apps/${startWebhookPath}/onboarding`, `${SESSION_COOKIE}=${session}`),
+      dashboardRequest(`/dashboard/default/apps/${CONVERSION.id}/onboarding`, `${SESSION_COOKIE}=${session}`),
       env,
     );
     expect(landing.status).toBe(200);
@@ -2253,7 +2253,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     // must see, and link addresses the App id.
     const landing = await worker.fetch(
       dashboardRequest(
-        `/dashboard/default/apps/${first.startWebhookPath}/onboarding`,
+        `/dashboard/default/apps/${CONVERSION.id}/onboarding`,
         `${SESSION_COOKIE}=${first.session}`,
       ),
       env,
@@ -2310,7 +2310,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.event).toBe("dashboard_manifest");
     expect(entry.stage).toBe("commit");
-    expect(entry.reason).toBe("slug_conflict");
+    expect(entry.reason).toBe("webhook_path_conflict");
   });
 
   test("github_app_id already connected → 409, zero new rows, hold burned (non-retryable)", async () => {
@@ -2359,7 +2359,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${CONVERSION.id}/onboarding`);
     const landing = await worker.fetch(
-      new Request(`https://worker.local/dashboard/default/apps/${WEBHOOK_PATH}/onboarding`, {
+      new Request(`https://worker.local/dashboard/default/apps/${CONVERSION.id}/onboarding`, {
         headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Accept-Language": "zh-CN,zh;q=0.9" },
       }),
       env,
@@ -2751,7 +2751,7 @@ function makeDbEnv(db: DashboardD1, overrides: Partial<Env> = {}): Env {
   return { ...baseEnv(overrides), DB: db } as Env;
 }
 
-describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
+describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
@@ -2777,37 +2777,38 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
     });
   }
 
-  function onboardingRequest(slug: string, login = "octocat"): Promise<Request> {
+  /** The App segment is GitHub's immutable App id (D0) — never the webhook path. */
+  function onboardingRequest(appId: number, login = "octocat"): Promise<Request> {
     return createSessionValue(login, null, SESSION_SECRET).then((session) =>
-      dashboardRequest(`/dashboard/default/apps/${slug}/onboarding`, `${SESSION_COOKIE}=${session}`),
+      dashboardRequest(`/dashboard/default/apps/${appId}/onboarding`, `${SESSION_COOKIE}=${session}`),
     );
   }
 
   test("no session → 302 to login", async () => {
     const res = await worker.fetch(
-      dashboardRequest(`/dashboard/default/apps/${WEBHOOK_PATH}/onboarding`),
+      dashboardRequest(`/dashboard/default/apps/${CONVERSION.id}/onboarding`),
       makeEnv(),
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
-  test("unknown slug → 404 (settings-family unknown-app shape)", async () => {
-    const res = await worker.fetch(await onboardingRequest("no-such-app"), makeEnv());
+  test("unknown App id → 404 (settings-family unknown-app shape)", async () => {
+    const res = await worker.fetch(await onboardingRequest(9_999_999), makeEnv());
     expect(res.status).toBe(404);
   });
 
   test("soft-deleted App → 404", async () => {
     const env = makeEnv();
     await seedApp(env, { deletedAt: new Date().toISOString() });
-    const res = await worker.fetch(await onboardingRequest(WEBHOOK_PATH), env);
+    const res = await worker.fetch(await onboardingRequest(CONVERSION.id), env);
     expect(res.status).toBe(404);
   });
 
   test("plain workspace member → 403 forbidden page", async () => {
     const env = makeEnv();
     await seedApp(env, { createdBy: "someone-else" });
-    const res = await worker.fetch(await onboardingRequest(WEBHOOK_PATH, "mallory"), env);
+    const res = await worker.fetch(await onboardingRequest(CONVERSION.id, "mallory"), env);
     expect(res.status).toBe(403);
     const body = await res.text();
     expect(body).not.toContain(CONVERSION.name);
@@ -2821,7 +2822,7 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
     // null-scope face).
     const env = makeEnv();
     await seedApp(env, { createdBy: "octocat-with-a-long-login" });
-    const res = await worker.fetch(await onboardingRequest(WEBHOOK_PATH, "octocat-with-a-long-login"), env);
+    const res = await worker.fetch(await onboardingRequest(CONVERSION.id, "octocat-with-a-long-login"), env);
     expect(res.status).toBe(200);
     const body = await res.text();
     // The displayed slug and the Settings link are GitHub-identity/app-id
@@ -2842,7 +2843,7 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
     // slug, so the numeric App id stands in.
     const env = makeEnv();
     await seedApp(env, { githubSlug: null });
-    const res = await worker.fetch(await onboardingRequest(WEBHOOK_PATH), env);
+    const res = await worker.fetch(await onboardingRequest(CONVERSION.id), env);
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain(`Slug: ${CONVERSION.id}`);
@@ -2851,7 +2852,7 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
   test("admin views any App's onboarding page", async () => {
     const env = makeEnv();
     await seedApp(env, { createdBy: "someone-else" });
-    const res = await worker.fetch(await onboardingRequest(WEBHOOK_PATH), env);
+    const res = await worker.fetch(await onboardingRequest(CONVERSION.id), env);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain(
       `href="/dashboard/default/apps/${CONVERSION.id}/settings"`,
@@ -2863,7 +2864,7 @@ describe("GET /dashboard/<ref>/apps/:slug/onboarding (AC4b)", () => {
     await seedApp(env);
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const zh = await worker.fetch(
-      new Request(`https://worker.local/dashboard/default/apps/${WEBHOOK_PATH}/onboarding`, {
+      new Request(`https://worker.local/dashboard/default/apps/${CONVERSION.id}/onboarding`, {
         headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Accept-Language": "zh-CN,zh;q=0.9" },
       }),
       env,

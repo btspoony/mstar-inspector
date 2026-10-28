@@ -64,7 +64,8 @@ async function seedApp(db: DashboardD1, slug: string): Promise<GithubAppRow> {
   const box = createSecretbox(TEST_KEY);
   return createAppsStore(db).createApp({
     id,
-    slug,
+    webhookPath: slug,
+    githubSlug: slug,
     githubAppId: 1001,
     name: slug,
     privateKeyEnc: await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
@@ -84,6 +85,8 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
   for (const name of [
     "0003_dashboard_users.sql",
     "0004_github_apps.sql",
+    // 0036: createApp writes webhook_path + github_slug (renamed from slug).
+    "0036_app_identity.sql",
     "0005_reviews_app_id.sql",
     "0006_app_provider_config.sql",
     "0008_github_apps_ops.sql",

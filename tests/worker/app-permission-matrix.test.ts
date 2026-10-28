@@ -33,8 +33,10 @@ const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].j
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-matrix-9988");
 
-const SETTINGS = "/dashboard/default/apps/mallorys-app/settings";
-const VERIFY = "/dashboard/default/api/apps/mallorys-app/keys/verify";
+/** The App's immutable GitHub App id — the only App address form (D0). */
+const APP_ID = 1001;
+const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
+const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
 
 /**
  * Seeded world (spec §2 actors): octocat = workspace `owner`; mallory created
@@ -61,8 +63,9 @@ async function seededWorld(): Promise<TestD1> {
   const box = createSecretbox(TEST_KEY);
   await createAppsStore(db).createApp({
     id,
-    slug: "mallorys-app",
-    githubAppId: 1001,
+    webhookPath: "mallorys-app",
+    githubSlug: "mallorys-app",
+    githubAppId: APP_ID,
     name: "mallorys-app",
     privateKeyEnc: await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
@@ -104,15 +107,15 @@ async function postForm(
   );
 }
 
-function appStatus(db: TestD1, slug: string): string | null {
-  const row = db.raw.query("SELECT status FROM github_apps WHERE slug = ?").get(slug) as {
+function appStatus(db: TestD1, appId: number): string | null {
+  const row = db.raw.query("SELECT status FROM github_apps WHERE github_app_id = ?").get(appId) as {
     status: string;
   } | null;
   return row?.status ?? null;
 }
 
-function reviewEnabled(db: TestD1, slug: string): number | null {
-  const row = db.raw.query("SELECT review_enabled FROM github_apps WHERE slug = ?").get(slug) as {
+function reviewEnabled(db: TestD1, appId: number): number | null {
+  const row = db.raw.query("SELECT review_enabled FROM github_apps WHERE github_app_id = ?").get(appId) as {
     review_enabled: number;
   } | null;
   return row?.review_enabled ?? null;
@@ -139,8 +142,8 @@ const MUTABLE_APP_TABLES = [
  * list, so a new swept table cannot land in one sweep and not the other.
  */
 function expectZeroAppMutations(db: TestD1): void {
-  expect(appStatus(db, "mallorys-app")).toBe("active");
-  expect(reviewEnabled(db, "mallorys-app")).toBe(1);
+  expect(appStatus(db, APP_ID)).toBe("active");
+  expect(reviewEnabled(db, APP_ID)).toBe(1);
   for (const table of MUTABLE_APP_TABLES) expect(rawCount(db, table), table).toBe(0);
 }
 
@@ -202,11 +205,11 @@ const MATRIX_ROUTES: MatrixRoute[] = [
   { name: "settings key/delete", path: `${SETTINGS}/key/delete`, fields: { provider: "anthropic" } },
   { name: "keys/verify", path: VERIFY, fields: { provider: "anthropic", key: PLAIN_KEY }, verifies: true },
   // --- ops family: pinned action paths ---
-  { name: "pause", path: "/dashboard/default/apps/mallorys-app/pause" },
-  { name: "resume", path: "/dashboard/default/apps/mallorys-app/resume" },
-  { name: "disable", path: "/dashboard/default/apps/mallorys-app/disable" },
-  { name: "enable", path: "/dashboard/default/apps/mallorys-app/enable" },
-  { name: "delete", path: "/dashboard/default/apps/mallorys-app/delete" },
+  { name: "pause", path: `/dashboard/default/apps/${APP_ID}/pause` },
+  { name: "resume", path: `/dashboard/default/apps/${APP_ID}/resume` },
+  { name: "disable", path: `/dashboard/default/apps/${APP_ID}/disable` },
+  { name: "enable", path: `/dashboard/default/apps/${APP_ID}/enable` },
+  { name: "delete", path: `/dashboard/default/apps/${APP_ID}/delete` },
 ];
 
 const ACTORS = [
@@ -288,7 +291,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
   }
 });
 
-// --- Read-face matrix: GET /dashboard/default/api/apps/:slug/settings ---
+// --- Read-face matrix: GET /dashboard/default/api/apps/:appId/settings ---
 // Identity-only non-manager detail face: a member who is neither creator nor
 // admin gets the D4 identity set (the GET /api/apps list fields + created_at
 // + the cached public GitHub profile) and can_manage:false — NO health or
@@ -297,7 +300,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
 // full base+health payload unchanged. Read-only, so the status/shape
 // assertions are the matrix itself.
 describe("App detail read-face permission matrix (settings JSON)", () => {
-  const FACE = "/dashboard/default/api/apps/mallorys-app/settings";
+  const FACE = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
   async function getFace(login: string, env: Env): Promise<Response> {
     return worker.fetch(
@@ -324,12 +327,14 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       "github_html_url",
       "github_metadata_synced_at",
       "github_name",
+      "github_slug",
       "review_enabled",
-      "slug",
       "status",
+      "webhook_path",
     ]);
-    expect(body.app.slug).toBe("mallorys-app");
-    expect(body.app.github_app_id).toBe(1001);
+    expect(body.app.github_app_id).toBe(APP_ID);
+    expect(body.app.github_slug).toBe("mallorys-app");
+    expect(body.app.webhook_path).toBe("mallorys-app");
     expect(body.app.created_by).toBe("mallory");
     expect(typeof body.app.created_at).toBe("string");
     // ops fields never ride the non-manager payload
@@ -364,9 +369,9 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
     });
   }
 
-  test("unknown slug → 404", async () => {
+  test("unknown App id → 404", async () => {
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/default/api/apps/no-such-app/settings", {
+      new Request("https://worker.local/dashboard/default/api/apps/9999/settings", {
         headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("hubot", null, SESSION_SECRET)}` },
       }),
       makeEnv(await seededWorld()),
@@ -375,13 +380,13 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
   });
 });
 
-// --- Read-face matrix: GET /dashboard/default/api/apps/:slug/insights/summary ---
+// --- Read-face matrix: GET /dashboard/default/api/apps/:appId/insights/summary ---
 // The per-App insights data face rides the SAME creator-or-admin rule
-// (canManageApp) as every write route above, plus the slug lookup
-// (unknown/soft-deleted → 404). Read-only, so no zero-mutation sweep is
+// (canManageApp) as every write route above, plus the App-id lookup
+// (non-numeric/unknown/soft-deleted → 404). Read-only, so no zero-mutation sweep is
 // needed — the assertions are the status matrix itself.
 describe("App insights read-face permission matrix", () => {
-  const FACE = "/dashboard/default/api/apps/mallorys-app/insights/summary";
+  const FACE = `/dashboard/default/api/apps/${APP_ID}/insights/summary`;
 
   async function getFace(login: string, env: Env): Promise<Response> {
     return worker.fetch(
@@ -412,10 +417,10 @@ describe("App insights read-face permission matrix", () => {
     });
   }
 
-  test("read face: unknown slug → 404 for a manager", async () => {
+  test("read face: unknown App id → 404 for a manager", async () => {
     const db = await seededWorld();
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/default/api/apps/no-such-app/insights/summary", {
+      new Request("https://worker.local/dashboard/default/api/apps/9999/insights/summary", {
         headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}` },
       }),
       makeEnv(db),

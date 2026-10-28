@@ -18,8 +18,10 @@ import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-const SETTINGS = "/dashboard/default/apps/mallorys-app/settings";
-const VERIFY = "/dashboard/default/api/apps/mallorys-app/keys/verify";
+/** The App's immutable GitHub App id — the only App address form (D0). */
+const APP_ID = 1001;
+const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
+const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
 const ACCOUNT_ID = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
 
 async function seededWorld() {
@@ -31,8 +33,9 @@ async function seededWorld() {
   const box = createSecretbox(TEST_KEY);
   const app = await createAppsStore(db).createApp({
     id,
-    slug: "mallorys-app",
-    githubAppId: 1001,
+    webhookPath: "mallorys-app",
+    githubSlug: "mallorys-app",
+    githubAppId: APP_ID,
     name: "mallorys-app",
     privateKeyEnc: await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
@@ -207,7 +210,7 @@ describe("settings 400 key transport", () => {
 
   test("review-trigger-mode invalid value → keyed JSON naming the rejected mode", async () => {
     const { db } = await seededWorld();
-    const res = await postForm("/dashboard/default/apps/mallorys-app/review-trigger-mode", "mallory", makeEnv(db), {
+    const res = await postForm(`/dashboard/default/apps/${APP_ID}/review-trigger-mode`, "mallory", makeEnv(db), {
       mode: "whenever",
     });
     expect(res.status).toBe(400);
@@ -238,7 +241,7 @@ describe("settings 400 key transport", () => {
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps/mallorys-app/settings");
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${APP_ID}/settings`);
   });
 });
 

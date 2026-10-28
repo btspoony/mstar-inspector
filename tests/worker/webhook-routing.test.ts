@@ -3,12 +3,12 @@
  *
  * `POST /webhook/:appSlug` — the ONLY HTTP review entry
  * (the legacy bare `/webhook` face is retired):
- * body-size cap (413) → slug lookup (active, not deleted) → signature verify →
+ * body-size cap (413) → webhook-path lookup (active, not deleted) → signature verify →
  * per-App `review_enabled` pause gate. The route attaches `appRef: { appId }`
  * after classification (lock L3).
  *
  * Isolation (AC-B5-isolation): App X's route verifies ONLY X's secret — a
- * sibling App's signature is a 401 with zero enqueue. Unknown slug /
+ * sibling App's signature is a 401 with zero enqueue. Unknown path /
  * disabled / soft-deleted → 404, zero enqueue. Any webhook-secret decrypt
  * failure (missing DASHBOARD_ENCRYPTION_KEY, tampered envelope) → 500
  * fail-closed (lock L1), zero enqueue.
@@ -52,6 +52,8 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   for (const name of [
     "0003_dashboard_users.sql",
     "0004_github_apps.sql",
+    // 0036: webhook_path (renamed from slug) + the cached github_slug.
+    "0036_app_identity.sql",
     "0005_reviews_app_id.sql",
     "0008_github_apps_ops.sql",
     "0011_webhook_deliveries.sql",
@@ -91,13 +93,23 @@ async function seedApp(
   const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
   const appCount = (db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number }).n;
   const mode = opts.reviewTriggerMode;
-  const baseArgs = [id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc] as const;
+  // `slug` is BOTH our webhook path and GitHub's own slug here: the route keys
+  // on the path, the bot mention keys on the GitHub slug (D1/D2).
+  const baseArgs = [
+    id,
+    opts.slug,
+    opts.slug,
+    opts.githubAppId ?? 1000 + appCount,
+    opts.slug,
+    privateKeyEnc,
+    webhookSecretEnc,
+  ] as const;
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at${mode !== undefined ? ", review_trigger_mode" : ""})
-       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now')${mode !== undefined ? ", ?" : ""})`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now')${mode !== undefined ? ", ?" : ""})`,
     )
     .run(...(mode !== undefined ? [...baseArgs, mode] : [...baseArgs]));
   // Production shape: createApp writes the App and its workspace mapping in
@@ -173,7 +185,7 @@ const PR_PAYLOAD = {
   repository: { name: "test-repo", owner: { login: "test-owner" } },
 };
 
-describe("POST /webhook/:appSlug (per-App routing)", () => {
+describe("POST /webhook/:webhookPath (per-App routing)", () => {
   test("valid signature with the App's own secret → 200 accepted, enqueued with appRef {appId}", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
@@ -258,7 +270,7 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(rows).toEqual([{ outcome: "rejected", status_code: 401 }]);
   });
 
-  test("unknown slug → 404, zero enqueue", async () => {
+  test("unknown webhook path → 404, zero enqueue", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -314,7 +326,7 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(sent).toHaveLength(0);
   });
 
-  test("body-size cap precedes the slug lookup → 413, zero enqueue (spec ordering)", async () => {
+  test("body-size cap precedes the webhook-path lookup → 413, zero enqueue (spec ordering)", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -663,7 +675,7 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     });
   });
 
-  test("a sibling App's mention does not trigger this App (slug-keyed matching)", async () => {
+  test("a sibling App's mention does not trigger this App (GitHub-slug-keyed matching)", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -727,7 +739,7 @@ describe("tenant attribution on the webhook read face", () => {
     const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(404);
-    expect(await res.text()).toBe("unknown app slug");
+    expect(await res.text()).toBe("unknown webhook path");
     expect(sent).toHaveLength(0);
     const rows = db.raw
       .query("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE app_id = ?")

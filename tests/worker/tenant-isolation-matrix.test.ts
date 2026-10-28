@@ -17,8 +17,8 @@
  *      covered by tests/worker/dashboard-tenancy.test.ts (no-membership 404)
  *   3. workspace member — reads the list, denied every management write.
  *      covered by tests/worker/dashboard-tenancy.test.ts (member 403)
- *   4. orphan App — absent from every workspace list, indistinguishable from a
- *      missing slug on its detail route.
+ *   4. orphan App — absent from every workspace list, indistinguishable from an
+ *      unknown App id on its detail route.
  *      covered by tests/store/tenant-read-face.test.ts (store-level invisibility)
  *   5. soft-deleted workspace — its slug answers 404.
  *      NEW cell (no task-level owner): the `workspaces.deleted_at` filter.
@@ -29,9 +29,11 @@
  *      NEW cell (workspace URL identifiers, 2026-10 — I-000059).
  *
  * Every cross-workspace cell (rows 1, 2, 4, 5, 6, 7) runs through BOTH address
- * forms — the slug and the generated id — because the segment is now
+ * forms — the workspace slug and the generated id — because the segment is
  * resolvable either way and a scoping rule that held for one form only would
- * not be isolation.
+ * not be isolation. The App segment itself is now GitHub's numeric App id
+ * (D0): there is exactly one App address form, and a non-numeric segment is
+ * just as invisible as an App belonging to another workspace.
  *
  * The consumer's own orphan/off read face is deliberately NOT re-driven here:
  * its fixture builder (encrypted PEM + per-App AI config) is file-private, and
@@ -131,21 +133,32 @@ function seedMembership(
   );
 }
 
-let nextGithubAppId = 5000;
+/** Fixture Apps are addressed by these GitHub App ids (the only App identity). */
+const ACME_APP_ID = 5001;
+const OTHER_APP_ID = 5002;
+const ORPHAN_APP_ID = 5003;
+const GONE_APP_ID = 5004;
 
 /** An App row plus its single workspace mapping (migration 0026 production shape). */
-function seedApp(db: TestD1, id: string, slug: string, workspaceId: string | null): void {
+function seedApp(
+  db: TestD1,
+  id: string,
+  slug: string,
+  workspaceId: string | null,
+  githubAppId: number,
+): void {
   const now = new Date().toISOString();
   seed(
     db,
     `INSERT INTO github_apps
-       (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+       (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
+     VALUES (?, ?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
              'octocat', 'active', ?, ?)`,
     id,
     slug,
-    nextGithubAppId++,
+    slug,
+    githubAppId,
     slug,
     now,
     now,
@@ -186,14 +199,14 @@ function matrixFixture() {
   seedMembership(db, "ws-other", users.dana, "owner");
   seedMembership(db, "ws-other", users.bob, "owner");
   seedMembership(db, "ws-gone", users.dana, "owner");
-  seedApp(db, "app-acme", "acme-app", "ws-acme");
-  seedApp(db, "app-other", "other-app", "ws-other");
-  seedApp(db, "app-orphan", "orphan-app", null);
-  seedApp(db, "app-gone", "gone-app", "ws-gone");
+  seedApp(db, "app-acme", "acme-app", "ws-acme", ACME_APP_ID);
+  seedApp(db, "app-other", "other-app", "ws-other", OTHER_APP_ID);
+  seedApp(db, "app-orphan", "orphan-app", null, ORPHAN_APP_ID);
+  seedApp(db, "app-gone", "gone-app", "ws-gone", GONE_APP_ID);
   return { db, users };
 }
 
-type ListBody = { viewer: { login: string }; apps: Array<{ slug: string }> };
+type ListBody = { viewer: { login: string }; apps: Array<{ github_app_id: number; github_slug: string | null }> };
 
 /**
  * Every persisted field a management write could touch on `app-acme`, plus the
@@ -227,19 +240,19 @@ function appSnapshot(db: TestD1, appId = "app-acme") {
  * keys/verify note) and is therefore excluded from the positive control.
  */
 const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string; ownerStatus?: number }> = [
-  { route: "/apps/acme-app/disable", ownerStatus: 200 },
-  { route: "/apps/acme-app/enable", ownerStatus: 200 },
-  { route: "/apps/acme-app/pause", ownerStatus: 200 },
-  { route: "/apps/acme-app/resume", ownerStatus: 200 },
-  { route: "/apps/acme-app/review-trigger-mode", body: "mode=open", ownerStatus: 200 },
-  { route: "/apps/acme-app/settings", body: "op=save-chain&model_chain=", ownerStatus: 200 },
+  { route: `/apps/${ACME_APP_ID}/disable`, ownerStatus: 200 },
+  { route: `/apps/${ACME_APP_ID}/enable`, ownerStatus: 200 },
+  { route: `/apps/${ACME_APP_ID}/pause`, ownerStatus: 200 },
+  { route: `/apps/${ACME_APP_ID}/resume`, ownerStatus: 200 },
+  { route: `/apps/${ACME_APP_ID}/review-trigger-mode`, body: "mode=open", ownerStatus: 200 },
+  { route: `/apps/${ACME_APP_ID}/settings`, body: "op=save-chain&model_chain=", ownerStatus: 200 },
   {
-    route: "/apps/acme-app/settings",
+    route: `/apps/${ACME_APP_ID}/settings`,
     body: "op=save-sandbox-image&sandbox_image_id=omp",
     ownerStatus: 200,
   },
   {
-    route: "/apps/acme-app/settings/key/delete",
+    route: `/apps/${ACME_APP_ID}/settings/key/delete`,
     body: "provider=anthropic&key_id=seeded-key",
     ownerStatus: 200,
   },
@@ -247,25 +260,25 @@ const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string; ownerStat
   // route verifies with globalThis.fetch). The member-403 cell below still
   // proves the authorization decision; the success path is owned by
   // tests/worker/settings-provider-first.test.ts.
-  { route: "/api/apps/acme-app/keys/verify", body: "provider=anthropic&key=sk-not-a-real-key" },
+  { route: `/api/apps/${ACME_APP_ID}/keys/verify`, body: "provider=anthropic&key=sk-not-a-real-key" },
   // Last: a manager's success soft-deletes the row.
-  { route: "/apps/acme-app/delete", ownerStatus: 200 },
+  { route: `/apps/${ACME_APP_ID}/delete`, ownerStatus: 200 },
 ];
 
 describe("tenant isolation matrix (scenario × layer)", () => {
   // row 1 — layers: route family gate → membership gate → scoped App resolve
   //         → strict store read. covered by tests/worker/dashboard-tenancy.test.ts
   //         (cross-workspace 404); composed here on a manager of BOTH tenants,
-  //         so the 404 can only come from the App↔workspace check. Every cell
-  //         runs through BOTH address forms (slug, then the row id) — a scoping
-  //         rule holding for one form only would not be isolation.
-  test("row 1 · cross-workspace App serves only inside its own workspace, 404 in the sibling — by slug and by id", async () => {
+  //         so the 404 can only come from the App↔workspace check. Both
+  //         tenants are addressed on both workspace ref forms — a scoping rule
+  //         holding for one form only would not be isolation.
+  test("row 1 · cross-workspace App serves only inside its own workspace, 404 in the sibling — on both ref forms", async () => {
     const { db } = matrixFixture();
     const env = envFor(db);
 
     for (const [ownRefs, ownApp, siblingRefs] of [
-      [["acme", "ws-acme"], "acme-app", ["other", "ws-other"]],
-      [["other", "ws-other"], "other-app", ["acme", "ws-acme"]],
+      [["acme", "ws-acme"], ACME_APP_ID, ["other", "ws-other"]],
+      [["other", "ws-other"], OTHER_APP_ID, ["acme", "ws-acme"]],
     ] as const) {
       for (const own of ownRefs) {
         const served = await worker.fetch(
@@ -289,14 +302,14 @@ describe("tenant isolation matrix (scenario × layer)", () => {
   //         covered by tests/worker/dashboard-tenancy.test.ts (no-membership 404);
   //         composed here over BOTH faces of the tenant (list + detail) so the
   //         absence of a membership row cannot leak as 403 on either.
-  test("row 2 · a signed-in non-member gets 404 — never 403 — on the list and the detail face, by slug and by id", async () => {
+  test("row 2 · a signed-in non-member gets 404 — never 403 — on the list and the detail face, on both ref forms", async () => {
     const { db } = matrixFixture();
     const env = envFor(db);
 
     for (const ref of ["acme", "ws-acme"]) {
       const list = await worker.fetch(await request(`/dashboard/${ref}/api/apps`, "bob"), env);
       const detail = await worker.fetch(
-        await request(`/dashboard/${ref}/apps/acme-app/onboarding`, "bob"),
+        await request(`/dashboard/${ref}/apps/${ACME_APP_ID}/onboarding`, "bob"),
         env,
       );
       for (const [face, res] of [
@@ -341,10 +354,10 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     const body = (await list.json()) as ListBody;
     expect(body.viewer.login).toBe("mallory");
     // Read access, not the full list contract (orphan exclusion is row 4's cell).
-    expect(body.apps.map((app) => app.slug)).toContain("acme-app");
+    expect(body.apps.map((app) => app.github_app_id)).toContain(ACME_APP_ID);
 
     const onboarding = await worker.fetch(
-      await request("/dashboard/acme/apps/acme-app/onboarding", "mallory"),
+      await request(`/dashboard/acme/apps/${ACME_APP_ID}/onboarding`, "mallory"),
       env,
     );
     expect(onboarding.status).toBe(403);
@@ -389,14 +402,14 @@ describe("tenant isolation matrix (scenario × layer)", () => {
         envFor(db),
       );
       expect(list.status, ref).toBe(200);
-      const slugs = ((await list.json()) as ListBody).apps.map((app) => app.slug);
-      expect(slugs, ref).toContain("acme-app");
-      expect(slugs, ref).not.toContain("orphan-app");
+      const appIds = ((await list.json()) as ListBody).apps.map((app) => app.github_app_id);
+      expect(appIds, ref).toContain(ACME_APP_ID);
+      expect(appIds, ref).not.toContain(ORPHAN_APP_ID);
 
-      // The detail agrees: the same unmapped row is indistinguishable from a
-      // missing slug (no workspace can claim it).
+      // The detail agrees: the same unmapped row is indistinguishable from an
+      // unknown App id (no workspace can claim it).
       const detail = await worker.fetch(
-        await request(`/dashboard/${ref}/apps/orphan-app/onboarding`, "dana"),
+        await request(`/dashboard/${ref}/apps/${ORPHAN_APP_ID}/onboarding`, "dana"),
         envFor(db),
       );
       expect(detail.status, ref).toBe(404);
@@ -416,7 +429,7 @@ describe("tenant isolation matrix (scenario × layer)", () => {
       expect(list.status, ref).toBe(404);
 
       const detail = await worker.fetch(
-        await request(`/dashboard/${ref}/apps/gone-app/onboarding`, "dana"),
+        await request(`/dashboard/${ref}/apps/${GONE_APP_ID}/onboarding`, "dana"),
         env,
       );
       expect(detail.status, ref).toBe(404);
@@ -440,13 +453,13 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     const env = envFor(db);
 
     const legacy = await worker.fetch(
-      await request("/dashboard/apps/gone-app/onboarding", "octocat"),
+      await request(`/dashboard/apps/${GONE_APP_ID}/onboarding`, "octocat"),
       env,
     );
     expect(legacy.status).toBe(404);
     for (const ref of ["gone", "ws-gone"]) {
       const scoped = await worker.fetch(
-        await request(`/dashboard/${ref}/apps/gone-app/onboarding`, "dana"),
+        await request(`/dashboard/${ref}/apps/${GONE_APP_ID}/onboarding`, "dana"),
         env,
       );
       expect(scoped.status, ref).toBe(404);
@@ -465,10 +478,10 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     const list = async (ref: string) => {
       const res = await worker.fetch(await request(`/dashboard/${ref}/api/apps`, "dana"), env);
       expect(res.status, ref).toBe(200);
-      return ((await res.json()) as ListBody).apps.map((app) => app.slug);
+      return ((await res.json()) as ListBody).apps.map((app) => app.github_app_id);
     };
     expect(await list("acme")).toEqual(await list("ws-acme"));
-    expect(await list("acme")).toEqual(["acme-app"]);
+    expect(await list("acme")).toEqual([ACME_APP_ID]);
 
     // Unknown and soft-deleted refs are the same invisibility, by either form.
     for (const ref of ["ghost", "gone", "ws-gone"]) {

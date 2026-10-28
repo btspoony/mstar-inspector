@@ -46,6 +46,8 @@ const OPERATOR = "Support-Bot";
 /** A second listed operator, holding its own grant on the same workspace. */
 const OTHER_OPERATOR = "Other-Bot";
 const DAY = 24 * 60 * 60 * 1000;
+/** The fixture App's GitHub App id — the App routes' only address form (D0). */
+const APP_ID = 4000;
 
 function envFor(db: TestD1, operators = OPERATOR): Env {
   return {
@@ -139,13 +141,14 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   seed(
     db,
     `INSERT INTO github_apps
-       (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+       (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
+     VALUES (?, ?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
              'dana', 'active', ?, ?)`,
     id,
     slug,
-    4000 + Math.floor(Math.random() * 1000),
+    slug,
+    APP_ID,
     slug,
     now,
     now,
@@ -204,7 +207,7 @@ describe("operator without a valid grant", () => {
       "/dashboard/acme/api/support/workspace",
       "/dashboard/acme/api/members",
       "/dashboard/acme/api/apps",
-      "/dashboard/acme/api/apps/acme-app/settings",
+      `/dashboard/acme/api/apps/${APP_ID}/settings`,
     ]) {
       const res = await worker.fetch(await authedRequest(path, OPERATOR), env);
       expect(res.status, path).toBe(404);
@@ -319,10 +322,10 @@ describe("operator with a valid grant", () => {
     const env = envFor(db);
     const cases: Array<{ path: string; method?: string; body?: string }> = [
       { path: "/dashboard/acme/api/apps" },
-      { path: "/dashboard/acme/api/apps/acme-app/settings" },
-      { path: "/dashboard/acme/api/apps/acme-app/models" },
-      { path: "/dashboard/acme/api/apps/acme-app/insights/summary" },
-      { path: "/dashboard/acme/api/apps/acme-app/keys/verify", method: "POST", body: "provider=openai" },
+      { path: `/dashboard/acme/api/apps/${APP_ID}/settings` },
+      { path: `/dashboard/acme/api/apps/${APP_ID}/models` },
+      { path: `/dashboard/acme/api/apps/${APP_ID}/insights/summary` },
+      { path: `/dashboard/acme/api/apps/${APP_ID}/keys/verify`, method: "POST", body: "provider=openai" },
     ];
     for (const item of cases) {
       const res = await worker.fetch(

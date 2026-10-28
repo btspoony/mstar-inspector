@@ -12,7 +12,7 @@
  *   App's `review_trigger_mode`: `open` auto-triggers `opened` only,
  *   `every_push` (the default) all three, `manual` none.
  * - `issue_comment.created` whose body contains the App's bot mention
- *   `@{appSlug}` as a standalone token (spec §3 grammar), on a pull request
+ *   `@{github_slug}` as a standalone token (spec §3 grammar), on a pull request
  *   thread, sent by a non-bot whose login is the PR author or the repository
  *   owner (Phase 5 B5 actor allowlist — prevents quota abuse by arbitrary
  *   commenters on public installs).
@@ -29,12 +29,13 @@ export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as con
 
 /**
  * The per-App trigger inputs classification branches on (spec
- * review-trigger-policy §2 read path): the resolved row's
- * `review_trigger_mode` and its slug (the mention target — one App's
- * mention never triggers another App). The per-App webhook route passes
- * both from the already-resolved row — no second lookup. An omitted
- * context defaults to `every_push` with NO mention target (empty slug never
- * matches — fail-safe: no trigger rather than a spurious one).
+ * review-trigger-policy §2/§3 read path): the resolved row's
+ * `review_trigger_mode` and its GitHub slug (the mention target — one App's
+ * mention never triggers another App). The mention login is GitHub's mutable
+ * `github_slug`, never our local webhook path or the row id. The per-App
+ * webhook route passes both from the already-resolved row — no second lookup.
+ * An omitted context defaults to `every_push` with NO mention target (empty
+ * slug never matches — fail-safe: no trigger rather than a spurious one).
  */
 export type ReviewTriggerContext = { mode: ReviewTriggerMode; appSlug: string };
 
@@ -68,7 +69,7 @@ function asciiFoldEquals(a: string, b: string): boolean {
 }
 
 /**
- * Whether `body` mentions the App's bot: contains `@{appSlug}` (ASCII
+ * Whether `body` mentions the App's bot: contains `@{github_slug}` (ASCII
  * case-insensitive, literal) as a standalone token per the LOGIN_CONTINUATION
  * boundary rule. Any position in the body; the mention IS the entire
  * grammar (spec §3 — no wording, no commands).
@@ -132,7 +133,7 @@ export const WEBHOOK_BODY_LIMIT = 1_000_000;
  * architect lock L1): the hot path constructed a `Webhooks` instance per
  * request only to call `verify`, which uses nothing but `options.secret`.
  * KEYED BY CACHEKEY, NOT the raw secret: each entry is `{ secret, webhooks }`
- * under the caller's cache key — each per-App `POST /webhook/:appSlug`
+ * under the caller's cache key — each per-App `POST /webhook/:webhookPath`
  * route passes its `github_apps.id` — so per-App isolation holds AND a
  * cached entry whose `secret` differs from the caller's current secret
  * (credential rotation) is rebuilt and REPLACED: the rotated secret
@@ -197,7 +198,7 @@ export async function verifySignature(
  * Classifier outcome. The `job` payload NEVER carries `appRef`
  * (AL-24-2/4): the classifier is secret-parameterized only and never sees
  * the App identity — the ONLY production attach point is the per-App
- * `POST /webhook/:appSlug` route, which adds `appRef: { appId }` after
+ * `POST /webhook/:webhookPath` route, which adds `appRef: { appId }` after
  * classification, before enqueue.
  */
 export type WebhookOutcome =
@@ -316,9 +317,9 @@ export async function classifyWebhook(
  * Event whitelist → ReviewJobPayload. Returns `ignore` for everything else.
  *
  * `trigger` is the per-App trigger context (spec review-trigger-policy §2):
- * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` keys
- * the issue_comment bot mention (§3). Defaults to `every_push` with no
- * mention target.
+ * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` (the
+ * row's GitHub slug) keys the issue_comment bot mention (§3). Defaults to
+ * `every_push` with no mention target.
  */
 export function classifyEvent(
   eventName: string | null,

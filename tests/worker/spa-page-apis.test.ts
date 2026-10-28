@@ -62,6 +62,8 @@ function createDb(): ReturnType<typeof createTestD1> {
     "0031_plans_usage.sql",
     "0032_unlimited_plan.sql",
     "0033_platform_admin.sql",
+    // 0036: github_apps.slug → webhook_path plus the cached github_slug.
+    "0036_app_identity.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -82,7 +84,8 @@ async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
   const enc = await encryptedColumns(id);
   await createAppsStore(db).createApp({
     id,
-    slug: "mstar-inspector-mallory",
+    webhookPath: "mstar-inspector-mallory",
+    githubSlug: "mstar-inspector-mallory",
     githubAppId: 1001,
     name: "mstar-inspector-mallory",
     privateKeyEnc: enc.privateKeyEnc,
@@ -137,12 +140,23 @@ describe("GET /dashboard/default/api/apps", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       viewer: { login: string; role: string };
-      apps: Array<{ slug: string; github_app_id: number; health: { rejected24h: number } }>;
+      apps: Array<{
+        github_app_id: number;
+        github_name: string | null;
+        github_slug: string | null;
+        github_avatar_url: string | null;
+        slug?: string;
+        health: { rejected24h: number };
+      }>;
     };
     expect(body.viewer).toEqual({ login: "hubot", role: "member" });
     expect(body.apps).toHaveLength(1);
-    expect(body.apps[0]?.slug).toBe("mstar-inspector-mallory");
     expect(body.apps[0]?.github_app_id).toBe(1001);
+    expect(body.apps[0]?.github_name).toBeNull();
+    expect(body.apps[0]?.github_slug).toBe("mstar-inspector-mallory");
+    expect(body.apps[0]?.github_avatar_url).toBeNull();
+    // The local webhook path is not an App address any more (D0/D6).
+    expect(body.apps[0]?.slug).toBeUndefined();
     expect(body.apps[0]?.health.rejected24h).toBe(0);
     const raw = JSON.stringify(body);
     expect(raw).not.toContain("private_key_enc");
@@ -150,24 +164,33 @@ describe("GET /dashboard/default/api/apps", () => {
   });
 });
 
-describe("GET /dashboard/default/api/apps/:slug/settings", () => {
-  test("creator 200 can_manage; other member 200 can_manage false; unknown slug 404", async () => {
+describe("GET /dashboard/default/api/apps/:appId/settings", () => {
+  test("creator 200 can_manage; other member 200 can_manage false; unknown App id 404", async () => {
     const db = await seededWorld();
     const env = makeEnv(db);
 
     // Manage is the workspace role, not App creation: 0027 maps the seeded
     // deployment admin to `owner` and every other user to `member`.
-    const owner = await get("/dashboard/default/api/apps/mstar-inspector-mallory/settings", "octocat", env);
+    const owner = await get("/dashboard/default/api/apps/1001/settings", "octocat", env);
     expect(owner.status).toBe(200);
     const body = (await owner.json()) as {
       can_manage: boolean;
-      app: { slug: string; review_enabled: boolean; created_by: string; sandbox_image_id: string };
+      app: {
+        github_app_id: number;
+        github_slug: string | null;
+        webhook_path: string;
+        review_enabled: boolean;
+        created_by: string;
+        sandbox_image_id: string;
+      };
       configured_providers?: Array<{ kind: string }>;
       provider_catalog?: Array<{ id: string; tier: string; verifiable: boolean; eligibility: string }>;
       providers?: unknown;
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
     };
-    expect(body.app.slug).toBe("mstar-inspector-mallory");
+    expect(body.app.github_app_id).toBe(1001);
+    expect(body.app.github_slug).toBe("mstar-inspector-mallory");
+    expect(body.app.webhook_path).toBe("mstar-inspector-mallory");
     expect(body.app.review_enabled).toBe(true);
     expect(body.can_manage).toBe(true);
     // clean cutover: the old `providers` catalog dump is gone; the
@@ -196,7 +219,7 @@ describe("GET /dashboard/default/api/apps/:slug/settings", () => {
 
     // The App's creator is a plain workspace member here, so creation no
     // longer grants the manage face.
-    const other = await get("/dashboard/default/api/apps/mstar-inspector-mallory/settings", "mallory", env);
+    const other = await get("/dashboard/default/api/apps/1001/settings", "mallory", env);
     expect(other.status).toBe(200);
     // identity-only non-manager face: the D4 identity set + the cached
     // public GitHub profile + can_manage false — NO health or ops data.
@@ -216,7 +239,8 @@ describe("GET /dashboard/default/api/apps/:slug/settings", () => {
       sandbox_images?: unknown;
     };
     expect(otherBody.can_manage).toBe(false);
-    expect(otherBody.app.slug).toBe("mstar-inspector-mallory");
+    expect(otherBody.app.github_app_id).toBe(1001);
+    expect(otherBody.app.github_slug).toBe("mstar-inspector-mallory");
     expect(Object.keys(otherBody).sort()).toEqual(["app", "can_manage"]);
     expect(Object.keys(otherBody.app).sort()).toEqual([
       "created_at",
@@ -227,9 +251,10 @@ describe("GET /dashboard/default/api/apps/:slug/settings", () => {
       "github_html_url",
       "github_metadata_synced_at",
       "github_name",
+      "github_slug",
       "review_enabled",
-      "slug",
       "status",
+      "webhook_path",
     ]);
     expect(typeof otherBody.app.created_at).toBe("string");
     // health/ops fields moved behind the manager branch; the settings
@@ -246,7 +271,7 @@ describe("GET /dashboard/default/api/apps/:slug/settings", () => {
     expect(otherBody.sandbox_images).toBeUndefined();
     expect(other.headers.get("cache-control")).toBe("private, no-store");
 
-    const missing = await get("/dashboard/default/api/apps/no-such-app/settings", "octocat", env);
+    const missing = await get("/dashboard/default/api/apps/9999/settings", "octocat", env);
     expect(missing.status).toBe(404);
   });
 
@@ -254,7 +279,7 @@ describe("GET /dashboard/default/api/apps/:slug/settings", () => {
     const db = await seededWorld();
     const env = makeEnv(db);
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/default/apps/mstar-inspector-mallory/settings", {
+      new Request("https://worker.local/dashboard/default/apps/1001/settings", {
         method: "POST",
         headers: {
           Cookie: `${SESSION_COOKIE}=${await cookie("hubot")}`,

@@ -38,6 +38,8 @@ const DAY = 24 * 60 * 60 * 1000;
 const WORKSPACE = "ws-acme";
 /** The workspace's slug — the ref every surface below is addressed by. */
 const REF = "acme";
+/** The fixture App's immutable GitHub App id — the App surfaces' own ref (D0). */
+const APP_ID = 7001;
 
 function envFor(db: TestD1): Env {
   return {
@@ -111,11 +113,12 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   seed(
     db,
     `INSERT INTO github_apps
-       (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+       (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
+     VALUES (?, ?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
              'dana', 'active', ?, ?)`,
     id,
+    slug,
     slug,
     // A fixed, unique github_app_id — the fixture is read-only on this column.
     7001,
@@ -225,27 +228,27 @@ const SURFACES: readonly Surface[] = [
   {
     name: "credentials",
     method: "POST",
-    path: `/dashboard/${REF}/api/apps/acme-app/keys/verify`,
+    path: `/dashboard/${REF}/api/apps/${APP_ID}/keys/verify`,
     body: () => "provider=anthropic&key=sk-not-a-real-key",
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
     action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "settings read",
-    path: `/dashboard/${REF}/api/apps/acme-app/settings`,
+    path: `/dashboard/${REF}/api/apps/${APP_ID}/settings`,
     status: { member: 200, granted: 403, denied: 404, outsider: 404 },
     action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "model chains",
-    path: `/dashboard/${REF}/api/apps/acme-app/models`,
+    path: `/dashboard/${REF}/api/apps/${APP_ID}/models`,
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
     action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "settings write",
     method: "POST",
-    path: `/dashboard/${REF}/apps/acme-app/settings`,
+    path: `/dashboard/${REF}/apps/${APP_ID}/settings`,
     body: () => "op=save-chain&model_chain=",
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
     action: { granted: "support.forbidden", denied: "support.denied" },

@@ -23,10 +23,12 @@ import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-mallory-verify-9988");
-const SETTINGS = "/dashboard/default/apps/mallorys-app/settings";
-const VERIFY = "/dashboard/default/api/apps/mallorys-app/keys/verify";
-const MODELS = "/dashboard/default/api/apps/mallorys-app/models";
-const SETTINGS_JSON = "/dashboard/default/api/apps/mallorys-app/settings";
+/** The App's immutable GitHub App id — the only App address form (D0). */
+const APP_ID = 1001;
+const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
+const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
+const MODELS = `/dashboard/default/api/apps/${APP_ID}/models`;
+const SETTINGS_JSON = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
 /**
  * One `configured_providers` wire row: a stored key (provider + pool identity +
@@ -56,8 +58,9 @@ async function seededWorld() {
   const box = createSecretbox(TEST_KEY);
   const app = await createAppsStore(db).createApp({
     id,
-    slug: "mallorys-app",
-    githubAppId: 1001,
+    webhookPath: "mallorys-app",
+    githubSlug: "mallorys-app",
+    githubAppId: APP_ID,
     name: "mallorys-app",
     privateKeyEnc: await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
@@ -192,7 +195,7 @@ describe("selector membership helpers (spec §6.3)", () => {
   });
 });
 
-describe("POST /dashboard/api/apps/:slug/keys/verify", () => {
+describe("POST /dashboard/api/apps/:appId/keys/verify", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {
     fetchSpy?.mockRestore();
@@ -260,7 +263,7 @@ describe("POST /dashboard/api/apps/:slug/keys/verify", () => {
   });
 });
 
-describe("GET /dashboard/api/apps/:slug/models", () => {
+describe("GET /dashboard/api/apps/:appId/models", () => {
   test("returns grouped selector grammar from verified cache + custom declarations", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
@@ -459,7 +462,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
       sandbox_image_id: "omp",
     });
     // The JSON face (not the SPA page path) reflects the saved selection.
-    const payload = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "mallory", env);
+    const payload = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
     const body = (await payload.json()) as {
       app: { sandbox_image_id: string };
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
@@ -499,7 +502,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
   });
 });
 
-describe("POST /dashboard/apps/:slug/settings — pinned add-key / add-custom-provider verify", () => {
+describe("POST /dashboard/apps/:appId/settings — pinned add-key / add-custom-provider verify", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {
     fetchSpy?.mockRestore();
@@ -678,7 +681,7 @@ describe("Server-side eligibility precheck (fail-closed)", () => {
   });
 });
 
-describe("POST /dashboard/apps/:slug/settings — add-template-provider materialization (spec §5)", () => {
+describe("POST /dashboard/apps/:appId/settings — add-template-provider materialization (spec §5)", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {
     fetchSpy?.mockRestore();
@@ -887,7 +890,7 @@ describe("POST /dashboard/apps/:slug/settings — add-template-provider material
 describe("GET settings includes delivery_summary for the sidebar", () => {
   test("delivery_summary is present and never includes encrypted columns", async () => {
     const { db } = await seededWorld();
-    const res = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "mallory", makeEnv(db));
+    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       delivery_summary: { latest: null; rejected24h: number };
@@ -926,11 +929,11 @@ describe("GET settings includes delivery_summary for the sidebar", () => {
 
   test("other member GET is 200 with can_manage false and base+health only", async () => {
     const { db } = await seededWorld();
-    const res = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "hubot", makeEnv(db));
+    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "hubot", makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       can_manage: boolean;
-      app: { slug: string };
+      app: { github_app_id: number; github_slug: string | null };
       keys?: unknown;
       configured_providers?: unknown;
       provider_catalog?: unknown;
@@ -939,7 +942,8 @@ describe("GET settings includes delivery_summary for the sidebar", () => {
       custom_providers?: unknown;
     };
     expect(body.can_manage).toBe(false);
-    expect(body.app.slug).toBe("mallorys-app");
+    expect(body.app.github_app_id).toBe(APP_ID);
+    expect(body.app.github_slug).toBe("mallorys-app");
     expect(body.keys).toBeUndefined();
     expect(body.configured_providers).toBeUndefined();
     expect(body.provider_catalog).toBeUndefined();
@@ -964,7 +968,7 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     configured_providers: ConfiguredRow[];
     provider_catalog: Array<{ id: string; tier: string; eligibility: string }>;
   }> {
-    const res = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "mallory", env);
+    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
     return (await res.json()) as {
       configured_providers: ConfiguredRow[];
@@ -1461,7 +1465,7 @@ describe("GET settings provider_catalog display_group (AD-547)", () => {
   };
 
   async function getCatalog(env: Env): Promise<CatalogRow[]> {
-    const res = await getJson("/dashboard/default/api/apps/mallorys-app/settings", "mallory", env);
+    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { provider_catalog: CatalogRow[] };
     return body.provider_catalog;

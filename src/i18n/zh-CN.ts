@@ -404,6 +404,7 @@ export const zhCN: Dictionary = {
       runtimeHarnessUnknown: "未知或已停用的运行时 harness — 未存储任何内容。",
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
+      githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
     },
     ops: "运维",
     opsCopy: "暂停以 2xx 忽略投递；停用以 404 应答；删除为软删 — 全部失败关闭。",

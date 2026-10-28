@@ -50,11 +50,11 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
-      .run(id, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
+      .run(id, id, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
   }
 
   /** Raw-insert one delivery row (full column control). */
@@ -96,6 +96,8 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
       "0008_github_apps_ops.sql",
       "0009_app_model_roles.sql",
       "0010_review_failures.sql",
+      // 0036: the fixture row carries webhook_path + github_slug.
+      "0036_app_identity.sql",
     ]) {
       applyMigrationFile(db, name);
     }
@@ -163,11 +165,11 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
-      .run(id, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
+      .run(id, id, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
   }
 
   test("recordDelivery persists a full row: UUID id, caller fields, datetime('now') created_at", async () => {
@@ -338,6 +340,8 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       "0026_workspaces.sql",
       // 0033: the enqueue decision reads the `review_global` server flag.
       "0033_platform_admin.sql",
+      // 0036: webhook_path (renamed from slug) + the cached github_slug.
+      "0036_app_identity.sql",
     ];
     if (withDeliveries) {
       names.push("0011_webhook_deliveries.sql");
@@ -369,11 +373,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
-      .run(id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
+      .run(id, opts.slug, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
     // Production shape: the read face joins app_workspaces.
     db.raw
       .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
