@@ -175,9 +175,9 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   seed(
     db,
     `INSERT INTO github_apps
-       (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+       (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
+     VALUES (?, ?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
              'octocat', 'active', ?, ?)`,
     id,
     slug,
@@ -187,6 +187,15 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
     now,
   );
   seed(db, "INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+}
+
+/** The numeric GitHub App id a fixture App was seeded with (the App's identity). */
+function appAcmeId(db: TestD1): number {
+  return (
+    db.raw.prepare("SELECT github_app_id FROM github_apps WHERE id = ?").get("app-acme") as {
+      github_app_id: number;
+    }
+  ).github_app_id;
 }
 
 /**
@@ -322,9 +331,11 @@ describe("workspace paths serve", () => {
     const env = envFor(db);
     const res = await worker.fetch(await authedRequest("/dashboard/acme/api/apps", "mallory"), env);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { viewer: { login: string }; apps: Array<{ slug: string }> };
+    const body = (await res.json()) as { viewer: { login: string }; apps: Array<{ github_app_id: number }> };
     expect(body.viewer.login).toBe("mallory");
-    expect(body.apps.map((app) => app.slug)).toEqual(["acme-app"]);
+    // The list payload's GitHub-identity fields are the App-ID payload task's;
+    // this fixture only needs the App to be addressable, by its numeric id.
+    expect(body.apps.map((app) => app.github_app_id)).toEqual([appAcmeId(db)]);
   });
 
   test("the workspace onboarding page serves managers and 403s a plain member", async () => {
@@ -379,10 +390,10 @@ describe("workspace paths serve", () => {
     const list = async (ref: string) => {
       const res = await worker.fetch(await authedRequest(`/dashboard/${ref}/api/apps`, "dana"), env);
       expect(res.status, ref).toBe(200);
-      return (await res.json()) as { apps: Array<{ slug: string }> };
+      return (await res.json()) as { apps: Array<{ github_app_id: number }> };
     };
     const byId = await list("ws-acme");
-    expect(byId.apps.map((app) => app.slug)).toEqual(["acme-app"]);
+    expect(byId.apps.map((app) => app.github_app_id)).toEqual([appAcmeId(db)]);
     expect(await list("acme")).toEqual(byId);
   });
 
@@ -1069,7 +1080,9 @@ describe("the onboarding CTA stays inside the workspace", () => {
     );
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain('href="/dashboard/acme/apps/acme-app/settings"');
+    // GitHub's slug is NULL in this fixture (never synced), so the page shows
+    // the App id; the Settings link addresses the App by that id.
+    expect(body).toContain(`href="/dashboard/acme/apps/${appAcmeId(db)}/settings"`);
     expect(body).not.toContain('href="/dashboard/apps/acme-app/settings"');
   });
 
@@ -1114,6 +1127,7 @@ describe("App creation is owner/admin", () => {
   const CONVERSION = {
     id: 987654,
     name: SLUG,
+    slug: SLUG,
     pem: "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----",
     webhook_secret: "not-a-real-webhook-secret",
   };
@@ -1160,7 +1174,9 @@ describe("App creation is owner/admin", () => {
     // The owner clears the gate and commits into the workspace the hold names.
     const owner = await postWithHold("dana", await createHoldValue(CONVERSION, "dana", SESSION_SECRET, SLUG, "default"), env);
     expect(owner.status).toBe(302);
-    expect(owner.headers.get("Location")).toBe(`/dashboard/default/apps/${SLUG}/onboarding`);
+    expect(owner.headers.get("Location")).toBe(
+      `/dashboard/default/apps/${CONVERSION.id}/onboarding`,
+    );
   });
 
   test("a no-ref manifest start on a multi-workspace deployment answers a readable 409 workspace_required", async () => {
@@ -1239,7 +1255,10 @@ describe("App creation is owner/admin", () => {
         { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
       ).then((request) => worker.fetch(request, env));
       expect(callback.status).toBe(302);
-      expect(callback.headers.get("Location")).toBe("/dashboard/ws-other/apps/mstar-inspector-dana/onboarding");
+      // The landing names the App by its immutable GitHub id.
+      expect(callback.headers.get("Location")).toBe(
+        `/dashboard/ws-other/apps/${CONVERSION.id}/onboarding`,
+      );
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1252,16 +1271,24 @@ describe("App creation is owner/admin", () => {
     // The READ is tenant-scoped too, for the very row this flow created: the
     // owning workspace serves it, and the sibling — same session, same slug —
     // answers the settings-family 404 (invisible, not merely forbidden).
+    // The App route still resolves its segment as a webhook path until the
+    // App-ID route table lands (Task 4), so the page is read through the path
+    // this flow minted.
+    const createdPath = (
+      db.raw
+        .prepare("SELECT webhook_path FROM github_apps WHERE github_app_id = ?")
+        .get(CONVERSION.id) as { webhook_path: string }
+    ).webhook_path;
     const ownerRead = await worker.fetch(
-      await authedRequest("/dashboard/other/apps/mstar-inspector-dana/onboarding", "dana", {
+      await authedRequest(`/dashboard/other/apps/${createdPath}/onboarding`, "dana", {
         accept: "text/html",
       }),
       env,
     );
     expect(ownerRead.status).toBe(200);
-    expect(await ownerRead.text()).toContain("mstar-inspector-dana");
+    expect(await ownerRead.text()).toContain(CONVERSION.slug!);
     const siblingRead = await worker.fetch(
-      await authedRequest("/dashboard/acme/apps/mstar-inspector-dana/onboarding", "dana", {
+      await authedRequest(`/dashboard/acme/apps/${createdPath}/onboarding`, "dana", {
         accept: "text/html",
       }),
       env,
@@ -1308,7 +1335,7 @@ describe("App creation is owner/admin", () => {
       // The redirect names the workspace's stable ID — not the slug the flow
       // started with, and not the one a squatter has since taken.
       expect(callback.headers.get("Location")).toBe(
-        "/dashboard/ws-acme/apps/mstar-inspector-dana/onboarding",
+        `/dashboard/ws-acme/apps/${CONVERSION.id}/onboarding`,
       );
     } finally {
       globalThis.fetch = realFetch;
@@ -1470,9 +1497,11 @@ describe("the route-local member gate", () => {
     );
     // The route still answers with the caller's own identity and workspace.
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { viewer: { login: string }; apps: Array<{ slug: string }> };
+    const body = (await res.json()) as { viewer: { login: string }; apps: Array<{ github_app_id: number }> };
     expect(body.viewer.login).toBe("mallory");
-    expect(body.apps.map((app) => app.slug)).toEqual(["acme-app"]);
+    // The list payload's GitHub-identity fields are the App-ID payload task's;
+    // this fixture only needs the App to be addressable, by its numeric id.
+    expect(body.apps.map((app) => app.github_app_id)).toEqual([appAcmeId(db)]);
     // The guard already read this row; the gate must not read it again.
     expect(statements.filter((sql) => USER_READ.test(sql))).toHaveLength(1);
   });
@@ -1514,6 +1543,7 @@ describe("a mid-flight demotion cannot finish the flow", () => {
   const CONVERSION = {
     id: 987654,
     name: SLUG,
+    slug: SLUG,
     pem: "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----",
     webhook_secret: "not-a-real-webhook-secret",
   };

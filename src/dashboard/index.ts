@@ -45,7 +45,6 @@ import {
   MANIFEST_HOLD_MAX_AGE_SEC,
   MANIFEST_STATE_COOKIE,
   MANIFEST_STATE_MAX_AGE_SEC,
-  buildAppSlug,
   buildHoldPayload,
   buildManifest,
   buildManifestCreateUrl,
@@ -53,7 +52,7 @@ import {
   encryptHoldValue,
   exchangeManifestCode,
   logManifestFailure,
-  randomSlugSuffix,
+  randomWebhookPath,
   readHoldValue,
   readManifestStateValue,
   type ManifestHoldPayload,
@@ -539,7 +538,8 @@ type ManifestSuccessTarget = { kind: "ok"; path: string } | { kind: "workspace_g
 /**
  * The post-commit landing page. The manifest flow's own request carries no
  * workspace segment, so `scopedAppPath` cannot rewrite this target: the App's
- * onboarding page is named by the workspace the commit just mapped it into.
+ * onboarding page is named by the workspace the commit just mapped it into and
+ * by the GitHub App id — the only identity GitHub never changes.
  *
  * The URL names the workspace by its stable id, which the flow already carried
  * — the row is resolved HERE, after the write, only to prove the workspace
@@ -552,12 +552,12 @@ type ManifestSuccessTarget = { kind: "ok"; path: string } | { kind: "workspace_g
 async function manifestSuccessTarget(
   env: Env,
   workspaceId: string,
-  appSlug: string,
+  githubAppId: number,
 ): Promise<ManifestSuccessTarget> {
   const db = dashboardD1(env);
   const workspace = db === null || workspaceId === "" ? null : await getWorkspaceByRef(db, workspaceId);
   if (workspace === null) return { kind: "workspace_gone" };
-  return { kind: "ok", path: `/dashboard/${workspace.id}/apps/${appSlug}/onboarding` };
+  return { kind: "ok", path: `/dashboard/${workspace.id}/apps/${githubAppId}/onboarding` };
 }
 
 function isSpaFetchPost(c: DashboardContext): boolean {
@@ -622,36 +622,18 @@ function dashboardD1(env: Env): DashboardDb | null {
   return db ?? null;
 }
 
-// --- Webhook slug resolution + manifest commit helpers ---
-
-/** Bounded suffix attempts before the INSERT's own UNIQUE error surfaces. */
-const SLUG_SUFFIX_ATTEMPTS = 6;
+// --- Manifest commit helpers ---
 
 function errorTypeName(err: unknown): string {
   return err instanceof Error ? err.name : String(err);
 }
 
-/** The sqlite UNIQUE violation for one github_apps column (slug retries). */
-function isAppsUniqueViolation(err: unknown, column: "slug" | "github_app_id"): boolean {
+/** The sqlite UNIQUE violation for one github_apps column. */
+function isAppsUniqueViolation(
+  err: unknown,
+  column: "webhook_path" | "github_app_id" | "github_slug",
+): boolean {
   return err instanceof Error && err.message.includes(`github_apps.${column}`);
-}
-
-/**
- * First slug in `[base, base-<suffix>…]` not present in github_apps
- * (soft-deleted rows count — their UNIQUE slug still owns the namespace).
- * Minted at start and carried through the signed state — the first line of
- * defense against collisions. A commit-time race does NOT remap (the
- * manifest already registered the slug's webhook URL with GitHub): the hold
- * is burned with a 409 instead.
- */
-async function resolveAvailableSlug(db: DashboardD1, base: string): Promise<string> {
-  const apps = createAppsStore(db);
-  let slug = base;
-  for (let attempt = 0; attempt <= SLUG_SUFFIX_ATTEMPTS; attempt++) {
-    if ((await apps.getAppBySlug(slug)) === null) return slug;
-    slug = `${base}-${randomSlugSuffix()}`;
-  }
-  return slug;
 }
 
 // --- Workspace (tenant) routing gate (migration 0026) ---
@@ -1271,17 +1253,18 @@ dashboardApp.post("/locale", async (c) => {
 });
 
 // --- GitHub App Manifest start + callback (no secret write) ---
-// --- Per-App slug mints here and rides the signed state ---
+// --- The per-App webhook path mints here and rides the signed state ---
 
 // Start: logged-in only. The SPA's create form posts under the workspace page
 // it is on (`/:workspaceRef/manifest/start`), so the target workspace comes
 // from the request itself; the deployment-level path resolves the sole
-// workspace instead. Then: mint the webhook slug (login-derived, DB
-// pre-resolved against existing slugs) and the single-use CSRF state cookie
-// CARRYING both slug and workspace ref (createManifestStateValue — same
+// workspace instead. Then: mint the webhook path (a UUID — the manifest form
+// needs the hook URL before GitHub creates the App, so this identifier cannot
+// derive from anything GitHub owns) and the single-use CSRF state cookie
+// CARRYING both path and workspace ref (createManifestStateValue — same
 // createStateValue HMAC discipline), and render the zero-JS form POST to
 // https://github.com/settings/apps/new (state rides the form-action query).
-// The manifest's webhook URL is the App's own route /webhook/{slug}.
+// The manifest's webhook URL is the App's own route /webhook/{webhookPath}.
 // Logged out → 302 to login (IA routing table).
 async function manifestStartRoute(c: DashboardContext, workspaceRef: string | undefined): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
@@ -1291,15 +1274,14 @@ async function manifestStartRoute(c: DashboardContext, workspaceRef: string | un
   // Creation is owner/admin OF THE ADDRESSED workspace (I-000082): a plain
   // member there could not manage the App the flow creates. A request that
   // names no workspace on a multi-workspace deployment has no target at all
-  // → 409 workspace_required. Checked BEFORE the slug mint / state cookie.
+  // → 409 workspace_required. Checked BEFORE the path mint / state cookie.
   const target = await resolveCreationTarget(c.env, session.login, workspaceRef);
   if (target.kind === "db_unbound") return c.text("dashboard storage is not configured", 500);
   if (target.kind !== "ok") return creationRefusal(c, session.login, target);
-  const db = dashboardD1(c.env)!;
-  const slug = await resolveAvailableSlug(db, buildAppSlug(session.login));
-  const state = await createManifestStateValue(secrets.sessionSecret, slug, target.workspaceId);
+  const webhookPath = randomWebhookPath();
+  const state = await createManifestStateValue(secrets.sessionSecret, webhookPath, target.workspaceId);
   c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
-  const manifest = buildManifest(new URL(c.req.url).origin, session.login, slug);
+  const manifest = buildManifest(new URL(c.req.url).origin, session.login, webhookPath);
   return c.html(
     manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state), requestLocale(c)),
   );
@@ -1372,7 +1354,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   const locale = requestLocale(c);
   // The payload feeds the shared commit path; the cookie string is parked on
   // retryable outcomes so /manifest/confirm can resume.
-  const holdPayload = buildHoldPayload(conversion, session.login, state.slug, state.workspaceId);
+  const holdPayload = buildHoldPayload(conversion, session.login, state.webhookPath, state.workspaceId);
   const hold = await encryptHoldValue(holdPayload, secrets.sessionSecret);
   const outcome = await commitManifestApp({
     db: dashboardD1(c.env),
@@ -1393,7 +1375,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   switch (outcome.kind) {
     case "success": {
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
-      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug);
+      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.github_app_id);
       if (target.kind === "workspace_gone") {
         // The App row is written but its workspace is gone (deleted between the
         // commit and this read): answer the named failure instead of a landing
@@ -1477,7 +1459,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       // Success: the hold is single-success — burned now that the row exists;
       // the operator lands on the App's onboarding page.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug);
+      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.github_app_id);
       if (target.kind === "workspace_gone") {
         logManifestFailure("commit", "workspace_gone");
         return c.html(manifestErrorPage(t(locale, "manifest.error.workspaceGone"), false, locale), 409);
@@ -1569,18 +1551,19 @@ async function commitManifestApp(args: {
     });
     return { kind: "encrypt_failed" };
   }
-  // Slug: pre-resolved at start and carried through the hold. A commit-time
-  // UNIQUE conflict means the slug was taken between start and commit — the
-  // manifest already registered {origin}/webhook/{hold.slug} with GitHub, so
-  // remapping the row to a fresh suffix would desync the webhook URL (the
-  // App would look connected yet never receive events, Bugbot F-1). The hold
-  // is burned instead: zero rows written, 409, and the operator restarts the
-  // flow with a fresh slug.
+  // Webhook path: minted at start and carried through the hold. A commit-time
+  // UNIQUE conflict means the path was taken between start and commit — the
+  // manifest already registered {origin}/webhook/{hold.webhookPath} with
+  // GitHub, so remapping the row to a fresh value would desync the webhook URL
+  // (the App would look connected yet never receive events, Bugbot F-1). The
+  // hold is burned instead: zero rows written, 409, and the operator restarts
+  // the flow with a fresh path.
   const apps = createAppsStore(db);
   try {
     const row = await apps.createApp({
       id: appId,
-      slug: hold.slug,
+      webhookPath: hold.webhookPath,
+      githubSlug: hold.slug,
       githubAppId: hold.id,
       name: hold.name,
       privateKeyEnc,
@@ -1590,16 +1573,18 @@ async function commitManifestApp(args: {
     });
     return { kind: "success", row, workspaceId };
   } catch (err) {
-    if (isAppsUniqueViolation(err, "slug")) {
-      // The GitHub App WAS created on GitHub, but its webhook slug was
+    if (isAppsUniqueViolation(err, "webhook_path")) {
+      // The GitHub App WAS created on GitHub, but its webhook path was
       // claimed before the row could land. Storing the row under any other
-      // slug would advertise a URL GitHub never posts to — burn the hold
+      // value would advertise a URL GitHub never posts to — burn the hold
       // and make the operator start a fresh creation flow.
-      logManifestFailure("commit", "slug_conflict", { slug: hold.slug });
+      logManifestFailure("commit", "slug_conflict", { webhook_path: hold.webhookPath });
       return { kind: "slug_conflict" };
     }
-    if (isAppsUniqueViolation(err, "github_app_id")) {
-      // The same GitHub App is already connected — retrying cannot help.
+    if (isAppsUniqueViolation(err, "github_app_id") || isAppsUniqueViolation(err, "github_slug")) {
+      // The same GitHub App is already connected — retrying cannot help. A
+      // replay trips `github_slug` first (migration 0036 made it unique), but
+      // the cause is the same App, so the outcome is the same.
       logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
       return { kind: "already_connected" };
     }
@@ -1640,7 +1625,7 @@ dashboardApp.get("/manifest/confirm", async (c) => {
         id: hold.id,
         name: hold.name,
         slug: hold.slug,
-        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
+        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.webhookPath}`,
       },
       requestLocale(c),
     ),
@@ -1678,8 +1663,8 @@ const appOnboardingRoute = async (c: DashboardContext) => {
       {
         id: app.github_app_id,
         name: app.name,
-        slug: app.slug,
-        webhookUrl: `${origin}/webhook/${app.slug}`,
+        slug: app.github_slug,
+        webhookUrl: `${origin}/webhook/${app.webhook_path}`,
       },
       requestLocale(c),
       // Set only on a workspace-scoped request; the view never reads env.
@@ -2377,7 +2362,9 @@ async function resolveScopedApp(
   slug: string,
   scope: WorkspaceScope,
 ): Promise<GithubAppRow | null> {
-  const app = await apps.getAppBySlug(slug);
+  // Mechanical rename fallout of the store's `slug` → `webhook_path` (Task 1);
+  // the App-ID resolution this helper is meant to become is Task 4's.
+  const app = await apps.getAppByWebhookPath(slug);
   if (!app || app.deleted_at !== null) return null;
   if (app.workspace_id !== scope.workspaceId) return null;
   return app;

@@ -499,12 +499,12 @@ export function manifestStartPage(
  * App summary confirm gate (spec § Multi-App 契约 — the manifest
  * overwrite-confirm semantics are GONE: nothing shared is overwritten, the
  * commit writes a NEW github_apps row). Single column, read-only summary
- * (name, numeric id, slug, webhook URL), amber note, primary submit.
+ * (name, numeric id, GitHub slug, webhook URL), amber note, primary submit.
  * PEM / webhook_secret NEVER appear here.
  */
 export function manifestConfirmPage(
   user: { login: string; name?: string },
-  app: { id: number; name: string; slug: string; webhookUrl: string },
+  app: { id: number; name: string; slug: string | null; webhookUrl: string },
   locale: Locale = "en",
 ): string {
   const ready = t(locale, "manifest.confirm.ready", {
@@ -512,7 +512,9 @@ export function manifestConfirmPage(
     id: `<span class="id">${app.id}</span>`,
   });
   const slugWebhook = t(locale, "manifest.confirm.slugWebhook", {
-    slug: `<strong>${escapeHtml(app.slug)}</strong>`,
+    // Before the first metadata sync GitHub's slug is unknown; the App id is
+    // the honest stand-in rather than an invented value.
+    slug: `<strong>${escapeHtml(app.slug ?? String(app.id))}</strong>`,
     webhookUrl: `<strong>${escapeHtml(app.webhookUrl)}</strong>`,
   });
   return page(
@@ -537,13 +539,16 @@ export function manifestConfirmPage(
 
 /**
  * App onboarding surface (AC4b) — the post-commit landing page:
- * App name, numeric id, slug, webhook URL, and the provider-first next-step
- * CTA into Settings. Same summary discipline as the confirm gate: tabular
- * id, no success green. PEM / webhook_secret NEVER appear here.
+ * App name, numeric id, GitHub slug, webhook URL, and the provider-first
+ * next-step CTA into Settings. Same summary discipline as the confirm gate:
+ * tabular id, no success green. PEM / webhook_secret NEVER appear here.
+ * The GitHub slug is what GitHub actually shows and can rename, so it falls
+ * back to the App id before the first metadata sync rather than inventing a
+ * value; the Settings link addresses the App by that immutable id.
  */
 export function manifestOnboardingPage(
   user: { login: string; name?: string },
-  app: { id: number; name: string; slug: string; webhookUrl: string },
+  app: { id: number; name: string; slug: string | null; webhookUrl: string },
   locale: Locale = "en",
   /** Workspace ref (id or slug) under `strict`; null renders today's legacy targets. */
   workspaceRef: string | null = null,
@@ -567,9 +572,9 @@ export function manifestOnboardingPage(
     <section class="enabled">
       <h2>${escapeHtml(t(locale, "manifest.onboarding.heading"))}</h2>
       <p>${connected}</p>
-      <p class="status">${escapeHtml(t(locale, "manifest.onboarding.slug", { slug: app.slug }))}<br>${escapeHtml(t(locale, "manifest.onboarding.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
+      <p class="status">${escapeHtml(t(locale, "manifest.onboarding.slug", { slug: app.slug ?? String(app.id) }))}<br>${escapeHtml(t(locale, "manifest.onboarding.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
       <p class="note">${escapeHtml(t(locale, "manifest.onboarding.nextStep"))}</p>
-      <p><a class="primary" href="${settingsBase}/${escapeHtml(app.slug)}/settings">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="/dashboard">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
+      <p><a class="primary" href="${settingsBase}/${app.id}/settings">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="/dashboard">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
     </section>
   </main>`,
     locale,
