@@ -55,9 +55,10 @@ layer answers "how much of this App may this member see". Verified contract
 
 - **Two-tier read faces on every App surface.** `canManageApp` (creator-or-admin)
   splits each payload into an identity tier and an ops tier. Identity tier =
-  exactly what the Apps-list rows expose (slug, `github_app_id`, `status`,
-  `review_enabled`, `created_by`) plus `created_at` + the public `github_*`
-  profile block + `can_manage: false` — safe for every member. Ops tier
+  exactly what the Apps-list rows expose (`webhook_path`, `github_app_id`,
+  `status`, `review_enabled`, `created_by`) plus `created_at` + the public
+  `github_*` profile block (including the cached `github_slug`) +
+  `can_manage: false` — safe for every member. Ops tier
   (installations, deliveries, sandbox image, provider keys/chains, trigger
   runtime config, insights) rides only the manager branch.
 - **Discrimination key stays `can_manage`** on one endpoint/one matcher entry;
