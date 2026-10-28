@@ -15,6 +15,7 @@ import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import {
   appDetailSearchQuery,
+  appDisplayName,
   appStatusPill,
   parseAppDetailSearch,
   parseModels,
@@ -333,9 +334,11 @@ export function AppDetailView({
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Identity header — serves both tabs. */}
+      {/* Identity header — serves both tabs. The heading names the App by its
+          GitHub display name (D6 fallback chain); the route `appId` stays the
+          address, never the visible identity. */}
       <PageHeader
-        title={appId}
+        title={appDisplayName(payload.app)}
         actions={
           <div className="flex flex-wrap items-center gap-3">
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>

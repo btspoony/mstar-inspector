@@ -191,7 +191,7 @@ describe("settings heading idiom (QC convergence)", () => {
     expect(shell.match(/<h1/g)).toHaveLength(1);
     expect(shell.match(/--typo-heading-24-size/g)).toHaveLength(1);
     expect(shell).toContain(
-      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">1</h1>',
+      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">Demo</h1>',
     );
     // Ownership: the triple is spelled once, in PageHeader, and the shell
     // composes it rather than re-spelling it.
@@ -199,7 +199,7 @@ describe("settings heading idiom (QC convergence)", () => {
     expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
     expect(pageHeader).toContain("tracking-(--typo-heading-24-tracking)");
     expect(detailPage).toContain("<PageHeader");
-    expect(detailPage).toContain("title={appId}");
+    expect(detailPage).toContain("title={appDisplayName(payload.app)}");
     expect(detailPage).not.toContain("--typo-heading-24");
     expect(settingsPage).not.toContain("--typo-heading-24");
     // Card titles ride the heading-16 step instead — the detail face never

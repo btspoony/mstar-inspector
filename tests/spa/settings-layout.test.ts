@@ -1690,7 +1690,7 @@ describe("settings header typography", () => {
     // Exactly one heading, and it is the heading-24 h1 carrying the slug.
     expect(shell.match(/<h1/g)).toHaveLength(1);
     expect(shell).toContain(
-      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">1</h1>',
+      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">Acme</h1>',
     );
     // Rendering alone cannot express OWNERSHIP — a shell inlining the same
     // triple renders byte-identical markup — so the face's single home is
@@ -1963,6 +1963,53 @@ describe("GitHub App identity card", () => {
     expect(t("zh_CN", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("在 GitHub 上管理 Acme");
     expect(t("en", "settings.appInfoSynced", { time: "5 minutes ago" })).toBe("Synced 5 minutes ago");
     expect(t("zh_CN", "settings.appInfoSynced", { time: "5 分钟前" })).toBe("同步于 5 分钟前");
+    // D5 force-refresh pair (en/zh parity).
+    expect(t("en", "settings.appInfoRefresh")).toBe("Refresh from GitHub");
+    expect(t("zh_CN", "settings.appInfoRefresh")).toBe("从 GitHub 刷新");
+    expect(t("en", "settings.appInfoRefreshDone")).toBe("Identity refreshed from GitHub.");
+    expect(t("zh_CN", "settings.appInfoRefreshDone")).toBe("已从 GitHub 刷新身份。");
+  });
+
+  describe("identity card force refresh (D5)", () => {
+    const card = (canManage: boolean, onReload?: () => Promise<unknown>): string =>
+      renderToStaticMarkup(
+        createElement(AppInfoCard, {
+          locale: "en",
+          app: meta({ github_name: "Acme Reviewer" }),
+          canManage,
+          onReload,
+        }),
+      );
+
+    test("manager-only: the refresh button renders only on the manager face with a reload path", () => {
+      expect(card(true, async () => true)).toContain(t("en", "settings.appInfoRefresh"));
+      // No reload path → no button (the identity face renders nothing).
+      expect(card(true)).not.toContain(t("en", "settings.appInfoRefresh"));
+      expect(card(false, async () => true)).not.toContain(t("en", "settings.appInfoRefresh"));
+    });
+
+    test("refresh POSTs refresh-metadata by github_app_id; success reloads, failure resolves the keyed message and never reloads", () => {
+      const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+      const cardBody = source.slice(
+        source.indexOf("export function AppInfoCard"),
+        source.indexOf("function HealthBody"),
+      );
+      expect(cardBody).toContain("${apiBase()}/api/apps/${app.github_app_id}/refresh-metadata");
+      // Manager-only gate + busy guard.
+      expect(cardBody).toContain("canManage && onReload");
+      expect(cardBody).toContain("disabled={refreshing}");
+      // Success: card-local notice + background reload, and the reload sits
+      // AFTER the failure branch's return — a keyed 400 never reloads.
+      const successReload = cardBody.indexOf("await onReload?.()");
+      expect(cardBody).toContain('t(locale, "settings.appInfoRefreshDone")');
+      expect(successReload).toBeGreaterThan(-1);
+      const errorNotice = cardBody.indexOf("message: settingsErrorMessage(locale, body)");
+      expect(errorNotice).toBeGreaterThan(-1);
+      expect(errorNotice).toBeLessThan(successReload);
+      // The failure notice is the keyed settings-error resolver (the card
+      // gains no error channel of its own).
+      expect(cardBody).toContain("settingsErrorMessage(locale, body)");
+    });
   });
 });
 
@@ -1970,7 +2017,7 @@ describe("GitHub App settings link wiring (AD-623)", () => {
   test("the page threads payload.can_manage into the card; the settings URL derives only through the helper", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Presentation-layer threading only — the payload contract gains nothing.
-    expect(source).toContain("<AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />");
+    expect(source).toContain("<AppInfoCard\n            locale={locale}\n            app={app}\n            canManage={payload.can_manage}\n            onReload={() => onReload({ background: true })}\n          />");
     // The card body routes the manager target through the pure helper (the
     // forbidden derivations — github_name / the local slug — cannot reach the
     // URL through it: it takes the html_url alone).

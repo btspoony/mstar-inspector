@@ -180,7 +180,7 @@ export const zhCN: Dictionary = {
     tableStatus: "状态",
     tableHealth: "健康",
     tableCreator: "创建者",
-    openAria: "打开 {slug} 详情",
+    openAria: "打开 {name} 详情",
   },
   members: {
     heading: "成员",
@@ -486,6 +486,10 @@ export const zhCN: Dictionary = {
     // 可及名用「管理」而非「查看」。成员面沿用 appInfoViewOnGithub。
     appInfoManageOnGithub: "在 GitHub 上管理 {name}",
     appInfoSynced: "同步于 {time}",
+    // (D5) 仅管理面的强制刷新：绕过 24h TTL 重新拉取缓存的 GitHub 资料；
+    // 成功提示确认缓存已重载。
+    appInfoRefresh: "从 GitHub 刷新",
+    appInfoRefreshDone: "已从 GitHub 刷新身份。",
     // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
     // 与 /healthz 字段及 release tag 同形。
     footer: {

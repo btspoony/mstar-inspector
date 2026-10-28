@@ -404,7 +404,12 @@ export function SettingsView({
           {/* The GitHub identity card sits before the manage conditional in
               the group (AC3); the viewer's authorization switches the name
               link's destination (AD-623). */}
-          <AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />
+          <AppInfoCard
+            locale={locale}
+            app={app}
+            canManage={payload.can_manage}
+            onReload={() => onReload({ background: true })}
+          />
 
           <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} onTriggerMode={runTriggerMode} />
         </SectionGroup>
@@ -588,13 +593,47 @@ export function AppInfoCard({
   locale,
   app,
   canManage,
+  onReload,
 }: {
   locale: SpaBoot["locale"];
   /** Both faces — the identity and manage app shapes structurally share every field the card reads. */
   app: SettingsIdentityAppMeta | SettingsAppMeta;
   /** Threaded from payload.can_manage at the call site — presentation only. */
   canManage: boolean;
+  /** The manager face's background reload — present iff canManage; the refresh button renders only when both hold. */
+  onReload?: () => Promise<unknown>;
 }) {
+  const [refreshing, setRefreshing] = useState(false);
+  // Card-local op feedback (the NoticeRegion idiom): the refresh outcome
+  // renders beside the button, never through a page-level channel.
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function refreshMetadata(): Promise<void> {
+    setRefreshing(true);
+    try {
+      const res = await fetch(`${apiBase()}/api/apps/${app.github_app_id}/refresh-metadata`, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      });
+      const body = await res.text();
+      // Keyed 400 (settings.error.githubMetadataRefreshFailed) or any other
+      // failure: the resolved message lands in this region and RETURNS before
+      // any reload — the cached face stays on screen.
+      if (!res.ok) {
+        const failure: OpNotice = { kind: "error", message: settingsErrorMessage(locale, body) };
+        setNotice(failure);
+        return;
+      }
+      // Success = the server re-cached the profile: a card-local notice plus a
+      // background reload re-renders the card from the fresh payload without
+      // a page banner.
+      const outcome: OpNotice = { kind: "success", message: t(locale, "settings.appInfoRefreshDone") };
+      setNotice(outcome);
+      await onReload?.();
+    } finally {
+      setRefreshing(false);
+    }
+  }
   // Derived BEFORE the per-field JSX so the href and the aria-label key off
   // the same resolved destination; a member viewer or a non-derivable url
   // leaves settingsHref null and every face below is today's.
@@ -653,6 +692,14 @@ export function AppInfoCard({
             ) : null}
           </div>
         </div>
+        {canManage && onReload ? (
+          <div className="mt-4 flex flex-col gap-2">
+            <Button type="button" variant="secondary" disabled={refreshing} onClick={() => void refreshMetadata()}>
+              {t(locale, "settings.appInfoRefresh")}
+            </Button>
+            <NoticeRegion notice={notice} />
+          </div>
+        ) : null}
       </CardContent>
     </SectionCard>
   );
@@ -831,7 +878,7 @@ function OpsCard({
       <CardContent className="flex flex-col gap-6">
         <ReviewTriggerControl
           locale={locale}
-          slug={app.github_slug ?? ""}
+          slug={app.github_slug}
           mode={app.review_trigger_mode}
           onTriggerMode={onTriggerMode}
         />
@@ -1052,7 +1099,12 @@ export function ReviewTriggerControl({
   onTriggerMode,
 }: {
   locale: SpaBoot["locale"];
-  slug: string;
+  /**
+   * The cached GitHub slug — the ONLY mention target (D2). Null before the
+   * first metadata sync: no real target exists, so no mention renders
+   * (fail-safe — an invented `@[bot]` could never trigger a review).
+   */
+  slug: string | null;
   mode: ReviewTriggerMode;
   onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
 }) {
@@ -1089,7 +1141,9 @@ export function ReviewTriggerControl({
     }
   }
 
-  const mention = botMention(slug);
+  // The mention exists only when GitHub's slug cache does — the string is
+  // the canonical `@{slug}[bot]` form (spec §3), never a local value.
+  const mention = slug ? botMention(slug) : null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -1111,19 +1165,21 @@ export function ReviewTriggerControl({
           ))}
         </ToggleGroup>
       </div>
-      <p className="text-xs text-muted-foreground">
-        {t(locale, "settings.triggerModeMention")}{" "}
-        {/* The mention renders as ONE text node, so a click-drag selects /
-            copies the exact string; the plain form rides the title and the
-            localized aria label (spec §3 operator visibility). */}
-        <code
-          className="rounded bg-muted px-1 py-0.5 font-mono text-foreground"
-          title={mention}
-          aria-label={t(locale, "settings.triggerModeMentionAria", { mention })}
-        >
-          {mention}
-        </code>
-      </p>
+      {mention ? (
+        <p className="text-xs text-muted-foreground">
+          {t(locale, "settings.triggerModeMention")}{" "}
+          {/* The mention renders as ONE text node, so a click-drag selects /
+              copies the exact string; the plain form rides the title and the
+              localized aria label (spec §3 operator visibility). */}
+          <code
+            className="rounded bg-muted px-1 py-0.5 font-mono text-foreground"
+            title={mention}
+            aria-label={t(locale, "settings.triggerModeMentionAria", { mention })}
+          >
+            {mention}
+          </code>
+        </p>
+      ) : null}
       <NoticeRegion notice={notice} />
     </div>
   );

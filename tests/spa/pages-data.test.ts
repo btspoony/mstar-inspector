@@ -223,6 +223,29 @@ describe("members/apps/settings parsers", () => {
     expect(parseApps({ apps: [] })).toBeNull();
   });
 
+  test("parseApps rows carry the D6 GitHub identity fields (github_name / github_slug / github_avatar_url)", () => {
+    const ok = parseApps({
+      viewer: { login: "mallory", role: "member" },
+      apps: [
+        {
+          github_app_id: 1,
+          github_name: "Demo",
+          github_slug: "demo",
+          github_avatar_url: "https://x.test/a.png",
+          status: "active",
+          review_enabled: 1,
+          created_by: "mallory",
+          health: { latest: null, rejected24h: 0 },
+        },
+      ],
+    });
+    expect(ok?.apps[0]).toMatchObject({
+      github_name: "Demo",
+      github_slug: "demo",
+      github_avatar_url: "https://x.test/a.png",
+    });
+  });
+
   test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
     const ok = parseSettings({
       can_manage: true,

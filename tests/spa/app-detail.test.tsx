@@ -138,8 +138,8 @@ describe("tab shell rendering (static SSR)", () => {
     const manage = renderDetail(managePayload, true);
     expect(manage).toContain(">Settings</button>");
     expect(manage).toContain(">Insights</button>");
-    // The identity header serves both tabs.
-    expect(manage).toContain(">1</h1>");
+    // The identity header serves both tabs — the GitHub display name (D6).
+    expect(manage).toContain(">Demo</h1>");
     expect(manage).toContain("by mallory");
   });
 

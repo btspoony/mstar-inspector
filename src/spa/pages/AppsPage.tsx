@@ -179,21 +179,31 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
     {
       header: t(locale, "apps.tableName"),
       // AD-581 identity cell: the App's brand surface. The list row links
-      // and keys by the immutable App id; the block is the GitHub display
-      // name (primary line) + App id (meta line).
+      // and keys by the immutable App id; the block is the App's GitHub
+      // avatar + display name (primary line) + App id (meta line) — the
+      // D6 fallback chain github_name ?? github_slug ?? String(github_app_id).
       cell: (app) => (
-        <div className="flex flex-col gap-0.5">
-          <a
-            className="text-sm font-semibold text-foreground no-underline hover:underline"
-            href={hrefOf(app.github_app_id)}
-            aria-label={t(locale, "apps.openAria", { slug: appDisplayName(app) })}
-            onClick={(event) => spaClick(hrefOf(app.github_app_id), event)}
-          >
-            {appDisplayName(app)}
-          </a>
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {t(locale, "apps.appId", { id: app.github_app_id })}
-          </span>
+        <div className="flex items-center gap-3">
+          {app.github_avatar_url ? (
+            <img
+              src={app.github_avatar_url}
+              alt=""
+              className="h-9 w-9 shrink-0 rounded-full border object-cover"
+            />
+          ) : null}
+          <div className="flex flex-col gap-0.5">
+            <a
+              className="text-sm font-semibold text-foreground no-underline hover:underline"
+              href={hrefOf(app.github_app_id)}
+              aria-label={t(locale, "apps.openAria", { name: appDisplayName(app) })}
+              onClick={(event) => spaClick(hrefOf(app.github_app_id), event)}
+            >
+              {appDisplayName(app)}
+            </a>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {t(locale, "apps.appId", { id: app.github_app_id })}
+            </span>
+          </div>
         </div>
       ),
     },

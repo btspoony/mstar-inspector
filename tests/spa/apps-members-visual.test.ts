@@ -208,9 +208,25 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(identity).toContain(">demo</a>");
     expect(identity).toContain('<span class="text-xs text-muted-foreground tabular-nums">');
     expect(identity).toContain(t("en", "apps.appId", { id: 1 }));
-    // No avatar channel exists: the payload carries no GitHub profile field,
-    // so the row's only image slot would have to come from somewhere else.
+    // Null avatar degrades per-field (D6): no img pretends a synced profile.
     expect(identity).not.toContain("<img");
+  });
+
+  test("identity cell avatar: github_avatar_url renders a rounded img; the name falls back github_name → slug → App id", () => {
+    // The synced face: the App's own logo (bot avatar), decorative alt.
+    const withAvatar = renderList([
+      appRow({ github_avatar_url: "https://avatars.githubusercontent.com/in/1234?v=4", github_name: "Demo" }),
+    ]);
+    expect(withAvatar).toContain(
+      '<img src="https://avatars.githubusercontent.com/in/1234?v=4" alt="" class="h-9 w-9 shrink-0 rounded-full border object-cover"',
+    );
+    expect(withAvatar).toContain(">Demo</a>");
+    expect(withAvatar).toContain('aria-label="Open Demo detail"');
+    // Fallback chain: no name → the slug; neither → the numeric App id.
+    const bySlug = renderList([appRow({ github_slug: "demo" })]);
+    expect(bySlug).toContain(">demo</a>");
+    const byId = renderList([appRow({ github_slug: null })]);
+    expect(byId).toContain(">1</a>");
   });
 
   test("whole-row click and the visible detail anchor keep their channels", () => {
@@ -255,11 +271,15 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       expect(classes, label).toContain(`text-(--badge-${tone}-fg)`);
     }
     // The emitted pill is the only geometry source: no hard-coded pill
-    // survives anywhere in the row markup.
+    // survives anywhere in the row markup (the avatar img's own rounded-full
+    // is excluded — it is the D6 logo channel, not pill geometry).
     const emitted = [...renderList([appRow()]).matchAll(/class="([^"]*)"/g)]
       .map((match) => match[1] ?? "")
       .join(" ");
     expect(emitted).not.toContain("rounded-full");
+    const withAvatar = renderList([appRow({ github_avatar_url: "https://x.test/a.png" })]);
+    expect(withAvatar.replace(/<img[^>]*>/g, "")).not.toContain("rounded-full");
+    expect(withAvatar).toContain("rounded-full border object-cover");
     expect(emitted).not.toMatch(/\bh-5\b/);
   });
 
@@ -609,9 +629,9 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
 
   test("the row anchor names its destination for assistive tech and says Detail, never Settings", () => {
     const html = renderList("/dashboard/acme/apps");
-    expect(html).toContain(`aria-label="${t("en", "apps.openAria", { slug: "demo" })}"`);
-    expect(t("en", "apps.openAria", { slug: "demo" })).toBe("Open demo detail");
-    expect(t("zh_CN", "apps.openAria", { slug: "demo" })).toBe("打开 demo 详情");
+    expect(html).toContain(`aria-label="${t("en", "apps.openAria", { name: "demo" })}"`);
+    expect(t("en", "apps.openAria", { name: "demo" })).toBe("Open demo detail");
+    expect(t("zh_CN", "apps.openAria", { name: "demo" })).toBe("打开 demo 详情");
     expect(html).toContain(`>${t("en", "apps.detail")}<`);
     expect(t("zh_CN", "apps.detail")).toBe("详情");
   });

@@ -26,7 +26,7 @@ const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/Set
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
 
-const controlHtml = (mode: ReviewTriggerMode, locale: "en" | "zh_CN" = "en", slug = "acme"): string =>
+const controlHtml = (mode: ReviewTriggerMode, locale: "en" | "zh_CN" = "en", slug: string | null = "acme"): string =>
   renderToStaticMarkup(createElement(ReviewTriggerControl, { locale, slug, mode, onTriggerMode: noopSave }));
 
 /** The one button-segment whose `title` carries the verbatim mode value. */
@@ -123,6 +123,15 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
     expect(html).toContain(">@mstar-review[bot]</code>");
     expect(html).toContain('title="@mstar-review[bot]"');
     expect(html).not.toContain("@acme[bot]");
+  });
+
+  test("no github_slug → no mention renders at all (D2 fail-safe; never an @[bot] placeholder)", () => {
+    // Before the first metadata sync there is no real mention target: the
+    // hint paragraph stays off the face entirely, the mode control does not.
+    const html = controlHtml("every_push", "en", null);
+    expect(html).not.toContain("[bot]");
+    expect(html).not.toContain("works in every mode");
+    expect(html).toContain('role="radiogroup"');
   });
 
   test("the mention copy sits in the control (near the mode segments, per the assignment)", () => {

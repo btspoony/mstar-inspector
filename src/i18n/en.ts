@@ -208,7 +208,7 @@ export const en = {
     tableStatus: "Status",
     tableHealth: "Health",
     tableCreator: "Creator",
-    openAria: "Open {slug} detail",
+    openAria: "Open {name} detail",
   },
   members: {
     heading: "Members",
@@ -567,6 +567,10 @@ export const en = {
     // "view". Member face keeps appInfoViewOnGithub.
     appInfoManageOnGithub: "Manage {name} on GitHub",
     appInfoSynced: "Synced {time}",
+    // Manager-only force refresh (D5): re-fetches the cached GitHub profile
+    // bypassing the 24h TTL; the success notice confirms the cache reloaded.
+    appInfoRefresh: "Refresh from GitHub",
+    appInfoRefreshDone: "Identity refreshed from GitHub.",
     /**
      * Deployment version footer. `{version}` carries the
      * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
