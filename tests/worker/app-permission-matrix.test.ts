@@ -27,6 +27,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
+import { testAppPem } from "../helpers/rsa-key";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -67,7 +68,9 @@ async function seededWorld(): Promise<TestD1> {
     githubSlug: "mallorys-app",
     githubAppId: APP_ID,
     name: "mallorys-app",
-    privateKeyEnc: await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
+    // A real PKCS#8 PEM: the refresh-metadata route's 200 side mints an App
+    // JWT, and WebCrypto rejects a placeholder body before any request leaves.
+    privateKeyEnc: await box.encryptSecret(await testAppPem(), `github_apps.private_key_enc:${id}`),
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     createdBy: "mallory",
     workspaceId: "default",
@@ -204,6 +207,10 @@ const MATRIX_ROUTES: MatrixRoute[] = [
   { name: "settings remove-custom-provider", path: SETTINGS, fields: { op: "remove-custom-provider", provider_id: "nope" } },
   { name: "settings key/delete", path: `${SETTINGS}/key/delete`, fields: { provider: "anthropic" } },
   { name: "keys/verify", path: VERIFY, fields: { provider: "anthropic", key: PLAIN_KEY }, verifies: true },
+  // (D5) The manager's forced metadata refresh — a manager-only write whose 200
+  // side additionally calls api.github.com (GET /app + the bot avatar leg), so
+  // the sweep's stub answers those URLs too.
+  { name: "refresh-metadata", path: `/dashboard/default/api/apps/${APP_ID}/refresh-metadata` },
   // --- ops family: pinned action paths ---
   { name: "pause", path: `/dashboard/default/apps/${APP_ID}/pause` },
   { name: "resume", path: `/dashboard/default/apps/${APP_ID}/resume` },
@@ -260,7 +267,8 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
       const env = makeEnv(db);
       const allowed = actor.expected === 200;
       const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-        (async () => {
+        (async (input: unknown) => {
+          const allowedUrl = String(input);
           if (!allowed) {
             // The deny path must short-circuit BEFORE any outbound call —
             // the guard fires before validation, verification, or writes.
@@ -268,10 +276,20 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
           }
           // Models-list shape for built-in verify; any 2xx for the custom
           // probe (its body is never scraped — models = declared model_ids).
-          return new Response(JSON.stringify({ data: [{ id: "claude-sonnet-4-6" }] }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
+          // The refresh-metadata route's profile leg needs the GET /app shape
+          // (a `name` string is its identity gate); its bot-avatar leg accepts
+          // any 2xx body.
+          return new Response(
+            JSON.stringify(
+              allowedUrl === "https://api.github.com/app"
+                ? { name: "mallorys-app", html_url: "https://github.com/apps/mallorys-app", slug: "mallorys-app" }
+                : { data: [{ id: "claude-sonnet-4-6" }] },
+            ),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
         }) as unknown as typeof fetch,
       );
       try {

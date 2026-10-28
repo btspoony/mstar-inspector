@@ -261,6 +261,11 @@ const MANAGEMENT_WRITES: ReadonlyArray<{ route: string; body?: string; ownerStat
   // proves the authorization decision; the success path is owned by
   // tests/worker/settings-provider-first.test.ts.
   { route: `/api/apps/${ACME_APP_ID}/keys/verify`, body: "provider=anthropic&key=sk-not-a-real-key" },
+  // Same shape for the metadata refresh: a real 200 needs a live api.github.com
+  // (the route mints an App JWT and fetches the profile). The member-403 cell
+  // proves the authorization decision; the success path is owned by
+  // tests/worker/settings-github-metadata.test.ts.
+  { route: `/api/apps/${ACME_APP_ID}/refresh-metadata` },
   // Last: a manager's success soft-deletes the row.
   { route: `/apps/${ACME_APP_ID}/delete`, ownerStatus: 200 },
 ];

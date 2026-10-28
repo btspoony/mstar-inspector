@@ -103,7 +103,7 @@ export type GithubAppRow = {
   /**
    * OUR webhook route key (migration 0036 renamed `slug`): opaque to GitHub
    * and to the review pipeline, UNIQUE NOT NULL. The rename kept every stored
-   * value, so live `/webhooks/{webhook_path}` URLs still resolve.
+   * value, so live `/webhook/:webhookPath` URLs still resolve.
    */
   webhook_path: string;
   github_app_id: number;

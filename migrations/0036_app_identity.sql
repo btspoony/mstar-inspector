@@ -7,10 +7,11 @@
 --
 -- Two statements:
 --   1. RENAME COLUMN keeps the stored VALUES, so every live webhook URL
---      (`/webhooks/{path}`) and every existing row keeps working — the path was
---      always opaque to us, only its name was wrong. SQLite rewrites the NOT
---      NULL + UNIQUE constraint onto the new name, so uniqueness stays enforced
---      with no table rebuild (a rebuild would be unsafe over a live DB).
+--      (`/webhook/:webhookPath`) and every existing row keeps working — the
+--      path was always opaque to us, only its name was wrong. SQLite rewrites
+--      the NOT NULL + UNIQUE constraint onto the new name, so uniqueness stays
+--      enforced with no table rebuild (a rebuild would be unsafe over a live
+--      DB).
 --   2. `github_slug` is nullable: rows that predate the first metadata sync have
 --      no honest value, and NULL says "never synced" instead of guessing.
 --

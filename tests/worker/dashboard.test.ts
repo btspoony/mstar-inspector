@@ -2897,15 +2897,17 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("before the first metadata sync the GitHub slug falls back to the App id", async () => {
+  test("before the first metadata sync the page labels the numeric App id as the App ID", async () => {
     // github_slug is NULL until the first sync; the page must not invent a
-    // slug, so the numeric App id stands in.
+    // slug, and it must not hand the operator a number under a "Slug" label
+    // either — the fallback is the numeric App id, labelled as such.
     const env = makeEnv();
     await seedApp(env, { githubSlug: null });
     const res = await worker.fetch(await onboardingRequest(CONVERSION.id), env);
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain(`Slug: ${CONVERSION.id}`);
+    expect(body).toContain(`App ID: ${CONVERSION.id}`);
+    expect(body).not.toContain(`Slug: ${CONVERSION.id}`);
   });
 
   test("admin views any App's onboarding page", async () => {

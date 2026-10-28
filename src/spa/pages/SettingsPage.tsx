@@ -30,7 +30,7 @@ import { SectionCard, SectionCardTitle, SectionGroup } from "../components/Secti
 import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { workspaceRefOf } from "../routes";
-import { apiBase } from "../workspace-base";
+import { apiBase, currentOrigin } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import { useRenameMembership } from "../workspace-memberships";
@@ -630,6 +630,12 @@ export function AppInfoCard({
       const outcome: OpNotice = { kind: "success", message: t(locale, "settings.appInfoRefreshDone") };
       setNotice(outcome);
       await onReload?.();
+    } catch {
+      // Transport failure (offline, a restarting Worker, DNS): the fetch
+      // REJECTS, so there is no HTTP status to resolve a key from. Same
+      // card-local error region, the shared save-failure copy, and no reload —
+      // the cached face stays (the sibling op channels' `common.saveFailed`).
+      setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
     } finally {
       setRefreshing(false);
     }
@@ -683,6 +689,18 @@ export function AppInfoCard({
             <p className="text-sm text-muted-foreground">
               {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
             </p>
+            {/* The delivery URL a webhook repoint needs (deploy doc § 3 sends
+                the operator here): manager-only, because `webhook_path` is the
+                App's signed delivery route and a member has no repoint duty.
+                Selected as one text node so click-drag copies it whole. */}
+            {canManage ? (
+              <p className="text-xs text-muted-foreground">
+                {t(locale, "settings.appInfoDeliveryUrl")}{" "}
+                <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">
+                  {`${currentOrigin()}/webhook/${app.webhook_path}`}
+                </code>
+              </p>
+            ) : null}
             {app.github_metadata_synced_at ? (
               <p className="text-xs text-muted-foreground">
                 {t(locale, "settings.appInfoSynced", {

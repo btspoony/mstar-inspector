@@ -511,12 +511,18 @@ export function manifestConfirmPage(
     appName: `<strong>${escapeHtml(app.name)}</strong>`,
     id: `<span class="id">${app.id}</span>`,
   });
-  const slugWebhook = t(locale, "manifest.confirm.slugWebhook", {
-    // Before the first metadata sync GitHub's slug is unknown; the App id is
-    // the honest stand-in rather than an invented value.
-    slug: `<strong>${escapeHtml(app.slug ?? String(app.id))}</strong>`,
-    webhookUrl: `<strong>${escapeHtml(app.webhookUrl)}</strong>`,
-  });
+  // Before the first metadata sync GitHub's slug is unknown; the App id is the
+  // honest stand-in, and it carries the App ID label rather than pretending to
+  // be a GitHub slug.
+  const slugWebhook = app.slug
+    ? t(locale, "manifest.confirm.slugWebhook", {
+        slug: `<strong>${escapeHtml(app.slug)}</strong>`,
+        webhookUrl: `<strong>${escapeHtml(app.webhookUrl)}</strong>`,
+      })
+    : t(locale, "manifest.confirm.appIdWebhook", {
+        id: `<strong>${app.id}</strong>`,
+        webhookUrl: `<strong>${escapeHtml(app.webhookUrl)}</strong>`,
+      });
   return page(
     t(locale, "manifest.title"),
     `${shellHeader(user, false, locale)}
@@ -542,9 +548,10 @@ export function manifestConfirmPage(
  * App name, numeric id, GitHub slug, webhook URL, and the provider-first
  * next-step CTA into Settings. Same summary discipline as the confirm gate:
  * tabular id, no success green. PEM / webhook_secret NEVER appear here.
- * The GitHub slug is what GitHub actually shows and can rename, so it falls
- * back to the App id before the first metadata sync rather than inventing a
- * value; the Settings link addresses the App by that immutable id.
+ * The GitHub slug is what GitHub actually shows and can rename, so before the
+ * first metadata sync the page shows the numeric App id under an **App ID**
+ * label instead of inventing a slug; the Settings link addresses the App by
+ * that same immutable id.
  */
 export function manifestOnboardingPage(
   user: { login: string; name?: string },
@@ -572,7 +579,7 @@ export function manifestOnboardingPage(
     <section class="enabled">
       <h2>${escapeHtml(t(locale, "manifest.onboarding.heading"))}</h2>
       <p>${connected}</p>
-      <p class="status">${escapeHtml(t(locale, "manifest.onboarding.slug", { slug: app.slug ?? String(app.id) }))}<br>${escapeHtml(t(locale, "manifest.onboarding.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
+      <p class="status">${escapeHtml(app.slug ? t(locale, "manifest.onboarding.slug", { slug: app.slug }) : t(locale, "manifest.onboarding.appId", { id: app.id }))}<br>${escapeHtml(t(locale, "manifest.onboarding.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
       <p class="note">${escapeHtml(t(locale, "manifest.onboarding.nextStep"))}</p>
       <p><a class="primary" href="${settingsBase}/${app.id}/settings">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="/dashboard">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
     </section>

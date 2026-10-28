@@ -75,6 +75,11 @@ type SeedOptions = {
   /** Tamper anchor: encrypt the webhook secret under a WRONG row AAD. */
   wrongAad?: boolean;
   /**
+   * Cached GitHub slug overrides the local path (which doubles as the slug
+   * here); `null` seeds a row that predates its first metadata sync.
+   */
+  githubSlug?: string | null;
+  /**
    * Per-App auto-trigger mode (migration 0022). OMITTED → the column is not
    * written, so the row exercises the DDL DEFAULT 'every_push'.
    */
@@ -98,7 +103,7 @@ async function seedApp(
   const baseArgs = [
     id,
     opts.slug,
-    opts.slug,
+    opts.githubSlug === undefined ? opts.slug : opts.githubSlug,
     opts.githubAppId ?? 1000 + appCount,
     opts.slug,
     privateKeyEnc,
@@ -673,6 +678,109 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
       triggered_by: "issue_comment",
       appRef: { appId: appRow.id },
     });
+  });
+
+  test("an unsynced App (github_slug NULL) logs mention_unresolved for a mention, still enqueues nothing", async () => {
+    // Upgrade surface: migration 0036 adds github_slug with no backfill, so
+    // every pre-existing row answers to no mention until its first metadata
+    // sync. A `manual`-mode App has the mention as its ONLY trigger, which is
+    // exactly the silent regression this warn makes observable. The delivery
+    // outcome vocabulary stays unchanged — this is still an `ignored`.
+    const db = createMigratedD1();
+    await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      githubSlug: null,
+      reviewTriggerMode: "manual",
+    });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 123 },
+      comment: { body: "@app-x please take another look" },
+      issue: { number: 7, pull_request: {}, user: { login: "alice" } },
+      repository: { name: "test-repo", owner: { login: "alice" } },
+      sender: { type: "User", login: "alice" },
+    });
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const line = warn.mock.calls
+      .map((call) => String(call[0]))
+      .find((entry) => entry.includes("mention_unresolved"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
+    expect(fields).toMatchObject({
+      event: "mention_unresolved",
+      reason: "mention_unresolved",
+    });
+    expect(fields.detail).toContain("webhook_path=app-x");
+    expect(fields.detail).toContain("app_id=");
+    // The delivery row still records the unchanged vocabulary.
+    const deliveries = db.raw
+      .query("SELECT outcome FROM webhook_deliveries")
+      .all() as Array<{ outcome: string }>;
+    expect(deliveries).toEqual([{ outcome: "ignored" }]);
+  });
+
+  test("a comment with no bot mention on an unsynced App stays a silent ignore (no mention_unresolved)", async () => {
+    // The warn is reserved for a mention that WOULD have matched: an ordinary
+    // comment on a never-synced App is the pre-existing, correct ignore.
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    try {
+      for (const [label, payload] of [
+        ["no mention at all", { comment: { body: "looks good to me" } }],
+        // A mention on an event the classifier never reaches the mention check
+        // for (`edited` is not whitelisted) must not warn either.
+        ["mention on an edited comment", { action: "edited", comment: { body: "@app-x look again" } }],
+      ] as const) {
+        const body = JSON.stringify({
+          action: "created",
+          installation: { id: 123 },
+          issue: { number: 7, pull_request: {}, user: { login: "alice" } },
+          repository: { name: "test-repo", owner: { login: "alice" } },
+          sender: { type: "User", login: "alice" },
+          ...payload,
+        });
+        const res = await postWebhook(
+          "/webhook/app-x",
+          body,
+          { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
+          env,
+        );
+        expect(res.status, label).toBe(200);
+      }
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(sent).toHaveLength(0);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((entry) => entry.includes("mention_unresolved"))).toBe(false);
   });
 
   test("a sibling App's mention does not trigger this App (GitHub-slug-keyed matching)", async () => {

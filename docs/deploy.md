@@ -1085,6 +1085,27 @@ apply last of all, and their rollback needs the pre-apply snapshot
 (§ Rollback).
 Note: migration 0006's `app_model_config` comment ("NULL / absent row = unset → falls back to the global OMP_REVIEW_MODEL") is superseded by AL-24-5 — chain-less Apps fail closed, no global chain since v0.9.
 
+#### Upgrade step after `0036_app_identity` (every deployed App)
+
+`0036` renames `github_apps.slug` to `webhook_path` (values kept, so every
+existing webhook URL keeps working) and adds a nullable cached `github_slug`,
+which is the bot-mention target (`@<github_slug>[bot]`). It has **no
+backfill** — the GitHub-side slug is only knowable from GitHub. So right
+after the deploy, every App that predates this change answers to **no
+mention at all** until its metadata is synced once:
+
+1. Open each App's settings page once — the read path's 24h-TTL refresh fills
+   `github_slug` — or press **Refresh from GitHub** on that card
+   (`POST /api/apps/{githubAppId}/refresh-metadata`) to force it immediately.
+2. Apps on `manual` trigger mode review on the mention only: until step 1
+   they will **not** review at all. Every other mode keeps working through
+   its `pull_request` trigger in the meantime.
+3. Watch for the structured `mention_unresolved` warn (it carries
+   `webhook_path=` and `app_id=`) while an App is still unsynced: it means a
+   comment mentioned a login, but that App's `github_slug` is NULL, so the
+   delivery was ignored. The delivery row still reads `ignored` — the warn is
+   the only signal, so grep it after the roll-out window.
+
 ### Secrets and vars inventory
 
 Worker secrets are managed as **GitHub Secrets** — the Deploy workflow

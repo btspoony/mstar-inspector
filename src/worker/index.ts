@@ -28,7 +28,13 @@ import { reconcileReviewChecks } from "./check-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
-import { classifyWebhook, WEBHOOK_BODY_LIMIT, type WebhookOutcome } from "./webhooks";
+import {
+  classifyWebhook,
+  MENTION_MISS_REASON,
+  payloadMentionsALogin,
+  WEBHOOK_BODY_LIMIT,
+  type WebhookOutcome,
+} from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
 import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
@@ -282,6 +288,7 @@ app.post("/webhook/:webhookPath", async (c) => {
   // slug (`github_slug`), NOT our webhook path: a rename changes the login that
   // can trigger a review. NULL (never synced) collapses to "" and matches
   // nothing — the existing fail-safe.
+  const appSlug = row.github_slug ?? "";
   const outcome = await classifyWebhook(
     appSecret,
     rawBody,
@@ -289,8 +296,30 @@ app.post("/webhook/:webhookPath", async (c) => {
     eventName,
     defaultLog,
     row.id,
-    { mode: row.review_trigger_mode, appSlug: row.github_slug ?? "" },
+    { mode: row.review_trigger_mode, appSlug },
   );
+
+  // ...which is also why an unsynced row must not fail SILENTLY: with no slug
+  // the mention can never match, so a `manual`-mode App (whose only trigger
+  // the mention is) just stops reviewing while the delivery reads `ignored`.
+  // Two gates keep this warn off every ordinary ignore: the classifier must
+  // have reached its mention check and missed (a `created` comment that did not
+  // match an empty slug — `edited`, other events and rejects never get here),
+  // AND the body must actually carry a login mention. Nothing else changes: the
+  // outcome, the delivery row's vocabulary (`ignored`) and the response stay as
+  // they were.
+  if (
+    appSlug === "" &&
+    outcome.kind === "ignore" &&
+    outcome.reason === MENTION_MISS_REASON &&
+    payloadMentionsALogin(rawBody)
+  ) {
+    webhookWarn(
+      "mention_unresolved",
+      `webhook_path=${webhookPath} app_id=${row.id}`,
+      "per-App webhook ignored an issue_comment mention — github_slug is not synced yet; open the App's settings page to sync it",
+    );
+  }
 
   // AL-20-1: best-effort delivery recording — the R2 diagnostics
   // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately

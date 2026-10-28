@@ -114,6 +114,43 @@ function bodyMentionsApp(body: string, appSlug: string): boolean {
 }
 
 /**
+ * The classifier's ignore reason for a comment that does not mention THIS App's
+ * bot. Exported so the per-App route can distinguish that one miss (which may
+ * be an UNSYNCED slug — see payloadMentionsALogin) from every other ignore,
+ * without duplicating the literal.
+ */
+export const MENTION_MISS_REASON = "comment body does not mention the App bot";
+
+/**
+ * Diagnostic twin of the mention grammar for an App whose `github_slug` is
+ * NOT cached yet (every row that predates its first metadata sync): does this
+ * issue_comment delivery mention some login as a standalone `@token`?
+ *
+ * It is NOT a trigger and never decides an outcome — the per-App route uses it
+ * only to explain an otherwise silent ignore, because with no slug
+ * `bodyMentionsApp` can never match and the App looks healthy while its mention
+ * trigger is dead. The check runs `bodyMentionsApp` over the login runs the
+ * body actually contains, so the grammar (boundaries, ASCII folding) stays
+ * single-sourced: `@acme[bot]` yields the run `acme`, which matches exactly as
+ * it would once the slug is known.
+ */
+export function payloadMentionsALogin(rawBody: string): boolean {
+  const parsed = parseBody(rawBody);
+  if (parsed === null) return false;
+  const result = issueCommentSchema.safeParse(parsed);
+  if (!result.success) return false;
+  const body = result.data.comment?.body ?? "";
+  let i = body.indexOf("@");
+  while (i !== -1) {
+    let end = i + 1;
+    while (end < body.length && LOGIN_CONTINUATION.test(body[end]!)) end++;
+    if (end > i + 1 && bodyMentionsApp(body, body.slice(i + 1, end))) return true;
+    i = body.indexOf("@", i + 1);
+  }
+  return false;
+}
+
+/**
  * §2.1 matrix for the auto (pull_request) face: `open` enqueues `opened`
  * only; `every_push` enqueues all whitelisted actions; `manual` never
  * auto-triggers (a bot mention is the only trigger).
@@ -400,7 +437,7 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   // never triggers another App.
   const body = comment?.body ?? "";
   if (!bodyMentionsApp(body, appSlug)) {
-    return { kind: "ignore", reason: "comment body does not mention the App bot" };
+    return { kind: "ignore", reason: MENTION_MISS_REASON };
   }
   if (issue?.pull_request == null) {
     return { kind: "ignore", reason: "comment is not on a pull request thread" };

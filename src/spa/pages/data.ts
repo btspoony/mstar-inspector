@@ -385,7 +385,11 @@ export type SettingsAppMeta = {
   review_enabled: boolean;
   created_by: string;
   last_webhook_at: string | null;
-  /** The local webhook path segment — never displayed to operators. */
+  /**
+   * The local webhook path segment — the manager identity card composes the
+   * delivery URL from it (a webhook repoint needs that URL); members never see
+   * it.
+   */
   webhook_path: string;
   /** The App's selected sandbox runtime image (registry id). */
   sandbox_image_id: string;

@@ -2490,9 +2490,9 @@ async function appStatusAction(
  * HTML-nav 302 target for pause/resume. Settings is the only native-form
  * caller (`<form method="post">` on the Review card); Apps-list uses fetch
  * `postForm`. Origin is a sanitized Referer pathname — never echoed as
- * Location. Settings-origin → `/dashboard/apps/:appId/settings` (DB slug);
- * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`. Both App
- * targets carry the request's workspace prefix (`scopedAppPath`).
+ * Location. Settings-origin → `/dashboard/apps/:appId/settings` (GitHub App
+ * id); apps-list origin → `/dashboard/apps`; anything else → `/dashboard`. Both
+ * App targets carry the request's workspace prefix (`scopedAppPath`).
  */
 function reviewActionRedirect(c: DashboardContext, appId: number): string {
   const settingsPath = scopedAppPath(c, `/dashboard/apps/${appId}/settings`);
@@ -2978,8 +2978,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
           created_at: app.created_at,
           github_name: app.github_name ?? null,
           github_slug: app.github_slug ?? null,
-          // Our own webhook route key (never a GitHub fact) — the settings card
-          // shows the delivery URL beside the mention string.
+          // Our own webhook route key (never a GitHub fact). It rides this face
+          // for shape parity only — the identity card renders the delivery
+          // URL from it on the MANAGER face, never here.
           webhook_path: app.webhook_path,
           github_description: app.github_description ?? null,
           github_html_url: app.github_html_url ?? null,
@@ -3014,8 +3015,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // the PEM / webhook-secret envelopes never leave the row.
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
-        // Our own webhook route key — the settings card composes the delivery
-        // URL from it; it is the row's only non-derived identifier.
+        // Our own webhook route key — the manager identity card composes the
+        // absolute delivery URL from it (the repoint surface); it is the row's
+        // only non-derived identifier.
         webhook_path: app.webhook_path,
         github_description: app.github_description ?? null,
         github_html_url: app.github_html_url ?? null,
@@ -3956,7 +3958,7 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
 // reader can never see another App's reviews.
 // Gate (JSON-only face — never an HTML page):
 //   - membership: requireMember (session + live member row);
-//   - app lookup by slug, same rule as requireAppVisible: unknown and
+//   - app lookup by GitHub App id, same rule as requireAppVisible: unknown and
 //     soft-deleted apps are equally invisible → 404;
 //   - creator-or-admin via canManageApp → 403.
 //   All deny bodies are `{ error }` JSON.
@@ -4030,7 +4032,7 @@ const appInsightsRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
 
-  // Same slug-resolution rule as requireAppVisible: unknown, soft-deleted and
+  // Same App-id resolution rule as requireAppVisible: unknown, soft-deleted and
   // cross-workspace apps are equally invisible → 404. JSON body — this face
   // never renders HTML (no forbiddenPage on either deny path).
   const app = await resolveScopedApp(
@@ -4055,7 +4057,7 @@ const appInsightsRoute = async (c: DashboardContext) => {
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
-    // The App row PK (never empty — the slug lookup resolved a real row),
+    // The App row PK (never empty — the GitHub App id resolved a real row),
     // composed into every aggregation by the store's appId filter.
     appId: app.id,
   });
