@@ -1,7 +1,7 @@
 /**
  * Per-App webhook routing tests (spec § Multi-App 契约).
  *
- * `POST /webhook/:appSlug` — the ONLY HTTP review entry
+ * `POST /webhook/:webhookPath` — the ONLY HTTP review entry
  * (the legacy bare `/webhook` face is retired):
  * body-size cap (413) → webhook-path lookup (active, not deleted) → signature verify →
  * per-App `review_enabled` pause gate. The route attaches `appRef: { appId }`
