@@ -273,6 +273,14 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
 
     const missing = await get("/dashboard/default/api/apps/9999/settings", "octocat", env);
     expect(missing.status).toBe(404);
+
+    // The App segment is decimal digits only: `0x3e9` / `1.001e3` parse to the
+    // seeded 1001 under `Number()`, so a lax segment check would answer the
+    // App's settings under a second URL.
+    for (const alias of ["0x3e9", "1.001e3", "1e3", "+1001"]) {
+      const res = await get(`/dashboard/default/api/apps/${alias}/settings`, "octocat", env);
+      expect(res.status, alias).toBe(404);
+    }
   });
 
   test("non-manager POST to settings stays 403 (write family unchanged)", async () => {

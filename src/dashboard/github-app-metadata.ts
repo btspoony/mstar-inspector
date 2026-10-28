@@ -152,19 +152,20 @@ async function mintAppJwt(githubAppId: number, decryptedPem: string): Promise<st
 /**
  * Derive the App slug from `GET /app`'s `html_url`
  * (`https://github.com/apps/<slug>`). Fallback for a degraded payload that
- * omits `slug`; anything else — non-https, a different path shape, multiple
- * segments after `apps` — yields null, because a guessed slug would become
- * the bot-mention target.
+ * omits `slug`; anything else — non-https, a host other than github.com, a
+ * different path shape, multiple segments after `apps` — yields null, because
+ * a guessed slug would become the bot-mention target.
  */
 export function githubAppSlugFromHtmlUrl(htmlUrl: string | null | undefined): string | null {
   if (typeof htmlUrl !== "string" || !htmlUrl.startsWith("https://")) return null;
-  let pathname: string;
+  let url: URL;
   try {
-    pathname = new URL(htmlUrl).pathname;
+    url = new URL(htmlUrl);
   } catch {
     return null;
   }
-  const segments = pathname.split("/").filter((segment) => segment.length > 0);
+  if (url.hostname !== "github.com") return null;
+  const segments = url.pathname.split("/").filter((segment) => segment.length > 0);
   return segments.length === 2 && segments[0] === "apps" ? segments[1]! : null;
 }
 

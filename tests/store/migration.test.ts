@@ -10,7 +10,7 @@
  *   - 0002 adds reviews.envelope: TEXT, nullable (M1 rows), CHECK
  *     json_valid for v1 rows
  *   - 0036 renames github_apps.slug to webhook_path (values preserved) and
- *     adds the nullable, uniquely indexed github_slug
+ *     adds the nullable, deliberately UNINDEXED github_slug cache
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
@@ -1513,7 +1513,7 @@ describe("migrations/0036_app_identity.sql", () => {
     );
   });
 
-  test("github_slug is nullable TEXT with a unique index", () => {
+  test("github_slug is a nullable TEXT cache with no unique index", () => {
     const db = createMigratedTestD1();
     const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
       name: string;
@@ -1526,12 +1526,12 @@ describe("migrations/0036_app_identity.sql", () => {
     expect(col!.type).toBe("TEXT");
     expect(col!.notnull).toBe(0);
     expect(col!.dflt_value).toBeNull();
-    expect(db.raw.query("PRAGMA index_info(github_apps_github_slug)").all()).toEqual([
-      expect.objectContaining({ name: "github_slug" }),
-    ]);
+    // Deliberately unindexed: the column caches a mutable upstream fact, so no
+    // index — unique or otherwise — may gate another App's write on it.
+    expect(db.raw.query("PRAGMA index_info(github_apps_github_slug)").all()).toEqual([]);
   });
 
-  test("several rows may hold a NULL github_slug (never synced), but a duplicate non-NULL slug is refused", () => {
+  test("several rows may hold a NULL github_slug (never synced) and two rows may share one slug (the cache is not an identity)", () => {
     const db = createMigratedTestD1();
     insertApp(db, "app-1", "one", 3001);
     insertApp(db, "app-2", "two", 3002);
@@ -1540,9 +1540,12 @@ describe("migrations/0036_app_identity.sql", () => {
     expect(nulls.n).toBe(2);
 
     db.raw.prepare("UPDATE github_apps SET github_slug = 'acme-inspector' WHERE id = 'app-1'").run();
-    // GitHub's slug identifies ONE App deployment-wide, so it is unique.
+    // GitHub frees and reuses a slug, so a stale cached copy plus a live one is
+    // a legitimate state, not a conflict. Identity is `github_app_id`.
     expect(() =>
       db.raw.prepare("UPDATE github_apps SET github_slug = 'acme-inspector' WHERE id = 'app-2'").run(),
-    ).toThrow(/UNIQUE constraint failed/);
+    ).not.toThrow();
+    const shared = db.raw.query("SELECT COUNT(*) AS n FROM github_apps WHERE github_slug = 'acme-inspector'").get() as { n: number };
+    expect(shared.n).toBe(2);
   });
 });

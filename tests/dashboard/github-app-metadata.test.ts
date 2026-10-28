@@ -505,6 +505,13 @@ describe("githubAppSlugFromHtmlUrl (the html_url fallback)", () => {
     expect(githubAppSlugFromHtmlUrl("https://github.com/apps/acme/installations")).toBeNull();
     expect(githubAppSlugFromHtmlUrl("https://github.com/acme")).toBeNull();
   });
+
+  test("the host is pinned to github.com — a look-alike host cannot smuggle a slug in", () => {
+    expect(githubAppSlugFromHtmlUrl("https://evil.example/apps/acme")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("https://github.com.evil.example/apps/acme")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("http://github.com/apps/acme")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("https://github.com/apps/acme")).toBe("acme");
+  });
 });
 
 describe("isGithubMetadataStale (TTL — the settings read path's refresh gate)", () => {

@@ -490,6 +490,31 @@ describe("tenant isolation matrix (scenario × layer)", () => {
     }
   });
 
+  // row 8 — layers: route family gate → App resolve segment parse. The App id
+  //         is GitHub's number spelled in DECIMAL DIGITS ONLY: `Number()`
+  //         accepts `0x138a` / `5.002e3` too, and each would address an App
+  //         under a second URL — a hidden alias form, exactly what this matrix
+  //         exists to refuse. Read on a manager of BOTH tenants, so the 404 can
+  //         only come from the parse, never from scoping.
+  test("row 8 · another spelling of an App id is 404, never a second address for the same App", async () => {
+    const { db } = matrixFixture();
+    const env = envFor(db);
+
+    // Positive control: the literal decimal id serves.
+    const literal = await worker.fetch(
+      await request(`/dashboard/acme/apps/${ACME_APP_ID}/onboarding`, "dana"),
+      env,
+    );
+    expect(literal.status, String(ACME_APP_ID)).toBe(200);
+
+    // `0x1389` / `5.001e3` both parse to 5001 under `Number()`; `+5001` is a
+    // third accepted spelling. None of them is an address.
+    for (const alias of ["0x1389", "5.001e3", "+5001", "0x138a", "5.002e3"]) {
+      const res = await worker.fetch(await request(`/dashboard/acme/apps/${alias}/onboarding`, "dana"), env);
+      expect(res.status, alias).toBe(404);
+    }
+  });
+
   // row 9 — layers: workspace gate operator classification → support_grants
   //         workspace-keyed lookup → route access declaration. covered at the
   //         unit level by tests/worker/operator-store.test.ts (`hasValidGrant`

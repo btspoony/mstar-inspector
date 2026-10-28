@@ -2197,9 +2197,11 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const rows = dbOf(brokeEnv).raw.query("SELECT webhook_path FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ webhook_path: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.webhook_path).toBe(WEBHOOK_PATH);
-    // 3. Replaying the same hold after success is the already-connected 409
-    // (the row is single-write): zero NEW rows, matching the long-standing
-    // "already connected" conflict semantics — never a double-write.
+    // 3. Replaying the same hold after success is a 409 conflict against one of
+    // the two REAL identity constraints (`webhook_path` or `github_app_id`):
+    // zero NEW rows, matching the long-standing conflict semantics — never a
+    // double-write. The cached `github_slug` is unindexed, so it can never be
+    // the reason.
     const replay = await doCommit({ env: { ...env, DB: dbOf(brokeEnv) } as unknown as Env, holdValue });
     expect(replay.status).toBe(409);
     expect(appRowCount({ ...env, DB: dbOf(brokeEnv) } as unknown as Env)).toBe(1);
@@ -2265,7 +2267,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(html).toContain(`href="/dashboard/default/apps/${CONVERSION.id}/settings"`);
   });
 
-  test("commit-time slug race (row appeared after start) → 409, hold burned, zero rows (never remap: the manifest registered the webhook URL)", async () => {
+  test("commit-time webhook-path race (row appeared after start) → 409, hold burned, zero rows (never remap: the manifest registered the webhook URL)", async () => {
     const rec = stubFetchRecording();
     const env = commitEnv();
     const db = dbOf(env);
@@ -2311,6 +2313,29 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(entry.event).toBe("dashboard_manifest");
     expect(entry.stage).toBe("commit");
     expect(entry.reason).toBe("webhook_path_conflict");
+  });
+
+  test("an unrelated App's stale github_slug cache never blocks this commit (the cache is not an identity)", async () => {
+    const env = commitEnv();
+    // Another App already connected, holding the SAME cached GitHub slug this
+    // conversion reports — GitHub freed and reused it upstream. Only
+    // `webhook_path` and `github_app_id` are identity, so the commit must land
+    // and keep the hold's PEM/webhook secret.
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      webhookPath: "earlier-webhook-path",
+      githubSlug: CONVERSION.slug,
+      githubAppId: 999,
+      name: "earlier",
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "someone-else",
+      workspaceId: "default",
+    });
+    const res = await doCommit({ env, holdValue: await freshHold() });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${CONVERSION.id}/onboarding`);
+    expect(appRowCount(env)).toBe(2);
   });
 
   test("github_app_id already connected → 409, zero new rows, hold burned (non-retryable)", async () => {

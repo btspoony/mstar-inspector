@@ -324,6 +324,16 @@ describe("apps-store (createAppsStore)", () => {
     expect(bare.github_slug).toBeNull();
   });
 
+  test("two Apps may cache the SAME github_slug (migration 0036 leaves it unindexed)", async () => {
+    const db = createMigratedD1();
+    // GitHub reuses a freed slug, so a stale cached copy plus a live one is a
+    // legitimate state: the cache is not an identity and must not gate a write.
+    const first = await seedApp(db, { webhookPath: "cache-a", githubAppId: 6161, githubSlug: "shared-slug" });
+    const second = await seedApp(db, { webhookPath: "cache-b", githubAppId: 6162, githubSlug: "shared-slug" });
+    expect(first.github_slug).toBe("shared-slug");
+    expect(second.github_slug).toBe("shared-slug");
+  });
+
   test("T1 review pin: secretbox AAD rowKey equals the row PK across create+read-back (end-to-end)", async () => {
     const db = createMigratedD1();
     const id = crypto.randomUUID();

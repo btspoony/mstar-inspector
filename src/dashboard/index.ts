@@ -631,7 +631,7 @@ function errorTypeName(err: unknown): string {
 /** The sqlite UNIQUE violation for one github_apps column. */
 function isAppsUniqueViolation(
   err: unknown,
-  column: "webhook_path" | "github_app_id" | "github_slug",
+  column: "webhook_path" | "github_app_id",
 ): boolean {
   return err instanceof Error && err.message.includes(`github_apps.${column}`);
 }
@@ -1581,10 +1581,8 @@ async function commitManifestApp(args: {
       logManifestFailure("commit", "webhook_path_conflict", { webhook_path: hold.webhookPath });
       return { kind: "slug_conflict" };
     }
-    if (isAppsUniqueViolation(err, "github_app_id") || isAppsUniqueViolation(err, "github_slug")) {
-      // The same GitHub App is already connected — retrying cannot help. A
-      // replay trips `github_slug` first (migration 0036 made it unique), but
-      // the cause is the same App, so the outcome is the same.
+    if (isAppsUniqueViolation(err, "github_app_id")) {
+      // The same GitHub App is already connected — retrying cannot help.
       logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
       return { kind: "already_connected" };
     }
@@ -2363,8 +2361,10 @@ async function resolveScopedApp(
   appIdParam: string,
   scope: WorkspaceScope,
 ): Promise<GithubAppRow | null> {
-  // `Number("")` is 0 and `Number("1001abc")` is NaN, so one check rejects the
-  // empty, non-numeric, fractional and non-positive segments alike.
+  // Digits only: `Number("")` is 0 and `Number("1001abc")` is NaN, but
+  // `Number("0x1f")`, `Number("1e3")` and `Number(" 5 ")` are all finite
+  // integers — those spellings would alias one App id under several URLs.
+  if (!/^[0-9]+$/.test(appIdParam)) return null;
   const githubAppId = Number(appIdParam);
   if (!Number.isSafeInteger(githubAppId) || githubAppId <= 0) return null;
   const app = await apps.getAppByGithubId(githubAppId);

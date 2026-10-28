@@ -378,6 +378,22 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
     );
     expect(res.status).toBe(404);
   });
+
+  // The segment is GitHub's numeric App id, spelled in decimal digits only.
+  // `0x1f` / `1e3` are number spellings, not ids; `0x3e9` / `1.001e3` are the
+  // dangerous ones — `Number()` parses both to the seeded 1001, so a lax
+  // parser would alias the App under four URLs.
+  for (const alias of ["0x1f", "1e3", "0x3e9", "1.001e3", "+1001"]) {
+    test(`App-id segment spelled ${alias} → 404 (not an alias)`, async () => {
+      const res = await worker.fetch(
+        new Request(`https://worker.local/dashboard/default/api/apps/${alias}/settings`, {
+          headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("hubot", null, SESSION_SECRET)}` },
+        }),
+        makeEnv(await seededWorld()),
+      );
+      expect(res.status).toBe(404);
+    });
+  }
 });
 
 // --- Read-face matrix: GET /dashboard/default/api/apps/:appId/insights/summary ---
