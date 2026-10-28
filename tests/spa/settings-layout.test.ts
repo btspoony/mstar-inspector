@@ -44,7 +44,8 @@ const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat"
 const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
   can_manage: true,
   app: {
-    slug: "acme-app",
+    github_slug: "acme-app",
+    webhook_path: "wh-acme",
     github_app_id: 1,
     status: "active",
     review_enabled: true,
@@ -1355,10 +1356,10 @@ describe("App workflow boundaries", () => {
     // wayfinding link, derived from the page's own base.
     const render = (pathname: string): string =>
       withLocation(pathname, () =>
-        renderToStaticMarkup(createElement(AppDetailPage, { boot: adminBoot, slug: "acme-app" })),
+        renderToStaticMarkup(createElement(AppDetailPage, { boot: adminBoot, appId: "1" })),
       );
 
-    const legacy = render("/dashboard/apps/acme-app");
+    const legacy = render("/dashboard/apps/1");
     expect(legacy).toContain('href="/dashboard/apps"');
     expect(legacy).toContain("Back to Apps");
     // These renders ARE the loading face (the loader never resolved), so the
@@ -1367,7 +1368,7 @@ describe("App workflow boundaries", () => {
 
     // A workspace App page keeps the wayfinding inside its workspace: the
     // legacy App family answers 404 under strict.
-    const scoped = render("/dashboard/acme/apps/acme-app");
+    const scoped = render("/dashboard/acme/apps/1");
     expect(scoped).toContain('href="/dashboard/acme/apps"');
     expect(scoped).not.toContain('href="/dashboard/apps"');
 
@@ -1672,11 +1673,11 @@ describe("settings header typography", () => {
     // the one PageHeader spelling (heading-24 page title, serving BOTH tabs).
     // The settings tab carries no page heading of its own anymore — asserted
     // on the rendered face, so a second heading or a re-spelled face fails.
-    const shell = withLocation("/dashboard/apps/acme-app", () =>
+    const shell = withLocation("/dashboard/apps/1", () =>
       renderToStaticMarkup(
         createElement(AppDetailView, {
           locale: "en",
-          slug: "acme-app",
+          appId: "1",
           payload: detailPayload(),
           groups: [],
           notice: null,
@@ -1689,7 +1690,7 @@ describe("settings header typography", () => {
     // Exactly one heading, and it is the heading-24 h1 carrying the slug.
     expect(shell.match(/<h1/g)).toHaveLength(1);
     expect(shell).toContain(
-      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">acme-app</h1>',
+      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">1</h1>',
     );
     // Rendering alone cannot express OWNERSHIP — a shell inlining the same
     // triple renders byte-identical markup — so the face's single home is
@@ -1778,7 +1779,8 @@ describe("GitHub App identity card", () => {
 
   function meta(overrides: Partial<SettingsAppMeta> = {}): SettingsAppMeta {
     return {
-      slug: "acme",
+      github_slug: "acme",
+      webhook_path: "wh-acme",
       github_app_id: 123456,
       status: "active",
       review_enabled: true,
@@ -1877,7 +1879,7 @@ describe("GitHub App identity card", () => {
     expect(trailing).toContain('href="https://github.com/settings/apps/url-slug-app"');
     const mismatched = html(
       meta({
-        slug: "local-app",
+        github_slug: "local-slug",
         github_name: "Totally Different",
         github_html_url: "https://github.com/apps/url-slug-app",
       }),

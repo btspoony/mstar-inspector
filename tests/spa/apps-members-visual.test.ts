@@ -5,7 +5,7 @@
  * in branches no fixture reaches) a narrowly scoped source pin covers it.
  *
  * 1. AD-581: the Apps list stays a semantic table — the identity cell is
- *    the brand surface (slug primary line + AppID meta line; the list
+ *    the brand surface (display-name primary line + AppID meta line; the list
  *    payload carries no GitHub profile fields, so there is no avatar),
  *    the whole-row click and the visible settings anchor keep their
  *    channels, and StatusBadge rides the v0.3 pill component tokens
@@ -33,7 +33,9 @@ import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
 
 const appRow = (overrides: Partial<AppsPayload["apps"][number]> = {}): AppsPayload["apps"][number] => ({
-  slug: "demo",
+  github_slug: "demo",
+  github_name: null,
+  github_avatar_url: null,
   github_app_id: 1,
   status: "active",
   review_enabled: 1,
@@ -195,13 +197,13 @@ function expectFullPageRegions(name: string, html: string): void {
 }
 
 describe("AppsPage table reinforcement (AD-581)", () => {
-  test("identity cell is the brand surface: slug primary line + AppID meta line", () => {
-    // The identity cell is the row's brand surface: a slug primary line and
+  test("identity cell is the brand surface: display-name primary line + AppID meta line", () => {
+    // The identity cell is the row's brand surface: a display-name primary line and
     // the AppID meta line under it — read off the emitted cell, not the page.
     const cells = [...renderList([appRow()]).matchAll(/<td [^>]*>([\s\S]*?)<\/td>/g)];
     const identity = cells[0]?.[1] ?? "";
     expect(identity).toContain(
-      '<a class="text-sm font-semibold text-foreground no-underline hover:underline" href="/dashboard/apps/demo"',
+      '<a class="text-sm font-semibold text-foreground no-underline hover:underline" href="/dashboard/apps/1"',
     );
     expect(identity).toContain(">demo</a>");
     expect(identity).toContain('<span class="text-xs text-muted-foreground tabular-nums">');
@@ -218,12 +220,12 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     const hrefs = (pathname: string) =>
       [...renderList([appRow()], pathname).matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
     // Legacy Apps page: the historical detail path, identity link + anchor.
-    expect(hrefs("/dashboard/apps")).toEqual(["/dashboard/apps/demo", "/dashboard/apps/demo"]);
+    expect(hrefs("/dashboard/apps")).toEqual(["/dashboard/apps/1", "/dashboard/apps/1"]);
     // Workspace Apps page: the workspace copy of the same route — the legacy
     // App family answers 404 under strict.
     expect(hrefs("/dashboard/acme/apps")).toEqual([
-      "/dashboard/acme/apps/demo",
-      "/dashboard/acme/apps/demo",
+      "/dashboard/acme/apps/1",
+      "/dashboard/acme/apps/1",
     ]);
     const scoped = renderList([appRow()], "/dashboard/acme/apps");
     expect(scoped).toContain('<a class="text-primary underline-offset-4 hover:underline"');
@@ -515,7 +517,9 @@ describe("empty-state copy (A6)", () => {
 describe("Create action is a boot capability (I-000082)", () => {
   const APPS = [
     {
-      slug: "demo",
+      github_slug: "demo",
+      github_name: null,
+      github_avatar_url: null,
       github_app_id: 1,
       status: "active" as const,
       review_enabled: 1,
@@ -563,7 +567,9 @@ describe("Create action is a boot capability (I-000082)", () => {
 
 describe("Apps list → App detail wayfinding (rendered)", () => {
   const ROW = {
-    slug: "demo",
+    github_slug: "demo",
+    github_name: null,
+    github_avatar_url: null,
     github_app_id: 1,
     status: "active" as const,
     review_enabled: 1,
@@ -592,12 +598,12 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
     // The legacy mount keeps the historical path; the workspace page rides its
     // workspace prefix.
     expect(destinations("/dashboard/apps")).toEqual([
-      ["/dashboard/apps/demo", "app-detail"],
-      ["/dashboard/apps/demo", "app-detail"],
+      ["/dashboard/apps/1", "app-detail"],
+      ["/dashboard/apps/1", "app-detail"],
     ]);
     expect(destinations("/dashboard/acme/apps")).toEqual([
-      ["/dashboard/acme/apps/demo", "app-detail"],
-      ["/dashboard/acme/apps/demo", "app-detail"],
+      ["/dashboard/acme/apps/1", "app-detail"],
+      ["/dashboard/acme/apps/1", "app-detail"],
     ]);
   });
 

@@ -36,6 +36,7 @@ import { formatRelativeTime } from "../relative-time";
 import { useRenameMembership } from "../workspace-memberships";
 import {
   activeChainTabId,
+  appDisplayName,
   configuredKeySlot,
   DEFAULT_CHAIN_NAME,
   isPaused,
@@ -178,7 +179,7 @@ export function SettingsView({
   // Every pinned path of this page hangs off the page's workspace prefix
   // (`/dashboard` legacy, `/dashboard/<slug>` under strict) — the legacy App
   // route family answers 404 on a workspace-scoped deployment.
-  const appPath = `${apiBase()}/apps/${app.slug}`;
+  const appPath = `${apiBase()}/apps/${app.github_app_id}`;
   const base = `${appPath}/settings`;
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
@@ -255,7 +256,7 @@ export function SettingsView({
     // rejects: load() catches its own failures into the page notice.
     try {
       ({ status, body } = await postForm(
-        `${apiBase()}/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
+        `${apiBase()}/api/apps/${encodeURIComponent(String(app.github_app_id))}/keys/verify`,
         fields,
       ));
     } catch {
@@ -305,7 +306,7 @@ export function SettingsView({
    * via the awaited background reload.
    */
   async function runTriggerMode(mode: ReviewTriggerMode): Promise<OpNotice> {
-    return submitTriggerMode(app.slug, mode, locale, () => onReload({ background: true }));
+    return submitTriggerMode(String(app.github_app_id), mode, locale, () => onReload({ background: true }));
   }
 
   async function onConfirm(): Promise<void> {
@@ -362,7 +363,7 @@ export function SettingsView({
     }
   }
 
-  const confirmCopy = pendingConfirmCopy(locale, app.slug, pending);
+  const confirmCopy = pendingConfirmCopy(locale, appDisplayName(app), pending);
 
   // Version footer: the deployment's current release from the
   // generated src/version.ts surface — the same `vX.Y.Z` form as the
@@ -475,7 +476,7 @@ export function SettingsView({
 
 function pendingConfirmCopy(
   locale: SpaBoot["locale"],
-  slug: string,
+  name: string,
   pending: PendingAction | null,
 ): { title: string; body: string; action: string; destructive: boolean } | null {
   if (!pending) return null;
@@ -508,31 +509,31 @@ function pendingConfirmCopy(
   }
   const map = {
     pause: {
-      title: t(locale, "settings.confirmPauseTitle", { slug }),
+      title: t(locale, "settings.confirmPauseTitle", { slug: name }),
       body: t(locale, "settings.confirmPauseBody"),
       action: t(locale, "apps.actions.pause"),
       destructive: false,
     },
     resume: {
-      title: t(locale, "settings.confirmResumeTitle", { slug }),
+      title: t(locale, "settings.confirmResumeTitle", { slug: name }),
       body: t(locale, "settings.confirmResumeBody"),
       action: t(locale, "apps.actions.resume"),
       destructive: false,
     },
     disable: {
-      title: t(locale, "settings.confirmDisableTitle", { slug }),
+      title: t(locale, "settings.confirmDisableTitle", { slug: name }),
       body: t(locale, "settings.confirmDisableBody"),
       action: t(locale, "settings.confirmDisableAction"),
       destructive: true,
     },
     enable: {
-      title: t(locale, "settings.confirmEnableTitle", { slug }),
+      title: t(locale, "settings.confirmEnableTitle", { slug: name }),
       body: t(locale, "settings.confirmEnableBody"),
       action: t(locale, "apps.actions.enable"),
       destructive: false,
     },
     delete: {
-      title: t(locale, "settings.confirmDeleteTitle", { slug }),
+      title: t(locale, "settings.confirmDeleteTitle", { slug: name }),
       body: t(locale, "settings.confirmDeleteBody"),
       action: t(locale, "settings.confirmDeleteButton"),
       destructive: true,
@@ -549,7 +550,8 @@ function pendingConfirmCopy(
  * `/apps/acme/settings` derives null, not slug "settings" (qc round 1,
  * qc2-F-001); an already settings-shaped url keeps deriving idempotently.
  * Deliberately never `github_name` (display name ≠ URL slug) and never the
- * local `SettingsAppMeta.slug` (local App slug ≠ GitHub App slug). The server
+ * local `SettingsAppMeta.webhook_path` (local webhook key ≠ GitHub App slug).
+ * The server
  * validates only the `https://` prefix (github-app-metadata.ts), so an
  * unusable shape — no `apps/<slug>` tail, or a value `new URL` cannot parse —
  * returns null and the caller keeps the public-page link (runtime
@@ -829,7 +831,7 @@ function OpsCard({
       <CardContent className="flex flex-col gap-6">
         <ReviewTriggerControl
           locale={locale}
-          slug={app.slug}
+          slug={app.github_slug ?? ""}
           mode={app.review_trigger_mode}
           onTriggerMode={onTriggerMode}
         />
@@ -1002,13 +1004,13 @@ export async function postPinnedOutcome(
  * instead of supplying an App path of its own.
  */
 export function submitTriggerMode(
-  slug: string,
+  appId: string,
   mode: ReviewTriggerMode,
   locale: SpaBoot["locale"],
   reload: () => Promise<unknown>,
 ): Promise<OpNotice> {
   return postPinnedOutcome(
-    `${apiBase()}/apps/${encodeURIComponent(slug)}/review-trigger-mode`,
+    `${apiBase()}/apps/${encodeURIComponent(appId)}/review-trigger-mode`,
     { mode },
     locale,
     reload,

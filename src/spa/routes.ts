@@ -24,7 +24,7 @@ export type SpaRoute =
   | { page: "members"; pathname: string; workspaceRef: string }
   | { page: "settings"; pathname: string; workspaceRef: string }
   | { page: "login"; pathname: "/dashboard/login" }
-  | { page: "app-detail"; pathname: string; slug: string; workspaceRef?: string };
+  | { page: "app-detail"; pathname: string; appId: string; workspaceRef?: string };
 
 /**
  * First path segments that can never name a workspace (today's routes). ONE
@@ -93,11 +93,11 @@ const WORKSPACE_APP_DETAIL_PATH = /^\/dashboard\/([^/]+)\/apps\/([^/]+)(?:\/sett
 
 /**
  * ONE matcher entry / page id serves both detail paths: the bare
- * `/dashboard/apps/:slug` (default tab 应用设置) and the legacy
- * `/dashboard/apps/:slug/settings` — a PERMANENT settings-tab deep link
+ * `/dashboard/apps/:appId` (default tab 应用设置) and the legacy
+ * `/dashboard/apps/:appId/settings` — a PERMANENT settings-tab deep link
  * (the settings POST family's HTML-nav 302 targets are pinned to it,
  * spec § IA), not a compat shim. The workspace twin
- * (`/dashboard/<workspaceRef>/apps/:slug`, `/settings` likewise) is the same
+ * (`/dashboard/<workspaceRef>/apps/:appId`, `/settings` likewise) is the same
  * page under that workspace's route family. The active tab is query-derived
  * (`?tab=insights`), so every path lands on the same page and the default
  * settings tab.
@@ -115,13 +115,13 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     if (WORKSPACE_APPS_PATH.test(pathname)) return { page: "apps", pathname, workspaceRef };
     if (WORKSPACE_MEMBERS_PATH.test(pathname)) return { page: "members", pathname, workspaceRef };
     if (WORKSPACE_SETTINGS_PATH.test(pathname)) return { page: "settings", pathname, workspaceRef };
-    const appSlug = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
-    if (appSlug) return { page: "app-detail", pathname, slug: appSlug, workspaceRef };
+    const appId = WORKSPACE_APP_DETAIL_PATH.exec(pathname)?.[2];
+    if (appId) return { page: "app-detail", pathname, appId, workspaceRef };
     return null;
   }
-  const slug = APP_DETAIL_PATH.exec(pathname)?.[1];
-  if (!slug) return null;
-  return { page: "app-detail", pathname, slug };
+  const appId = APP_DETAIL_PATH.exec(pathname)?.[1];
+  if (!appId) return null;
+  return { page: "app-detail", pathname, appId };
 }
 
 /**

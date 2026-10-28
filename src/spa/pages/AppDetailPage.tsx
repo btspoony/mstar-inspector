@@ -80,16 +80,16 @@ export function AppDetailShell({
  */
 export async function loadAppDetail(
   base: string,
-  slug: string,
+  appId: string,
 ): Promise<{ payload: SettingsPayload; groups: ModelOptionGroup[] } | null> {
   const parsed = parseSettings(
-    await fetchJson(`${base}/api/apps/${encodeURIComponent(slug)}/settings`),
+    await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/settings`),
   );
   if (!parsed) return null;
   let groups: ModelOptionGroup[] = [];
   if (parsed.can_manage) {
     try {
-      groups = parseModels(await fetchJson(`${base}/api/apps/${encodeURIComponent(slug)}/models`))?.groups ?? [];
+      groups = parseModels(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/models`))?.groups ?? [];
     } catch {
       groups = [];
     }
@@ -98,8 +98,8 @@ export async function loadAppDetail(
 }
 
 /**
- * The App detail page (App detail IA): `/dashboard/apps/:slug` —
- * and the legacy `/dashboard/apps/:slug/settings` deep link (a permanent
+ * The App detail page (App detail IA): `/dashboard/apps/:appId` —
+ * and the legacy `/dashboard/apps/:appId/settings` deep link (a permanent
  * settings-tab target: the settings POST family's HTML-nav 302s pin it) —
  * render this ONE two-tab shell. Default tab 应用设置 (the existing
  * settings capability, {@link SettingsView}); the 洞察 tab
@@ -120,12 +120,12 @@ export async function loadAppDetail(
  * (`parseAppDetailSearch`), and every in-page edit commits with
  * `replaceState` (`appDetailSearchQuery`) — never popstate, so no loop.
  */
-export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
+export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string }) {
   const locale = boot.locale;
   // Read per render (the AppsPage precedent): the switcher navigates with
   // pushState + popstate, so no new document re-injects the boot — the page
   // base must track the URL it is actually on. `/dashboard/acme/apps/demo` →
-  // `/dashboard/beta/apps/demo` keeps the slug, so a base pinned at mount
+  // `/dashboard/beta/apps/12345` keeps the appId, so a base pinned at mount
   // would leave the previous workspace's settings and model chain on screen.
   const base = apiBase();
   const [payload, setPayload] = useState<SettingsPayload | null>(null);
@@ -134,7 +134,7 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
   // The can_manage gate as the payload states it, mirrored into a ref so
-  // the (registered-once) popstate listener and the mount/slug
+  // the (registered-once) popstate listener and the mount/appId
   // re-derivations read the CURRENT gate instead of a stale `false`
   // closure — a manager's `?tab=insights` deep link and history
   // back/forward must activate the insights tab. The mirror is written
@@ -172,7 +172,7 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
     async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
       if (!background) setState("loading");
       try {
-        const loaded = await loadAppDetail(base, slug);
+        const loaded = await loadAppDetail(base, appId);
         if (cancelledRef.current) return false;
         if (!loaded) {
           if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
@@ -195,13 +195,13 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
         return false;
       }
     },
-    [base, slug, locale],
+    [base, appId, locale],
   );
 
   useEffect(() => {
     cancelledRef.current = false;
     void load();
-    // A slug or workspace push re-derives the URL state too (the address bar
+    // An appId or workspace push re-derives the URL state too (the address bar
     // moved); the gate comes from the ref mirror, never a stale payload
     // closure.
     setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
@@ -281,7 +281,7 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
       {state === "ok" && payload ? (
         <AppDetailView
           locale={locale}
-          slug={slug}
+          appId={appId}
           payload={payload}
           groups={groups}
           notice={notice}
@@ -297,13 +297,13 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
 /**
  * The tabbed face — pure `t()` + data rendering, no window/router
  * access, so tests can static-render it (the AppInfoCard idiom). The
- * identity header (slug h1 + status + creator) belongs to the shell and
+ * identity header (appId h1 + status + creator) belongs to the shell and
  * serves BOTH tabs; the settings tab body keeps only the version footer
  * (page wayfinding — the back link — moved to the shell).
  */
 export function AppDetailView({
   locale,
-  slug,
+  appId,
   payload,
   groups,
   notice,
@@ -312,7 +312,7 @@ export function AppDetailView({
   onSearch,
 }: {
   locale: SpaBoot["locale"];
-  slug: string;
+  appId: string;
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
   notice: { kind: NoticeKind; message: string } | null;
@@ -335,7 +335,7 @@ export function AppDetailView({
     <div className="flex flex-col gap-6">
       {/* Identity header — serves both tabs. */}
       <PageHeader
-        title={slug}
+        title={appId}
         actions={
           <div className="flex flex-wrap items-center gap-3">
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
@@ -391,7 +391,7 @@ export function AppDetailView({
         </TabsContent>
         {canManage ? (
           <TabsContent value="insights" forceMount>
-            <AppInsightsTab locale={locale} slug={slug} search={search} onSearch={onSearch} />
+            <AppInsightsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />
           </TabsContent>
         ) : null}
       </Tabs>

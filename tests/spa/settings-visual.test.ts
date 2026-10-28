@@ -6,7 +6,7 @@
  * 1. AD-591: the tier idiom is defined ONCE in SectionCard.tsx (composing
  *    the copy-in ui/card.tsx); the page picks a tier through the prop and
  *    never hand-assembles tier classNames. Tier 1 = identity/status zone
- *    (slug row + AppInfo + Ops/Health), Tier 2 = configuration zone
+ *    (identity header + AppInfo + Ops/Health), Tier 2 = configuration zone
  *    (RuntimeHarness from T1; Providers/Chains/Seats joined in T2).
  * 2. v0.3 face: page/panel headings ride the heading-24/20 token steps
  * (QC idiom convergence), card titles ride heading-16, group
@@ -35,7 +35,8 @@ const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
   can_manage: true,
   app: {
-    slug: "demo",
+    github_slug: "demo",
+    webhook_path: "wh-demo",
     github_app_id: 1,
     status: "active",
     review_enabled: true,
@@ -161,7 +162,7 @@ describe("settings section rhythm (AD-591)", () => {
 });
 
 describe("settings heading idiom (QC convergence)", () => {
-  test("the slug identity header is the rendered heading-24 h1; no raw size utility appears on either face", () => {
+  test("the appId identity header is the rendered heading-24 h1; no raw size utility appears on either face", () => {
     // SUPERSEDE (App detail IA): the identity header moved onto the
     // AppDetailPage shell with the heading-24 face; that face now lives in
     // the ONE PageHeader spelling and the shell composes it. The settings tab
@@ -171,11 +172,11 @@ describe("settings heading idiom (QC convergence)", () => {
     // heading-24 triple renders byte-identical markup. The source pins below
     // are what keep the face single-homed — the shell composes <PageHeader>
     // and PageHeader is the only file spelling the triple.
-    const shell = withLocation("/dashboard/apps/demo", () =>
+    const shell = withLocation("/dashboard/apps/1", () =>
       renderToStaticMarkup(
         createElement(AppDetailView, {
           locale: "en",
-          slug: "demo",
+          appId: "1",
           payload: detailPayload(),
           groups: [],
           notice: null,
@@ -186,11 +187,11 @@ describe("settings heading idiom (QC convergence)", () => {
       ),
     );
     // The identity header is the page's ONLY heading, and it carries the
-    // heading-24 trio with the slug as its content.
+    // heading-24 trio with the appId as its content.
     expect(shell.match(/<h1/g)).toHaveLength(1);
     expect(shell.match(/--typo-heading-24-size/g)).toHaveLength(1);
     expect(shell).toContain(
-      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">demo</h1>',
+      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">1</h1>',
     );
     // Ownership: the triple is spelled once, in PageHeader, and the shell
     // composes it rather than re-spelling it.
@@ -198,7 +199,7 @@ describe("settings heading idiom (QC convergence)", () => {
     expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
     expect(pageHeader).toContain("tracking-(--typo-heading-24-tracking)");
     expect(detailPage).toContain("<PageHeader");
-    expect(detailPage).toContain("title={slug}");
+    expect(detailPage).toContain("title={appId}");
     expect(detailPage).not.toContain("--typo-heading-24");
     expect(settingsPage).not.toContain("--typo-heading-24");
     // Card titles ride the heading-16 step instead — the detail face never

@@ -1,7 +1,7 @@
 /**
  * Enumerated client router (pathname + params). App detail IA:
- * ONE page id (`app-detail`) serves both `/dashboard/apps/:slug` (default
- * tab 应用设置) and the legacy `/dashboard/apps/:slug/settings` permanent
+ * ONE page id (`app-detail`) serves both `/dashboard/apps/:appId` (default
+ * tab 应用设置) and the legacy `/dashboard/apps/:appId/settings` permanent
  * settings-tab deep link.
  */
 import { describe, expect, test } from "bun:test";
@@ -37,24 +37,24 @@ describe("matchSpaRoute", () => {
     expect(matchSpaRoute("/dashboard/login")).toEqual({ page: "login", pathname: "/dashboard/login" });
   });
 
-  test("/dashboard/apps/:slug is the detail page (default tab is query-derived, not route state)", () => {
-    expect(matchSpaRoute("/dashboard/apps/acme")).toEqual({
+  test("/dashboard/apps/:appId is the detail page (default tab is query-derived, not route state)", () => {
+    expect(matchSpaRoute("/dashboard/apps/12345")).toEqual({
       page: "app-detail",
-      pathname: "/dashboard/apps/acme",
-      slug: "acme",
+      pathname: "/dashboard/apps/12345",
+      appId: "12345",
     });
-    expect(matchRoute("/dashboard/apps/acme")).toEqual({
+    expect(matchRoute("/dashboard/apps/12345")).toEqual({
       page: "app-detail",
-      pathname: "/dashboard/apps/acme",
-      slug: "acme",
+      pathname: "/dashboard/apps/12345",
+      appId: "12345",
     });
   });
 
-  test("the legacy /dashboard/apps/:slug/settings path lands on the SAME detail page id (permanent settings-tab deep link)", () => {
-    expect(matchSpaRoute("/dashboard/apps/acme/settings")).toEqual({
+  test("the legacy /dashboard/apps/:appId/settings path lands on the SAME detail page id (permanent settings-tab deep link)", () => {
+    expect(matchSpaRoute("/dashboard/apps/12345/settings")).toEqual({
       page: "app-detail",
-      pathname: "/dashboard/apps/acme/settings",
-      slug: "acme",
+      pathname: "/dashboard/apps/12345/settings",
+      appId: "12345",
     });
   });
 
@@ -74,24 +74,24 @@ describe("matchSpaRoute", () => {
 });
 
 describe("matchSpaRoute — workspace-scoped App pages", () => {
-  test("the workspace Apps page and its App detail routes carry the slug", () => {
+  test("the workspace Apps page and its App detail routes carry the appId", () => {
     expect(matchSpaRoute("/dashboard/acme/apps")).toEqual({
       page: "apps",
       pathname: "/dashboard/acme/apps",
       workspaceRef: "acme",
     });
-    expect(matchSpaRoute("/dashboard/acme/apps/acme-app")).toEqual({
+    expect(matchSpaRoute("/dashboard/acme/apps/12345")).toEqual({
       page: "app-detail",
-      pathname: "/dashboard/acme/apps/acme-app",
-      slug: "acme-app",
+      pathname: "/dashboard/acme/apps/12345",
+      appId: "12345",
       workspaceRef: "acme",
     });
     // The permanent settings-tab deep link exists on the workspace family too
     // (the settings POST family's HTML-nav 302 targets it under strict).
-    expect(matchSpaRoute("/dashboard/acme/apps/acme-app/settings")).toEqual({
+    expect(matchSpaRoute("/dashboard/acme/apps/12345/settings")).toEqual({
       page: "app-detail",
-      pathname: "/dashboard/acme/apps/acme-app/settings",
-      slug: "acme-app",
+      pathname: "/dashboard/acme/apps/12345/settings",
+      appId: "12345",
       workspaceRef: "acme",
     });
   });
@@ -125,8 +125,8 @@ describe("matchSpaRoute — workspace-scoped App pages", () => {
   });
 
   test("workspace pages stop at the enumerated shapes (onboarding and deeper paths are Worker routes)", () => {
-    expect(matchSpaRoute("/dashboard/acme/apps/acme-app/onboarding")).toBeNull();
-    expect(matchSpaRoute("/dashboard/acme/apps/acme-app/settings/key/delete")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/apps/12345/onboarding")).toBeNull();
+    expect(matchSpaRoute("/dashboard/acme/apps/12345/settings/key/delete")).toBeNull();
     expect(isWorkspaceRoute("/dashboard/acme/api/apps")).toBe(false);
     // Members IS a workspace page now; deeper shapes are still Worker routes.
     expect(isWorkspaceRoute("/dashboard/acme/members")).toBe(true);
@@ -137,8 +137,8 @@ describe("matchSpaRoute — workspace-scoped App pages", () => {
     for (const path of [
       "/dashboard",
       "/dashboard/apps",
-      "/dashboard/apps/acme",
-      "/dashboard/apps/acme/settings",
+      "/dashboard/apps/12345",
+      "/dashboard/apps/12345/settings",
       "/dashboard/login",
     ]) {
       expect(isWorkspaceRoute(path), path).toBe(false);

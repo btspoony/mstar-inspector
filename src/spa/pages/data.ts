@@ -128,8 +128,10 @@ export function insightsRepoOptions(repos: readonly string[], current: string): 
 export type AppsPayload = {
   viewer: { login: string; role: Role };
   apps: Array<{
-    slug: string;
     github_app_id: number;
+    github_name: string | null;
+    github_slug: string | null;
+    github_avatar_url: string | null;
     status: string;
     review_enabled: number;
     created_by: string;
@@ -354,21 +356,23 @@ export function isReviewTriggerMode(value: unknown): value is ReviewTriggerMode 
 
 /**
  * The D4 identity set — the fields the GET /api/apps list rows expose
- * (slug, github_app_id, status, review_enabled, created_by) plus created_at
- * and the cached public GitHub profile. This is the NON-MANAGER detail
- * face's whole app shape: everything from the ops stores (installations,
+ * (github_app_id, status, review_enabled, created_by) plus created_at and
+ * the cached public GitHub profile. This is the NON-MANAGER detail face's
+ * whole app shape: everything from the ops stores (installations,
  * deliveries, sandbox_image_id, review-trigger runtime config) stays behind
  * the manager face (the server keys the split on `can_manage`).
  */
 export type SettingsIdentityAppMeta = {
-  slug: string;
   github_app_id: number;
   status: string;
   review_enabled: boolean;
   created_by: string;
   /** `datetime('now')` UTC string — joins the required identity keys. */
   created_at: string;
+  /** The local webhook route key (never a GitHub fact) — rides both faces. */
+  webhook_path: string;
   github_name: string | null;
+  github_slug: string | null;
   github_description: string | null;
   github_html_url: string | null;
   github_avatar_url: string | null;
@@ -376,12 +380,13 @@ export type SettingsIdentityAppMeta = {
 };
 
 export type SettingsAppMeta = {
-  slug: string;
   github_app_id: number;
   status: string;
   review_enabled: boolean;
   created_by: string;
   last_webhook_at: string | null;
+  /** The local webhook path segment — never displayed to operators. */
+  webhook_path: string;
   /** The App's selected sandbox runtime image (registry id). */
   sandbox_image_id: string;
   /** The App's review trigger mode (spec §2) — the control's current value. */
@@ -393,6 +398,7 @@ export type SettingsAppMeta = {
    * secret never ride this face. Present on BOTH payload faces (AC3).
    */
   github_name: string | null;
+  github_slug: string | null;
   github_description: string | null;
   github_html_url: string | null;
   github_avatar_url: string | null;
@@ -416,6 +422,19 @@ type SettingsHealth = {
 
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
 export type SettingsReadOnlyPayload = { can_manage: false; app: SettingsIdentityAppMeta };
+
+/**
+ * The App's operator-facing display name (D0): GitHub's current name, then
+ * its slug, then the immutable numeric App id — mirrors the server's
+ * appDisplayName, so a rename shows up wherever the SPA names the App.
+ */
+export function appDisplayName(app: {
+  github_name: string | null;
+  github_slug: string | null;
+  github_app_id: number;
+}): string {
+  return app.github_name ?? app.github_slug ?? String(app.github_app_id);
+}
 
 /** Creator-or-admin adds the settings zones: keys, chains, providers. */
 export type SettingsManagePayload = {
@@ -650,20 +669,20 @@ export function insightsTrendPoints(data: InsightsSummary): InsightsTrendPoint[]
 /**
  * Per-App insights summary URL — `base` is the page's workspace prefix
  * (`/dashboard`, or `/dashboard/<slug>` under strict) plus the Worker's
- * `GET /api/apps/:slug/insights/summary` face. `repo` is omitted when empty
+ * `GET /api/apps/:appId/insights/summary` face. `repo` is omitted when empty
  * (the no-filter default). `include=repos` rides every read: the repo Select
  * needs the window-scoped distinct repo set on every face it can render (the
  * insights tab has no repo-less summary consumer).
  */
 export function appInsightsSummaryUrl(
   base: string,
-  slug: string,
+  appId: string,
   window: string,
   repo: string,
 ): string {
   const params = new URLSearchParams({ window, include: "repos" });
   if (repo !== "") params.set("repo", repo);
-  return `${base}/api/apps/${encodeURIComponent(slug)}/insights/summary?${params.toString()}`;
+  return `${base}/api/apps/${encodeURIComponent(appId)}/insights/summary?${params.toString()}`;
 }
 
 /** The App detail page's two tabs (应用设置 / 洞察). Insights is manager-only. */
@@ -1021,9 +1040,13 @@ function isNullableString(value: unknown): value is string | null {
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data) || !isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
-  if (typeof data.app.slug !== "string" || typeof data.app.status !== "string") return null;
+  if (typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
+  // The local webhook route key rides BOTH faces; the cached GitHub slug is
+  // a nullable GitHub fact (NULL = never synced).
+  if (typeof data.app.webhook_path !== "string") return null;
+  if (!isNullableString(data.app.github_slug)) return null;
   if (!data.can_manage) {
     // Identity-only non-manager face (App detail IA): the D4
     // identity set — created_at joins the required keys; everything from
