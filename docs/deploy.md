@@ -1665,7 +1665,7 @@ and the settings model faces write and read.
    workspace Members page, and the last owner cannot be removed or demoted.
 2. **Create GitHub App** — on the dashboard workbench (`/dashboard`, the
    Apps-first home) click **Create GitHub App**. The dashboard mints the App's
-   webhook path (`crypto.randomUUID()`, DB pre-resolved) and POSTs the App
+   webhook path (`crypto.randomUUID()`, no DB lookup) and POSTs the App
    manifest to `https://github.com/settings/apps/new` — the manifest's
    webhook URL is the App's OWN route `{origin}/webhook/{webhookPath}`
    (`src/dashboard/manifest.ts` `buildManifest`). Confirm the requested
