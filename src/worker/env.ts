@@ -22,8 +22,9 @@ export type Env = {
   ASSETS?: Fetcher;
   /**
    * D1 binding: the per-App webhook face (`POST
-   * /webhook/:appSlug`) reads the `github_apps` row for its slug and touches
-   * `app_installations` through src/dashboard/apps-store.ts (lock L1 leaf);
+   * /webhook/:webhookPath`) resolves the `github_apps` row by its
+   * `webhook_path` and touches `app_installations` through
+   * src/dashboard/apps-store.ts (lock L1 leaf);
    * the dashboard reads it through its own optional local face, and the 06
    * queue face declares the same binding as the REQUIRED `PipelineEnv.DB`.
    * Unbound → the per-App route fails closed with 500 (dashboard-dependency

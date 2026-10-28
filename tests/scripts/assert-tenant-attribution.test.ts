@@ -98,7 +98,7 @@ describe("attributionVerdict", () => {
       // one mapped App, one App whose workspace row is missing
       const insertApp = db.raw.prepare(
         `INSERT INTO github_apps
-           (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'k', 'w', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       );

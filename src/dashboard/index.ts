@@ -6,7 +6,7 @@
  * POST …/disable|enable|delete — creator-or-admin) + per-App review
  * pause/resume (POST …/pause|/resume — the same action
  * pattern) + per-App AI config settings (GET/POST
- * /dashboard/apps/:slug/settings — BYOK provider keys, masked, + model chain
+ * /dashboard/apps/:appId/settings — BYOK provider keys, masked, + model chain
  * — and POST …/settings/key/delete, creator-or-admin; plus the
  * settings Review switch and the read-only install-health panel, and
  * the Role models editor on the same op-discriminated POST) behind a
@@ -45,7 +45,6 @@ import {
   MANIFEST_HOLD_MAX_AGE_SEC,
   MANIFEST_STATE_COOKIE,
   MANIFEST_STATE_MAX_AGE_SEC,
-  buildAppSlug,
   buildHoldPayload,
   buildManifest,
   buildManifestCreateUrl,
@@ -53,7 +52,7 @@ import {
   encryptHoldValue,
   exchangeManifestCode,
   logManifestFailure,
-  randomSlugSuffix,
+  randomWebhookPath,
   readHoldValue,
   readManifestStateValue,
   type ManifestHoldPayload,
@@ -539,7 +538,8 @@ type ManifestSuccessTarget = { kind: "ok"; path: string } | { kind: "workspace_g
 /**
  * The post-commit landing page. The manifest flow's own request carries no
  * workspace segment, so `scopedAppPath` cannot rewrite this target: the App's
- * onboarding page is named by the workspace the commit just mapped it into.
+ * onboarding page is named by the workspace the commit just mapped it into and
+ * by the GitHub App id — the only identity GitHub never changes.
  *
  * The URL names the workspace by its stable id, which the flow already carried
  * — the row is resolved HERE, after the write, only to prove the workspace
@@ -552,12 +552,12 @@ type ManifestSuccessTarget = { kind: "ok"; path: string } | { kind: "workspace_g
 async function manifestSuccessTarget(
   env: Env,
   workspaceId: string,
-  appSlug: string,
+  githubAppId: number,
 ): Promise<ManifestSuccessTarget> {
   const db = dashboardD1(env);
   const workspace = db === null || workspaceId === "" ? null : await getWorkspaceByRef(db, workspaceId);
   if (workspace === null) return { kind: "workspace_gone" };
-  return { kind: "ok", path: `/dashboard/${workspace.id}/apps/${appSlug}/onboarding` };
+  return { kind: "ok", path: `/dashboard/${workspace.id}/apps/${githubAppId}/onboarding` };
 }
 
 function isSpaFetchPost(c: DashboardContext): boolean {
@@ -622,36 +622,18 @@ function dashboardD1(env: Env): DashboardDb | null {
   return db ?? null;
 }
 
-// --- Webhook slug resolution + manifest commit helpers ---
-
-/** Bounded suffix attempts before the INSERT's own UNIQUE error surfaces. */
-const SLUG_SUFFIX_ATTEMPTS = 6;
+// --- Manifest commit helpers ---
 
 function errorTypeName(err: unknown): string {
   return err instanceof Error ? err.name : String(err);
 }
 
-/** The sqlite UNIQUE violation for one github_apps column (slug retries). */
-function isAppsUniqueViolation(err: unknown, column: "slug" | "github_app_id"): boolean {
+/** The sqlite UNIQUE violation for one github_apps column. */
+function isAppsUniqueViolation(
+  err: unknown,
+  column: "webhook_path" | "github_app_id",
+): boolean {
   return err instanceof Error && err.message.includes(`github_apps.${column}`);
-}
-
-/**
- * First slug in `[base, base-<suffix>…]` not present in github_apps
- * (soft-deleted rows count — their UNIQUE slug still owns the namespace).
- * Minted at start and carried through the signed state — the first line of
- * defense against collisions. A commit-time race does NOT remap (the
- * manifest already registered the slug's webhook URL with GitHub): the hold
- * is burned with a 409 instead.
- */
-async function resolveAvailableSlug(db: DashboardD1, base: string): Promise<string> {
-  const apps = createAppsStore(db);
-  let slug = base;
-  for (let attempt = 0; attempt <= SLUG_SUFFIX_ATTEMPTS; attempt++) {
-    if ((await apps.getAppBySlug(slug)) === null) return slug;
-    slug = `${base}-${randomSlugSuffix()}`;
-  }
-  return slug;
 }
 
 // --- Workspace (tenant) routing gate (migration 0026) ---
@@ -1271,17 +1253,19 @@ dashboardApp.post("/locale", async (c) => {
 });
 
 // --- GitHub App Manifest start + callback (no secret write) ---
-// --- Per-App slug mints here and rides the signed state ---
+// --- The per-App webhook path mints here and rides the signed state ---
 
 // Start: logged-in only. The SPA's create form posts under the workspace page
 // it is on (`/:workspaceRef/manifest/start`), so the target workspace comes
 // from the request itself; the deployment-level path resolves the sole
-// workspace instead. Then: mint the webhook slug (login-derived, DB
-// pre-resolved against existing slugs) and the single-use CSRF state cookie
-// CARRYING both slug and workspace ref (createManifestStateValue — same
+// workspace instead. Then: mint the webhook path (a UUID — the manifest form
+// needs the hook URL before GitHub creates the App, so this identifier cannot
+// derive from anything GitHub owns) — that same value becomes the row PK at
+// commit, one identity per App — and the single-use CSRF state cookie
+// CARRYING both path and workspace ref (createManifestStateValue — same
 // createStateValue HMAC discipline), and render the zero-JS form POST to
 // https://github.com/settings/apps/new (state rides the form-action query).
-// The manifest's webhook URL is the App's own route /webhook/{slug}.
+// The manifest's webhook URL is the App's own route /webhook/{webhookPath}.
 // Logged out → 302 to login (IA routing table).
 async function manifestStartRoute(c: DashboardContext, workspaceRef: string | undefined): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
@@ -1291,15 +1275,14 @@ async function manifestStartRoute(c: DashboardContext, workspaceRef: string | un
   // Creation is owner/admin OF THE ADDRESSED workspace (I-000082): a plain
   // member there could not manage the App the flow creates. A request that
   // names no workspace on a multi-workspace deployment has no target at all
-  // → 409 workspace_required. Checked BEFORE the slug mint / state cookie.
+  // → 409 workspace_required. Checked BEFORE the path mint / state cookie.
   const target = await resolveCreationTarget(c.env, session.login, workspaceRef);
   if (target.kind === "db_unbound") return c.text("dashboard storage is not configured", 500);
   if (target.kind !== "ok") return creationRefusal(c, session.login, target);
-  const db = dashboardD1(c.env)!;
-  const slug = await resolveAvailableSlug(db, buildAppSlug(session.login));
-  const state = await createManifestStateValue(secrets.sessionSecret, slug, target.workspaceId);
+  const webhookPath = randomWebhookPath();
+  const state = await createManifestStateValue(secrets.sessionSecret, webhookPath, target.workspaceId);
   c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
-  const manifest = buildManifest(new URL(c.req.url).origin, session.login, slug);
+  const manifest = buildManifest(new URL(c.req.url).origin, session.login, webhookPath);
   return c.html(
     manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state), requestLocale(c)),
   );
@@ -1372,7 +1355,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   const locale = requestLocale(c);
   // The payload feeds the shared commit path; the cookie string is parked on
   // retryable outcomes so /manifest/confirm can resume.
-  const holdPayload = buildHoldPayload(conversion, session.login, state.slug, state.workspaceId);
+  const holdPayload = buildHoldPayload(conversion, session.login, state.webhookPath, state.workspaceId);
   const hold = await encryptHoldValue(holdPayload, secrets.sessionSecret);
   const outcome = await commitManifestApp({
     db: dashboardD1(c.env),
@@ -1393,7 +1376,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   switch (outcome.kind) {
     case "success": {
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
-      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug);
+      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.github_app_id);
       if (target.kind === "workspace_gone") {
         // The App row is written but its workspace is gone (deleted between the
         // commit and this read): answer the named failure instead of a landing
@@ -1477,7 +1460,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       // Success: the hold is single-success — burned now that the row exists;
       // the operator lands on the App's onboarding page.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.slug);
+      const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.github_app_id);
       if (target.kind === "workspace_gone") {
         logManifestFailure("commit", "workspace_gone");
         return c.html(manifestErrorPage(t(locale, "manifest.error.workspaceGone"), false, locale), 409);
@@ -1522,8 +1505,9 @@ type ManifestCommitOutcome =
  * second click) and the POST /manifest/commit recovery route. The decrypted
  * hold payload + the acting session login are passed in; the hold's login
  * binding is re-checked here on EVERY call. Outcomes mirror the route's long-standing
- * semantics: success = ONE github_apps row (secretbox AAD rowKey = the
- * caller-generated row PK, decided BEFORE encryption — review pin);
+ * semantics: success = ONE github_apps row (secretbox AAD rowKey = the row
+ * PK, which IS the start-minted webhook path — ONE identity, not a second
+ * UUID);
  * login_mismatch / slug_conflict / already_connected = non-retryable (the
  * caller burns the hold); db_unbound / encrypt_failed / db_rejected =
  * retryable (the caller keeps the hold so /manifest/confirm can resume).
@@ -1547,17 +1531,21 @@ async function commitManifestApp(args: {
     return { kind: "login_mismatch" };
   }
   if (!db || workspaceId === null) return { kind: "db_unbound" };
-  // Review pin: the row id exists BEFORE encryption so the secretbox AAD
-  // rowKey (github_apps.<column>:<id>) equals the row's primary key.
-  const appId = crypto.randomUUID();
+  // The signed hold's webhook path IS the row PK: the App's identity was
+  // decided at start (the manifest already registered {origin}/webhook/{path}
+  // with GitHub), so a second local UUID would give one App two identities.
+  // AAD rowKey (github_apps.<column>:<id>) therefore binds the webhook path.
   let privateKeyEnc: string;
   let webhookSecretEnc: string;
   try {
     const box = createSecretbox(encryptionKey);
-    privateKeyEnc = await box.encryptSecret(hold.pem, `github_apps.private_key_enc:${appId}`);
+    privateKeyEnc = await box.encryptSecret(
+      hold.pem,
+      `github_apps.private_key_enc:${hold.webhookPath}`,
+    );
     webhookSecretEnc = await box.encryptSecret(
       hold.webhook_secret,
-      `github_apps.webhook_secret_enc:${appId}`,
+      `github_apps.webhook_secret_enc:${hold.webhookPath}`,
     );
   } catch (err) {
     // SecretboxKeyError (missing/malformed DASHBOARD_ENCRYPTION_KEY) and any
@@ -1569,18 +1557,19 @@ async function commitManifestApp(args: {
     });
     return { kind: "encrypt_failed" };
   }
-  // Slug: pre-resolved at start and carried through the hold. A commit-time
-  // UNIQUE conflict means the slug was taken between start and commit — the
-  // manifest already registered {origin}/webhook/{hold.slug} with GitHub, so
-  // remapping the row to a fresh suffix would desync the webhook URL (the
-  // App would look connected yet never receive events, Bugbot F-1). The hold
-  // is burned instead: zero rows written, 409, and the operator restarts the
-  // flow with a fresh slug.
+  // Webhook path: minted at start and carried through the hold. A commit-time
+  // UNIQUE conflict means the path was taken between start and commit — the
+  // manifest already registered {origin}/webhook/{hold.webhookPath} with
+  // GitHub, so remapping the row to a fresh value would desync the webhook URL
+  // (the App would look connected yet never receive events, Bugbot F-1). The
+  // hold is burned instead: zero rows written, 409, and the operator restarts
+  // the flow with a fresh path.
   const apps = createAppsStore(db);
   try {
     const row = await apps.createApp({
-      id: appId,
-      slug: hold.slug,
+      id: hold.webhookPath,
+      webhookPath: hold.webhookPath,
+      githubSlug: hold.slug,
       githubAppId: hold.id,
       name: hold.name,
       privateKeyEnc,
@@ -1590,12 +1579,12 @@ async function commitManifestApp(args: {
     });
     return { kind: "success", row, workspaceId };
   } catch (err) {
-    if (isAppsUniqueViolation(err, "slug")) {
-      // The GitHub App WAS created on GitHub, but its webhook slug was
+    if (isAppsUniqueViolation(err, "webhook_path")) {
+      // The GitHub App WAS created on GitHub, but its webhook path was
       // claimed before the row could land. Storing the row under any other
-      // slug would advertise a URL GitHub never posts to — burn the hold
+      // value would advertise a URL GitHub never posts to — burn the hold
       // and make the operator start a fresh creation flow.
-      logManifestFailure("commit", "slug_conflict", { slug: hold.slug });
+      logManifestFailure("commit", "webhook_path_conflict", { webhook_path: hold.webhookPath });
       return { kind: "slug_conflict" };
     }
     if (isAppsUniqueViolation(err, "github_app_id")) {
@@ -1640,7 +1629,7 @@ dashboardApp.get("/manifest/confirm", async (c) => {
         id: hold.id,
         name: hold.name,
         slug: hold.slug,
-        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
+        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.webhookPath}`,
       },
       requestLocale(c),
     ),
@@ -1662,7 +1651,7 @@ const appOnboardingRoute = async (c: DashboardContext) => {
   if (!member.ok) return member.response;
   const app = await resolveScopedApp(
     createAppsStore(member.db),
-    c.req.param("slug") ?? "",
+    c.req.param("appId") ?? "",
     member.scope,
   );
   if (!app) {
@@ -1678,8 +1667,8 @@ const appOnboardingRoute = async (c: DashboardContext) => {
       {
         id: app.github_app_id,
         name: app.name,
-        slug: app.slug,
-        webhookUrl: `${origin}/webhook/${app.slug}`,
+        slug: app.github_slug,
+        webhookUrl: `${origin}/webhook/${app.webhook_path}`,
       },
       requestLocale(c),
       // Set only on a workspace-scoped request; the view never reads env.
@@ -2368,19 +2357,37 @@ function canManageApp(scope: WorkspaceScope): boolean {
 }
 
 /**
- * Resolve the App addressed by an App route. An App from another workspace is
- * exactly as invisible as an unknown slug (404), and a soft-deleted row stays
- * invisible.
+ * Resolve the App addressed by an App route. The segment is GitHub's immutable
+ * numeric App id — the only App identifier an operator sees that never changes.
+ * A non-numeric segment, an App from another workspace and a soft-deleted row
+ * are all equally invisible (404).
  */
 async function resolveScopedApp(
   apps: ReturnType<typeof createAppsStore>,
-  slug: string,
+  appIdParam: string,
   scope: WorkspaceScope,
 ): Promise<GithubAppRow | null> {
-  const app = await apps.getAppBySlug(slug);
+  // Digits only: `Number("")` is 0 and `Number("1001abc")` is NaN, but
+  // `Number("0x1f")`, `Number("1e3")` and `Number(" 5 ")` are all finite
+  // integers — those spellings would alias one App id under several URLs.
+  if (!/^[0-9]+$/.test(appIdParam)) return null;
+  const githubAppId = Number(appIdParam);
+  if (!Number.isSafeInteger(githubAppId) || githubAppId <= 0) return null;
+  const app = await apps.getAppByGithubId(githubAppId);
   if (!app || app.deleted_at !== null) return null;
   if (app.workspace_id !== scope.workspaceId) return null;
   return app;
+}
+
+/**
+ * The App's operator-facing label (D6): GitHub's current name, then its slug,
+ * then the immutable numeric ids. Every settings notice and dialog name the
+ * App this way, so a rename shows up wherever the App is mentioned.
+ */
+function appDisplayName(
+  app: Pick<GithubAppRow, "github_name" | "github_slug" | "github_app_id">,
+): string {
+  return app.github_name ?? app.github_slug ?? String(app.github_app_id);
 }
 
 /**
@@ -2416,8 +2423,12 @@ const appListRoute = async (c: DashboardContext) => {
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
     apps: rows.map((app) => ({
-      slug: app.slug,
+      // App id + the cached GitHub facts (D6): the list links and labels by
+      // the immutable id, and renders whatever GitHub currently calls the App.
       github_app_id: app.github_app_id,
+      github_name: app.github_name ?? null,
+      github_slug: app.github_slug ?? null,
+      github_avatar_url: app.github_avatar_url ?? null,
       status: app.status,
       review_enabled: app.review_enabled,
       created_by: app.created_by,
@@ -2451,7 +2462,7 @@ async function appStatusAction(
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
   const apps = createAppsStore(gate.db);
-  const app = await resolveScopedApp(apps, c.req.param("slug") ?? "", gate.scope);
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   if (action === "delete") {
@@ -2479,12 +2490,12 @@ async function appStatusAction(
  * HTML-nav 302 target for pause/resume. Settings is the only native-form
  * caller (`<form method="post">` on the Review card); Apps-list uses fetch
  * `postForm`. Origin is a sanitized Referer pathname — never echoed as
- * Location. Settings-origin → `/dashboard/apps/:slug/settings` (DB slug);
- * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`. Both App
- * targets carry the request's workspace prefix (`scopedAppPath`).
+ * Location. Settings-origin → `/dashboard/apps/:appId/settings` (GitHub App
+ * id); apps-list origin → `/dashboard/apps`; anything else → `/dashboard`. Both
+ * App targets carry the request's workspace prefix (`scopedAppPath`).
  */
-function reviewActionRedirect(c: DashboardContext, slug: string): string {
-  const settingsPath = scopedAppPath(c, `/dashboard/apps/${slug}/settings`);
+function reviewActionRedirect(c: DashboardContext, appId: number): string {
+  const settingsPath = scopedAppPath(c, `/dashboard/apps/${appId}/settings`);
   const listPath = scopedAppPath(c, APPS_LIST_REDIRECT);
   const origin = new URL(c.req.raw.url).origin;
   const refererPath = new URL(safeLocaleRedirect(c.req.header("Referer"), origin), origin).pathname;
@@ -2510,10 +2521,10 @@ async function appReviewAction(
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
   const apps = createAppsStore(gate.db);
-  const app = await resolveScopedApp(apps, c.req.param("slug") ?? "", gate.scope);
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
-  const htmlRedirect = reviewActionRedirect(c, app.slug);
+  const htmlRedirect = reviewActionRedirect(c, app.github_app_id);
   const paused = app.review_enabled === 0;
   if (action === "pause" ? paused : !paused) return pinnedPostMutationResponse(c, htmlRedirect, "ok"); // idempotent no-op — never touch the row
   await apps.setReviewEnabled(app.id, action === "resume");
@@ -2556,18 +2567,18 @@ async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
   const apps = createAppsStore(gate.db);
-  const app = await resolveScopedApp(apps, c.req.param("slug") ?? "", gate.scope);
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   const form = await c.req.parseBody();
   const mode = typeof form["mode"] === "string" ? form["mode"] : "";
   if (!isReviewTriggerMode(mode)) {
-    return settings400Response(c, app.slug, SETTINGS_400_KEYS.triggerModeUnknown, { mode });
+    return settings400Response(c, app.github_app_id, SETTINGS_400_KEYS.triggerModeUnknown, { mode });
   }
   if (app.review_trigger_mode !== mode) {
     await apps.setReviewTriggerMode(app.id, mode);
   }
-  return settingsPostResponse(c, app.slug, "ok");
+  return settingsPostResponse(c, app.github_app_id, "ok");
 }
 
 // --- Per-App AI configuration settings (spec § Per-App BYOK) ---
@@ -2578,7 +2589,7 @@ async function appReviewTriggerModeAction(c: DashboardContext): Promise<Response
 // the per-request guard has already verified membership. POSTs ride the
 // session cookie (same discipline as the members and apps action routes — no
 // new token scheme). Route shapes per the plan brief: GET/POST
-// /dashboard/apps/:slug/settings — the POST carries an explicit `op`
+// /dashboard/apps/:appId/settings — the POST carries an explicit `op`
 // discriminator (add-key | save-chain | save-roles) because the zero-JS page
 // has three forms on one action path — and the delete-key action path
 // …/settings/key/delete (the HTML-form convention cannot emit a DELETE verb).
@@ -2612,7 +2623,7 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
   if (!member.ok) return member;
   const app = await resolveScopedApp(
     createAppsStore(member.db),
-    c.req.param("slug") ?? "",
+    c.req.param("appId") ?? "",
     member.scope,
   );
   if (!app) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
@@ -2683,11 +2694,11 @@ function isOmpRuntimeImage(sandboxImageId: string): boolean {
  */
 function settingsPostResponse(
   c: DashboardContext,
-  slug: string,
+  appId: number,
   message: string,
   status: 200 | 500 = 200,
 ): Response {
-  return pinnedPostMutationResponse(c, `/dashboard/apps/${slug}/settings`, message, status);
+  return pinnedPostMutationResponse(c, `/dashboard/apps/${appId}/settings`, message, status);
 }
 
 /**
@@ -2699,12 +2710,12 @@ function settingsPostResponse(
  */
 function settingsRemoveResponse(
   c: DashboardContext,
-  slug: string,
+  appId: number,
   changed: boolean,
   message: string,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${appId}/settings`), 302);
   }
   return c.json({ changed, message }, 200);
 }
@@ -2767,6 +2778,7 @@ const SETTINGS_400_KEYS = {
   runtimeHarnessUnknown: "settings.error.runtimeHarnessUnknown",
   triggerModeUnknown: "settings.error.triggerModeUnknown",
   unknownOperation: "settings.error.unknownOperation",
+  githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
 } as const satisfies Record<string, DictionaryKey>;
 
 /**
@@ -2778,12 +2790,12 @@ const SETTINGS_400_KEYS = {
  */
 function settings400Response(
   c: DashboardContext,
-  slug: string,
+  appId: number,
   key: DictionaryKey,
   params?: Record<string, string | number>,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${appId}/settings`), 302);
   }
   return c.json({ key, message: t("en", key, params), ...(params ? { params } : {}) }, 400);
 }
@@ -2796,10 +2808,10 @@ function settings400Response(
  */
 function settingsKeyLimitResponse(
   c: DashboardContext,
-  slug: string,
+  appId: number,
   provider: string,
 ): Response {
-  return settings400Response(c, slug, SETTINGS_400_KEYS.providerKeyLimit, {
+  return settings400Response(c, appId, SETTINGS_400_KEYS.providerKeyLimit, {
     provider,
     limit: MAX_KEYS_PER_PROVIDER,
   });
@@ -2823,13 +2835,13 @@ function verifyFailCopy(reason: ReturnType<typeof mapVerifyReason>): string {
 /** 400 for a verify miss: JSON `{ ok, reason, message }` so the SPA maps `reason` via t(); `message` keeps the English face for native posts. */
 function settingsVerifyFailResponse(
   c: DashboardContext,
-  slug: string,
+  appId: number,
   reason: VerifyFailureReason,
 ): Response {
   const mapped = mapVerifyReason(reason);
   const message = verifyFailCopy(mapped);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${appId}/settings`), 302);
   }
   return c.json({ ok: false, reason: mapped, message }, 400);
 }
@@ -2843,71 +2855,133 @@ const MEMBERSHIP_FAIL_CODE = "not_in_verified_models" as const;
 /** 400 for a membership miss: JSON `{ code, message, selector }` so the SPA maps `code` via t(); `message` keeps the English face for native posts. */
 function settingsMembershipFailResponse(
   c: DashboardContext,
-  slug: string,
+  appId: number,
   selector: string,
 ): Response {
   const message = membershipFailCopy(selector);
   if (wantsHtmlFormNavigation(c)) {
-    return c.redirect(scopedAppPath(c, `/dashboard/apps/${slug}/settings`), 302);
+    return c.redirect(scopedAppPath(c, `/dashboard/apps/${appId}/settings`), 302);
   }
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }
 
 /**
- * (AD-531): the settings read path's lazy GitHub-metadata refresh —
- * the ONLY writer of the migration-0019 profile columns (via the single store
- * entry saveGithubMetadata). Runs at most once per request and only when the
- * cached profile is missing or outside the 24h TTL; the leg is
- * decrypt (the per-App secretbox envelope, AAD = the createApp convention) →
- * mint App JWT → GET /app → persist, with every failure mode optional:
- *   - a missing DASHBOARD_ENCRYPTION_KEY skips the refresh silently (the
- *     architect watch item: the cached profile is a read-path extra, so the
- *     non-manager face must never 500 for its sake — the manage branch keeps
- *     its existing fail-closed 500 for its OWN decryption needs below);
+ * The ONE GitHub-metadata refresh core (D4) — the only writer of the
+ * migration-0019 profile columns plus `github_slug`, via the single store entry
+ * saveGithubMetadata. The leg is decrypt (the per-App secretbox envelope, AAD =
+ * the createApp convention) → mint App JWT → GET /app → persist.
+ *
+ * `force: false` is the settings read path's lazy 24h-TTL refresh (AD-531): a
+ * fresh cache is served as-is — EXCEPT while `github_slug` is still NULL, which
+ * is "never synced" regardless of the TTL timestamp. Migration 0036 added the
+ * column with no backfill, so a row that predates it carries a non-NULL
+ * `github_metadata_synced_at` from 0019 with no slug; treating that as fresh
+ * would leave the App's bot mention dead forever behind a documented "open the
+ * settings page" remedy that fetches nothing.
+ *
+ * That exception needs its own floor, or an App that can never sync (deleted
+ * upstream → 404, rotated key → 401, suspended → 403, slug-less payload) would
+ * be re-fetched on EVERY settings read, by every member, paying up to the 5 s
+ * timeout each time. `github_metadata_attempted_at` (migration 0037) is that
+ * floor: the NULL-slug branch re-attempts at most once per TTL window, and
+ * every attempt that persists no slug stamps it. `force: true` is the
+ * manager's manual refresh and bypasses both bounds, always calling GitHub.
+ *
+ * The caller-visible contract differs by entry point, so the RESULT says what
+ * happened instead of the failure being swallowed here:
+ *   - a missing DASHBOARD_ENCRYPTION_KEY skips the refresh (`skipped`) — the
+ *     non-manager read face must never 500 for a display-only extra;
  *   - `{ok:false}` from the fetch (network, timeout, bad key format, non-200)
- *     keeps the cached columns untouched and emits one secret-free structured
- *     warn (stage + app id — the fetch collapses failure reasons by design);
+ *     keeps the cached columns untouched (`failed`);
  *   - a decrypt throw (corrupt envelope / SecretboxKeyError) or a store
- *     rejection is swallowed by the leg's own catch-all and logged via the
- *     logSettingsFailure convention (error type only — never the PEM, JWT,
- *     or any header material).
- * Fail-open BY STRUCTURE: this function never throws and returns the row to
- * serve — re-read fresh after a SUCCESSFUL persist so the payload carries the
- * values actually in D1, the caller's row otherwise (a failed refresh wrote
- * nothing, so the re-read is skipped) — so the refresh can never enter the
- * route's outer 500 face (AD-531).
+ *     rejection is caught here and logged via the logSettingsFailure
+ *     convention (error type only — never the PEM, JWT or any header material)
+ *     and reported as `failed`.
+ * Never throws. `row` is re-read after a successful persist so the caller
+ * serves the values actually in D1; on any other outcome it is the input row
+ * (nothing was written, so the re-read is skipped).
  */
-async function refreshGithubMetadataForRead(
+type GithubMetadataRefresh =
+  | { status: "refreshed"; row: GithubAppRow }
+  | { status: "fresh"; row: GithubAppRow }
+  | { status: "skipped"; row: GithubAppRow }
+  | { status: "failed"; row: GithubAppRow };
+
+async function refreshGithubMetadata(
   app: GithubAppRow,
   apps: ReturnType<typeof createAppsStore>,
   encryptionKey: string | undefined,
-): Promise<GithubAppRow> {
+  options: { force: boolean },
+): Promise<GithubMetadataRefresh> {
+  if (!options.force) {
+    // A synced row is bounded by its profile TTL; an unsynced one (NULL slug)
+    // by its last ATTEMPT. The attempt marker, not synced_at, decides there:
+    // a row that never synced has synced_at NULL, so OR-ing it in would make
+    // every permanently failing App stale on every read — the very loop the
+    // marker exists to close.
+    const stale = isGithubMetadataStale(
+      app.github_slug === null ? app.github_metadata_attempted_at : app.github_metadata_synced_at,
+    );
+    if (!stale) return { status: "fresh", row: app };
+  }
+  if (!encryptionKey) return { status: "skipped", row: app };
+  /**
+   * Record that a fetch attempt left no cached slug (migration 0037). Pure
+   * bookkeeping for the next read's bound, so it never enters this function's
+   * result: a store rejection here is logged and swallowed rather than turned
+   * into a 500 on a fail-open read. A persisted slug needs no marker — the
+   * 0019 synced_at already records the success.
+   */
+  const markAttempt = async (stillUnsynced: boolean): Promise<void> => {
+    if (!stillUnsynced) return;
+    try {
+      await apps.touchGithubMetadataAttempt(app.id);
+    } catch (err) {
+      logSettingsFailure("github_metadata_attempt", app.id, err);
+    }
+  };
   try {
-    if (!isGithubMetadataStale(app.github_metadata_synced_at)) return app;
-    if (!encryptionKey) return app;
     const decryptedPem = await createSecretbox(encryptionKey).decryptSecret(
       app.private_key_enc,
       `github_apps.private_key_enc:${app.id}`,
     );
     const result = await fetchAppMetadata(app.github_app_id, decryptedPem);
-    if (result.ok) {
-      await apps.saveGithubMetadata(app.id, result.metadata);
-      const fresh = await apps.getAppById(app.id);
-      if (fresh) return fresh;
-    } else {
+    if (!result.ok) {
       // Secret-free structured warn (the logSettingsFailure shape): no error
       // object exists here — fetchAppMetadata collapses every failure class
       // into the reason-less `{ok:false}` on purpose.
       console.warn(
         JSON.stringify({ event: "dashboard_settings", stage: "github_metadata_fetch", app_id: app.id }),
       );
+      await markAttempt(app.github_slug === null);
+      return { status: "failed", row: app };
     }
+    await apps.saveGithubMetadata(app.id, result.metadata);
+    const row = (await apps.getAppById(app.id)) ?? app;
+    // A payload that yields no slug persists the profile but leaves the
+    // re-attempt trigger hot; the marker keeps it from looping.
+    await markAttempt(row.github_slug === null);
+    return { status: "refreshed", row };
   } catch (err) {
-    // Fail-open: the cached columns serve as-is (metadata is display-only) —
-    // but the failure stays observable, secret-free.
+    // The failure stays observable, secret-free; the cached columns serve as-is.
     logSettingsFailure("github_metadata_refresh", app.id, err);
+    await markAttempt(app.github_slug === null);
+    return { status: "failed", row: app };
   }
-  return app;
+}
+
+/**
+ * The read path's lazy refresh (AD-531): fail-open BY STRUCTURE — the result
+ * is discarded and the row to serve returned, so a metadata failure can never
+ * enter the route's outer 500 face.
+ */
+async function refreshGithubMetadataForRead(
+  app: GithubAppRow,
+  apps: ReturnType<typeof createAppsStore>,
+  encryptionKey: string | undefined,
+): Promise<GithubAppRow> {
+  const refresh = await refreshGithubMetadata(app, apps, encryptionKey, { force: false });
+  return refresh.row;
 }
 
 /** SPA JSON face (spec §2 read face): any member can load the face, but the
@@ -2929,7 +3003,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
     c.header("Cache-Control", "private, no-store");
     if (!canManageApp(gate.scope)) {
       // Identity-only non-manager face: the D4 identity set — the fields the
-      // GET /api/apps list rows already expose (slug, github_app_id, status,
+      // GET /api/apps list rows already expose (github_app_id, status,
       // review_enabled, created_by) plus created_at and the cached public
       // GitHub profile. Everything from the ops stores (installations,
       // deliveries, sandbox_image_id, review-trigger runtime config) stays
@@ -2938,13 +3012,17 @@ const appSettingsRoute = async (c: DashboardContext) => {
       return c.json({
         can_manage: false,
         app: {
-          slug: app.slug,
           github_app_id: app.github_app_id,
           status: app.status,
           review_enabled: app.review_enabled !== 0,
           created_by: app.created_by,
           created_at: app.created_at,
           github_name: app.github_name ?? null,
+          github_slug: app.github_slug ?? null,
+          // Our own webhook route key (never a GitHub fact). It rides this face
+          // for shape parity only — the identity card renders the delivery
+          // URL from it on the MANAGER face, never here.
+          webhook_path: app.webhook_path,
           github_description: app.github_description ?? null,
           github_html_url: app.github_html_url ?? null,
           github_avatar_url: app.github_avatar_url ?? null,
@@ -2957,7 +3035,6 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const deliverySummary = await apps.deliverySummary(app.id);
     const base = {
       app: {
-        slug: app.slug,
         github_app_id: app.github_app_id,
         status: app.status,
         review_enabled: app.review_enabled !== 0,
@@ -2978,6 +3055,11 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // non-manager payload carries them too). Public profile fields only —
         // the PEM / webhook-secret envelopes never leave the row.
         github_name: app.github_name ?? null,
+        github_slug: app.github_slug ?? null,
+        // Our own webhook route key — the manager identity card composes the
+        // absolute delivery URL from it (the repoint surface); it is the row's
+        // only non-derived identifier.
+        webhook_path: app.webhook_path,
         github_description: app.github_description ?? null,
         github_html_url: app.github_html_url ?? null,
         github_avatar_url: app.github_avatar_url ?? null,
@@ -3125,6 +3207,29 @@ const appSettingsRoute = async (c: DashboardContext) => {
     logSettingsFailure("api_render", gate.app.id, err);
     return c.text("the app settings could not be read from encrypted storage", 500);
   }
+};
+
+/**
+ * (D5) The manager's manual GitHub-metadata refresh: `POST
+ * /api/apps/:appId/refresh-metadata`. A rename or a new logo is otherwise
+ * invisible for up to the read path's 24h TTL, so this bypasses the TTL and
+ * always asks GitHub. Behind requireAppSettings (owner-or-admin + a configured
+ * encryption key). Success answers the ordinary settings 2xx (the SPA
+ * refetches the JSON face); an upstream failure answers the keyed 400 — never a
+ * 5xx, because an unreachable GitHub is a retryable operator-level condition,
+ * not a broken server. The cached columns stay untouched on failure.
+ */
+const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> => {
+  const gate = await requireAppSettings(c);
+  if (!gate.ok) return gate.response;
+  const apps = createAppsStore(gate.db);
+  const refresh = await refreshGithubMetadata(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY, {
+    force: true,
+  });
+  if (refresh.status !== "refreshed") {
+    return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.githubMetadataRefreshFailed);
+  }
+  return settingsPostResponse(c, gate.app.github_app_id, `Refreshed ${appDisplayName(refresh.row)} from GitHub.`);
 };
 
 const appModelsRoute = async (c: DashboardContext) => {
@@ -3280,8 +3385,8 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (!PROVIDER_IDS.includes(provider)) {
       return provider === ""
-        ? settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerRequired)
-        : settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerUnknown, { provider });
+        ? settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerRequired)
+        : settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerUnknown, { provider });
     }
     // Fail-closed server-side precheck: the App's selected
     // runtime harness must be omp for ANY provider key to be
@@ -3290,16 +3395,16 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // 400, zero writes. Plain-text family (native/legacy surface only — the
     // SPA's add-key path is verify-first via /keys/verify).
     if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerUnavailableOnHarness, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerUnavailableOnHarness, {
         provider,
         image: gate.app.sandbox_image_id,
       });
     }
     if (plainKey === "") {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyRequired);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyRequired);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyTooLong, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyTooLong, {
         count: plainKey.length,
         limit: MAX_PROVIDER_KEY_LENGTH,
       });
@@ -3308,22 +3413,22 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // runtime's config-value resolver (packages/shared/src/credential-key.ts) — the
     // same rule the runner's payload decoder enforces fail-closed.
     if (isCommandConfigKey(plainKey)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
     try {
       const verified = await verifyProviderKey({ fetch: globalThis.fetch }, provider, plainKey);
       if (!verified.ok) {
-        return settingsVerifyFailResponse(c, gate.app.slug, verified.reason);
+        return settingsVerifyFailResponse(c, gate.app.github_app_id, verified.reason);
       }
       await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
       if (err instanceof ProviderKeyLimitError) {
-        return settingsKeyLimitResponse(c, gate.app.slug, provider);
+        return settingsKeyLimitResponse(c, gate.app.github_app_id, provider);
       }
-      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, gate.app.slug, `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
+    return settingsPostResponse(c, gate.app.github_app_id, `Stored the ${provider} key for ${appDisplayName(gate.app)} — it is only ever shown masked.`,
     );
   }
   if (op === "save-chain") {
@@ -3331,24 +3436,24 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // it into an array) must be rejected — never treated as the empty-clear
     // path, which would silently wipe the stored chain.
     if (Array.isArray(form.model_chain)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainFieldDuplicated);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.chainFieldDuplicated);
     }
     const raw = typeof form.model_chain === "string" ? form.model_chain : "";
     try {
       if (raw.trim() === "") {
         await store.setModelChain(gate.app.id, null);
-        return settingsPostResponse(c, gate.app.slug, `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only).`,
+        return settingsPostResponse(c, gate.app.github_app_id, `Cleared the model chain for ${appDisplayName(gate.app)} — reviews fail closed until a chain + provider keys are configured (per-App only).`,
         );
       }
       if (raw.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainTooLong, {
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.chainTooLong, {
           count: raw.length,
           limit: MAX_MODEL_SELECTOR_LENGTH,
         });
       }
       const selectors = parseModelChain(raw);
       if (selectors.length === 0) {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainEmpty);
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.chainEmpty);
       }
       const failing = findFailingSelector(
         selectors,
@@ -3356,14 +3461,14 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         await store.listCustomProviders(gate.app.id),
       );
       if (failing) {
-        return settingsMembershipFailResponse(c, gate.app.slug, failing);
+        return settingsMembershipFailResponse(c, gate.app.github_app_id, failing);
       }
       await store.setModelChain(gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
-      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, gate.app.slug, `Saved the model chain for ${gate.app.slug}.`);
+    return settingsPostResponse(c, gate.app.github_app_id, `Saved the model chain for ${appDisplayName(gate.app)}.`);
   }
   if (op === "save-roles") {
     // The seat → chain editor rework (spec §4.4), F-002 (QC wave):
@@ -3386,12 +3491,12 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       // arrives as an ARRAY — explicit 400 rejection (zero
       // writes), never the silent last-wins the default parseBody had.
       if (Array.isArray(value)) {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.roleFieldDuplicated, { field });
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.roleFieldDuplicated, { field });
       }
       if (typeof value !== "string") continue;
       const role = field.slice("role_".length);
       if (!MODEL_ROLE_IDS.includes(role)) {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.roleUnknown, { role });
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.roleUnknown, { role });
       }
       // F-001 (QC): canonicalize BEFORE bind — the known-chain check below
       // and the store's upsert must see the SAME trimmed name, or a crafted
@@ -3405,12 +3510,12 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // fields" guard; a strict subset names exactly what is absent.
     const missingSeats = MODEL_ROLE_IDS.filter((role) => !(role in refs));
     if (missingSeats.length === MODEL_ROLE_IDS.length) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.roleFieldsMissingAll);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.roleFieldsMissingAll);
     }
     if (missingSeats.length > 0) {
       return settings400Response(
         c,
-        gate.app.slug,
+        gate.app.github_app_id,
         missingSeats.length === 1 ? SETTINGS_400_KEYS.roleFieldMissing : SETTINGS_400_KEYS.roleFieldsMissing,
         { roles: missingSeats.join(", ") },
       );
@@ -3427,15 +3532,15 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       for (const [role, chainName] of Object.entries(refs)) {
         if (chainName === "" || chainName === DEFAULT_CHAIN_NAME) continue;
         if (!knownChains.has(chainName)) {
-          return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.roleChainUnknown, { role });
+          return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.roleChainUnknown, { role });
         }
       }
       await store.setModelChainSeats(gate.app.id, refs);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
-      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, gate.app.slug, `Saved the role models for ${gate.app.slug}.`);
+    return settingsPostResponse(c, gate.app.github_app_id, `Saved the role models for ${appDisplayName(gate.app)}.`);
   }
   if (op === "add-chain") {
     // (spec §4.4): create or replace one NAMED chain. The name
@@ -3445,22 +3550,22 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const name = typeof form.name === "string" ? form.name.trim() : "";
     const chain = typeof form.chain === "string" ? form.chain : "";
     if (name === "" || name === DEFAULT_CHAIN_NAME || !MODEL_CHAIN_NAME_PATTERN.test(name)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainNameInvalid, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.chainNameInvalid, {
         limit: MAX_MODEL_CHAIN_NAME_LENGTH,
       });
     }
     if (chain.trim() === "") {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainValueRequired);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.chainValueRequired);
     }
     if (chain.length > MAX_MODEL_SELECTOR_LENGTH) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainTooLong, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.chainTooLong, {
         count: chain.length,
         limit: MAX_MODEL_SELECTOR_LENGTH,
       });
     }
     const selectors = parseModelChain(chain);
     if (selectors.length === 0) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainEmpty);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.chainEmpty);
     }
     const failing = findFailingSelector(
       selectors,
@@ -3468,15 +3573,15 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       await store.listCustomProviders(gate.app.id),
     );
     if (failing) {
-      return settingsMembershipFailResponse(c, gate.app.slug, failing);
+      return settingsMembershipFailResponse(c, gate.app.github_app_id, failing);
     }
     try {
       await store.upsertModelChain(gate.app.id, name, chain);
     } catch (err) {
       logSettingsFailure("add_chain", gate.app.id, err);
-      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, gate.app.slug, `Saved the ${name} model chain for ${gate.app.slug}.`);
+    return settingsPostResponse(c, gate.app.github_app_id, `Saved the ${name} model chain for ${appDisplayName(gate.app)}.`);
   }
   if (op === "remove-chain") {
     // (spec §4.4): delete one NAMED chain — seats referencing
@@ -3485,15 +3590,15 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // removed here (clear it via save-chain instead).
     const name = typeof form.name === "string" ? form.name.trim() : "";
     if (name === "" || name === DEFAULT_CHAIN_NAME) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.defaultChainRemoveProtected);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.defaultChainRemoveProtected);
     }
     try {
       await store.removeModelChain(gate.app.id, name);
     } catch (err) {
       logSettingsFailure("remove_chain", gate.app.id, err);
-      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, gate.app.slug, `Removed the ${name} model chain for ${gate.app.slug} — seats using it fall back to the default chain.`);
+    return settingsPostResponse(c, gate.app.github_app_id, `Removed the ${name} model chain for ${appDisplayName(gate.app)} — seats using it fall back to the default chain.`);
   }
   if (op === "add-custom-provider") {
     // Declare a NON-built-in model provider for the App. Every
@@ -3513,13 +3618,13 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const modelIds = parseModelChain(typeof form.model_ids === "string" ? form.model_ids : "");
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (providerId === "") {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerIdRequired);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdRequired);
     }
     if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerIdInvalid);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdInvalid);
     }
     if (PROVIDER_IDS.includes(providerId)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerIdBuiltin, { provider: providerId });
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdBuiltin, { provider: providerId });
     }
     // save-sandbox-image (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
     // image already declares as a capability host (omp: ark-plan) would be
@@ -3527,7 +3632,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // still got injected, so the declaration is refused up front (the store's
     // upsertCustomProvider re-checks against the same registry host ids).
     if (sandboxImageHostIds(gate.app.sandbox_image_id).includes(providerId)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerIdBaseConfig, { provider: providerId });
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdBaseConfig, { provider: providerId });
     }
     // QC wave-1 W-2: declarations per App are capped (growth-only — an
     // update of an already-declared id never counts against the cap). The
@@ -3537,47 +3642,47 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       !declaredCustomProviders.some((p) => p.provider_id === providerId) &&
       declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
     ) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderMax, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.customProviderMax, {
         limit: MAX_CUSTOM_PROVIDER_COUNT,
       });
     }
     if (baseUrl === "") {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.baseUrlRequired);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.baseUrlRequired);
     }
     if (!isValidCustomProviderBaseUrl(baseUrl)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.baseUrlInvalid);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.baseUrlInvalid);
     }
     if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.baseUrlTooLong, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.baseUrlTooLong, {
         count: baseUrl.length,
         limit: MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
       });
     }
     if (api === "") {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiProtocolRequired);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiProtocolRequired);
     }
     if (!CUSTOM_PROVIDER_API_IDS.includes(api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiProtocolUnknown, { api });
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiProtocolUnknown, { api });
     }
     if (modelIds.length === 0) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdsRequired);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdsRequired);
     }
     if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdsTooMany, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdsTooMany, {
         count: modelIds.length,
         limit: MAX_CUSTOM_PROVIDER_MODEL_IDS,
       });
     }
     if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdTooLong, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdTooLong, {
         limit: MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
       });
     }
     if (plainKey === "") {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyRequired);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyRequired);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyTooLong, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyTooLong, {
         count: plainKey.length,
         limit: MAX_PROVIDER_KEY_LENGTH,
       });
@@ -3586,7 +3691,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // runtime's config-value resolver (packages/shared/src/credential-key.ts) — the
     // same rule the runner's payload decoder enforces fail-closed.
     if (isCommandConfigKey(plainKey)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
     try {
       const verified = await verifyProviderKey(
@@ -3600,7 +3705,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         },
       );
       if (!verified.ok) {
-        return settingsVerifyFailResponse(c, gate.app.slug, verified.reason);
+        return settingsVerifyFailResponse(c, gate.app.github_app_id, verified.reason);
       }
       await store.upsertCustomProvider(
         gate.app.id,
@@ -3613,7 +3718,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       // current endpoint is refused by the store — the keyed 400 the SPA
       // replays in the operator's locale (nothing was written).
       if (err instanceof ProviderEndpointLockedError) {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerEndpointLocked, {
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerEndpointLocked, {
           provider: providerId,
         });
       }
@@ -3621,15 +3726,15 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       // throw InvalidCustomProviderError AFTER the route pre-check passed
       // (a concurrent save won the last slot) — that is a 400, not a 500.
       if (err instanceof InvalidCustomProviderError) {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderDeclRejected);
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.customProviderDeclRejected);
       }
       // The declaration's key POOL can be full (the cap is per (App, provider)).
       if (err instanceof ProviderKeyLimitError) {
-        return settingsKeyLimitResponse(c, gate.app.slug, providerId);
+        return settingsKeyLimitResponse(c, gate.app.github_app_id, providerId);
       }
-      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, gate.app.slug, `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
+    return settingsPostResponse(c, gate.app.github_app_id, `Declared custom provider ${providerId} for ${appDisplayName(gate.app)} — its key is stored encrypted and injected by environment variable name.`,
     );
   }
   if (op === "add-template-provider") {
@@ -3653,24 +3758,24 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     const template = PROVIDER_META[templateId];
     if (template === undefined || template.tier !== "template") {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateUnknown);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateUnknown);
     }
     const baseUrlTemplate = formBaseUrl !== "" ? formBaseUrl : template.baseUrl;
     if (baseUrlTemplate === null || baseUrlTemplate === "") {
       // Only a template whose catalog base URL is absent AND whose form
       // override is empty is unmaterializable (breadth rows may ship with a
       // null snapshot base URL — the editable override covers them).
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateIncomplete);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateIncomplete);
     }
     // The account id demand is conditional on the effective base URL's
     // {account_id} placeholder — a no-placeholder template materializes
     // without one.
     if (baseUrlTemplate.includes("{account_id}")) {
       if (accountId === "") {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.accountIdRequired);
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.accountIdRequired);
       }
       if (!CLOUDFLARE_ACCOUNT_ID_PATTERN.test(accountId)) {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.accountIdInvalid);
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.accountIdInvalid);
       }
     }
     // The template id must not collide with a built-in or with a capability
@@ -3678,17 +3783,17 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // template tier is disjoint from both today, but a future template must
     // not silently shadow one).
     if (PROVIDER_IDS.includes(templateId)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateIdBuiltin, { template: templateId });
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateIdBuiltin, { template: templateId });
     }
     if (sandboxImageHostIds(gate.app.sandbox_image_id).includes(templateId)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateIdBaseConfig, { template: templateId });
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateIdBaseConfig, { template: templateId });
     }
     const baseUrl = baseUrlTemplate.replace("{account_id}", accountId);
     if (!isValidCustomProviderBaseUrl(baseUrl)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.materializedBaseUrlInvalid);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.materializedBaseUrlInvalid);
     }
     if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.baseUrlTooLong, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.baseUrlTooLong, {
         count: baseUrl.length,
         limit: MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
       });
@@ -3696,30 +3801,30 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     if (!CUSTOM_PROVIDER_API_IDS.includes(template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
       // template.api is `string | null` (catalog snapshot shape) — String()
       // keeps the former `${template.api}` face for the null case verbatim.
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateApiUnsupported, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateApiUnsupported, {
         api: String(template.api),
       });
     }
     const modelIds = [...template.models];
     if (modelIds.length === 0) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateNoModels);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateNoModels);
     }
     if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdsTooMany, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdsTooMany, {
         count: modelIds.length,
         limit: MAX_CUSTOM_PROVIDER_MODEL_IDS,
       });
     }
     if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdTooLong, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.modelIdTooLong, {
         limit: MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
       });
     }
     if (plainKey === "") {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyRequired);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyRequired);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyTooLong, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyTooLong, {
         count: plainKey.length,
         limit: MAX_PROVIDER_KEY_LENGTH,
       });
@@ -3728,7 +3833,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // runtime's config-value resolver (packages/shared/src/credential-key.ts) — the
     // same rule the runner's payload decoder enforces fail-closed.
     if (isCommandConfigKey(plainKey)) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
     const declaredCustomProviders = await store.listCustomProviders(gate.app.id);
     const storedDeclaration = declaredCustomProviders.find((p) => p.provider_id === templateId);
@@ -3736,7 +3841,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       storedDeclaration === undefined &&
       declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
     ) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateMaterializeMax, {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.templateMaterializeMax, {
         limit: MAX_CUSTOM_PROVIDER_COUNT,
       });
     }
@@ -3764,7 +3869,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         },
       );
       if (!verified.ok) {
-        return settingsVerifyFailResponse(c, gate.app.slug, verified.reason);
+        return settingsVerifyFailResponse(c, gate.app.github_app_id, verified.reason);
       }
       await store.upsertCustomProvider(
         gate.app.id,
@@ -3776,19 +3881,19 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       // A1: the template save path materializes the SAME custom-provider
       // declaration, so it carries the same endpoint lock.
       if (err instanceof ProviderEndpointLockedError) {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerEndpointLocked, {
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerEndpointLocked, {
           provider: templateId,
         });
       }
       if (err instanceof InvalidCustomProviderError) {
-        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderDeclRejected);
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.customProviderDeclRejected);
       }
       if (err instanceof ProviderKeyLimitError) {
-        return settingsKeyLimitResponse(c, gate.app.slug, templateId);
+        return settingsKeyLimitResponse(c, gate.app.github_app_id, templateId);
       }
-      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, gate.app.slug, `Materialized the ${template.label} template as custom provider ${templateId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
+    return settingsPostResponse(c, gate.app.github_app_id, `Materialized the ${template.label} template as custom provider ${templateId} for ${appDisplayName(gate.app)} — its key is stored encrypted and injected by environment variable name.`,
     );
   }
   if (op === "remove-custom-provider") {
@@ -3798,18 +3903,18 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       removed = await store.removeCustomProvider(gate.app.id, providerId);
     } catch (err) {
       logSettingsFailure("remove_custom_provider", gate.app.id, err);
-      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
     // Tolerant no-op (the id grammar already bounds what can ever be
     // stored): an unknown provider id simply has no row — a 2xx, not a 400.
     // The declaration and every key of its pool go together (removeCustomProvider).
     return settingsRemoveResponse(
       c,
-      gate.app.slug,
+      gate.app.github_app_id,
       removed,
       removed
-        ? `Removed the custom provider ${providerId} from ${gate.app.slug}.`
-        : `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
+        ? `Removed the custom provider ${providerId} from ${appDisplayName(gate.app)}.`
+        : `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${appDisplayName(gate.app)} — nothing changed.`,
     );
   }
   if (op === "save-sandbox-image") {
@@ -3824,19 +3929,19 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const imageId = typeof form.sandbox_image_id === "string" ? form.sandbox_image_id.trim() : "";
     const image = getSandboxImage(imageId);
     if (!image || !image.enabled) {
-      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.runtimeHarnessUnknown);
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.runtimeHarnessUnknown);
     }
     try {
       await createAppsStore(gate.db).setSandboxImage(gate.app.id, image.id);
     } catch (err) {
       logSettingsFailure("save_sandbox_image", gate.app.id, err);
-      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, gate.app.slug, `Saved the ${image.id} runtime harness for ${gate.app.slug}.`);
+    return settingsPostResponse(c, gate.app.github_app_id, `Saved the ${image.id} runtime harness for ${appDisplayName(gate.app)}.`);
   }
   // Review fold-in: an unknown op is a validation failure like any
   // other — 400 with the reason.
-  return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.unknownOperation);
+  return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.unknownOperation);
 };
 
 const appKeyDeleteRoute = async (c: DashboardContext) => {
@@ -3863,18 +3968,18 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
       : await store.deleteProviderKey(gate.app.id, provider, keyId);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
-    return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+    return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
   }
   // Tolerant no-op (the allowlist already bounds what can ever be stored):
   // an unknown provider — or a key id no row matches, including an absent one —
   // simply has no row: a 2xx, not a 400.
   return settingsRemoveResponse(
     c,
-    gate.app.slug,
+    gate.app.github_app_id,
     removed,
     removed
-      ? `Removed the stored ${provider} key for ${gate.app.slug}.`
-      : `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,
+      ? `Removed the stored ${provider} key for ${appDisplayName(gate.app)}.`
+      : `No stored ${provider === "" ? "(unspecified)" : provider} key on ${appDisplayName(gate.app)} — nothing changed.`,
   );
 };
 
@@ -3887,14 +3992,14 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
 //
 // JSON read face for the insights aggregation (src/dashboard/insights-store.ts
 // — the module-boundary leaf, zero store/pipeline/review imports), scoped to a
-// single App: GET /api/apps/:slug/insights/summary. The former cross-App
+// single App: GET /api/apps/:appId/insights/summary. The former cross-App
 // global endpoint (GET /api/insights/summary) is REMOVED — insights are an
 // App-owned surface, and the store's `appId` filter composes the app row PK
 // into EVERY aggregation (including the opt-in repos query), so one App's
 // reader can never see another App's reviews.
 // Gate (JSON-only face — never an HTML page):
 //   - membership: requireMember (session + live member row);
-//   - app lookup by slug, same rule as requireAppVisible: unknown and
+//   - app lookup by GitHub App id, same rule as requireAppVisible: unknown and
 //     soft-deleted apps are equally invisible → 404;
 //   - creator-or-admin via canManageApp → 403.
 //   All deny bodies are `{ error }` JSON.
@@ -3968,12 +4073,12 @@ const appInsightsRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
 
-  // Same slug-resolution rule as requireAppVisible: unknown, soft-deleted and
+  // Same App-id resolution rule as requireAppVisible: unknown, soft-deleted and
   // cross-workspace apps are equally invisible → 404. JSON body — this face
   // never renders HTML (no forbiddenPage on either deny path).
   const app = await resolveScopedApp(
     createAppsStore(member.db),
-    c.req.param("slug") ?? "",
+    c.req.param("appId") ?? "",
     member.scope,
   );
   if (!app) return c.json({ error: "unknown app" }, 404);
@@ -3993,7 +4098,7 @@ const appInsightsRoute = async (c: DashboardContext) => {
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
-    // The App row PK (never empty — the slug lookup resolved a real row),
+    // The App row PK (never empty — the GitHub App id resolved a real row),
     // composed into every aggregation by the store's appId filter.
     appId: app.id,
   });
@@ -4047,20 +4152,21 @@ type AppRoute = {
 };
 
 const APP_ROUTES: ReadonlyArray<AppRoute> = [
-  { method: "get", path: "/apps/:slug/onboarding", handler: appOnboardingRoute, access: "write" },
+  { method: "get", path: "/apps/:appId/onboarding", handler: appOnboardingRoute, access: "write" },
   { method: "get", path: "/api/apps", handler: appListRoute, access: "write" },
-  { method: "post", path: "/apps/:slug/disable", handler: (c) => appStatusAction(c, "disable"), access: "write" },
-  { method: "post", path: "/apps/:slug/enable", handler: (c) => appStatusAction(c, "enable"), access: "write" },
-  { method: "post", path: "/apps/:slug/delete", handler: (c) => appStatusAction(c, "delete"), access: "write" },
-  { method: "post", path: "/apps/:slug/pause", handler: (c) => appReviewAction(c, "pause"), access: "write" },
-  { method: "post", path: "/apps/:slug/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
-  { method: "post", path: "/apps/:slug/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
-  { method: "get", path: "/api/apps/:slug/settings", handler: appSettingsRoute, access: "write" },
-  { method: "get", path: "/api/apps/:slug/models", handler: appModelsRoute, access: "write" },
-  { method: "post", path: "/api/apps/:slug/keys/verify", handler: appKeyVerifyRoute, access: "write" },
-  { method: "post", path: "/apps/:slug/settings", handler: appSettingsSaveRoute, access: "write" },
-  { method: "post", path: "/apps/:slug/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
-  { method: "get", path: "/api/apps/:slug/insights/summary", handler: appInsightsRoute, access: "write" },
+  { method: "post", path: "/apps/:appId/disable", handler: (c) => appStatusAction(c, "disable"), access: "write" },
+  { method: "post", path: "/apps/:appId/enable", handler: (c) => appStatusAction(c, "enable"), access: "write" },
+  { method: "post", path: "/apps/:appId/delete", handler: (c) => appStatusAction(c, "delete"), access: "write" },
+  { method: "post", path: "/apps/:appId/pause", handler: (c) => appReviewAction(c, "pause"), access: "write" },
+  { method: "post", path: "/apps/:appId/resume", handler: (c) => appReviewAction(c, "resume"), access: "write" },
+  { method: "post", path: "/apps/:appId/review-trigger-mode", handler: appReviewTriggerModeAction, access: "write" },
+  { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
+  { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
+  { method: "post", path: "/api/apps/:appId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
+  { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
+  { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId/insights/summary", handler: appInsightsRoute, access: "write" },
   // The member list is `read` (every member sees it, and the operator's AC2
   // field set is this same list); every App/settings read and invite face is
   // `write` (AC3).

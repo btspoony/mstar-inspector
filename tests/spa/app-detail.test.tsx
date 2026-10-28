@@ -13,7 +13,7 @@
  * 4. R1 closure: the kept data.ts insights helpers (parseInsights /
  *    INSIGHTS_WINDOWS / insightsRepo*) get their new consumer — the
  *    per-App insights tab — via the mount-prefixed
- *    /dashboard/api/apps/:slug/insights/summary face.
+ *    /dashboard/api/apps/:appId/insights/summary face.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -38,7 +38,8 @@ const insightsTab = readFileSync(join(spaRoot, "pages/AppInsightsTab.tsx"), "utf
 const tabsWrapper = readFileSync(join(spaRoot, "components/ui/tabs.tsx"), "utf8");
 
 const IDENTITY_APP = {
-  slug: "demo",
+  github_slug: "demo",
+  webhook_path: "wh-demo",
   github_app_id: 1,
   status: "active",
   review_enabled: true,
@@ -83,7 +84,7 @@ function renderDetail(payload: typeof identityPayload | typeof managePayload, ca
   return renderToStaticMarkup(
     createElement(AppDetailView, {
       locale: "en",
-      slug: "demo",
+      appId: "1",
       payload,
       groups: [],
       notice: null,
@@ -121,13 +122,13 @@ describe("app detail URL state (shared pure helpers)", () => {
     );
   });
 
-  test("the per-App summary URL is base-prefixed and encodes slug + filters; include=repos always rides", () => {
-    expect(appInsightsSummaryUrl("/dashboard", "demo", "30", "")).toBe(
-      "/dashboard/api/apps/demo/insights/summary?window=30&include=repos",
+  test("the per-App summary URL is base-prefixed and encodes appId + filters; include=repos always rides", () => {
+    expect(appInsightsSummaryUrl("/dashboard", "1", "30", "")).toBe(
+      "/dashboard/api/apps/1/insights/summary?window=30&include=repos",
     );
     // A workspace-scoped page rides its own prefix (no legacy App family there).
-    expect(appInsightsSummaryUrl("/dashboard/acme", "acme inc", "7", "acme/web")).toBe(
-      "/dashboard/acme/api/apps/acme%20inc/insights/summary?window=7&include=repos&repo=acme%2Fweb",
+    expect(appInsightsSummaryUrl("/dashboard/acme", "12345", "7", "acme/web")).toBe(
+      "/dashboard/acme/api/apps/12345/insights/summary?window=7&include=repos&repo=acme%2Fweb",
     );
   });
 });
@@ -137,8 +138,8 @@ describe("tab shell rendering (static SSR)", () => {
     const manage = renderDetail(managePayload, true);
     expect(manage).toContain(">Settings</button>");
     expect(manage).toContain(">Insights</button>");
-    // The identity header serves both tabs.
-    expect(manage).toContain(">demo</h1>");
+    // The identity header serves both tabs — the GitHub display name (D6).
+    expect(manage).toContain(">Demo</h1>");
     expect(manage).toContain("by mallory");
   });
 
@@ -258,7 +259,7 @@ describe("tab shell source contracts", () => {
     expect(detailPage).toContain("history.replaceState");
     // The page never pushes history itself (navigation stays in the router).
     expect(detailPage).not.toContain(".pushState(");
-    // State derives through the shared pure helper (mount init, slug
+    // State derives through the shared pure helper (mount init, appId
     // re-derivation, payload-landing demotion check + re-derivation,
     // popstate).
     expect(detailPage.match(/parseAppDetailSearch\(/g)?.length).toBe(5);
@@ -266,7 +267,7 @@ describe("tab shell source contracts", () => {
 
   test("manager deep-link fix: the gate rides a ref mirror, re-derived when the payload lands — never a stale false closure", () => {
     // (Fix round 1): the registered-once popstate listener (and the
-    // mount/slug re-derivations) must read the canManageRef mirror — a
+    // mount/appId re-derivations) must read the canManageRef mirror — a
     // stale `payload?.can_manage ?? false` closure would permanently
     // resolve a manager's `?tab=insights` deep link and history
     // back/forward to the settings tab.
@@ -314,7 +315,7 @@ describe("tab shell source contracts", () => {
   });
 
   test("R1 closure: the insights tab consumes the kept data.ts helpers over the mount-prefixed per-App face", () => {
-    expect(insightsTab).toContain("appInsightsSummaryUrl(apiBase(), slug");
+    expect(insightsTab).toContain("appInsightsSummaryUrl(apiBase(), appId");
     expect(insightsTab).toContain("parseInsights(");
     expect(insightsTab).toContain("INSIGHTS_WINDOWS.map");
     expect(insightsTab).toContain("insightsRepoOptions(");
@@ -370,7 +371,7 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     const html = renderToStaticMarkup(
       createElement(AppInsightsTab, {
         locale: "en",
-        slug: "demo",
+        appId: "1",
         search: { tab: "insights", window: "30", repo: "" },
         onSearch: () => {},
       }),
@@ -395,7 +396,7 @@ describe("workspace switch on the App detail page (SF-1)", () => {
       return new Response(JSON.stringify(identityPayload), { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      const loaded = await loadAppDetail(apiBase(pathname), "demo");
+      const loaded = await loadAppDetail(apiBase(pathname), "1");
       expect(loaded?.payload.can_manage).toBe(false);
       return calls;
     } finally {
@@ -403,15 +404,15 @@ describe("workspace switch on the App detail page (SF-1)", () => {
     }
   }
 
-  test("two workspaces sharing an app slug issue two reads, the second under the new base", async () => {
-    // The switcher rewrites only the workspace segment, so `slug` stays
-    // "demo": the base must be derived per render (AppsPage precedent) or
+  test("two workspaces sharing an app id issue two reads, the second under the new base", async () => {
+    // The switcher rewrites only the workspace segment, so `appId` stays
+    // "1": the base must be derived per render (AppsPage precedent) or
     // the page keeps the previous workspace's settings on screen.
-    expect(await readUnder("/dashboard/acme/apps/demo")).toEqual([
-      "/dashboard/acme/api/apps/demo/settings",
+    expect(await readUnder("/dashboard/acme/apps/1")).toEqual([
+      "/dashboard/acme/api/apps/1/settings",
     ]);
-    expect(await readUnder("/dashboard/beta/apps/demo")).toEqual([
-      "/dashboard/beta/api/apps/demo/settings",
+    expect(await readUnder("/dashboard/beta/apps/1")).toEqual([
+      "/dashboard/beta/api/apps/1/settings",
     ]);
   });
 
@@ -427,10 +428,10 @@ describe("workspace switch on the App detail page (SF-1)", () => {
       );
     }) as unknown as typeof fetch;
     try {
-      await loadAppDetail("/dashboard/beta", "demo");
+      await loadAppDetail("/dashboard/beta", "1");
       expect(calls).toEqual([
-        "/dashboard/beta/api/apps/demo/settings",
-        "/dashboard/beta/api/apps/demo/models",
+        "/dashboard/beta/api/apps/1/settings",
+        "/dashboard/beta/api/apps/1/models",
       ]);
     } finally {
       globalThis.fetch = realFetch;

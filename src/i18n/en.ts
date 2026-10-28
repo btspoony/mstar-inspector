@@ -208,7 +208,7 @@ export const en = {
     tableStatus: "Status",
     tableHealth: "Health",
     tableCreator: "Creator",
-    openAria: "Open {slug} detail",
+    openAria: "Open {name} detail",
   },
   members: {
     heading: "Members",
@@ -473,6 +473,8 @@ export const en = {
       runtimeHarnessUnknown: "Unknown or disabled runtime harness — nothing was stored.",
       triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
+      githubMetadataRefreshFailed:
+        "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
     },
     ops: "Operations",
     opsCopy: "Pause ignores deliveries with 2xx; disable answers 404; delete is a soft-delete — all fail closed.",
@@ -559,12 +561,19 @@ export const en = {
     appInfoCopy:
       "The identity GitHub reports for this App. Profile fields are cached from the App's GitHub settings page; open the name to manage it there.",
     appInfoAppId: "App ID: {id}",
+    // Manager-only: the absolute delivery URL a webhook repoint needs. The
+    // deploy doc sends the operator to this card for it.
+    appInfoDeliveryUrl: "Webhook URL:",
     appInfoViewOnGithub: "View {name} on GitHub",
     // (AD-623): the manager-face label — the name link targets the
     // App's GitHub settings page, so the accessible name says "manage", not
     // "view". Member face keeps appInfoViewOnGithub.
     appInfoManageOnGithub: "Manage {name} on GitHub",
     appInfoSynced: "Synced {time}",
+    // Manager-only force refresh (D5): re-fetches the cached GitHub profile
+    // bypassing the 24h TTL; the success notice confirms the cache reloaded.
+    appInfoRefresh: "Refresh from GitHub",
+    appInfoRefreshDone: "Identity refreshed from GitHub.",
     /**
      * Deployment version footer. `{version}` carries the
      * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
@@ -588,6 +597,9 @@ export const en = {
       ready: "GitHub App {appName} (id {id}) is ready to connect.",
       registeredAs: "It will be registered for this deployment as:",
       slugWebhook: "Slug {slug} · webhook URL {webhookUrl}",
+      // Before the first metadata sync GitHub's slug is unknown; the App id is
+      // the honest stand-in and says so, instead of borrowing the Slug label.
+      appIdWebhook: "App ID {id} · webhook URL {webhookUrl}",
       note:
         "Connecting delivers this App's pull_request and issue_comment webhooks to this Worker. Reviews are controlled per App — pause an App to stop its reviews.",
       create: "Create App",
@@ -598,6 +610,10 @@ export const en = {
       heading: "GitHub App connected",
       connected: "GitHub App {appName} (id {id}) is connected to this deployment.",
       slug: "Slug: {slug}",
+      // The NULL-slug face: what the page shows is the numeric App id, so the
+      // label says so (the fallback must not hand the operator a number under
+      // a "Slug" label).
+      appId: "App ID: {id}",
       webhookUrl: "Webhook URL: {webhookUrl}",
       nextStep:
         "Next: open Settings and configure a provider — reviews begin once this App's provider key is verified and its models are picked.",
@@ -619,7 +635,7 @@ export const en = {
       noEncryptionKey:
         "This deployment has no valid DASHBOARD_ENCRYPTION_KEY to store App credentials with — ask the operator to configure it, then resubmit.",
       slugConflict:
-        "Another App claimed this App's webhook slug while setup was in progress, so the GitHub App was created on GitHub but not connected to this deployment — no Worker data was stored. A manifest-created App cannot be connected twice: delete the just-created App on GitHub, then run a new app-creation flow from the dashboard.",
+        "Another App claimed this App's webhook path while setup was in progress, so the GitHub App was created on GitHub but not connected to this deployment — no Worker data was stored. A manifest-created App cannot be connected twice: delete the just-created App on GitHub, then run a new app-creation flow from the dashboard.",
       alreadyConnected: "This GitHub App is already connected on this deployment — no changes were made.",
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",

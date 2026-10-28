@@ -16,6 +16,7 @@ import { Webhooks } from "@octokit/webhooks";
 import {
   classifyEvent,
   classifyWebhook,
+  payloadMentionsALogin,
   PULL_REQUEST_ACTIONS,
   verifySignature,
   type ReviewTriggerContext,
@@ -527,6 +528,65 @@ describe("classifyEvent — bot mention grammar: ASCII-restricted folding (QC F-
     // Boundary characters are read from the ORIGINAL body against the ASCII
     // class — U+0130 is outside [A-Za-z0-9-], so it cannot close the boundary.
     expect(classifyMention("\u0130 @bot-i please", I_SLUG).kind).toBe("job");
+  });
+});
+
+describe("payloadMentionsALogin — the unsynced-App diagnostic (grammar parity)", () => {
+  /** Wrap a comment body in the issue_comment delivery shape the scan parses. */
+  const commentPayload = (body: string): string => issueCommentBody({ comment: { body } });
+
+  test("a standalone login mention is found (the diagnostic's whole purpose)", () => {
+    expect(payloadMentionsALogin(commentPayload("@acme[bot] please re-review"))).toBe(true);
+    expect(payloadMentionsALogin(commentPayload("hey @acme can you look?"))).toBe(true);
+    expect(payloadMentionsALogin(commentPayload("context\n@acme"))).toBe(true);
+  });
+
+  test("boundary rules match the trigger grammar exactly", () => {
+    // No target slug exists here, so ANY standalone login run is a mention:
+    // `@acme-other` / `@acmebot` are login runs in their own right (the run
+    // extends, it does not continue past a boundary) and both match.
+    expect(payloadMentionsALogin(commentPayload("ping @acme-other maybe"))).toBe(true);
+    expect(payloadMentionsALogin(commentPayload("ping @acmebot maybe"))).toBe(true);
+    // The leading boundary: an email-shaped name@host is preceded by a login
+    // character and never mentions a login.
+    expect(payloadMentionsALogin(commentPayload("no mention at all"))).toBe(false);
+    expect(payloadMentionsALogin(commentPayload("mail me at name@acme.host"))).toBe(false);
+    expect(payloadMentionsALogin(commentPayload("mail me at a@b"))).toBe(false);
+    // A run ending at the very end of the body has no after-character, which
+    // counts as outside the set (the absent-boundary rule).
+    expect(payloadMentionsALogin(commentPayload("@acme-"))).toBe(true);
+    // A bare `@` with no login run is not a mention.
+    expect(payloadMentionsALogin(commentPayload("@ hi"))).toBe(false);
+    expect(payloadMentionsALogin(commentPayload("@"))).toBe(false);
+  });
+
+  test("an email-shaped occurrence does not hide a later standalone one", () => {
+    expect(payloadMentionsALogin(commentPayload("name@acmebot.host is mail, but @acme is ours"))).toBe(true);
+  });
+
+  test("a body that is not an issue_comment payload is false", () => {
+    expect(payloadMentionsALogin("{not json")).toBe(false);
+    expect(payloadMentionsALogin(JSON.stringify({ action: "created" }))).toBe(false);
+  });
+
+  // One linear pass over the body — the per-token rescan this replaced was
+  // quadratic (17.6 s at 160 KB). These cases do not time anything; they keep
+  // the large-body path functionally visible so a reintroduced rescan has to
+  // execute it.
+  const atDense = (tail: string): string => `${"mail name@host.example ".repeat(10_000)}${tail}`;
+
+  test("200 KB `@`-dense body with no standalone login run is false", () => {
+    const body = atDense("");
+    expect(body.length).toBeGreaterThan(200_000);
+    expect(payloadMentionsALogin(commentPayload(body))).toBe(false);
+  });
+
+  test("200 KB `@`-dense body with a standalone mention at the END is true", () => {
+    // Worst case for a per-token rescan: every earlier `@` is rescanned from
+    // the first `@` before the match is found.
+    const body = atDense("@acme[bot]");
+    expect(body.length).toBeGreaterThan(200_000);
+    expect(payloadMentionsALogin(commentPayload(body))).toBe(true);
   });
 });
 

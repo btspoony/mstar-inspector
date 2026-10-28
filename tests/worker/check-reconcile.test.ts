@@ -102,11 +102,11 @@ function seedApp(
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, review_enabled, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
+       VALUES (?, ?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
     )
-    .run(id, `checks-${id}`, githubAppId, `checks-${id}`, status);
+    .run(id, `checks-${id}`, `checks-${id}`, githubAppId, `checks-${id}`, status);
   if (install) {
     db.raw
       .prepare(

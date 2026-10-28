@@ -12,7 +12,7 @@
  *   App's `review_trigger_mode`: `open` auto-triggers `opened` only,
  *   `every_push` (the default) all three, `manual` none.
  * - `issue_comment.created` whose body contains the App's bot mention
- *   `@{appSlug}` as a standalone token (spec §3 grammar), on a pull request
+ *   `@{github_slug}` as a standalone token (spec §3 grammar), on a pull request
  *   thread, sent by a non-bot whose login is the PR author or the repository
  *   owner (Phase 5 B5 actor allowlist — prevents quota abuse by arbitrary
  *   commenters on public installs).
@@ -29,12 +29,13 @@ export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as con
 
 /**
  * The per-App trigger inputs classification branches on (spec
- * review-trigger-policy §2 read path): the resolved row's
- * `review_trigger_mode` and its slug (the mention target — one App's
- * mention never triggers another App). The per-App webhook route passes
- * both from the already-resolved row — no second lookup. An omitted
- * context defaults to `every_push` with NO mention target (empty slug never
- * matches — fail-safe: no trigger rather than a spurious one).
+ * review-trigger-policy §2/§3 read path): the resolved row's
+ * `review_trigger_mode` and its GitHub slug (the mention target — one App's
+ * mention never triggers another App). The mention login is GitHub's mutable
+ * `github_slug`, never our local webhook path or the row id. The per-App
+ * webhook route passes both from the already-resolved row — no second lookup.
+ * An omitted context defaults to `every_push` with NO mention target (empty
+ * slug never matches — fail-safe: no trigger rather than a spurious one).
  */
 export type ReviewTriggerContext = { mode: ReviewTriggerMode; appSlug: string };
 
@@ -68,7 +69,7 @@ function asciiFoldEquals(a: string, b: string): boolean {
 }
 
 /**
- * Whether `body` mentions the App's bot: contains `@{appSlug}` (ASCII
+ * Whether `body` mentions the App's bot: contains `@{github_slug}` (ASCII
  * case-insensitive, literal) as a standalone token per the LOGIN_CONTINUATION
  * boundary rule. Any position in the body; the mention IS the entire
  * grammar (spec §3 — no wording, no commands).
@@ -113,6 +114,56 @@ function bodyMentionsApp(body: string, appSlug: string): boolean {
 }
 
 /**
+ * The classifier's ignore reason for a comment that does not mention THIS App's
+ * bot. Exported so the per-App route can distinguish that one miss (which may
+ * be an UNSYNCED slug — see payloadMentionsALogin) from every other ignore,
+ * without duplicating the literal.
+ */
+export const MENTION_MISS_REASON = "comment body does not mention the App bot";
+
+/**
+ * Diagnostic twin of the mention grammar for an App whose `github_slug` is
+ * NOT cached yet (every row that predates its first metadata sync): does this
+ * issue_comment delivery mention some login as a standalone `@token`?
+ *
+ * It is NOT a trigger and never decides an outcome — the per-App route uses it
+ * only to explain an otherwise silent ignore, because with no slug
+ * `bodyMentionsApp` can never match and the App looks healthy while its mention
+ * trigger is dead.
+ *
+ * There is no target login here: the login run following each `@` IS the
+ * candidate, so the grammar reduces to the LOGIN_CONTINUATION boundary pair
+ * over the ORIGINAL body — the same rule bodyMentionsApp applies around its
+ * slug (`@acme[bot]` yields the standalone run `acme`). Decided inline in one
+ * pass: the runs never overlap, so the scan is linear in the body. Handing
+ * each run to bodyMentionsApp would rescan from the first `@` per token
+ * (quadratic — 17.6 s on a 160 KB body, reachable before the thread/bot/actor
+ * gates while the App is unsynced).
+ */
+export function payloadMentionsALogin(rawBody: string): boolean {
+  const parsed = parseBody(rawBody);
+  if (parsed === null) return false;
+  const result = issueCommentSchema.safeParse(parsed);
+  if (!result.success) return false;
+  const body = result.data.comment?.body ?? "";
+  let i = body.indexOf("@");
+  while (i !== -1) {
+    let end = i + 1;
+    while (end < body.length && LOGIN_CONTINUATION.test(body[end]!)) end++;
+    // A non-empty login run whose leading boundary is outside the
+    // continuation set (body start counts as outside) — this is what rejects
+    // the email-shaped `name@host`. The trailing boundary needs no check: the
+    // loop above only stops at a non-continuation character or the body end,
+    // so the character after the run is outside the set by construction.
+    if (end > i + 1 && !LOGIN_CONTINUATION.test(i > 0 ? body[i - 1]! : "")) {
+      return true;
+    }
+    i = body.indexOf("@", i + 1);
+  }
+  return false;
+}
+
+/**
  * §2.1 matrix for the auto (pull_request) face: `open` enqueues `opened`
  * only; `every_push` enqueues all whitelisted actions; `manual` never
  * auto-triggers (a bot mention is the only trigger).
@@ -132,7 +183,7 @@ export const WEBHOOK_BODY_LIMIT = 1_000_000;
  * architect lock L1): the hot path constructed a `Webhooks` instance per
  * request only to call `verify`, which uses nothing but `options.secret`.
  * KEYED BY CACHEKEY, NOT the raw secret: each entry is `{ secret, webhooks }`
- * under the caller's cache key — each per-App `POST /webhook/:appSlug`
+ * under the caller's cache key — each per-App `POST /webhook/:webhookPath`
  * route passes its `github_apps.id` — so per-App isolation holds AND a
  * cached entry whose `secret` differs from the caller's current secret
  * (credential rotation) is rebuilt and REPLACED: the rotated secret
@@ -197,7 +248,7 @@ export async function verifySignature(
  * Classifier outcome. The `job` payload NEVER carries `appRef`
  * (AL-24-2/4): the classifier is secret-parameterized only and never sees
  * the App identity — the ONLY production attach point is the per-App
- * `POST /webhook/:appSlug` route, which adds `appRef: { appId }` after
+ * `POST /webhook/:webhookPath` route, which adds `appRef: { appId }` after
  * classification, before enqueue.
  */
 export type WebhookOutcome =
@@ -316,9 +367,9 @@ export async function classifyWebhook(
  * Event whitelist → ReviewJobPayload. Returns `ignore` for everything else.
  *
  * `trigger` is the per-App trigger context (spec review-trigger-policy §2):
- * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` keys
- * the issue_comment bot mention (§3). Defaults to `every_push` with no
- * mention target.
+ * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` (the
+ * row's GitHub slug) keys the issue_comment bot mention (§3). Defaults to
+ * `every_push` with no mention target.
  */
 export function classifyEvent(
   eventName: string | null,
@@ -399,7 +450,7 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   // never triggers another App.
   const body = comment?.body ?? "";
   if (!bodyMentionsApp(body, appSlug)) {
-    return { kind: "ignore", reason: "comment body does not mention the App bot" };
+    return { kind: "ignore", reason: MENTION_MISS_REASON };
   }
   if (issue?.pull_request == null) {
     return { kind: "ignore", reason: "comment is not on a pull request thread" };

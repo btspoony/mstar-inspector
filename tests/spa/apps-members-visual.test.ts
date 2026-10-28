@@ -5,7 +5,7 @@
  * in branches no fixture reaches) a narrowly scoped source pin covers it.
  *
  * 1. AD-581: the Apps list stays a semantic table — the identity cell is
- *    the brand surface (slug primary line + AppID meta line; the list
+ *    the brand surface (display-name primary line + AppID meta line; the list
  *    payload carries no GitHub profile fields, so there is no avatar),
  *    the whole-row click and the visible settings anchor keep their
  *    channels, and StatusBadge rides the v0.3 pill component tokens
@@ -33,7 +33,9 @@ import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
 
 const appRow = (overrides: Partial<AppsPayload["apps"][number]> = {}): AppsPayload["apps"][number] => ({
-  slug: "demo",
+  github_slug: "demo",
+  github_name: null,
+  github_avatar_url: null,
   github_app_id: 1,
   status: "active",
   review_enabled: 1,
@@ -195,20 +197,36 @@ function expectFullPageRegions(name: string, html: string): void {
 }
 
 describe("AppsPage table reinforcement (AD-581)", () => {
-  test("identity cell is the brand surface: slug primary line + AppID meta line", () => {
-    // The identity cell is the row's brand surface: a slug primary line and
+  test("identity cell is the brand surface: display-name primary line + AppID meta line", () => {
+    // The identity cell is the row's brand surface: a display-name primary line and
     // the AppID meta line under it — read off the emitted cell, not the page.
     const cells = [...renderList([appRow()]).matchAll(/<td [^>]*>([\s\S]*?)<\/td>/g)];
     const identity = cells[0]?.[1] ?? "";
     expect(identity).toContain(
-      '<a class="text-sm font-semibold text-foreground no-underline hover:underline" href="/dashboard/apps/demo"',
+      '<a class="text-sm font-semibold text-foreground no-underline hover:underline" href="/dashboard/apps/1"',
     );
     expect(identity).toContain(">demo</a>");
     expect(identity).toContain('<span class="text-xs text-muted-foreground tabular-nums">');
     expect(identity).toContain(t("en", "apps.appId", { id: 1 }));
-    // No avatar channel exists: the payload carries no GitHub profile field,
-    // so the row's only image slot would have to come from somewhere else.
+    // Null avatar degrades per-field (D6): no img pretends a synced profile.
     expect(identity).not.toContain("<img");
+  });
+
+  test("identity cell avatar: github_avatar_url renders a rounded img; the name falls back github_name → slug → App id", () => {
+    // The synced face: the App's own logo (bot avatar), decorative alt.
+    const withAvatar = renderList([
+      appRow({ github_avatar_url: "https://avatars.githubusercontent.com/in/1234?v=4", github_name: "Demo" }),
+    ]);
+    expect(withAvatar).toContain(
+      '<img src="https://avatars.githubusercontent.com/in/1234?v=4" alt="" class="h-9 w-9 shrink-0 rounded-full border object-cover"',
+    );
+    expect(withAvatar).toContain(">Demo</a>");
+    expect(withAvatar).toContain('aria-label="Open Demo detail"');
+    // Fallback chain: no name → the slug; neither → the numeric App id.
+    const bySlug = renderList([appRow({ github_slug: "demo" })]);
+    expect(bySlug).toContain(">demo</a>");
+    const byId = renderList([appRow({ github_slug: null })]);
+    expect(byId).toContain(">1</a>");
   });
 
   test("whole-row click and the visible detail anchor keep their channels", () => {
@@ -218,12 +236,12 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     const hrefs = (pathname: string) =>
       [...renderList([appRow()], pathname).matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
     // Legacy Apps page: the historical detail path, identity link + anchor.
-    expect(hrefs("/dashboard/apps")).toEqual(["/dashboard/apps/demo", "/dashboard/apps/demo"]);
+    expect(hrefs("/dashboard/apps")).toEqual(["/dashboard/apps/1", "/dashboard/apps/1"]);
     // Workspace Apps page: the workspace copy of the same route — the legacy
     // App family answers 404 under strict.
     expect(hrefs("/dashboard/acme/apps")).toEqual([
-      "/dashboard/acme/apps/demo",
-      "/dashboard/acme/apps/demo",
+      "/dashboard/acme/apps/1",
+      "/dashboard/acme/apps/1",
     ]);
     const scoped = renderList([appRow()], "/dashboard/acme/apps");
     expect(scoped).toContain('<a class="text-primary underline-offset-4 hover:underline"');
@@ -253,11 +271,15 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       expect(classes, label).toContain(`text-(--badge-${tone}-fg)`);
     }
     // The emitted pill is the only geometry source: no hard-coded pill
-    // survives anywhere in the row markup.
+    // survives anywhere in the row markup (the avatar img's own rounded-full
+    // is excluded — it is the D6 logo channel, not pill geometry).
     const emitted = [...renderList([appRow()]).matchAll(/class="([^"]*)"/g)]
       .map((match) => match[1] ?? "")
       .join(" ");
     expect(emitted).not.toContain("rounded-full");
+    const withAvatar = renderList([appRow({ github_avatar_url: "https://x.test/a.png" })]);
+    expect(withAvatar.replace(/<img[^>]*>/g, "")).not.toContain("rounded-full");
+    expect(withAvatar).toContain("rounded-full border object-cover");
     expect(emitted).not.toMatch(/\bh-5\b/);
   });
 
@@ -515,7 +537,9 @@ describe("empty-state copy (A6)", () => {
 describe("Create action is a boot capability (I-000082)", () => {
   const APPS = [
     {
-      slug: "demo",
+      github_slug: "demo",
+      github_name: null,
+      github_avatar_url: null,
       github_app_id: 1,
       status: "active" as const,
       review_enabled: 1,
@@ -563,7 +587,9 @@ describe("Create action is a boot capability (I-000082)", () => {
 
 describe("Apps list → App detail wayfinding (rendered)", () => {
   const ROW = {
-    slug: "demo",
+    github_slug: "demo",
+    github_name: null,
+    github_avatar_url: null,
     github_app_id: 1,
     status: "active" as const,
     review_enabled: 1,
@@ -592,20 +618,20 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
     // The legacy mount keeps the historical path; the workspace page rides its
     // workspace prefix.
     expect(destinations("/dashboard/apps")).toEqual([
-      ["/dashboard/apps/demo", "app-detail"],
-      ["/dashboard/apps/demo", "app-detail"],
+      ["/dashboard/apps/1", "app-detail"],
+      ["/dashboard/apps/1", "app-detail"],
     ]);
     expect(destinations("/dashboard/acme/apps")).toEqual([
-      ["/dashboard/acme/apps/demo", "app-detail"],
-      ["/dashboard/acme/apps/demo", "app-detail"],
+      ["/dashboard/acme/apps/1", "app-detail"],
+      ["/dashboard/acme/apps/1", "app-detail"],
     ]);
   });
 
   test("the row anchor names its destination for assistive tech and says Detail, never Settings", () => {
     const html = renderList("/dashboard/acme/apps");
-    expect(html).toContain(`aria-label="${t("en", "apps.openAria", { slug: "demo" })}"`);
-    expect(t("en", "apps.openAria", { slug: "demo" })).toBe("Open demo detail");
-    expect(t("zh_CN", "apps.openAria", { slug: "demo" })).toBe("打开 demo 详情");
+    expect(html).toContain(`aria-label="${t("en", "apps.openAria", { name: "demo" })}"`);
+    expect(t("en", "apps.openAria", { name: "demo" })).toBe("Open demo detail");
+    expect(t("zh_CN", "apps.openAria", { name: "demo" })).toBe("打开 demo 详情");
     expect(html).toContain(`>${t("en", "apps.detail")}<`);
     expect(t("zh_CN", "apps.detail")).toBe("详情");
   });

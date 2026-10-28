@@ -12,7 +12,7 @@
  *
  * Schema contracts pinned by lock L2:
  *   - 0004 creates github_apps BEFORE app_installations (same-file FK);
- *     status CHECK ('active','disabled'); slug / github_app_id UNIQUE;
+ *     status CHECK ('active','disabled'); webhook_path / github_app_id UNIQUE;
  *     NO ON DELETE clause anywhere (default NO ACTION — a hard DELETE of an
  *     app referenced by reviews must be refused; soft-delete is the only
  *     removal path).
@@ -69,10 +69,12 @@ function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void
   return db;
 }
 /**
- * Seed DB + the migrations in wrangler order 0003 → 0004 → 0005 → 0026.
+ * Seed DB + the migrations in wrangler order 0003 → 0004 → 0005 → 0026 → 0036.
  * 0026 carries the workspace data plane `createApp` now writes into; its
  * `workspace_members.user_id` references `users(id)`, the table 0003 creates,
- * so the fixture applies the production shape up to 0003 first.
+ * so the fixture applies the production shape up to 0003 first. 0036 renames
+ * `slug` → `webhook_path` and adds `github_slug`, so every store call here
+ * runs against the column names the store actually binds.
  */
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createSeededD1();
@@ -80,6 +82,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   applyMigration(db, "0004_github_apps.sql");
   applyMigration(db, "0005_reviews_app_id.sql");
   applyMigration(db, "0026_workspaces.sql");
+  applyMigration(db, "0036_app_identity.sql");
   return db;
 }
 
@@ -91,7 +94,10 @@ const APP_INPUT: CreateAppInput = {
   // T1 review pin: the caller supplies the row PK so the secretbox AAD
   // (github_apps.<column>:<id>) is computable BEFORE insert.
   id: "018f4a2e-7c1d-4e5a-9b2f-3d6c8a1e4f70",
-  slug: "mstar-inspector-octocat",
+  webhookPath: "mstar-inspector-octocat",
+  // Migration 0036: GitHub's own slug is a separate cached column — NULL is
+  // the honest "never synced" default for a freshly minted App.
+  githubSlug: null,
   githubAppId: 123456,
   name: "mstar-inspector-octocat",
   privateKeyEnc: "v1.primary.aXZpdi.Y3QmIHRhZw==",
@@ -125,7 +131,7 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
     const byName = new Map(cols.map((c) => [c.name, c]));
     for (const name of [
       "id",
-      "slug",
+      "webhook_path",
       "github_app_id",
       "name",
       "private_key_enc",
@@ -139,7 +145,11 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
       expect(byName.has(name)).toBe(true);
     }
     expect(byName.get("id")!.pk).toBe(1);
-    expect(byName.get("slug")!.notnull).toBe(1);
+    expect(byName.get("webhook_path")!.notnull).toBe(1);
+    // Migration 0036: GitHub's own slug is its own nullable column — the local
+    // route key (`webhook_path`) is what stays NOT NULL and UNIQUE.
+    expect(byName.has("slug")).toBe(false);
+    expect(byName.get("github_slug")!.notnull).toBe(0);
     expect(byName.get("github_app_id")!.notnull).toBe(1);
     expect(byName.get("private_key_enc")!.notnull).toBe(1);
     expect(byName.get("webhook_secret_enc")!.notnull).toBe(1);
@@ -159,11 +169,11 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
     await db.prepare("UPDATE github_apps SET status = 'disabled'").run();
   });
 
-  test("slug and github_app_id are UNIQUE", async () => {
+  test("webhook_path and github_app_id are UNIQUE", async () => {
     const db = createMigratedD1();
     await seedApp(db);
     await expect(seedApp(db, { githubAppId: 999999 })).rejects.toThrow(/UNIQUE constraint failed/);
-    await expect(seedApp(db, { slug: "other-slug" })).rejects.toThrow(/UNIQUE constraint failed/);
+    await expect(seedApp(db, { webhookPath: "other-slug" })).rejects.toThrow(/UNIQUE constraint failed/);
   });
 
   test("app_installations: FK to github_apps enforced, UNIQUE (app_id, installation_id)", async () => {
@@ -234,10 +244,10 @@ describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)",
     );
     const joined = db.raw
       .query(
-        `SELECT r.id, a.slug FROM reviews r JOIN github_apps a ON a.id = r.app_id WHERE r.id = 'review-4'`,
+        `SELECT r.id, a.webhook_path FROM reviews r JOIN github_apps a ON a.id = r.app_id WHERE r.id = 'review-4'`,
       )
-      .get() as { id: string; slug: string };
-    expect(joined.slug).toBe(APP_INPUT.slug);
+      .get() as { id: string; webhook_path: string };
+    expect(joined.webhook_path).toBe(APP_INPUT.webhookPath);
     expect(() =>
       rawRun(
         db,
@@ -263,7 +273,7 @@ describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)",
     // so even an App without review history cannot be hard-deleted: the
     // ownership map outlives the review history, and soft delete is the only
     // removal path at the schema level.
-    const orphan = await seedApp(db, { slug: "orphan", githubAppId: 42 });
+    const orphan = await seedApp(db, { webhookPath: "orphan", githubAppId: 42 });
     expect(() => rawRun(db, "DELETE FROM github_apps WHERE id = ?", orphan.id)).toThrow(
       /FOREIGN KEY constraint failed/,
     );
@@ -279,7 +289,7 @@ describe("apps-store (createAppsStore)", () => {
     // store-generated default that would break the pre-computed AAD.
     expect(app.id).toBe(APP_INPUT.id);
     expect(UUID_RE.test(app.id)).toBe(true);
-    expect(app.slug).toBe(APP_INPUT.slug);
+    expect(app.webhook_path).toBe(APP_INPUT.webhookPath);
     expect(app.github_app_id).toBe(APP_INPUT.githubAppId);
     expect(app.name).toBe(APP_INPUT.name);
     // The store treats encrypted payloads as opaque strings — no peeking.
@@ -292,6 +302,38 @@ describe("apps-store (createAppsStore)", () => {
     expect(app.updated_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 
+  test("createApp writes webhook_path and github_slug as independent columns (migration 0036)", async () => {
+    const db = createMigratedD1();
+    const app = await store(db).createApp({
+      ...APP_INPUT,
+      id: crypto.randomUUID(),
+      webhookPath: "local-route-key",
+      githubSlug: "acme-inspector",
+      githubAppId: 5150,
+    });
+    // The two identities are NOT interchangeable: the local route key never
+    // leaks into the GitHub column and vice versa.
+    expect(app.webhook_path).toBe("local-route-key");
+    expect(app.github_slug).toBe("acme-inspector");
+    const raw = db.raw
+      .query("SELECT webhook_path, github_slug FROM github_apps WHERE id = ?")
+      .get(app.id) as { webhook_path: string; github_slug: string | null };
+    expect(raw).toEqual({ webhook_path: "local-route-key", github_slug: "acme-inspector" });
+    // Omitted github_slug stays NULL: "never synced" is the honest default.
+    const bare = await seedApp(db, { webhookPath: "never-synced", githubAppId: 5151, githubSlug: null });
+    expect(bare.github_slug).toBeNull();
+  });
+
+  test("two Apps may cache the SAME github_slug (migration 0036 leaves it unindexed)", async () => {
+    const db = createMigratedD1();
+    // GitHub reuses a freed slug, so a stale cached copy plus a live one is a
+    // legitimate state: the cache is not an identity and must not gate a write.
+    const first = await seedApp(db, { webhookPath: "cache-a", githubAppId: 6161, githubSlug: "shared-slug" });
+    const second = await seedApp(db, { webhookPath: "cache-b", githubAppId: 6162, githubSlug: "shared-slug" });
+    expect(first.github_slug).toBe("shared-slug");
+    expect(second.github_slug).toBe("shared-slug");
+  });
+
   test("T1 review pin: secretbox AAD rowKey equals the row PK across create+read-back (end-to-end)", async () => {
     const db = createMigratedD1();
     const id = crypto.randomUUID();
@@ -301,7 +343,7 @@ describe("apps-store (createAppsStore)", () => {
     const row = await store(db).createApp({
       ...APP_INPUT,
       id,
-      slug: "aad-pin",
+      webhookPath: "aad-pin",
       githubAppId: 424242,
       privateKeyEnc,
       webhookSecretEnc: "v1.primary.aXZpdi.cGxhY2Vob2xkZXI=",
@@ -320,22 +362,47 @@ describe("apps-store (createAppsStore)", () => {
     ).rejects.toThrow(/AAD mismatch/);
   });
 
-  test("getAppBySlug / getAppById round-trip; missing lookups return null", async () => {
+  test("getAppByWebhookPath / getAppById round-trip; missing lookups return null", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
-    expect((await store(db).getAppBySlug(APP_INPUT.slug))?.id).toBe(app.id);
-    expect(await store(db).getAppBySlug("no-such-slug")).toBeNull();
-    expect((await store(db).getAppById(app.id))?.slug).toBe(APP_INPUT.slug);
+    expect((await store(db).getAppByWebhookPath(APP_INPUT.webhookPath))?.id).toBe(app.id);
+    expect(await store(db).getAppByWebhookPath("no-such-path")).toBeNull();
+    expect((await store(db).getAppById(app.id))?.webhook_path).toBe(APP_INPUT.webhookPath);
     expect(await store(db).getAppById("no-such-id")).toBeNull();
   });
 
-  test("getAppBySlug / getAppById still resolve soft-deleted rows (callers filter)", async () => {
+  test("getAppByWebhookPath / getAppById still resolve soft-deleted rows (callers filter)", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     await store(db).softDeleteApp(app.id);
-    const bySlug = await store(db).getAppBySlug(APP_INPUT.slug);
-    expect(bySlug?.deleted_at).not.toBeNull();
+    const byPath = await store(db).getAppByWebhookPath(APP_INPUT.webhookPath);
+    expect(byPath?.deleted_at).not.toBeNull();
     expect((await store(db).getAppById(app.id))?.deleted_at).not.toBeNull();
+  });
+
+  test("getAppByGithubId finds the row by GitHub's numeric id, and only through the tenant join", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db, { githubAppId: 987654 });
+    expect((await store(db).getAppByGithubId(987654))?.id).toBe(app.id);
+    expect(await store(db).getAppByGithubId(1)).toBeNull();
+  });
+
+  test("getAppByGithubId resolves a soft-deleted row but NOT a soft-deleted workspace", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db, { githubAppId: 987655 });
+    await store(db).softDeleteApp(app.id);
+    // Soft delete is the caller's filter — the read face still resolves it.
+    expect((await store(db).getAppByGithubId(987655))?.deleted_at).not.toBeNull();
+
+    rawRun(
+      db,
+      `INSERT INTO workspaces (id, slug, name, created_by, created_at) VALUES ('second', 'second', 'Second', NULL, '2026-10-21T00:00:00.000Z')`,
+    );
+    const second = await seedApp(db, { webhookPath: "tenant-gone", githubAppId: 987656, workspaceId: "second" });
+    expect((await store(db).getAppByGithubId(987656))?.id).toBe(second.id);
+    rawRun(db, "UPDATE workspaces SET deleted_at = datetime('now') WHERE id = 'second'");
+    // A retired tenant can never start a review — same guard as getAppById.
+    expect(await store(db).getAppByGithubId(987656)).toBeNull();
   });
 
   test("a soft-deleted workspace makes both resolution reads null; listApps still sees the App", async () => {
@@ -344,7 +411,7 @@ describe("apps-store (createAppsStore)", () => {
     db.raw
       .prepare("UPDATE workspaces SET deleted_at = datetime('now') WHERE id = ?")
       .run(APP_INPUT.workspaceId!);
-    expect(await store(db).getAppBySlug(APP_INPUT.slug)).toBeNull();
+    expect(await store(db).getAppByWebhookPath(APP_INPUT.webhookPath)).toBeNull();
     expect(await store(db).getAppById(app.id)).toBeNull();
     // The operator list has no execution face — a retired tenant stays visible.
     expect((await store(db).listApps()).map((row) => row.id)).toEqual([app.id]);
@@ -352,15 +419,15 @@ describe("apps-store (createAppsStore)", () => {
 
   test("listApps returns non-deleted apps, newest first", async () => {
     const db = createMigratedD1();
-    const older = await seedApp(db, { slug: "older", githubAppId: 1 });
-    const newer = await seedApp(db, { slug: "newer", githubAppId: 2 });
-    const deleted = await seedApp(db, { slug: "gone", githubAppId: 3 });
+    const older = await seedApp(db, { webhookPath: "older", githubAppId: 1 });
+    const newer = await seedApp(db, { webhookPath: "newer", githubAppId: 2 });
+    const deleted = await seedApp(db, { webhookPath: "gone", githubAppId: 3 });
     // Distinct timestamps (datetime('now') has second resolution).
     rawRun(db, "UPDATE github_apps SET created_at = '2026-01-01 00:00:00' WHERE id = ?", older.id);
     rawRun(db, "UPDATE github_apps SET created_at = '2026-02-01 00:00:00' WHERE id = ?", newer.id);
     await store(db).softDeleteApp(deleted.id);
     const listed = await store(db).listApps();
-    expect(listed.map((a) => a.slug)).toEqual(["newer", "older"]);
+    expect(listed.map((a) => a.webhook_path)).toEqual(["newer", "older"]);
   });
 
   test("setAppStatus toggles active/disabled, bumps updated_at, and reports whether a row changed", async () => {
@@ -498,12 +565,12 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     expect(mappingRows(db)).toEqual([]);
   });
 
-  test("the mapping write is in the same batch: a slug conflict rolls back both rows", async () => {
+  test("the mapping write is in the same batch: a webhook_path conflict rolls back both rows", async () => {
     const db = createMigratedD1();
     const first = await seedApp(db);
-    // Same slug, fresh id (the pre-resolved-slug race the store must refuse).
-    await expect(seedApp(db, { slug: APP_INPUT.slug, githubAppId: 999 })).rejects.toThrow(
-      /UNIQUE constraint failed: github_apps.slug/,
+    // Same webhook path, fresh id (the pre-resolved-path race the store must refuse).
+    await expect(seedApp(db, { webhookPath: APP_INPUT.webhookPath, githubAppId: 999 })).rejects.toThrow(
+      /UNIQUE constraint failed: github_apps.webhook_path/,
     );
     // The failed batch left no mapping behind for the rejected id...
     expect(mappingRows(db)).toEqual([{ app_id: first.id, workspace_id: "default" }]);
@@ -550,8 +617,8 @@ describe("apps-store workspace dual write (migration 0026)", () => {
 
   test("repeated createApp never creates a workspace: the seeded row is the only one", async () => {
     const db = createMigratedD1();
-    await seedApp(db, { slug: "one", githubAppId: 1 });
-    await seedApp(db, { slug: "two", githubAppId: 2 });
+    await seedApp(db, { webhookPath: "one", githubAppId: 1 });
+    await seedApp(db, { webhookPath: "two", githubAppId: 2 });
     const row = db.raw.query("SELECT COUNT(*) AS n FROM workspaces").get() as CountRow;
     expect(row.n).toBe(1);
     expect(mappingRows(db)).toHaveLength(2);
@@ -573,10 +640,11 @@ describe("apps-store workspace dual write (migration 0026)", () => {
       batch: async () => [],
     };
     const s = createAppsStore(db);
-    await s.getAppBySlug("slug");
+    await s.getAppByWebhookPath("path");
+    await s.getAppByGithubId(1);
     await s.getAppById("id");
     await s.listApps();
-    expect(queries).toHaveLength(3);
+    expect(queries).toHaveLength(4);
     for (const query of queries) {
       expect(query).toContain("INNER JOIN app_workspaces");
       expect(query).toContain("w.workspace_id");
@@ -757,8 +825,8 @@ describe("apps-store delivery read faces (consumption)", () => {
   test("deliverySummaries batches latest row + 24h rejected count per app in ONE call (QC W-1), incl. zero-delivery apps", async () => {
     const db = createDeliveryD1();
     const appA = await seedApp(db);
-    const appB = await seedApp(db, { slug: "app-b", githubAppId: 123457 });
-    const appC = await seedApp(db, { slug: "app-c", githubAppId: 123458 }); // zero deliveries
+    const appB = await seedApp(db, { webhookPath: "app-b", githubAppId: 123457 });
+    const appC = await seedApp(db, { webhookPath: "app-c", githubAppId: 123458 }); // zero deliveries
     const s = store(db);
     // appA: latest = rejected (in-window) after an ok + an ignored.
     await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ignored", statusCode: null });
@@ -791,7 +859,7 @@ describe("apps-store delivery read faces (consumption)", () => {
   test("deliverySummaries returns ONLY the requested apps; an empty list is an empty map", async () => {
     const db = createDeliveryD1();
     const appA = await seedApp(db);
-    await seedApp(db, { slug: "app-b", githubAppId: 123459 }); // appB — never requested
+    await seedApp(db, { webhookPath: "app-b", githubAppId: 123459 }); // appB — never requested
     const s = store(db);
     await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ok", statusCode: null });
 
@@ -802,7 +870,7 @@ describe("apps-store delivery read faces (consumption)", () => {
   });
 });
 
-describe("saveGithubMetadata (migration 0019)", () => {
+describe("saveGithubMetadata (migrations 0019/0036)", () => {
   // `satisfies` pins the saveGithubMetadata input shape while keeping the
   // literal's non-null field types for exact-value assertions below.
   const METADATA = {
@@ -810,9 +878,10 @@ describe("saveGithubMetadata (migration 0019)", () => {
     githubDescription: "PR review bot for Acme",
     githubHtmlUrl: "https://github.com/apps/acme-inspector",
     githubAvatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
+    githubSlug: "acme-inspector",
   } satisfies GithubAppMetadataInput;
 
-  test("a freshly created app reads all five profile columns as NULL (never synced)", async () => {
+  test("a freshly created app reads every profile column — github_slug included — as NULL (never synced)", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db);
     const row = await store(db).getAppById(app.id);
@@ -821,11 +890,12 @@ describe("saveGithubMetadata (migration 0019)", () => {
       github_description: null,
       github_html_url: null,
       github_avatar_url: null,
+      github_slug: null,
       github_metadata_synced_at: null,
     });
   });
 
-  test("writes the four profile fields + synced_at, and does NOT touch updated_at", async () => {
+  test("writes the four profile fields + github_slug + synced_at, and does NOT touch updated_at", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db);
     // Pin updated_at to a known past value: the write is machine-triggered
@@ -840,7 +910,7 @@ describe("saveGithubMetadata (migration 0019)", () => {
     const row = db.raw
       .query(
         `SELECT github_name, github_description, github_html_url, github_avatar_url,
-                github_metadata_synced_at, updated_at
+                github_slug, github_metadata_synced_at, updated_at
          FROM github_apps WHERE id = ?`,
       )
       .get(app.id) as {
@@ -848,6 +918,7 @@ describe("saveGithubMetadata (migration 0019)", () => {
       github_description: string;
       github_html_url: string;
       github_avatar_url: string;
+      github_slug: string;
       github_metadata_synced_at: string;
       updated_at: string;
     };
@@ -855,6 +926,7 @@ describe("saveGithubMetadata (migration 0019)", () => {
     expect(row.github_description).toBe(METADATA.githubDescription);
     expect(row.github_html_url).toBe(METADATA.githubHtmlUrl);
     expect(row.github_avatar_url).toBe(METADATA.githubAvatarUrl);
+    expect(row.github_slug).toBe(METADATA.githubSlug);
     expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     expect(row.updated_at).toBe("2000-01-01 00:00:00");
   });
@@ -867,6 +939,7 @@ describe("saveGithubMetadata (migration 0019)", () => {
       githubDescription: null,
       githubHtmlUrl: null,
       githubAvatarUrl: null,
+      githubSlug: null,
     });
     expect(changed).toBe(true);
     const row = await store(db).getAppById(app.id);
@@ -874,7 +947,24 @@ describe("saveGithubMetadata (migration 0019)", () => {
     expect(row!.github_description).toBeNull();
     expect(row!.github_html_url).toBeNull();
     expect(row!.github_avatar_url).toBeNull();
+    expect(row!.github_slug).toBeNull();
     expect(row!.github_metadata_synced_at).not.toBeNull();
+  });
+
+  test("a null github_slug bind preserves the cached slug (COALESCE — the bot-mention target)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    expect(await s.saveGithubMetadata(app.id, METADATA)).toBe(true);
+
+    // A degraded later fetch (upstream shape change / bot lookup failure)
+    // carries no slug; the cached one is the only mention target, so it stays.
+    expect(
+      await s.saveGithubMetadata(app.id, { ...METADATA, githubName: "Renamed App", githubSlug: null }),
+    ).toBe(true);
+    const row = await s.getAppById(app.id);
+    expect(row!.github_name).toBe("Renamed App"); // other columns still overwrite
+    expect(row!.github_slug).toBe(METADATA.githubSlug);
   });
 
   test("refuses soft-deleted rows exactly like setAppStatus (false, zero columns written)", async () => {
@@ -884,11 +974,42 @@ describe("saveGithubMetadata (migration 0019)", () => {
     expect(await store(db).saveGithubMetadata(app.id, METADATA)).toBe(false);
     const row = await store(db).getAppById(app.id);
     expect(row!.github_name).toBeNull();
+    expect(row!.github_slug).toBeNull();
     expect(row!.github_metadata_synced_at).toBeNull();
   });
 
   test("an unknown id is a false-returning no-op (the setAppStatus convention)", async () => {
     const db = createMigratedTestD1();
     expect(await store(db).saveGithubMetadata(crypto.randomUUID(), METADATA)).toBe(false);
+  });
+});
+
+describe("touchGithubMetadataAttempt (migration 0037)", () => {
+  test("stamps only github_metadata_attempted_at — never the profile columns or updated_at", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    db.raw.prepare("UPDATE github_apps SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(app.id);
+
+    await store(db).touchGithubMetadataAttempt(app.id);
+
+    const row = await store(db).getAppById(app.id);
+    expect(row!.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(row!.github_metadata_synced_at).toBeNull();
+    expect(row!.github_name).toBeNull();
+    expect(row!.github_slug).toBeNull();
+    expect(row!.updated_at).toBe("2000-01-01 00:00:00");
+  });
+
+  test("an unknown or soft-deleted id is a silent no-op", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    expect(await store(db).softDeleteApp(app.id)).toBe(true);
+
+    // The attempt already happened upstream; refusing to record it would
+    // re-open the per-read fetch loop. Neither call may throw.
+    await store(db).touchGithubMetadataAttempt(app.id);
+    await store(db).touchGithubMetadataAttempt(crypto.randomUUID());
+
+    expect((await store(db).getAppById(app.id))!.github_metadata_attempted_at).toBeNull();
   });
 });

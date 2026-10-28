@@ -12,7 +12,7 @@ import { PageSkeleton } from "../components/state/PageSkeleton";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import { spaClick } from "../spa-click";
-import { appStatusPill, parseApps, type AppsPayload } from "./data";
+import { appDisplayName, appStatusPill, parseApps, type AppsPayload } from "./data";
 import { GitHubMark } from "./LoginPage";
 import { apiBase } from "../workspace-base";
 
@@ -173,27 +173,37 @@ function CreateAppButton({
 
 /** One App row — exported so its links are asserted on rendered markup. */
 export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: AppsPayload }) {
-  const hrefOf = (slug: string): string => `${apiBase()}/apps/${slug}`;
+  const hrefOf = (appId: number): string => `${apiBase()}/apps/${appId}`;
 
   const columns: DataTableColumn<AppsPayload["apps"][number]>[] = [
     {
       header: t(locale, "apps.tableName"),
-      // AD-581 identity cell: the App's brand surface. The list payload
-      // carries no GitHub profile fields, so the block is slug (primary line)
-      // + App id (meta line) — no avatar.
+      // AD-581 identity cell: the App's brand surface. The list row links
+      // and keys by the immutable App id; the block is the App's GitHub
+      // avatar + display name (primary line) + App id (meta line) — the
+      // D6 fallback chain github_name ?? github_slug ?? String(github_app_id).
       cell: (app) => (
-        <div className="flex flex-col gap-0.5">
-          <a
-            className="text-sm font-semibold text-foreground no-underline hover:underline"
-            href={hrefOf(app.slug)}
-            aria-label={t(locale, "apps.openAria", { slug: app.slug })}
-            onClick={(event) => spaClick(hrefOf(app.slug), event)}
-          >
-            {app.slug}
-          </a>
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {t(locale, "apps.appId", { id: app.github_app_id })}
-          </span>
+        <div className="flex items-center gap-3">
+          {app.github_avatar_url ? (
+            <img
+              src={app.github_avatar_url}
+              alt=""
+              className="h-9 w-9 shrink-0 rounded-full border object-cover"
+            />
+          ) : null}
+          <div className="flex flex-col gap-0.5">
+            <a
+              className="text-sm font-semibold text-foreground no-underline hover:underline"
+              href={hrefOf(app.github_app_id)}
+              aria-label={t(locale, "apps.openAria", { name: appDisplayName(app) })}
+              onClick={(event) => spaClick(hrefOf(app.github_app_id), event)}
+            >
+              {appDisplayName(app)}
+            </a>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {t(locale, "apps.appId", { id: app.github_app_id })}
+            </span>
+          </div>
         </div>
       ),
     },
@@ -233,8 +243,8 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
       cell: (app) => (
         <a
           className="text-primary underline-offset-4 hover:underline"
-          href={hrefOf(app.slug)}
-          onClick={(event) => spaClick(hrefOf(app.slug), event)}
+          href={hrefOf(app.github_app_id)}
+          onClick={(event) => spaClick(hrefOf(app.github_app_id), event)}
         >
           {t(locale, "apps.detail")}
         </a>
@@ -246,10 +256,10 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
     <DataTable
       columns={columns}
       rows={payload.apps}
-      rowKey={(app) => app.slug}
+      rowKey={(app) => String(app.github_app_id)}
       rowProps={(app) => ({
         className: "cursor-pointer",
-        onClick: (event) => spaClick(hrefOf(app.slug), event),
+        onClick: (event) => spaClick(hrefOf(app.github_app_id), event),
       })}
     />
   );

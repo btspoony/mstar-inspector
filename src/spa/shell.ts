@@ -42,7 +42,7 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
 
 /**
  * Apps → `/dashboard`, `/dashboard/apps` (+ settings under
- * `/dashboard/apps/:slug`) — the root lands on Apps, so the brand href and
+ * `/dashboard/apps/:appId`) — the root lands on Apps, so the brand href and
  * `/dashboard/apps` highlight the same entry. Remaining entries follow the
  * generic rule below.
  *

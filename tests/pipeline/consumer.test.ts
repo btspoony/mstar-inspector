@@ -137,7 +137,7 @@ async function createSeededTestD1(): Promise<TestD1> {
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, 'consumer-test-app', 424242, 'consumer-test-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
@@ -1555,7 +1555,7 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, 'comma-chain-app', 424243, 'comma-chain-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
@@ -1629,7 +1629,7 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
          VALUES (?, 'comma-override-app', 424244, 'comma-override-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
@@ -1797,6 +1797,8 @@ describe("createReviewConsumer", () => {
       // 0031 completes the current set: the consumer meters every started
       // execution into usage_events.
       "0031_plans_usage.sql",
+      // 0036 renames the seeded route-key column, as the deploy does.
+      "0036_app_identity.sql",
     ]) {
       db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
     }

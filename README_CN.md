@@ -18,7 +18,7 @@
 多席位 coding-agent 会话运行在隔离的 Cloudflare Sandbox 容器中，结果以单条 upsert 评论回到 PR，结构化
 findings 落入 D1 供后续分析。
 
-- **一份部署，多 App 共用** —— 通过 dashboard 注册任意数量的 GitHub App；每个 App 拥有独立的 slug、加密凭据、BYOK provider keys 和模型链
+- **一份部署，多 App 共用** —— 通过 dashboard 注册任意数量的 GitHub App；每个 App 拥有独立的不透明 webhook 路径、加密凭据、BYOK provider keys 和模型链
 - **隔离执行** —— 每次审查运行在一次性 Cloudflare Sandbox 容器中（clone → review → 销毁），镜像内零密钥
 - **结构化结果** —— 审查产出 `mstar.review/v1` envelope（verdict + 分级 findings）持久化到 D1，为后续去重、复现统计和健康分析提供数据层
 - **findings 生命周期跨轮保留** —— 未解决的 findings 跨轮存续：每轮将它们对照当前代码与讨论重新验证，结果呈现在同一条总体评论中，且只自动 resolve 那些 Inspector 能证明属于自己、且被积极修复的 review thread（finding 的 *addressed* 处置从不等同于 *resolved* 的 GitHub thread）
@@ -30,7 +30,7 @@ findings 落入 D1 供后续分析。
 ```mermaid
 flowchart LR
     D["Dashboard SPA<br/>注册 App · BYOK keys · 模型链"] -->|"per-App 加密凭据"| DB[("D1 存储")]
-    GH["GitHub webhook<br/>POST /webhook/:appSlug"] --> WH["用该 App 的 secret<br/>验签"]
+    GH["GitHub webhook<br/>POST /webhook/:webhookPath"] --> WH["用该 App 的 secret<br/>验签"]
     WH --> Q[("Queue")]
     Q --> CO["Consumer"]
     CO --> SB["Sandbox 容器<br/>clone → 多席位 agent 审查"]
@@ -39,7 +39,7 @@ flowchart LR
 ```
 
 一份部署服务任意数量的 GitHub App。每个 App 通过 dashboard 注册，自带加密凭据、provider key（BYOK）
-与模型链，存放在 D1——部署层不存在共享的审查凭据。入站 webhook 按 App slug 路由，审查在一次性
+与模型链，存放在 D1——部署层不存在共享的审查凭据。入站 webhook 按 App 的 webhook 路径路由，审查在一次性
 Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.review/v1`）落入 D1，供去重、复现统计与健康
 分析使用。
 
@@ -104,8 +104,8 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
 
 6. **登录并注册 GitHub App** —— 访问 `https://<your-worker>/dashboard`，用 GitHub 登录，走 **Register App**
    manifest 流程。它会在你的账号上创建 GitHub App（per-App webhook URL 形如
-   `{origin}/webhook/<slug>`），把 PEM 与 webhook secret 加密存入 D1，并展示需要你在 GitHub
-   侧设置的准确 webhook URL。
+   `{origin}/webhook/<webhookPath>`——每个 App 独立生成的不透明随机值，不是 GitHub slug），
+   把 PEM 与 webhook secret 加密存入 D1，并展示需要你在 GitHub 侧设置的准确 webhook URL。
 
 7. **配置 App** —— 在该 App 的 dashboard Settings 页添加审查模型所需的 provider API key（BYOK，加密落
    D1）和模型链。缺这些的 App 审查会 fail-closed——见 [Per-App 配置](#per-app-配置)。
@@ -116,7 +116,7 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
 
 ## 审查如何运作
 
-- **Per-App 路由**：GitHub 把 webhook 送到 `POST /webhook/:appSlug`。Worker 解析 slug、用该 App
+- **Per-App 路由**：GitHub 把 webhook 送到 `POST /webhook/:webhookPath`。Worker 解析该 webhook 路径、用该 App
   解密出的 secret 验签，入队一条带 App 身份的审查任务。审查没有其他入口。
 - **Queue → Sandbox**：Cloudflare Queue consumer 在一次性 Sandbox 容器里 clone PR 并运行多席位 agent 会话——见 [Agent 运行时](#agent-运行时)。
 - **用途受限的凭据**：Worker 从单一认证点铸造两份 installation grant，各自限定在一个仓库。Sandbox
@@ -168,7 +168,7 @@ Sandbox 容器中逐个运行，每个结果都以结构化形式（`mstar.revie
 
 ## Per-App 配置
 
-审查所需的一切都在 dashboard 的 Settings 页（`/dashboard/apps/<slug>/settings`）**按 App
+审查所需的一切都在 dashboard 的 Settings 页（`/dashboard/apps/<appId>/settings`，即数字形式的 GitHub App ID）**按 App
 配置**——不存在跨 App 泄漏的部署级 provider key 或模型链旋钮。
 
 - **Provider key（BYOK）**—— 加密存 D1，只从该 App 自己的配置注入审查容器，经固定 provider

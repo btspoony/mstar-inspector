@@ -16,6 +16,8 @@ import { createTestD1 } from "../store/helpers";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
+/** The App's immutable GitHub App id — the only App address form (D0). */
+const DEMO_APP_ID = 42;
 
 function createD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
@@ -31,6 +33,8 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0026_workspaces.sql",
     // 0028: the SPA boot reads pending invites.
     "0028_workspace_invites.sql",
+    // 0036: github_apps.slug → webhook_path plus the cached github_slug.
+    "0036_app_identity.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -57,8 +61,9 @@ async function seed(db: ReturnType<typeof createD1>): Promise<void> {
   const enc = await encryptedColumns(id);
   await createAppsStore(db).createApp({
     id,
-    slug: "demo-app",
-    githubAppId: 42,
+    webhookPath: "demo-app",
+    githubSlug: "demo-app",
+    githubAppId: DEMO_APP_ID,
     name: "demo-app",
     createdBy: "octocat",
     privateKeyEnc: enc.privateKeyEnc,
@@ -102,7 +107,7 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
-    const res = await postMutation("/dashboard/default/apps/demo-app/pause", env, await cookie("octocat"));
+    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
   });
@@ -111,7 +116,7 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
-    const res = await postMutation("/dashboard/default/apps/demo-app/pause", env, await cookie("octocat"), {
+    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
       Accept: "text/html",
     });
     expect(res.status).toBe(302);
@@ -122,7 +127,7 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
-    const res = await postMutation("/dashboard/default/apps/demo-app/pause", env, await cookie("octocat"), {
+    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
       Accept: "text/html",
       [SPA_POST_FORM_HEADER]: SPA_POST_FORM_VALUE,
     });
@@ -134,12 +139,12 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
-    const res = await postMutation("/dashboard/default/apps/demo-app/pause", env, await cookie("octocat"), {
+    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
       Accept: "text/html",
-      Referer: "https://worker.local/dashboard/default/apps/demo-app/settings",
+      Referer: `https://worker.local/dashboard/default/apps/${DEMO_APP_ID}/settings`,
     });
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps/demo-app/settings");
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${DEMO_APP_ID}/settings`);
   });
 
   test("HTML-nav resume from settings Referer redirects to the SPA settings URL", async () => {
@@ -147,21 +152,21 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     await seed(db);
     const env = makeEnv(db);
     const cookieHeader = await cookie("octocat");
-    const paused = await postMutation("/dashboard/default/apps/demo-app/pause", env, cookieHeader);
+    const paused = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, cookieHeader);
     expect(paused.status).toBe(200);
-    const res = await postMutation("/dashboard/default/apps/demo-app/resume", env, cookieHeader, {
+    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/resume`, env, cookieHeader, {
       Accept: "text/html",
-      Referer: "https://worker.local/dashboard/default/apps/demo-app/settings",
+      Referer: `https://worker.local/dashboard/default/apps/${DEMO_APP_ID}/settings`,
     });
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps/demo-app/settings");
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${DEMO_APP_ID}/settings`);
   });
 
   test("HTML-nav pause with apps-list Referer redirects to the workspace Apps list", async () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
-    const res = await postMutation("/dashboard/default/apps/demo-app/pause", env, await cookie("octocat"), {
+    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
       Accept: "text/html",
       Referer: "https://worker.local/dashboard/default/apps",
     });
@@ -173,9 +178,9 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
-    const res = await postMutation("/dashboard/default/apps/demo-app/pause", env, await cookie("octocat"), {
+    const res = await postMutation(`/dashboard/default/apps/${DEMO_APP_ID}/pause`, env, await cookie("octocat"), {
       Accept: "text/html",
-      Referer: "https://worker.local/dashboard/default/apps/demo-app/settings",
+      Referer: `https://worker.local/dashboard/default/apps/${DEMO_APP_ID}/settings`,
       [SPA_POST_FORM_HEADER]: SPA_POST_FORM_VALUE,
     });
     expect(res.status).toBe(200);
@@ -187,7 +192,7 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     await seed(db);
     const env = makeEnv(db);
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/default/apps/demo-app/settings", {
+      new Request(`https://worker.local/dashboard/default/apps/${DEMO_APP_ID}/settings`, {
         method: "POST",
         headers: {
           Cookie: await cookie("octocat"),
@@ -199,6 +204,6 @@ describe("POST mutation Accept routing (QC W-2)", () => {
       env,
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/default/apps/demo-app/settings");
+    expect(res.headers.get("Location")).toBe(`/dashboard/default/apps/${DEMO_APP_ID}/settings`);
   });
 });

@@ -98,22 +98,38 @@ function seedMembership(db: TestD1, workspaceId: string, userId: string): void {
   );
 }
 
+/**
+ * The App's immutable GitHub App id (D0) — the detail routes address the App by
+ * this, never by its local webhook path. Deterministic per workspace so the
+ * path builder can name it without threading a read through the case table.
+ */
+const appIds = new Map<string, number>();
 let nextGithubAppId = 7000;
 
-/** An App plus its workspace mapping; the slug is derived from the workspace id. */
+function githubAppIdOf(workspaceId: string): number {
+  let id = appIds.get(workspaceId);
+  if (id === undefined) {
+    id = nextGithubAppId++;
+    appIds.set(workspaceId, id);
+  }
+  return id;
+}
+
+/** An App plus its workspace mapping; the label is derived from the workspace id. */
 function seedApp(db: TestD1, workspaceId: string): void {
   const slug = `${workspaceId}-app`;
   const now = new Date().toISOString();
   seed(
     db,
     `INSERT INTO github_apps
-       (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+       (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
+     VALUES (?, ?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
              'dana', 'active', ?, ?)`,
     `app-${workspaceId}`,
     slug,
-    nextGithubAppId++,
+    slug,
+    githubAppIdOf(workspaceId),
     slug,
     now,
     now,
@@ -154,7 +170,7 @@ function surfaces() {
       // A dashboard-rendered page: the tenant gate resolves the ref, then the
       // member gate answers the page or the styled 404.
       path: (ref: string, workspaceId: string) =>
-        `/dashboard/${ref}/apps/${workspaceId}-app/onboarding`,
+        `/dashboard/${ref}/apps/${githubAppIdOf(workspaceId)}/onboarding`,
       accept: "text/html",
     },
     {
@@ -257,11 +273,14 @@ describe("workspace ref matrix — six ref shapes × two resolving surfaces", ()
         envFor(db),
       );
       expect(res.status, ref).toBe(200);
-      return (await res.json()) as { apps: Array<{ slug: string }> };
+      return (await res.json()) as { apps: Array<{ github_app_id: number; github_slug: string | null }> };
     };
     const byId = await read("ws-acme");
     const bySlug = await read("acme");
-    expect(byId.apps.map((app) => app.slug)).toEqual(["ws-acme-app"]);
+    // The list row carries GitHub's slug and the immutable App id — never the
+    // local webhook path (D6).
+    expect(byId.apps.map((app) => app.github_slug)).toEqual(["ws-acme-app"]);
+    expect(byId.apps.map((app) => app.github_app_id)).toEqual([githubAppIdOf("ws-acme")]);
     expect(bySlug).toEqual(byId);
   });
 });

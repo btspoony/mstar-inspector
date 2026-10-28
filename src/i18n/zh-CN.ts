@@ -180,7 +180,7 @@ export const zhCN: Dictionary = {
     tableStatus: "状态",
     tableHealth: "健康",
     tableCreator: "创建者",
-    openAria: "打开 {slug} 详情",
+    openAria: "打开 {name} 详情",
   },
   members: {
     heading: "成员",
@@ -404,6 +404,7 @@ export const zhCN: Dictionary = {
       runtimeHarnessUnknown: "未知或已停用的运行时 harness — 未存储任何内容。",
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
+      githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
     },
     ops: "运维",
     opsCopy: "暂停以 2xx 忽略投递；停用以 404 应答；删除为软删 — 全部失败关闭。",
@@ -480,11 +481,17 @@ export const zhCN: Dictionary = {
     appInfo: "GitHub App",
     appInfoCopy: "此 App 在 GitHub 上的身份。资料字段在访问设置页时从该 App 的 GitHub 设置页缓存；点击名称可前往 GitHub 管理。",
     appInfoAppId: "App ID：{id}",
+    // 仅管理面：webhook 重指向所需的绝对投递 URL。部署文档让运维来此卡查看。
+    appInfoDeliveryUrl: "Webhook URL：",
     appInfoViewOnGithub: "在 GitHub 上查看 {name}",
     // (AD-623) 管理面标签——名称链接指向该 App 的 GitHub 设置页，
     // 可及名用「管理」而非「查看」。成员面沿用 appInfoViewOnGithub。
     appInfoManageOnGithub: "在 GitHub 上管理 {name}",
     appInfoSynced: "同步于 {time}",
+    // (D5) 仅管理面的强制刷新：绕过 24h TTL 重新拉取缓存的 GitHub 资料；
+    // 成功提示确认缓存已重载。
+    appInfoRefresh: "从 GitHub 刷新",
+    appInfoRefreshDone: "已从 GitHub 刷新身份。",
     // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
     // 与 /healthz 字段及 release tag 同形。
     footer: {
@@ -505,6 +512,8 @@ export const zhCN: Dictionary = {
       ready: "GitHub App {appName}（id {id}）已准备好连接。",
       registeredAs: "它将为此部署注册为：",
       slugWebhook: "Slug {slug} · webhook URL {webhookUrl}",
+      // 首次元数据同步前 GitHub 的 slug 未知；数字 App id 是诚实的替代值，并如实标注。
+      appIdWebhook: "App ID {id} · webhook URL {webhookUrl}",
       note: "连接后，此 App 的 pull_request 和 issue_comment webhook 将投递到此 Worker。审查按 App 控制 — 暂停某个 App 即可停止其审查。",
       create: "创建 App",
       cancel: "取消",
@@ -514,6 +523,8 @@ export const zhCN: Dictionary = {
       heading: "GitHub App 已连接",
       connected: "GitHub App {appName}（id {id}）已连接到此部署。",
       slug: "Slug：{slug}",
+      // slug 为 NULL 时页面展示的是数字 App id，标签如实说明。
+      appId: "App ID：{id}",
       webhookUrl: "Webhook URL：{webhookUrl}",
       nextStep: "下一步：打开设置并配置 provider — 验证 provider key 并选择模型后，此 App 的审查才会开始。",
       openSettings: "打开设置",
@@ -533,7 +544,7 @@ export const zhCN: Dictionary = {
       noEncryptionKey:
         "此部署没有有效的 DASHBOARD_ENCRYPTION_KEY 来存储 App 凭据 — 请让运维配置后再提交。",
       slugConflict:
-        "设置进行期间另一个 App 占用了此 App 的 webhook slug，因此 GitHub 上已创建 App 但未连接到此部署 — 未写入任何 Worker 数据。Manifest 创建的 App 不能连接两次：请在 GitHub 上删除刚创建的 App，然后从控制台重新开始创建流程。",
+        "设置进行期间另一个 App 占用了此 App 的 webhook 路径，因此 GitHub 上已创建 App 但未连接到此部署 — 未写入任何 Worker 数据。Manifest 创建的 App 不能连接两次：请在 GitHub 上删除刚创建的 App，然后从控制台重新开始创建流程。",
       alreadyConnected: "此 GitHub App 已在此部署上连接 — 未做任何更改。",
       dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",

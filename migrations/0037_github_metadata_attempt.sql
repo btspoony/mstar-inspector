@@ -1,0 +1,24 @@
+-- 0037_github_metadata_attempt.sql — bound the NULL-slug re-attempt.
+--
+-- 0036 added a nullable `github_slug` with no backfill, so a row that predates
+-- it reads as "never synced" until one fetch succeeds. The settings read path
+-- deliberately treats that NULL as stale on every read (the documented "open
+-- the settings page" remedy must actually fetch), which is right for the first
+-- attempt and wrong after it: a fetch that fails (404 App deleted, 401 rotated
+-- key, 403 suspended) or succeeds without a slug persists nothing, so the row
+-- stays in exactly the state that triggers another fetch. Every member's
+-- settings render then pays one `GET /app` plus up to the 5 s timeout.
+--
+-- `github_metadata_attempted_at` is the marker that restores the bound: the read
+-- path re-attempts an unsynced row at most once per TTL window instead of once
+-- per read. `apps-store.touchGithubMetadataAttempt` stamps it after every fetch
+-- attempt that persists no slug; a successful slug needs no mark (the 0019
+-- `github_metadata_synced_at` column already records it), and `force: true`
+-- bypasses both bounds.
+--
+-- Metadata-only ADD COLUMN, nullable, no default — the 0008/0019 form, safe over
+-- a live DB with existing rows: they read NULL ("never attempted"), which the
+-- reader treats as stale, so the first read after the deploy attempts once and
+-- stamps. Must apply AFTER 0036 (the reader keys the pair).
+
+ALTER TABLE github_apps ADD COLUMN github_metadata_attempted_at TEXT;

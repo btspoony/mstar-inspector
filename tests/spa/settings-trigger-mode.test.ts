@@ -26,7 +26,7 @@ const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/Set
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
 
-const controlHtml = (mode: ReviewTriggerMode, locale: "en" | "zh_CN" = "en", slug = "acme"): string =>
+const controlHtml = (mode: ReviewTriggerMode, locale: "en" | "zh_CN" = "en", slug: string | null = "acme"): string =>
   renderToStaticMarkup(createElement(ReviewTriggerControl, { locale, slug, mode, onTriggerMode: noopSave }));
 
 /** The one button-segment whose `title` carries the verbatim mode value. */
@@ -125,6 +125,15 @@ describe("mention-string display (spec §3 operator visibility, SSR)", () => {
     expect(html).not.toContain("@acme[bot]");
   });
 
+  test("no github_slug → no mention renders at all (D2 fail-safe; never an @[bot] placeholder)", () => {
+    // Before the first metadata sync there is no real mention target: the
+    // hint paragraph stays off the face entirely, the mode control does not.
+    const html = controlHtml("every_push", "en", null);
+    expect(html).not.toContain("[bot]");
+    expect(html).not.toContain("works in every mode");
+    expect(html).toContain('role="radiogroup"');
+  });
+
   test("the mention copy sits in the control (near the mode segments, per the assignment)", () => {
     const html = controlHtml("every_push");
     expect(html.indexOf('role="radiogroup"')).toBeGreaterThan(-1);
@@ -154,13 +163,13 @@ describe("save flow + 400 fallback contract", () => {
     };
     try {
       for (const [pathname, expected] of [
-        ["/dashboard/apps/acme-app", "/dashboard/apps/acme-app/review-trigger-mode"],
-        ["/dashboard/acme/apps/acme-app", "/dashboard/acme/apps/acme-app/review-trigger-mode"],
+        ["/dashboard/apps/1", "/dashboard/apps/1/review-trigger-mode"],
+        ["/dashboard/acme/apps/1", "/dashboard/acme/apps/1/review-trigger-mode"],
       ] as const) {
         calls.length = 0;
         reloads = 0;
         scope.location = { pathname };
-        const outcome = await submitTriggerMode("acme-app", "manual", "en", reload);
+        const outcome = await submitTriggerMode("1", "manual", "en", reload);
         // ONE wire call to the page's own App family — the legacy family 404s
         // under a workspace page — carrying the verbatim mode.
         expect(calls).toHaveLength(1);
@@ -182,10 +191,10 @@ describe("save flow + 400 fallback contract", () => {
       throw new TypeError("network down");
     }) as unknown as typeof fetch;
     const scope = globalThis as { location?: { pathname: string } };
-    scope.location = { pathname: "/dashboard/apps/acme-app" };
+    scope.location = { pathname: "/dashboard/apps/1" };
     let reloads = 0;
     try {
-      const outcome = await submitTriggerMode("acme-app", "manual", "en", async () => {
+      const outcome = await submitTriggerMode("1", "manual", "en", async () => {
         reloads += 1;
         return true;
       });

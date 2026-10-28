@@ -30,12 +30,13 @@ import { SectionCard, SectionCardTitle, SectionGroup } from "../components/Secti
 import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { workspaceRefOf } from "../routes";
-import { apiBase } from "../workspace-base";
+import { apiBase, currentOrigin } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import { useRenameMembership } from "../workspace-memberships";
 import {
   activeChainTabId,
+  appDisplayName,
   configuredKeySlot,
   DEFAULT_CHAIN_NAME,
   isPaused,
@@ -178,7 +179,7 @@ export function SettingsView({
   // Every pinned path of this page hangs off the page's workspace prefix
   // (`/dashboard` legacy, `/dashboard/<slug>` under strict) — the legacy App
   // route family answers 404 on a workspace-scoped deployment.
-  const appPath = `${apiBase()}/apps/${app.slug}`;
+  const appPath = `${apiBase()}/apps/${app.github_app_id}`;
   const base = `${appPath}/settings`;
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
@@ -255,7 +256,7 @@ export function SettingsView({
     // rejects: load() catches its own failures into the page notice.
     try {
       ({ status, body } = await postForm(
-        `${apiBase()}/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
+        `${apiBase()}/api/apps/${encodeURIComponent(String(app.github_app_id))}/keys/verify`,
         fields,
       ));
     } catch {
@@ -305,7 +306,7 @@ export function SettingsView({
    * via the awaited background reload.
    */
   async function runTriggerMode(mode: ReviewTriggerMode): Promise<OpNotice> {
-    return submitTriggerMode(app.slug, mode, locale, () => onReload({ background: true }));
+    return submitTriggerMode(String(app.github_app_id), mode, locale, () => onReload({ background: true }));
   }
 
   async function onConfirm(): Promise<void> {
@@ -362,7 +363,7 @@ export function SettingsView({
     }
   }
 
-  const confirmCopy = pendingConfirmCopy(locale, app.slug, pending);
+  const confirmCopy = pendingConfirmCopy(locale, appDisplayName(app), pending);
 
   // Version footer: the deployment's current release from the
   // generated src/version.ts surface — the same `vX.Y.Z` form as the
@@ -403,7 +404,12 @@ export function SettingsView({
           {/* The GitHub identity card sits before the manage conditional in
               the group (AC3); the viewer's authorization switches the name
               link's destination (AD-623). */}
-          <AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />
+          <AppInfoCard
+            locale={locale}
+            app={app}
+            canManage={payload.can_manage}
+            onReload={() => onReload({ background: true })}
+          />
 
           <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} onTriggerMode={runTriggerMode} />
         </SectionGroup>
@@ -475,7 +481,7 @@ export function SettingsView({
 
 function pendingConfirmCopy(
   locale: SpaBoot["locale"],
-  slug: string,
+  name: string,
   pending: PendingAction | null,
 ): { title: string; body: string; action: string; destructive: boolean } | null {
   if (!pending) return null;
@@ -508,31 +514,31 @@ function pendingConfirmCopy(
   }
   const map = {
     pause: {
-      title: t(locale, "settings.confirmPauseTitle", { slug }),
+      title: t(locale, "settings.confirmPauseTitle", { slug: name }),
       body: t(locale, "settings.confirmPauseBody"),
       action: t(locale, "apps.actions.pause"),
       destructive: false,
     },
     resume: {
-      title: t(locale, "settings.confirmResumeTitle", { slug }),
+      title: t(locale, "settings.confirmResumeTitle", { slug: name }),
       body: t(locale, "settings.confirmResumeBody"),
       action: t(locale, "apps.actions.resume"),
       destructive: false,
     },
     disable: {
-      title: t(locale, "settings.confirmDisableTitle", { slug }),
+      title: t(locale, "settings.confirmDisableTitle", { slug: name }),
       body: t(locale, "settings.confirmDisableBody"),
       action: t(locale, "settings.confirmDisableAction"),
       destructive: true,
     },
     enable: {
-      title: t(locale, "settings.confirmEnableTitle", { slug }),
+      title: t(locale, "settings.confirmEnableTitle", { slug: name }),
       body: t(locale, "settings.confirmEnableBody"),
       action: t(locale, "apps.actions.enable"),
       destructive: false,
     },
     delete: {
-      title: t(locale, "settings.confirmDeleteTitle", { slug }),
+      title: t(locale, "settings.confirmDeleteTitle", { slug: name }),
       body: t(locale, "settings.confirmDeleteBody"),
       action: t(locale, "settings.confirmDeleteButton"),
       destructive: true,
@@ -549,7 +555,8 @@ function pendingConfirmCopy(
  * `/apps/acme/settings` derives null, not slug "settings" (qc round 1,
  * qc2-F-001); an already settings-shaped url keeps deriving idempotently.
  * Deliberately never `github_name` (display name ≠ URL slug) and never the
- * local `SettingsAppMeta.slug` (local App slug ≠ GitHub App slug). The server
+ * local `SettingsAppMeta.webhook_path` (local webhook key ≠ GitHub App slug).
+ * The server
  * validates only the `https://` prefix (github-app-metadata.ts), so an
  * unusable shape — no `apps/<slug>` tail, or a value `new URL` cannot parse —
  * returns null and the caller keeps the public-page link (runtime
@@ -586,13 +593,53 @@ export function AppInfoCard({
   locale,
   app,
   canManage,
+  onReload,
 }: {
   locale: SpaBoot["locale"];
   /** Both faces — the identity and manage app shapes structurally share every field the card reads. */
   app: SettingsIdentityAppMeta | SettingsAppMeta;
   /** Threaded from payload.can_manage at the call site — presentation only. */
   canManage: boolean;
+  /** The manager face's background reload — present iff canManage; the refresh button renders only when both hold. */
+  onReload?: () => Promise<unknown>;
 }) {
+  const [refreshing, setRefreshing] = useState(false);
+  // Card-local op feedback (the NoticeRegion idiom): the refresh outcome
+  // renders beside the button, never through a page-level channel.
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function refreshMetadata(): Promise<void> {
+    setRefreshing(true);
+    try {
+      const res = await fetch(`${apiBase()}/api/apps/${app.github_app_id}/refresh-metadata`, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+      });
+      const body = await res.text();
+      // Keyed 400 (settings.error.githubMetadataRefreshFailed) or any other
+      // failure: the resolved message lands in this region and RETURNS before
+      // any reload — the cached face stays on screen.
+      if (!res.ok) {
+        const failure: OpNotice = { kind: "error", message: settingsErrorMessage(locale, body) };
+        setNotice(failure);
+        return;
+      }
+      // Success = the server re-cached the profile: a card-local notice plus a
+      // background reload re-renders the card from the fresh payload without
+      // a page banner.
+      const outcome: OpNotice = { kind: "success", message: t(locale, "settings.appInfoRefreshDone") };
+      setNotice(outcome);
+      await onReload?.();
+    } catch {
+      // Transport failure (offline, a restarting Worker, DNS): the fetch
+      // REJECTS, so there is no HTTP status to resolve a key from. Same
+      // card-local error region, the shared save-failure copy, and no reload —
+      // the cached face stays (the sibling op channels' `common.saveFailed`).
+      setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+    } finally {
+      setRefreshing(false);
+    }
+  }
   // Derived BEFORE the per-field JSX so the href and the aria-label key off
   // the same resolved destination; a member viewer or a non-derivable url
   // leaves settingsHref null and every face below is today's.
@@ -642,6 +689,18 @@ export function AppInfoCard({
             <p className="text-sm text-muted-foreground">
               {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
             </p>
+            {/* The delivery URL a webhook repoint needs (deploy doc § 3 sends
+                the operator here): manager-only, because `webhook_path` is the
+                App's signed delivery route and a member has no repoint duty.
+                Selected as one text node so click-drag copies it whole. */}
+            {canManage ? (
+              <p className="text-xs text-muted-foreground">
+                {t(locale, "settings.appInfoDeliveryUrl")}{" "}
+                <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">
+                  {`${currentOrigin()}/webhook/${app.webhook_path}`}
+                </code>
+              </p>
+            ) : null}
             {app.github_metadata_synced_at ? (
               <p className="text-xs text-muted-foreground">
                 {t(locale, "settings.appInfoSynced", {
@@ -651,6 +710,14 @@ export function AppInfoCard({
             ) : null}
           </div>
         </div>
+        {canManage && onReload ? (
+          <div className="mt-4 flex flex-col gap-2">
+            <Button type="button" variant="secondary" disabled={refreshing} onClick={() => void refreshMetadata()}>
+              {t(locale, "settings.appInfoRefresh")}
+            </Button>
+            <NoticeRegion notice={notice} />
+          </div>
+        ) : null}
       </CardContent>
     </SectionCard>
   );
@@ -829,7 +896,7 @@ function OpsCard({
       <CardContent className="flex flex-col gap-6">
         <ReviewTriggerControl
           locale={locale}
-          slug={app.slug}
+          slug={app.github_slug}
           mode={app.review_trigger_mode}
           onTriggerMode={onTriggerMode}
         />
@@ -1002,13 +1069,13 @@ export async function postPinnedOutcome(
  * instead of supplying an App path of its own.
  */
 export function submitTriggerMode(
-  slug: string,
+  appId: string,
   mode: ReviewTriggerMode,
   locale: SpaBoot["locale"],
   reload: () => Promise<unknown>,
 ): Promise<OpNotice> {
   return postPinnedOutcome(
-    `${apiBase()}/apps/${encodeURIComponent(slug)}/review-trigger-mode`,
+    `${apiBase()}/apps/${encodeURIComponent(appId)}/review-trigger-mode`,
     { mode },
     locale,
     reload,
@@ -1050,7 +1117,12 @@ export function ReviewTriggerControl({
   onTriggerMode,
 }: {
   locale: SpaBoot["locale"];
-  slug: string;
+  /**
+   * The cached GitHub slug — the ONLY mention target (D2). Null before the
+   * first metadata sync: no real target exists, so no mention renders
+   * (fail-safe — an invented `@[bot]` could never trigger a review).
+   */
+  slug: string | null;
   mode: ReviewTriggerMode;
   onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
 }) {
@@ -1087,7 +1159,9 @@ export function ReviewTriggerControl({
     }
   }
 
-  const mention = botMention(slug);
+  // The mention exists only when GitHub's slug cache does — the string is
+  // the canonical `@{slug}[bot]` form (spec §3), never a local value.
+  const mention = slug ? botMention(slug) : null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -1109,19 +1183,21 @@ export function ReviewTriggerControl({
           ))}
         </ToggleGroup>
       </div>
-      <p className="text-xs text-muted-foreground">
-        {t(locale, "settings.triggerModeMention")}{" "}
-        {/* The mention renders as ONE text node, so a click-drag selects /
-            copies the exact string; the plain form rides the title and the
-            localized aria label (spec §3 operator visibility). */}
-        <code
-          className="rounded bg-muted px-1 py-0.5 font-mono text-foreground"
-          title={mention}
-          aria-label={t(locale, "settings.triggerModeMentionAria", { mention })}
-        >
-          {mention}
-        </code>
-      </p>
+      {mention ? (
+        <p className="text-xs text-muted-foreground">
+          {t(locale, "settings.triggerModeMention")}{" "}
+          {/* The mention renders as ONE text node, so a click-drag selects /
+              copies the exact string; the plain form rides the title and the
+              localized aria label (spec §3 operator visibility). */}
+          <code
+            className="rounded bg-muted px-1 py-0.5 font-mono text-foreground"
+            title={mention}
+            aria-label={t(locale, "settings.triggerModeMentionAria", { mention })}
+          >
+            {mention}
+          </code>
+        </p>
+      ) : null}
       <NoticeRegion notice={notice} />
     </div>
   );

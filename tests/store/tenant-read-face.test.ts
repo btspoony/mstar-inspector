@@ -26,8 +26,9 @@ const SRC_DIR = join(import.meta.dir, "../../src");
 
 const APP_INPUT: CreateAppInput = {
   id: "018f4a2e-7c1d-4e5a-9b2f-3d6c8a1e4f70",
-  slug: "tenant-read-face",
+  webhookPath: "tenant-read-face",
   githubAppId: 987654,
+  githubSlug: null,
   name: "tenant-read-face",
   privateKeyEnc: "v1.primary.aXZpdi.Y3QmIHRhZw==",
   webhookSecretEnc: "v1.primary.aXZpdi.d2ViaG9vaw==",
@@ -42,8 +43,8 @@ async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Pro
 /** One App mapped to the 'default' workspace, one orphan App with no mapping. */
 async function seedMappedAndOrphan() {
   const db = createMigratedTestD1();
-  const mapped = await seedApp(db, { slug: "mapped", githubAppId: 1 });
-  const orphan = await seedApp(db, { slug: "orphan", githubAppId: 2 });
+  const mapped = await seedApp(db, { webhookPath: "mapped", githubAppId: 1 });
+  const orphan = await seedApp(db, { webhookPath: "orphan", githubAppId: 2 });
   db.raw.prepare(`DELETE FROM app_workspaces WHERE app_id = ?`).run(orphan.id);
   return { db, mapped, orphan };
 }
@@ -56,13 +57,15 @@ describe("apps-store tenant read face", () => {
     expect(rows[0]!.workspace_id).toBe("default");
   });
 
-  test("an orphan App is null from getAppById and getAppBySlug", async () => {
+  test("an orphan App is null from getAppById, getAppByWebhookPath and getAppByGithubId", async () => {
     const { db, mapped, orphan } = await seedMappedAndOrphan();
     const store = createAppsStore(db);
     expect((await store.getAppById(mapped.id))?.workspace_id).toBe("default");
     expect(await store.getAppById(orphan.id)).toBeNull();
-    expect((await store.getAppBySlug("mapped"))?.workspace_id).toBe("default");
-    expect(await store.getAppBySlug("orphan")).toBeNull();
+    expect((await store.getAppByWebhookPath("mapped"))?.workspace_id).toBe("default");
+    expect(await store.getAppByWebhookPath("orphan")).toBeNull();
+    expect((await store.getAppByGithubId(1))?.workspace_id).toBe("default");
+    expect(await store.getAppByGithubId(2)).toBeNull();
   });
 });
 
@@ -222,12 +225,14 @@ describe("tenant read face allowlist", () => {
    * The annotation claims "no tenant-facing field". The review-threads read
    * used to select `ga.slug` (a tenant-facing column) while reading
    * `identity.slug` instead — a comment that was not true of its statement.
+   * Migration 0036 split that column in two (`webhook_path`, `github_slug`);
+   * both stay off a maintenance read exactly as `slug` did.
    * Every maintenance SELECT must stay off the identity/ownership columns
    * (`private_key_enc` is frozen plan-scope maintenance credential routing, not
    * a response field).
    */
   test("a maintenance read selects no identity or ownership column", () => {
-    const TENANT_FACING = /\b(?:slug|name|workspace_id)\b/i;
+    const TENANT_FACING = /\b(?:webhook_path|github_slug|name|workspace_id)\b/i;
     for (const rel of Object.keys(MAINTENANCE_SITES)) {
       for (const site of prepareStatements(readFileSync(join(SRC_DIR, rel), "utf8"))) {
         expect({ file: rel, line: site.line + 1, tenantFacing: TENANT_FACING.test(site.sql) }).toEqual({

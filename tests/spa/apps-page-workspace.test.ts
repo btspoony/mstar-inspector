@@ -44,7 +44,7 @@ async function readUnder(pathname: string): Promise<{ url: string; apps: string[
     return new Response(
       JSON.stringify({
         viewer: { login: "octocat", role: "admin" },
-        apps: [{ slug: `${workspace}-app` }],
+        apps: [{ github_app_id: 1, github_slug: `${workspace}-app` }],
       }),
       { status: 200 },
     );
@@ -52,7 +52,7 @@ async function readUnder(pathname: string): Promise<{ url: string; apps: string[
   try {
     const payload = await loadApps(apiBase(pathname));
     expect(calls).toHaveLength(1);
-    return { url: calls[0]!, apps: (payload?.apps ?? []).map((app) => app.slug) };
+    return { url: calls[0]!, apps: (payload?.apps ?? []).map((app) => app.github_slug ?? "") };
   } finally {
     globalThis.fetch = realFetch;
   }

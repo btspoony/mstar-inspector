@@ -32,7 +32,7 @@ export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBo
     case "login":
       return <LoginPage boot={boot} />;
     case "app-detail":
-      return <AppDetailPage boot={boot} slug={route.slug} />;
+      return <AppDetailPage boot={boot} appId={route.appId} />;
     default:
       return <h1 className={styles.heading}>{t(boot.locale, "nav.brand")}</h1>;
   }

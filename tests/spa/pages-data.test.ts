@@ -223,11 +223,35 @@ describe("members/apps/settings parsers", () => {
     expect(parseApps({ apps: [] })).toBeNull();
   });
 
+  test("parseApps rows carry the D6 GitHub identity fields (github_name / github_slug / github_avatar_url)", () => {
+    const ok = parseApps({
+      viewer: { login: "mallory", role: "member" },
+      apps: [
+        {
+          github_app_id: 1,
+          github_name: "Demo",
+          github_slug: "demo",
+          github_avatar_url: "https://x.test/a.png",
+          status: "active",
+          review_enabled: 1,
+          created_by: "mallory",
+          health: { latest: null, rejected24h: 0 },
+        },
+      ],
+    });
+    expect(ok?.apps[0]).toMatchObject({
+      github_name: "Demo",
+      github_slug: "demo",
+      github_avatar_url: "https://x.test/a.png",
+    });
+  });
+
   test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
     const ok = parseSettings({
       can_manage: true,
       app: {
-        slug: "demo",
+        github_slug: "demo",
+        webhook_path: "wh-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -249,11 +273,11 @@ describe("members/apps/settings parsers", () => {
       custom_provider_api_ids: ["openai-completions"],
       sandbox_images: [{ id: "omp", enabled: true }],
     });
-    expect(ok?.app.slug).toBe("demo");
+    expect(ok?.app.webhook_path).toBe("wh-demo");
     expect(ok?.can_manage).toBe(true);
     expect(
       parseSettings({
-        app: { slug: "demo", status: "active", review_enabled: 1, last_webhook_at: null },
+        app: { github_slug: "demo", webhook_path: "wh-demo", status: "active", review_enabled: 1, last_webhook_at: null },
         keys: [],
         configured_providers: [],
         provider_catalog: [],
@@ -267,7 +291,8 @@ describe("members/apps/settings parsers", () => {
     const manageBase = {
       can_manage: true,
       app: {
-        slug: "demo",
+        github_slug: "demo",
+        webhook_path: "wh-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -308,7 +333,8 @@ describe("members/apps/settings parsers", () => {
     const base = {
       can_manage: true,
       app: {
-        slug: "demo",
+        github_slug: "demo",
+        webhook_path: "wh-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -352,7 +378,8 @@ describe("members/apps/settings parsers", () => {
     const identityBase = {
       can_manage: false,
       app: {
-        slug: "demo",
+        github_slug: "demo",
+        webhook_path: "wh-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -384,7 +411,8 @@ describe("members/apps/settings parsers", () => {
     const manageBase = {
       can_manage: true,
       app: {
-        slug: "demo",
+        github_slug: "demo",
+        webhook_path: "wh-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -496,7 +524,8 @@ describe("members/apps/settings parsers", () => {
     // identity set — created_at + the cached public GitHub profile; no
     // installations/deliveries, no sandbox image, no trigger mode.
     const identityApp = {
-      slug: "demo",
+      github_slug: "demo",
+      webhook_path: "wh-demo",
       github_app_id: 1,
       status: "active",
       review_enabled: true,
@@ -522,7 +551,8 @@ describe("members/apps/settings parsers", () => {
       parseSettings({
         can_manage: true,
         app: {
-          slug: "demo",
+          github_slug: "demo",
+          webhook_path: "wh-demo",
           github_app_id: 1,
           status: "active",
           review_enabled: true,
@@ -600,7 +630,8 @@ describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
     app: {
-      slug: "demo",
+      github_slug: "demo",
+      webhook_path: "wh-demo",
       github_app_id: 1,
       status: "active",
       review_enabled: true,

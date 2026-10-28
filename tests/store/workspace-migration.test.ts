@@ -68,7 +68,7 @@ function insertApp(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+      `INSERT INTO github_apps (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
          created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', ?, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
     )

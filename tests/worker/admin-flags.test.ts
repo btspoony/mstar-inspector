@@ -264,9 +264,9 @@ async function seedApp(db: TestD1): Promise<void> {
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, 'app-x', 4242, 'app-x', ?, ?, 'fixture', 'active', NULL, datetime('now'), datetime('now'))`,
+       VALUES (?, 'app-x', 'app-x', 4242, 'app-x', ?, ?, 'fixture', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, privateKeyEnc, webhookSecretEnc);
   db.raw.prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')").run(id);

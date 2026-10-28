@@ -11,11 +11,15 @@
  *   - failure injection → structured `{ok:false}`, NEVER a throw: OpenSSH
  *     PEM, garbage/empty PEM, fetch rejection (network/abort), HTTP
  *     non-200, and an unexpected payload (missing name);
- *   - extraction: ONLY the four migration-0019 profile fields survive
- *     (slug/permissions/events/owner.login never leave the module);
- *     per-item degradation to null for absent optional fields, with the
- *     URL fields additionally scheme-gated to https: (non-conforming
- *     values drop to null);
+ *   - extraction: ONLY the cached profile fields survive
+ *     (permissions/events/owner.login never leave the module); per-item
+ *     degradation to null for absent optional fields, with every URL
+ *     scheme-gated to https: (non-conforming values drop to null);
+ *   - the App slug: `slug` from GET /app, else derived from html_url (the
+ *     single `/apps/<slug>` segment, https: only);
+ *   - the App's own logo: one GET /users/{slug}[bot] with the same JWT,
+ *     separately fail-open (non-2xx / rejection / bad shape → null avatar,
+ *     profile intact, result still ok);
  *   - upstream face: GET https://api.github.com/app, Accept
  *     application/vnd.github+json, pinned API version, User-Agent, Bearer
  *     JWT, and an AbortSignal (the 5s AD-531 budget).
@@ -24,7 +28,12 @@
  * tests/worker/entry.test.ts precedent) — no test touches the real API.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { fetchAppMetadata, GITHUB_METADATA_TTL_MS, isGithubMetadataStale } from "../../src/dashboard/github-app-metadata";
+import {
+  fetchAppMetadata,
+  githubAppSlugFromHtmlUrl,
+  GITHUB_METADATA_TTL_MS,
+  isGithubMetadataStale,
+} from "../../src/dashboard/github-app-metadata";
 import { fakePem } from "../helpers/fake-secrets";
 
 // --- test RSA key material (generated per test; no fixtures) ---
@@ -133,6 +142,28 @@ const GITHUB_PROFILE = {
   owner: { login: "acme", id: 1, avatar_url: "https://avatars.githubusercontent.com/u/1?v=4" },
 };
 
+/** The App's own logo — the bot account's avatar, not the owner's. */
+const APP_LOGO_URL = "https://avatars.githubusercontent.com/u/9999?v=4";
+
+/** Route the two GitHub faces by URL. The stub stays explicit (never keyed
+ * on call order): a missing bot request fails loudly, and an unexpected URL
+ * surfaces instead of being answered by the profile body. */
+function stubGithubFaces(options: {
+  profile: () => Response;
+  avatar?: () => Response;
+}): { calls: FetchCall[] } {
+  return stubFetch((url) => {
+    if (url === "https://api.github.com/app") return options.profile();
+    if (url.startsWith("https://api.github.com/users/") && options.avatar) return options.avatar();
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+}
+
+/** The bot-account body for `GET /users/{slug}[bot]`. */
+function botFace(avatarUrl: unknown = APP_LOGO_URL, login = "acme-inspector[bot]") {
+  return jsonResponse({ login, id: 9999, avatar_url: avatarUrl });
+}
+
 /** Decode a JWT and verify its signature against the fixture's public key. */
 async function decodeAndVerifyJwt(
   jwt: string,
@@ -162,7 +193,10 @@ afterEach(() => {
 describe("fetchAppMetadata (AD-531)", () => {
   test("mints a verifiable RS256 App JWT and extracts ONLY the public profile fields (PKCS#8 PEM)", async () => {
     const { pem, publicKey } = await pkcs8Fixture();
-    const { calls } = stubFetch(() => jsonResponse(GITHUB_PROFILE));
+    const { calls } = stubGithubFaces({
+      profile: () => jsonResponse(GITHUB_PROFILE),
+      avatar: () => botFace(),
+    });
     // Capture the AbortSignal.timeout argument while delegating to the real
     // implementation (the signal stays genuine) — pins the locked AD-531
     // 5s budget by value, not just by signal type.
@@ -174,21 +208,22 @@ describe("fetchAppMetadata (AD-531)", () => {
 
     const result = await fetchAppMetadata(1001, pem);
 
-    // Exactly the four migration-0019 fields — slug/permissions/events and
-    // the rest of the response body never leave the module.
+    // Exactly the cached profile fields — permissions/events and the rest of
+    // both response bodies never leave the module.
     expect(result).toEqual({
       ok: true,
       metadata: {
         githubName: "Acme Inspector",
         githubDescription: "PR review bot for Acme",
         githubHtmlUrl: "https://github.com/apps/acme-inspector",
-        githubAvatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
+        githubAvatarUrl: APP_LOGO_URL,
+        githubSlug: "acme-inspector",
       },
     });
 
-    // Upstream face: one GET to the /app endpoint, documented headers, and
-    // the AD-531 abort budget attached.
-    expect(calls).toHaveLength(1);
+    // Upstream face: GET /app then GET /users/{slug}[bot], documented headers,
+    // and the AD-531 abort budget attached to both.
+    expect(calls).toHaveLength(2);
     const call = calls[0]!;
     expect(call.url).toBe("https://api.github.com/app");
     expect(call.init!.method).toBe("GET");
@@ -198,6 +233,13 @@ describe("fetchAppMetadata (AD-531)", () => {
     expect(headers.get("user-agent")).toBe("mstar-inspector");
     expect(call.init!.signal).toBeInstanceOf(AbortSignal);
     expect(timeoutMs).toBe(5000); // the 5s AD-531 budget, exactly
+
+    // The App's own logo comes from the bot account, carrying the same JWT.
+    const avatarCall = calls[1]!;
+    expect(avatarCall.url).toBe("https://api.github.com/users/acme-inspector%5Bbot%5D");
+    const avatarHeaders = new Headers(avatarCall.init!.headers);
+    expect(avatarHeaders.get("authorization")).toBe(headers.get("authorization"));
+    expect(avatarCall.init!.signal).toBeInstanceOf(AbortSignal);
 
     // JWT: pinned header/claims + signature verifiable with the fixture's
     // own public key.
@@ -217,7 +259,7 @@ describe("fetchAppMetadata (AD-531)", () => {
 
   test("accepts a PKCS#1 PEM (the manifest-conversion format) and signs with the same key", async () => {
     const { pem, publicKey } = await pkcs1Fixture();
-    stubFetch(() => jsonResponse(GITHUB_PROFILE));
+    stubGithubFaces({ profile: () => jsonResponse(GITHUB_PROFILE), avatar: () => botFace() });
 
     const result = await fetchAppMetadata(1001, pem);
 
@@ -227,28 +269,31 @@ describe("fetchAppMetadata (AD-531)", () => {
         githubName: "Acme Inspector",
         githubDescription: "PR review bot for Acme",
         githubHtmlUrl: "https://github.com/apps/acme-inspector",
-        githubAvatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
+        githubAvatarUrl: APP_LOGO_URL,
+        githubSlug: "acme-inspector",
       },
     });
   });
 
   test("the PKCS#1 JWT signature also verifies with the matching public key", async () => {
     const { pem, publicKey } = await pkcs1Fixture();
-    let bearer = "";
-    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
-      bearer = new Headers(init!.headers).get("authorization")!;
-      return jsonResponse(GITHUB_PROFILE);
-    }) as typeof fetch;
+    const { calls } = stubGithubFaces({
+      profile: () => jsonResponse(GITHUB_PROFILE),
+      avatar: () => botFace(),
+    });
 
     const result = await fetchAppMetadata(1001, pem);
 
     expect(result.ok).toBe(true);
+    const bearer = new Headers(calls[0]!.init!.headers).get("authorization")!;
     const { valid } = await decodeAndVerifyJwt(bearer.slice("Bearer ".length), publicKey);
     expect(valid).toBe(true);
   });
 
   test("an OpenSSH-format PEM → {ok:false} with the mint error swallowed BEFORE any network call", async () => {
-    const { calls } = stubFetch(() => jsonResponse(GITHUB_PROFILE));
+    const { calls } = stubFetch((url) => {
+      throw new Error(`unexpected fetch: ${url}`);
+    });
     const pem = fakePem("b3BlbnNzaC1rZXktdjEAAAAA", "OPENSSH PRIVATE KEY");
 
     const result = await fetchAppMetadata(1001, pem);
@@ -266,11 +311,11 @@ describe("fetchAppMetadata (AD-531)", () => {
     });
   });
 
-  test("HTTP non-200 → {ok:false}, zero retries", async () => {
+  test("HTTP non-200 on GET /app → {ok:false}, zero retries, no bot request", async () => {
     const { calls } = stubFetch(() => jsonResponse({ message: "Not Found" }, 404));
     const { pem } = await pkcs8Fixture();
     expect(await fetchAppMetadata(1001, pem)).toEqual({ ok: false });
-    expect(calls).toHaveLength(1); // the zero-retry lock (AD-531)
+    expect(calls).toHaveLength(1); // the zero-retry lock (AD-531), and no avatar leg
   });
 
   test("fetch rejection (network failure / abort) → {ok:false}, zero retries", async () => {
@@ -301,9 +346,9 @@ describe("fetchAppMetadata (AD-531)", () => {
     expect(nonJson.calls).toHaveLength(1);
   });
 
-  test("nullable upstream fields degrade per-item to null metadata", async () => {
+  test("nullable upstream fields degrade per-item — and no slug means no bot request", async () => {
     const { pem } = await pkcs8Fixture();
-    stubFetch(() => jsonResponse({ name: "Bare App", description: null }));
+    const { calls } = stubFetch(() => jsonResponse({ name: "Bare App", description: null }));
 
     expect(await fetchAppMetadata(1001, pem)).toEqual({
       ok: true,
@@ -312,13 +357,15 @@ describe("fetchAppMetadata (AD-531)", () => {
         githubDescription: null,
         githubHtmlUrl: null,
         githubAvatarUrl: null,
+        githubSlug: null,
       },
     });
+    expect(calls).toHaveLength(1); // no slug from either source → nothing to look up
   });
 
-  test("non-https html_url / avatar_url are dropped to null (the extraction scheme gate)", async () => {
+  test("non-https html_url is dropped to null and yields no derived slug", async () => {
     const { pem } = await pkcs8Fixture();
-    stubFetch(() =>
+    const { calls } = stubFetch(() =>
       jsonResponse({
         name: "Odd App",
         html_url: "http://github.com/apps/odd",
@@ -335,8 +382,135 @@ describe("fetchAppMetadata (AD-531)", () => {
         githubDescription: null,
         githubHtmlUrl: null,
         githubAvatarUrl: null,
+        githubSlug: null,
       },
     });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a payload without `slug` derives it from html_url and looks up that bot", async () => {
+    const { pem } = await pkcs8Fixture();
+    const { calls } = stubGithubFaces({
+      profile: () => jsonResponse({ name: "Acme Inspector", html_url: "https://github.com/apps/acme-inspector" }),
+      avatar: () => botFace(),
+    });
+
+    const result = await fetchAppMetadata(1001, pem);
+
+    expect(result).toEqual({
+      ok: true,
+      metadata: {
+        githubName: "Acme Inspector",
+        githubDescription: null,
+        githubHtmlUrl: "https://github.com/apps/acme-inspector",
+        githubAvatarUrl: APP_LOGO_URL,
+        githubSlug: "acme-inspector",
+      },
+    });
+    expect(calls[1]!.url).toBe("https://api.github.com/users/acme-inspector%5Bbot%5D");
+  });
+
+  test("`slug` in the payload wins over the html_url derivation", async () => {
+    const { pem } = await pkcs8Fixture();
+    const { calls } = stubGithubFaces({
+      // A renamed App: the API slug is current while html_url still trails it.
+      profile: () =>
+        jsonResponse({
+          name: "Renamed App",
+          slug: "renamed-app",
+          html_url: "https://github.com/apps/old-app",
+        }),
+      avatar: () => botFace(APP_LOGO_URL, "renamed-app[bot]"),
+    });
+
+    const result = await fetchAppMetadata(1001, pem);
+
+    expect(result).toEqual({
+      ok: true,
+      metadata: {
+        githubName: "Renamed App",
+        githubDescription: null,
+        githubHtmlUrl: "https://github.com/apps/old-app",
+        githubAvatarUrl: APP_LOGO_URL,
+        githubSlug: "renamed-app",
+      },
+    });
+    expect(calls[1]!.url).toBe("https://api.github.com/users/renamed-app%5Bbot%5D");
+  });
+
+  test("bot lookup 404 → githubAvatarUrl null, profile fields still persist, result ok", async () => {
+    const { pem } = await pkcs8Fixture();
+    const { calls } = stubGithubFaces({
+      profile: () => jsonResponse(GITHUB_PROFILE),
+      avatar: () => jsonResponse({ message: "Not Found" }, 404),
+    });
+
+    expect(await fetchAppMetadata(1001, pem)).toEqual({
+      ok: true,
+      metadata: {
+        githubName: "Acme Inspector",
+        githubDescription: "PR review bot for Acme",
+        githubHtmlUrl: "https://github.com/apps/acme-inspector",
+        githubAvatarUrl: null,
+        githubSlug: "acme-inspector",
+      },
+    });
+    expect(calls).toHaveLength(2); // one App fetch + one bot attempt, no retry
+  });
+
+  test("bot lookup rejection / malformed / non-https avatar → githubAvatarUrl null, never a failed result", async () => {
+    const { pem } = await pkcs8Fixture();
+    const failures: Array<() => Response> = [
+      () => {
+        throw new TypeError("fetch failed");
+      },
+      () => jsonResponse({ login: "acme-inspector[bot]" }), // no avatar_url
+      () => botFace("javascript:alert(1)"),
+      () => new Response("<html>gateway error</html>", { status: 200 }), // non-JSON
+    ];
+    for (const avatar of failures) {
+      stubGithubFaces({ profile: () => jsonResponse(GITHUB_PROFILE), avatar });
+      expect(await fetchAppMetadata(1001, pem)).toEqual({
+        ok: true,
+        metadata: {
+          githubName: "Acme Inspector",
+          githubDescription: "PR review bot for Acme",
+          githubHtmlUrl: "https://github.com/apps/acme-inspector",
+          githubAvatarUrl: null,
+          githubSlug: "acme-inspector",
+        },
+      });
+    }
+  });
+});
+
+describe("githubAppSlugFromHtmlUrl (the html_url fallback)", () => {
+  test("reads the single segment after /apps", () => {
+    expect(githubAppSlugFromHtmlUrl("https://github.com/apps/wood-s-pr-inspector")).toBe(
+      "wood-s-pr-inspector",
+    );
+    // Trailing slash / query / fragment are not part of the slug.
+    expect(githubAppSlugFromHtmlUrl("https://github.com/apps/acme/")).toBe("acme");
+    expect(githubAppSlugFromHtmlUrl("https://github.com/apps/acme?tab=1#readme")).toBe("acme");
+  });
+
+  test("anything but a single /apps segment is null (a guessed slug would target a real bot)", () => {
+    expect(githubAppSlugFromHtmlUrl(null)).toBeNull();
+    expect(githubAppSlugFromHtmlUrl(undefined)).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("http://github.com/apps/acme")).toBeNull(); // scheme gate
+    expect(githubAppSlugFromHtmlUrl("javascript:alert(1)//github.com/apps/acme")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("not a url")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("https://github.com/apps")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("https://github.com/apps/acme/installations")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("https://github.com/acme")).toBeNull();
+  });
+
+  test("the host is pinned to github.com — a look-alike host cannot smuggle a slug in", () => {
+    expect(githubAppSlugFromHtmlUrl("https://evil.example/apps/acme")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("https://github.com.evil.example/apps/acme")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("http://github.com/apps/acme")).toBeNull();
+    expect(githubAppSlugFromHtmlUrl("https://github.com/apps/acme")).toBe("acme");
   });
 });
 

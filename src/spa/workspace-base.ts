@@ -24,3 +24,14 @@ function currentPathname(): string {
   const scope = globalThis as { location?: { pathname?: string } };
   return scope.location?.pathname ?? "/dashboard";
 }
+
+/**
+ * The current origin — the one operator-facing URL the SPA prints in absolute
+ * form is the App's webhook delivery URL, and GitHub needs the host, not a
+ * path. Same narrow read as currentPathname: outside a document it returns "",
+ * so a static render degrades to root-relative `/webhook/...`, never throws.
+ */
+export function currentOrigin(): string {
+  const scope = globalThis as { location?: { origin?: string } };
+  return scope.location?.origin ?? "";
+}

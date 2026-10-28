@@ -6,7 +6,7 @@
  * `appRef.appId` — which GitHub App's credentials the consumer must resolve
  * for this job (required single shape,
  * AL-24-2). The `github_apps` row (D1) with that id — attached by the
- * per-App `POST /webhook/:appSlug` route after classification, the ONLY
+ * per-App `POST /webhook/:webhookPath` route after classification, the ONLY
  * production attach point.
  *
  * `appId` is a reference (a `github_apps.id` UUID), never a credential —

@@ -9,7 +9,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
@@ -33,6 +34,7 @@ import type { SpaBoot } from "../../src/spa/boot";
 import { SupportNotice } from "../../src/spa/components/SupportNotice";
 import { AppDetailPage, AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import { withLocation } from "./browser-stub";
+import { installDom } from "./dom";
 
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
@@ -44,7 +46,8 @@ const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat"
 const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
   can_manage: true,
   app: {
-    slug: "acme-app",
+    github_slug: "acme-app",
+    webhook_path: "wh-acme",
     github_app_id: 1,
     status: "active",
     review_enabled: true,
@@ -1355,10 +1358,10 @@ describe("App workflow boundaries", () => {
     // wayfinding link, derived from the page's own base.
     const render = (pathname: string): string =>
       withLocation(pathname, () =>
-        renderToStaticMarkup(createElement(AppDetailPage, { boot: adminBoot, slug: "acme-app" })),
+        renderToStaticMarkup(createElement(AppDetailPage, { boot: adminBoot, appId: "1" })),
       );
 
-    const legacy = render("/dashboard/apps/acme-app");
+    const legacy = render("/dashboard/apps/1");
     expect(legacy).toContain('href="/dashboard/apps"');
     expect(legacy).toContain("Back to Apps");
     // These renders ARE the loading face (the loader never resolved), so the
@@ -1367,7 +1370,7 @@ describe("App workflow boundaries", () => {
 
     // A workspace App page keeps the wayfinding inside its workspace: the
     // legacy App family answers 404 under strict.
-    const scoped = render("/dashboard/acme/apps/acme-app");
+    const scoped = render("/dashboard/acme/apps/1");
     expect(scoped).toContain('href="/dashboard/acme/apps"');
     expect(scoped).not.toContain('href="/dashboard/apps"');
 
@@ -1467,9 +1470,14 @@ describe("section-scoped op feedback", () => {
     expect(source).toContain("Promise<OpNotice>");
     // The only top-notice writes left are load()'s two background-failure
     // paths (parse failure + request failure) — the page-level
-    // channel for background reloads. Ops never land there.
+    // channel for background reloads. Ops never land there; card-local
+    // notices (AppInfoCard's own `setNotice({ … })` outcome region) are that
+    // card's channel and are excluded here.
     expect(detail.match(/setNotice\(\{/g)?.length).toBe(2);
-    expect(source).not.toContain("setNotice({");
+    const outsideInfoCard = source
+      .slice(0, source.indexOf("export function AppInfoCard"))
+      .concat(source.slice(source.indexOf("function HealthBody")));
+    expect(outsideInfoCard).not.toContain("setNotice({");
     // Bugbot fix: a successful load() — foreground or background —
     // clears the page banner, so a recovered reload never leaves a stale
     // "load failed" up. New shape: failure writes 2 + success clear 1, and
@@ -1485,9 +1493,11 @@ describe("section-scoped op feedback", () => {
     // network-level POST failure (postForm throws before an outcome exists)
     // resolves the dedicated save-failed copy so the op's card still reports
     // — no silent failure surface, and a failed save no longer claims the
-    // page couldn't load. Exactly the three transport catches use it.
+    // page couldn't load. The four transport catches use it: the three op
+    // channels plus the identity card's refresh (whose fetch rejects with no
+    // status to key a message from).
     expect(source).toContain('message: t(locale, "common.saveFailed")');
-    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(3);
+    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(4);
     // Page-level reload failures keep the load-failed copy: load()'s two
     // background-failure paths and the draft create's reload-failure return.
     expect(source).toContain('message: t(locale, "common.loadFailed")');
@@ -1672,11 +1682,11 @@ describe("settings header typography", () => {
     // the one PageHeader spelling (heading-24 page title, serving BOTH tabs).
     // The settings tab carries no page heading of its own anymore — asserted
     // on the rendered face, so a second heading or a re-spelled face fails.
-    const shell = withLocation("/dashboard/apps/acme-app", () =>
+    const shell = withLocation("/dashboard/apps/1", () =>
       renderToStaticMarkup(
         createElement(AppDetailView, {
           locale: "en",
-          slug: "acme-app",
+          appId: "1",
           payload: detailPayload(),
           groups: [],
           notice: null,
@@ -1689,7 +1699,7 @@ describe("settings header typography", () => {
     // Exactly one heading, and it is the heading-24 h1 carrying the slug.
     expect(shell.match(/<h1/g)).toHaveLength(1);
     expect(shell).toContain(
-      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">acme-app</h1>',
+      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">Acme</h1>',
     );
     // Rendering alone cannot express OWNERSHIP — a shell inlining the same
     // triple renders byte-identical markup — so the face's single home is
@@ -1778,7 +1788,8 @@ describe("GitHub App identity card", () => {
 
   function meta(overrides: Partial<SettingsAppMeta> = {}): SettingsAppMeta {
     return {
-      slug: "acme",
+      github_slug: "acme",
+      webhook_path: "wh-acme",
       github_app_id: 123456,
       status: "active",
       review_enabled: true,
@@ -1877,7 +1888,7 @@ describe("GitHub App identity card", () => {
     expect(trailing).toContain('href="https://github.com/settings/apps/url-slug-app"');
     const mismatched = html(
       meta({
-        slug: "local-app",
+        github_slug: "local-slug",
         github_name: "Totally Different",
         github_html_url: "https://github.com/apps/url-slug-app",
       }),
@@ -1961,6 +1972,125 @@ describe("GitHub App identity card", () => {
     expect(t("zh_CN", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("在 GitHub 上管理 Acme");
     expect(t("en", "settings.appInfoSynced", { time: "5 minutes ago" })).toBe("Synced 5 minutes ago");
     expect(t("zh_CN", "settings.appInfoSynced", { time: "5 分钟前" })).toBe("同步于 5 分钟前");
+    // D5 force-refresh pair (en/zh parity).
+    expect(t("en", "settings.appInfoRefresh")).toBe("Refresh from GitHub");
+    expect(t("zh_CN", "settings.appInfoRefresh")).toBe("从 GitHub 刷新");
+    expect(t("en", "settings.appInfoRefreshDone")).toBe("Identity refreshed from GitHub.");
+    expect(t("zh_CN", "settings.appInfoRefreshDone")).toBe("已从 GitHub 刷新身份。");
+  });
+
+  describe("identity card force refresh (D5)", () => {
+    const card = (canManage: boolean, onReload?: () => Promise<unknown>): string =>
+      renderToStaticMarkup(
+        createElement(AppInfoCard, {
+          locale: "en",
+          app: meta({ github_name: "Acme Reviewer" }),
+          canManage,
+          onReload,
+        }),
+      );
+
+    test("manager-only: the refresh button renders only on the manager face with a reload path", () => {
+      expect(card(true, async () => true)).toContain(t("en", "settings.appInfoRefresh"));
+      // No reload path → no button (the identity face renders nothing).
+      expect(card(true)).not.toContain(t("en", "settings.appInfoRefresh"));
+      expect(card(false, async () => true)).not.toContain(t("en", "settings.appInfoRefresh"));
+    });
+
+    test("the delivery URL renders on the manager face only, composed from webhook_path", () => {
+      // The webhook repoint needs the absolute URL GitHub posts to; the deploy
+      // doc sends the operator to this card for it, so the card must carry it —
+      // and only for the manager, because a member has no repoint duty and
+      // `webhook_path` is the signed delivery route.
+      const deliveryUrl = (canManage: boolean): string =>
+        withLocation("/dashboard/acme/apps/123456/settings", () => card(canManage), "https://worker.example");
+
+      const manager = deliveryUrl(true);
+      expect(manager).toContain(t("en", "settings.appInfoDeliveryUrl"));
+      expect(manager).toContain("https://worker.example/webhook/wh-acme");
+
+      const member = deliveryUrl(false);
+      expect(member).not.toContain(t("en", "settings.appInfoDeliveryUrl"));
+      expect(member).not.toContain("wh-acme");
+    });
+
+    test("the delivery URL label is dictionary-backed in both locales", () => {
+      expect(t("en", "settings.appInfoDeliveryUrl")).toBe("Webhook URL:");
+      expect(t("zh_CN", "settings.appInfoDeliveryUrl")).toBe("Webhook URL：");
+    });
+
+    test("refresh POSTs refresh-metadata by github_app_id; success reloads, failure resolves the keyed message and never reloads", () => {
+      const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+      const cardBody = source.slice(
+        source.indexOf("export function AppInfoCard"),
+        source.indexOf("function HealthBody"),
+      );
+      expect(cardBody).toContain("${apiBase()}/api/apps/${app.github_app_id}/refresh-metadata");
+      // Manager-only gate + busy guard.
+      expect(cardBody).toContain("canManage && onReload");
+      expect(cardBody).toContain("disabled={refreshing}");
+      // Success: card-local notice + background reload, and the reload sits
+      // AFTER the failure branch's return — a keyed 400 never reloads.
+      const successReload = cardBody.indexOf("await onReload?.()");
+      expect(cardBody).toContain('t(locale, "settings.appInfoRefreshDone")');
+      expect(successReload).toBeGreaterThan(-1);
+      const errorNotice = cardBody.indexOf("message: settingsErrorMessage(locale, body)");
+      expect(errorNotice).toBeGreaterThan(-1);
+      expect(errorNotice).toBeLessThan(successReload);
+      // The failure notice is the keyed settings-error resolver (the card
+      // gains no error channel of its own).
+      expect(cardBody).toContain("settingsErrorMessage(locale, body)");
+    });
+
+    test("a transport failure (fetch rejects) shows the save-failure notice and never reloads", async () => {
+      // Offline / a restarting Worker / DNS: the fetch REJECTS, so there is no
+      // status to resolve a key from. Before the catch this was an unhandled
+      // rejection with zero feedback — the operator saw the button re-enable
+      // and nothing else.
+      const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps/123456/settings");
+      const realFetch = globalThis.fetch;
+      let reloads = 0;
+      globalThis.fetch = (async () => {
+        throw new TypeError("Failed to fetch");
+      }) as unknown as typeof fetch;
+      try {
+        const container = win.document.createElement("div");
+        win.document.body.appendChild(container);
+        const root = createRoot(container as unknown as Element);
+        await act(async () =>
+          root.render(
+            createElement(AppInfoCard, {
+              locale: "en",
+              app: meta({ github_name: "Acme Reviewer" }),
+              canManage: true,
+              onReload: async () => {
+                reloads += 1;
+                return true;
+              },
+            }),
+          ),
+        );
+
+        const button = [...container.querySelectorAll("button")].find(
+          (candidate) => candidate.textContent === t("en", "settings.appInfoRefresh"),
+        );
+        expect(button).toBeDefined();
+        await act(async () => {
+          button?.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+        });
+
+        const alert = container.querySelector('[role="alert"]');
+        expect(alert?.textContent).toBe(t("en", "common.saveFailed"));
+        expect(reloads).toBe(0);
+        // The button recovered (the finally still clears the busy flag).
+        expect((button as unknown as HTMLButtonElement).disabled).toBe(false);
+
+        await act(async () => root.unmount());
+      } finally {
+        globalThis.fetch = realFetch;
+        cleanup();
+      }
+    });
   });
 });
 
@@ -1968,7 +2098,7 @@ describe("GitHub App settings link wiring (AD-623)", () => {
   test("the page threads payload.can_manage into the card; the settings URL derives only through the helper", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Presentation-layer threading only — the payload contract gains nothing.
-    expect(source).toContain("<AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />");
+    expect(source).toContain("<AppInfoCard\n            locale={locale}\n            app={app}\n            canManage={payload.can_manage}\n            onReload={() => onReload({ background: true })}\n          />");
     // The card body routes the manager target through the pure helper (the
     // forbidden derivations — github_name / the local slug — cannot reach the
     // URL through it: it takes the html_url alone).

@@ -32,7 +32,7 @@ import { TrendChart } from "@/components/charts/TrendChart";
  * kept (`parseInsights`, `INSIGHTS_WINDOWS` segments, repo-select
  * helpers) and the shared charts. Closes the kept-helper consumer residual.
  *
- * Data plane: `GET /dashboard/api/apps/:slug/insights/summary`
+ * Data plane: `GET /dashboard/api/apps/:appId/insights/summary`
  * with `include=repos` for the repo Select (QC F-001 semantics unchanged).
  * Filter state is CONTROLLED by the AppDetailPage shell: the shell derives
  * `{ tab, window, repo }` from the location via `parseAppDetailSearch`
@@ -55,12 +55,12 @@ import { TrendChart } from "@/components/charts/TrendChart";
  */
 export function AppInsightsTab({
   locale,
-  slug,
+  appId,
   search,
   onSearch,
 }: {
   locale: SpaBoot["locale"];
-  slug: string;
+  appId: string;
   search: AppDetailSearch;
   /** Shell-owned commit: replaceState + state update (never popstate). */
   onSearch: (next: AppDetailSearch) => void;
@@ -76,7 +76,7 @@ export function AppInsightsTab({
     setState("loading");
     // include=repos: the records Select needs the window-scoped distinct
     // repo set (QC F-001); default summary reads stay cheap.
-    fetchJson(appInsightsSummaryUrl(apiBase(), slug, search.window, search.repo))
+    fetchJson(appInsightsSummaryUrl(apiBase(), appId, search.window, search.repo))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parseInsights(raw);
@@ -93,7 +93,7 @@ export function AppInsightsTab({
     return () => {
       cancelled = true;
     };
-  }, [slug, search.window, search.repo, reloadNonce]);
+  }, [appId, search.window, search.repo, reloadNonce]);
 
   function onWindowChange(next: string): void {
     // Radix fires "" when the active segment is re-clicked — keep the window.
