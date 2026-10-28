@@ -16,10 +16,19 @@
  * Flow: normalizePrivateKey(decryptedPem) → importKey("pkcs8") → RS256-sign
  * `{alg:RS256,typ:JWT}` / `{iat,exp,iss:<githubAppId>}` →
  * GET https://api.github.com/app (Bearer) → extract ONLY the public profile
- * fields the migration-0019 columns cache (name / description / html_url /
- * owner.avatar_url — the URL fields scheme-gated to https: at extraction).
- * Nothing else from the response — not the slug, not
- * permissions/events, nothing secret-shaped — leaves this module.
+ * fields the migration-0019/0036 columns cache (name / description / html_url
+ * / slug + the App's own logo — every URL scheme-gated to https: at
+ * extraction) → GET https://api.github.com/users/{slug}[bot] for the logo.
+ * Nothing else from either response — not permissions/events, nothing
+ * secret-shaped — leaves this module.
+ *
+ * Every GitHub fact here is MUTABLE (an operator renames the App, uploads a
+ * new logo, and the HTML URL follows the slug), so the columns are a cache
+ * refreshed on the 24h TTL, never an identifier. The logo is the App's own,
+ * not its owner's avatar: the REST `integration` schema has no logo field,
+ * and the bot account's `avatar_url` is the one REST source that returns it.
+ * The bot lookup is separately fail-open — a missing logo costs one column,
+ * never the profile.
  *
  * Failure discipline (AD-531): ZERO retries (the caller's 24h TTL bounds
  * the cost to ≤1 fetch per request; ≤1/App/day once a sync succeeds), a
@@ -37,6 +46,12 @@ import { normalizePrivateKey } from "./private-key";
 import type { GithubAppMetadataInput } from "./apps-store";
 
 const GITHUB_APP_API_URL = "https://api.github.com/app";
+/**
+ * Bot-account face — the only REST source of the App's own logo: the
+ * `integration` schema has no logo field, while `GET /users/{slug}[bot]`
+ * returns the App avatar the operator uploads.
+ */
+const GITHUB_USERS_API_URL = "https://api.github.com/users";
 /** Upstream budget (AD-531 lock): 5 seconds, zero retries. */
 const FETCH_TIMEOUT_MS = 5_000;
 /**
@@ -135,11 +150,60 @@ async function mintAppJwt(githubAppId: number, decryptedPem: string): Promise<st
 }
 
 /**
- * The fetch result: `{ ok: true, metadata }` carries exactly the four
- * migration-0019 profile fields — the `saveGithubMetadata` input shape, so
- * the caller persists it verbatim. `{ ok: false }` = any failure (bad key,
- * network/timeout, non-200, unexpected payload); the caller keeps its
- * cached values and responds fail-open.
+ * Derive the App slug from `GET /app`'s `html_url`
+ * (`https://github.com/apps/<slug>`). Fallback for a degraded payload that
+ * omits `slug`; anything else — non-https, a different path shape, multiple
+ * segments after `apps` — yields null, because a guessed slug would become
+ * the bot-mention target.
+ */
+export function githubAppSlugFromHtmlUrl(htmlUrl: string | null | undefined): string | null {
+  if (typeof htmlUrl !== "string" || !htmlUrl.startsWith("https://")) return null;
+  let pathname: string;
+  try {
+    pathname = new URL(htmlUrl).pathname;
+  } catch {
+    return null;
+  }
+  const segments = pathname.split("/").filter((segment) => segment.length > 0);
+  return segments.length === 2 && segments[0] === "apps" ? segments[1]! : null;
+}
+
+/**
+ * The App's own logo (D3): one GET on the bot account, separately fail-open.
+ * Non-2xx, timeout, bad shape or a missing slug all yield null — this leg can
+ * cost the logo column, never the profile the first response established.
+ */
+async function fetchAppAvatarUrl(
+  slug: string | null,
+  headers: Record<string, string>,
+): Promise<string | null> {
+  if (!slug) return null;
+  try {
+    const res = await fetch(`${GITHUB_USERS_API_URL}/${encodeURIComponent(`${slug}[bot]`)}`, {
+      method: "GET",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers,
+    });
+    if (!res.ok) {
+      await res.body?.cancel();
+      return null;
+    }
+    const data = (await res.json().catch(() => null)) as { avatar_url?: unknown } | null;
+    return typeof data?.avatar_url === "string" && data.avatar_url.startsWith("https://")
+      ? data.avatar_url
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The fetch result: `{ ok: true, metadata }` carries exactly the cached
+ * profile fields — the `saveGithubMetadata` input shape, so the caller
+ * persists it verbatim. `{ ok: false }` = any failure of the App request
+ * (bad key, network/timeout, non-200, unexpected payload); the caller keeps
+ * its cached values and responds fail-open. A failed bot lookup is NOT a
+ * failure here — it only nulls `githubAvatarUrl`.
  */
 export type FetchAppMetadataResult =
   | { ok: true; metadata: GithubAppMetadataInput }
@@ -160,15 +224,16 @@ export async function fetchAppMetadata(
 ): Promise<FetchAppMetadataResult> {
   try {
     const jwt = await mintAppJwt(githubAppId, decryptedPem);
+    const headers = {
+      Authorization: `Bearer ${jwt}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "mstar-inspector",
+    };
     const res = await fetch(GITHUB_APP_API_URL, {
       method: "GET",
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      headers: {
-        Authorization: `Bearer ${jwt}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "mstar-inspector",
-      },
+      headers,
     });
     if (!res.ok) {
       // Consume the failed body so the connection is released promptly
@@ -180,7 +245,7 @@ export async function fetchAppMetadata(
       name?: unknown;
       description?: unknown;
       html_url?: unknown;
-      owner?: { avatar_url?: unknown } | null;
+      slug?: unknown;
     } | null;
     // Shape gate: `name` is the identity field — without it the payload is
     // not the GET /app shape (STOP clause: a structural change degrades,
@@ -192,21 +257,24 @@ export async function fetchAppMetadata(
     if (!data || typeof data.name !== "string" || data.name.length === 0) {
       return { ok: false };
     }
+    const githubHtmlUrl =
+      typeof data.html_url === "string" && data.html_url.startsWith("https://")
+        ? data.html_url
+        : null;
+    // `slug` is the authoritative source; html_url derivation covers a
+    // payload that drops it, and the fallback reads the scheme-gated URL only.
+    const slug =
+      typeof data.slug === "string" && data.slug.length > 0
+        ? data.slug
+        : githubAppSlugFromHtmlUrl(githubHtmlUrl);
     return {
       ok: true,
       metadata: {
         githubName: data.name,
         githubDescription: typeof data.description === "string" ? data.description : null,
-        githubHtmlUrl:
-          typeof data.html_url === "string" && data.html_url.startsWith("https://")
-            ? data.html_url
-            : null,
-        githubAvatarUrl:
-          data.owner &&
-          typeof data.owner.avatar_url === "string" &&
-          data.owner.avatar_url.startsWith("https://")
-            ? data.owner.avatar_url
-            : null,
+        githubHtmlUrl,
+        githubAvatarUrl: await fetchAppAvatarUrl(slug, headers),
+        githubSlug: slug,
       },
     };
   } catch {

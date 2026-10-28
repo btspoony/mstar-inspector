@@ -941,6 +941,22 @@ describe("saveGithubMetadata (migrations 0019/0036)", () => {
     expect(row!.github_metadata_synced_at).not.toBeNull();
   });
 
+  test("a null github_slug bind preserves the cached slug (COALESCE — the bot-mention target)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    expect(await s.saveGithubMetadata(app.id, METADATA)).toBe(true);
+
+    // A degraded later fetch (upstream shape change / bot lookup failure)
+    // carries no slug; the cached one is the only mention target, so it stays.
+    expect(
+      await s.saveGithubMetadata(app.id, { ...METADATA, githubName: "Renamed App", githubSlug: null }),
+    ).toBe(true);
+    const row = await s.getAppById(app.id);
+    expect(row!.github_name).toBe("Renamed App"); // other columns still overwrite
+    expect(row!.github_slug).toBe(METADATA.githubSlug);
+  });
+
   test("refuses soft-deleted rows exactly like setAppStatus (false, zero columns written)", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db);

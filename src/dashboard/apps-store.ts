@@ -63,8 +63,9 @@
  *     github_metadata_synced_at):
  *     writes ONLY those six, never updated_at (the touchLastWebhook
  *     machine-trigger precedent — the settings read path's lazy 24h TTL
- *     refresh is the only caller), and refuses soft-deleted rows exactly
- *     like setAppStatus.
+ *     refresh is the only caller), refuses soft-deleted rows exactly
+ *     like setAppStatus, and COALESCE-preserves github_slug so a degraded
+ *     fetch cannot clear the cached bot-mention target.
  *   - listInstallations is the install-health read face for the settings
  *     panel: this App's installations, most recently seen
  *     first.
@@ -659,13 +660,20 @@ export function createAppsStore(db: AppsStoreD1) {
      * precedent: this write is machine-triggered, at most once per App per
      * TTL window). Refuses soft-deleted rows exactly like setAppStatus.
      * Returns whether a row changed (false also covers unknown ids).
+     *
+     * `github_slug` is COALESCE-preserved: a degraded fetch (upstream shape
+     * change, bot lookup failure) writes NULL, and a cached slug is the only
+     * bot-mention target — clearing it would silently disable the trigger, so
+     * a null bind keeps the stored value. Every other column is a display
+     * value and overwrites honestly.
      */
     async saveGithubMetadata(id: string, metadata: GithubAppMetadataInput): Promise<boolean> {
       const res = await db
         .prepare(
           `UPDATE github_apps
            SET github_name = ?, github_description = ?, github_html_url = ?,
-               github_avatar_url = ?, github_slug = ?, github_metadata_synced_at = datetime('now')
+               github_avatar_url = ?, github_slug = COALESCE(?, github_slug),
+               github_metadata_synced_at = datetime('now')
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(
