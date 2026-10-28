@@ -1260,7 +1260,8 @@ dashboardApp.post("/locale", async (c) => {
 // from the request itself; the deployment-level path resolves the sole
 // workspace instead. Then: mint the webhook path (a UUID — the manifest form
 // needs the hook URL before GitHub creates the App, so this identifier cannot
-// derive from anything GitHub owns) and the single-use CSRF state cookie
+// derive from anything GitHub owns) — that same value becomes the row PK at
+// commit, one identity per App — and the single-use CSRF state cookie
 // CARRYING both path and workspace ref (createManifestStateValue — same
 // createStateValue HMAC discipline), and render the zero-JS form POST to
 // https://github.com/settings/apps/new (state rides the form-action query).
@@ -1504,8 +1505,9 @@ type ManifestCommitOutcome =
  * second click) and the POST /manifest/commit recovery route. The decrypted
  * hold payload + the acting session login are passed in; the hold's login
  * binding is re-checked here on EVERY call. Outcomes mirror the route's long-standing
- * semantics: success = ONE github_apps row (secretbox AAD rowKey = the
- * caller-generated row PK, decided BEFORE encryption — review pin);
+ * semantics: success = ONE github_apps row (secretbox AAD rowKey = the row
+ * PK, which IS the start-minted webhook path — ONE identity, not a second
+ * UUID);
  * login_mismatch / slug_conflict / already_connected = non-retryable (the
  * caller burns the hold); db_unbound / encrypt_failed / db_rejected =
  * retryable (the caller keeps the hold so /manifest/confirm can resume).
@@ -1529,17 +1531,21 @@ async function commitManifestApp(args: {
     return { kind: "login_mismatch" };
   }
   if (!db || workspaceId === null) return { kind: "db_unbound" };
-  // Review pin: the row id exists BEFORE encryption so the secretbox AAD
-  // rowKey (github_apps.<column>:<id>) equals the row's primary key.
-  const appId = crypto.randomUUID();
+  // The signed hold's webhook path IS the row PK: the App's identity was
+  // decided at start (the manifest already registered {origin}/webhook/{path}
+  // with GitHub), so a second local UUID would give one App two identities.
+  // AAD rowKey (github_apps.<column>:<id>) therefore binds the webhook path.
   let privateKeyEnc: string;
   let webhookSecretEnc: string;
   try {
     const box = createSecretbox(encryptionKey);
-    privateKeyEnc = await box.encryptSecret(hold.pem, `github_apps.private_key_enc:${appId}`);
+    privateKeyEnc = await box.encryptSecret(
+      hold.pem,
+      `github_apps.private_key_enc:${hold.webhookPath}`,
+    );
     webhookSecretEnc = await box.encryptSecret(
       hold.webhook_secret,
-      `github_apps.webhook_secret_enc:${appId}`,
+      `github_apps.webhook_secret_enc:${hold.webhookPath}`,
     );
   } catch (err) {
     // SecretboxKeyError (missing/malformed DASHBOARD_ENCRYPTION_KEY) and any
@@ -1561,7 +1567,7 @@ async function commitManifestApp(args: {
   const apps = createAppsStore(db);
   try {
     const row = await apps.createApp({
-      id: appId,
+      id: hold.webhookPath,
       webhookPath: hold.webhookPath,
       githubSlug: hold.slug,
       githubAppId: hold.id,

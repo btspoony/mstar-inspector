@@ -86,9 +86,11 @@
  *     persist time — the x-github-event header is attacker-influenced on
  *     the unauthenticated reject path; the DDL has no length constraint.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
- *     convention); createApp ids are caller-supplied UUIDs (the reviews.id
+ *     convention); createApp ids are caller-supplied (the reviews.id
  *     caller-UUID convention — review pin: secretbox AAD rowKey MUST
- *     equal the row PK, so the caller generates the id before encrypting).
+ *     equal the row PK, so the caller decides the id before encrypting).
+ *     The manifest flow reuses its start-minted webhook path as the id, so
+ *     one App has ONE local identity instead of two UUIDs.
  *   - UNIQUE / FK violations throw (fail-loud): duplicate webhook_path,
  *     github_app_id, or (app_id, installation_id) pairs, and unknown app
  *     references are caller-visible errors, never swallowed.
@@ -197,7 +199,8 @@ export type CreateAppInput = {
    * `github_apps.<column>:<id>` BEFORE insert, so the id must exist first —
    * the encrypted columns' AAD rowKey always equals this primary key. Not
    * optional: a store-generated default would make the caller's AAD
-   * unknowable and the row undecryptable.
+   * unknowable and the row undecryptable. The manifest flow passes its
+   * webhook path here, so id === webhookPath for rows it creates.
    */
   id: string;
   /**

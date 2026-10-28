@@ -104,10 +104,11 @@ export function buildAppName(login: string): string {
 // --- webhook path (per-App webhook URL, spec § Multi-App 契约) ---
 
 /**
- * The row's only locally minted identifier. It must exist BEFORE GitHub
- * creates the App (the manifest form needs the hook URL), so it can derive
- * from nothing GitHub owns: a UUID is opaque, URL-safe, and collision-free
- * without a pre-resolve read.
+ * The row's only locally minted identifier — and therefore its primary key:
+ * it must exist BEFORE GitHub creates the App (the manifest form needs the
+ * hook URL), so it can derive from nothing GitHub owns. A UUID is opaque,
+ * URL-safe, and collision-free without a pre-resolve read. The manifest
+ * commit reuses it as `github_apps.id`, so one App keeps ONE identity.
  */
 export function randomWebhookPath(): string {
   return crypto.randomUUID();

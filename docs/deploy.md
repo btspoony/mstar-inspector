@@ -1679,8 +1679,9 @@ and the settings model faces write and read.
    page (App id / name / slug / webhook URL — never the PEM or webhook
    secret). Submit the confirm form (`/dashboard/manifest/commit`): the PEM
    and webhook secret are encrypted with `DASHBOARD_ENCRYPTION_KEY` (AAD
-   rowKey = the row PK) and ONE `github_apps` row is written. Missing key →
-   500 fail-closed, hold kept (fix the env, then resubmit).
+   rowKey = the row PK, which IS the webhook path minted at start) and ONE
+   `github_apps` row is written. Missing key → 500 fail-closed, hold kept
+   (fix the env, then resubmit).
 4. **Confirm the row + delivery health** — the success page shows the slug
    and webhook URL. Verify in D1 (grab the `id` — the R1 pin below needs
    it):
