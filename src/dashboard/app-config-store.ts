@@ -1791,8 +1791,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * the submitted key in that declaration's pool as a verified slot (the
      * declaration flow verifies before saving, so it lands
      * verified_at = now with verified_status 'ok' — or 'reachable' unless the
-     * declared host's models endpoint is KNOWN to reject a bogus key
-     * (customProbeCanRejectKey's allow-list; an unknown host is unproven); a
+     * declared base URL derives a models endpoint KNOWN to reject a bogus key
+     * (customProbeCanRejectKey's allow-list; anything else is unproven); a
      * key already in the pool
      * is updated in place, a NEW one takes the next free slot up to
      * MAX_KEYS_PER_PROVIDER). model_ids is stored as a TEXT JSON array
@@ -1957,9 +1957,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               decl.provider_id,
             );
       const key = keyInsertStatement(CUSTOM_KEY_TABLE, appId, decl.provider_id, keyId, keyEnc, {
-        // Fail-closed on state honesty: only a host KNOWN to reject a bogus
-        // key lets the probe's 2xx claim the key; anything else records the
-        // weaker reachability.
+        // Fail-closed on state honesty: only a models endpoint KNOWN to reject
+        // a bogus key lets the probe's 2xx claim the key; anything else records
+        // the weaker reachability.
         verifiedStatus: customProbeCanRejectKey(decl.base_url) ? "ok" : "reachable",
         newDeclaration: isNew,
         endpoint: { base_url: decl.base_url, api: decl.api },

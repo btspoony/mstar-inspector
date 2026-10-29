@@ -297,34 +297,38 @@ function customModelsUrl(baseUrl: string): string {
 }
 
 /**
- * Hosts whose declared models endpoint REJECTS a bogus key, so a 2xx there
- * proves the submitted key. An ALLOW-list, never a deny-list: a host missing
- * here is unproven, not public, and the caller records the weaker `reachable`
- * state. That default stays true for hosts that only later start answering
- * 2xx without a credential.
+ * Models URLs that REJECT a bogus key, so a 2xx there proves the submitted
+ * key. An ALLOW-list, never a deny-list: a URL missing here is unproven, not
+ * public, and the caller records the weaker `reachable` state. That default
+ * stays true for endpoints that only later start answering 2xx without a
+ * credential.
  *
  * TypeSafe's omp auth rule validates `GET https://api.typesafe.ai/v1/models`
- * — exactly the path customModelsUrl probes — and carries no public-endpoint
- * note, so a bogus key is answered 401/403 there.
+ * and carries no public-endpoint note, so a bogus key is answered 401/403
+ * there. The evidence names ONE PATH, so the entry is the probes' full URL:
+ * a declaration on that host with another path (`/console`), a query or a
+ * fragment derives a different probe URL and stays unproven.
  *
- * shortcut: one host only, so every other custom/template declaration lands
- * `reachable`. Add a host here only with evidence its models endpoint answers
- * 401/403 for a bogus key.
+ * shortcut: one endpoint only, so every other custom/template declaration
+ * lands `reachable`. Add an entry here only with evidence its models URL
+ * answers 401/403 for a bogus key.
  */
-const KEY_REJECTING_MODELS_PROBE_HOSTS: Readonly<Record<string, true>> = { "api.typesafe.ai": true };
+const KEY_REJECTING_MODELS_PROBE_URLS: Readonly<Record<string, true>> = { "https://api.typesafe.ai/v1/models": true };
 
 /** Whether a custom-provider probe on this base URL can REJECT a bogus key. */
 export function customProbeCanRejectKey(baseUrl: string): boolean {
-  let host: string;
+  // Judge the URL the probe will actually request, not the declared host: a
+  // path, query or fragment changes where the key gets sent.
+  let spec: URL;
   try {
-    host = new URL(baseUrl).hostname;
+    spec = new URL(customModelsUrl(baseUrl));
   } catch {
     // Unprovable by default; an unparseable base URL never reaches a probe
-    // anyway — the store refuses it.
+    // anyway — the store refuses it. A fragment-only suffix does not throw,
+    // it just derives a non-matching pathname.
     return false;
   }
-  // Own-key check: a hostname such as "constructor" must not hit a prototype.
-  return Object.hasOwn(KEY_REJECTING_MODELS_PROBE_HOSTS, host);
+  return Object.hasOwn(KEY_REJECTING_MODELS_PROBE_URLS, spec.origin + spec.pathname);
 }
 
 /**

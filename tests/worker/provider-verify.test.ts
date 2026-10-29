@@ -772,6 +772,24 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     expect(customProbeCanRejectKey("not a url")).toBe(false);
   });
 
+  test("the allow-list matches the PROBED URL, not the host: only shapes deriving /v1/models qualify", () => {
+    // Evidence for api.typesafe.ai names GET /v1/models exactly, and
+    // customModelsUrl appends the suffix to whatever the declaration carries.
+    for (const baseUrl of ["https://api.typesafe.ai", "https://api.typesafe.ai/", "https://api.typesafe.ai/v1", "https://API.TYPESAFE.AI/v1"]) {
+      expect(customProbeCanRejectKey(baseUrl)).toBe(true);
+    }
+    // Same host, derived probe elsewhere → unproven.
+    for (const baseUrl of [
+      "https://api.typesafe.ai/console",
+      "https://api.typesafe.ai/#x",
+      "https://api.typesafe.ai/v1?x=1",
+      "https://api.typesafe.ai:8443/v1",
+      "http://api.typesafe.ai",
+    ]) {
+      expect(customProbeCanRejectKey(baseUrl)).toBe(false);
+    }
+  });
+
   test("an unknown host records 'reachable' — a 2xx there cannot prove the key", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "auth-probe-app");

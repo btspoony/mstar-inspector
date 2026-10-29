@@ -1088,6 +1088,30 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     });
   });
 
+  test("a template override on the SAME allow-listed host but an off-path base URL lands 'reachable'", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    // The allow-list evidence names GET /v1/models; this declaration probes
+    // /console/v1/models, so a 2xx there proves only that the endpoint answered.
+    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "typesafe",
+      base_url: "https://api.typesafe.ai/console",
+      key: PLAIN_KEY,
+    });
+    expect(stored.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://api.typesafe.ai/console/v1/models",
+      expect.objectContaining({ method: "GET" }),
+    );
+    const body = await getConfigured(makeEnv(db));
+    expect(body.configured_providers.find((row) => row.kind === "key")).toMatchObject({
+      kind: "key",
+      provider: "typesafe",
+      verified_status: "reachable",
+    });
+  });
+
   test("a non-catalog custom declaration is configured state", async () => {
     const { db } = await seededWorld();
     fetchSpy = mockStatus(200, { data: [] });
