@@ -64,7 +64,6 @@ async function seedApp(db: DashboardD1, slug: string): Promise<GithubAppRow> {
   const box = createSecretbox(TEST_KEY);
   return createAppsStore(db).createApp({
     id,
-    webhookPath: slug,
     githubSlug: slug,
     githubAppId: 1001,
     name: slug,
@@ -95,6 +94,13 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
     "0012_custom_providers_and_key_updated_at.sql",
     // 0026: createApp's atomic app_workspaces mapping.
     "0026_workspaces.sql",
+    // 0038 rebuilds github_apps, so the fixture must carry every column the
+    // rebuild copies.
+    "0018_app_sandbox_images.sql",
+    "0019_github_apps_metadata.sql",
+    "0022_app_trigger_mode.sql",
+    "0037_github_metadata_attempt.sql",
+    "0038_webhook_path_drop.sql",
   ]) {
     applyMigration(db, name);
   }

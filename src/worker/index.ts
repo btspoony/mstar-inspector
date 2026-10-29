@@ -10,7 +10,7 @@
  * - GET/HEAD enumerated SPA pages with Accept text/html → ASSETS index.html
  * - GET /healthz → 200 {"ok":true,"version":"vX.Y.Z"} (version
  *   from the generated src/version.ts, same shape as the smoke-entry face)
- * - POST /webhook/:webhookPath → per-App webhook face (the ONLY HTTP review
+ * - POST /webhook/:workspaceId/:appId → per-App webhook face (the ONLY HTTP review
  *   entry — the legacy bare `/webhook` face is
  *   retired): our webhook path → github_apps row (active, not deleted) → that App's
  *   decrypted webhook secret verifies the signature → classify → enqueue
@@ -149,16 +149,17 @@ app.route("/dashboard", dashboardApp);
  * Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review
  * entry — the legacy bare `/webhook` face is
  * retired). Pre-order: body-size cap (413) → DB-unbound guard (500
- * fail-closed — the dashboard-dependency convention) → `webhook_path`
- * lookup → signature verify → per-App `review_enabled` pause gate. The
- * path locates the `github_apps` row (active, not deleted) whose DECRYPTED
- * webhook secret parameterizes the same `classifyWebhook` classifier
- * (secret-parameterized only — the classifier never sees the App
- * identity); the route handler attaches `appRef: { appId }`
- * after classification, before `REVIEW_QUEUE.send` (lock L3). The path is
- * our own opaque route key (migration 0036) — GitHub's mutable App slug is
- * never part of the URL, so a rename cannot break deliveries.
- * Unknown path / disabled / soft-deleted → 404, zero enqueue. Any webhook
+ * fail-closed — the dashboard-dependency convention) → workspace + app id
+ * lookup → signature verify → per-App `review_enabled` pause gate. The two
+ * URL segments locate the `github_apps` row (active, not deleted) in THAT
+ * workspace, whose DECRYPTED webhook secret parameterizes the same
+ * `classifyWebhook` classifier (secret-parameterized only — the classifier
+ * never sees the App identity); the route handler attaches
+ * `appRef: { appId }` after classification, before `REVIEW_QUEUE.send`
+ * (lock L3). Both segments are immutable internal ids (the workspace's
+ * `workspaces.id` and the App's `github_apps.id`) — GitHub's mutable App
+ * slug is never part of the URL, so a rename cannot break deliveries.
+ * Unknown / mismatched pair / disabled / soft-deleted → 404, zero enqueue. Any webhook
  * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
  * envelope) → 500 fail-closed (lock L1); GitHub retries, nothing enqueues.
  *
@@ -190,7 +191,7 @@ app.route("/dashboard", dashboardApp);
  * never affected). The retired legacy face recorded nothing (AL-20-1:
  * legacy 不落行 — it was the fallback path with no dashboard consumer).
  */
-app.post("/webhook/:webhookPath", async (c) => {
+app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Body-size cap checked BEFORE buffering the body (B6). Two gates: the
   // truthful over-limit header short-circuits before any byte is read, and
   // the streamed read below is byte-authoritative (61-R1) — a missing,
@@ -235,26 +236,28 @@ app.post("/webhook/:webhookPath", async (c) => {
   // zero enqueue).
   const appsStore = createAppsStore(db);
 
-  // Webhook-path lookup: exactly one active, non-deleted App may serve this
-  // route. Unknown / disabled / soft-deleted are all 404 with zero side
-  // effects (the log distinguishes them for the operator; the response does
-  // not).
-  const webhookPath = c.req.param("webhookPath");
-  const row = await appsStore.getAppByWebhookPath(webhookPath);
+  // Workspace + App lookup: the pair must name an App that belongs to that
+  // workspace. Unknown / mismatched / disabled / soft-deleted are all 404 with
+  // zero side effects (the log distinguishes them for the operator; the
+  // response does not).
+  const workspaceId = c.req.param("workspaceId");
+  const appId = c.req.param("appId");
+  const webhookRef = `workspace_id=${workspaceId} app_id=${appId}`;
+  const row = await appsStore.getAppForWebhook(workspaceId, appId);
   if (row === null) {
     webhookWarn(
       "unknown_webhook_path",
-      `webhook_path=${webhookPath}`,
+      webhookRef,
       "per-App webhook rejected with 404 — unknown webhook path",
     );
     return c.text("unknown webhook path", 404);
   }
   if (row.deleted_at !== null) {
-    webhookWarn("app_deleted", `webhook_path=${webhookPath}`, "per-App webhook rejected with 404 — app is soft-deleted");
+    webhookWarn("app_deleted", webhookRef, "per-App webhook rejected with 404 — app is soft-deleted");
     return c.text("unknown webhook path", 404);
   }
   if (row.status !== "active") {
-    webhookWarn("app_disabled", `webhook_path=${webhookPath}`, "per-App webhook rejected with 404 — app is disabled");
+    webhookWarn("app_disabled", webhookRef, "per-App webhook rejected with 404 — app is disabled");
     return c.text("unknown webhook path", 404);
   }
 
@@ -316,7 +319,7 @@ app.post("/webhook/:webhookPath", async (c) => {
   ) {
     webhookWarn(
       "mention_unresolved",
-      `webhook_path=${webhookPath} app_id=${row.id}`,
+      `${webhookRef} row_id=${row.id}`,
       "per-App webhook ignored an issue_comment mention — github_slug is not synced yet; open the App's settings page to sync it",
     );
   }
@@ -378,7 +381,7 @@ app.post("/webhook/:webhookPath", async (c) => {
     // fields; no sampling, no aggregation state.
     webhookInfo(
       "review_paused",
-      `webhook_path=${webhookPath}`,
+      webhookRef,
       "per-App webhook ignored with 2xx — app review paused (zero enqueue)",
     );
     return c.text("ignored", 200);
@@ -390,7 +393,7 @@ app.post("/webhook/:webhookPath", async (c) => {
   if (!(await isFlagEnabled(db, "review_global"))) {
     webhookInfo(
       "review_global_off",
-      `webhook_path=${webhookPath}`,
+      webhookRef,
       "per-App webhook ignored with 2xx — review_global flag off (zero enqueue)",
     );
     return c.text("ignored", 200);

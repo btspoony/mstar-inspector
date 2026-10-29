@@ -834,11 +834,11 @@ describe("createInsightsStore", () => {
       db.raw
         .query(
           `INSERT INTO github_apps
-             (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+             (id, github_app_id, name, private_key_enc, webhook_secret_enc,
               created_by, status, deleted_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+           VALUES (?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
         )
-        .run(id, id, ghId, id);
+        .run(id, ghId, id);
     }
     insertReview(db, {
       id: "r-a",

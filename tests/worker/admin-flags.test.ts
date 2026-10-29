@@ -254,7 +254,9 @@ const PR_PAYLOAD = {
 
 /** An active App row with real secretbox envelopes plus its workspace mapping. */
 async function seedApp(db: TestD1): Promise<void> {
-  const id = crypto.randomUUID();
+  // The row id is the webhook URL's app segment, so the route assertion can
+  // name it.
+  const id = "app-x";
   const box = createSecretbox(ENCRYPTION_KEY);
   const webhookSecretEnc = await box.encryptSecret(
     WEBHOOK_SECRET,
@@ -264,9 +266,9 @@ async function seedApp(db: TestD1): Promise<void> {
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, 'app-x', 'app-x', 4242, 'app-x', ?, ?, 'fixture', 'active', NULL, datetime('now'), datetime('now'))`,
+       VALUES (?, 'app-x', 4242, 'app-x', ?, ?, 'fixture', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, privateKeyEnc, webhookSecretEnc);
   db.raw.prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')").run(id);
@@ -288,7 +290,7 @@ async function postWebhook(env: Env): Promise<Response> {
   const body = JSON.stringify(PR_PAYLOAD);
   const signature = await new Webhooks({ secret: WEBHOOK_SECRET }).sign(body);
   return worker.fetch(
-    new Request("https://worker.local/webhook/app-x", {
+    new Request("https://worker.local/webhook/default/app-x", {
       method: "POST",
       headers: { "x-hub-signature-256": signature, "x-github-event": "pull_request" },
       body,

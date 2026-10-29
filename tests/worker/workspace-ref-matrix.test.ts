@@ -122,12 +122,11 @@ function seedApp(db: TestD1, workspaceId: string): void {
   seed(
     db,
     `INSERT INTO github_apps
-       (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+       (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
+     VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
              'dana', 'active', ?, ?)`,
     `app-${workspaceId}`,
-    slug,
     slug,
     githubAppIdOf(workspaceId),
     slug,

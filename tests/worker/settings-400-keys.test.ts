@@ -33,7 +33,6 @@ async function seededWorld() {
   const box = createSecretbox(TEST_KEY);
   const app = await createAppsStore(db).createApp({
     id,
-    webhookPath: "mallorys-app",
     githubSlug: "mallorys-app",
     githubAppId: APP_ID,
     name: "mallorys-app",

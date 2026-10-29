@@ -47,7 +47,7 @@ const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
   can_manage: true,
   app: {
     github_slug: "acme-app",
-    webhook_path: "wh-acme",
+    id: "app-acme",
     github_app_id: 1,
     status: "active",
     review_enabled: true,
@@ -1789,7 +1789,7 @@ describe("GitHub App identity card", () => {
   function meta(overrides: Partial<SettingsAppMeta> = {}): SettingsAppMeta {
     return {
       github_slug: "acme",
-      webhook_path: "wh-acme",
+      id: "app-acme",
       github_app_id: 123456,
       status: "active",
       review_enabled: true,
@@ -1997,21 +1997,44 @@ describe("GitHub App identity card", () => {
       expect(card(false, async () => true)).not.toContain(t("en", "settings.appInfoRefresh"));
     });
 
-    test("the delivery URL renders on the manager face only, composed from webhook_path", () => {
+    test("the delivery URL renders on the manager face, composed from the workspace id + local App UID", () => {
       // The webhook repoint needs the absolute URL GitHub posts to; the deploy
       // doc sends the operator to this card for it, so the card must carry it —
-      // and only for the manager, because a member has no repoint duty and
-      // `webhook_path` is the signed delivery route.
+      // and only for the manager, because a member has no repoint duty.
       const deliveryUrl = (canManage: boolean): string =>
         withLocation("/dashboard/acme/apps/123456/settings", () => card(canManage), "https://worker.example");
 
       const manager = deliveryUrl(true);
       expect(manager).toContain(t("en", "settings.appInfoDeliveryUrl"));
-      expect(manager).toContain("https://worker.example/webhook/wh-acme");
+      // workspace segment = the addressed workspace (its id), app segment = the
+      // local App UID.
+      expect(manager).toContain("https://worker.example/webhook/acme/app-acme");
 
       const member = deliveryUrl(false);
       expect(member).not.toContain(t("en", "settings.appInfoDeliveryUrl"));
-      expect(member).not.toContain("wh-acme");
+      expect(member).not.toContain("https://worker.example/webhook/");
+    });
+
+    test("both URL segments are readable from the card: GitHub App id and local App UID", () => {
+      const out = withLocation(
+        "/dashboard/acme/apps/123456/settings",
+        () => card(true),
+        "https://worker.example",
+      );
+      expect(out).toContain(t("en", "settings.appInfoAppId", { id: 123456 }));
+      expect(out).toContain(t("en", "settings.appInfoLocalId", { id: "app-acme" }));
+    });
+
+    test("no workspace segment on the path → no delivery URL (never a malformed one)", () => {
+      // The bare (pre-workspace) App route carries no workspace id, so the
+      // card cannot compose the URL and must print nothing rather than
+      // `/webhook//<id>`.
+      const out = withLocation(
+        "/dashboard/apps/123456/settings",
+        () => card(true),
+        "https://worker.example",
+      );
+      expect(out).not.toContain(t("en", "settings.appInfoDeliveryUrl"));
     });
 
     test("the delivery URL label is dictionary-backed in both locales", () => {

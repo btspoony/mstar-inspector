@@ -481,6 +481,9 @@ export const zhCN: Dictionary = {
     appInfo: "GitHub App",
     appInfoCopy: "此 App 在 GitHub 上的身份。资料字段在访问设置页时从该 App 的 GitHub 设置页缓存；点击名称可前往 GitHub 管理。",
     appInfoAppId: "App ID：{id}",
+    // 本地行 id——webhook URL 的第二段，与 GitHub App id 并列显示，
+    // 使 URL 的两段都可直接从卡片读出。
+    appInfoLocalId: "本地 App ID：{id}",
     // 仅管理面：webhook 重指向所需的绝对投递 URL。部署文档让运维来此卡查看。
     appInfoDeliveryUrl: "Webhook URL：",
     appInfoViewOnGithub: "在 GitHub 上查看 {name}",
@@ -543,8 +546,6 @@ export const zhCN: Dictionary = {
       loginMismatch: "此确认属于另一个 GitHub 登录 — 请重新登录并从头开始创建流程。",
       noEncryptionKey:
         "此部署没有有效的 DASHBOARD_ENCRYPTION_KEY 来存储 App 凭据 — 请让运维配置后再提交。",
-      slugConflict:
-        "设置进行期间另一个 App 占用了此 App 的 webhook 路径，因此 GitHub 上已创建 App 但未连接到此部署 — 未写入任何 Worker 数据。Manifest 创建的 App 不能连接两次：请在 GitHub 上删除刚创建的 App，然后从控制台重新开始创建流程。",
       alreadyConnected: "此 GitHub App 已在此部署上连接 — 未做任何更改。",
       dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",

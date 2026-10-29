@@ -110,9 +110,9 @@ function seedApp(db: TestD1, workspaceId: string): void {
   seed(
     db,
     `INSERT INTO github_apps
-       (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+       (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
-     VALUES ('app-acme', 'acme-app', 'acme-app', 4711, 'acme-app', 'v1.primary.aXZpdi5wcmV0ZXh0',
+     VALUES ('app-acme', 'acme-app', 4711, 'acme-app', 'v1.primary.aXZpdi5wcmV0ZXh0',
              'v1.primary.aXZpdi5wcmV0ZXh0', 'dana', 'active', ?, ?)`,
     now,
     now,

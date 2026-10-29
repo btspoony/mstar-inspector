@@ -1,7 +1,7 @@
 /**
  * Per-App webhook routing tests (spec § Multi-App 契约).
  *
- * `POST /webhook/:webhookPath` — the ONLY HTTP review entry
+ * `POST /webhook/:workspaceId/:appId` — the ONLY HTTP review entry
  * (the legacy bare `/webhook` face is retired):
  * body-size cap (413) → webhook-path lookup (active, not deleted) → signature verify →
  * per-App `review_enabled` pause gate. The route attaches `appRef: { appId }`
@@ -61,6 +61,12 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0026_workspaces.sql",
     // 0033: the enqueue decision reads the `review_global` server flag.
     "0033_platform_admin.sql",
+    // 0038 rebuilds github_apps, so the fixture must carry every column the
+    // rebuild copies.
+    "0018_app_sandbox_images.sql",
+    "0019_github_apps_metadata.sql",
+    "0037_github_metadata_attempt.sql",
+    "0038_webhook_path_drop.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -91,18 +97,19 @@ async function seedApp(
   db: ReturnType<typeof createTestD1>,
   opts: SeedOptions,
 ): Promise<{ id: string; slug: string }> {
-  const id = crypto.randomUUID();
+  // The row id is the webhook URL's app segment, so this fixture uses the
+  // slug as the id (one value, two roles — the production shape's identity).
+  const id = opts.slug;
   const box = createSecretbox(TEST_KEY);
   const aad = opts.wrongAad ? `github_apps.webhook_secret_enc:not-this-row` : `github_apps.webhook_secret_enc:${id}`;
   const webhookSecretEnc = await box.encryptSecret(opts.secret, aad);
   const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
   const appCount = (db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number }).n;
   const mode = opts.reviewTriggerMode;
-  // `slug` is BOTH our webhook path and GitHub's own slug here: the route keys
-  // on the path, the bot mention keys on the GitHub slug (D1/D2).
+  // `slug` is GitHub's own slug here (the bot mention target); the webhook
+  // route keys on the row id + workspace instead.
   const baseArgs = [
     id,
-    opts.slug,
     opts.githubSlug === undefined ? opts.slug : opts.githubSlug,
     opts.githubAppId ?? 1000 + appCount,
     opts.slug,
@@ -112,9 +119,9 @@ async function seedApp(
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at${mode !== undefined ? ", review_trigger_mode" : ""})
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now')${mode !== undefined ? ", ?" : ""})`,
+       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now')${mode !== undefined ? ", ?" : ""})`,
     )
     .run(...(mode !== undefined ? [...baseArgs, mode] : [...baseArgs]));
   // Production shape: createApp writes the App and its workspace mapping in
@@ -190,7 +197,7 @@ const PR_PAYLOAD = {
   repository: { name: "test-repo", owner: { login: "test-owner" } },
 };
 
-describe("POST /webhook/:webhookPath (per-App routing)", () => {
+describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   test("valid signature with the App's own secret → 200 accepted, enqueued with appRef {appId}", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
@@ -199,7 +206,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,
@@ -231,13 +238,13 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     // Y's secret against X's slug, and X's secret against Y's slug — both
     // fail verification (each route decrypts only ITS OWN App's secret).
     const resXY = await postWebhook(
-      `/webhook/${appX.slug}`,
+      `/webhook/default/${appX.slug}`,
       body,
       { "x-hub-signature-256": await signatureFor("secret-y", body), "x-github-event": "pull_request" },
       env,
     );
     const resYX = await postWebhook(
-      `/webhook/${appY.slug}`,
+      `/webhook/default/${appY.slug}`,
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,
@@ -261,7 +268,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      `/webhook/${appRow.slug}`,
+      `/webhook/default/${appRow.slug}`,
       body,
       { "x-hub-signature-256": await signatureFor("not-the-secret", body), "x-github-event": "pull_request" },
       env,
@@ -283,7 +290,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/no-such-app",
+      "/webhook/default/no-such-app",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,
@@ -302,7 +309,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,
@@ -321,7 +328,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,
@@ -339,7 +346,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
 
     // Header-only oversized request: rejected before the body is buffered.
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       "",
       { "content-length": String(1_000_001), "x-github-event": "ping" },
       env,
@@ -370,7 +377,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     let res: Response;
     try {
       res = await postWebhook(
-        "/webhook/app-x",
+        "/webhook/default/app-x",
         oversized,
         { "content-length": String(oversized.length), "x-github-event": "ping" },
         env,
@@ -407,7 +414,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     let res: Response;
     try {
       res = await postWebhook(
-        "/webhook/app-x",
+        "/webhook/default/app-x",
         oversized,
         { "content-length": "10", "x-github-event": "ping" },
         env,
@@ -437,7 +444,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     // Two limit/2 chunks + 1 byte: the byte count crosses the cap only on
     // the third chunk — multi-chunk accumulation, a single byte over.
     const half = new Uint8Array(WEBHOOK_BODY_LIMIT / 2).fill(97);
-    const request = new Request("https://worker.local/webhook/app-x", {
+    const request = new Request("https://worker.local/webhook/default/app-x", {
       method: "POST",
       headers: { "x-github-event": "ping" },
       body: new ReadableStream<Uint8Array>({
@@ -487,7 +494,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify({ ...PR_PAYLOAD, pad: "x".repeat(WEBHOOK_BODY_LIMIT - base.length) });
     expect(body.length).toBe(WEBHOOK_BODY_LIMIT);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
@@ -514,7 +521,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     expect(Buffer.byteLength(body)).toBe(WEBHOOK_BODY_LIMIT);
     expect(body.length).toBeLessThan(WEBHOOK_BODY_LIMIT); // the UTF-16 trap is real
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
@@ -529,7 +536,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
@@ -543,7 +550,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, { "x-github-event": "pull_request" }, env);
+    const res = await postWebhook("/webhook/default/app-x", body, { "x-github-event": "pull_request" }, env);
 
     expect(res.status).toBe(401);
     expect(sent).toHaveLength(0);
@@ -557,7 +564,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,
@@ -575,7 +582,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,
@@ -593,7 +600,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,
@@ -618,7 +625,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     });
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
       env,
@@ -646,7 +653,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const prBody = JSON.stringify(PR_PAYLOAD);
 
     const prRes = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       prBody,
       { "x-hub-signature-256": await signatureFor("secret-x", prBody), "x-github-event": "pull_request" },
       env,
@@ -664,7 +671,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
       sender: { type: "User", login: "alice" },
     });
     const mentionRes = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       mentionBody,
       { "x-hub-signature-256": await signatureFor("secret-x", mentionBody), "x-github-event": "issue_comment" },
       env,
@@ -710,7 +717,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     let res: Response;
     try {
       res = await postWebhook(
-        "/webhook/app-x",
+        "/webhook/default/app-x",
         body,
         { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
         env,
@@ -731,7 +738,8 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
       event: "mention_unresolved",
       reason: "mention_unresolved",
     });
-    expect(fields.detail).toContain("webhook_path=app-x");
+    expect(fields.detail).toContain("workspace_id=default");
+    expect(fields.detail).toContain("app_id=app-x");
     expect(fields.detail).toContain("app_id=");
     // The delivery row still records the unchanged vocabulary.
     const deliveries = db.raw
@@ -767,7 +775,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
           ...payload,
         });
         const res = await postWebhook(
-          "/webhook/app-x",
+          "/webhook/default/app-x",
           body,
           { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
           env,
@@ -798,7 +806,7 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     });
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
       env,
@@ -817,8 +825,8 @@ describe("POST /webhook/:webhookPath (per-App routing)", () => {
     const body = JSON.stringify(PR_PAYLOAD);
     const headers = { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" };
 
-    const first = await postWebhook("/webhook/app-x", body, headers, env);
-    const second = await postWebhook("/webhook/app-x", body, headers, env);
+    const first = await postWebhook("/webhook/default/app-x", body, headers, env);
+    const second = await postWebhook("/webhook/default/app-x", body, headers, env);
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
@@ -844,7 +852,7 @@ describe("tenant attribution on the webhook read face", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DASHBOARD_ENCRYPTION_KEY: undefined });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(404);
     expect(await res.text()).toBe("unknown webhook path");
@@ -862,7 +870,7 @@ describe("tenant attribution on the webhook read face", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
@@ -880,7 +888,7 @@ describe("installations upsert wiring", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,
@@ -906,7 +914,7 @@ describe("installations upsert wiring", () => {
 
     const body1 = JSON.stringify(PR_PAYLOAD);
     await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body1,
       { "x-hub-signature-256": await signatureFor("secret-x", body1), "x-github-event": "pull_request" },
       env,
@@ -921,7 +929,7 @@ describe("installations upsert wiring", () => {
     // (and therefore reaches the touch) instead of being KV-skipped.
     const body2 = JSON.stringify({ ...PR_PAYLOAD, number: 43, pull_request: { number: 43, head: { sha: "def456" } } });
     const res2 = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body2,
       { "x-hub-signature-256": await signatureFor("secret-x", body2), "x-github-event": "pull_request" },
       env,
@@ -947,7 +955,7 @@ describe("installations upsert wiring", () => {
 
     const body = JSON.stringify(PR_PAYLOAD);
     const headers = { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" };
-    const first = await postWebhook("/webhook/app-x", body, headers, env);
+    const first = await postWebhook("/webhook/default/app-x", body, headers, env);
     expect(first.status).toBe(200);
     // Backdate + stamp a login: the duplicate delivery must refresh seen_at
     // WITHOUT wiping the stored login (bare touch).
@@ -961,7 +969,7 @@ describe("installations upsert wiring", () => {
     // is still refreshed (spec: upsert on ANY webhook carrying
     // installation_id; a duplicate delivery is still evidence the install
     // is alive).
-    const second = await postWebhook("/webhook/app-x", body, headers, env);
+    const second = await postWebhook("/webhook/default/app-x", body, headers, env);
 
     expect(second.status).toBe(200);
     expect(sent).toHaveLength(1); // the duplicate was KV-skipped, NOT re-enqueued
@@ -999,7 +1007,7 @@ describe("installations upsert wiring", () => {
     let res: Response;
     try {
       res = await postWebhook(
-        "/webhook/app-x",
+        "/webhook/default/app-x",
         body,
         { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
         env,
@@ -1036,7 +1044,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
@@ -1058,7 +1066,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     console.log = info;
     let res: Response;
     try {
-      res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
     } finally {
       console.log = origLog;
     }
@@ -1085,7 +1093,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body, "ping"), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body, "ping"), env);
 
     expect(res.status).toBe(200);
     expect(sent).toHaveLength(0);
@@ -1100,7 +1108,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("wrong-secret", body), "x-github-event": "pull_request" },
       env,
@@ -1122,12 +1130,12 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     const body = JSON.stringify(PR_PAYLOAD);
 
     const resDisabled = await postWebhook(
-      "/webhook/app-disabled",
+      "/webhook/default/app-disabled",
       body,
       await sigHeaders("secret-d", body),
       env,
     );
-    const resDeleted = await postWebhook("/webhook/app-deleted", body, await sigHeaders("secret-r", body), env);
+    const resDeleted = await postWebhook("/webhook/default/app-deleted", body, await sigHeaders("secret-r", body), env);
 
     expect(resDisabled.status).toBe(404);
     expect(resDeleted.status).toBe(404);
@@ -1207,7 +1215,7 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
     // 1. First delivery memoizes the verifier under the row id (secret-v1).
     const firstQueue = makeQueue();
     const firstEnv = makeEnv(db, { REVIEW_QUEUE: firstQueue.queue as never });
-    const first = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-v1", body), firstEnv);
+    const first = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-v1", body), firstEnv);
     expect(first.status).toBe(200);
     expect(firstQueue.sent).toHaveLength(1);
 
@@ -1222,7 +1230,7 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
     // verifier was rebuilt + replaced under the same row-id cacheKey.
     const secondQueue = makeQueue();
     const secondEnv = makeEnv(db, { REVIEW_QUEUE: secondQueue.queue as never });
-    const second = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-v2", body), secondEnv);
+    const second = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-v2", body), secondEnv);
     expect(second.status).toBe(200);
     expect(secondQueue.sent).toHaveLength(1);
 
@@ -1230,7 +1238,7 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
     //    exactly (rotation evicts the old secret's verifier).
     const staleQueue = makeQueue();
     const staleEnv = makeEnv(db, { REVIEW_QUEUE: staleQueue.queue as never });
-    const stale = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-v1", body), staleEnv);
+    const stale = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-v1", body), staleEnv);
     expect(stale.status).toBe(401);
     expect(staleQueue.sent).toHaveLength(0);
   });

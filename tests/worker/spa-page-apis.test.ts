@@ -64,6 +64,11 @@ function createDb(): ReturnType<typeof createTestD1> {
     "0033_platform_admin.sql",
     // 0036: github_apps.slug → webhook_path plus the cached github_slug.
     "0036_app_identity.sql",
+    // 0038 rebuilds github_apps, so the fixture must carry every column the
+    // rebuild copies (0018/0019 already applied above).
+    "0022_app_trigger_mode.sql",
+    "0037_github_metadata_attempt.sql",
+    "0038_webhook_path_drop.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -80,11 +85,11 @@ async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
   seedMembership(db, "default", "octocat", "owner");
   seedMembership(db, "default", "mallory", "member");
   seedMembership(db, "default", "hubot", "member");
-  const id = crypto.randomUUID();
+  // A stable local App UID so the payload assertion can name it.
+  const id = "app-mallory";
   const enc = await encryptedColumns(id);
   await createAppsStore(db).createApp({
     id,
-    webhookPath: "mstar-inspector-mallory",
     githubSlug: "mstar-inspector-mallory",
     githubAppId: 1001,
     name: "mstar-inspector-mallory",
@@ -178,7 +183,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       app: {
         github_app_id: number;
         github_slug: string | null;
-        webhook_path: string;
+        id: string;
         review_enabled: boolean;
         created_by: string;
         sandbox_image_id: string;
@@ -190,7 +195,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     };
     expect(body.app.github_app_id).toBe(1001);
     expect(body.app.github_slug).toBe("mstar-inspector-mallory");
-    expect(body.app.webhook_path).toBe("mstar-inspector-mallory");
+    expect(body.app.id).toBe("app-mallory");
     expect(body.app.review_enabled).toBe(true);
     expect(body.can_manage).toBe(true);
     // clean cutover: the old `providers` catalog dump is gone; the
@@ -252,9 +257,9 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       "github_metadata_synced_at",
       "github_name",
       "github_slug",
+      "id",
       "review_enabled",
       "status",
-      "webhook_path",
     ]);
     expect(typeof otherBody.app.created_at).toBe("string");
     // health/ops fields moved behind the manager branch; the settings

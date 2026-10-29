@@ -22,8 +22,8 @@ export type Env = {
   ASSETS?: Fetcher;
   /**
    * D1 binding: the per-App webhook face (`POST
-   * /webhook/:webhookPath`) resolves the `github_apps` row by its
-   * `webhook_path` and touches `app_installations` through
+   * /webhook/:workspaceId/:appId`) resolves the `github_apps` row by that
+   * pair and touches `app_installations` through
    * src/dashboard/apps-store.ts (lock L1 leaf);
    * the dashboard reads it through its own optional local face, and the 06
    * queue face declares the same binding as the REQUIRED `PipelineEnv.DB`.

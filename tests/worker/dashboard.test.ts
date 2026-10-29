@@ -110,10 +110,16 @@ function parseManifestField(body: string): Record<string, unknown> {
   ) as Record<string, unknown>;
 }
 
-/** The webhook path the manifest registered, read off its hook URL. */
-function webhookPathOf(manifest: Record<string, unknown>): string {
+/** The two ids the manifest registered, read off its hook URL. */
+function hookSegmentsOf(manifest: Record<string, unknown>): { workspaceId: string; appId: string } {
   const url = (manifest.hook_attributes as { url: string }).url;
-  return url.slice("https://worker.local/webhook/".length);
+  const [workspaceId = "", appId = ""] = url.slice("https://worker.local/webhook/".length).split("/");
+  return { workspaceId, appId };
+}
+
+/** The App id the manifest registered (the hook URL's second segment). */
+function appIdOf(manifest: Record<string, unknown>): string {
+  return hookSegmentsOf(manifest).appId;
 }
 
 function baseEnv(overrides: Partial<Env> = {}): Env {
@@ -1035,7 +1041,7 @@ describe("manifest hold cookie (manifest.ts)", () => {
     expect(payload).toEqual({
       ...CONVERSION,
       login: "octocat",
-      webhookPath: WEBHOOK_PATH,
+      appId: WEBHOOK_PATH,
       workspaceId: "default",
       exp: expect.any(Number),
     });
@@ -1231,7 +1237,7 @@ describe("/dashboard manifest routes", () => {
       state,
       stateCookie,
       manifest,
-      startWebhookPath: webhookPathOf(manifest),
+      startAppId: appIdOf(manifest),
     };
   }
 
@@ -1269,16 +1275,17 @@ describe("/dashboard manifest routes", () => {
     expect(body).toContain('method="post"');
     expect(body).toContain(`action="https://github.com/settings/apps/new?state=${state}"`);
     // Locked manifest content (spec § Manifest 内容); B5: the webhook URL is
-    // the App's OWN route /webhook/{webhookPath}, where the path is a random
-    // UUID because it must exist before GitHub names the App.
+    // the App's OWN route /webhook/{workspaceId}/{appId}, where the app id is
+    // a random UUID because it must exist before GitHub names the App.
     expect(manifest.name).toBe("mstar-inspector-octocat");
     expect(manifest.url).toBe("https://worker.local");
     expect(manifest.hook_attributes).toEqual({
-      url: `https://worker.local/webhook/${webhookPathOf(manifest)}`,
+      url: `https://worker.local/webhook/default/${appIdOf(manifest)}`,
     });
-    expect(webhookPathOf(manifest)).toMatch(UUID_SHAPE);
+    expect(hookSegmentsOf(manifest).workspaceId).toBe("default");
+    expect(appIdOf(manifest)).toMatch(UUID_SHAPE);
     // No derivation from the login: the defect this task removes.
-    expect(webhookPathOf(manifest)).not.toContain("octocat");
+    expect(appIdOf(manifest)).not.toContain("octocat");
     expect(manifest.redirect_url).toBe("https://worker.local/dashboard/manifest/callback");
     expect(manifest.public).toBe(false);
     expect(manifest.default_events).toEqual(["pull_request", "issue_comment"]);
@@ -1323,12 +1330,13 @@ describe("/dashboard manifest routes", () => {
     // The start copy names the App GitHub will actually register — never the
     // untruncated name that GitHub would reject.
     expect(body).toContain(`<strong>${name}</strong>`);
-    // B5: the webhook path is a random UUID, independent of the (capped) App
-    // name and of the login.
-    expect(webhookPathOf(manifest)).toMatch(UUID_SHAPE);
+    // B5: the app id is a random UUID, independent of the (capped) App name
+    // and of the login.
+    expect(appIdOf(manifest)).toMatch(UUID_SHAPE);
     expect(manifest.hook_attributes).toEqual({
-      url: `https://worker.local/webhook/${webhookPathOf(manifest)}`,
+      url: `https://worker.local/webhook/default/${appIdOf(manifest)}`,
     });
+    expect(hookSegmentsOf(manifest).workspaceId).toBe("default");
   });
 
   test("callback without a session → 302 to login (IA routing table)", async () => {
@@ -1417,7 +1425,7 @@ describe("/dashboard manifest routes", () => {
     // The callback now runs the commit itself (AC4b — no second click), so
     // it needs the commit-shaped env: encryption key + D1.
     const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
-    const { session, state, startWebhookPath } = await startManifest();
+    const { session, state, startAppId } = await startManifest();
     const calls: string[] = [];
     let seenHeaders: Record<string, string> = {};
     globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
@@ -1453,20 +1461,18 @@ describe("/dashboard manifest routes", () => {
     ).toBe(true);
     expect(cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`) && !c.includes("Max-Age=0"))).toBe(false);
     // Exactly one encrypted github_apps row: the row PK IS the state-carried
-    // webhook path (one identity, no second UUID), and GitHub's own slug as
-    // captured at conversion.
+    // app id the manifest URL names (one identity, no second UUID), and
+    // GitHub's own slug as captured at conversion.
     const rows = dbOf(env).raw.query(
-      "SELECT id, webhook_path, github_slug, github_app_id, created_by FROM github_apps",
+      "SELECT id, github_slug, github_app_id, created_by FROM github_apps",
     ).all() as Array<{
       id: string;
-      webhook_path: string;
       github_slug: string | null;
       github_app_id: number;
       created_by: string;
     }>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.id).toBe(startWebhookPath);
-    expect(rows[0]!.webhook_path).toBe(startWebhookPath);
+    expect(rows[0]!.id).toBe(startAppId);
     expect(rows[0]!.github_slug).toBe(CONVERSION.slug);
     expect(rows[0]!.github_app_id).toBe(CONVERSION.id);
     expect(rows[0]!.created_by).toBe("octocat");
@@ -1486,7 +1492,7 @@ describe("/dashboard manifest routes", () => {
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(body).toContain(CONVERSION.name);
     expect(body).toContain(`Slug: ${CONVERSION.slug}`);
-    expect(body).toContain(`https://worker.local/webhook/${startWebhookPath}`);
+    expect(body).toContain(`https://worker.local/webhook/default/${startAppId}`);
     expect(body).toContain(`href="/dashboard/default/apps/${CONVERSION.id}/settings"`);
     expect(body).toContain(">Open Settings</a>");
     expect(body).not.toContain("BEGIN");
@@ -1503,7 +1509,6 @@ describe("/dashboard manifest routes", () => {
     // The same GitHub App is already connected on this deployment.
     await envDb(env).createApp({
       id: crypto.randomUUID(),
-      webhookPath: "earlier-webhook-path",
       githubSlug: "mstar-inspector-earlier",
       githubAppId: CONVERSION.id,
       name: "earlier",
@@ -1532,38 +1537,6 @@ describe("/dashboard manifest routes", () => {
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.stage).toBe("commit");
     expect(entry.reason).toBe("github_app_id_conflict");
-  });
-
-  test("callback auto-commit webhook-path race → 409 error page, hold burned, zero rows for the held App", async () => {
-    const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
-    // The start mints the path the manifest registers with GitHub; the racer
-    // claims that same path before the commit lands.
-    const { session, state, startWebhookPath } = await startManifest();
-    await envDb(env).createApp({
-      id: crypto.randomUUID(),
-      webhookPath: startWebhookPath,
-      githubSlug: "someone-elses-app",
-      githubAppId: 999,
-      name: "raced",
-      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
-      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
-      createdBy: "someone-else",
-      workspaceId: "default",
-    });
-    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
-    const res = await worker.fetch(
-      callbackRequest(session, state, `code=manifest-code&state=${state}`),
-      env,
-    );
-    expect(res.status).toBe(409);
-    expect(
-      res.headers.getSetCookie().some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
-    ).toBe(true);
-    const rows = dbOf(env).raw.query("SELECT webhook_path FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ webhook_path: string }>;
-    expect(rows).toHaveLength(0);
-    const body = await res.text();
-    expect(body).toContain("not connected");
-    expect(body).not.toContain("BEGIN");
   });
 
   test("callback retryable 500 (missing encryption key) → resumable page, hold cookie parked, confirm gate reachable", async () => {
@@ -1787,7 +1760,7 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(body).toContain(CONVERSION.name);
     expect(body).toContain(`Slug <strong>${CONVERSION.slug}</strong>`);
-    expect(body).toContain(`https://worker.local/webhook/${WEBHOOK_PATH}`);
+    expect(body).toContain(`https://worker.local/webhook/default/${WEBHOOK_PATH}`);
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
@@ -2077,7 +2050,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const stateCookie =
       start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
     const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
-    const startWebhookPath = webhookPathOf(parseManifestField(await start.text()));
+    const startAppId = appIdOf(parseManifestField(await start.text()));
     // 2. callback: conversion + the write happen in THIS request — the exact
     // one upstream call of the whole flow.
     const callback = await worker.fetch(
@@ -2101,7 +2074,6 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const db = dbOf(env);
     const rows = db.raw.query("SELECT * FROM github_apps").all() as Array<{
       id: string;
-      webhook_path: string;
       github_slug: string | null;
       github_app_id: number;
       name: string;
@@ -2113,10 +2085,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     }>;
     expect(rows).toHaveLength(1);
     const row = rows[0]!;
-    // ONE identity per App: the row PK IS the webhook path the manifest
-    // registered — not a second local UUID.
-    expect(row.id).toBe(startWebhookPath);
-    expect(row.webhook_path).toBe(startWebhookPath);
+    // ONE identity per App: the row PK IS the app id the manifest registered —
+    // not a second local UUID.
+    expect(row.id).toBe(startAppId);
     expect(row.github_slug).toBe(CONVERSION.slug);
     expect(row.github_app_id).toBe(CONVERSION.id);
     expect(row.name).toBe(CONVERSION.name);
@@ -2150,7 +2121,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(landing.status).toBe(200);
     const html = await landing.text();
     expect(html).toContain(`Slug: ${CONVERSION.slug}`);
-    expect(html).toContain(`https://worker.local/webhook/${startWebhookPath}`);
+    expect(html).toContain(`https://worker.local/webhook/default/${startAppId}`);
     expect(html).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(html).not.toContain("BEGIN");
     expect(html).not.toContain(FAKE_PEM);
@@ -2200,12 +2171,12 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(committed.status).toBe(302);
     expect(committed.headers.get("Location")).toBe(`/dashboard/default/apps/${CONVERSION.id}/onboarding`);
     expectHoldExpired(committed);
-    const rows = dbOf(brokeEnv).raw.query("SELECT webhook_path FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ webhook_path: string }>;
+    const rows = dbOf(brokeEnv).raw.query("SELECT id FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ id: string }>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.webhook_path).toBe(WEBHOOK_PATH);
-    // 3. Replaying the same hold after success is a 409 conflict against one of
-    // the two REAL identity constraints (`webhook_path` or `github_app_id`):
-    // zero NEW rows, matching the long-standing conflict semantics — never a
+    expect(rows[0]!.id).toBe(WEBHOOK_PATH);
+    // 3. Replaying the same hold after success is a 409 conflict against the
+    // REAL identity (`github_app_id`, plus the row PK the hold pins): zero NEW
+    // rows, matching the long-standing conflict semantics — never a
     // double-write. The cached `github_slug` is unindexed, so it can never be
     // the reason.
     const replay = await doCommit({ env: { ...env, DB: dbOf(brokeEnv) } as unknown as Env, holdValue });
@@ -2213,11 +2184,11 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(appRowCount({ ...env, DB: dbOf(brokeEnv) } as unknown as Env)).toBe(1);
   });
 
-  test("two starts mint distinct random webhook paths and each commit lands on the path its manifest registered", async () => {
+  test("two starts mint distinct app ids and each commit lands on the id its manifest registered", async () => {
     const env = commitEnv();
     const db = dbOf(env);
-    // No namespace to pre-resolve any more: two Apps from the SAME login get
-    // two independent UUID paths, and neither derives from the login.
+    // No namespace to pre-resolve: two Apps from the SAME login get two
+    // independent UUIDs, and neither derives from the login.
     const startFlow = async () => {
       const session = await createSessionValue("octocat", null, SESSION_SECRET);
       const res = await worker.fetch(
@@ -2232,14 +2203,14 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       return {
         session,
         state: (cookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1),
-        startWebhookPath: webhookPathOf(parseManifestField(await res.text())),
+        startAppId: appIdOf(parseManifestField(await res.text())),
       };
     };
     const first = await startFlow();
     const second = await startFlow();
-    expect(first.startWebhookPath).not.toBe(second.startWebhookPath);
-    expect(first.startWebhookPath).toMatch(UUID_SHAPE);
-    const startUrl = `https://worker.local/webhook/${first.startWebhookPath}`;
+    expect(first.startAppId).not.toBe(second.startAppId);
+    expect(first.startAppId).toMatch(UUID_SHAPE);
+    const startUrl = `https://worker.local/webhook/default/${first.startAppId}`;
     stubGitHubConversionOnly();
     const callback = await worker.fetch(
       dashboardRequest(
@@ -2251,21 +2222,19 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(callback.status).toBe(302);
     expect(callback.headers.get("Location")).toBe(`/dashboard/default/apps/${CONVERSION.id}/onboarding`);
     const rows = db.raw.query(
-      "SELECT id, webhook_path, github_slug, github_app_id FROM github_apps WHERE github_app_id = ?",
+      "SELECT id, github_slug, github_app_id FROM github_apps WHERE github_app_id = ?",
     ).all(CONVERSION.id) as Array<{
       id: string;
-      webhook_path: string;
       github_slug: string | null;
       github_app_id: number;
     }>;
     expect(rows).toHaveLength(1);
-    // The row PK IS the webhook path (one identity per App), and the
-    // committed path equals the URL the manifest registered with GitHub —
-    // a second start would mint a DIFFERENT row id (asserted above on the
-    // two manifests), so re-running the flow never collapses onto one row.
-    expect(rows[0]!.id).toBe(first.startWebhookPath);
-    expect(rows[0]!.webhook_path).toBe(first.startWebhookPath);
-    expect(`https://worker.local/webhook/${rows[0]!.webhook_path}`).toBe(startUrl);
+    // The row PK IS the app id the manifest registered (one identity per App),
+    // and its workspace segment is the target workspace — a second start mints
+    // a DIFFERENT row id (asserted above on the two manifests), so re-running
+    // the flow never collapses onto one row.
+    expect(rows[0]!.id).toBe(first.startAppId);
+    expect(`https://worker.local/webhook/default/${rows[0]!.id}`).toBe(startUrl);
     expect(rows[0]!.github_slug).toBe(CONVERSION.slug);
     // The landing page shows the GitHub slug and the webhook URL the operator
     // must see, and link addresses the App id.
@@ -2282,7 +2251,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expect(html).toContain(startUrl);
     expect(html).toContain(`href="/dashboard/default/apps/${CONVERSION.id}/settings"`);
     // …and re-running the whole flow lands a SECOND App row with its OWN
-    // identity: distinct id === distinct webhook path, never one row twice.
+    // identity, never one row twice.
     stubGitHubConversionOnly({ ...CONVERSION, id: CONVERSION.id + 1, name: `${CONVERSION.name}-2` });
     const secondCallback = await worker.fetch(
       dashboardRequest(
@@ -2293,71 +2262,22 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     );
     expect(secondCallback.status).toBe(302);
     const all = db.raw.query(
-      "SELECT id, webhook_path, github_app_id FROM github_apps ORDER BY github_app_id",
-    ).all() as Array<{ id: string; webhook_path: string; github_app_id: number }>;
-    expect(all.map((r) => [r.github_app_id, r.id, r.webhook_path])).toEqual([
-      [CONVERSION.id, first.startWebhookPath, first.startWebhookPath],
-      [CONVERSION.id + 1, second.startWebhookPath, second.startWebhookPath],
+      "SELECT id, github_app_id FROM github_apps ORDER BY github_app_id",
+    ).all() as Array<{ id: string; github_app_id: number }>;
+    expect(all.map((r) => [r.github_app_id, r.id])).toEqual([
+      [CONVERSION.id, first.startAppId],
+      [CONVERSION.id + 1, second.startAppId],
     ]);
-  });
-
-  test("commit-time webhook-path race (row appeared after start) → 409, hold burned, zero rows (never remap: the manifest registered the webhook URL)", async () => {
-    const rec = stubFetchRecording();
-    const env = commitEnv();
-    const db = dbOf(env);
-    // The hold carries the path the manifest registered with GitHub…
-    const holdValue = await createHoldValue(
-      CONVERSION,
-      "octocat",
-      SESSION_SECRET,
-      WEBHOOK_PATH,
-      "default",
-    );
-    // …but that path got taken before the commit landed (the race).
-    await envDb(env).createApp({
-      id: crypto.randomUUID(),
-      webhookPath: WEBHOOK_PATH,
-      githubSlug: "someone-elses-app",
-      githubAppId: 999,
-      name: "raced",
-      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
-      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
-      createdBy: "someone-else",
-      workspaceId: "default",
-    });
-    const warns = spyOnWarn();
-    const res = await doCommit({ env, holdValue });
-    expect(res.status).toBe(409);
-    expectHoldExpired(res); // the hold can never commit correctly — burned
-    // Zero rows written for the held App, and the only row in the table is
-    // the racer's pre-existing one.
-    const rows = db.raw.query("SELECT webhook_path FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ webhook_path: string }>;
-    expect(rows).toHaveLength(0);
-    expect(appRowCount(env)).toBe(1);
-    // No remap, no upstream rescue (no webhook PATCH path) — zero fetch.
-    expect(rec.urls).toHaveLength(0);
-    // Copy: the App was created on GitHub but NOT connected + how to recover.
-    const html = await res.text();
-    expect(html).toContain("not connected");
-    expect(html).toContain("delete the just-created App on GitHub");
-    expect(html).not.toContain("BEGIN");
-    expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
-    // Structured log names the reason for operators.
-    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
-    expect(entry.event).toBe("dashboard_manifest");
-    expect(entry.stage).toBe("commit");
-    expect(entry.reason).toBe("webhook_path_conflict");
   });
 
   test("an unrelated App's stale github_slug cache never blocks this commit (the cache is not an identity)", async () => {
     const env = commitEnv();
     // Another App already connected, holding the SAME cached GitHub slug this
     // conversion reports — GitHub freed and reused it upstream. Only
-    // `webhook_path` and `github_app_id` are identity, so the commit must land
+    // `github_app_id` is the identity, so the commit must land
     // and keep the hold's PEM/webhook secret.
     await envDb(env).createApp({
       id: crypto.randomUUID(),
-      webhookPath: "earlier-webhook-path",
       githubSlug: CONVERSION.slug,
       githubAppId: 999,
       name: "earlier",
@@ -2377,7 +2297,6 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     const env = commitEnv();
     await envDb(env).createApp({
       id: crypto.randomUUID(),
-      webhookPath: "earlier-webhook-path",
       githubSlug: "mstar-inspector-earlier",
       githubAppId: CONVERSION.id,
       name: "earlier",
@@ -2644,8 +2563,16 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0031_plans_usage.sql",
   // 0033: the OAuth callback and workspace creation read their server flag.
   "0033_platform_admin.sql",
-  // 0036: github_apps.slug → webhook_path plus the cached github_slug.
+  // 0036: github_apps.slug → github_slug cache.
   "0036_app_identity.sql",
+  // 0038 rebuilds github_apps from the columns the intervening migrations add,
+  // so the dashboard world must carry them before it.
+  "0008_github_apps_ops.sql",
+  "0018_app_sandbox_images.sql",
+  "0019_github_apps_metadata.sql",
+  "0022_app_trigger_mode.sql",
+  "0037_github_metadata_attempt.sql",
+  "0038_webhook_path_drop.sql",
 ] as const;
 
 function createDashboardTestD1(
@@ -2816,10 +2743,9 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     globalThis.fetch = origFetch;
   });
 
-  function seedApp(env: Env, overrides: Partial<{ webhookPath: string; githubSlug: string | null; githubAppId: number; name: string; createdBy: string; deletedAt: string | null }> = {}) {
+  function seedApp(env: Env, overrides: Partial<{ githubSlug: string | null; githubAppId: number; name: string; createdBy: string; deletedAt: string | null }> = {}) {
     return envDb(env).createApp({
       id: crypto.randomUUID(),
-      webhookPath: overrides.webhookPath ?? WEBHOOK_PATH,
       githubSlug: overrides.githubSlug === undefined ? CONVERSION.slug : overrides.githubSlug,
       githubAppId: overrides.githubAppId ?? CONVERSION.id,
       name: overrides.name ?? CONVERSION.name,
@@ -2880,15 +2806,15 @@ describe("GET /dashboard/<ref>/apps/:appId/onboarding (AC4b)", () => {
     // 2026-10, removed the creator-or-deployment-admin rule from the
     // null-scope face).
     const env = makeEnv();
-    await seedApp(env, { createdBy: "octocat-with-a-long-login" });
+    const app = await seedApp(env, { createdBy: "octocat-with-a-long-login" });
     const res = await worker.fetch(await onboardingRequest(CONVERSION.id, "octocat-with-a-long-login"), env);
     expect(res.status).toBe(200);
     const body = await res.text();
     // The displayed slug and the Settings link are GitHub-identity/app-id
-    // facts; the webhook URL is the local route key.
+    // facts; the webhook URL is workspace id + the local App UID.
     expect(body).toContain(`Slug: ${CONVERSION.slug}`);
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
-    expect(body).toContain(`https://worker.local/webhook/${WEBHOOK_PATH}`);
+    expect(body).toContain(`https://worker.local/webhook/default/${app.id}`);
     expect(body).toContain(`href="/dashboard/default/apps/${CONVERSION.id}/settings"`);
     expect(body).toContain(">Open Settings</a>");
     expect(body).toContain("Next: open Settings and configure a provider");
@@ -3143,7 +3069,6 @@ describe("dashboard users store (users.ts)", () => {
     applyMigrationFile(db.raw, "0011_webhook_deliveries.sql"); // the list's health face
     await envDb(env).createApp({
       id: crypto.randomUUID(),
-      webhookPath: WEBHOOK_PATH,
       githubSlug: CONVERSION.slug,
       githubAppId: CONVERSION.id,
       name: CONVERSION.name,

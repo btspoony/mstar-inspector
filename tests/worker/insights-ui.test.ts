@@ -109,7 +109,6 @@ async function insightsWorld(): Promise<{
   const box = createSecretbox(API_TEST_KEY);
   await createAppsStore(db).createApp({
     id: appId,
-    webhookPath: "widgets-app",
     githubSlug: "widgets-app",
     githubAppId: WIDGETS_APP_ID,
     name: "widgets-app",
@@ -120,7 +119,6 @@ async function insightsWorld(): Promise<{
   });
   await createAppsStore(db).createApp({
     id: otherAppId,
-    webhookPath: "other-app",
     githubSlug: "other-app",
     githubAppId: OTHER_APP_ID,
     name: "other-app",

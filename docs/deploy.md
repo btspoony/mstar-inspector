@@ -1085,10 +1085,36 @@ apply last of all, and their rollback needs the pre-apply snapshot
 (§ Rollback).
 Note: migration 0006's `app_model_config` comment ("NULL / absent row = unset → falls back to the global OMP_REVIEW_MODEL") is superseded by AL-24-5 — chain-less Apps fail closed, no global chain since v0.9.
 
+#### Upgrade step after `0038_webhook_path_drop` (every deployed App, REQUIRED)
+
+`0038` rebuilds `github_apps` without the local route key `webhook_path`:
+the per-App webhook URL is now keyed by **two immutable ids**,
+`{origin}/webhook/{workspace_id}/{app_id}` (`workspaces.id` and the App's own
+`github_apps.id`). The old single-segment `/webhook/<uuid>` route is retired
+with **no compatibility path** — GitHub keeps delivering to it and gets a
+404 until the URL is repointed.
+
+1. Deploy (the Deploy workflow applies `0038` before the Worker ships). The
+   migration is a table rebuild (SQLite cannot drop a `UNIQUE` column): it
+   runs inside the migration transaction on a small table, so expect a brief
+   write lock on `github_apps` during the apply and no data loss — every row
+   survives. Nothing is backfilled: the two URL segments already exist in the
+   database.
+2. For each live App, open its settings card
+   (`/dashboard/{workspace_id}/apps/{github_app_id}/settings`). The card shows
+   **both segments** — the GitHub App id, the **Local App ID**, and the exact
+   **Webhook URL** — copy that URL.
+3. In the GitHub App settings → **Webhook**, replace **Webhook URL** with the
+   copied `https://<worker-host>/webhook/<workspace_id>/<app_id>` and save.
+   Until this is done the App receives no events (its GitHub deliveries 404).
+4. Verify with the R2 checklist (§ 3) — the health column should show a fresh
+   `ok`/`ignored` row within a minute of the next push.
+
 #### Upgrade step after `0036_app_identity` (every deployed App)
 
-`0036` renames `github_apps.slug` to `webhook_path` (values kept, so every
-existing webhook URL keeps working) and adds a nullable cached `github_slug`,
+`0036` renames `github_apps.slug` to `webhook_path` (superseded by `0038`,
+which drops that column and re-keys the URL by workspace + app id — see the
+`0038` step above) and adds a nullable cached `github_slug`,
 which is the bot-mention target (`@<github_slug>[bot]`). It has **no
 backfill** — the GitHub-side slug is only knowable from GitHub. So right
 after the deploy, every App that predates this change answers to **no
@@ -1105,7 +1131,7 @@ mention at all** until its metadata is synced once:
    they will **not** review at all. Every other mode keeps working through
    its `pull_request` trigger in the meantime.
 3. Watch for the structured `mention_unresolved` warn (it carries
-   `webhook_path=` and `app_id=`) while an App is still unsynced: it means a
+   `workspace_id=` and `app_id=`) while an App is still unsynced: it means a
    comment mentioned a login, but that App's `github_slug` is NULL, so the
    delivery was ignored. The delivery row still reads `ignored` — the warn is
    the only signal. Read it from the Worker's live log with
@@ -1255,11 +1281,11 @@ nothing at the deployment level can stop them for you:
 ```bash
 # staging (default environment)
 wrangler d1 execute mstar-inspector-db --remote --command \
-  "SELECT webhook_path, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"
+  "SELECT id, github_app_id, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"
 
 # production
 wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
-  "SELECT webhook_path, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"
+  "SELECT id, github_app_id, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"
 ```
 
 Every row reading `review_enabled = 1` is an App that will review on the next
@@ -1694,9 +1720,9 @@ and the settings model faces write and read.
    workspace Members page, and the last owner cannot be removed or demoted.
 2. **Create GitHub App** — on the dashboard workbench (`/dashboard`, the
    Apps-first home) click **Create GitHub App**. The dashboard mints the App's
-   webhook path (`crypto.randomUUID()`, no DB lookup) and POSTs the App
-   manifest to `https://github.com/settings/apps/new` — the manifest's
-   webhook URL is the App's OWN route `{origin}/webhook/{webhookPath}`
+   row id (`crypto.randomUUID()`, no DB lookup) and POSTs the App manifest to
+   `https://github.com/settings/apps/new` — the manifest's webhook URL is the
+   App's OWN route `{origin}/webhook/{workspace_id}/{app_id}`
    (`src/dashboard/manifest.ts` `buildManifest`). Confirm the requested
    permissions on GitHub — `contents: write`, `metadata: read`,
    `pull_requests: write`, `issues: write`, `checks: write` (rationale, the
@@ -1708,15 +1734,15 @@ and the settings model faces write and read.
    page (App id / name / slug / webhook URL — never the PEM or webhook
    secret). Submit the confirm form (`/dashboard/manifest/commit`): the PEM
    and webhook secret are encrypted with `DASHBOARD_ENCRYPTION_KEY` (AAD
-   rowKey = the row PK, which IS the webhook path minted at start) and ONE
-   `github_apps` row is written. Missing key → 500 fail-closed, hold kept
+   rowKey = the row PK, which IS the app id minted at start and carried in
+   the manifest's webhook URL) and ONE `github_apps` row is written. Missing key → 500 fail-closed, hold kept
    (fix the env, then resubmit).
 4. **Confirm the row + delivery health** — the success page shows the slug
    and webhook URL. Verify in D1 (grab the `id` — the R1 pin below needs
    it):
    ```bash
    wrangler d1 execute mstar-inspector-prod-db --remote --env production --command \
-     "SELECT id, webhook_path, name, status, created_by, created_at FROM github_apps ORDER BY created_at DESC LIMIT 1"
+     "SELECT id, github_app_id, name, status, created_by, created_at FROM github_apps ORDER BY created_at DESC LIMIT 1"
    ```
    Healthy — exactly one row (the App just committed; the query caps at
    `LIMIT 1`). Zero rows means the manifest commit produced no App (the
@@ -1736,8 +1762,9 @@ created with a different URL or the Worker host changed:
 1. Open the GitHub App settings page
    (`https://github.com/settings/apps/<app-name>`).
 2. Under **Webhook**, set **Webhook URL** to
-   `https://<worker-host>/webhook/<webhookPath>` (the opaque webhook URL
-   shown on the dashboard success page / the App settings page) and save.
+   `https://<worker-host>/webhook/<workspace_id>/<app_id>` (the exact URL the
+   dashboard success page / the App settings card prints — both segments are
+   internal ids, never a GitHub slug) and save.
 
 **R2 checklist** (the "断线看得见" verification face — run after any repoint
 or when deliveries look dead):
@@ -1745,7 +1772,7 @@ or when deliveries look dead):
 | Check | Where | Healthy state |
 |---|---|---|
 | Review switch | Dashboard App settings / `github_apps.review_enabled` | On (`1`) for an App that should review. A paused App (`0`) ignores every verified delivery with 2xx and records `paused`/`ignored` rather than `ok` — this is the ONLY review control |
-| Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<webhookPath>` — the per-App route |
+| Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<workspace_id>/<app_id>` — the per-App route (both segments must match the App's settings card) |
 | Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
 | Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
 | Delivery health | Dashboard Apps list health column + settings recent-deliveries panel | Recent rows show `ok` / `ignored` / `paused` outcomes; NO `N rejected in 24h` badge; the latest row's relative time is recent |

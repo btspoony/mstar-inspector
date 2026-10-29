@@ -373,8 +373,8 @@ describe("runSweep", () => {
     const db = createMigratedTestD1();
     db.raw
       .query(
-        `INSERT INTO github_apps (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
-         VALUES ('app-1', 'retention-app', 'retention-app', 9001, 'retention-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
+        `INSERT INTO github_apps (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
+         VALUES ('app-1', 'retention-app', 9001, 'retention-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
       )
       .run();
     // Ages are relative to the real clock — a hard-coded calendar date slides

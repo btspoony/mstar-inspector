@@ -23,14 +23,13 @@
  * through IN-list queries (deliverySummaries) — so it needs a narrower face.
  *
  * Semantics (route call sites rely on these):
- *   - getAppByWebhookPath / getAppByGithubId / getAppById return the row
+ *   - getAppForWebhook / getAppByGithubId / getAppById return the row
  *     REGARDLESS of status or deleted_at — callers (webhook route, consumer)
  *     filter active + not deleted per the Multi-App contract.
- *   - The two App identities are distinct columns (migration 0036):
- *     `webhook_path` is OUR opaque webhook route key and keeps its stored
- *     values, so live GitHub webhook URLs never break; `github_slug` is
- *     GitHub's own mutable slug, cached by saveGithubMetadata and the only
- *     source of the `<slug>[bot]` mention login.
+ *   - The App's local identity is its row `id` (the webhook URL's second
+ *     segment); `github_slug` is GitHub's own mutable slug, cached by
+ *     saveGithubMetadata and the only source of the `<slug>[bot]` mention
+ *     login.
  *   - listApps is the dashboard-list face: non-deleted rows, newest first.
  *   - setAppStatus refuses soft-deleted rows (a deleted app can never be
  *     re-activated) and returns whether a row changed.
@@ -95,23 +94,21 @@
  *     convention); createApp ids are caller-supplied (the reviews.id
  *     caller-UUID convention — review pin: secretbox AAD rowKey MUST
  *     equal the row PK, so the caller decides the id before encrypting).
- *     The manifest flow reuses its start-minted webhook path as the id, so
- *     one App has ONE local identity instead of two UUIDs.
- *   - UNIQUE / FK violations throw (fail-loud): duplicate webhook_path,
- *     github_app_id, or (app_id, installation_id) pairs, and unknown app
- *     references are caller-visible errors, never swallowed.
+ *     The manifest flow mints that id at start, so the webhook URL is known
+ *     before GitHub creates the App.
+ *   - UNIQUE / FK violations throw (fail-loud): duplicate github_app_id or
+ *     (app_id, installation_id) pairs, and unknown app references are
+ *     caller-visible errors, never swallowed.
  */
 import { getSandboxImage } from "../contracts/sandbox-images";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
-  id: string;
   /**
-   * OUR webhook route key (migration 0036 renamed `slug`): opaque to GitHub
-   * and to the review pipeline, UNIQUE NOT NULL. The rename kept every stored
-   * value, so live `/webhook/:webhookPath` URLs still resolve.
+   * The local App UID — also the webhook URL's app segment
+   * (`/webhook/<workspace_id>/<id>`) and the secretbox AAD row key.
    */
-  webhook_path: string;
+  id: string;
   github_app_id: number;
   name: string;
   /** secretbox envelope of the App PEM — opaque, never decrypted here. */
@@ -143,13 +140,13 @@ export type GithubAppRow = {
   github_description: string | null;
   /** Cached GitHub App settings-page URL (migration 0019); NULL = never synced. */
   github_html_url: string | null;
-  /** Cached App logo URL (the bot account's avatar, migration 0019/0036); NULL = never synced. */
+  /** Cached App icon URL (`/in/<github_app_id>`, migration 0019); NULL = never synced. */
   github_avatar_url: string | null;
   /**
    * GitHub's own App slug (migration 0036), cached from `GET /app`; NULL =
    * never synced. Mutable upstream and NOT derivable from `name`, which is why
    * it is its own column: the `<github_slug>[bot]` mention login and the
-   * dashboard links read it, while `webhook_path` stays our route key.
+   * dashboard links read it, never the row id or the icon.
    */
   github_slug: string | null;
   /**
@@ -212,15 +209,10 @@ export type CreateAppInput = {
    * `github_apps.<column>:<id>` BEFORE insert, so the id must exist first —
    * the encrypted columns' AAD rowKey always equals this primary key. Not
    * optional: a store-generated default would make the caller's AAD
-   * unknowable and the row undecryptable. The manifest flow passes its
-   * webhook path here, so id === webhookPath for rows it creates.
+   * unknowable and the row undecryptable. The manifest flow mints it at
+   * start, because the manifest's webhook URL carries it.
    */
   id: string;
-  /**
-   * OUR webhook route key (migration 0036 renamed `slug` to `webhook_path`).
-   * Callers mint it; GitHub never sees it as an identity.
-   */
-  webhookPath: string;
   /**
    * GitHub's App slug, when the caller already knows it. NULL is the honest
    * default ("never synced") — the first metadata sync fills it.
@@ -382,7 +374,7 @@ type AppsStoreD1 = {
  */
 export const APP_READ_SQL = {
   getAppById: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ?`,
-  getAppByWebhookPath: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.webhook_path = ?`,
+  getAppForWebhook: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
   getAppByGithubId: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
   listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
 } as const;
@@ -451,10 +443,8 @@ export function createAppsStore(db: AppsStoreD1) {
      * never exists without an owner. sandbox_image_id is omitted: the
      * migration 0018 DDL default materializes every new row onto the
      * registry's default image ('omp') — the store face for changing it is
-     * setSandboxImage. UNIQUE violations on webhook_path
-     * or github_app_id throw — the route layer pre-resolves the webhook path at
-     * start, and a commit-time race burns the hold (409) instead of
-     * remapping (the manifest registered the webhook URL with GitHub).
+     * setSandboxImage. A UNIQUE violation on github_app_id throws — the
+     * commit path turns it into `already_connected` (409).
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
@@ -472,13 +462,12 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `INSERT INTO github_apps
-               (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+               (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
                 created_by, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`,
           )
           .bind(
             id,
-            input.webhookPath,
             input.githubSlug,
             input.githubAppId,
             input.name,
@@ -498,14 +487,18 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * By webhook path (migration 0036's name for `slug`); resolves
-     * soft-deleted and disabled App rows too (callers filter), but NOT an App
-     * whose workspace is soft-deleted.
+     * By the webhook URL's two segments — the App row `id` must belong to the
+     * named workspace. Resolves soft-deleted and disabled App rows too
+     * (callers filter), but NOT an App whose workspace is soft-deleted, and
+     * never an App paired with a workspace it does not belong to.
      */
-    async getAppByWebhookPath(webhookPath: string): Promise<GithubAppTenantRow | null> {
+    async getAppForWebhook(
+      workspaceId: string,
+      appId: string,
+    ): Promise<GithubAppTenantRow | null> {
       return db
-        .prepare(APP_READ_SQL.getAppByWebhookPath)
-        .bind(webhookPath)
+        .prepare(APP_READ_SQL.getAppForWebhook)
+        .bind(appId, workspaceId)
         .first<GithubAppTenantRow>();
     },
 

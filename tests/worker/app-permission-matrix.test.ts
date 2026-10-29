@@ -64,7 +64,6 @@ async function seededWorld(): Promise<TestD1> {
   const box = createSecretbox(TEST_KEY);
   await createAppsStore(db).createApp({
     id,
-    webhookPath: "mallorys-app",
     githubSlug: "mallorys-app",
     githubAppId: APP_ID,
     name: "mallorys-app",
@@ -346,13 +345,15 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       "github_metadata_synced_at",
       "github_name",
       "github_slug",
+      "id",
       "review_enabled",
       "status",
-      "webhook_path",
     ]);
     expect(body.app.github_app_id).toBe(APP_ID);
     expect(body.app.github_slug).toBe("mallorys-app");
-    expect(body.app.webhook_path).toBe("mallorys-app");
+    // The local App UID is the payload's other identifier (the webhook URL's
+    // app segment); its value is the caller-supplied row id.
+    expect(typeof body.app.id).toBe("string");
     expect(body.app.created_by).toBe("mallory");
     expect(typeof body.app.created_at).toBe("string");
     // ops fields never ride the non-manager payload

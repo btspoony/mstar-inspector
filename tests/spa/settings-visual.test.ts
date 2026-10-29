@@ -36,7 +36,7 @@ const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
   can_manage: true,
   app: {
     github_slug: "demo",
-    webhook_path: "wh-demo",
+    id: "app-demo",
     github_app_id: 1,
     status: "active",
     review_enabled: true,

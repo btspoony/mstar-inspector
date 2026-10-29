@@ -82,11 +82,11 @@ function seedAppRow(db: TestD1, id: string, githubAppId = 1001): void {
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+       VALUES (?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
-    .run(id, `lifecycle-test-${id}`, githubAppId, `lifecycle-test-${id}`);
+    .run(id, githubAppId, `lifecycle-test-${id}`);
 }
 
 function createSeededTestD1(): TestD1 {

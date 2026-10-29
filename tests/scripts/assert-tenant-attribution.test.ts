@@ -98,12 +98,12 @@ describe("attributionVerdict", () => {
       // one mapped App, one App whose workspace row is missing
       const insertApp = db.raw.prepare(
         `INSERT INTO github_apps
-           (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'k', 'w', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         VALUES (?, ?, ?, 'k', 'w', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       );
-      insertApp.run("app-mapped", "mapped", 1, "mapped");
-      insertApp.run("app-orphan", "orphan", 2, "orphan");
+      insertApp.run("app-mapped", 1, "mapped");
+      insertApp.run("app-orphan", 2, "orphan");
       db.raw.prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-mapped', 'default')").run();
 
       const orphaned = verdictFor(ZERO_ORPHAN_SQL, db);

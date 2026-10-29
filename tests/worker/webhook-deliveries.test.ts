@@ -44,17 +44,27 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
-  /** Raw-insert one github_apps row (dummy envelopes — no decryption here). */
+  /**
+   * Raw-insert one github_apps row (dummy envelopes — no decryption here).
+   * The local route key exists only on the pre-0038 shapes this describe
+   * also builds, so the column list follows the fixture's shape.
+   */
   function seedAppRow(db: ReturnType<typeof createTestD1>, id = "app-1"): void {
     const appNum = Number(id.replace(/\D/g, "")) || 1;
+    const hasPath = (db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>).some(
+      (column) => column.name === "webhook_path",
+    );
+    const pathColumn = hasPath ? "webhook_path, " : "";
+    const pathValue = hasPath ? "?, " : "";
+    const pathBind = hasPath ? [id] : [];
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, ${pathColumn}github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         VALUES (?, ${pathValue}?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
-      .run(id, id, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
+      .run(id, ...pathBind, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
   }
 
   /** Raw-insert one delivery row (full column control). */
@@ -165,11 +175,11 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
-      .run(id, id, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
+      .run(id, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
   }
 
   test("recordDelivery persists a full row: UUID id, caller fields, datetime('now') created_at", async () => {
@@ -342,6 +352,13 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       "0033_platform_admin.sql",
       // 0036: webhook_path (renamed from slug) + the cached github_slug.
       "0036_app_identity.sql",
+      // 0038 rebuilds github_apps, so the fixture must carry every column the
+      // rebuild copies.
+      "0018_app_sandbox_images.sql",
+      "0019_github_apps_metadata.sql",
+      "0022_app_trigger_mode.sql",
+      "0037_github_metadata_attempt.sql",
+      "0038_webhook_path_drop.sql",
     ];
     if (withDeliveries) {
       names.push("0011_webhook_deliveries.sql");
@@ -364,7 +381,8 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     db: ReturnType<typeof createTestD1>,
     opts: SeedOptions,
   ): Promise<{ id: string; slug: string }> {
-    const id = crypto.randomUUID();
+    // The row id is the webhook URL's app segment, so the slug doubles as it.
+    const id = opts.slug;
     const box = createSecretbox(TEST_KEY);
     const webhookSecretEnc = await box.encryptSecret(opts.secret, `github_apps.webhook_secret_enc:${id}`);
     const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
@@ -373,11 +391,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
-      .run(id, opts.slug, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
+      .run(id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
     // Production shape: the read face joins app_workspaces.
     db.raw
       .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
@@ -469,7 +487,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
@@ -487,7 +505,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
@@ -504,7 +522,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body, "ping"), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body, "ping"), env);
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
@@ -522,7 +540,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
-      "/webhook/app-x",
+      "/webhook/default/app-x",
       body,
       { "x-hub-signature-256": await signatureFor("wrong-secret", body), "x-github-event": "pull_request" },
       env,
@@ -548,7 +566,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     console.warn = warn;
     let res: Response;
     try {
-      res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
     } finally {
       console.warn = origWarn;
     }
@@ -606,7 +624,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
@@ -633,7 +651,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     console.warn = warn;
     let res: Response;
     try {
-      res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
     } finally {
       console.warn = origWarn;
     }
@@ -662,7 +680,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     let res: Response;
     try {
       res = await postWebhook(
-        "/webhook/app-x",
+        "/webhook/default/app-x",
         body,
         { "x-hub-signature-256": await signatureFor("wrong-secret", body), "x-github-event": "pull_request" },
         env,
@@ -689,7 +707,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     // Unknown slug → 404 before any signature work.
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const res404 = await postWebhook(
-      "/webhook/no-such-app",
+      "/webhook/default/no-such-app",
       body,
       { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
       env,

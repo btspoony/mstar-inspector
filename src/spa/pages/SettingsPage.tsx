@@ -31,7 +31,7 @@ import { SectionCard, SectionCardTitle, SectionGroup } from "../components/Secti
 import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { workspaceRefOf } from "../routes";
-import { apiBase, currentOrigin } from "../workspace-base";
+import { apiBase, currentOrigin, currentWorkspaceId } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import { useRenameMembership } from "../workspace-memberships";
@@ -555,7 +555,7 @@ function pendingConfirmCopy(
  * `/apps/acme/settings` derives null, not slug "settings" (qc round 1,
  * qc2-F-001); an already settings-shaped url keeps deriving idempotently.
  * Deliberately never `github_name` (display name ≠ URL slug) and never the
- * local `SettingsAppMeta.webhook_path` (local webhook key ≠ GitHub App slug).
+ * local `SettingsAppMeta.id` (local App UID ≠ GitHub App slug).
  * The server
  * validates only the `https://` prefix (github-app-metadata.ts), so an
  * unusable shape — no `apps/<slug>` tail, or a value `new URL` cannot parse —
@@ -640,6 +640,10 @@ export function AppInfoCard({
       setRefreshing(false);
     }
   }
+  // The delivery URL's first segment: the addressed workspace's stable id,
+  // derived from the path exactly like `apiBase()`. Null off a
+  // workspace-scoped page, and the URL line then renders nothing.
+  const workspaceId = currentWorkspaceId();
   // Derived BEFORE the per-field JSX so the href and the aria-label key off
   // the same resolved destination; a member viewer or a non-derivable url
   // leaves settingsHref null and every face below is today's.
@@ -679,15 +683,19 @@ export function AppInfoCard({
             <p className="text-sm text-muted-foreground">
               {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
             </p>
+            <p className="text-sm text-muted-foreground">
+              {t(locale, "settings.appInfoLocalId", { id: app.id })}
+            </p>
             {/* The delivery URL a webhook repoint needs (deploy doc § 3 sends
-                the operator here): manager-only, because `webhook_path` is the
-                App's signed delivery route and a member has no repoint duty.
+                the operator here): manager-only, because the webhook URL is
+                the App's delivery route and a member has no repoint duty.
+                Both segments are internal ids, so the card shows them above.
                 Selected as one text node so click-drag copies it whole. */}
-            {canManage ? (
+            {canManage && workspaceId ? (
               <p className="text-xs text-muted-foreground">
                 {t(locale, "settings.appInfoDeliveryUrl")}{" "}
                 <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">
-                  {`${currentOrigin()}/webhook/${app.webhook_path}`}
+                  {`${currentOrigin()}/webhook/${workspaceId}/${app.id}`}
                 </code>
               </p>
             ) : null}

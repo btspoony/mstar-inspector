@@ -39,7 +39,7 @@ const tabsWrapper = readFileSync(join(spaRoot, "components/ui/tabs.tsx"), "utf8"
 
 const IDENTITY_APP = {
   github_slug: "demo",
-  webhook_path: "wh-demo",
+  id: "app-demo",
   github_app_id: 1,
   status: "active",
   review_enabled: true,

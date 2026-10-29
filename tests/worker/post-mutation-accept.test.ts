@@ -35,6 +35,13 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0028_workspace_invites.sql",
     // 0036: github_apps.slug → webhook_path plus the cached github_slug.
     "0036_app_identity.sql",
+    // 0038 rebuilds github_apps, so the fixture must carry every column the
+    // rebuild copies.
+    "0018_app_sandbox_images.sql",
+    "0019_github_apps_metadata.sql",
+    "0022_app_trigger_mode.sql",
+    "0037_github_metadata_attempt.sql",
+    "0038_webhook_path_drop.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -61,7 +68,6 @@ async function seed(db: ReturnType<typeof createD1>): Promise<void> {
   const enc = await encryptedColumns(id);
   await createAppsStore(db).createApp({
     id,
-    webhookPath: "demo-app",
     githubSlug: "demo-app",
     githubAppId: DEMO_APP_ID,
     name: "demo-app",

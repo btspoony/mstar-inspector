@@ -99,9 +99,11 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0024_provider_multi_key.sql",
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
-    // 0036 renames the local App route key to `webhook_path` — the column
-    // this fixture seeds.
     "0036_app_identity.sql",
+    // 0038 rebuilds github_apps, so the fixture must carry every column the
+    // rebuild copies.
+    "0037_github_metadata_attempt.sql",
+    "0038_webhook_path_drop.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -127,11 +129,11 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+       VALUES (?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
-    .run(id, opts.slug, opts.githubAppId, opts.slug, privateKeyEnc, webhookSecretEnc);
+    .run(id, opts.githubAppId, opts.slug, privateKeyEnc, webhookSecretEnc);
   await mapAppToDefaultWorkspace(db, id);
   // AL-24-5: every seeded App gets its AI-config health
   // baseline — a model chain + the `ark` BYOK key its chain needs — so the
@@ -720,7 +722,6 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     // first so the DELETE can proceed.
     const row = db.raw.query("SELECT * FROM github_apps WHERE id = ?").get(appX.id) as {
       id: string;
-      webhook_path: string;
       github_app_id: number;
       name: string;
       private_key_enc: string;
@@ -760,11 +761,11 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     // second factory call proves the not-found gate evicted the entry.
     db.raw
       .prepare(
-        `INSERT INTO github_apps (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+        `INSERT INTO github_apps (id, github_app_id, name, private_key_enc, webhook_secret_enc,
            created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(row.id, row.webhook_path, row.github_app_id, row.name, row.private_key_enc, row.webhook_secret_enc, row.created_by, row.status, row.deleted_at, row.created_at, row.updated_at);
+      .run(row.id, row.github_app_id, row.name, row.private_key_enc, row.webhook_secret_enc, row.created_by, row.status, row.deleted_at, row.created_at, row.updated_at);
     await mapAppToDefaultWorkspace(db, row.id);
     // Re-seed the per-App AI config so the fail-closed gate passes again.
     const configStore = createAppConfigStore(db, TEST_KEY);

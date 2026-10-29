@@ -82,11 +82,11 @@ async function createSeededTestD1(): Promise<TestD1> {
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+       VALUES (?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
-    .run(APP_ID, SLUG, GITHUB_APP_ID, SLUG);
+    .run(APP_ID, GITHUB_APP_ID, SLUG);
   await mapAppToDefaultWorkspace(db, APP_ID);
   db.raw
     .prepare(`INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES (?, ?, ?, 'acme', datetime('now'))`)

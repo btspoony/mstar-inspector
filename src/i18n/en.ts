@@ -561,6 +561,9 @@ export const en = {
     appInfoCopy:
       "The identity GitHub reports for this App. Profile fields are cached from the App's GitHub settings page; open the name to manage it there.",
     appInfoAppId: "App ID: {id}",
+    // The local row id — the webhook URL's second segment, shown next to the
+    // GitHub App id so both URL segments are readable from the card.
+    appInfoLocalId: "Local App ID: {id}",
     // Manager-only: the absolute delivery URL a webhook repoint needs. The
     // deploy doc sends the operator to this card for it.
     appInfoDeliveryUrl: "Webhook URL:",
@@ -634,8 +637,6 @@ export const en = {
         "This confirmation belongs to a different GitHub login — sign back in and restart the app-creation flow.",
       noEncryptionKey:
         "This deployment has no valid DASHBOARD_ENCRYPTION_KEY to store App credentials with — ask the operator to configure it, then resubmit.",
-      slugConflict:
-        "Another App claimed this App's webhook path while setup was in progress, so the GitHub App was created on GitHub but not connected to this deployment — no Worker data was stored. A manifest-created App cannot be connected twice: delete the just-created App on GitHub, then run a new app-creation flow from the dashboard.",
       alreadyConnected: "This GitHub App is already connected on this deployment — no changes were made.",
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",

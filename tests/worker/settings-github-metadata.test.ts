@@ -121,7 +121,6 @@ async function seededWorld(privateKeyPem: string): Promise<{ db: TestD1; appId: 
   const box = createSecretbox(TEST_KEY);
   await createAppsStore(db).createApp({
     id,
-    webhookPath: "mallorys-app",
     githubSlug: "mallorys-app",
     githubAppId: APP_ID,
     name: "mallorys-app",
