@@ -187,6 +187,7 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
         <div className="flex items-center gap-3">
           <AppAvatar
             src={app.github_avatar_url}
+            appId={app.github_app_id}
             className="h-9 w-9 shrink-0 rounded-full border object-cover"
           />
           <div className="flex flex-col gap-0.5">

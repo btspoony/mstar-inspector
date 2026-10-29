@@ -666,7 +666,11 @@ export function AppInfoCard({
       </CardHeader>
       <CardContent>
         <div className="flex items-start gap-4">
-          <AppAvatar src={app.github_avatar_url} className="h-12 w-12 shrink-0 rounded-full border object-cover" />
+          <AppAvatar
+            src={app.github_avatar_url}
+            appId={app.github_app_id}
+            className="h-12 w-12 shrink-0 rounded-full border object-cover"
+          />
           <div className="flex min-w-0 flex-col gap-1">
             {app.github_name ? (
               app.github_html_url ? (

@@ -18,6 +18,7 @@ const ICON = "https://avatars.githubusercontent.com/in/1234?s=120&v=4";
 
 async function mount(
   src: string | null,
+  appId?: number,
 ): Promise<{
   container: Element;
   rerender: (next: string | null) => Promise<void>;
@@ -28,11 +29,13 @@ async function mount(
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
-  await act(async () => root.render(createElement(AppAvatar, { src, className: BOX })));
+  await act(async () => root.render(createElement(AppAvatar, { src, appId, className: BOX })));
   return {
     container: container as unknown as Element,
     rerender: async (next: string | null) => {
-      await act(async () => root.render(createElement(AppAvatar, { src: next, className: BOX })));
+      await act(async () =>
+        root.render(createElement(AppAvatar, { src: next, appId, className: BOX })),
+      );
     },
     fireError: async () => {
       const img = container.querySelector("img");
@@ -79,7 +82,28 @@ describe("AppAvatar", () => {
     }
   });
 
-  test("a never-synced App renders the mark directly — no <img> at all", async () => {
+  test("a NULL cached avatar is derived from the App id — a real icon on the first load", async () => {
+    // The column is empty (never synced, or synced by a version that could not
+    // derive the URL), so the mark comes from the numeric App id on read.
+    const mounted = await mount(null, 1234);
+    try {
+      const img = mounted.container.querySelector("img");
+      expect(img?.getAttribute("src")).toBe("https://avatars.githubusercontent.com/in/1234?s=120&v=4");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  test("a cached src wins over the derived URL", async () => {
+    const mounted = await mount(ICON, 1234);
+    try {
+      expect(mounted.container.querySelector("img")?.getAttribute("src")).toBe(ICON);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  test("neither src nor appId → the default mark, no <img> at all", async () => {
     const mounted = await mount(null);
     try {
       expect(mounted.container.querySelector("img")).toBeNull();

@@ -208,8 +208,9 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(identity).toContain(">demo</a>");
     expect(identity).toContain('<span class="text-xs text-muted-foreground tabular-nums">');
     expect(identity).toContain(t("en", "apps.appId", { id: 1 }));
-    // Null avatar degrades per-field (D6): no img pretends a synced profile.
-    expect(identity).not.toContain("<img");
+    // A null cached avatar still renders the icon: it is derived from the
+    // numeric App id on read, so the first page load is never a placeholder.
+    expect(identity).toContain('<img src="https://avatars.githubusercontent.com/in/1?s=120&v=4"');
   });
 
   test("identity cell avatar: github_avatar_url renders a rounded img; the name falls back github_name → slug → App id", () => {
@@ -233,8 +234,9 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     // Rendered from the real row component under the two ACTUAL pathnames: the
     // emitted links are the page's own base, so a wrong base, a legacy target
     // under a workspace page, or a /settings deep link fails here.
+    // `<img src>` is not an href — only real anchors are collected.
     const hrefs = (pathname: string) =>
-      [...renderList([appRow()], pathname).matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
+      [...renderList([appRow()], pathname).matchAll(/<a [^>]*href="([^"]+)"/g)].map((match) => match[1]);
     // Legacy Apps page: the historical detail path, identity link + anchor.
     expect(hrefs("/dashboard/apps")).toEqual(["/dashboard/apps/1", "/dashboard/apps/1"]);
     // Workspace Apps page: the workspace copy of the same route — the legacy
@@ -609,7 +611,7 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
 
   /** Every href the list emits, with the route it resolves to. */
   function destinations(pathname: string): Array<[string, string | undefined]> {
-    return [...renderList(pathname).matchAll(/href="([^"]+)"/g)].map(([, href]) => {
+    return [...renderList(pathname).matchAll(/<a [^>]*href="([^"]+)"/g)].map(([, href]) => {
       const route = matchSpaRoute(href ?? "");
       return [href ?? "", route?.page];
     });
