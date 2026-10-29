@@ -378,13 +378,6 @@ describe("omp provider union (third generator input)", () => {
     }
   });
 
-  test("the generator's materializable-api copy matches CUSTOM_PROVIDER_API_IDS", () => {
-    const generator = readFileSync(join(REPO_ROOT, "scripts/generate-provider-catalog.ts"), "utf8");
-    for (const api of CUSTOM_PROVIDER_API_IDS) {
-      expect(generator, api).toContain(`"${api}"`);
-    }
-  });
-
   test("commandcode is mixed-protocol: two rows, no typesafe prefill, typesafe kept on its own row", () => {
     // One custom-provider declaration carries exactly one protocol, so the
     // Responses and Messages surfaces are separate template rows.

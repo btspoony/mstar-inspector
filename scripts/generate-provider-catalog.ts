@@ -346,9 +346,28 @@ export function buildCatalog(
     for (const key of builtinSourceKeys) catalogBeforeUnion[key] = true;
     for (const key of Object.keys(TEMPLATE_DEDUPE_SNAPSHOT_KEYS)) catalogBeforeUnion[key] = true;
     const recordsByProvider: Record<string, OmpSnapshot["providers"]> = {};
+    const recordIds = new Set<string>();
     for (const record of omp.providers) {
+      // A duplicate row id is a corrupted extraction: the second record would
+      // silently overwrite the first as "already present".
+      if (recordIds.has(record.id)) {
+        throw new Error(
+          `vendored omp snapshot carries duplicate record id ${JSON.stringify(record.id)} — fix scripts/provider-catalog/omp-api-key-providers.json`,
+        );
+      }
+      recordIds.add(record.id);
       const providerId = record.sourceProviderId ?? record.id;
       (recordsByProvider[providerId] ??= []).push(record);
+    }
+    // The union loop below walks ompProviderIds; a record grouped under any
+    // other id would never be visited, so reject it instead of dropping it.
+    const ompProviderIdSet = new Set(omp.ompProviderIds);
+    for (const providerId of Object.keys(recordsByProvider)) {
+      if (!ompProviderIdSet.has(providerId)) {
+        throw new Error(
+          `vendored omp record ${JSON.stringify(providerId)} is absent from ompProviderIds — list it in scripts/provider-catalog/omp-api-key-providers.json`,
+        );
+      }
     }
     for (const providerId of omp.ompProviderIds) {
       const records = recordsByProvider[providerId] ?? [];
