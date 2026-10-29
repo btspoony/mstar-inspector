@@ -427,7 +427,12 @@ type SettingsHealth = {
 };
 
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
-export type SettingsReadOnlyPayload = { can_manage: false; app: SettingsIdentityAppMeta };
+export type SettingsReadOnlyPayload = {
+  can_manage: false;
+  /** The App's stable workspace id — server-resolved, never a path segment. */
+  workspace_id: string;
+  app: SettingsIdentityAppMeta;
+};
 
 /**
  * The App's operator-facing display name (D0): GitHub's current name, then
@@ -445,6 +450,8 @@ export function appDisplayName(app: {
 /** Creator-or-admin adds the settings zones: keys, chains, providers. */
 export type SettingsManagePayload = {
   can_manage: true;
+  /** The App's stable workspace id — server-resolved, never a path segment. */
+  workspace_id: string;
   app: SettingsAppMeta;
   keys: ProviderKeyRow[];
   model_chain: string | null;
@@ -1046,6 +1053,9 @@ function isNullableString(value: unknown): value is string | null {
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data) || !isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
+  // The delivery URL's workspace segment: the server-resolved id, required on
+  // both faces (a path ref may be a slug and must never be printed).
+  if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
   if (typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;

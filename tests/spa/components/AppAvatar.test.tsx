@@ -20,6 +20,7 @@ async function mount(
   src: string | null,
 ): Promise<{
   container: Element;
+  rerender: (next: string | null) => Promise<void>;
   fireError: () => Promise<void>;
   cleanup: () => Promise<void>;
 }> {
@@ -30,6 +31,9 @@ async function mount(
   await act(async () => root.render(createElement(AppAvatar, { src, className: BOX })));
   return {
     container: container as unknown as Element,
+    rerender: async (next: string | null) => {
+      await act(async () => root.render(createElement(AppAvatar, { src: next, className: BOX })));
+    },
     fireError: async () => {
       const img = container.querySelector("img");
       expect(img).not.toBeNull();
@@ -57,6 +61,19 @@ describe("AppAvatar", () => {
       expect(svg).not.toBeNull();
       // Same box, so the row height never changes across the swap.
       expect(mounted.container.firstElementChild?.className).toContain(BOX);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  test("a new src after a failure is attempted again (the mark is not sticky)", async () => {
+    const mounted = await mount(ICON);
+    try {
+      await mounted.fireError();
+      expect(mounted.container.querySelector("img")).toBeNull();
+      await mounted.rerender("https://avatars.githubusercontent.com/in/4321?s=120&v=4");
+      const img = mounted.container.querySelector("img");
+      expect(img?.getAttribute("src")).toBe("https://avatars.githubusercontent.com/in/4321?s=120&v=4");
     } finally {
       await mounted.cleanup();
     }

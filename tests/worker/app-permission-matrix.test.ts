@@ -332,8 +332,14 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
     const res = await getFace("hubot", makeEnv(await seededWorld()));
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toContain("application/json");
-    const body = (await res.json()) as { can_manage: unknown; app: Record<string, unknown> };
-    expect(Object.keys(body).sort()).toEqual(["app", "can_manage"]);
+    const body = (await res.json()) as {
+      can_manage: unknown;
+      workspace_id: unknown;
+      app: Record<string, unknown>;
+    };
+    expect(Object.keys(body).sort()).toEqual(["app", "can_manage", "workspace_id"]);
+    // The delivery URL's workspace segment: the server-resolved stable id.
+    expect(body.workspace_id).toBe("default");
     expect(body.can_manage).toBe(false);
     expect(Object.keys(body.app).sort()).toEqual([
       "created_at",

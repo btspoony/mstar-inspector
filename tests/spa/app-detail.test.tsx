@@ -52,10 +52,15 @@ const IDENTITY_APP = {
   github_metadata_synced_at: null,
 };
 
-const identityPayload = { can_manage: false as const, app: IDENTITY_APP };
+const identityPayload = {
+  can_manage: false as const,
+  workspace_id: "ws_0123456789abcdefghijkl",
+  app: IDENTITY_APP,
+};
 
 const managePayload = {
   can_manage: true as const,
+  workspace_id: "ws_0123456789abcdefghijkl",
   app: {
     ...IDENTITY_APP,
     last_webhook_at: null,

@@ -17,17 +17,6 @@ export function apiBase(pathname: string = currentPathname()): string {
   return ref === null ? "/dashboard" : `/dashboard/${ref}`;
 }
 
-/**
- * The workspace id the current page addresses — the webhook delivery URL's
- * first segment. Derived from the pathname exactly like {@link apiBase} (the
- * workspace ref IS `workspaces.id`), and null outside a workspace-scoped page
- * or outside a document, so a static render prints no URL instead of a wrong
- * one.
- */
-export function currentWorkspaceId(): string | null {
-  return workspaceRefOf(currentPathname());
-}
-
 /** No `location` outside a document (static render, tests) → the legacy base. */
 function currentPathname(): string {
   // The bundle runs in a document, where `location` exists; this narrow read

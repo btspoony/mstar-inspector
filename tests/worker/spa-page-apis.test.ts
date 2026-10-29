@@ -180,6 +180,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(owner.status).toBe(200);
     const body = (await owner.json()) as {
       can_manage: boolean;
+      workspace_id: string;
       app: {
         github_app_id: number;
         github_slug: string | null;
@@ -196,6 +197,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(body.app.github_app_id).toBe(1001);
     expect(body.app.github_slug).toBe("mstar-inspector-mallory");
     expect(body.app.id).toBe("app-mallory");
+    expect(body.workspace_id).toBe("default");
     expect(body.app.review_enabled).toBe(true);
     expect(body.can_manage).toBe(true);
     // clean cutover: the old `providers` catalog dump is gone; the
@@ -246,7 +248,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(otherBody.can_manage).toBe(false);
     expect(otherBody.app.github_app_id).toBe(1001);
     expect(otherBody.app.github_slug).toBe("mstar-inspector-mallory");
-    expect(Object.keys(otherBody).sort()).toEqual(["app", "can_manage"]);
+    expect(Object.keys(otherBody).sort()).toEqual(["app", "can_manage", "workspace_id"]);
     expect(Object.keys(otherBody.app).sort()).toEqual([
       "created_at",
       "created_by",

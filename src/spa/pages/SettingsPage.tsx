@@ -31,7 +31,7 @@ import { SectionCard, SectionCardTitle, SectionGroup } from "../components/Secti
 import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { workspaceRefOf } from "../routes";
-import { apiBase, currentOrigin, currentWorkspaceId } from "../workspace-base";
+import { apiBase, currentOrigin } from "../workspace-base";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import { useRenameMembership } from "../workspace-memberships";
@@ -383,7 +383,12 @@ export function SettingsView({
     return (
       <div className="flex flex-col gap-6">
         <SectionGroup label={t(locale, "settings.group.appInfo")}>
-          <AppInfoCard locale={locale} app={payload.app} canManage={false} />
+          <AppInfoCard
+            locale={locale}
+            app={payload.app}
+            workspaceId={payload.workspace_id}
+            canManage={false}
+          />
         </SectionGroup>
         {versionFooter}
       </div>
@@ -407,6 +412,7 @@ export function SettingsView({
           <AppInfoCard
             locale={locale}
             app={app}
+            workspaceId={payload.workspace_id}
             canManage={payload.can_manage}
             onReload={() => onReload({ background: true })}
           />
@@ -592,12 +598,19 @@ export function githubAppSettingsUrl(githubHtmlUrl: string): string | null {
 export function AppInfoCard({
   locale,
   app,
+  workspaceId,
   canManage,
   onReload,
 }: {
   locale: SpaBoot["locale"];
   /** Both faces — the identity and manage app shapes structurally share every field the card reads. */
   app: SettingsIdentityAppMeta | SettingsAppMeta;
+  /**
+   * The App's stable workspace id from the payload — the delivery URL's first
+   * segment. Deliberately NOT derived from the pathname: a route ref may be a
+   * workspace slug, and the printed URL must carry the id GitHub is pointed at.
+   */
+  workspaceId: string;
   /** Threaded from payload.can_manage at the call site — presentation only. */
   canManage: boolean;
   /** The manager face's background reload — present iff canManage; the refresh button renders only when both hold. */
@@ -640,10 +653,6 @@ export function AppInfoCard({
       setRefreshing(false);
     }
   }
-  // The delivery URL's first segment: the addressed workspace's stable id,
-  // derived from the path exactly like `apiBase()`. Null off a
-  // workspace-scoped page, and the URL line then renders nothing.
-  const workspaceId = currentWorkspaceId();
   // Derived BEFORE the per-field JSX so the href and the aria-label key off
   // the same resolved destination; a member viewer or a non-derivable url
   // leaves settingsHref null and every face below is today's.
@@ -691,7 +700,7 @@ export function AppInfoCard({
                 the App's delivery route and a member has no repoint duty.
                 Both segments are internal ids, so the card shows them above.
                 Selected as one text node so click-drag copies it whole. */}
-            {canManage && workspaceId ? (
+            {canManage ? (
               <p className="text-xs text-muted-foreground">
                 {t(locale, "settings.appInfoDeliveryUrl")}{" "}
                 <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">

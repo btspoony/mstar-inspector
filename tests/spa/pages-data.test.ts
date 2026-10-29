@@ -249,6 +249,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
     const ok = parseSettings({
       can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -290,6 +291,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the sandbox image selection + selector choices", () => {
     const manageBase = {
       can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -332,6 +334,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review trigger mode on the manage face; off-vocabulary fails the parse", () => {
     const base = {
       can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -377,6 +380,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings (identity-only face) requires the D4 identity set — created_at joins the required keys", () => {
     const identityBase = {
       can_manage: false,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -410,6 +414,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings separates configured state from the catalog", () => {
     const manageBase = {
       can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
         id: "app-demo",
@@ -537,7 +542,11 @@ describe("members/apps/settings parsers", () => {
       github_avatar_url: null,
       github_metadata_synced_at: null,
     };
-    const readOnly = parseSettings({ can_manage: false, app: identityApp });
+    const readOnly = parseSettings({
+      workspace_id: "ws_0123456789abcdefghijkl",
+      can_manage: false,
+      app: identityApp,
+    });
     expect(readOnly?.can_manage).toBe(false);
     expect(readOnly && !readOnly.can_manage && readOnly.app.created_at).toBe("2026-01-01 00:00:00");
     expect(readOnly && "keys" in readOnly).toBe(false);
@@ -545,11 +554,16 @@ describe("members/apps/settings parsers", () => {
     expect(readOnly && "installations" in readOnly).toBe(false);
     // A missing identity field is a contract breach.
     const { created_at: _dropped, ...withoutCreated } = identityApp;
-    expect(parseSettings({ can_manage: false, app: withoutCreated })).toBeNull();
+    expect(parseSettings({
+      workspace_id: "ws_0123456789abcdefghijkl",
+      can_manage: false,
+      app: withoutCreated,
+    })).toBeNull();
     // can_manage=true without the settings zones is also a breach.
     expect(
       parseSettings({
         can_manage: true,
+        workspace_id: "ws_0123456789abcdefghijkl",
         app: {
           github_slug: "demo",
           id: "app-demo",
@@ -629,6 +643,7 @@ describe("model chain tab model", () => {
 describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
+    workspace_id: "ws_0123456789abcdefghijkl",
     app: {
       github_slug: "demo",
       id: "app-demo",

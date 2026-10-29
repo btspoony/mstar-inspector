@@ -1413,9 +1413,8 @@ dashboardApp.get("/manifest/callback", async (c) => {
 // overwritten). The hold cookie is bound to the committing session and
 // survives RETRYABLE outcomes (500 encrypt/DB failures) so the operator can
 // retry without creating a second GitHub App; it is burned on success,
-// login mismatch, undecryptable/expired hold, the non-retryable
-// already-connected conflict, and the non-retryable slug-conflict race (the
-// manifest already registered the webhook URL — remapping would desync it).
+// login mismatch, an undecryptable/expired hold, and the non-retryable
+// already-connected conflict (the same GitHub App cannot be connected twice).
 // Missing/undecryptable/expired hold = flow expired → 302 back to the start,
 // zero writes. The write is delegated to commitManifestApp — the
 // SAME path the callback auto-commit runs — so a native resubmit after a
@@ -2992,6 +2991,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // discrimination the SPA's detail-face parse keys on.
       return c.json({
         can_manage: false,
+        // The stable workspace id the App belongs to — with the local App UID
+        // it composes the webhook delivery URL. Server-resolved, never the
+        // request's path segment (a ref may be a slug).
+        workspace_id: gate.scope.workspaceId,
         app: {
           github_app_id: app.github_app_id,
           status: app.status,
@@ -3015,6 +3018,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const deliveries = await apps.listRecentDeliveries(app.id, 5);
     const deliverySummary = await apps.deliverySummary(app.id);
     const base = {
+      // The stable workspace id the App belongs to (server-resolved scope,
+      // never the request's path segment): with `app.id` it composes the
+      // webhook delivery URL.
+      workspace_id: gate.scope.workspaceId,
       app: {
         github_app_id: app.github_app_id,
         status: app.status,
