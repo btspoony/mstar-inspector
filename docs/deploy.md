@@ -2010,7 +2010,7 @@ controls are installed (the Dockerfile carries the documentation block only).
   - `github.com` / `api.github.com` — git clone/fetch of the PR head (token
     via scoped extraheader exec env) and gh CLI.
   - Provider API hosts by active provider config — the 18 built-in provider
-    hosts resolve in omp's runtime registry (omp SDK 18.12.3, outside this
+    hosts resolve in omp's runtime registry (omp SDK 18.13.3, outside this
     repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
     19-entry list, `ark` included); the ark capability host
     `ark.cn-beijing.volces.com` is declared in the omp registry entry
@@ -2035,7 +2035,10 @@ the Dockerfile cannot read the module) and derives `REVIEW_SKILL_VERSION` from
 the same source.
 
 Historical bumps, superseding chain, and digest provenance (records, not live
-values): mstar-harness **4.0.7** (2026-10-24, ref
+values): mstar-harness **4.1.2** (2026-10-30, ref
+`582428520edca3812aca25028013bf636eece8d6`, superseding the 4.0.7 pin; omp SDK
+18.13.3, engine `^4.1.2` resolved to 4.1.2);
+mstar-harness **4.0.7** (2026-10-24, ref
 `db013c73255f3af1e166d15ae7c3514dc200da6b`, superseding the 4.0.4 pin;
 omp SDK 18.12.3 unchanged, engine `^4.0.7` resolved to 4.0.7);
 mstar-harness **4.0.4** (2026-10-20, ref `d58005df`, superseding the 4.0.2 pin, which
