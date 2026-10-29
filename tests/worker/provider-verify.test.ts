@@ -84,7 +84,7 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
   for (const name of [
     "0003_dashboard_users.sql",
     "0004_github_apps.sql",
-    // 0036: createApp writes webhook_path + github_slug (renamed from slug).
+    // 0036: the cached github_slug column (createApp writes it).
     "0036_app_identity.sql",
     "0005_reviews_app_id.sql",
     "0006_app_provider_config.sql",

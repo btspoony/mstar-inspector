@@ -3,10 +3,9 @@
  * the real worker mount (app.route("/dashboard", dashboardApp)).
  * The GitHub App Manifest start/callback coverage (state CSRF,
  * locked conversion headers, encrypted hold cookie, no-secret HTML);
- * the commit coverage pins the rewritten flow: slug-carrying signed state, hold-bound
- * D1 write of the encrypted github_apps row (AAD rowKey = row PK), the
- * commit-time slug-conflict 409 burn (never remap — the manifest registered
- * the webhook URL), fail-closed DASHBOARD_ENCRYPTION_KEY, zero
+ * the commit coverage pins the rewritten flow: app-id-carrying signed state,
+ * hold-bound D1 write of the encrypted github_apps row (AAD rowKey = row PK),
+ * the already-connected 409 burn, fail-closed DASHBOARD_ENCRYPTION_KEY, zero
  * api.cloudflare.com calls, no-secret summary HTML.
  *
  * The end-to-end callback network path is exercised only in live smoke
@@ -93,8 +92,8 @@ const CONVERSION = {
   pem: FAKE_PEM,
   webhook_secret: FAKE_WEBHOOK_SECRET,
 };
-/** The webhook path is a fresh UUID per start — never derived from the login. */
-const WEBHOOK_PATH = "7f0a4d2e-1c3b-4a5f-9e8d-6c2b1a0f9e7d";
+/** The App id minted at start is a fresh UUID — never derived from the login. */
+const START_APP_ID = "7f0a4d2e-1c3b-4a5f-9e8d-6c2b1a0f9e7d";
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The hidden-field manifest JSON from a start page (reverse escapeHtml exactly). */
@@ -1033,7 +1032,7 @@ describe("/dashboard/locale", () => {
 
 describe("manifest hold cookie (manifest.ts)", () => {
   const freshHold = (login = "octocat", nowMs = Date.now()) =>
-    createHoldValue(CONVERSION, login, SESSION_SECRET, WEBHOOK_PATH, "default", nowMs);
+    createHoldValue(CONVERSION, login, SESSION_SECRET, START_APP_ID, "default", nowMs);
 
   test("round trip carries id/name/login/slug/pem/webhook_secret", async () => {
     const value = await freshHold();
@@ -1041,7 +1040,7 @@ describe("manifest hold cookie (manifest.ts)", () => {
     expect(payload).toEqual({
       ...CONVERSION,
       login: "octocat",
-      appId: WEBHOOK_PATH,
+      appId: START_APP_ID,
       workspaceId: "default",
       exp: expect.any(Number),
     });
@@ -1394,7 +1393,7 @@ describe("/dashboard manifest routes", () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     // B5: a valid manifest state carries the webhook path (createStateValue
     // alone is a B0 OAuth state and must NOT verify here).
-    const state = await createManifestStateValue(SESSION_SECRET, WEBHOOK_PATH, "default");
+    const state = await createManifestStateValue(SESSION_SECRET, START_APP_ID, "default");
     const warns = spyOnWarn();
     const res = await worker.fetch(callbackRequest(session, state, `state=${state}`), makeEnv());
     expect(res.status).toBe(400);
@@ -1477,9 +1476,7 @@ describe("/dashboard manifest routes", () => {
     expect(rows[0]!.github_app_id).toBe(CONVERSION.id);
     expect(rows[0]!.created_by).toBe("octocat");
     // Landing page: name / id / GitHub slug / webhook URL + the Settings CTA,
-    // never secrets. The redirect target names the App id (asserted above);
-    // the ROUTE still resolves the segment as a webhook path until the App-ID
-    // route table lands (Task 4), so the page is rendered through that key.
+    // never secrets. The route segment is the immutable GitHub App id.
     const landing = await worker.fetch(
       dashboardRequest(
         `/dashboard/default/apps/${CONVERSION.id}/onboarding`,
@@ -1740,7 +1737,7 @@ describe("buildAppName (manifest.ts, GitHub 34-char App-name cap)", () => {
 
 describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", () => {
   const freshHold = () =>
-    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, WEBHOOK_PATH, "default");
+    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, START_APP_ID, "default");
 
   function resumeRequest(path: string, session: string, hold?: string): Request {
     const cookies = hold ? `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${hold}` : `${SESSION_COOKIE}=${session}`;
@@ -1760,7 +1757,7 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(body).toContain(CONVERSION.name);
     expect(body).toContain(`Slug <strong>${CONVERSION.slug}</strong>`);
-    expect(body).toContain(`https://worker.local/webhook/default/${WEBHOOK_PATH}`);
+    expect(body).toContain(`https://worker.local/webhook/default/${START_APP_ID}`);
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
@@ -1905,7 +1902,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
   }
 
   const freshHold = () =>
-    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, WEBHOOK_PATH, "default");
+    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, START_APP_ID, "default");
 
   function commitEnv(overrides: Partial<Env> = {}): Env {
     // makeEnv seeds the default members (octocat is an admin) and the
@@ -1971,7 +1968,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
       CONVERSION,
       "octocat",
       SESSION_SECRET,
-      WEBHOOK_PATH,
+      START_APP_ID,
       "default",
       Date.now() - (MANIFEST_HOLD_MAX_AGE_SEC + 100) * 1000,
     );
@@ -2147,7 +2144,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     // webhook path exactly as /manifest/start would have minted it.
     const brokeEnv = makeEnv();
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
-    const state = await createManifestStateValue(SESSION_SECRET, WEBHOOK_PATH, "default");
+    const state = await createManifestStateValue(SESSION_SECRET, START_APP_ID, "default");
     globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
     const failed = await worker.fetch(
       dashboardRequest(
@@ -2173,7 +2170,7 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     expectHoldExpired(committed);
     const rows = dbOf(brokeEnv).raw.query("SELECT id FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ id: string }>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.id).toBe(WEBHOOK_PATH);
+    expect(rows[0]!.id).toBe(START_APP_ID);
     // 3. Replaying the same hold after success is a 409 conflict against the
     // REAL identity (`github_app_id`, plus the row PK the hold pins): zero NEW
     // rows, matching the long-standing conflict semantics — never a

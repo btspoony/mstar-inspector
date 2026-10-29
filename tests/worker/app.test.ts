@@ -4,11 +4,9 @@ import { APP_VERSION } from "../../src/version";
 import type { Env } from "../../src/worker/env";
 
 /**
- * Worker entry smoke tests. The legacy bare `POST /webhook` face is retired
- * — its end-to-end coverage (valid signature / 401 / 500 /
- * 413) now lives in tests/worker/webhook-routing.test.ts
- * against the per-App `POST /webhook/:webhookPath` route, sharing the same
- * pre-order. This file keeps the non-webhook entry surface.
+ * Worker entry smoke tests — the non-webhook entry surface. The per-App
+ * webhook route's end-to-end coverage (valid signature / 401 / 500 / 413)
+ * lives in tests/worker/webhook-routing.test.ts.
  */
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
