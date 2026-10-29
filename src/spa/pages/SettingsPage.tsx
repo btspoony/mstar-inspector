@@ -1360,12 +1360,16 @@ function ConfiguredKeyRow({
           {row.updated_at
             ? ` · ${t(locale, "settings.updated", { time: formatRelativeTime(row.updated_at, locale) })}`
             : ""}
-          {/* One row per stored key: the verification state is the row's own. */}
+          {/* One row per stored key: the verification state is the row's own.
+              `reachable` is deliberately NOT "verified" — the probe only
+              proved the endpoint answered. */}
           {row.verified_status === "ok" && row.verified_at
             ? ` · ${t(locale, "settings.keyVerifiedAt", { time: formatRelativeTime(row.verified_at, locale) })}`
-            : row.verified_status === "failed"
-              ? ` · ${t(locale, "settings.keyVerifyFailed")}`
-              : ""}
+            : row.verified_status === "reachable" && row.verified_at
+              ? ` · ${t(locale, "settings.keyReachableAt", { time: formatRelativeTime(row.verified_at, locale) })}`
+              : row.verified_status === "failed"
+                ? ` · ${t(locale, "settings.keyVerifyFailed")}`
+                : ""}
         </div>
       </div>
       <Button

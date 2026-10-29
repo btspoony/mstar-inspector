@@ -309,6 +309,7 @@ export const zhCN: Dictionary = {
     keyEnding: "密钥结尾 {last4}",
     keyTooShort: "密钥太短，无法显示结尾",
     keyVerifiedAt: "已验证 {time}",
+    keyReachableAt: "端点可达 {time} — 密钥未验证",
     keyVerifyFailed: "验证失败",
     updated: "更新于 {time}",
     remove: "移除",

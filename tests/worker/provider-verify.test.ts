@@ -725,4 +725,53 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
   test("VERIFY_TIMEOUT_MS is 10s and the default deps path uses it", () => {
     expect(VERIFY_TIMEOUT_MS).toBe(10_000);
   });
+
+  test("a 2xx from a PUBLIC models endpoint stamps the key 'reachable', never 'ok'", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "public-probe-app");
+    const store = configStore(db);
+    // Command Code's models endpoint answers 2xx with no valid credential, so
+    // the probe proves reachability only. Both of its catalog rows
+    // (openai-responses and anthropic-messages) share that host.
+    for (const decl of [
+      { provider_id: "commandcode", base_url: "https://api.commandcode.ai/provider/v1", api: "openai-responses" as const },
+      { provider_id: "commandcode-anthropic", base_url: "https://api.commandcode.ai/provider", api: "anthropic-messages" as const },
+    ]) {
+      const verified = await verifyProviderKey({ fetch: mockFetch(json(200, { data: [] })) }, decl.provider_id, PLAIN_KEY, {
+        baseUrl: decl.base_url,
+        api: decl.api,
+        modelIds: ["m1"],
+      });
+      expect(verified.ok).toBe(true);
+      await store.upsertCustomProvider(app.id, { ...decl, model_ids: ["m1"] }, PLAIN_KEY);
+    }
+    const rows = db.raw
+      .query("SELECT provider, verified_at, verified_status FROM app_custom_provider_keys WHERE app_id = ? ORDER BY provider")
+      .all(app.id) as Array<{ provider: string; verified_at: string | null; verified_status: string | null }>;
+    expect(rows).toEqual([
+      { provider: "commandcode", verified_at: expect.stringMatching(SQLITE_TS_RE), verified_status: "reachable" },
+      { provider: "commandcode-anthropic", verified_at: expect.stringMatching(SQLITE_TS_RE), verified_status: "reachable" },
+    ]);
+    // The settings faces carry that weaker state, so the SPA never renders it
+    // as "verified at …".
+    expect((await store.listCustomProviderKeys(app.id)).map((row) => row.verifiedStatus)).toEqual([
+      "reachable",
+      "reachable",
+    ]);
+  });
+
+  test("an authenticated custom probe still stamps 'ok' (a bogus key there is rejected 401/403)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "auth-probe-app");
+    const store = configStore(db);
+    await store.upsertCustomProvider(
+      app.id,
+      { provider_id: "my-custom", base_url: "https://example.com/v1", api: "openai-completions", model_ids: ["m1"] },
+      PLAIN_KEY,
+    );
+    const row = db.raw
+      .query("SELECT verified_status FROM app_custom_provider_keys WHERE app_id = ?")
+      .get(app.id) as { verified_status: string | null };
+    expect(row.verified_status).toBe("ok");
+  });
 });

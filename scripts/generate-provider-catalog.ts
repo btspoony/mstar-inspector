@@ -377,7 +377,16 @@ export function buildCatalog(
       if (records.length === 0) {
         if (Object.hasOwn(catalogBeforeUnion, providerId)) audit.ompAlreadyPresent.push(providerId);
         else if (Object.hasOwn(omp.excluded.alias, providerId)) {
-          audit.ompAliasSkips.push(`${providerId} → ${omp.excluded.alias[providerId]}`);
+          // Rule (b) claims the provider is COVERED BY another catalog row, so
+          // a target that is not a row would silently drop the provider while
+          // the audit header kept asserting that coverage.
+          const target = omp.excluded.alias[providerId]!;
+          if (!Object.hasOwn(catalogBeforeUnion, target)) {
+            throw new Error(
+              `omp provider ${JSON.stringify(providerId)} aliases ${JSON.stringify(target)}, which is not a catalog row — fix scripts/provider-catalog/omp-api-key-providers.json`,
+            );
+          }
+          audit.ompAliasSkips.push(`${providerId} → ${target}`);
         } else if (omp.excluded.nonModel.includes(providerId)) audit.ompNonModel.push(providerId);
         else if (omp.excluded.oauthOrDeviceCode.includes(providerId)) {
           audit.ompNotMaterializable.push(`${providerId} (oauth/device-code login)`);

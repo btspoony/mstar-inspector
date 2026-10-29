@@ -297,6 +297,28 @@ function customModelsUrl(baseUrl: string): string {
 }
 
 /**
+ * Hosts whose models endpoint is PUBLIC: it answers 2xx with no valid
+ * credential, so a 2xx there proves reachability only. A caller must not
+ * record such a save as a verified key.
+ *
+ * shortcut: Command Code's public `/provider/v1/models` cannot reject a bogus
+ * key (its `anthropic-messages` row is the same host); omp validates that
+ * provider against `/alpha/whoami` instead. Upgrade this probe if a rejected
+ * bogus key ever matters more than the extra round trip.
+ */
+const PUBLIC_MODELS_PROBE_HOSTS: ReadonlySet<string> = new Set(["api.commandcode.ai"]);
+
+/** Whether a custom-provider probe on this base URL can REJECT a bogus key. */
+export function customProbeCanRejectKey(baseUrl: string): boolean {
+  try {
+    return !PUBLIC_MODELS_PROBE_HOSTS.has(new URL(baseUrl).hostname);
+  } catch {
+    // An unparseable base URL never reaches a probe — the store refuses it.
+    return true;
+  }
+}
+
+/**
  * Verify one CUSTOM-provider key (spec §6.1/§6.2): probe the declared base
  * URL's models endpoint with the protocol-appropriate auth for the declared
  * `api` form (anthropic-messages → x-api-key + anthropic-version; both
@@ -309,11 +331,7 @@ function customModelsUrl(baseUrl: string): string {
  * never write app_provider_models rows — their dropdown source is the
  * declared model_ids, returned here for callers to display.
  *
- * shortcut: the `typesafe` probe cannot reject a bogus Command Code key —
- * Command Code's public `/provider/v1/models` answers 2xx without a valid key
- * (its `anthropic-messages` row is the same host). omp validates that provider
- * against `/alpha/whoami` instead; upgrade this probe if a rejected bogus key
- * ever matters more than the extra round trip.
+ * A 2xx here is NOT always proof of the key: see customProbeCanRejectKey.
  */
 async function verifyCustomProvider(
   deps: VerifyDeps,

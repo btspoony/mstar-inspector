@@ -171,10 +171,13 @@ export type CatalogProvider = {
 };
 
 /**
- * The store-enforced verification vocabulary: `ok` / `failed` after a verify,
- * NULL while a key was never verified (mirrors `app_provider_keys.verified_status`).
+ * The store-enforced verification vocabulary (mirrors
+ * `app_provider_keys.verified_status`): `ok` = the probe proved the KEY,
+ * `reachable` = it only proved the ENDPOINT answered (the host's models
+ * endpoint is public and cannot reject a bogus key), `failed` = a recorded
+ * failed verify, NULL = never verified.
  */
-export type KeyVerifiedStatus = "ok" | "failed" | null;
+export type KeyVerifiedStatus = "ok" | "reachable" | "failed" | null;
 
 /**
  * One row of the settings `keys` face (the store's ProviderKeySummary): the
@@ -967,7 +970,7 @@ function isConfiguredProviderList(value: unknown): value is ConfiguredProvider[]
 
 /** The verification vocabulary is closed — an off-vocabulary value fails the parse. */
 function isKeyVerifiedStatus(value: unknown): value is KeyVerifiedStatus {
-  return value === null || value === "ok" || value === "failed";
+  return value === null || value === "ok" || value === "reachable" || value === "failed";
 }
 
 /**

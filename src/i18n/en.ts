@@ -356,6 +356,7 @@ export const en = {
     keyEnding: "key ending {last4}",
     keyTooShort: "key too short to show a tail",
     keyVerifiedAt: "verified {time}",
+    keyReachableAt: "endpoint reachable {time} — key not verified",
     keyVerifyFailed: "verification failed",
     updated: "updated {time}",
     remove: "Remove",

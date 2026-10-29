@@ -428,4 +428,29 @@ describe("omp provider union (third generator input)", () => {
     expect(audit.ompAlreadyPresent).toContain("anthropic");
     expect(audit.ompRowCount).toBe(0);
   });
+
+  test("an alias whose target is not a catalog row throws instead of silently dropping the provider", () => {
+    // Rule (b) asserts the provider is covered BY another row; a target that
+    // does not resolve would drop the provider while the generated header kept
+    // claiming coverage.
+    expect(() =>
+      buildCatalog(snapshotOnly, {
+        source: OMP_SNAPSHOT.source,
+        ompProviderIds: ["moonshot"],
+        excluded: { alias: { moonshot: "moonshot-ai-retired" }, nonModel: [], oauthOrDeviceCode: [], notMaterializable: {} },
+        providers: [],
+      }),
+    ).toThrow(
+      'omp provider "moonshot" aliases "moonshot-ai-retired", which is not a catalog row — fix scripts/provider-catalog/omp-api-key-providers.json',
+    );
+    // The same alias with a resolvable target is an ordinary rule-(b) skip.
+    const { catalog, audit } = buildCatalog(snapshotOnly, {
+      source: OMP_SNAPSHOT.source,
+      ompProviderIds: ["moonshot"],
+      excluded: { alias: { moonshot: "moonshotai" }, nonModel: [], oauthOrDeviceCode: [], notMaterializable: {} },
+      providers: [],
+    });
+    expect(Object.hasOwn(catalog, "moonshot")).toBe(false);
+    expect(audit.ompAliasSkips).toEqual(["moonshot → moonshotai"]);
+  });
 });

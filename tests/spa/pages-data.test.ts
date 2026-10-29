@@ -810,13 +810,15 @@ describe("provider catalog rows + add selection", () => {
     const { keyId: _droppedId, ...withoutId } = keyRow;
     expect(parseSettings({ ...manageBase, keys: [withoutId] })).toBeNull();
     expect(parseSettings({ ...manageBase, keys: [{ provider: "anthropic", last4: "1111" }] })).toBeNull();
-    // The verification vocabulary is closed (store-enforced ok|failed) — an
-    // off-vocabulary status fails the parse instead of rendering a state the
-    // row can never hold.
+    // The verification vocabulary is closed (store-enforced ok|reachable|failed)
+    // — an off-vocabulary status fails the parse instead of rendering a state
+    // the row can never hold.
     expect(
       parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "maybe" }] }),
     ).toBeNull();
     expect(parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "failed" }] })).not.toBeNull();
+    // `reachable` = the probe only proved the endpoint answered.
+    expect(parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "reachable" }] })).not.toBeNull();
   });
 
   test("a custom pool's key row parses through the same configured key-row guard", () => {

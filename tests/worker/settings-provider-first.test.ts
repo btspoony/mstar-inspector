@@ -1046,6 +1046,29 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
   });
 
+  test("a 2xx from a public models endpoint lands a 'reachable' row, never 'ok'", async () => {
+    const { db } = await seededWorld();
+    // Command Code's models endpoint answers 2xx without a valid key, so the
+    // probe proves reachability only — the stored row must not claim the key.
+    fetchSpy = mockStatus(200, { data: [] });
+    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "commandcode",
+      key: PLAIN_KEY,
+    });
+    expect(stored.status).toBe(200);
+    const body = await getConfigured(makeEnv(db));
+    expect(body.configured_providers.find((row) => row.kind === "key")).toMatchObject({
+      kind: "key",
+      provider: "commandcode",
+      verified_status: "reachable",
+    });
+    const keyRow = db.raw
+      .query("SELECT verified_status FROM app_custom_provider_keys WHERE provider = 'commandcode'")
+      .get() as { verified_status: string | null };
+    expect(keyRow.verified_status).toBe("reachable");
+  });
+
   test("a non-catalog custom declaration is configured state", async () => {
     const { db } = await seededWorld();
     fetchSpy = mockStatus(200, { data: [] });
