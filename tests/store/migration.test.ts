@@ -1613,3 +1613,185 @@ describe("migrations/0037_github_metadata_attempt.sql", () => {
     expect(after.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 });
+
+describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** The pre-0038 shape: 0003 … 0037, i.e. what production runs today. */
+  function createPre0038Db(): TestD1 {
+    // createTestD1 already applied the 0001/0002 base shape, so the chain here
+    // starts at 0003 and stops before the migration under test.
+    const db = createTestD1();
+    for (const name of readdirSync(MIGRATIONS_DIR)
+      .filter((name) => name.endsWith(".sql") && name >= "0003" && name < "0038")
+      .sort()) {
+      applyMigrationFile(db, name);
+    }
+    return db;
+  }
+
+  /**
+   * Two live Apps, each with its own workspace mapping, installation and
+   * delivery — the child rows the rebuild must carry across its DROP TABLE.
+   */
+  function seedLiveData(db: TestD1): void {
+    insertGithubAppRow(db, {
+      id: "app-live-1",
+      name: "Acme Reviewer",
+      githubAppId: 1001,
+      createdBy: "mallory",
+    });
+    insertGithubAppRow(db, {
+      id: "app-live-2",
+      name: "Widgets Reviewer",
+      githubAppId: 1002,
+      createdBy: "octocat",
+      deletedExpr: "datetime('now')",
+    });
+    // Distinguishable credentials per row: the copy must not swap them.
+    db.raw
+      .prepare("UPDATE github_apps SET private_key_enc = ?, webhook_secret_enc = ?, github_slug = ? WHERE id = ?")
+      .run("v1.primary.cGVtLTE=", "v1.primary.c2VjcmV0LTE=", "acme-reviewer", "app-live-1");
+    db.raw
+      .prepare("UPDATE github_apps SET private_key_enc = ?, webhook_secret_enc = ?, github_slug = ? WHERE id = ?")
+      .run("v1.primary.cGVtLTI=", "v1.primary.c2VjcmV0LTI=", "widgets-reviewer", "app-live-2");
+    db.raw
+      .prepare(
+        `INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-live-1', 'default')`,
+      )
+      .run();
+    for (const [id, installationId] of [
+      ["inst-1", 123],
+      ["inst-2", 456],
+    ] as const) {
+      db.raw
+        .prepare(
+          `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+           VALUES (?, ?, ?, 'acme', '2026-01-01 00:00:00')`,
+        )
+        .run(id, id === "inst-1" ? "app-live-1" : "app-live-2", installationId);
+    }
+    for (const [id, appId, outcome] of [
+      ["delivery-1", "app-live-1", "ok"],
+      ["delivery-2", "app-live-2", "rejected"],
+    ] as const) {
+      db.raw
+        .prepare(
+          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, created_at)
+           VALUES (?, ?, 'pull_request', ?, 401, '2026-01-02 00:00:00')`,
+        )
+        .run(id, appId, outcome);
+    }
+  }
+
+  test("rebuilds the table with foreign keys ON inside one transaction: every row and child survives, the column is gone, UNIQUE holds", () => {
+    const db = createPre0038Db();
+    seedLiveData(db);
+    const appsBefore = db.raw
+      .query(
+        `SELECT id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status,
+                deleted_at, review_enabled, sandbox_image_id, github_slug, review_trigger_mode
+         FROM github_apps ORDER BY id`,
+      )
+      .all();
+    expect(appsBefore).toHaveLength(2);
+    const childrenBefore = {
+      workspaces: db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all(),
+      installations: db.raw
+        .query("SELECT id, app_id, installation_id, account_login, seen_at FROM app_installations ORDER BY id")
+        .all(),
+      deliveries: db.raw
+        .query("SELECT id, app_id, event_name, outcome, status_code, created_at FROM webhook_deliveries ORDER BY id")
+        .all(),
+    };
+    expect(childrenBefore.workspaces).toHaveLength(1);
+    expect(childrenBefore.installations).toHaveLength(2);
+    expect(childrenBefore.deliveries).toHaveLength(2);
+
+    // D1 runs every migration file inside one implicit transaction with
+    // foreign keys enforced, so the test applies the file the same way: one
+    // transaction, FK enforcement ON, and the file's own PRAGMA switches are
+    // the ones under test (SQLite ignores `foreign_keys` inside a transaction,
+    // which is exactly why the migration also defers the checks).
+    db.raw.exec("PRAGMA foreign_keys = ON");
+    const apply = db.raw.transaction(() => {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0038_webhook_path_drop.sql"), "utf8"));
+    });
+    expect(() => apply()).not.toThrow();
+
+    // The rows survive field for field, in the same order and with the same
+    // values (the copy is positional, so a swapped column would show up here).
+    const appsAfter = db.raw
+      .query(
+        `SELECT id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status,
+                deleted_at, review_enabled, sandbox_image_id, github_slug, review_trigger_mode
+         FROM github_apps ORDER BY id`,
+      )
+      .all();
+    expect(appsAfter).toEqual(appsBefore);
+    expect(appsAfter.map((row) => (row as { github_app_id: number }).github_app_id)).toEqual([1001, 1002]);
+
+    // No child row was cascaded, dropped or rewritten.
+    expect(db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all()).toEqual(
+      childrenBefore.workspaces,
+    );
+    expect(
+      db.raw
+        .query("SELECT id, app_id, installation_id, account_login, seen_at FROM app_installations ORDER BY id")
+        .all(),
+    ).toEqual(childrenBefore.installations);
+    expect(
+      db.raw
+        .query("SELECT id, app_id, event_name, outcome, status_code, created_at FROM webhook_deliveries ORDER BY id")
+        .all(),
+    ).toEqual(childrenBefore.deliveries);
+    expect(db.raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
+
+    // The column is gone, and the one remaining identity constraint still bites.
+    const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).not.toContain("webhook_path");
+    expect(() =>
+      insertGithubAppRow(db, { id: "app-dup", githubAppId: 1001 }),
+    ).toThrow(/UNIQUE constraint failed: github_apps.github_app_id/);
+    // FK enforcement is still live after the rebuild (the file restores it).
+    expect(() =>
+      db.raw
+        .prepare("INSERT INTO app_installations (id, app_id, installation_id, seen_at) VALUES ('inst-x', 'nope', 1, '2026-01-01 00:00:00')")
+        .run(),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  test("replaying the file on an already-migrated schema is a no-op, leaving no staging table", () => {
+    // No ledger exists in the test double, so the realistic second run is a raw
+    // replay. The rebuild must be idempotent on the post-0038 shape (the
+    // ledger is what normally prevents this call), and it must not leave the
+    // staging table or a half-rebuilt schema behind.
+    const db = createMigratedTestD1();
+    insertGithubAppRow(db, { id: "app-keep", githubAppId: 2001, name: "Keep" });
+    db.raw
+      .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-keep', 'default')")
+      .run();
+    const appsBefore = db.raw.query("SELECT id, github_app_id, name FROM github_apps ORDER BY id").all();
+    const childrenBefore = db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all();
+
+    expect(() => db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0038_webhook_path_drop.sql"), "utf8"))).not.toThrow();
+
+    expect(db.raw.query("SELECT id, github_app_id, name FROM github_apps ORDER BY id").all()).toEqual(appsBefore);
+    expect(db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all()).toEqual(
+      childrenBefore,
+    );
+    const tables = db.raw
+      .query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((table) => table.name)).not.toContain("github_apps_staging");
+    expect(
+      (db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>).map((column) => column.name),
+    ).not.toContain("webhook_path");
+    // The file's own PRAGMA switches leave FK enforcement ON for the rest of
+    // the run (the connection default the migration must not weaken).
+    expect((db.raw.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
+  });
+});
