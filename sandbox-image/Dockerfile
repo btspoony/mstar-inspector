@@ -92,7 +92,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref db013c73255f3af1e166d15ae7c3514dc200da6b (tag v4.0.7, bumped 2026-10-24).
+# mstar-harness plugin, pinned ref 582428520edca3812aca25028013bf636eece8d6 (tag v4.1.2, bumped 2026-10-30).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -103,7 +103,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin db013c73255f3af1e166d15ae7c3514dc200da6b \
+    && git -C /opt/mstar-harness fetch --depth 1 origin 582428520edca3812aca25028013bf636eece8d6 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
@@ -179,7 +179,7 @@ RUN sh /opt/verify-cli-shim.sh
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
-# lockfile (omp SDK 18.12.3 = packages/runner/package.json). `--omit=optional` is NOT used:
+# lockfile (omp SDK 18.13.3 = packages/runner/package.json). `--omit=optional` is NOT used:
 # pi-natives ships its platform binary as an optional dep, so omitting optionals
 # breaks the runner at load (T4 live smoke). Size control instead prunes the
 # transformers tree (local-embedding models only — the runner uses the remote

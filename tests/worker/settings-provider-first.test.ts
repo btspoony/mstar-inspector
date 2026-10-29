@@ -1020,7 +1020,8 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     const body = await getConfigured(makeEnv(db));
     expect(body.configured_providers).toEqual([
       // The materialized pool's own rows: a template provider is managed per
-      // key exactly like a free-form custom declaration.
+      // key exactly like a free-form custom declaration — and, like one, its
+      // probe only proves the endpoint answered.
       {
         kind: "key",
         provider: "workers-ai",
@@ -1028,7 +1029,7 @@ describe("GET settings configured_providers vs provider_catalog", () => {
         last4: PLAIN_KEY.slice(-4),
         updated_at: expect.any(String),
         verified_at: expect.any(String),
-        verified_status: "ok",
+        verified_status: "reachable",
       },
       {
         kind: "custom",
@@ -1046,6 +1047,71 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
   });
 
+  test("a template on an unproven host lands a 'reachable' row, never 'ok'", async () => {
+    const { db } = await seededWorld();
+    // Command Code's models endpoint answers 2xx without a valid key and no
+    // allow-list entry covers that host, so the stored row must not claim the
+    // key.
+    fetchSpy = mockStatus(200, { data: [] });
+    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "commandcode",
+      key: PLAIN_KEY,
+    });
+    expect(stored.status).toBe(200);
+    const body = await getConfigured(makeEnv(db));
+    expect(body.configured_providers.find((row) => row.kind === "key")).toMatchObject({
+      kind: "key",
+      provider: "commandcode",
+      verified_status: "reachable",
+    });
+    const keyRow = db.raw
+      .query("SELECT verified_status FROM app_custom_provider_keys WHERE provider = 'commandcode'")
+      .get() as { verified_status: string | null };
+    expect(keyRow.verified_status).toBe("reachable");
+  });
+
+  test("a template on the allow-listed TypeSafe host lands 'ok' — its models endpoint rejects a bogus key", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "typesafe",
+      key: PLAIN_KEY,
+    });
+    expect(stored.status).toBe(200);
+    const body = await getConfigured(makeEnv(db));
+    expect(body.configured_providers.find((row) => row.kind === "key")).toMatchObject({
+      kind: "key",
+      provider: "typesafe",
+      verified_status: "ok",
+    });
+  });
+
+  test("a template override on the SAME allow-listed host but an off-path base URL lands 'reachable'", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    // The allow-list evidence names GET /v1/models; this declaration probes
+    // /console/v1/models, so a 2xx there proves only that the endpoint answered.
+    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "typesafe",
+      base_url: "https://api.typesafe.ai/console",
+      key: PLAIN_KEY,
+    });
+    expect(stored.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://api.typesafe.ai/console/v1/models",
+      expect.objectContaining({ method: "GET" }),
+    );
+    const body = await getConfigured(makeEnv(db));
+    expect(body.configured_providers.find((row) => row.kind === "key")).toMatchObject({
+      kind: "key",
+      provider: "typesafe",
+      verified_status: "reachable",
+    });
+  });
+
   test("a non-catalog custom declaration is configured state", async () => {
     const { db } = await seededWorld();
     fetchSpy = mockStatus(200, { data: [] });
@@ -1061,7 +1127,8 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     const body = await getConfigured(makeEnv(db));
     expect(body.configured_providers).toEqual([
       // Its key is a row of its own — the delete handle the whole-provider
-      // removal deliberately is not.
+      // removal deliberately is not. `example.com` is no known
+      // key-rejecting host, so a 2xx there proves reachability only.
       {
         kind: "key",
         provider: "my-custom",
@@ -1069,7 +1136,7 @@ describe("GET settings configured_providers vs provider_catalog", () => {
         last4: PLAIN_KEY.slice(-4),
         updated_at: expect.any(String),
         verified_at: expect.any(String),
-        verified_status: "ok",
+        verified_status: "reachable",
       },
       {
         kind: "custom",
@@ -1252,7 +1319,8 @@ describe("multi-key provider pools (routes)", () => {
       [PLAIN_KEY.slice(-4), SECOND_KEY.slice(-4)].sort(),
     );
     expect(keyRows.every((row) => row.provider === "my-custom")).toBe(true);
-    expect(keyRows.every((row) => row.verified_status === "ok")).toBe(true);
+    // A 2xx on `example.com` proves reachability only.
+    expect(keyRows.every((row) => row.verified_status === "reachable")).toBe(true);
     // The add flow's per-provider face carries them too — a materialized
     // template's pool is listed there before another key is appended.
     expect(

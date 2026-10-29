@@ -7,7 +7,9 @@
  * `scripts/provider-catalog/models.dev-2026-09-04.json` (fetched 2026-09-04
  * from https://models.dev/api.json; the `api` field carries the base URL)
  * + the omp-facing override table in the generator (labels / env-name
- * contract / workers-ai template). Runtime is fully static: zero network,
+ * contract / workers-ai template) + the vendored omp provider snapshot
+ * `scripts/provider-catalog/omp-api-key-providers.json` (omp 18.13.3,
+ * extracted 2026-10-30). Runtime is fully static: zero network,
  * zero ai-sdk runtime dependencies — the Worker, the dashboard, and the
  * sandbox image only import this module. PURE DATA + pure derivations:
  * zero imports of any kind.
@@ -42,6 +44,20 @@
  *     after rules a/b): (none)
  *   - models prefill cap: at most the first 20 model ids per provider
  *     (deterministic snapshot order — template prefill only)
+ * omp provider union (omp 18.13.3, vendored 2026-10-30 — every omp
+ * API-key provider id names its rule; 89 providers → 16 template rows):
+ *   - (a) already in the catalog (builtin or template) (45): aiand, alibaba-coding-plan, alibaba-token-plan, amazon-bedrock, anthropic, azure, baseten, cerebras, cline-pass, cloudflare-ai-gateway, cloudflare-workers-ai, coralbricks, cursor, deepinfra, deepseek, github-copilot, google, google-vertex, groq, huggingface, inception, kilo, meta, minimax, mistral, nvidia, ollama-cloud, openai, opencode-go, openrouter, sakana, siliconflow, siliconflow-cn, stepfun, synthetic, umans, venice, wafer-serverless, xai, xiaomi, xiaomi-token-plan-ams, xiaomi-token-plan-cn, xiaomi-token-plan-sgp, zai, zenmux
+ *   - (b) naming alias of an existing catalog row (14): abliteration → abliteration-ai, charm-hyper → hyper, fireworks → fireworks-ai, gmi-cloud → gmicloud, lm-studio → lmstudio, minimax-code → minimax-coding-plan, minimax-code-cn → minimax-cn-coding-plan, moonshot → moonshotai, nanogpt → nano-gpt, novita → novita-ai, opencode-zen → opencode, together → togetherai, vercel-ai-gateway → vercel, zhipu-coding-plan → zhipuai-coding-plan
+ *   - (c) non-model — no API-key env, search or local-inference surface (3):
+ *     apple, local, web
+ *   - (d) not materializable — id grammar, protocol outside the custom-provider set, or a
+ *     non-{account_id} URL placeholder (12):
+ *     bedrock-mantle (base URL carries a non-{account_id} placeholder ({region})), devin (oauth/device-code login), factory-droid (oauth/device-code login), gitlab-duo (oauth/device-code login), gitlab-duo-agent (oauth/device-code login), google-antigravity (oauth/device-code login), google-gemini-cli (oauth/device-code login), kimi-code (oauth/device-code login), muse-code (oauth/device-code login), openai-codex (oauth/device-code login), snowflake (base URL is an account-placeholder host (https://snowflake-account.invalid/...)), xai-oauth (oauth/device-code login)
+ *   - union rows are `template` tier with a null envName; prefill is the omp seed
+ *     vocabulary capped at 20 (empty when omp ships none)
+ *   - `commandcode` is mixed-protocol and therefore two rows — `commandcode`
+ *     (openai-responses) and `commandcode-anthropic` (anthropic-messages) — because a
+ *     custom-provider declaration carries exactly one protocol
  */
 
 export type ProviderTier = "builtin" | "template";
@@ -4482,6 +4498,218 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
       "lynkr-auto"
     ],
     "doc": "https://github.com/Fast-Editor/Lynkr"
+  },
+  "aimlapi": {
+    "label": "AIML API",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.aimlapi.com/v1",
+    "api": "openai-completions",
+    "models": [
+      "gpt-5.5-2026-04-23"
+    ],
+    "doc": null
+  },
+  "commandcode": {
+    "label": "Command Code",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.commandcode.ai/provider/v1",
+    "api": "openai-responses",
+    "models": [
+      "gpt-5.3-codex",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.5",
+      "gpt-6-astra",
+      "gpt-6-luna",
+      "gpt-6-sol",
+      "gpt-5.6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "meta/muse-spark-1.3",
+      "deepseek/deepseek-v4-flash",
+      "deepseek/deepseek-v4-flash-vision-exp",
+      "deepseek/deepseek-v4-pro",
+      "zai-org/GLM-5.2",
+      "deepseek/deepseek-v4-flash-fast",
+      "deepseek/deepseek-v4.1-flash",
+      "deepseek/deepseek-v4.1-flash-fast",
+      "moonshotai/Kimi-K3",
+      "z-ai/glm-5.3-flash"
+    ],
+    "doc": null
+  },
+  "commandcode-anthropic": {
+    "label": "Command Code (Anthropic Messages)",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.commandcode.ai/provider",
+    "api": "anthropic-messages",
+    "models": [
+      "claude-fable-5",
+      "claude-fable-5-1",
+      "claude-opus-4-7",
+      "claude-opus-4-8",
+      "claude-opus-5",
+      "claude-opus-5-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-5",
+      "claude-sonnet-5-5",
+      "claude-haiku-4-5-20251001"
+    ],
+    "doc": null
+  },
+  "coreweave": {
+    "label": "CoreWeave Serverless Inference",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.inference.wandb.ai/v1",
+    "api": "openai-completions",
+    "models": [
+      "openai/gpt-oss-120b"
+    ],
+    "doc": null
+  },
+  "firepass": {
+    "label": "Fire Pass (Fireworks subscription)",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.fireworks.ai/inference/v1",
+    "api": "openai-completions",
+    "models": [
+      "glm-5.2-fast",
+      "kimi-k3-fast"
+    ],
+    "doc": null
+  },
+  "helmcode": {
+    "label": "Helmcode",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.helmcode.com/v1",
+    "api": "openai-completions",
+    "models": [
+      "deepseek-v4-flash",
+      "qwen3.6",
+      "gemma4",
+      "glm5.3"
+    ],
+    "doc": null
+  },
+  "litellm": {
+    "label": "LiteLLM",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": null,
+    "api": "openai-completions",
+    "models": [
+      "claude-opus-5-5"
+    ],
+    "doc": null
+  },
+  "ollama": {
+    "label": "Ollama (Local OpenAI-compatible)",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": null,
+    "api": "openai-completions",
+    "models": [
+      "gpt-oss:20b"
+    ],
+    "doc": null
+  },
+  "qianfan": {
+    "label": "Qianfan",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://qianfan.baidubce.com/v2",
+    "api": "openai-completions",
+    "models": [
+      "deepseek-v3.2"
+    ],
+    "doc": null
+  },
+  "qwen-portal": {
+    "label": "Qwen Portal",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://portal.qwen.ai/v1",
+    "api": "openai-completions",
+    "models": [
+      "coder-model"
+    ],
+    "doc": null
+  },
+  "sambanova": {
+    "label": "SambaNova",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.sambanova.ai/v1",
+    "api": "openai-completions",
+    "models": [
+      "gpt-oss-120b"
+    ],
+    "doc": null
+  },
+  "singularityapi-dev": {
+    "label": "SingularityAPI",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.singularityapi.dev/v1",
+    "api": "openai-completions",
+    "models": [
+      "deepseek-v4-flash"
+    ],
+    "doc": null
+  },
+  "singularityapi-tech": {
+    "label": "SingularityAPI Reserved Lanes",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.singularityapi.tech/v1",
+    "api": "openai-completions",
+    "models": [
+      "deepseek-ai/DeepSeek-V4.1-Flash"
+    ],
+    "doc": null
+  },
+  "typesafe": {
+    "label": "TypeSafe",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://api.typesafe.ai",
+    "api": "typesafe",
+    "models": [
+      "jev-1.14.0",
+      "jev-latest"
+    ],
+    "doc": null
+  },
+  "vllm": {
+    "label": "vLLM (Local OpenAI-compatible)",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": null,
+    "api": "openai-completions",
+    "models": [
+      "gpt-oss-20b"
+    ],
+    "doc": null
+  },
+  "yolo-auto": {
+    "label": "Yolo-Auto",
+    "tier": "template",
+    "envName": null,
+    "baseUrl": "https://yolo-auto.com/v1",
+    "api": "openai-completions",
+    "models": [
+      "qwen3.8-27b",
+      "yolo",
+      "yolo-small",
+      "yolo-128k"
+    ],
+    "doc": null
   }
 };
 

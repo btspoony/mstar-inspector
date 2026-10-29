@@ -22,8 +22,17 @@ import {
   providerEnvName,
 } from "../../src/pipeline/provider-catalog";
 import { PROVIDER_IDS_BUILTIN, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
-import { CUSTOM_PROVIDER_ID_PATTERN } from "../../src/dashboard/app-config-store";
+import { CUSTOM_PROVIDER_API_IDS, CUSTOM_PROVIDER_ID_PATTERN } from "../../src/dashboard/app-config-store";
 import { buildCatalog } from "../../scripts/generate-provider-catalog";
+
+const REPO_ROOT = join(import.meta.dir, "../..");
+/** The vendored omp provider union input (the generator's third input). */
+const OMP_SNAPSHOT = JSON.parse(
+  readFileSync(join(REPO_ROOT, "scripts/provider-catalog/omp-api-key-providers.json"), "utf8"),
+) as {
+  source: { version: string; extracted: string };
+  providers: { id: string; api: string; baseUrl: string | null; models: string[] }[];
+};
 
 describe("shared provider mapping", () => {
   test("PROVIDER_ENV_NAMES is the frozen env-name snapshot of PROVIDERS", () => {
@@ -46,15 +55,22 @@ describe("shared provider mapping", () => {
   });
 });
 describe("provider catalog tiers (spec §5; breadth)", () => {
-  test("the catalog is 19 builtin + the full template tier (workers-ai + snapshot breadth)", () => {
+  test("the catalog is 19 builtin + the full template tier (curated + snapshot breadth + omp union)", () => {
     const builtin = Object.entries(PROVIDER_CATALOG).filter(([, e]) => e.tier === "builtin");
     const template = Object.entries(PROVIDER_CATALOG).filter(([, e]) => e.tier === "template");
     // The 19 runner-consumable builtins are immutable (Global
-    // Constraints); the template tier is the hand-curated workers-ai entry
-    // plus every breadth row from the committed snapshot (194 → 195).
+    // Constraints). The template tier is derived, not restated: every omp
+    // union row (all new, by construction) plus everything that was already
+    // template-tier before the union.
     expect(builtin).toHaveLength(19);
-    expect(template).toHaveLength(195);
-    expect(Object.keys(PROVIDER_CATALOG)).toHaveLength(214);
+    const unionIds = OMP_SNAPSHOT.providers.map((record) => record.id);
+    for (const id of unionIds) {
+      expect(template.map(([entryId]) => entryId), id).toContain(id);
+      expect(PROVIDER_CATALOG[id]!.tier, id).toBe("template");
+    }
+    // workers-ai + the 194 committed breadth rows + the 16 union rows.
+    expect(template).toHaveLength(1 + 194 + unionIds.length);
+    expect(Object.keys(PROVIDER_CATALOG)).toHaveLength(19 + template.length);
     expect(Object.keys(PROVIDERS)).toEqual(builtin.map(([id]) => id));
     expect(Object.keys(TEMPLATE_PROVIDERS)).toEqual(template.map(([id]) => id));
   });
@@ -177,9 +193,9 @@ describe("provider catalog breadth enumeration (spec § Providers contract 2)", 
       expect(templateIds.has(key), key).toBe(true);
       expect(PROVIDER_CATALOG[key]!.tier, key).toBe("template");
     }
-    // 194 breadth + 19 builtin + 1 curated template = 214 catalog rows.
+    // 194 breadth + 19 builtin + 1 curated template + the omp union rows.
     expect(expectedBreadth).toHaveLength(194);
-    expect(templateIds.size).toBe(195);
+    expect(templateIds.size).toBe(195 + OMP_SNAPSHOT.providers.length);
   });
 
   test("snapshot-derived entries follow the breadth mapping (label/baseUrl/api/models/doc, 20-model prefill cap)", () => {
@@ -333,8 +349,108 @@ describe("generator breadth-collision guard (audit DEBT-46-05)", () => {
   });
 
   test("the guard is unreachable with the committed snapshot (audit: no collision today)", () => {
+    // Snapshot only: the union pass is a separate, optional input.
     const { catalog, audit } = buildCatalog(snapshot);
     expect(Object.keys(catalog)).toHaveLength(214);
     expect(audit.breadthCount).toBe(194);
+  });
+});
+
+describe("omp provider union (third generator input)", () => {
+  const unionIds = OMP_SNAPSHOT.providers.map((record) => record.id);
+  const snapshotOnly = JSON.parse(
+    readFileSync(join(REPO_ROOT, "scripts/provider-catalog/models.dev-2026-09-04.json"), "utf8"),
+  ) as Record<string, never>;
+
+  test("every union record is a template row with a valid id, a materializable api and a label", () => {
+    for (const record of OMP_SNAPSHOT.providers) {
+      const entry = PROVIDER_CATALOG[record.id];
+      expect(entry, record.id).toBeDefined();
+      expect(entry!.tier, record.id).toBe("template");
+      expect(entry!.envName, record.id).toBeNull();
+      expect(CUSTOM_PROVIDER_ID_PATTERN.test(record.id), record.id).toBe(true);
+      expect([...CUSTOM_PROVIDER_API_IDS] as string[], record.id).toContain(record.api);
+      expect(entry!.api, record.id).toBe(record.api);
+      expect(entry!.baseUrl, record.id).toBe(record.baseUrl);
+      expect(entry!.label.length, record.id).toBeGreaterThan(0);
+      // Prefill is the vendored vocabulary, capped at the 20-model prefill cap.
+      expect(entry!.models, record.id).toEqual(record.models.slice(0, 20));
+    }
+  });
+
+  test("commandcode is mixed-protocol: two rows, no typesafe prefill, typesafe kept on its own row", () => {
+    // One custom-provider declaration carries exactly one protocol, so the
+    // Responses and Messages surfaces are separate template rows.
+    expect(PROVIDER_CATALOG["commandcode"]).toMatchObject({
+      tier: "template",
+      api: "openai-responses",
+      baseUrl: "https://api.commandcode.ai/provider/v1",
+    });
+    expect(PROVIDER_CATALOG["commandcode-anthropic"]).toMatchObject({
+      tier: "template",
+      api: "anthropic-messages",
+      baseUrl: "https://api.commandcode.ai/provider",
+    });
+    for (const id of ["commandcode", "commandcode-anthropic"]) {
+      expect(PROVIDER_CATALOG[id]!.models.length, id).toBeGreaterThan(0);
+      expect(PROVIDER_CATALOG[id]!.models as readonly string[], id).not.toContain("typesafe/jev");
+    }
+    // The judge wire keeps its own row.
+    expect(PROVIDER_CATALOG["typesafe"]).toMatchObject({ tier: "template", api: "typesafe" });
+  });
+
+  test("the union adds no builtin row — the runner allowlist stays at 19", () => {
+    expect(PROVIDER_IDS_BUILTIN).toHaveLength(19);
+    for (const id of unionIds) {
+      expect(PROVIDER_IDS_BUILTIN as readonly string[], id).not.toContain(id);
+      expect(providerEnvName(id), id).toBeUndefined();
+    }
+  });
+
+  test("the union pass skips a record whose id is already a catalog row", () => {
+    const { catalog, audit } = buildCatalog(snapshotOnly, {
+      source: OMP_SNAPSHOT.source,
+      ompProviderIds: ["anthropic"],
+      excluded: { alias: {}, nonModel: [], oauthOrDeviceCode: [], notMaterializable: {} },
+      providers: [
+        {
+          id: "anthropic",
+          label: "Impostor",
+          env: "IMPOSTOR_API_KEY",
+          baseUrl: null,
+          api: "openai-completions",
+          models: [],
+        },
+      ],
+    });
+    // The pre-existing builtin row is untouched and the record is audited.
+    expect((catalog["anthropic"] as { tier: string }).tier).toBe("builtin");
+    expect(audit.ompAlreadyPresent).toContain("anthropic");
+    expect(audit.ompRowCount).toBe(0);
+  });
+
+  test("an alias whose target is not a catalog row throws instead of silently dropping the provider", () => {
+    // Rule (b) asserts the provider is covered BY another row; a target that
+    // does not resolve would drop the provider while the generated header kept
+    // claiming coverage.
+    expect(() =>
+      buildCatalog(snapshotOnly, {
+        source: OMP_SNAPSHOT.source,
+        ompProviderIds: ["moonshot"],
+        excluded: { alias: { moonshot: "moonshot-ai-retired" }, nonModel: [], oauthOrDeviceCode: [], notMaterializable: {} },
+        providers: [],
+      }),
+    ).toThrow(
+      'omp provider "moonshot" aliases "moonshot-ai-retired", which is not a catalog row — fix scripts/provider-catalog/omp-api-key-providers.json',
+    );
+    // The same alias with a resolvable target is an ordinary rule-(b) skip.
+    const { catalog, audit } = buildCatalog(snapshotOnly, {
+      source: OMP_SNAPSHOT.source,
+      ompProviderIds: ["moonshot"],
+      excluded: { alias: { moonshot: "moonshotai" }, nonModel: [], oauthOrDeviceCode: [], notMaterializable: {} },
+      providers: [],
+    });
+    expect(Object.hasOwn(catalog, "moonshot")).toBe(false);
+    expect(audit.ompAliasSkips).toEqual(["moonshot → moonshotai"]);
   });
 });

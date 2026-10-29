@@ -14,7 +14,7 @@
  *   must agree with the top-level verdict (consistency rule)
  * - title/body are required non-empty; category is a free string;
  *   file_path / line_start / line_end are optional and nullable
- * - the envelope is CLOSED (engine 4.0.7): an unknown top-level key or an
+ * - the envelope is CLOSED (engine 4.1.2): an unknown top-level key or an
  *   unknown finding key is REJECTED with `review.unknown-key` — EXCEPT a
  *   residual M1 `severity` key (top-level or per-finding), which keeps its
  *   `review.inspector-vocab` refusal ahead of the generic unknown-key code

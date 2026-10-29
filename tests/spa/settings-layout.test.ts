@@ -16,7 +16,7 @@ import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { APP_VERSION } from "../../src/version";
-import { PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
+import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
 import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta } from "../../src/spa/pages/data";
 import {
   ProviderCombobox,
@@ -337,6 +337,12 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
     expect(page).toContain("settings.keyVerifyFailed");
     const keyRow = page.slice(page.indexOf("function ConfiguredKeyRow"), page.indexOf("function ConfiguredCustomRow"));
     expect(keyRow).toContain("row.verified_status");
+    // A probe that could not reject a bogus key renders the weaker
+    // "reachable" state — never the "verified at …" claim.
+    expect(keyRow).toContain("settings.keyReachableAt");
+    expect(keyRow.indexOf('row.verified_status === "reachable"')).toBeGreaterThan(
+      keyRow.indexOf('row.verified_status === "ok"'),
+    );
   });
 
   test("a provider's stored keys are listed whole — the add form never folds keys[] into one slot", () => {
@@ -383,11 +389,14 @@ describe("catalog provenance + eligibility messaging", () => {
   });
 
   test("provenance copy is dictionary-backed in both locales", () => {
-    // Provenance names the count + committed-snapshot source.
-    expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("214");
-    expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("models.dev");
-    expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("214");
-    expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("models.dev");
+    // The provenance line is rendered with the REAL payload catalog length, so
+    // assert that length and the committed-snapshot sources — never a pinned
+    // count that every breadth or union addition has to hand-edit.
+    const count = Object.keys(PROVIDER_CATALOG).length;
+    expect(t("en", "settings.catalogProvenance", { count })).toContain(String(count));
+    expect(t("en", "settings.catalogProvenance", { count })).toContain("models.dev and omp snapshots");
+    expect(t("zh_CN", "settings.catalogProvenance", { count })).toContain(String(count));
+    expect(t("zh_CN", "settings.catalogProvenance", { count })).toContain("models.dev 与 omp 快照");
     expect(t("en", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
     expect(t("zh_CN", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
     expect(t("en", "settings.eligibilityTemplate", { image: "omp" })).toContain("omp");
@@ -836,8 +845,9 @@ describe("add-entry visibility + picker usability at breadth", () => {
     expect(t("en", "settings.accountId")).not.toContain("Cloudflare");
     expect(t("zh_CN", "settings.accountId")).not.toContain("Cloudflare");
     // The provenance/count line interpolates the payload catalog length.
-    expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("214 providers");
-    expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("214 个提供方");
+    const count = Object.keys(PROVIDER_CATALOG).length;
+    expect(t("en", "settings.catalogProvenance", { count })).toContain(`${count} providers`);
+    expect(t("zh_CN", "settings.catalogProvenance", { count })).toContain(`${count} 个提供方`);
   });
 });
 

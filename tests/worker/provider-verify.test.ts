@@ -33,6 +33,7 @@ import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import {
   PROVIDER_VERIFY_ENDPOINTS,
   VERIFY_TIMEOUT_MS,
+  customProbeCanRejectKey,
   verifyProviderKey,
   type VerifyDeps,
 } from "../../src/dashboard/provider-verify";
@@ -515,6 +516,19 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
     expect(calls[0]!.headers).toEqual({ "x-api-key": PLAIN_KEY, "anthropic-version": "2023-06-01" });
   });
 
+  test("typesafe custom provider uses the OpenAI-shaped Bearer probe on {baseUrl}/v1/models", async () => {
+    const calls: FetchCall[] = [];
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(200, { data: [{ id: "jev-latest" }] }), calls) },
+      "custom",
+      PLAIN_KEY,
+      { ...CUSTOM, api: "typesafe" },
+    );
+    expect(result).toEqual({ ok: true, models: CUSTOM.modelIds });
+    expect(calls[0]!.url).toBe("https://custom.example.com/v1/models");
+    expect(calls[0]!.headers).toEqual({ authorization: `Bearer ${PLAIN_KEY}` });
+  });
+
   test("timeout → unreachable", async () => {
     const result = await verifyProviderKey(
       { fetch: TIMEOUT_FETCH, timeoutMs: 25 },
@@ -711,5 +725,102 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
 
   test("VERIFY_TIMEOUT_MS is 10s and the default deps path uses it", () => {
     expect(VERIFY_TIMEOUT_MS).toBe(10_000);
+  });
+
+  test("a declaration on an unproven host stamps 'reachable', never 'ok'", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "public-probe-app");
+    const store = configStore(db);
+    // Command Code's models endpoint answers 2xx with no valid credential, so
+    // nothing there proves the key. Both of its catalog rows
+    // (openai-responses and anthropic-messages) share that host.
+    for (const decl of [
+      { provider_id: "commandcode", base_url: "https://api.commandcode.ai/provider/v1", api: "openai-responses" as const },
+      { provider_id: "commandcode-anthropic", base_url: "https://api.commandcode.ai/provider", api: "anthropic-messages" as const },
+    ]) {
+      const verified = await verifyProviderKey({ fetch: mockFetch(json(200, { data: [] })) }, decl.provider_id, PLAIN_KEY, {
+        baseUrl: decl.base_url,
+        api: decl.api,
+        modelIds: ["m1"],
+      });
+      expect(verified.ok).toBe(true);
+      await store.upsertCustomProvider(app.id, { ...decl, model_ids: ["m1"] }, PLAIN_KEY);
+    }
+    const rows = db.raw
+      .query("SELECT provider, verified_at, verified_status FROM app_custom_provider_keys WHERE app_id = ? ORDER BY provider")
+      .all(app.id) as Array<{ provider: string; verified_at: string | null; verified_status: string | null }>;
+    expect(rows).toEqual([
+      { provider: "commandcode", verified_at: expect.stringMatching(SQLITE_TS_RE), verified_status: "reachable" },
+      { provider: "commandcode-anthropic", verified_at: expect.stringMatching(SQLITE_TS_RE), verified_status: "reachable" },
+    ]);
+    // The settings faces carry that weaker state, so the SPA never renders it
+    // as "verified at …".
+    expect((await store.listCustomProviderKeys(app.id)).map((row) => row.verifiedStatus)).toEqual([
+      "reachable",
+      "reachable",
+    ]);
+  });
+
+  test("the probe-rejectability allow-list never matches an Object prototype key", () => {
+    // A declaration may name any https host; these must stay unproven rather
+    // than inherit a prototype member as if it were an allow-list entry.
+    for (const host of ["constructor", "toString", "__proto__"]) {
+      expect(customProbeCanRejectKey(`https://${host}/v1`)).toBe(false);
+    }
+    expect(customProbeCanRejectKey("https://api.typesafe.ai")).toBe(true);
+    // Unparseable input is unproven too (the store refuses such a URL first).
+    expect(customProbeCanRejectKey("not a url")).toBe(false);
+  });
+
+  test("the allow-list matches the PROBED URL, not the host: only shapes deriving /v1/models qualify", () => {
+    // Evidence for api.typesafe.ai names GET /v1/models exactly, and
+    // customModelsUrl appends the suffix to whatever the declaration carries.
+    for (const baseUrl of ["https://api.typesafe.ai", "https://api.typesafe.ai/", "https://api.typesafe.ai/v1", "https://API.TYPESAFE.AI/v1"]) {
+      expect(customProbeCanRejectKey(baseUrl)).toBe(true);
+    }
+    // Same host, derived probe elsewhere → unproven.
+    for (const baseUrl of [
+      "https://api.typesafe.ai/console",
+      "https://api.typesafe.ai/#x",
+      "https://api.typesafe.ai/v1?x=1",
+      "https://api.typesafe.ai:8443/v1",
+      "http://api.typesafe.ai",
+    ]) {
+      expect(customProbeCanRejectKey(baseUrl)).toBe(false);
+    }
+  });
+
+  test("an unknown host records 'reachable' — a 2xx there cannot prove the key", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "auth-probe-app");
+    const store = configStore(db);
+    // Nothing in this repo proves that an arbitrary operator-declared host
+    // rejects a bogus key, so the probe only proved the ENDPOINT answered.
+    await store.upsertCustomProvider(
+      app.id,
+      { provider_id: "my-custom", base_url: "https://example.com/v1", api: "openai-completions", model_ids: ["m1"] },
+      PLAIN_KEY,
+    );
+    const row = db.raw
+      .query("SELECT verified_status FROM app_custom_provider_keys WHERE app_id = ?")
+      .get(app.id) as { verified_status: string | null };
+    expect(row.verified_status).toBe("reachable");
+  });
+
+  test("an allow-listed key-rejecting host still records 'ok' (api.typesafe.ai answers 401/403 for a bogus key)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "allow-listed-probe-app");
+    const store = configStore(db);
+    // omp's auth rule validates GET https://api.typesafe.ai/v1/models — the
+    // exact path the custom probe hits — so a 2xx there IS proof of the key.
+    await store.upsertCustomProvider(
+      app.id,
+      { provider_id: "typesafe", base_url: "https://api.typesafe.ai", api: "typesafe", model_ids: ["jev-latest"] },
+      PLAIN_KEY,
+    );
+    const row = db.raw
+      .query("SELECT verified_status FROM app_custom_provider_keys WHERE app_id = ?")
+      .get(app.id) as { verified_status: string | null };
+    expect(row.verified_status).toBe("ok");
   });
 });

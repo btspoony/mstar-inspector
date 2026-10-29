@@ -89,7 +89,10 @@
  *     first — the guard here is the backstop for direct callers).
  *   - saveVerifiedKey is the verified analogue: the same per-key upsert with
  *     verified_at = now + verified_status = 'ok', plus THAT KEY's
- *     verified-model evidence row, as ONE atomic db.batch.
+ *     verified-model evidence row, as ONE atomic db.batch. (Built-in providers
+ *     only: every built-in probe rejects a bogus key, so a 2xx there IS proof;
+ *     the declaration-time custom path records 'reachable' instead unless its
+ *     host is allow-listed as key-rejecting.)
  *   - deleteProviderKey removes ONE slot — and, when it actually removed that
  *     row, that key's OWN evidence row (a model only the removed credential
  *     could reach must not stay selectable; evidence is keyed by the
@@ -159,7 +162,21 @@
 import { createSecretbox } from "./secretbox";
 import { createAppsStore } from "./apps-store";
 import { sandboxImageHostIds } from "../contracts/sandbox-images";
+import { customProbeCanRejectKey } from "./provider-verify";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
+
+/**
+ * The store-enforced `verified_status` vocabulary (migration 0015; no CHECK
+ * constraint — producer-enforced, the 0006/0012 precedent):
+ *   - `ok`        the probe PROVED the submitted key (a bogus key is answered
+ *                 401/403 there, which is what makes the 2xx meaningful)
+ *   - `reachable` the probe only proved the ENDPOINT answered — the host is
+ *                 not known to reject a bogus key (every custom/template
+ *                 declaration except the allow-listed probes)
+ *   - `failed`    a recorded failed verify
+ * NULL = never verified.
+ */
+export type VerifiedStatus = "ok" | "reachable" | "failed";
 
 /**
  * A row of `app_provider_keys` — and, byte-identical in shape, of
@@ -183,7 +200,7 @@ export type AppProviderKeyRow = {
   updated_at: string | null;
   /** Verification time (migration 0015); NULL = never verified. */
   verified_at: string | null;
-  /** Verification outcome ('ok' | 'failed', store-enforced; migration 0015); NULL = never verified. */
+  /** Verification outcome (VerifiedStatus, store-enforced; migration 0015); NULL = never verified. */
   verified_status: string | null;
 };
 
@@ -216,9 +233,11 @@ export type AppModelChainSeatRow = {
 };
 /**
  * The custom-provider API protocol enum (AL-23-1 verdict): of the omp SDK
- * Api full set, ONLY the three open protocol forms are declarable BYOK —
- * the google, bedrock, azure, and codex shapes are vendor
+ * Api full set, ONLY the open protocol forms are declarable BYOK — the
+ * google, bedrock, azure, and codex shapes are vendor
  * OAuth/credential-chain forms that do not fit a baseUrl+key declaration.
+ * `typesafe` is omp's TypeSafe judgement wire (a plain Bearer + `{base}/v1/
+ * models` discovery), so it fits the same declaration shape.
  * Declared locally, NOT imported: dashboard modules must not import
  * pipeline/review code (Q2).
  */
@@ -226,6 +245,7 @@ export const CUSTOM_PROVIDER_API_IDS = [
   "anthropic-messages",
   "openai-completions",
   "openai-responses",
+  "typesafe",
 ] as const;
 
 export type CustomProviderApi = (typeof CUSTOM_PROVIDER_API_IDS)[number];
@@ -847,7 +867,7 @@ export type ProviderKeySummary = {
   updatedAt: string | null;
   /** Verification time (migration 0015); NULL = never verified. */
   verifiedAt: string | null;
-  /** 'ok' | 'failed' (store-enforced); NULL = never verified. */
+  /** VerifiedStatus (store-enforced); NULL = never verified. */
   verifiedStatus: string | null;
 };
 
@@ -1057,8 +1077,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
    * identity and (for an owned pool) the declaration's existence all live in
    * its WHERE, so an insert matching ZERO rows is a refusal, never a silent
    * no-op. A conflicting row is UPDATEd in place with the caller's
-   * verification state — `verified: false` resets it, because an unverified
-   * write must never inherit a stale verified_status.
+   * verification state — `verifiedStatus: null` resets it, because an
+   * unverified write must never inherit a stale verified_status.
    *
    * `opts.endpoint` (custom-provider declarations only) is the endpoint the
    * key was VERIFIED against; it pins the owning declaration to it:
@@ -1079,10 +1099,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     provider: string,
     keyId: string,
     keyEnc: string,
-    opts: { verified: boolean; newDeclaration?: boolean; endpoint?: { base_url: string; api: string } },
+    opts: { verifiedStatus: VerifiedStatus | null; newDeclaration?: boolean; endpoint?: { base_url: string; api: string } },
   ): AppConfigStatement {
-    const verifiedAt = opts.verified ? "(SELECT ts FROM now)" : "NULL";
-    const verifiedStatus = opts.verified ? "'ok'" : "NULL";
+    const verifiedAt = opts.verifiedStatus === null ? "NULL" : "(SELECT ts FROM now)";
+    const verifiedStatus = opts.verifiedStatus === null ? "NULL" : `'${opts.verifiedStatus}'`;
     // A declaration-OWNED pool additionally requires its declaration row, so a
     // declaration removal racing this write matches zero rows instead of
     // stranding an orphan credential a re-declaration would revive.
@@ -1211,7 +1231,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     appId: string,
     provider: string,
     plainKey: string,
-    opts: { verified: boolean; models?: string[] },
+    opts: { verifiedStatus: VerifiedStatus | null; models?: string[] },
   ): Promise<void> {
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
       throw new ProviderKeyTooLongError();
@@ -1387,7 +1407,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * for direct callers).
      */
     addProviderKey(appId: string, provider: string, plainKey: string): Promise<void> {
-      return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, { verified: false });
+      return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, { verifiedStatus: null });
     },
 
     /**
@@ -1408,7 +1428,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * ProviderKeyLimitError for a NEW slot past MAX_KEYS_PER_PROVIDER.
      */
     saveVerifiedKey(appId: string, provider: string, plainKey: string, models: string[]): Promise<void> {
-      return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, { verified: true, models });
+      return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, { verifiedStatus: "ok", models });
     },
 
     /**
@@ -1770,8 +1790,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * 0024 moved the key material into app_custom_provider_keys), then stores
      * the submitted key in that declaration's pool as a verified slot (the
      * declaration flow verifies before saving, so it lands
-     * verified_at = now / verified_status = 'ok'; a key already in the pool is
-     * updated in place, a NEW one takes the next free slot up to
+     * verified_at = now with verified_status 'ok' — or 'reachable' unless the
+     * declared base URL derives a models endpoint KNOWN to reject a bogus key
+     * (customProbeCanRejectKey's allow-list; anything else is unproven); a
+     * key already in the pool
+     * is updated in place, a NEW one takes the next free slot up to
      * MAX_KEYS_PER_PROVIDER). model_ids is stored as a TEXT JSON array
      * (AL-23-1 DDL). An invalid declaration throws
      * InvalidCustomProviderError / ProviderKeyTooLongError before any crypto
@@ -1934,7 +1957,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               decl.provider_id,
             );
       const key = keyInsertStatement(CUSTOM_KEY_TABLE, appId, decl.provider_id, keyId, keyEnc, {
-        verified: true,
+        // Fail-closed on state honesty: only a models endpoint KNOWN to reject
+        // a bogus key lets the probe's 2xx claim the key; anything else records
+        // the weaker reachability.
+        verifiedStatus: customProbeCanRejectKey(decl.base_url) ? "ok" : "reachable",
         newDeclaration: isNew,
         endpoint: { base_url: decl.base_url, api: decl.api },
       });
@@ -2032,7 +2058,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       if (declared === null) {
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);
       }
-      await addKey(CUSTOM_KEY_TABLE, appId, providerId, plainKey, { verified: false });
+      await addKey(CUSTOM_KEY_TABLE, appId, providerId, plainKey, { verifiedStatus: null });
     },
 
     /**

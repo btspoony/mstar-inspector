@@ -25,7 +25,7 @@
  * (`findUnknownFindingKey`) runs AFTER the gate, so it cannot mask that code
  * (mapping spec §4.2: parse/validate failure → no post, no insert).
  *
- * The engine 4.0.7 envelope is CLOSED: `validateMstarReviewV1` refuses every
+ * The engine 4.1.2 envelope is CLOSED: `validateMstarReviewV1` refuses every
  * top-level key outside the envelope with `review.unknown-key`. Its findings
  * are not key-checked by the engine, so unknown finding keys are refused here
  * with the same code (`findUnknownFindingKey`) instead of being dropped
@@ -82,7 +82,7 @@ const FINDING_KEYS = new Set(Object.keys(findingSchema.shape));
 
 /**
  * First `findings[i].<key>` outside the finding schema, or null. The engine
- * 4.0.7 unknown-key gate covers the envelope and the tally but not findings;
+ * 4.1.2 unknown-key gate covers the envelope and the tally but not findings;
  * this keeps an unknown finding key from being dropped silently.
  */
 function findUnknownFindingKey(doc: unknown): string | null {
