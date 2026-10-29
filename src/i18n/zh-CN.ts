@@ -436,7 +436,7 @@ export const zhCN: Dictionary = {
     addProvider: "添加模型提供方",
     addProviderCopy: "从目录中选择一个模型提供方 — 选中后显示其配置要求。在 App 运行时 harness 上不可用的条目会被标记且无法保存；目录外的提供方请使用下方的自定义声明。",
     catalogProvenance:
-      "{count} 个提供方，来自已提交的 models.dev 快照并编译进应用 — 在提交密钥验证之前不会联系任何提供方。",
+      "{count} 个提供方，来自已提交的 models.dev 与 omp 快照并编译进应用 — 在提交密钥验证之前不会联系任何提供方。",
     catalogBuiltin: "常用提供方",
     catalogTemplate: "目录模板",
     eligibilityBuiltin: "可与 {image} 运行时 harness 配合使用 — 该提供方作为内置提供方运行。",

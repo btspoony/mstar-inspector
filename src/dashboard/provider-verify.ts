@@ -300,14 +300,20 @@ function customModelsUrl(baseUrl: string): string {
  * Verify one CUSTOM-provider key (spec §6.1/§6.2): probe the declared base
  * URL's models endpoint with the protocol-appropriate auth for the declared
  * `api` form (anthropic-messages → x-api-key + anthropic-version; both
- * openai-* forms → Bearer — the "declared api protocol equivalent" of the
- * assignment's probe rule). 401/403 → invalid_key; ANY 2xx → ok with models
- * = the declared modelIds, verbatim (the plan's §6.1 echo contract: 成功时
- * models = 声明 modelIds 回显，无抓取 — the vocabulary IS the declaration;
- * the response body is never scraped); every other non-2xx →
+ * openai-* forms and `typesafe` → Bearer — the "declared api protocol
+ * equivalent" of the assignment's probe rule). 401/403 → invalid_key; ANY 2xx
+ * → ok with models = the declared modelIds, verbatim (the plan's §6.1 echo
+ * contract: 成功时 models = 声明 modelIds 回显，无抓取 — the vocabulary IS the
+ * declaration; the response body is never scraped); every other non-2xx →
  * unexpected_response; transport failures → unreachable. Custom providers
  * never write app_provider_models rows — their dropdown source is the
  * declared model_ids, returned here for callers to display.
+ *
+ * shortcut: the `typesafe` probe cannot reject a bogus Command Code key —
+ * Command Code's public `/provider/v1/models` answers 2xx without a valid key
+ * (its `anthropic-messages` row is the same host). omp validates that provider
+ * against `/alpha/whoami` instead; upgrade this probe if a rejected bogus key
+ * ever matters more than the extra round trip.
  */
 async function verifyCustomProvider(
   deps: VerifyDeps,

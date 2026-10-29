@@ -515,6 +515,19 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
     expect(calls[0]!.headers).toEqual({ "x-api-key": PLAIN_KEY, "anthropic-version": "2023-06-01" });
   });
 
+  test("typesafe custom provider uses the OpenAI-shaped Bearer probe on {baseUrl}/v1/models", async () => {
+    const calls: FetchCall[] = [];
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(200, { data: [{ id: "jev-latest" }] }), calls) },
+      "custom",
+      PLAIN_KEY,
+      { ...CUSTOM, api: "typesafe" },
+    );
+    expect(result).toEqual({ ok: true, models: CUSTOM.modelIds });
+    expect(calls[0]!.url).toBe("https://custom.example.com/v1/models");
+    expect(calls[0]!.headers).toEqual({ authorization: `Bearer ${PLAIN_KEY}` });
+  });
+
   test("timeout → unreachable", async () => {
     const result = await verifyProviderKey(
       { fetch: TIMEOUT_FETCH, timeoutMs: 25 },

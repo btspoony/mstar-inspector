@@ -35,7 +35,8 @@ export const REVIEW_SEATS: Record<Exclude<ReviewLevel, "deep">, number> = { quic
  * and the runner writes the
  * pool into the run's credential store before the session starts (never the
  * input JSON, never a synthesized models.yml, never a log line). The `api`
- * vocabulary (anthropic-messages | openai-completions | openai-responses) and
+ * vocabulary (anthropic-messages | openai-completions | openai-responses |
+ * typesafe — forwarded verbatim into the synthesized models.yml) and
  * the id/baseUrl bounds live dashboard-side (assertCustomProvider); the runner
  * guard validates shape only.
  */

@@ -509,7 +509,7 @@ export const en = {
     addProviderCopy:
       "Pick a catalog provider — its configuration requirements appear once selected. Entries unusable under the App's runtime harness are marked and can't be saved; providers outside the catalog use the custom declaration below.",
     catalogProvenance:
-      "{count} providers from the committed models.dev snapshot, compiled into the app — no provider is contacted until you submit a key for verification.",
+      "{count} providers from the committed models.dev and omp snapshots, compiled into the app — no provider is contacted until you submit a key for verification.",
     catalogBuiltin: "Common providers",
     catalogTemplate: "Catalog templates",
     eligibilityBuiltin: "Works under the {image} runtime harness — this provider runs as a built-in.",

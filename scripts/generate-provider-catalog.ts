@@ -13,7 +13,7 @@
  * for pipeline consumers; the sandbox image copies only
  * packages/{shared,runner}/src).
  *
- * Inputs (both pinned):
+ * Inputs (three pinned):
  *   1. `scripts/provider-catalog/models.dev-2026-09-04.json` — a trimmed
  *      snapshot of the ai-sdk ecosystem directory dataset (models.dev,
  *      fetched 2026-09-04 from https://models.dev/api.json; trimmed to the
@@ -31,6 +31,11 @@
  *      ids it lacks (cursor) get local metadata.
  *   3. The hand-curated `workers-ai` template — preserved verbatim; the
  *      snapshot's `cloudflare-workers-ai` row is deduped into it.
+ *   4. `scripts/provider-catalog/omp-api-key-providers.json` — a vendored
+ *      snapshot of the omp SDK's API-key LLM providers (version, extraction
+ *      date and extraction rules in its own header). It supplies provider
+ *      breadth the models.dev snapshot lacks; every surviving record lands
+ *      as a `template` row, so the runner allowlist never changes.
  *
  * Breadth enumeration (spec § Providers contract item 2): beyond
  * the pinned tiers above, EVERY remaining snapshot key becomes a `template`
@@ -46,14 +51,15 @@
  *       a custom-provider declaration, so it must satisfy the same grammar;
  *       counted separately in the header.
  *
- * Generation-time dependencies: NONE beyond Node builtins + the vendored
- * snapshot (the "exact-pin" requirement is satisfied by the dated snapshot;
+ * Generation-time dependencies: NONE beyond Node builtins + the two vendored
+ * snapshots (the "exact-pin" requirement is satisfied by the dated snapshot;
  * no npm package is installed for generation).
  */
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/models.dev-2026-09-04.json");
+const OMP_SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/omp-api-key-providers.json");
 const OUT_PATH = path.resolve("src/contracts/provider-catalog.generated.ts");
 
 type SnapshotProvider = {
@@ -63,6 +69,28 @@ type SnapshotProvider = {
   api: string | null;
   doc: string | null;
   model_ids: string[];
+};
+
+/** The vendored omp provider union input (`omp-api-key-providers.json`). */
+type OmpSnapshot = {
+  source: { version: string; extracted: string };
+  providers: {
+    id: string;
+    label: string;
+    env: string;
+    baseUrl: string | null;
+    api: string;
+    models: string[];
+    /** Set only where a mixed-protocol row id differs from its omp provider. */
+    sourceProviderId?: string;
+  }[];
+  ompProviderIds: string[];
+  excluded: {
+    alias: Record<string, string>;
+    nonModel: string[];
+    oauthOrDeviceCode: string[];
+    notMaterializable: Record<string, string>;
+  };
 };
 
 /** One builtin-tier entry spec. `sourceKey` = the models.dev snapshot key
@@ -182,13 +210,38 @@ type BreadthAudit = {
   idPatternFails: string[];
   /** Snapshot keys that became breadth template rows. */
   breadthCount: number;
+  /** omp union: ids already present in the catalog (builtin or template). */
+  ompAlreadyPresent: string[];
+  /** omp union: ids that name the same vendor as an existing catalog row. */
+  ompAliasSkips: string[];
+  /** omp union: non-model providers (no env key, or a search/local surface). */
+  ompNonModel: string[];
+  /** omp union: records that could not be materialized, with the failing rule. */
+  ompNotMaterializable: string[];
+  /** omp union: records that became template rows. */
+  ompRowCount: number;
 };
+
+/** The template `api` vocabulary — mirrors CUSTOM_PROVIDER_API_IDS in
+ *  src/dashboard/app-config-store.ts (parity-locked by
+ *  tests/pipeline/providers.test.ts; keep the entries byte-equal). */
+const MATERIALIZABLE_APIS: readonly string[] = [
+  "anthropic-messages",
+  "openai-completions",
+  "openai-responses",
+  "typesafe",
+];
+
+/** The only `{placeholder}` a union row may carry; the save flow substitutes
+ *  exactly this one. Any other placeholder is unmaterializable. */
+const ALLOWED_URL_PLACEHOLDERS: Record<string, true> = { account_id: true };
 
 /** Pure catalog builder — exported so the collision guard is testable
  *  (tests/pipeline/providers.test.ts) without file I/O or spawning the
  *  writer; the authoring path below is the only caller with side effects. */
 export function buildCatalog(
   snapshot: Record<string, SnapshotProvider>,
+  omp?: OmpSnapshot,
 ): { catalog: Record<string, unknown>; audit: BreadthAudit } {
   const catalog: Record<string, unknown> = {};
   for (const spec of BUILTIN_ORDER) {
@@ -221,7 +274,17 @@ export function buildCatalog(
   const builtinSourceKeys = new Set(
     BUILTIN_ORDER.filter((spec) => spec.sourceKey !== undefined).map((spec) => spec.sourceKey!),
   );
-  const audit: BreadthAudit = { excludedSourceKeys: [], dedupedKeys: [], idPatternFails: [], breadthCount: 0 };
+  const audit: BreadthAudit = {
+    excludedSourceKeys: [],
+    dedupedKeys: [],
+    idPatternFails: [],
+    breadthCount: 0,
+    ompAlreadyPresent: [],
+    ompAliasSkips: [],
+    ompNonModel: [],
+    ompNotMaterializable: [],
+    ompRowCount: 0,
+  };
   // Snapshot insertion order (JSON.parse preserves it for non-numeric keys)
   // is the deterministic breadth order — the pinned file's own sequence.
   for (const [key, source] of Object.entries(snapshot)) {
@@ -267,12 +330,91 @@ export function buildCatalog(
     };
     audit.breadthCount += 1;
   }
+  // Third input: the vendored omp API-key provider snapshot. Runs AFTER the
+  // models.dev breadth pass so rules (a)/(b) can see every catalog row the
+  // earlier passes produced. Every surviving record is a template row — the
+  // builtin allowlist never grows. The scan covers EVERY omp provider id so
+  // the generated header can name, by rule, each one that did not become a
+  // row.
+  if (omp !== undefined) {
+    // Rule (a) sees the catalog rows AND the models.dev keys the builtin tier
+    // consumed: an omp provider that names a builtin's source key (e.g.
+    // `cloudflare-ai-gateway` → the `ai-gateway` builtin) is already covered
+    // by that builtin row, even though the key itself is not a catalog id.
+    const catalogBeforeUnion: Record<string, true> = {};
+    for (const id of Object.keys(catalog)) catalogBeforeUnion[id] = true;
+    for (const key of builtinSourceKeys) catalogBeforeUnion[key] = true;
+    for (const key of Object.keys(TEMPLATE_DEDUPE_SNAPSHOT_KEYS)) catalogBeforeUnion[key] = true;
+    const recordsByProvider: Record<string, OmpSnapshot["providers"]> = {};
+    for (const record of omp.providers) {
+      const providerId = record.sourceProviderId ?? record.id;
+      (recordsByProvider[providerId] ??= []).push(record);
+    }
+    for (const providerId of omp.ompProviderIds) {
+      const records = recordsByProvider[providerId] ?? [];
+      // Rule (a)/(b)/(c): a provider with no vendored record was already
+      // excluded at extraction — restate WHY, from the pinned exclusion
+      // tables, so the header audit stays complete and checkable.
+      if (records.length === 0) {
+        if (Object.hasOwn(catalogBeforeUnion, providerId)) audit.ompAlreadyPresent.push(providerId);
+        else if (Object.hasOwn(omp.excluded.alias, providerId)) {
+          audit.ompAliasSkips.push(`${providerId} → ${omp.excluded.alias[providerId]}`);
+        } else if (omp.excluded.nonModel.includes(providerId)) audit.ompNonModel.push(providerId);
+        else if (omp.excluded.oauthOrDeviceCode.includes(providerId)) {
+          audit.ompNotMaterializable.push(`${providerId} (oauth/device-code login)`);
+        } else if (Object.hasOwn(omp.excluded.notMaterializable, providerId)) {
+          audit.ompNotMaterializable.push(
+            `${providerId} (${omp.excluded.notMaterializable[providerId]})`,
+          );
+        } else {
+          throw new Error(
+            `omp provider ${JSON.stringify(providerId)} has no vendored record and no exclusion rule — classify it in scripts/provider-catalog/omp-api-key-providers.json`,
+          );
+        }
+        continue;
+      }
+      for (const record of records) {
+        if (Object.hasOwn(catalog, record.id)) {
+          audit.ompAlreadyPresent.push(record.id);
+          continue;
+        }
+        if (record.env.trim() === "") {
+          audit.ompNonModel.push(record.id);
+          continue;
+        }
+        if (!CUSTOM_PROVIDER_ID_PATTERN.test(record.id)) {
+          audit.ompNotMaterializable.push(`${record.id} (id grammar)`);
+          continue;
+        }
+        if (!MATERIALIZABLE_APIS.includes(record.api)) {
+          audit.ompNotMaterializable.push(`${record.id} (protocol ${record.api})`);
+          continue;
+        }
+        const placeholders = [...(record.baseUrl ?? "").matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!);
+        if (placeholders.some((name) => !Object.hasOwn(ALLOWED_URL_PLACEHOLDERS, name))) {
+          audit.ompNotMaterializable.push(`${record.id} (url placeholder ${placeholders.join(", ")})`);
+          continue;
+        }
+        catalog[record.id] = {
+          label: record.label,
+          tier: "template",
+          envName: null,
+          baseUrl: record.baseUrl,
+          api: record.api,
+          models: record.models.slice(0, TEMPLATE_MODEL_PREFILL_CAP),
+          doc: null,
+        };
+        audit.ompRowCount += 1;
+      }
+    }
+  }
   return { catalog, audit };
 }
 
 async function main(): Promise<void> {
   const snapshot = JSON.parse(await readFile(SNAPSHOT_PATH, "utf8")) as Record<string, SnapshotProvider>;
-  const { catalog, audit } = buildCatalog(snapshot);
+  const omp = JSON.parse(await readFile(OMP_SNAPSHOT_PATH, "utf8")) as OmpSnapshot;
+  const { catalog, audit } = buildCatalog(snapshot, omp);
 
   const catalogLiteral = JSON.stringify(catalog, null, 2);
   const builtinIdsLiteral = JSON.stringify(BUILTIN_ORDER.map((spec) => spec.id), null, 2);
@@ -291,7 +433,21 @@ async function main(): Promise<void> {
  *   - rule (c) skipped, failing CUSTOM_PROVIDER_ID_PATTERN (${audit.idPatternFails.length} additional
  *     after rules a/b): ${wrapList(audit.idPatternFails)}
  *   - models prefill cap: at most the first ${TEMPLATE_MODEL_PREFILL_CAP} model ids per provider
- *     (deterministic snapshot order — template prefill only)`;
+ *     (deterministic snapshot order — template prefill only)
+ * omp provider union (omp ${omp.source.version}, vendored ${omp.source.extracted} — every omp
+ * API-key provider id names its rule; ${omp.ompProviderIds.length} providers → ${audit.ompRowCount} template rows):
+ *   - (a) already in the catalog (builtin or template) (${audit.ompAlreadyPresent.length}): ${wrapList(audit.ompAlreadyPresent)}
+ *   - (b) naming alias of an existing catalog row (${audit.ompAliasSkips.length}): ${wrapList(audit.ompAliasSkips)}
+ *   - (c) non-model — no API-key env, search or local-inference surface (${audit.ompNonModel.length}):
+ *     ${wrapList(audit.ompNonModel)}
+ *   - (d) not materializable — id grammar, protocol outside the custom-provider set, or a
+ *     non-{account_id} URL placeholder (${audit.ompNotMaterializable.length}):
+ *     ${wrapList(audit.ompNotMaterializable)}
+ *   - union rows are \`template\` tier with a null envName; prefill is the omp seed
+ *     vocabulary capped at ${TEMPLATE_MODEL_PREFILL_CAP} (empty when omp ships none)
+ *   - \`commandcode\` is mixed-protocol and therefore two rows — \`commandcode\`
+ *     (openai-responses) and \`commandcode-anthropic\` (anthropic-messages) — because a
+ *     custom-provider declaration carries exactly one protocol`;
 
   const moduleSource = `/**
  * GENERATED FILE — provider catalog (spec §5). DO NOT EDIT BY HAND — regenerate with
@@ -302,7 +458,9 @@ async function main(): Promise<void> {
  * \`scripts/provider-catalog/models.dev-2026-09-04.json\` (fetched 2026-09-04
  * from https://models.dev/api.json; the \`api\` field carries the base URL)
  * + the omp-facing override table in the generator (labels / env-name
- * contract / workers-ai template). Runtime is fully static: zero network,
+ * contract / workers-ai template) + the vendored omp provider snapshot
+ * \`scripts/provider-catalog/omp-api-key-providers.json\` (omp ${omp.source.version},
+ * extracted ${omp.source.extracted}). Runtime is fully static: zero network,
  * zero ai-sdk runtime dependencies — the Worker, the dashboard, and the
  * sandbox image only import this module. PURE DATA + pure derivations:
  * zero imports of any kind.
@@ -406,7 +564,9 @@ export const TEMPLATE_PROVIDERS: Record<string, ProviderCatalogEntry> = Object.f
   console.log(
     `wrote ${OUT_PATH} (${moduleSource.length} bytes): ` +
       `${BUILTIN_ORDER.length} builtin + ${Object.keys(TEMPLATES).length} curated template + ${audit.breadthCount} breadth templates; ` +
-      `skips: ${audit.excludedSourceKeys.length} sourceKey / ${audit.dedupedKeys.length} dedupe / ${audit.idPatternFails.length} id-pattern`,
+      `skips: ${audit.excludedSourceKeys.length} sourceKey / ${audit.dedupedKeys.length} dedupe / ${audit.idPatternFails.length} id-pattern; ` +
+      `omp union: ${audit.ompRowCount} rows / ${audit.ompAlreadyPresent.length} present / ${audit.ompAliasSkips.length} alias / ` +
+      `${audit.ompNonModel.length} non-model / ${audit.ompNotMaterializable.length} not-materializable`,
   );
 }
 

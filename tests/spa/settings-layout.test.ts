@@ -384,9 +384,9 @@ describe("catalog provenance + eligibility messaging", () => {
 
   test("provenance copy is dictionary-backed in both locales", () => {
     // Provenance names the count + committed-snapshot source.
-    expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("214");
+    expect(t("en", "settings.catalogProvenance", { count: 230 })).toContain("230");
     expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("models.dev");
-    expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("214");
+    expect(t("zh_CN", "settings.catalogProvenance", { count: 230 })).toContain("230");
     expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("models.dev");
     expect(t("en", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
     expect(t("zh_CN", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
@@ -836,8 +836,8 @@ describe("add-entry visibility + picker usability at breadth", () => {
     expect(t("en", "settings.accountId")).not.toContain("Cloudflare");
     expect(t("zh_CN", "settings.accountId")).not.toContain("Cloudflare");
     // The provenance/count line interpolates the payload catalog length.
-    expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("214 providers");
-    expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("214 个提供方");
+    expect(t("en", "settings.catalogProvenance", { count: 230 })).toContain("230 providers");
+    expect(t("zh_CN", "settings.catalogProvenance", { count: 230 })).toContain("230 个提供方");
   });
 });
 

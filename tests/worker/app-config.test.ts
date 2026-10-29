@@ -2458,11 +2458,15 @@ describe("duplication locks", () => {
   test("PROVIDER_META mirrors the pipeline catalog's display metadata exactly", () => {
     expect(PROVIDER_META).toEqual(PROVIDER_CATALOG);
     // The mirror carries the builtin tier (the 19) plus the full template
-    // tier (workers-ai + the snapshot breadth) — the provider list UI and
-    // the materialization route consume it.
-    expect(Object.keys(PROVIDER_META)).toHaveLength(214);
+    // tier (workers-ai + the snapshot breadth + the omp union) — the provider
+    // list UI and the materialization route consume it.
     expect(Object.keys(PROVIDER_META).filter((id) => PROVIDER_META[id]!.tier === "builtin")).toHaveLength(19);
     expect(PROVIDER_META["workers-ai"]!.tier).toBe("template");
+    // A union row (and the mixed-protocol Command Code split) is reachable
+    // through the mirror the picker renders from.
+    for (const id of ["commandcode", "commandcode-anthropic", "typesafe"]) {
+      expect(PROVIDER_META[id]!.tier, id).toBe("template");
+    }
   });
 
   test("parseModelChain behaves exactly like the runtime-omp parseModelSelectors", () => {
@@ -3323,6 +3327,28 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       .get(app.id) as { key_enc: string };
     expect(row.key_enc).toMatch(/^v1\.primary\./);
     expect(row.key_enc).not.toContain(sk("custom-ark-9988"));
+  });
+
+  test("the typesafe protocol is declarable and round-trips as a stored declaration", async () => {
+    // omp's TypeSafe wire (a plain Bearer models probe) is one of the
+    // materializable custom protocols, so a `typesafe` template row can be
+    // saved through the same add-custom-provider form.
+    const { db, app } = await seededWorld();
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      ...CUSTOM_FORM,
+      provider_id: "my-typesafe",
+      base_url: "https://api.typesafe.ai",
+      api: "typesafe",
+      model_ids: "jev-latest",
+    });
+    expect(res.status).toBe(200);
+    const row = db.raw
+      .query("SELECT api, model_ids FROM app_custom_providers WHERE app_id = ? AND provider_id = 'my-typesafe'")
+      .get(app.id) as { api: string; model_ids: string };
+    expect(row.api).toBe("typesafe");
+    expect(JSON.parse(row.model_ids)).toEqual(["jev-latest"]);
+    const declared = await configStore(db).listCustomProviders(app.id);
+    expect(declared.find((p) => p.provider_id === "my-typesafe")?.api).toBe("typesafe");
   });
 
   test("400 matrix: bad id / http baseUrl / enum-violating api / empty model_ids / over-length — zero writes", async () => {

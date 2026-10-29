@@ -216,9 +216,11 @@ export type AppModelChainSeatRow = {
 };
 /**
  * The custom-provider API protocol enum (AL-23-1 verdict): of the omp SDK
- * Api full set, ONLY the three open protocol forms are declarable BYOK —
- * the google, bedrock, azure, and codex shapes are vendor
+ * Api full set, ONLY the open protocol forms are declarable BYOK — the
+ * google, bedrock, azure, and codex shapes are vendor
  * OAuth/credential-chain forms that do not fit a baseUrl+key declaration.
+ * `typesafe` is omp's TypeSafe judgement wire (a plain Bearer + `{base}/v1/
+ * models` discovery), so it fits the same declaration shape.
  * Declared locally, NOT imported: dashboard modules must not import
  * pipeline/review code (Q2).
  */
@@ -226,6 +228,7 @@ export const CUSTOM_PROVIDER_API_IDS = [
   "anthropic-messages",
   "openai-completions",
   "openai-responses",
+  "typesafe",
 ] as const;
 
 export type CustomProviderApi = (typeof CUSTOM_PROVIDER_API_IDS)[number];
