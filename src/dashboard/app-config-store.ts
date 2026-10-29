@@ -91,8 +91,8 @@
  *     verified_at = now + verified_status = 'ok', plus THAT KEY's
  *     verified-model evidence row, as ONE atomic db.batch. (Built-in providers
  *     only: every built-in probe rejects a bogus key, so a 2xx there IS proof;
- *     the declaration-time custom path records 'reachable' instead when its
- *     host's models endpoint is public.)
+ *     the declaration-time custom path records 'reachable' instead unless its
+ *     host is allow-listed as key-rejecting.)
  *   - deleteProviderKey removes ONE slot — and, when it actually removed that
  *     row, that key's OWN evidence row (a model only the removed credential
  *     could reach must not stay selectable; evidence is keyed by the
@@ -170,8 +170,9 @@ import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-ca
  * constraint — producer-enforced, the 0006/0012 precedent):
  *   - `ok`        the probe PROVED the submitted key (a bogus key is answered
  *                 401/403 there, which is what makes the 2xx meaningful)
- *   - `reachable` the probe only proved the ENDPOINT answered — its models
- *                 endpoint is public and cannot reject a bogus key
+ *   - `reachable` the probe only proved the ENDPOINT answered — the host is
+ *                 not known to reject a bogus key (every custom/template
+ *                 declaration except the allow-listed probes)
  *   - `failed`    a recorded failed verify
  * NULL = never verified.
  */
@@ -1789,9 +1790,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * 0024 moved the key material into app_custom_provider_keys), then stores
      * the submitted key in that declaration's pool as a verified slot (the
      * declaration flow verifies before saving, so it lands
-     * verified_at = now with verified_status 'ok' — or 'reachable' when the
-     * declared host's models endpoint is public and the probe could not
-     * reject a bogus key (customProbeCanRejectKey); a key already in the pool
+     * verified_at = now with verified_status 'ok' — or 'reachable' unless the
+     * declared host's models endpoint is KNOWN to reject a bogus key
+     * (customProbeCanRejectKey's allow-list; an unknown host is unproven); a
+     * key already in the pool
      * is updated in place, a NEW one takes the next free slot up to
      * MAX_KEYS_PER_PROVIDER). model_ids is stored as a TEXT JSON array
      * (AL-23-1 DDL). An invalid declaration throws
@@ -1955,8 +1957,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               decl.provider_id,
             );
       const key = keyInsertStatement(CUSTOM_KEY_TABLE, appId, decl.provider_id, keyId, keyEnc, {
-        // A declaration on a public-models host only proved its ENDPOINT
-        // answered — record that weaker state instead of claiming the key.
+        // Fail-closed on state honesty: only a host KNOWN to reject a bogus
+        // key lets the probe's 2xx claim the key; anything else records the
+        // weaker reachability.
         verifiedStatus: customProbeCanRejectKey(decl.base_url) ? "ok" : "reachable",
         newDeclaration: isNew,
         endpoint: { base_url: decl.base_url, api: decl.api },

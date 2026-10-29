@@ -173,9 +173,9 @@ export type CatalogProvider = {
 /**
  * The store-enforced verification vocabulary (mirrors
  * `app_provider_keys.verified_status`): `ok` = the probe proved the KEY,
- * `reachable` = it only proved the ENDPOINT answered (the host's models
- * endpoint is public and cannot reject a bogus key), `failed` = a recorded
- * failed verify, NULL = never verified.
+ * `reachable` = it only proved the ENDPOINT answered (the host is not known to
+ * reject a bogus key), `failed` = a recorded failed verify, NULL = never
+ * verified.
  */
 export type KeyVerifiedStatus = "ok" | "reachable" | "failed" | null;
 

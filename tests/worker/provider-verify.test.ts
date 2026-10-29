@@ -33,6 +33,7 @@ import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import {
   PROVIDER_VERIFY_ENDPOINTS,
   VERIFY_TIMEOUT_MS,
+  customProbeCanRejectKey,
   verifyProviderKey,
   type VerifyDeps,
 } from "../../src/dashboard/provider-verify";
@@ -726,12 +727,12 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     expect(VERIFY_TIMEOUT_MS).toBe(10_000);
   });
 
-  test("a 2xx from a PUBLIC models endpoint stamps the key 'reachable', never 'ok'", async () => {
+  test("a declaration on an unproven host stamps 'reachable', never 'ok'", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "public-probe-app");
     const store = configStore(db);
     // Command Code's models endpoint answers 2xx with no valid credential, so
-    // the probe proves reachability only. Both of its catalog rows
+    // nothing there proves the key. Both of its catalog rows
     // (openai-responses and anthropic-messages) share that host.
     for (const decl of [
       { provider_id: "commandcode", base_url: "https://api.commandcode.ai/provider/v1", api: "openai-responses" as const },
@@ -760,13 +761,43 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     ]);
   });
 
-  test("an authenticated custom probe still stamps 'ok' (a bogus key there is rejected 401/403)", async () => {
+  test("the probe-rejectability allow-list never matches an Object prototype key", () => {
+    // A declaration may name any https host; these must stay unproven rather
+    // than inherit a prototype member as if it were an allow-list entry.
+    for (const host of ["constructor", "toString", "__proto__"]) {
+      expect(customProbeCanRejectKey(`https://${host}/v1`)).toBe(false);
+    }
+    expect(customProbeCanRejectKey("https://api.typesafe.ai")).toBe(true);
+    // Unparseable input is unproven too (the store refuses such a URL first).
+    expect(customProbeCanRejectKey("not a url")).toBe(false);
+  });
+
+  test("an unknown host records 'reachable' — a 2xx there cannot prove the key", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "auth-probe-app");
     const store = configStore(db);
+    // Nothing in this repo proves that an arbitrary operator-declared host
+    // rejects a bogus key, so the probe only proved the ENDPOINT answered.
     await store.upsertCustomProvider(
       app.id,
       { provider_id: "my-custom", base_url: "https://example.com/v1", api: "openai-completions", model_ids: ["m1"] },
+      PLAIN_KEY,
+    );
+    const row = db.raw
+      .query("SELECT verified_status FROM app_custom_provider_keys WHERE app_id = ?")
+      .get(app.id) as { verified_status: string | null };
+    expect(row.verified_status).toBe("reachable");
+  });
+
+  test("an allow-listed key-rejecting host still records 'ok' (api.typesafe.ai answers 401/403 for a bogus key)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "allow-listed-probe-app");
+    const store = configStore(db);
+    // omp's auth rule validates GET https://api.typesafe.ai/v1/models — the
+    // exact path the custom probe hits — so a 2xx there IS proof of the key.
+    await store.upsertCustomProvider(
+      app.id,
+      { provider_id: "typesafe", base_url: "https://api.typesafe.ai", api: "typesafe", model_ids: ["jev-latest"] },
       PLAIN_KEY,
     );
     const row = db.raw

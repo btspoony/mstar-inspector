@@ -297,25 +297,34 @@ function customModelsUrl(baseUrl: string): string {
 }
 
 /**
- * Hosts whose models endpoint is PUBLIC: it answers 2xx with no valid
- * credential, so a 2xx there proves reachability only. A caller must not
- * record such a save as a verified key.
+ * Hosts whose declared models endpoint REJECTS a bogus key, so a 2xx there
+ * proves the submitted key. An ALLOW-list, never a deny-list: a host missing
+ * here is unproven, not public, and the caller records the weaker `reachable`
+ * state. That default stays true for hosts that only later start answering
+ * 2xx without a credential.
  *
- * shortcut: Command Code's public `/provider/v1/models` cannot reject a bogus
- * key (its `anthropic-messages` row is the same host); omp validates that
- * provider against `/alpha/whoami` instead. Upgrade this probe if a rejected
- * bogus key ever matters more than the extra round trip.
+ * TypeSafe's omp auth rule validates `GET https://api.typesafe.ai/v1/models`
+ * — exactly the path customModelsUrl probes — and carries no public-endpoint
+ * note, so a bogus key is answered 401/403 there.
+ *
+ * shortcut: one host only, so every other custom/template declaration lands
+ * `reachable`. Add a host here only with evidence its models endpoint answers
+ * 401/403 for a bogus key.
  */
-const PUBLIC_MODELS_PROBE_HOSTS: ReadonlySet<string> = new Set(["api.commandcode.ai"]);
+const KEY_REJECTING_MODELS_PROBE_HOSTS: Readonly<Record<string, true>> = { "api.typesafe.ai": true };
 
 /** Whether a custom-provider probe on this base URL can REJECT a bogus key. */
 export function customProbeCanRejectKey(baseUrl: string): boolean {
+  let host: string;
   try {
-    return !PUBLIC_MODELS_PROBE_HOSTS.has(new URL(baseUrl).hostname);
+    host = new URL(baseUrl).hostname;
   } catch {
-    // An unparseable base URL never reaches a probe — the store refuses it.
-    return true;
+    // Unprovable by default; an unparseable base URL never reaches a probe
+    // anyway — the store refuses it.
+    return false;
   }
+  // Own-key check: a hostname such as "constructor" must not hit a prototype.
+  return Object.hasOwn(KEY_REJECTING_MODELS_PROBE_HOSTS, host);
 }
 
 /**

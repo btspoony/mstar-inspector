@@ -1812,14 +1812,16 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(keyRow.key_id).toBe(await keyIdOf(PLAIN_CUSTOM_KEY));
     expect(keyRow.key_enc).toMatch(/^v1\.primary\./);
     expect(keyRow.key_enc).not.toContain(PLAIN_CUSTOM_KEY);
-    // The declaration flow verifies before saving, so the key lands 'ok'.
-    expect(keyRow.verified_status).toBe("ok");
+    // The declaration flow stored the key after a probe that proved the
+    // ENDPOINT answered — `ark.cn-beijing.volces.com` is not a known
+    // key-rejecting host, so the row carries the weaker state.
+    expect(keyRow.verified_status).toBe("reachable");
     expect(keyRow.verified_at).toMatch(SQLITE_TS_RE);
     // The list faces are decrypt-free: declaration + masked tail, never keys.
     await expect(configStore(db).listCustomProviders(app.id)).resolves.toEqual([{ ...CUSTOM, has_keys: true }]);
     const keys = await configStore(db).listCustomProviderKeys(app.id);
     expect(keys.map((key) => ({ provider: key.provider, last4: key.last4, verifiedStatus: key.verifiedStatus }))).toEqual([
-      { provider: CUSTOM.provider_id, last4: "9988", verifiedStatus: "ok" },
+      { provider: CUSTOM.provider_id, last4: "9988", verifiedStatus: "reachable" },
     ]);
     expect(JSON.stringify(keys)).not.toContain(PLAIN_CUSTOM_KEY);
   });
