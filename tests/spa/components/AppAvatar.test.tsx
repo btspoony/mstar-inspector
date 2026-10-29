@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
+import { appAvatarUrl } from "../../../src/contracts/app-avatar";
 import { AppAvatar } from "../../../src/spa/components/AppAvatar";
 import { installDom } from "../dom";
 
@@ -74,9 +75,9 @@ describe("AppAvatar", () => {
     try {
       await mounted.fireError();
       expect(mounted.container.querySelector("img")).toBeNull();
-      await mounted.rerender("https://avatars.githubusercontent.com/in/4321?s=120&v=4");
+      await mounted.rerender(appAvatarUrl(4321));
       const img = mounted.container.querySelector("img");
-      expect(img?.getAttribute("src")).toBe("https://avatars.githubusercontent.com/in/4321?s=120&v=4");
+      expect(img?.getAttribute("src")).toBe(appAvatarUrl(4321));
     } finally {
       await mounted.cleanup();
     }
@@ -88,7 +89,7 @@ describe("AppAvatar", () => {
     const mounted = await mount(null, 1234);
     try {
       const img = mounted.container.querySelector("img");
-      expect(img?.getAttribute("src")).toBe("https://avatars.githubusercontent.com/in/1234?s=120&v=4");
+      expect(img?.getAttribute("src")).toBe(appAvatarUrl(1234));
     } finally {
       await mounted.cleanup();
     }

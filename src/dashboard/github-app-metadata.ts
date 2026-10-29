@@ -19,9 +19,9 @@
  * fields the migration-0019/0036 columns cache (name / description / html_url
  * / slug — every URL scheme-gated to https: at extraction). Nothing else from
  * the response — not permissions/events, nothing secret-shaped — leaves this
- * module. The logo needs no request: GitHub serves an App's icon at
- * https://avatars.githubusercontent.com/in/<github_app_id>, the same CDN
- * object the bot account's `avatar_url` points at. An App JWT is only
+ * module. The logo needs no request: the shared contract
+ * (src/contracts/app-avatar.ts) derives it from the numeric App id — the same
+ * CDN object the bot account's `avatar_url` points at. An App JWT is only
  * accepted on `/app*` and the `/…/installation` routes, so a bot-account
  * lookup could never have worked.
  *
@@ -41,12 +41,11 @@
  * (last-responsible-moment) — this module never sees the envelope, the
  * encryption key, or any webhook secret, and never logs.
  */
+import { appAvatarUrl } from "../contracts/app-avatar";
 import { normalizePrivateKey } from "./private-key";
 import type { GithubAppMetadataInput } from "./apps-store";
 
 const GITHUB_APP_API_URL = "https://api.github.com/app";
-/** The App icon's CDN object, keyed by the numeric App id (no API call). */
-const APP_AVATAR_BASE_URL = "https://avatars.githubusercontent.com/in";
 /** Upstream budget (AD-531 lock): 5 seconds, zero retries. */
 const FETCH_TIMEOUT_MS = 5_000;
 /**
@@ -165,16 +164,6 @@ export function githubAppSlugFromHtmlUrl(htmlUrl: string | null | undefined): st
   if (url.hostname !== "github.com") return null;
   const segments = url.pathname.split("/").filter((segment) => segment.length > 0);
   return segments.length === 2 && segments[0] === "apps" ? segments[1]! : null;
-}
-
-/**
- * The App's own icon, derived from the numeric GitHub App id: GitHub serves
- * the uploaded logo at `avatars.githubusercontent.com/in/<github_app_id>` —
- * the very object the bot account's `avatar_url` points at, minus the request.
- * Pure, so this leg cannot fail; a CDN miss is the SPA's `onError` fallback.
- */
-function appAvatarUrl(githubAppId: number): string {
-  return `${APP_AVATAR_BASE_URL}/${githubAppId}?s=120&v=4`;
 }
 
 /**

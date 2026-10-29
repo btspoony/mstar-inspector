@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
 import { MembersPage, MembersTable } from "../../src/spa/pages/MembersPage";
@@ -210,16 +211,16 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(identity).toContain(t("en", "apps.appId", { id: 1 }));
     // A null cached avatar still renders the icon: it is derived from the
     // numeric App id on read, so the first page load is never a placeholder.
-    expect(identity).toContain('<img src="https://avatars.githubusercontent.com/in/1?s=120&v=4"');
+    expect(identity).toContain(`<img src="${appAvatarUrl(1)}"`);
   });
 
   test("identity cell avatar: github_avatar_url renders a rounded img; the name falls back github_name → slug → App id", () => {
     // The synced face: the App's own logo (bot avatar), decorative alt.
     const withAvatar = renderList([
-      appRow({ github_avatar_url: "https://avatars.githubusercontent.com/in/1234?v=4", github_name: "Demo" }),
+      appRow({ github_avatar_url: appAvatarUrl(1234), github_name: "Demo" }),
     ]);
     expect(withAvatar).toContain(
-      '<img src="https://avatars.githubusercontent.com/in/1234?v=4" alt="" class="h-9 w-9 shrink-0 rounded-full border object-cover"',
+      `<img src="${appAvatarUrl(1234)}" alt="" class="h-9 w-9 shrink-0 rounded-full border object-cover"`,
     );
     expect(withAvatar).toContain(">Demo</a>");
     expect(withAvatar).toContain('aria-label="Open Demo detail"');

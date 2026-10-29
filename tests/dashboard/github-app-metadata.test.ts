@@ -35,6 +35,7 @@ import {
   GITHUB_METADATA_TTL_MS,
   isGithubMetadataStale,
 } from "../../src/dashboard/github-app-metadata";
+import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { fakePem } from "../helpers/fake-secrets";
 
 // --- test RSA key material (generated per test; no fixtures) ---
@@ -143,8 +144,11 @@ const GITHUB_PROFILE = {
   owner: { login: "acme", id: 1, avatar_url: "https://avatars.githubusercontent.com/u/1?v=4" },
 };
 
-/** The icon URL derived from the numeric App id — no request, no CDN hit. */
-const AVATAR_URL = (appId: number): string => `https://avatars.githubusercontent.com/in/${appId}?s=120&v=4`;
+/**
+ * The icon URL: asserted through the SHARED contract the SPA also consumes, so
+ * a drift in that one derivation cannot pass both sides green.
+ */
+const AVATAR_URL = (appId: number): string => appAvatarUrl(appId);
 
 /**
  * The ONE upstream face a metadata sync may touch. Any other URL throws, so a

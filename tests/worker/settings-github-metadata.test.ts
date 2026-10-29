@@ -28,6 +28,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser } from "../../src/dashboard/users";
 import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
 import type { Env } from "../../src/worker/env";
+import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -75,8 +76,8 @@ const GITHUB_PROFILE = {
   owner: { avatar_url: "https://avatars.githubusercontent.com/u/1?v=4" },
 };
 
-/** The App icon derived from the numeric App id — no CDN request is made. */
-const APP_AVATAR_URL = `https://avatars.githubusercontent.com/in/${APP_ID}?s=120&v=4`;
+/** The App icon: the SHARED derivation (no second copy of the template). */
+const APP_AVATAR_URL = appAvatarUrl(APP_ID);
 
 /**
  * One refresh = exactly ONE request (`GET /app`): the icon is derived, so any

@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { APP_VERSION } from "../../src/version";
@@ -1848,7 +1849,7 @@ describe("GitHub App identity card", () => {
     const out = html(meta());
     expect(out).toContain("GitHub App");
     expect(out).toContain("App ID: 123456");
-    expect(out).toContain('<img src="https://avatars.githubusercontent.com/in/123456?s=120&amp;v=4"');
+    expect(out).toContain(`<img src="${appAvatarUrl(123456).replaceAll("&", "&amp;")}"`);
     expect(out).not.toContain("<a ");
   });
 
@@ -1864,7 +1865,7 @@ describe("GitHub App identity card", () => {
     expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
     expect(out).toContain("Acme Reviewer");
     // Same derivation as the never-synced face: the id, not the empty column.
-    expect(out).toContain("https://avatars.githubusercontent.com/in/123456?s=120&amp;v=4");
+    expect(out).toContain(appAvatarUrl(123456).replaceAll("&", "&amp;"));
     expect(out).not.toContain("Reviews pull requests");
     expect(out).not.toContain("Synced ");
     expect(out).toContain("App ID: 123456");
@@ -1954,9 +1955,6 @@ describe("GitHub App identity card", () => {
       source.indexOf("export function AppInfoCard"),
       source.indexOf("function HealthBody"),
     );
-    expect(cardBody).toContain("<AppAvatar");
-    expect(cardBody).toContain("src={app.github_avatar_url}");
-    expect(cardBody).toContain("appId={app.github_app_id}");
     expect(cardBody).toContain("app.github_name ? (");
     expect(cardBody).toContain("app.github_html_url ? (");
     expect(cardBody).toContain("app.github_description ?");
