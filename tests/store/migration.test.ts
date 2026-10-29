@@ -1620,6 +1620,23 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
+  /**
+   * One migration file as executable statements, comments stripped. The file
+   * is executed statement by statement inside a caller-owned transaction so no
+   * implicit commit can move a `PRAGMA` out of it — `exec(wholeFile)` is what
+   * would make bun:sqlite commit early and turn the in-transaction
+   * `PRAGMA foreign_keys = OFF` into a real switch.
+   */
+  function statementsOf(name: string): string[] {
+    return readFileSync(join(MIGRATIONS_DIR, name), "utf8")
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n")
+      .split(";")
+      .map((statement) => statement.trim())
+      .filter((statement) => statement.length > 0);
+  }
+
   /** The pre-0038 shape: 0003 … 0037, i.e. what production runs today. */
   function createPre0038Db(): TestD1 {
     // createTestD1 already applied the 0001/0002 base shape, so the chain here
@@ -1712,15 +1729,34 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     expect(childrenBefore.deliveries).toHaveLength(2);
 
     // D1 runs every migration file inside one implicit transaction with
-    // foreign keys enforced, so the test applies the file the same way: one
-    // transaction, FK enforcement ON, and the file's own PRAGMA switches are
-    // the ones under test (SQLite ignores `foreign_keys` inside a transaction,
-    // which is exactly why the migration also defers the checks).
+    // foreign keys enforced. The statements run one by one inside a
+    // caller-owned transaction so nothing can commit early: a whole-file
+    // `exec` lets bun:sqlite commit, and the file's `PRAGMA foreign_keys = OFF`
+    // would then really switch enforcement off — proving the plain-SQLite
+    // branch instead of D1's (where the pragma inside a transaction is a no-op
+    // and only `defer_foreign_keys` carries the gap across the parent DROP).
     db.raw.exec("PRAGMA foreign_keys = ON");
+    const statements = statementsOf("0038_webhook_path_drop.sql");
+    expect(statements.length).toBeGreaterThan(5);
+    // Captured at the parent DROP, inside the transaction.
+    const atDrop: { foreign_keys?: number; defer_foreign_keys?: number } = {};
     const apply = db.raw.transaction(() => {
-      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0038_webhook_path_drop.sql"), "utf8"));
+      for (const statement of statements) {
+        if (statement.startsWith("DROP TABLE github_apps\n") || statement.trim() === "DROP TABLE github_apps") {
+          atDrop.foreign_keys = (db.raw.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys;
+          atDrop.defer_foreign_keys = (
+            db.raw.query("PRAGMA defer_foreign_keys").get() as { defer_foreign_keys: number }
+          ).defer_foreign_keys;
+        }
+        db.raw.prepare(statement).run();
+      }
     });
     expect(() => apply()).not.toThrow();
+
+    // The in-transaction `PRAGMA foreign_keys = OFF` was ignored (SQLite keeps
+    // the setting until the transaction ends), and the deferred check is the
+    // one holding the parent DROP together.
+    expect(atDrop).toEqual({ foreign_keys: 1, defer_foreign_keys: 1 });
 
     // The rows survive field for field, in the same order and with the same
     // values (the copy is positional, so a swapped column would show up here).
@@ -1777,7 +1813,10 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     const appsBefore = db.raw.query("SELECT id, github_app_id, name FROM github_apps ORDER BY id").all();
     const childrenBefore = db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all();
 
-    expect(() => db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0038_webhook_path_drop.sql"), "utf8"))).not.toThrow();
+    const replay = db.raw.transaction(() => {
+      for (const statement of statementsOf("0038_webhook_path_drop.sql")) db.raw.prepare(statement).run();
+    });
+    expect(() => replay()).not.toThrow();
 
     expect(db.raw.query("SELECT id, github_app_id, name FROM github_apps ORDER BY id").all()).toEqual(appsBefore);
     expect(db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all()).toEqual(
