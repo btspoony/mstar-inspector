@@ -16,7 +16,7 @@
     "bun": ">=1.4.0"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "1.0.2",
+    "@cloudflare/sandbox": "1.0.3",
     "@mstar-harness/engine": "^4.1.2",
     "@octokit/auth-app": "8.3.1",
     "@octokit/rest": "22.0.1",
