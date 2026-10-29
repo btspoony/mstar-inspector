@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
+import { AppAvatar } from "../components/AppAvatar";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -184,13 +185,10 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
       // D6 fallback chain github_name ?? github_slug ?? String(github_app_id).
       cell: (app) => (
         <div className="flex items-center gap-3">
-          {app.github_avatar_url ? (
-            <img
-              src={app.github_avatar_url}
-              alt=""
-              className="h-9 w-9 shrink-0 rounded-full border object-cover"
-            />
-          ) : null}
+          <AppAvatar
+            src={app.github_avatar_url}
+            className="h-9 w-9 shrink-0 rounded-full border object-cover"
+          />
           <div className="flex flex-col gap-0.5">
             <a
               className="text-sm font-semibold text-foreground no-underline hover:underline"

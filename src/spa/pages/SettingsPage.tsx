@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { AppAvatar } from "../components/AppAvatar";
 import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
 import { postForm, putJson } from "../api";
@@ -61,7 +62,6 @@ import {
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
-import { GitHubMark } from "./LoginPage";
 import { PageNotice } from "./PageNotice";
 
 type PendingAction =
@@ -653,17 +653,7 @@ export function AppInfoCard({
       </CardHeader>
       <CardContent>
         <div className="flex items-start gap-4">
-          {app.github_avatar_url ? (
-            <img
-              src={app.github_avatar_url}
-              alt=""
-              className="h-12 w-12 shrink-0 rounded-full border object-cover"
-            />
-          ) : (
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border bg-muted text-muted-foreground">
-              <GitHubMark className="h-6 w-6" />
-            </div>
-          )}
+          <AppAvatar src={app.github_avatar_url} className="h-12 w-12 shrink-0 rounded-full border object-cover" />
           <div className="flex min-w-0 flex-col gap-1">
             {app.github_name ? (
               app.github_html_url ? (

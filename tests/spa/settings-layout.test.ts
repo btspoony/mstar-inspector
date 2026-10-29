@@ -1948,7 +1948,7 @@ describe("GitHub App identity card", () => {
       source.indexOf("export function AppInfoCard"),
       source.indexOf("function HealthBody"),
     );
-    expect(cardBody).toContain("app.github_avatar_url ? (");
+    expect(cardBody).toContain("<AppAvatar src={app.github_avatar_url}");
     expect(cardBody).toContain("app.github_name ? (");
     expect(cardBody).toContain("app.github_html_url ? (");
     expect(cardBody).toContain("app.github_description ?");

@@ -271,10 +271,12 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       expect(classes, label).toContain(`text-(--badge-${tone}-fg)`);
     }
     // The emitted pill is the only geometry source: no hard-coded pill
-    // survives anywhere in the row markup (the avatar img's own rounded-full
-    // is excluded — it is the D6 logo channel, not pill geometry).
+    // survives anywhere in the row markup (the avatar surface's own
+    // rounded-full is excluded — it is the D6 logo channel, not pill
+    // geometry).
     const emitted = [...renderList([appRow()]).matchAll(/class="([^"]*)"/g)]
       .map((match) => match[1] ?? "")
+      .filter((classes) => !classes.includes("object-cover"))
       .join(" ");
     expect(emitted).not.toContain("rounded-full");
     const withAvatar = renderList([appRow({ github_avatar_url: "https://x.test/a.png" })]);
