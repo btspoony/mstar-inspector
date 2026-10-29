@@ -30,6 +30,7 @@ writeFileSync(
   [
     "---",
     "name: mstar-audit",
+    "description: Fixture marker for plugin-root unit tests.",
     "---",
     "",
     "# mstar-audit",
