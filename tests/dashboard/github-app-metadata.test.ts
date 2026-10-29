@@ -17,9 +17,10 @@
  *     scheme-gated to https: (non-conforming values drop to null);
  *   - the App slug: `slug` from GET /app, else derived from html_url (the
  *     single `/apps/<slug>` segment, https: only);
- *   - the App's own logo: one GET /users/{slug}[bot] with the same JWT,
- *     separately fail-open (non-2xx / rejection / bad shape → null avatar,
- *     profile intact, result still ok);
+ *   - the App icon: derived from the numeric App id
+ *     (`avatars.githubusercontent.com/in/<id>`), so the sync issues exactly
+ *     ONE upstream request — an App JWT is rejected everywhere but `/app*`
+ *     and the `/…/installation` routes;
  *   - upstream face: GET https://api.github.com/app, Accept
  *     application/vnd.github+json, pinned API version, User-Agent, Bearer
  *     JWT, and an AbortSignal (the 5s AD-531 budget).
@@ -34,6 +35,7 @@ import {
   GITHUB_METADATA_TTL_MS,
   isGithubMetadataStale,
 } from "../../src/dashboard/github-app-metadata";
+import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { fakePem } from "../helpers/fake-secrets";
 
 // --- test RSA key material (generated per test; no fixtures) ---
@@ -142,26 +144,22 @@ const GITHUB_PROFILE = {
   owner: { login: "acme", id: 1, avatar_url: "https://avatars.githubusercontent.com/u/1?v=4" },
 };
 
-/** The App's own logo — the bot account's avatar, not the owner's. */
-const APP_LOGO_URL = "https://avatars.githubusercontent.com/u/9999?v=4";
+/**
+ * The icon URL: asserted through the SHARED contract the SPA also consumes, so
+ * a drift in that one derivation cannot pass both sides green.
+ */
+const AVATAR_URL = (appId: number): string => appAvatarUrl(appId);
 
-/** Route the two GitHub faces by URL. The stub stays explicit (never keyed
- * on call order): a missing bot request fails loudly, and an unexpected URL
- * surfaces instead of being answered by the profile body. */
-function stubGithubFaces(options: {
-  profile: () => Response;
-  avatar?: () => Response;
-}): { calls: FetchCall[] } {
+/**
+ * The ONE upstream face a metadata sync may touch. Any other URL throws, so a
+ * second request (the retired bot-account lookup) fails the test loudly
+ * instead of passing silently.
+ */
+function stubApp(profile: () => Response): { calls: FetchCall[] } {
   return stubFetch((url) => {
-    if (url === "https://api.github.com/app") return options.profile();
-    if (url.startsWith("https://api.github.com/users/") && options.avatar) return options.avatar();
+    if (url === "https://api.github.com/app") return profile();
     throw new Error(`unexpected fetch: ${url}`);
   });
-}
-
-/** The bot-account body for `GET /users/{slug}[bot]`. */
-function botFace(avatarUrl: unknown = APP_LOGO_URL, login = "acme-inspector[bot]") {
-  return jsonResponse({ login, id: 9999, avatar_url: avatarUrl });
 }
 
 /** Decode a JWT and verify its signature against the fixture's public key. */
@@ -193,10 +191,7 @@ afterEach(() => {
 describe("fetchAppMetadata (AD-531)", () => {
   test("mints a verifiable RS256 App JWT and extracts ONLY the public profile fields (PKCS#8 PEM)", async () => {
     const { pem, publicKey } = await pkcs8Fixture();
-    const { calls } = stubGithubFaces({
-      profile: () => jsonResponse(GITHUB_PROFILE),
-      avatar: () => botFace(),
-    });
+    const { calls } = stubApp(() => jsonResponse(GITHUB_PROFILE));
     // Capture the AbortSignal.timeout argument while delegating to the real
     // implementation (the signal stays genuine) — pins the locked AD-531
     // 5s budget by value, not just by signal type.
@@ -209,21 +204,22 @@ describe("fetchAppMetadata (AD-531)", () => {
     const result = await fetchAppMetadata(1001, pem);
 
     // Exactly the cached profile fields — permissions/events and the rest of
-    // both response bodies never leave the module.
+    // the response body never leave the module. The icon is derived from the
+    // numeric App id (no CDN request).
     expect(result).toEqual({
       ok: true,
       metadata: {
         githubName: "Acme Inspector",
         githubDescription: "PR review bot for Acme",
         githubHtmlUrl: "https://github.com/apps/acme-inspector",
-        githubAvatarUrl: APP_LOGO_URL,
+        githubAvatarUrl: AVATAR_URL(1001),
         githubSlug: "acme-inspector",
       },
     });
 
-    // Upstream face: GET /app then GET /users/{slug}[bot], documented headers,
-    // and the AD-531 abort budget attached to both.
-    expect(calls).toHaveLength(2);
+    // Upstream face: exactly ONE request (GET /app), documented headers, and
+    // the AD-531 abort budget attached to it.
+    expect(calls).toHaveLength(1);
     const call = calls[0]!;
     expect(call.url).toBe("https://api.github.com/app");
     expect(call.init!.method).toBe("GET");
@@ -233,13 +229,6 @@ describe("fetchAppMetadata (AD-531)", () => {
     expect(headers.get("user-agent")).toBe("mstar-inspector");
     expect(call.init!.signal).toBeInstanceOf(AbortSignal);
     expect(timeoutMs).toBe(5000); // the 5s AD-531 budget, exactly
-
-    // The App's own logo comes from the bot account, carrying the same JWT.
-    const avatarCall = calls[1]!;
-    expect(avatarCall.url).toBe("https://api.github.com/users/acme-inspector%5Bbot%5D");
-    const avatarHeaders = new Headers(avatarCall.init!.headers);
-    expect(avatarHeaders.get("authorization")).toBe(headers.get("authorization"));
-    expect(avatarCall.init!.signal).toBeInstanceOf(AbortSignal);
 
     // JWT: pinned header/claims + signature verifiable with the fixture's
     // own public key.
@@ -259,7 +248,7 @@ describe("fetchAppMetadata (AD-531)", () => {
 
   test("accepts a PKCS#1 PEM (the manifest-conversion format) and signs with the same key", async () => {
     const { pem, publicKey } = await pkcs1Fixture();
-    stubGithubFaces({ profile: () => jsonResponse(GITHUB_PROFILE), avatar: () => botFace() });
+    stubApp(() => jsonResponse(GITHUB_PROFILE));
 
     const result = await fetchAppMetadata(1001, pem);
 
@@ -269,7 +258,7 @@ describe("fetchAppMetadata (AD-531)", () => {
         githubName: "Acme Inspector",
         githubDescription: "PR review bot for Acme",
         githubHtmlUrl: "https://github.com/apps/acme-inspector",
-        githubAvatarUrl: APP_LOGO_URL,
+        githubAvatarUrl: AVATAR_URL(1001),
         githubSlug: "acme-inspector",
       },
     });
@@ -277,10 +266,7 @@ describe("fetchAppMetadata (AD-531)", () => {
 
   test("the PKCS#1 JWT signature also verifies with the matching public key", async () => {
     const { pem, publicKey } = await pkcs1Fixture();
-    const { calls } = stubGithubFaces({
-      profile: () => jsonResponse(GITHUB_PROFILE),
-      avatar: () => botFace(),
-    });
+    const { calls } = stubApp(() => jsonResponse(GITHUB_PROFILE));
 
     const result = await fetchAppMetadata(1001, pem);
 
@@ -346,7 +332,7 @@ describe("fetchAppMetadata (AD-531)", () => {
     expect(nonJson.calls).toHaveLength(1);
   });
 
-  test("nullable upstream fields degrade per-item — and no slug means no bot request", async () => {
+  test("nullable upstream fields degrade per-item — the icon still derives from the App id", async () => {
     const { pem } = await pkcs8Fixture();
     const { calls } = stubFetch(() => jsonResponse({ name: "Bare App", description: null }));
 
@@ -356,11 +342,11 @@ describe("fetchAppMetadata (AD-531)", () => {
         githubName: "Bare App",
         githubDescription: null,
         githubHtmlUrl: null,
-        githubAvatarUrl: null,
+        githubAvatarUrl: AVATAR_URL(1001),
         githubSlug: null,
       },
     });
-    expect(calls).toHaveLength(1); // no slug from either source → nothing to look up
+    expect(calls).toHaveLength(1); // no slug from either source, and no logo lookup to make
   });
 
   test("non-https html_url is dropped to null and yields no derived slug", async () => {
@@ -381,19 +367,18 @@ describe("fetchAppMetadata (AD-531)", () => {
         githubName: "Odd App",
         githubDescription: null,
         githubHtmlUrl: null,
-        githubAvatarUrl: null,
+        githubAvatarUrl: AVATAR_URL(1001),
         githubSlug: null,
       },
     });
     expect(calls).toHaveLength(1);
   });
 
-  test("a payload without `slug` derives it from html_url and looks up that bot", async () => {
+  test("a payload without `slug` derives it from html_url", async () => {
     const { pem } = await pkcs8Fixture();
-    const { calls } = stubGithubFaces({
-      profile: () => jsonResponse({ name: "Acme Inspector", html_url: "https://github.com/apps/acme-inspector" }),
-      avatar: () => botFace(),
-    });
+    const { calls } = stubApp(() =>
+      jsonResponse({ name: "Acme Inspector", html_url: "https://github.com/apps/acme-inspector" }),
+    );
 
     const result = await fetchAppMetadata(1001, pem);
 
@@ -403,25 +388,23 @@ describe("fetchAppMetadata (AD-531)", () => {
         githubName: "Acme Inspector",
         githubDescription: null,
         githubHtmlUrl: "https://github.com/apps/acme-inspector",
-        githubAvatarUrl: APP_LOGO_URL,
+        githubAvatarUrl: AVATAR_URL(1001),
         githubSlug: "acme-inspector",
       },
     });
-    expect(calls[1]!.url).toBe("https://api.github.com/users/acme-inspector%5Bbot%5D");
+    expect(calls).toHaveLength(1);
   });
 
   test("`slug` in the payload wins over the html_url derivation", async () => {
     const { pem } = await pkcs8Fixture();
-    const { calls } = stubGithubFaces({
+    stubApp(() =>
       // A renamed App: the API slug is current while html_url still trails it.
-      profile: () =>
-        jsonResponse({
-          name: "Renamed App",
-          slug: "renamed-app",
-          html_url: "https://github.com/apps/old-app",
-        }),
-      avatar: () => botFace(APP_LOGO_URL, "renamed-app[bot]"),
-    });
+      jsonResponse({
+        name: "Renamed App",
+        slug: "renamed-app",
+        html_url: "https://github.com/apps/old-app",
+      }),
+    );
 
     const result = await fetchAppMetadata(1001, pem);
 
@@ -431,56 +414,21 @@ describe("fetchAppMetadata (AD-531)", () => {
         githubName: "Renamed App",
         githubDescription: null,
         githubHtmlUrl: "https://github.com/apps/old-app",
-        githubAvatarUrl: APP_LOGO_URL,
+        githubAvatarUrl: AVATAR_URL(1001),
         githubSlug: "renamed-app",
       },
     });
-    expect(calls[1]!.url).toBe("https://api.github.com/users/renamed-app%5Bbot%5D");
   });
 
-  test("bot lookup 404 → githubAvatarUrl null, profile fields still persist, result ok", async () => {
+  test("the icon tracks the App id, not the slug — a rename keeps the same CDN object", async () => {
     const { pem } = await pkcs8Fixture();
-    const { calls } = stubGithubFaces({
-      profile: () => jsonResponse(GITHUB_PROFILE),
-      avatar: () => jsonResponse({ message: "Not Found" }, 404),
-    });
+    stubApp(() => jsonResponse(GITHUB_PROFILE));
 
-    expect(await fetchAppMetadata(1001, pem)).toEqual({
-      ok: true,
-      metadata: {
-        githubName: "Acme Inspector",
-        githubDescription: "PR review bot for Acme",
-        githubHtmlUrl: "https://github.com/apps/acme-inspector",
-        githubAvatarUrl: null,
-        githubSlug: "acme-inspector",
-      },
-    });
-    expect(calls).toHaveLength(2); // one App fetch + one bot attempt, no retry
-  });
+    // App id 987654 ≠ the fixture's slug: the derived URL uses the id alone.
+    const result = await fetchAppMetadata(987654, pem);
 
-  test("bot lookup rejection / malformed / non-https avatar → githubAvatarUrl null, never a failed result", async () => {
-    const { pem } = await pkcs8Fixture();
-    const failures: Array<() => Response> = [
-      () => {
-        throw new TypeError("fetch failed");
-      },
-      () => jsonResponse({ login: "acme-inspector[bot]" }), // no avatar_url
-      () => botFace("javascript:alert(1)"),
-      () => new Response("<html>gateway error</html>", { status: 200 }), // non-JSON
-    ];
-    for (const avatar of failures) {
-      stubGithubFaces({ profile: () => jsonResponse(GITHUB_PROFILE), avatar });
-      expect(await fetchAppMetadata(1001, pem)).toEqual({
-        ok: true,
-        metadata: {
-          githubName: "Acme Inspector",
-          githubDescription: "PR review bot for Acme",
-          githubHtmlUrl: "https://github.com/apps/acme-inspector",
-          githubAvatarUrl: null,
-          githubSlug: "acme-inspector",
-        },
-      });
-    }
+    expect(result.ok && result.metadata.githubAvatarUrl).toBe(AVATAR_URL(987654));
+    expect(result.ok && result.metadata.githubSlug).toBe("acme-inspector");
   });
 });
 

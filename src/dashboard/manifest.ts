@@ -9,10 +9,9 @@
  *   signValue/verifyValue discipline (createStateValue), single-use,
  *   Max-Age 600; DISTINCT from B0's `__Host-mstar-oauth-state`. `state`
  *   rides the GitHub form-action query (GitHub echoes it into the
- *   redirect_url next to `code`). B5: the value CARRIES the webhook path
- *   minted at start — the path survives start → callback only through
- *   this signed carrier (the manifest form is client-editable, so it is
- *   not a trusted carrier).
+ *   redirect_url next to `code`). B5: the value CARRIES the row id minted at
+ *   start — it survives start → callback only through this signed carrier
+ *   (the manifest form is client-editable, so it is not a trusted carrier).
  * - Conversion: POST https://api.github.com/app-manifests/{code}/conversions
  *   with Accept: application/vnd.github+json + X-GitHub-Api-Version
  *   2022-11-28 and NO Authorization header (the code is the credential; a
@@ -22,9 +21,9 @@
  *   info "mstar-manifest-hold"), Max-Age 600; bound to the callback session
  *   login, kept across retryable commit outcomes (500/502), burned on
  *   success, login mismatch, bad hold, or logout.
- *   Payload NEVER enters HTML, logs, or D1. B5: the payload also carries
- *   the webhook path (so the commit can write the D1 row after the state
- *   cookie is burned) and GitHub's own App slug (the bot mention target).
+ *   Payload NEVER enters HTML, logs, or D1. B5: the payload also carries the
+ *   row id (so the commit can write the D1 row after the state cookie is
+ *   burned) and GitHub's own App slug (the bot mention target).
  * - Storage口径 (lock L1): the conversion PEM is stored VERBATIM
  *   (encrypted) — normalization to PKCS#8 stays at createReviewCommenter
  *   construction on the consumer side.
@@ -101,19 +100,6 @@ export function buildAppName(login: string): string {
   return `${APP_NAME_PREFIX}${login}`.slice(0, GITHUB_APP_NAME_MAX_LENGTH);
 }
 
-// --- webhook path (per-App webhook URL, spec § Multi-App 契约) ---
-
-/**
- * The row's only locally minted identifier — and therefore its primary key:
- * it must exist BEFORE GitHub creates the App (the manifest form needs the
- * hook URL), so it can derive from nothing GitHub owns. A UUID is opaque,
- * URL-safe, and collision-free without a pre-resolve read. The manifest
- * commit reuses it as `github_apps.id`, so one App keeps ONE identity.
- */
-export function randomWebhookPath(): string {
-  return crypto.randomUUID();
-}
-
 /**
  * Manifest JSON for the locked review permission set (spec §7.6:
  * `contents: "write"` is authorized for Worker-side thread resolution —
@@ -122,14 +108,20 @@ export function randomWebhookPath(): string {
  * OAuth App fields, no old-App migration branch).
  * `redirect_url` stays the bare callback — CSRF `state` rides the
  * form-action query instead (GitHub echoes it back next to `code`). B5: the
- * webhook is the App's OWN route `{origin}/webhook/{webhookPath}` — the path
- * is minted at start and carried to the commit through the signed state.
+ * webhook is the App's OWN route `{origin}/webhook/{workspaceId}/{appId}` —
+ * both ids exist before GitHub creates the App, so the hook URL needs no
+ * GitHub fact and survives a rename.
  */
-export function buildManifest(origin: string, login: string, webhookPath: string): ManifestPayload {
+export function buildManifest(
+  origin: string,
+  login: string,
+  workspaceId: string,
+  appId: string,
+): ManifestPayload {
   return {
     name: buildAppName(login),
     url: origin,
-    hook_attributes: { url: `${origin}/webhook/${webhookPath}` },
+    hook_attributes: { url: `${origin}/webhook/${workspaceId}/${appId}` },
     redirect_url: `${origin}/dashboard/manifest/callback`,
     public: false,
     default_events: ["pull_request", "issue_comment"],
@@ -150,10 +142,14 @@ export function buildManifestCreateUrl(state: string): string {
   return url.toString();
 }
 
-// --- webhook-path-carrying CSRF state (B5: same createStateValue HMAC discipline) ---
+// --- app-id-carrying CSRF state (B5: same createStateValue HMAC discipline) ---
 
 export type ManifestStatePayload = {
-  webhookPath: string;
+  /**
+   * The future `github_apps.id`, minted at start so the webhook URL is known
+   * before GitHub creates the App. It becomes the row PK at commit.
+   */
+  appId: string;
   /**
    * The STABLE `workspaces.id` the flow creates the App in, decided at start
    * from the request context and carried through the signed state so the
@@ -165,17 +161,17 @@ export type ManifestStatePayload = {
 };
 
 /**
- * Signed manifest state carrying the webhook path minted at start plus the
- * target workspace. Same discipline as B0's createStateValue: HMAC-signed with
+ * Signed manifest state carrying the App id minted at start plus the target
+ * workspace. Same discipline as B0's createStateValue: HMAC-signed with
  * DASHBOARD_SESSION_SECRET, used as BOTH the state cookie value and the
  * form-action query param, single-use (expired at the callback).
  */
 export async function createManifestStateValue(
   secret: string,
-  webhookPath: string,
+  appId: string,
   workspaceId: string,
 ): Promise<string> {
-  return signValue(JSON.stringify({ webhookPath, workspaceId }), secret);
+  return signValue(JSON.stringify({ appId, workspaceId }), secret);
 }
 
 /**
@@ -197,7 +193,7 @@ export async function readManifestStateValue(
   } catch {
     return null;
   }
-  if (typeof payload.webhookPath !== "string" || !/^[a-zA-Z0-9-]+$/.test(payload.webhookPath)) {
+  if (typeof payload.appId !== "string" || !/^[a-zA-Z0-9-]+$/.test(payload.appId)) {
     return null;
   }
   if (typeof payload.workspaceId !== "string" || payload.workspaceId.length === 0) return null;
@@ -293,8 +289,8 @@ export type ManifestHoldPayload = {
   login: string;
   /** GitHub's App slug from the conversion — the bot mention target; null until the first metadata sync. */
   slug: string | null;
-  /** Webhook path minted at start (carried from the signed state). */
-  webhookPath: string;
+  /** Row id minted at start (carried from the signed state). */
+  appId: string;
   /** Target workspace id (carried from the signed state); the commit maps the App here. */
   workspaceId: string;
   pem: string;
@@ -331,7 +327,7 @@ async function holdKey(secret: string): Promise<CryptoKey> {
 export function buildHoldPayload(
   conversion: ManifestConversion,
   login: string,
-  webhookPath: string,
+  appId: string,
   workspaceId: string,
   nowMs = Date.now(),
 ): ManifestHoldPayload {
@@ -340,7 +336,7 @@ export function buildHoldPayload(
     name: conversion.name,
     login,
     slug: conversion.slug,
-    webhookPath,
+    appId,
     workspaceId,
     pem: conversion.pem,
     webhook_secret: conversion.webhook_secret,
@@ -369,11 +365,11 @@ export async function createHoldValue(
   conversion: ManifestConversion,
   login: string,
   secret: string,
-  webhookPath: string,
+  appId: string,
   workspaceId: string,
   nowMs = Date.now(),
 ): Promise<string> {
-  return encryptHoldValue(buildHoldPayload(conversion, login, webhookPath, workspaceId, nowMs), secret);
+  return encryptHoldValue(buildHoldPayload(conversion, login, appId, workspaceId, nowMs), secret);
 }
 
 /** Decrypts + shape/expiry check; anything off → null (treat as flow expired). */
@@ -408,7 +404,7 @@ export async function readHoldValue(
   if (payload.slug !== null && (typeof payload.slug !== "string" || payload.slug.length === 0)) {
     return null;
   }
-  if (typeof payload.webhookPath !== "string" || payload.webhookPath.length === 0) return null;
+  if (typeof payload.appId !== "string" || payload.appId.length === 0) return null;
   if (typeof payload.workspaceId !== "string" || payload.workspaceId.length === 0) return null;
   if (typeof payload.pem !== "string" || payload.pem.length === 0) return null;
   if (typeof payload.webhook_secret !== "string" || payload.webhook_secret.length === 0) return null;

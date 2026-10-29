@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
 import { MembersPage, MembersTable } from "../../src/spa/pages/MembersPage";
@@ -208,17 +209,18 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(identity).toContain(">demo</a>");
     expect(identity).toContain('<span class="text-xs text-muted-foreground tabular-nums">');
     expect(identity).toContain(t("en", "apps.appId", { id: 1 }));
-    // Null avatar degrades per-field (D6): no img pretends a synced profile.
-    expect(identity).not.toContain("<img");
+    // A null cached avatar still renders the icon: it is derived from the
+    // numeric App id on read, so the first page load is never a placeholder.
+    expect(identity).toContain(`<img src="${appAvatarUrl(1)}"`);
   });
 
   test("identity cell avatar: github_avatar_url renders a rounded img; the name falls back github_name → slug → App id", () => {
     // The synced face: the App's own logo (bot avatar), decorative alt.
     const withAvatar = renderList([
-      appRow({ github_avatar_url: "https://avatars.githubusercontent.com/in/1234?v=4", github_name: "Demo" }),
+      appRow({ github_avatar_url: appAvatarUrl(1234), github_name: "Demo" }),
     ]);
     expect(withAvatar).toContain(
-      '<img src="https://avatars.githubusercontent.com/in/1234?v=4" alt="" class="h-9 w-9 shrink-0 rounded-full border object-cover"',
+      `<img src="${appAvatarUrl(1234)}" alt="" class="h-9 w-9 shrink-0 rounded-full border object-cover"`,
     );
     expect(withAvatar).toContain(">Demo</a>");
     expect(withAvatar).toContain('aria-label="Open Demo detail"');
@@ -233,8 +235,9 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     // Rendered from the real row component under the two ACTUAL pathnames: the
     // emitted links are the page's own base, so a wrong base, a legacy target
     // under a workspace page, or a /settings deep link fails here.
+    // `<img src>` is not an href — only real anchors are collected.
     const hrefs = (pathname: string) =>
-      [...renderList([appRow()], pathname).matchAll(/href="([^"]+)"/g)].map((match) => match[1]);
+      [...renderList([appRow()], pathname).matchAll(/<a [^>]*href="([^"]+)"/g)].map((match) => match[1]);
     // Legacy Apps page: the historical detail path, identity link + anchor.
     expect(hrefs("/dashboard/apps")).toEqual(["/dashboard/apps/1", "/dashboard/apps/1"]);
     // Workspace Apps page: the workspace copy of the same route — the legacy
@@ -271,10 +274,12 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       expect(classes, label).toContain(`text-(--badge-${tone}-fg)`);
     }
     // The emitted pill is the only geometry source: no hard-coded pill
-    // survives anywhere in the row markup (the avatar img's own rounded-full
-    // is excluded — it is the D6 logo channel, not pill geometry).
+    // survives anywhere in the row markup (the avatar surface's own
+    // rounded-full is excluded — it is the D6 logo channel, not pill
+    // geometry).
     const emitted = [...renderList([appRow()]).matchAll(/class="([^"]*)"/g)]
       .map((match) => match[1] ?? "")
+      .filter((classes) => !classes.includes("object-cover"))
       .join(" ");
     expect(emitted).not.toContain("rounded-full");
     const withAvatar = renderList([appRow({ github_avatar_url: "https://x.test/a.png" })]);
@@ -607,7 +612,7 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
 
   /** Every href the list emits, with the route it resolves to. */
   function destinations(pathname: string): Array<[string, string | undefined]> {
-    return [...renderList(pathname).matchAll(/href="([^"]+)"/g)].map(([, href]) => {
+    return [...renderList(pathname).matchAll(/<a [^>]*href="([^"]+)"/g)].map(([, href]) => {
       const route = matchSpaRoute(href ?? "");
       return [href ?? "", route?.page];
     });

@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { APP_VERSION } from "../../src/version";
@@ -45,9 +46,10 @@ const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat"
 /** A manage-face settings payload — the full settings tab body renders. */
 const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
   can_manage: true,
+  workspace_id: "ws_0123456789abcdefghijkl",
   app: {
     github_slug: "acme-app",
-    webhook_path: "wh-acme",
+    id: "app-acme",
     github_app_id: 1,
     status: "active",
     review_enabled: true,
@@ -1784,12 +1786,17 @@ describe("GitHub App identity card", () => {
    * passes true explicitly.
    */
   const html = (app: SettingsAppMeta, canManage = false): string =>
-    renderToStaticMarkup(createElement(AppInfoCard, { locale: "en", app, canManage }));
+    renderToStaticMarkup(
+      createElement(AppInfoCard, { locale: "en", app, workspaceId: WORKSPACE_ID, canManage }),
+    );
+
+  /** The App's stable workspace id (never the route ref/slug). */
+  const WORKSPACE_ID = "ws_0123456789abcdefghijkl";
 
   function meta(overrides: Partial<SettingsAppMeta> = {}): SettingsAppMeta {
     return {
       github_slug: "acme",
-      webhook_path: "wh-acme",
+      id: "app-acme",
       github_app_id: 123456,
       status: "active",
       review_enabled: true,
@@ -1834,17 +1841,16 @@ describe("GitHub App identity card", () => {
     expect(out).toContain("Synced ");
   });
 
-  test("never-synced App degrades to local fields: card renders, no link, no crash", () => {
-    // (e) all metadata null — the card still renders (title + local App id),
-    // the placeholder mark stands in for the avatar, and nothing pretends a
-    // synced profile exists: no anchor, no img, no GitHub URL anywhere.
+  test("never-synced App degrades to local fields, and the icon is derived from the App id", () => {
+    // (e) all metadata null — the card still renders (title + local App id)
+    // and no anchor pretends a synced profile exists. The avatar is NOT a
+    // placeholder here: the cached column is empty, so the mark comes from the
+    // numeric App id on read (the first page load shows the real icon).
     const out = html(meta());
     expect(out).toContain("GitHub App");
     expect(out).toContain("App ID: 123456");
-    expect(out).toContain('viewBox="0 0 24 24"'); // the octocat placeholder mark
+    expect(out).toContain(`<img src="${appAvatarUrl(123456).replaceAll("&", "&amp;")}"`);
     expect(out).not.toContain("<a ");
-    expect(out).not.toContain("<img");
-    expect(out).not.toContain("http");
   });
 
   test("mixed-null metadata renders only the present fields, per-field degradation", () => {
@@ -1858,7 +1864,8 @@ describe("GitHub App identity card", () => {
     );
     expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
     expect(out).toContain("Acme Reviewer");
-    expect(out).not.toContain("<img");
+    // Same derivation as the never-synced face: the id, not the empty column.
+    expect(out).toContain(appAvatarUrl(123456).replaceAll("&", "&amp;"));
     expect(out).not.toContain("Reviews pull requests");
     expect(out).not.toContain("Synced ");
     expect(out).toContain("App ID: 123456");
@@ -1948,7 +1955,6 @@ describe("GitHub App identity card", () => {
       source.indexOf("export function AppInfoCard"),
       source.indexOf("function HealthBody"),
     );
-    expect(cardBody).toContain("app.github_avatar_url ? (");
     expect(cardBody).toContain("app.github_name ? (");
     expect(cardBody).toContain("app.github_html_url ? (");
     expect(cardBody).toContain("app.github_description ?");
@@ -1985,6 +1991,7 @@ describe("GitHub App identity card", () => {
         createElement(AppInfoCard, {
           locale: "en",
           app: meta({ github_name: "Acme Reviewer" }),
+          workspaceId: WORKSPACE_ID,
           canManage,
           onReload,
         }),
@@ -1997,21 +2004,45 @@ describe("GitHub App identity card", () => {
       expect(card(false, async () => true)).not.toContain(t("en", "settings.appInfoRefresh"));
     });
 
-    test("the delivery URL renders on the manager face only, composed from webhook_path", () => {
+    test("the delivery URL renders on the manager face, composed from the workspace id + local App UID", () => {
       // The webhook repoint needs the absolute URL GitHub posts to; the deploy
       // doc sends the operator to this card for it, so the card must carry it —
-      // and only for the manager, because a member has no repoint duty and
-      // `webhook_path` is the signed delivery route.
+      // and only for the manager, because a member has no repoint duty.
       const deliveryUrl = (canManage: boolean): string =>
         withLocation("/dashboard/acme/apps/123456/settings", () => card(canManage), "https://worker.example");
 
       const manager = deliveryUrl(true);
       expect(manager).toContain(t("en", "settings.appInfoDeliveryUrl"));
-      expect(manager).toContain("https://worker.example/webhook/wh-acme");
+      // workspace segment = the payload's stable id (NOT the path ref), app
+      // segment = the local App UID.
+      expect(manager).toContain(`https://worker.example/webhook/${WORKSPACE_ID}/app-acme`);
 
       const member = deliveryUrl(false);
       expect(member).not.toContain(t("en", "settings.appInfoDeliveryUrl"));
-      expect(member).not.toContain("wh-acme");
+      expect(member).not.toContain("https://worker.example/webhook/");
+    });
+
+    test("both URL segments are readable from the card: GitHub App id and local App UID", () => {
+      const out = withLocation(
+        "/dashboard/acme/apps/123456/settings",
+        () => card(true),
+        "https://worker.example",
+      );
+      expect(out).toContain(t("en", "settings.appInfoAppId", { id: 123456 }));
+      expect(out).toContain(t("en", "settings.appInfoLocalId", { id: "app-acme" }));
+    });
+
+    test("a workspace SLUG in the path never reaches the delivery URL — the payload's id does", () => {
+      // The route segment is a ref, which may be a slug (`acme`); GitHub must
+      // be pointed at the stable workspace id, so the URL comes from the
+      // payload only.
+      const out = withLocation(
+        "/dashboard/acme/apps/123456/settings",
+        () => card(true),
+        "https://worker.example",
+      );
+      expect(out).toContain(`https://worker.example/webhook/${WORKSPACE_ID}/app-acme`);
+      expect(out).not.toContain("https://worker.example/webhook/acme/");
     });
 
     test("the delivery URL label is dictionary-backed in both locales", () => {
@@ -2062,6 +2093,7 @@ describe("GitHub App identity card", () => {
             createElement(AppInfoCard, {
               locale: "en",
               app: meta({ github_name: "Acme Reviewer" }),
+              workspaceId: WORKSPACE_ID,
               canManage: true,
               onReload: async () => {
                 reloads += 1;
@@ -2098,7 +2130,11 @@ describe("GitHub App settings link wiring (AD-623)", () => {
   test("the page threads payload.can_manage into the card; the settings URL derives only through the helper", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Presentation-layer threading only — the payload contract gains nothing.
-    expect(source).toContain("<AppInfoCard\n            locale={locale}\n            app={app}\n            canManage={payload.can_manage}\n            onReload={() => onReload({ background: true })}\n          />");
+    // Threading is presentation-only: the card gets the payload's own
+    // `can_manage` and `workspace_id` (never a path-derived value).
+    expect(source).toContain(
+      "<AppInfoCard\n            locale={locale}\n            app={app}\n            workspaceId={payload.workspace_id}\n            canManage={payload.can_manage}\n            onReload={() => onReload({ background: true })}\n          />",
+    );
     // The card body routes the manager target through the pure helper (the
     // forbidden derivations — github_name / the local slug — cannot reach the
     // URL through it: it takes the html_url alone).

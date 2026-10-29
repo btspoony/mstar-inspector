@@ -79,6 +79,12 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0033_platform_admin.sql",
     // 0036: github_apps.slug → webhook_path plus the cached github_slug.
     "0036_app_identity.sql",
+    // 0038 rebuilds github_apps, so the fixture must carry every column the
+    // rebuild copies.
+    "0018_app_sandbox_images.sql",
+    "0019_github_apps_metadata.sql",
+    "0037_github_metadata_attempt.sql",
+    "0038_webhook_path_drop.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -93,11 +99,12 @@ async function seedApp(
   db: DashboardD1,
   opts: { slug: string; githubAppId: number; createdBy: string },
 ): Promise<GithubAppRow> {
-  const id = crypto.randomUUID();
+  // The row id is the webhook URL's app segment: keep it derivable so the
+  // route assertions below can name the App without re-reading the row.
+  const id = `app-${opts.slug}`;
   const enc = await encryptedColumns(id);
   return createAppsStore(db).createApp({
     id,
-    webhookPath: opts.slug,
     githubSlug: opts.slug,
     githubAppId: opts.githubAppId,
     name: opts.slug,
@@ -250,7 +257,7 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
     expect(appStatus(db, MALLORY_APP_ID)).toBe("disabled");
     // T2 contract through the UI action: the disabled App's webhook 404s
     // (the webhook-path lookup resolves the row, then the status gate refuses).
-    const webhook = await post("/webhook/mstar-inspector-mallory", "", makeEnv(db));
+    const webhook = await post("/webhook/default/app-mstar-inspector-mallory", "", makeEnv(db));
     expect(webhook.status).toBe(404);
   });
 
@@ -266,7 +273,7 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(appStatus(db, MALLORY_APP_ID)).toBe("active");
-    const webhook = await post("/webhook/mstar-inspector-mallory", "", makeEnv(db));
+    const webhook = await post("/webhook/default/app-mstar-inspector-mallory", "", makeEnv(db));
     // Active + not deleted → the row resolved and the (missing) signature
     // fails verification: 401, NOT the 404 of an unknown/disabled app.
     expect(webhook.status).toBe(401);
@@ -327,7 +334,7 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
       .get() as { deleted_at: string | null };
     expect(row.deleted_at).not.toBeNull();
     // The brief's bridged AC: the deleted app's webhook route 404s (T2).
-    const webhook = await post("/webhook/mstar-inspector-mallory", "", makeEnv(db));
+    const webhook = await post("/webhook/default/app-mstar-inspector-mallory", "", makeEnv(db));
     expect(webhook.status).toBe(404);
     // Managing a deleted app is 404 — it no longer exists for the UI.
     const manage = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/disable`, cookie, makeEnv(db));
@@ -359,7 +366,7 @@ describe("POST /dashboard/default/apps/:appId/pause|resume (per-App review pause
     const db = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     await post(`/dashboard/default/apps/${MALLORY_APP_ID}/pause`, cookie, makeEnv(db));
-    const webhook = await post("/webhook/mstar-inspector-mallory", "", makeEnv(db));
+    const webhook = await post("/webhook/default/app-mstar-inspector-mallory", "", makeEnv(db));
     expect(webhook.status).toBe(401);
     expect(reviewEnabled(db, MALLORY_APP_ID)).toBe(0);
   });

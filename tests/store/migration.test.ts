@@ -28,9 +28,69 @@ const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
  * `slug` to `webhook_path`, and the describes below seed both the pre- and
  * post-0036 schema, so a raw INSERT cannot hard-code either name.
  */
-function appPathColumn(db: TestD1): "slug" | "webhook_path" {
+function appPathColumn(db: TestD1): "slug" | "webhook_path" | null {
   const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>;
-  return columns.some((c) => c.name === "webhook_path") ? "webhook_path" : "slug";
+  if (columns.some((c) => c.name === "webhook_path")) return "webhook_path";
+  return columns.some((c) => c.name === "slug") ? "slug" : null;
+}
+
+/**
+ * Insert one github_apps row into whichever shape the fixture carries. The
+ * local route key is `slug` before 0036, `webhook_path` until 0038, and gone
+ * afterwards (the row id carries it) — this helper is the one place that
+ * knows the difference.
+ */
+function insertGithubAppRow(
+  db: TestD1,
+  row: {
+    id: string;
+    githubAppId?: number;
+    name?: string;
+    createdBy?: string;
+    /** SQL expression for deleted_at (defaults NULL). */
+    deletedExpr?: string;
+    extraColumns?: string;
+    extraValues?: string;
+  },
+): void {
+  const pathColumn = appPathColumn(db);
+  const columns = [
+    "id",
+    ...(pathColumn ? [pathColumn] : []),
+    "github_app_id",
+    "name",
+    "private_key_enc",
+    "webhook_secret_enc",
+    "created_by",
+    "status",
+    "deleted_at",
+    ...(row.extraColumns ? [row.extraColumns] : []),
+    "created_at",
+    "updated_at",
+  ].join(", ");
+  const values = [
+    "?",
+    ...(pathColumn ? ["?"] : []),
+    "?",
+    "?",
+    "'enc'",
+    "'enc'",
+    "?",
+    "'active'",
+    row.deletedExpr ?? "NULL",
+    ...(row.extraValues ? [row.extraValues] : []),
+    "datetime('now')",
+    "datetime('now')",
+  ].join(", ");
+  db.raw
+    .prepare(`INSERT INTO github_apps (${columns}) VALUES (${values})`)
+    .run(
+      row.id,
+      ...(pathColumn ? [row.id] : []),
+      row.githubAppId ?? 1001,
+      row.name ?? row.id,
+      row.createdBy ?? "mallory",
+    );
 }
 
 const REVIEW = {
@@ -208,14 +268,7 @@ describe("migrations/0008_github_apps_ops.sql", () => {
 
   /** Raw-insert one pre-0008-shaped github_apps row (the 0004 column list). */
   function insertPre0008App(db: ReturnType<typeof createTestD1>): void {
-    db.raw
-      .prepare(
-        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
-           created_by, status, deleted_at, created_at, updated_at)
-         VALUES ('app-1', 'acmes-app', 1001, 'acmes-app', 'enc', 'enc', 'mallory', 'active', NULL,
-           datetime('now'), datetime('now'))`,
-      )
-      .run();
+    insertGithubAppRow(db, { id: "app-1", name: "acmes-app", githubAppId: 1001 });
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0007 with live rows)", () => {
@@ -236,13 +289,13 @@ describe("migrations/0008_github_apps_ops.sql", () => {
     // 0002/0005 precedent) — the live row survives untouched.
     expect(() => applyMigrationFile(db, "0008_github_apps_ops.sql")).not.toThrow();
     const row = db.raw
-      .query(`SELECT ${appPathColumn(db)} AS webhook_path, status, review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'`)
+      .query(`SELECT ${appPathColumn(db) ?? "id"} AS webhook_path, status, review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'`)
       .get() as { webhook_path: string; status: string; review_enabled: number; last_webhook_at: string | null };
     // Existing rows materialize to the resume default (L5: every App known
     // before the migration stays reviewing), last delivery never seen.
     expect(row.review_enabled).toBe(1);
     expect(row.last_webhook_at).toBeNull();
-    expect(row.webhook_path).toBe("acmes-app");
+    expect(row.webhook_path).toBe("app-1");
     expect(row.status).toBe("active");
     const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(count.n).toBe(1);
@@ -295,14 +348,7 @@ describe("migrations/0009_app_model_roles.sql", () => {
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: ReturnType<typeof createTestD1>, id: string, githubAppId = 1001): void {
-    db.raw
-      .prepare(
-        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
-           created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', NULL,
-           datetime('now'), datetime('now'))`,
-      )
-      .run(id, id, githubAppId, id);
+    insertGithubAppRow(db, { id, githubAppId });
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0008 with live rows)", () => {
@@ -510,13 +556,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: TestD1, id: string): void {
-    db.raw
-      .prepare(
-        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
-           created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, 1001, ?, 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
-      )
-      .run(id, id, id);
+    insertGithubAppRow(db, { id });
   }
 
   /** The pre-0020 shape (0001–0019, filename order) — what production runs today. */
@@ -938,14 +978,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: TestD1, id: string, githubAppId = 1001): void {
-    db.raw
-      .prepare(
-        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
-           created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', NULL,
-           datetime('now'), datetime('now'))`,
-      )
-      .run(id, id, githubAppId, id);
+    insertGithubAppRow(db, { id, githubAppId });
   }
 
   /** The pre-chains shape (0001–0016) with live app_model_config / app_model_roles rows. */
@@ -1103,15 +1136,11 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: TestD1, id: string, opts: { githubAppId?: number; deleted?: boolean } = {}): void {
-    db.raw
-      .prepare(
-        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
-           created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active',
-           ${opts.deleted ? "datetime('now', '-1 hour')" : "NULL"},
-           datetime('now'), datetime('now'))`,
-      )
-      .run(id, id, opts.githubAppId ?? 1001, id);
+    insertGithubAppRow(db, {
+      id,
+      githubAppId: opts.githubAppId,
+      deletedExpr: opts.deleted ? "datetime('now', '-1 hour')" : undefined,
+    });
   }
 
   /** The pre-0018 shape (0001–0017, filename order) — what production runs today. */
@@ -1190,8 +1219,8 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
     expect(() =>
       db.raw
         .prepare(
-          `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status, sandbox_image_id, created_at, updated_at)
-           VALUES ('app-null', 'app-null', 1002, 'app-null', 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
+          `INSERT INTO github_apps (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status, sandbox_image_id, created_at, updated_at)
+           VALUES ('app-null', 1002, 'app-null', 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
         )
         .run(),
     ).toThrow(/NOT NULL constraint failed/);
@@ -1219,15 +1248,11 @@ describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
 
   /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: TestD1, id: string, opts: { githubAppId?: number; deleted?: boolean } = {}): void {
-    db.raw
-      .prepare(
-        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
-           created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active',
-           ${opts.deleted ? "datetime('now', '-1 hour')" : "NULL"},
-           datetime('now'), datetime('now'))`,
-      )
-      .run(id, id, opts.githubAppId ?? 1001, id);
+    insertGithubAppRow(db, {
+      id,
+      githubAppId: opts.githubAppId,
+      deletedExpr: opts.deleted ? "datetime('now', '-1 hour')" : undefined,
+    });
   }
 
   /** The pre-0019 shape (0001–0018, filename order) — what production runs today. */
@@ -1468,18 +1493,9 @@ describe("migrations/0036_app_identity.sql", () => {
     return db;
   }
 
-  /**
-   * One live row, seeded by whichever name this shape carries: `createPre0036Db`
-   * still has `slug`, the fully migrated shape has `webhook_path`.
-   */
+  /** One live row, seeded by whichever shape this fixture carries. */
   function insertApp(db: TestD1, id: string, path: string, githubAppId: number): void {
-    db.raw
-      .prepare(
-        `INSERT INTO github_apps (id, ${appPathColumn(db)}, github_app_id, name, private_key_enc, webhook_secret_enc,
-           created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
-      )
-      .run(id, path, githubAppId, path);
+    insertGithubAppRow(db, { id, name: path, githubAppId });
   }
 
   test("renames slug to webhook_path and keeps every stored value (live webhook URLs stay valid)", () => {
@@ -1495,22 +1511,34 @@ describe("migrations/0036_app_identity.sql", () => {
       .query("SELECT id, webhook_path FROM github_apps ORDER BY id")
       .all() as Array<{ id: string; webhook_path: string }>;
     expect(rows).toEqual([
-      { id: "app-1", webhook_path: "acmes-app" },
-      { id: "app-2", webhook_path: "widgets-app" },
+      { id: "app-1", webhook_path: "app-1" },
+      { id: "app-2", webhook_path: "app-2" },
     ]);
     const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>;
     expect(columns.map((c) => c.name)).not.toContain("slug");
   });
 
   test("the rename carries NOT NULL and UNIQUE onto webhook_path (no table rebuild)", () => {
-    const db = createMigratedTestD1();
+    const db = createPre0036Db();
+    applyMigrationFile(db, "0036_app_identity.sql");
     const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
       name: string;
       notnull: number;
     }>;
     expect(cols.find((c) => c.name === "webhook_path")!.notnull).toBe(1);
-    insertApp(db, "app-1", "taken", 2001);
-    expect(() => insertApp(db, "app-2", "taken", 2002)).toThrow(
+    // Two rows may not share a route key (the constraint moved with the
+    // rename, so it is still enforced on the new name).
+    const insertWithPath = (id: string, githubAppId: number): void => {
+      db.raw
+        .prepare(
+          `INSERT INTO github_apps (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+             created_by, status, deleted_at, created_at, updated_at)
+           VALUES (?, 'taken', ?, 'taken', 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
+        )
+        .run(id, githubAppId);
+    };
+    insertWithPath("app-1", 2001);
+    expect(() => insertWithPath("app-2", 2002)).toThrow(
       /UNIQUE constraint failed: github_apps.webhook_path/,
     );
   });
@@ -1570,14 +1598,7 @@ describe("migrations/0037_github_metadata_attempt.sql", () => {
 
   test("existing rows read NULL (never attempted) and the column round-trips the datetime TEXT form", () => {
     const db = createMigratedTestD1();
-    db.raw
-      .prepare(
-        `INSERT INTO github_apps (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
-           created_by, status, deleted_at, created_at, updated_at)
-         VALUES ('app-1', 'attempt-app', 4001, 'attempt-app', 'enc', 'enc', 'mallory', 'active', NULL,
-                 datetime('now'), datetime('now'))`,
-      )
-      .run();
+    insertGithubAppRow(db, { id: "app-1", name: "attempt-app", githubAppId: 4001 });
     // The ADD COLUMN is metadata-only: the live row survives and reads NULL,
     // which the read path treats as stale (one attempt after the deploy).
     const before = db.raw
@@ -1590,5 +1611,226 @@ describe("migrations/0037_github_metadata_attempt.sql", () => {
       .query("SELECT github_metadata_attempted_at FROM github_apps WHERE id = 'app-1'")
       .get() as { github_metadata_attempted_at: string };
     expect(after.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+});
+
+describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /**
+   * One migration file as executable statements, comments stripped. The file
+   * is executed statement by statement inside a caller-owned transaction so no
+   * implicit commit can move a `PRAGMA` out of it — `exec(wholeFile)` is what
+   * would make bun:sqlite commit early and turn the in-transaction
+   * `PRAGMA foreign_keys = OFF` into a real switch.
+   */
+  function statementsOf(name: string): string[] {
+    return readFileSync(join(MIGRATIONS_DIR, name), "utf8")
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n")
+      .split(";")
+      .map((statement) => statement.trim())
+      .filter((statement) => statement.length > 0);
+  }
+
+  /** The pre-0038 shape: 0003 … 0037, i.e. what production runs today. */
+  function createPre0038Db(): TestD1 {
+    // createTestD1 already applied the 0001/0002 base shape, so the chain here
+    // starts at 0003 and stops before the migration under test.
+    const db = createTestD1();
+    for (const name of readdirSync(MIGRATIONS_DIR)
+      .filter((name) => name.endsWith(".sql") && name >= "0003" && name < "0038")
+      .sort()) {
+      applyMigrationFile(db, name);
+    }
+    return db;
+  }
+
+  /**
+   * Two live Apps, each with its own workspace mapping, installation and
+   * delivery — the child rows the rebuild must carry across its DROP TABLE.
+   */
+  function seedLiveData(db: TestD1): void {
+    insertGithubAppRow(db, {
+      id: "app-live-1",
+      name: "Acme Reviewer",
+      githubAppId: 1001,
+      createdBy: "mallory",
+    });
+    insertGithubAppRow(db, {
+      id: "app-live-2",
+      name: "Widgets Reviewer",
+      githubAppId: 1002,
+      createdBy: "octocat",
+      deletedExpr: "datetime('now')",
+    });
+    // Distinguishable credentials per row: the copy must not swap them.
+    db.raw
+      .prepare("UPDATE github_apps SET private_key_enc = ?, webhook_secret_enc = ?, github_slug = ? WHERE id = ?")
+      .run("v1.primary.cGVtLTE=", "v1.primary.c2VjcmV0LTE=", "acme-reviewer", "app-live-1");
+    db.raw
+      .prepare("UPDATE github_apps SET private_key_enc = ?, webhook_secret_enc = ?, github_slug = ? WHERE id = ?")
+      .run("v1.primary.cGVtLTI=", "v1.primary.c2VjcmV0LTI=", "widgets-reviewer", "app-live-2");
+    db.raw
+      .prepare(
+        `INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-live-1', 'default')`,
+      )
+      .run();
+    for (const [id, installationId] of [
+      ["inst-1", 123],
+      ["inst-2", 456],
+    ] as const) {
+      db.raw
+        .prepare(
+          `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+           VALUES (?, ?, ?, 'acme', '2026-01-01 00:00:00')`,
+        )
+        .run(id, id === "inst-1" ? "app-live-1" : "app-live-2", installationId);
+    }
+    for (const [id, appId, outcome] of [
+      ["delivery-1", "app-live-1", "ok"],
+      ["delivery-2", "app-live-2", "rejected"],
+    ] as const) {
+      db.raw
+        .prepare(
+          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, created_at)
+           VALUES (?, ?, 'pull_request', ?, 401, '2026-01-02 00:00:00')`,
+        )
+        .run(id, appId, outcome);
+    }
+  }
+
+  test("rebuilds the table with foreign keys ON inside one transaction: every row and child survives, the column is gone, UNIQUE holds", () => {
+    const db = createPre0038Db();
+    seedLiveData(db);
+    const appsBefore = db.raw
+      .query(
+        `SELECT id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status,
+                deleted_at, review_enabled, sandbox_image_id, github_slug, review_trigger_mode
+         FROM github_apps ORDER BY id`,
+      )
+      .all();
+    expect(appsBefore).toHaveLength(2);
+    const childrenBefore = {
+      workspaces: db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all(),
+      installations: db.raw
+        .query("SELECT id, app_id, installation_id, account_login, seen_at FROM app_installations ORDER BY id")
+        .all(),
+      deliveries: db.raw
+        .query("SELECT id, app_id, event_name, outcome, status_code, created_at FROM webhook_deliveries ORDER BY id")
+        .all(),
+    };
+    expect(childrenBefore.workspaces).toHaveLength(1);
+    expect(childrenBefore.installations).toHaveLength(2);
+    expect(childrenBefore.deliveries).toHaveLength(2);
+
+    // D1 runs every migration file inside one implicit transaction with
+    // foreign keys enforced. The statements run one by one inside a
+    // caller-owned transaction so nothing can commit early: a whole-file
+    // `exec` lets bun:sqlite commit, and the file's `PRAGMA foreign_keys = OFF`
+    // would then really switch enforcement off — proving the plain-SQLite
+    // branch instead of D1's (where the pragma inside a transaction is a no-op
+    // and only `defer_foreign_keys` carries the gap across the parent DROP).
+    db.raw.exec("PRAGMA foreign_keys = ON");
+    const statements = statementsOf("0038_webhook_path_drop.sql");
+    expect(statements.length).toBeGreaterThan(5);
+    // Captured at the parent DROP, inside the transaction.
+    const atDrop: { foreign_keys?: number; defer_foreign_keys?: number } = {};
+    const apply = db.raw.transaction(() => {
+      for (const statement of statements) {
+        if (statement.startsWith("DROP TABLE github_apps\n") || statement.trim() === "DROP TABLE github_apps") {
+          atDrop.foreign_keys = (db.raw.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys;
+          atDrop.defer_foreign_keys = (
+            db.raw.query("PRAGMA defer_foreign_keys").get() as { defer_foreign_keys: number }
+          ).defer_foreign_keys;
+        }
+        db.raw.prepare(statement).run();
+      }
+    });
+    expect(() => apply()).not.toThrow();
+
+    // The in-transaction `PRAGMA foreign_keys = OFF` was ignored (SQLite keeps
+    // the setting until the transaction ends), and the deferred check is the
+    // one holding the parent DROP together.
+    expect(atDrop).toEqual({ foreign_keys: 1, defer_foreign_keys: 1 });
+
+    // The rows survive field for field, in the same order and with the same
+    // values (the copy is positional, so a swapped column would show up here).
+    const appsAfter = db.raw
+      .query(
+        `SELECT id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status,
+                deleted_at, review_enabled, sandbox_image_id, github_slug, review_trigger_mode
+         FROM github_apps ORDER BY id`,
+      )
+      .all();
+    expect(appsAfter).toEqual(appsBefore);
+    expect(appsAfter.map((row) => (row as { github_app_id: number }).github_app_id)).toEqual([1001, 1002]);
+
+    // No child row was cascaded, dropped or rewritten.
+    expect(db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all()).toEqual(
+      childrenBefore.workspaces,
+    );
+    expect(
+      db.raw
+        .query("SELECT id, app_id, installation_id, account_login, seen_at FROM app_installations ORDER BY id")
+        .all(),
+    ).toEqual(childrenBefore.installations);
+    expect(
+      db.raw
+        .query("SELECT id, app_id, event_name, outcome, status_code, created_at FROM webhook_deliveries ORDER BY id")
+        .all(),
+    ).toEqual(childrenBefore.deliveries);
+    expect(db.raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
+
+    // The column is gone, and the one remaining identity constraint still bites.
+    const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).not.toContain("webhook_path");
+    expect(() =>
+      insertGithubAppRow(db, { id: "app-dup", githubAppId: 1001 }),
+    ).toThrow(/UNIQUE constraint failed: github_apps.github_app_id/);
+    // FK enforcement is still live after the rebuild (the file restores it).
+    expect(() =>
+      db.raw
+        .prepare("INSERT INTO app_installations (id, app_id, installation_id, seen_at) VALUES ('inst-x', 'nope', 1, '2026-01-01 00:00:00')")
+        .run(),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  test("replaying the file on an already-migrated schema is a no-op, leaving no staging table", () => {
+    // No ledger exists in the test double, so the realistic second run is a raw
+    // replay. The rebuild must be idempotent on the post-0038 shape (the
+    // ledger is what normally prevents this call), and it must not leave the
+    // staging table or a half-rebuilt schema behind.
+    const db = createMigratedTestD1();
+    insertGithubAppRow(db, { id: "app-keep", githubAppId: 2001, name: "Keep" });
+    db.raw
+      .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-keep', 'default')")
+      .run();
+    const appsBefore = db.raw.query("SELECT id, github_app_id, name FROM github_apps ORDER BY id").all();
+    const childrenBefore = db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all();
+
+    const replay = db.raw.transaction(() => {
+      for (const statement of statementsOf("0038_webhook_path_drop.sql")) db.raw.prepare(statement).run();
+    });
+    expect(() => replay()).not.toThrow();
+
+    expect(db.raw.query("SELECT id, github_app_id, name FROM github_apps ORDER BY id").all()).toEqual(appsBefore);
+    expect(db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all()).toEqual(
+      childrenBefore,
+    );
+    const tables = db.raw
+      .query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((table) => table.name)).not.toContain("github_apps_staging");
+    expect(
+      (db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>).map((column) => column.name),
+    ).not.toContain("webhook_path");
+    // The file's own PRAGMA switches leave FK enforcement ON for the rest of
+    // the run (the connection default the migration must not weaken).
+    expect((db.raw.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
   });
 });

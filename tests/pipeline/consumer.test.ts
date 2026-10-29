@@ -137,9 +137,9 @@ async function createSeededTestD1(): Promise<TestD1> {
   db.raw
     .prepare(
       `INSERT INTO github_apps
-         (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+         (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, 'consumer-test-app', 424242, 'consumer-test-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+       VALUES (?, 424242, 'consumer-test-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC);
   // Production shape (migration 0026): createApp writes the App row and its
@@ -1555,9 +1555,9 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, 'comma-chain-app', 424243, 'comma-chain-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         VALUES (?, 424243, 'comma-chain-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
       .run(
         commaAppId,
@@ -1629,9 +1629,9 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(
         `INSERT INTO github_apps
-           (id, webhook_path, github_app_id, name, private_key_enc, webhook_secret_enc,
+           (id, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, deleted_at, created_at, updated_at)
-         VALUES (?, 'comma-override-app', 424244, 'comma-override-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+         VALUES (?, 424244, 'comma-override-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
       .run(
         overrideAppId,

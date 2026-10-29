@@ -174,6 +174,11 @@ function createPreProviderPoolD1(): TestD1 {
   // 0023: createUser clears a removal record in the same batch as its insert,
   // so every membership-creating fixture needs the tombstone table too.
   applyMigration(db, "0023_removed_logins.sql");
+  // 0037/0038: the metadata-attempt marker plus the github_apps rebuild that
+  // drops the local route key — every App seeded through createApp needs the
+  // post-0038 shape.
+  applyMigration(db, "0037_github_metadata_attempt.sql");
+  applyMigration(db, "0038_webhook_path_drop.sql");
   return db;
 }
 
@@ -323,7 +328,6 @@ async function seedApp(
   const box = createSecretbox(TEST_KEY);
   return createAppsStore(db).createApp({
     id,
-    webhookPath: opts.slug,
     githubSlug: opts.slug,
     githubAppId: opts.githubAppId ?? 1001,
     name: opts.slug,
@@ -332,6 +336,22 @@ async function seedApp(
     createdBy: opts.createdBy,
     workspaceId: "default",
   });
+}
+
+/**
+ * Seed a github_apps row on a PRE-0038 shape (the migration-order tests below
+ * stop before the rebuild, so the old local route key is still NOT NULL).
+ * `createApp` writes the post-0038 column set and cannot be used there.
+ */
+function seedPreMigrationAppRow(db: DashboardD1, id: string, slug: string): void {
+  (db as unknown as { raw: { prepare(sql: string): { run(...params: unknown[]): unknown } } }).raw
+    .prepare(
+      `INSERT INTO github_apps
+         (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, ?, ?, 1001, ?, 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
+    )
+    .run(id, id, slug, slug);
 }
 
 /** mallory owns "mallorys-app"; ada owns "adas-app"; hubot owns none; octocat is admin. */
@@ -418,7 +438,8 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
     const db = createPopulatedPre0006D1();
     // An app row exists BEFORE 0006 applies — the FK parent is populated,
     // exactly the wrangler order on a live deployment.
-    return seedApp(db, { slug: "pre-existing", createdBy: "mallory" }).then(() => {
+    seedPreMigrationAppRow(db, "app-pre-0006", "pre-existing");
+    return Promise.resolve().then(() => {
       expect(() => applyMigration(db, "0006_app_provider_config.sql")).not.toThrow();
       // Append-only: the seeded review row (app_id NULL = legacy) is untouched.
       const row = db.raw.query("SELECT app_id FROM reviews WHERE id = 'review-1'").get() as {
@@ -520,7 +541,8 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
 describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
   test("applies cleanly after 0006; pre-existing key rows keep created_at and carry NULL updated_at until the key is re-set", async () => {
     const db = createPopulatedPre0006D1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    seedPreMigrationAppRow(db, "app-pre-0012", "a");
+    const app = { id: "app-pre-0012" };
     applyMigration(db, "0006_app_provider_config.sql");
     // A key row written BEFORE 0012 (the pre-migration column set), under the
     // pre-pool two-segment AAD — what a live deployment carries across.
@@ -601,7 +623,8 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
     ]) {
       applyMigration(db, name);
     }
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    seedPreMigrationAppRow(db, "app-pre-0017", "a");
+    const app = { id: "app-pre-0017" };
     rawRun(
       db,
       `INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES (?, ?, datetime('now'))`,

@@ -28,6 +28,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser } from "../../src/dashboard/users";
 import { createMigratedTestD1, seedDefaultMemberships, type TestD1 } from "../store/helpers";
 import type { Env } from "../../src/worker/env";
+import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -75,22 +76,18 @@ const GITHUB_PROFILE = {
   owner: { avatar_url: "https://avatars.githubusercontent.com/u/1?v=4" },
 };
 
-/** The App's own logo lives on the bot account, not the owner (D3). */
-const BOT_AVATAR_URL = "https://avatars.githubusercontent.com/u/173?v=4";
-const BOT_USER_URL = "https://api.github.com/users/acme-inspector%5Bbot%5D";
+/** The App icon: the SHARED derivation (no second copy of the template). */
+const APP_AVATAR_URL = appAvatarUrl(APP_ID);
 
 /**
- * One refresh = TWO requests: `GET /app` (profile + slug) then the bot-user
- * logo leg. Keyed by URL so each leg is answered deliberately.
+ * One refresh = exactly ONE request (`GET /app`): the icon is derived, so any
+ * other upstream URL is a failure, not a silent answer.
  */
 function githubStub(profile: Record<string, unknown>) {
-  return (url: string) =>
-    url === "https://api.github.com/app"
-      ? new Response(JSON.stringify(profile), { status: 200, headers: { "content-type": "application/json" } })
-      : new Response(JSON.stringify({ avatar_url: BOT_AVATAR_URL }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
+  return (url: string) => {
+    if (url !== "https://api.github.com/app") throw new Error(`unexpected fetch: ${url}`);
+    return new Response(JSON.stringify(profile), { status: 200, headers: { "content-type": "application/json" } });
+  };
 }
 
 // --- fetch stubbing (tests/worker/entry.test.ts precedent) ---
@@ -125,7 +122,6 @@ async function seededWorld(privateKeyPem: string): Promise<{ db: TestD1; appId: 
   const box = createSecretbox(TEST_KEY);
   await createAppsStore(db).createApp({
     id,
-    webhookPath: "mallorys-app",
     githubSlug: "mallorys-app",
     githubAppId: APP_ID,
     name: "mallorys-app",
@@ -212,14 +208,14 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app", BOT_USER_URL]);
+    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
     expect(new Headers(calls[0]!.init!.headers).get("authorization")!.startsWith("Bearer ")).toBe(true);
 
     const body = (await res.json()) as { app: Record<string, unknown> };
     expect(body.app.github_name).toBe("Acme Inspector");
     expect(body.app.github_description).toBe("PR review bot for Acme");
     expect(body.app.github_html_url).toBe("https://github.com/apps/acme-inspector");
-    expect(body.app.github_avatar_url).toBe(BOT_AVATAR_URL);
+    expect(body.app.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(body.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
     // The single store writer persisted exactly the profile columns — and the
@@ -228,7 +224,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(row.github_name).toBe("Acme Inspector");
     expect(row.github_description).toBe("PR review bot for Acme");
     expect(row.github_html_url).toBe("https://github.com/apps/acme-inspector");
-    expect(row.github_avatar_url).toBe(BOT_AVATAR_URL);
+    expect(row.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     expect(row.updated_at).toBe(row.created_at);
 
@@ -278,7 +274,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app", BOT_USER_URL]);
+    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
     const body = (await res.json()) as { app: Record<string, unknown> };
     expect(body.app.github_slug).toBe("acme-inspector");
     const row = db.raw.query("SELECT github_slug FROM github_apps WHERE id = ?").get(appId) as {
@@ -296,7 +292,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
     const body = (await res.json()) as { app: Record<string, unknown> };
     expect(body.app.github_name).toBe("Renamed Inspector");
     const row = cachedColumns(db, appId);
@@ -366,7 +362,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app", BOT_USER_URL]);
+    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
     expect(cachedColumns(db, appId).github_slug).toBe("acme-inspector");
   });
 
@@ -382,7 +378,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const env = makeEnv(db);
 
     expect((await getSettings("mallory", env)).status).toBe(200);
-    expect(calls).toHaveLength(1); // GET /app only — no slug, so no bot lookup
+    expect(calls).toHaveLength(1); // GET /app only — the icon needs no request
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Acme Inspector");
     expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
@@ -406,7 +402,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await postRefresh("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app", BOT_USER_URL]);
+    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
     expect(cachedColumns(db, appId).github_slug).toBe("acme-inspector");
   });
 
@@ -475,12 +471,12 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(viewerBody.app.github_name).toBe("Acme Inspector");
     expect(viewerBody.app.github_description).toBe("PR review bot for Acme");
     expect(viewerBody.app.github_html_url).toBe("https://github.com/apps/acme-inspector");
-    expect(viewerBody.app.github_avatar_url).toBe(BOT_AVATAR_URL);
+    expect(viewerBody.app.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(viewerBody.app.github_slug).toBe("acme-inspector");
     expect(viewerBody.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     // The synced-at cache means the second face triggered NO second fetch:
     // one refresh = the two requests of the first face.
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
     // The base-only face still carries no settings zones (pin).
     expect(viewerBody.keys).toBeUndefined();
     expect(viewerBody.provider_catalog).toBeUndefined();
@@ -499,7 +495,7 @@ describe("POST /api/apps/:appId/refresh-metadata — the manager's forced refres
     const res = await postRefresh("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app", BOT_USER_URL]);
+    expect(calls.map((call) => call.url)).toEqual(["https://api.github.com/app"]);
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Renamed Inspector");
     expect(row.github_metadata_synced_at).not.toBe(before.github_metadata_synced_at);

@@ -369,8 +369,8 @@ export type SettingsIdentityAppMeta = {
   created_by: string;
   /** `datetime('now')` UTC string — joins the required identity keys. */
   created_at: string;
-  /** The local webhook route key (never a GitHub fact) — rides both faces. */
-  webhook_path: string;
+  /** The local App UID — the webhook URL's app segment (never a GitHub fact). */
+  id: string;
   github_name: string | null;
   github_slug: string | null;
   github_description: string | null;
@@ -386,13 +386,13 @@ export type SettingsAppMeta = {
   created_by: string;
   last_webhook_at: string | null;
   /**
-   * The local webhook path segment (never a GitHub fact). It rides BOTH
-   * payload faces — the member face returns it too, and parseSettings requires
-   * it either way — because it is part of the App's identity set. Only the
-   * MANAGER identity card composes the delivery URL from it (a webhook repoint
-   * needs that URL).
+   * The local App UID — the webhook URL's app segment (never a GitHub fact).
+   * It rides BOTH payload faces — the member face returns it too, and
+   * parseSettings requires it either way — because it is part of the App's
+   * identity set. Only the MANAGER identity card composes the delivery URL
+   * from it (a webhook repoint needs that URL).
    */
-  webhook_path: string;
+  id: string;
   /** The App's selected sandbox runtime image (registry id). */
   sandbox_image_id: string;
   /** The App's review trigger mode (spec §2) — the control's current value. */
@@ -427,7 +427,12 @@ type SettingsHealth = {
 };
 
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
-export type SettingsReadOnlyPayload = { can_manage: false; app: SettingsIdentityAppMeta };
+export type SettingsReadOnlyPayload = {
+  can_manage: false;
+  /** The App's stable workspace id — server-resolved, never a path segment. */
+  workspace_id: string;
+  app: SettingsIdentityAppMeta;
+};
 
 /**
  * The App's operator-facing display name (D0): GitHub's current name, then
@@ -445,6 +450,8 @@ export function appDisplayName(app: {
 /** Creator-or-admin adds the settings zones: keys, chains, providers. */
 export type SettingsManagePayload = {
   can_manage: true;
+  /** The App's stable workspace id — server-resolved, never a path segment. */
+  workspace_id: string;
   app: SettingsAppMeta;
   keys: ProviderKeyRow[];
   model_chain: string | null;
@@ -1046,12 +1053,15 @@ function isNullableString(value: unknown): value is string | null {
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data) || !isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
+  // The delivery URL's workspace segment: the server-resolved id, required on
+  // both faces (a path ref may be a slug and must never be printed).
+  if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
   if (typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
-  // The local webhook route key rides BOTH faces; the cached GitHub slug is
-  // a nullable GitHub fact (NULL = never synced).
-  if (typeof data.app.webhook_path !== "string") return null;
+  // The local App UID rides BOTH faces; the cached GitHub slug is a nullable
+  // GitHub fact (NULL = never synced).
+  if (typeof data.app.id !== "string") return null;
   if (!isNullableString(data.app.github_slug)) return null;
   if (!data.can_manage) {
     // Identity-only non-manager face (App detail IA): the D4

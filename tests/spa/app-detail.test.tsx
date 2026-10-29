@@ -39,7 +39,7 @@ const tabsWrapper = readFileSync(join(spaRoot, "components/ui/tabs.tsx"), "utf8"
 
 const IDENTITY_APP = {
   github_slug: "demo",
-  webhook_path: "wh-demo",
+  id: "app-demo",
   github_app_id: 1,
   status: "active",
   review_enabled: true,
@@ -52,10 +52,15 @@ const IDENTITY_APP = {
   github_metadata_synced_at: null,
 };
 
-const identityPayload = { can_manage: false as const, app: IDENTITY_APP };
+const identityPayload = {
+  can_manage: false as const,
+  workspace_id: "ws_0123456789abcdefghijkl",
+  app: IDENTITY_APP,
+};
 
 const managePayload = {
   can_manage: true as const,
+  workspace_id: "ws_0123456789abcdefghijkl",
   app: {
     ...IDENTITY_APP,
     last_webhook_at: null,

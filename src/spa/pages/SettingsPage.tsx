@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { AppAvatar } from "../components/AppAvatar";
 import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
 import { postForm, putJson } from "../api";
@@ -61,7 +62,6 @@ import {
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
-import { GitHubMark } from "./LoginPage";
 import { PageNotice } from "./PageNotice";
 
 type PendingAction =
@@ -383,7 +383,12 @@ export function SettingsView({
     return (
       <div className="flex flex-col gap-6">
         <SectionGroup label={t(locale, "settings.group.appInfo")}>
-          <AppInfoCard locale={locale} app={payload.app} canManage={false} />
+          <AppInfoCard
+            locale={locale}
+            app={payload.app}
+            workspaceId={payload.workspace_id}
+            canManage={false}
+          />
         </SectionGroup>
         {versionFooter}
       </div>
@@ -407,6 +412,7 @@ export function SettingsView({
           <AppInfoCard
             locale={locale}
             app={app}
+            workspaceId={payload.workspace_id}
             canManage={payload.can_manage}
             onReload={() => onReload({ background: true })}
           />
@@ -555,7 +561,7 @@ function pendingConfirmCopy(
  * `/apps/acme/settings` derives null, not slug "settings" (qc round 1,
  * qc2-F-001); an already settings-shaped url keeps deriving idempotently.
  * Deliberately never `github_name` (display name ≠ URL slug) and never the
- * local `SettingsAppMeta.webhook_path` (local webhook key ≠ GitHub App slug).
+ * local `SettingsAppMeta.id` (local App UID ≠ GitHub App slug).
  * The server
  * validates only the `https://` prefix (github-app-metadata.ts), so an
  * unusable shape — no `apps/<slug>` tail, or a value `new URL` cannot parse —
@@ -592,12 +598,19 @@ export function githubAppSettingsUrl(githubHtmlUrl: string): string | null {
 export function AppInfoCard({
   locale,
   app,
+  workspaceId,
   canManage,
   onReload,
 }: {
   locale: SpaBoot["locale"];
   /** Both faces — the identity and manage app shapes structurally share every field the card reads. */
   app: SettingsIdentityAppMeta | SettingsAppMeta;
+  /**
+   * The App's stable workspace id from the payload — the delivery URL's first
+   * segment. Deliberately NOT derived from the pathname: a route ref may be a
+   * workspace slug, and the printed URL must carry the id GitHub is pointed at.
+   */
+  workspaceId: string;
   /** Threaded from payload.can_manage at the call site — presentation only. */
   canManage: boolean;
   /** The manager face's background reload — present iff canManage; the refresh button renders only when both hold. */
@@ -653,17 +666,11 @@ export function AppInfoCard({
       </CardHeader>
       <CardContent>
         <div className="flex items-start gap-4">
-          {app.github_avatar_url ? (
-            <img
-              src={app.github_avatar_url}
-              alt=""
-              className="h-12 w-12 shrink-0 rounded-full border object-cover"
-            />
-          ) : (
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border bg-muted text-muted-foreground">
-              <GitHubMark className="h-6 w-6" />
-            </div>
-          )}
+          <AppAvatar
+            src={app.github_avatar_url}
+            appId={app.github_app_id}
+            className="h-12 w-12 shrink-0 rounded-full border object-cover"
+          />
           <div className="flex min-w-0 flex-col gap-1">
             {app.github_name ? (
               app.github_html_url ? (
@@ -689,15 +696,19 @@ export function AppInfoCard({
             <p className="text-sm text-muted-foreground">
               {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
             </p>
+            <p className="text-sm text-muted-foreground">
+              {t(locale, "settings.appInfoLocalId", { id: app.id })}
+            </p>
             {/* The delivery URL a webhook repoint needs (deploy doc § 3 sends
-                the operator here): manager-only, because `webhook_path` is the
-                App's signed delivery route and a member has no repoint duty.
+                the operator here): manager-only, because the webhook URL is
+                the App's delivery route and a member has no repoint duty.
+                Both segments are internal ids, so the card shows them above.
                 Selected as one text node so click-drag copies it whole. */}
             {canManage ? (
               <p className="text-xs text-muted-foreground">
                 {t(locale, "settings.appInfoDeliveryUrl")}{" "}
                 <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">
-                  {`${currentOrigin()}/webhook/${app.webhook_path}`}
+                  {`${currentOrigin()}/webhook/${workspaceId}/${app.id}`}
                 </code>
               </p>
             ) : null}

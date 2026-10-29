@@ -52,7 +52,6 @@ import {
   encryptHoldValue,
   exchangeManifestCode,
   logManifestFailure,
-  randomWebhookPath,
   readHoldValue,
   readManifestStateValue,
   type ManifestHoldPayload,
@@ -629,10 +628,7 @@ function errorTypeName(err: unknown): string {
 }
 
 /** The sqlite UNIQUE violation for one github_apps column. */
-function isAppsUniqueViolation(
-  err: unknown,
-  column: "webhook_path" | "github_app_id",
-): boolean {
+function isAppsUniqueViolation(err: unknown, column: "github_app_id"): boolean {
   return err instanceof Error && err.message.includes(`github_apps.${column}`);
 }
 
@@ -1253,19 +1249,19 @@ dashboardApp.post("/locale", async (c) => {
 });
 
 // --- GitHub App Manifest start + callback (no secret write) ---
-// --- The per-App webhook path mints here and rides the signed state ---
+// --- The App id mints here and rides the signed state ---
 
 // Start: logged-in only. The SPA's create form posts under the workspace page
 // it is on (`/:workspaceRef/manifest/start`), so the target workspace comes
 // from the request itself; the deployment-level path resolves the sole
-// workspace instead. Then: mint the webhook path (a UUID — the manifest form
-// needs the hook URL before GitHub creates the App, so this identifier cannot
-// derive from anything GitHub owns) — that same value becomes the row PK at
-// commit, one identity per App — and the single-use CSRF state cookie
-// CARRYING both path and workspace ref (createManifestStateValue — same
-// createStateValue HMAC discipline), and render the zero-JS form POST to
+// workspace instead. Then: mint the row id (a UUID — the manifest form needs
+// the hook URL before GitHub creates the App, and this id is the URL's app
+// segment) and the single-use CSRF state cookie CARRYING both that id and the
+// target workspace (createManifestStateValue — same createStateValue HMAC
+// discipline), and render the zero-JS form POST to
 // https://github.com/settings/apps/new (state rides the form-action query).
-// The manifest's webhook URL is the App's own route /webhook/{webhookPath}.
+// The manifest's webhook URL is the App's own route
+// /webhook/{workspaceId}/{appId}.
 // Logged out → 302 to login (IA routing table).
 async function manifestStartRoute(c: DashboardContext, workspaceRef: string | undefined): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
@@ -1279,10 +1275,15 @@ async function manifestStartRoute(c: DashboardContext, workspaceRef: string | un
   const target = await resolveCreationTarget(c.env, session.login, workspaceRef);
   if (target.kind === "db_unbound") return c.text("dashboard storage is not configured", 500);
   if (target.kind !== "ok") return creationRefusal(c, session.login, target);
-  const webhookPath = randomWebhookPath();
-  const state = await createManifestStateValue(secrets.sessionSecret, webhookPath, target.workspaceId);
+  const appId = crypto.randomUUID();
+  const state = await createManifestStateValue(secrets.sessionSecret, appId, target.workspaceId);
   c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
-  const manifest = buildManifest(new URL(c.req.url).origin, session.login, webhookPath);
+  const manifest = buildManifest(
+    new URL(c.req.url).origin,
+    session.login,
+    target.workspaceId,
+    appId,
+  );
   return c.html(
     manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state), requestLocale(c)),
   );
@@ -1355,7 +1356,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   const locale = requestLocale(c);
   // The payload feeds the shared commit path; the cookie string is parked on
   // retryable outcomes so /manifest/confirm can resume.
-  const holdPayload = buildHoldPayload(conversion, session.login, state.webhookPath, state.workspaceId);
+  const holdPayload = buildHoldPayload(conversion, session.login, state.appId, state.workspaceId);
   const hold = await encryptHoldValue(holdPayload, secrets.sessionSecret);
   const outcome = await commitManifestApp({
     db: dashboardD1(c.env),
@@ -1398,9 +1399,6 @@ dashboardApp.get("/manifest/callback", async (c) => {
     case "encrypt_failed":
       parkHold();
       return c.html(manifestErrorPage(t(locale, "manifest.error.noEncryptionKey"), true, locale), 500);
-    case "slug_conflict":
-      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
-      return c.html(manifestErrorPage(t(locale, "manifest.error.slugConflict"), false, locale), 409);
     case "already_connected":
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
@@ -1415,9 +1413,8 @@ dashboardApp.get("/manifest/callback", async (c) => {
 // overwritten). The hold cookie is bound to the committing session and
 // survives RETRYABLE outcomes (500 encrypt/DB failures) so the operator can
 // retry without creating a second GitHub App; it is burned on success,
-// login mismatch, undecryptable/expired hold, the non-retryable
-// already-connected conflict, and the non-retryable slug-conflict race (the
-// manifest already registered the webhook URL — remapping would desync it).
+// login mismatch, an undecryptable/expired hold, and the non-retryable
+// already-connected conflict (the same GitHub App cannot be connected twice).
 // Missing/undecryptable/expired hold = flow expired → 302 back to the start,
 // zero writes. The write is delegated to commitManifestApp — the
 // SAME path the callback auto-commit runs — so a native resubmit after a
@@ -1477,9 +1474,6 @@ dashboardApp.post("/manifest/commit", async (c) => {
       return c.text("dashboard storage is not configured", 500);
     case "encrypt_failed":
       return c.html(manifestErrorPage(t(locale, "manifest.error.noEncryptionKey"), true, locale), 500);
-    case "slug_conflict":
-      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      return c.html(manifestErrorPage(t(locale, "manifest.error.slugConflict"), false, locale), 409);
     case "already_connected":
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
@@ -1496,7 +1490,6 @@ type ManifestCommitOutcome =
   | { kind: "login_mismatch" }
   | { kind: "db_unbound" }
   | { kind: "encrypt_failed" }
-  | { kind: "slug_conflict" }
   | { kind: "already_connected" }
   | { kind: "db_rejected" };
 
@@ -1506,11 +1499,11 @@ type ManifestCommitOutcome =
  * hold payload + the acting session login are passed in; the hold's login
  * binding is re-checked here on EVERY call. Outcomes mirror the route's long-standing
  * semantics: success = ONE github_apps row (secretbox AAD rowKey = the row
- * PK, which IS the start-minted webhook path — ONE identity, not a second
- * UUID);
- * login_mismatch / slug_conflict / already_connected = non-retryable (the
- * caller burns the hold); db_unbound / encrypt_failed / db_rejected =
- * retryable (the caller keeps the hold so /manifest/confirm can resume).
+ * PK, which IS the start-minted app id — the same value the manifest's
+ * webhook URL carries);
+ * login_mismatch / already_connected = non-retryable (the caller burns the
+ * hold); db_unbound / encrypt_failed / db_rejected = retryable (the caller
+ * keeps the hold so /manifest/confirm can resume).
  * Zero upstream calls: encryption + a local D1 write only.
  */
 async function commitManifestApp(args: {
@@ -1531,21 +1524,22 @@ async function commitManifestApp(args: {
     return { kind: "login_mismatch" };
   }
   if (!db || workspaceId === null) return { kind: "db_unbound" };
-  // The signed hold's webhook path IS the row PK: the App's identity was
-  // decided at start (the manifest already registered {origin}/webhook/{path}
-  // with GitHub), so a second local UUID would give one App two identities.
-  // AAD rowKey (github_apps.<column>:<id>) therefore binds the webhook path.
+  // The signed hold's app id IS the row PK: the App's identity was decided at
+  // start (the manifest already registered
+  // {origin}/webhook/{workspaceId}/{appId} with GitHub), so a second local
+  // UUID would give one App two identities. AAD rowKey
+  // (github_apps.<column>:<id>) therefore binds that id.
   let privateKeyEnc: string;
   let webhookSecretEnc: string;
   try {
     const box = createSecretbox(encryptionKey);
     privateKeyEnc = await box.encryptSecret(
       hold.pem,
-      `github_apps.private_key_enc:${hold.webhookPath}`,
+      `github_apps.private_key_enc:${hold.appId}`,
     );
     webhookSecretEnc = await box.encryptSecret(
       hold.webhook_secret,
-      `github_apps.webhook_secret_enc:${hold.webhookPath}`,
+      `github_apps.webhook_secret_enc:${hold.appId}`,
     );
   } catch (err) {
     // SecretboxKeyError (missing/malformed DASHBOARD_ENCRYPTION_KEY) and any
@@ -1557,18 +1551,12 @@ async function commitManifestApp(args: {
     });
     return { kind: "encrypt_failed" };
   }
-  // Webhook path: minted at start and carried through the hold. A commit-time
-  // UNIQUE conflict means the path was taken between start and commit — the
-  // manifest already registered {origin}/webhook/{hold.webhookPath} with
-  // GitHub, so remapping the row to a fresh value would desync the webhook URL
-  // (the App would look connected yet never receive events, Bugbot F-1). The
-  // hold is burned instead: zero rows written, 409, and the operator restarts
-  // the flow with a fresh path.
+  // The remaining UNIQUE identity is github_app_id: the same GitHub App
+  // cannot be connected twice, and a retry cannot help — the hold is burned.
   const apps = createAppsStore(db);
   try {
     const row = await apps.createApp({
-      id: hold.webhookPath,
-      webhookPath: hold.webhookPath,
+      id: hold.appId,
       githubSlug: hold.slug,
       githubAppId: hold.id,
       name: hold.name,
@@ -1579,14 +1567,6 @@ async function commitManifestApp(args: {
     });
     return { kind: "success", row, workspaceId };
   } catch (err) {
-    if (isAppsUniqueViolation(err, "webhook_path")) {
-      // The GitHub App WAS created on GitHub, but its webhook path was
-      // claimed before the row could land. Storing the row under any other
-      // value would advertise a URL GitHub never posts to — burn the hold
-      // and make the operator start a fresh creation flow.
-      logManifestFailure("commit", "webhook_path_conflict", { webhook_path: hold.webhookPath });
-      return { kind: "slug_conflict" };
-    }
     if (isAppsUniqueViolation(err, "github_app_id")) {
       // The same GitHub App is already connected — retrying cannot help.
       logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
@@ -1629,7 +1609,7 @@ dashboardApp.get("/manifest/confirm", async (c) => {
         id: hold.id,
         name: hold.name,
         slug: hold.slug,
-        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.webhookPath}`,
+        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.workspaceId}/${hold.appId}`,
       },
       requestLocale(c),
     ),
@@ -1668,7 +1648,7 @@ const appOnboardingRoute = async (c: DashboardContext) => {
         id: app.github_app_id,
         name: app.name,
         slug: app.github_slug,
-        webhookUrl: `${origin}/webhook/${app.webhook_path}`,
+        webhookUrl: `${origin}/webhook/${member.scope.workspaceId}/${app.id}`,
       },
       requestLocale(c),
       // Set only on a workspace-scoped request; the view never reads env.
@@ -3011,6 +2991,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // discrimination the SPA's detail-face parse keys on.
       return c.json({
         can_manage: false,
+        // The stable workspace id the App belongs to — with the local App UID
+        // it composes the webhook delivery URL. Server-resolved, never the
+        // request's path segment (a ref may be a slug).
+        workspace_id: gate.scope.workspaceId,
         app: {
           github_app_id: app.github_app_id,
           status: app.status,
@@ -3019,10 +3003,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
           created_at: app.created_at,
           github_name: app.github_name ?? null,
           github_slug: app.github_slug ?? null,
-          // Our own webhook route key (never a GitHub fact). It rides this face
-          // for shape parity only — the identity card renders the delivery
-          // URL from it on the MANAGER face, never here.
-          webhook_path: app.webhook_path,
+          // The local App UID — the webhook URL's app segment. It rides this
+          // face for shape parity only (the identity card renders the
+          // delivery URL on the MANAGER face, never here).
+          id: app.id,
           github_description: app.github_description ?? null,
           github_html_url: app.github_html_url ?? null,
           github_avatar_url: app.github_avatar_url ?? null,
@@ -3034,6 +3018,10 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const deliveries = await apps.listRecentDeliveries(app.id, 5);
     const deliverySummary = await apps.deliverySummary(app.id);
     const base = {
+      // The stable workspace id the App belongs to (server-resolved scope,
+      // never the request's path segment): with `app.id` it composes the
+      // webhook delivery URL.
+      workspace_id: gate.scope.workspaceId,
       app: {
         github_app_id: app.github_app_id,
         status: app.status,
@@ -3056,10 +3044,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
         // the PEM / webhook-secret envelopes never leave the row.
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
-        // Our own webhook route key — the manager identity card composes the
-        // absolute delivery URL from it (the repoint surface); it is the row's
-        // only non-derived identifier.
-        webhook_path: app.webhook_path,
+        // The local App UID — with the workspace id it composes the absolute
+        // delivery URL the manager identity card shows (the repoint surface).
+        id: app.id,
         github_description: app.github_description ?? null,
         github_html_url: app.github_html_url ?? null,
         github_avatar_url: app.github_avatar_url ?? null,

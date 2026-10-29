@@ -249,9 +249,10 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
     const ok = parseSettings({
       can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
-        webhook_path: "wh-demo",
+        id: "app-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -273,11 +274,11 @@ describe("members/apps/settings parsers", () => {
       custom_provider_api_ids: ["openai-completions"],
       sandbox_images: [{ id: "omp", enabled: true }],
     });
-    expect(ok?.app.webhook_path).toBe("wh-demo");
+    expect(ok?.app.id).toBe("app-demo");
     expect(ok?.can_manage).toBe(true);
     expect(
       parseSettings({
-        app: { github_slug: "demo", webhook_path: "wh-demo", status: "active", review_enabled: 1, last_webhook_at: null },
+        app: { github_slug: "demo", id: "app-demo", status: "active", review_enabled: 1, last_webhook_at: null },
         keys: [],
         configured_providers: [],
         provider_catalog: [],
@@ -290,9 +291,10 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the sandbox image selection + selector choices", () => {
     const manageBase = {
       can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
-        webhook_path: "wh-demo",
+        id: "app-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -332,9 +334,10 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings requires the review trigger mode on the manage face; off-vocabulary fails the parse", () => {
     const base = {
       can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
-        webhook_path: "wh-demo",
+        id: "app-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -377,9 +380,10 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings (identity-only face) requires the D4 identity set — created_at joins the required keys", () => {
     const identityBase = {
       can_manage: false,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
-        webhook_path: "wh-demo",
+        id: "app-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -410,9 +414,10 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings separates configured state from the catalog", () => {
     const manageBase = {
       can_manage: true,
+      workspace_id: "ws_0123456789abcdefghijkl",
       app: {
         github_slug: "demo",
-        webhook_path: "wh-demo",
+        id: "app-demo",
         github_app_id: 1,
         status: "active",
         review_enabled: true,
@@ -525,7 +530,7 @@ describe("members/apps/settings parsers", () => {
     // installations/deliveries, no sandbox image, no trigger mode.
     const identityApp = {
       github_slug: "demo",
-      webhook_path: "wh-demo",
+      id: "app-demo",
       github_app_id: 1,
       status: "active",
       review_enabled: true,
@@ -537,7 +542,11 @@ describe("members/apps/settings parsers", () => {
       github_avatar_url: null,
       github_metadata_synced_at: null,
     };
-    const readOnly = parseSettings({ can_manage: false, app: identityApp });
+    const readOnly = parseSettings({
+      workspace_id: "ws_0123456789abcdefghijkl",
+      can_manage: false,
+      app: identityApp,
+    });
     expect(readOnly?.can_manage).toBe(false);
     expect(readOnly && !readOnly.can_manage && readOnly.app.created_at).toBe("2026-01-01 00:00:00");
     expect(readOnly && "keys" in readOnly).toBe(false);
@@ -545,14 +554,19 @@ describe("members/apps/settings parsers", () => {
     expect(readOnly && "installations" in readOnly).toBe(false);
     // A missing identity field is a contract breach.
     const { created_at: _dropped, ...withoutCreated } = identityApp;
-    expect(parseSettings({ can_manage: false, app: withoutCreated })).toBeNull();
+    expect(parseSettings({
+      workspace_id: "ws_0123456789abcdefghijkl",
+      can_manage: false,
+      app: withoutCreated,
+    })).toBeNull();
     // can_manage=true without the settings zones is also a breach.
     expect(
       parseSettings({
         can_manage: true,
+        workspace_id: "ws_0123456789abcdefghijkl",
         app: {
           github_slug: "demo",
-          webhook_path: "wh-demo",
+          id: "app-demo",
           github_app_id: 1,
           status: "active",
           review_enabled: true,
@@ -629,9 +643,10 @@ describe("model chain tab model", () => {
 describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
+    workspace_id: "ws_0123456789abcdefghijkl",
     app: {
       github_slug: "demo",
-      webhook_path: "wh-demo",
+      id: "app-demo",
       github_app_id: 1,
       status: "active",
       review_enabled: true,
