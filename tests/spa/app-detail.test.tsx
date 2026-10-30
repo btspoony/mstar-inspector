@@ -181,7 +181,7 @@ describe("tab shell rendering (static SSR)", () => {
       "settings.appInfo",
       "settings.ops",
       "settings.runtimeHarness",
-      "settings.providers",
+      "settings.providers.title",
       "settings.modelChains",
       "settings.seats",
     ] as const) {

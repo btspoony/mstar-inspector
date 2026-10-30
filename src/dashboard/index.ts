@@ -3153,7 +3153,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // order, then the template tier (the hand-curated workers-ai entry
       // followed by the snapshot breadth — the catalog's own key order).
       // `verifiable: false` marks the console-only providers (no probeable
-      // endpoint: azure-openai / ai-gateway / zai today — the old
+      // endpoint: azure-openai / ai-gateway — the old
       // addKeyProviderIds filter); templates verify via
       // the custom probe, so always verifiable.
       // (AD-547): every entry also carries a display-only

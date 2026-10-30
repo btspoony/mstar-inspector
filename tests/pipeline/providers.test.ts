@@ -23,6 +23,7 @@ import {
 } from "../../src/pipeline/provider-catalog";
 import { PROVIDER_IDS_BUILTIN, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
 import { CUSTOM_PROVIDER_API_IDS, CUSTOM_PROVIDER_ID_PATTERN } from "../../src/dashboard/app-config-store";
+import { PROVIDER_VERIFY_ENDPOINTS } from "../../src/dashboard/provider-verify";
 import { buildCatalog } from "../../scripts/generate-provider-catalog";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
@@ -84,11 +85,41 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
     for (const [id, entry] of Object.entries(PROVIDER_CATALOG)) {
       if (entry.tier === "builtin") {
         expect(entry.envName, id).not.toBeNull();
-        expect(entry.api, id).toBeNull();
+        // A builtin carries an `api` only as the declaration prefill of a
+        // console-only row (the settings face opens the custom form with it).
+        if (entry.api !== null) expect([...CUSTOM_PROVIDER_API_IDS] as string[], id).toContain(entry.api);
       } else {
         expect(entry.envName, id).toBeNull();
         expect(entry.api, id).not.toBeNull();
       }
+    }
+  });
+
+  test("the console-only builtins carry the declaration prefill the settings face derives from", () => {
+    // Both are verify-`unsupported` (no probeable host of their own), so the
+    // add-provider console branch opens the custom form with these values
+    // instead of a dead end — one source, never a second hand-copied URL.
+    for (const [id, shape] of [
+      ["azure-openai", "https://{resource}.openai.azure.com/openai/deployments/{deployment}"],
+      ["ai-gateway", "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway}"],
+    ] as const) {
+      const entry = PROVIDER_CATALOG[id]!;
+      expect(entry.tier, id).toBe("builtin");
+      expect(entry.api, id).toBe("openai-completions");
+      expect(entry.baseUrl, id).toBe(shape);
+    }
+  });
+
+  test("a builtin catalog entry carries an `api` prefill exactly where verification is unsupported", () => {
+    // The settings face routes a non-verifiable builtin to the add-provider
+    // console branch, and that branch opens the custom form prefilled from the
+    // catalog's `api` + `baseUrl`. The catalog and the verify endpoint map are
+    // built independently, so pin their agreement here: a future hostless
+    // builtin cannot reach the console branch with an empty prefill, and a
+    // verifiable one cannot carry a stray declaration prefill.
+    for (const [id, entry] of Object.entries(PROVIDER_CATALOG)) {
+      if (entry.tier !== "builtin") continue;
+      expect(entry.api !== null, id).toBe(PROVIDER_VERIFY_ENDPOINTS[id]?.kind === "unsupported");
     }
   });
 

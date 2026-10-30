@@ -8,8 +8,8 @@
  *    the brand surface (display-name primary line + AppID meta line; the list
  *    payload carries no GitHub profile fields, so there is no avatar),
  *    the whole-row click and the visible settings anchor keep their
- *    channels, and StatusBadge rides the v0.3 pill component tokens
- *    (--badge-*) with the semantic tones preserved.
+ *    channels, and StatusBadge carries its semantic tone through the
+ *    `data-tone` attribute (the class face is the component's own pin).
  * 2. v0.3 face: page titles on the heading-24 token step, the DESIGN.md
  *    Table header (background-200 band + label-12 headers), zero raw hex.
  * 3. A6: the new empty-state guidance keys exist atomically in both
@@ -255,23 +255,21 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(t("zh_CN", "apps.detail")).toBe("详情");
   });
 
-  test("the status pill rides the v0.3 pill component tokens with semantic tones", () => {
-    // Every pill the list emits, located by its rendered label.
-    const pillClass = (overrides: Partial<AppsPayload["apps"][number]>, label: string) =>
+  test("the status pill carries the semantic tone through its data-tone attribute", () => {
+    // Every pill the list emits, located by its rendered label, read through
+    // the tone attribute — a design-token rename is not a behaviour change.
+    const pillTone = (overrides: Partial<AppsPayload["apps"][number]>, label: string) =>
       renderList([appRow(overrides)]).match(
-        new RegExp(`<span class="([^"]*)">${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</span>`),
+        new RegExp(
+          `<span [^>]*data-tone="([a-z]+)"[^>]*>${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</span>`,
+        ),
       )?.[1] ?? "";
     for (const [overrides, label, tone] of [
       [{ status: "active", review_enabled: 1 }, t("en", "apps.status.active"), "success"],
-      [{ status: "active", review_enabled: 0 }, t("en", "apps.status.paused"), "warn"],
+      [{ status: "active", review_enabled: 0 }, t("en", "apps.status.paused"), "warning"],
+      [{ status: "disabled", review_enabled: 1 }, t("en", "apps.status.disabled"), "warning"],
     ] as const) {
-      const classes = pillClass(overrides, label);
-      // Shape comes from the --badge-* component tokens (AD-574 pill exception).
-      expect(classes, label).toContain("h-(--badge-height)");
-      expect(classes, label).toContain("rounded-(--badge-radius)");
-      // Tones stay on the semantic badge vars (constraint #5).
-      expect(classes, label).toContain(`bg-(--badge-${tone}-bg)`);
-      expect(classes, label).toContain(`text-(--badge-${tone}-fg)`);
+      expect(pillTone(overrides, label), label).toBe(tone);
     }
     // The emitted pill is the only geometry source: no hard-coded pill
     // survives anywhere in the row markup (the avatar surface's own

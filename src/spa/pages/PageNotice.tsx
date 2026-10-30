@@ -39,6 +39,30 @@ export function PageNotice({
   );
 }
 
+/**
+ * One op's outcome, resolved back to the card (or form cluster)
+ * that produced it. Op feedback never rides the page-level notice channel —
+ * that stays reserved for background-reload failures. `warn` is the tolerant
+ * no-op face: a remove that matched nothing is neither a saved change nor a
+ * failure, so it announces the no-change copy without claiming either.
+ */
+export type OpNotice = { kind: NoticeKind; message: string };
+
+/**
+ * A card's inline op-feedback region: the page banner's markup,
+ * roles (alert/status) and notice tokens rendered INSIDE the card next to the
+ * actions that produced the outcome. Regions are per action cluster, so the
+ * feedback sits where the user is looking. A cluster's region may
+ * also sit inside a card's grouped list — the providers remove outcome renders
+ * inside the group the removed row belonged to. Clear rule (pinned): a
+ * region's content is replaced wholesale by the next op targeting that same
+ * region — no manual clears, no cross-card resets.
+ */
+export function NoticeRegion({ notice }: { notice: OpNotice | null }) {
+  if (!notice) return null;
+  return <PageNotice kind={notice.kind} message={notice.message} />;
+}
+
 export function LoadingNotice({ locale }: { locale: Locale }) {
   return <p className={styles.status}>{t(locale, "common.loading")}</p>;
 }

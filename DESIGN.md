@@ -1,7 +1,7 @@
 ---
-version: 0.3.5
+version: 0.4
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted). Supersedes the earlier theme lock (2026-09-04, user instruction). v0.3 (AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (AD-641, 2026-09-11) retires the sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the neutral accent tint. v0.3.3 (AD-653, 2026-09-12) adds the insights daily stacked-bar chart vocabulary: severity stacks keep the frozen 700-step semantic family (red/amber/gray), category stacks join teal/purple/pink with blue-700 staying the neutral unknown-slug tone and gray-700 the uncategorized fallback — Appendix A gains their dual-theme vs-card rows. v0.3.4 (2026-09-16, user feedback round) makes the default deterministic: the prefers-color-scheme OS fallback is removed, so with no stored choice every browser renders dark, and the SPA body canvas is painted background-100. v0.3.5 (2026-10-25) documents the composition primitives — PageHeader, StatCard/StatGrid, DataTable, StatusBadge — with their fixed type and spacing steps; documentation only, no token value moved."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted). Supersedes the earlier theme lock (2026-09-04, user instruction). v0.3 (AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (AD-641, 2026-09-11) retires the sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the neutral accent tint. v0.3.3 (AD-653, 2026-09-12) adds the insights daily stacked-bar chart vocabulary: severity stacks keep the frozen 700-step semantic family (red/amber/gray), category stacks join teal/purple/pink with blue-700 staying the neutral unknown-slug tone and gray-700 the uncategorized fallback — Appendix A gains their dual-theme vs-card rows. v0.3.4 (2026-09-16, user feedback round) makes the default deterministic: the prefers-color-scheme OS fallback is removed, so with no stored choice every browser renders dark, and the SPA body canvas is painted background-100. v0.3.5 (2026-10-25) documents the composition primitives — PageHeader, StatCard/StatGrid, DataTable, StatusBadge — with their fixed type and spacing steps; documentation only, no token value moved. v0.4 (2026-10-30) adds three component specs — group-card, list-row, step-dialog — additive only: no token value changes."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -529,6 +529,23 @@ components:
     rounded: "{rounded.sm}"
     padding: "0 8px"
     height: 32px
+  # The SPA's ui/button `size="sm"` face (h-8 px-3 text-sm): 32px like
+  # button-small, but a 12px side pad and the 14px label. button-small is the
+  # SSR dashboard's 12px header face — the two are not interchangeable.
+  button-sm:
+    typography: "{typography.button-14}"
+    rounded: "{rounded.sm}"
+    padding: "0 12px"
+    height: 32px
+  # The SPA's ui/button `size="xs"` ghost face (h-6 px-2 text-xs): the 24px
+  # in-row action, 12px label — the one consumer is the admin console's
+  # workspace row (WorkspacesPage). Not button-small: that is the SSR
+  # dashboard's 32px header face.
+  button-xs:
+    typography: "{typography.button-12}"
+    rounded: "{rounded.sm}"
+    padding: "0 8px"
+    height: 24px
   input:
     backgroundColor: "{colors.background-100}"
     textColor: "{colors.gray-1000}"
@@ -625,6 +642,53 @@ components:
     typography: "{typography.label-14}"
     rounded: "{rounded.sm}"
     height: 36px
+  group-card:
+    # Fill and radius are inherited through ui/card's Card (### Card).
+    # The hairline is NOT inherited: Card's `border` carries width only and
+    # preflight leaves border-color at currentColor, so the component sets
+    # gray-alpha-400 itself (same rule SectionCard documents per tier).
+    # Card's symmetric 24px padding is replaced by the two paddings below.
+    backgroundColor: "{colors.background-200}"
+    borderColor: "{colors.gray-alpha-400}"
+    rounded: "{rounded.md}"
+    headerPadding: "14px 16px"
+    bodyPadding: "0 16px 14px"
+    # No divider under the header — the list-row container border inside the
+    # body carries the separation.
+    titleTypography: "{typography.heading-16}"
+    subtitleTypography: "{typography.label-12}"
+    subtitleTextColor: "{colors.gray-700}"
+    headerAction: "{components.button-sm}"
+  list-row:
+    borderColor: "{colors.gray-alpha-400}"
+    rounded: "{rounded.sm}"
+    rowBackgroundColor: "{colors.gray-200}"
+    rowPadding: "9px 12px"
+    separator: "1px {colors.gray-alpha-300}"
+    identityTypography: "{typography.label-14}"
+    identityFontFamily: "font-mono"
+    identityMinWidth: 76px
+    statusSlot: "StatusBadge"
+    metaTypography: "{typography.label-12}"
+    metaTextColor: "{colors.gray-700}"
+    action: "{components.button-sm}"
+    actionVariant: "ghost"
+    # Default ghost; a confirm-gated removal renders `destructive` — see
+    # ### list-row for the exception.
+    slotOrder: "identity, status, meta, actions"
+    columnGap: 12px
+  step-dialog:
+    surface: "inherits ui/dialog DialogContent — container radius through the bridge, {elevation.shadow-pop}, sm:max-w-lg, p-6"
+    titleTypography: "{typography.heading-16}"
+    descriptionTypography: "{typography.label-12}"
+    descriptionTextColor: "{colors.gray-700}"
+    stepIndicatorTypography: "{typography.label-12}"
+    stepIndicatorTextColor: "{colors.gray-700}"
+    stepIndicatorActiveTextColor: "{colors.brand-700}"
+    stepIndicatorMinSteps: 2
+    footerAlign: "right"
+    footerGap: "{spacing.2}"
+    footerSlot: "caller renders the disabled submit button and the in-progress copy; the shell holds no busy state"
 ---
 
 <!-- COMPLETENESS_LEVEL: 3 — last audited 2026-09-09 -->
@@ -750,7 +814,13 @@ Kept from L1: `heading-24`, `heading-16`, `copy-16`, `copy-14`.
 - `heading-16` — section titles, card titles.
 - `label-14` / `label-12` — nav, form labels, table headers, badges.
 - `copy-16` / `copy-14` — body and secondary copy.
-- `button-14` / `button-12` — button labels (default / small).
+- `button-14` — button labels: the default control face and the SPA small
+  button (`components.button-sm`).
+- `button-12` — 12px labels: the SSR dashboard header action
+  (`components.button-small`, `0 8px` pad) and the SPA's `xs` ghost face
+  (`components.button-xs` — `ui/button` `size="xs"`, `h-6`, `px-2`; the admin
+  console's row slug action). The SPA's small button is
+  `components.button-sm` on `button-14`.
 - `mono-13` — ids, hashes, timestamps; use tabular figures.
 
 Dashboard numerals: `font-variant-numeric: tabular-nums` on counts, ids, and
@@ -965,7 +1035,10 @@ Variants: `button-primary` (brand-700, rendered on the SPA and SSR faces
 since the T3 bridge re-point + QC-round-1 SSR re-point), `button-danger`
 (red-700), `button-secondary` (surface +
 gray-400 border), `button-disabled` (gray-100 fill, gray-700 text,
-not-allowed). Size: default 40px; `button-small` 32px.
+not-allowed). Size: default 40px; `button-small` 32px (`12px` label, `0 8px`
+pad) on the SSR dashboard header; `button-sm` 32px (`h-8 px-3`, `button-14`)
+on the SPA; `button-xs` 24px (`h-6 px-2`, `button-12`) for the admin
+console's in-row ghost action.
 
 **States** (all enabled variants):
 
@@ -1052,6 +1125,48 @@ the pill. A face never mixes the two vocabularies on one surface.
 `notice-success` / `notice-warn` / `notice-error`: 100 fill, 400 border,
 900 text of the semantic scale, `copy-14`, control radius (`rounded-sm`),
 16px padding. Always include what happened + what to do next on error.
+
+### group-card
+
+A set of children under one parent object (providers × keys is the first case).
+The surface and container radius are `### Card`'s — `background-200` fill and
+`rounded-md` — inherited through `ui/card`'s `Card`, not restated here. The
+hairline is not inherited: `Card`'s bare `border` carries width only and
+preflight leaves `border-color` at `currentColor`, so the component sets
+`gray-alpha-400` itself. Card's symmetric 24px padding splits into a header
+band (`14px 16px`) and a body (`0 16px 14px`). No divider sits under the
+header: the separation is carried by the `list-row` container border inside the
+body. Title on `heading-16`; subtitle on `label-12` in `gray-700`; the header
+action is `button-sm` (`32px` high, `rounded-sm`, `0 12px` padding,
+`button-14`). The `meta-line` (`api · base_url · N models [expand]`) and the
+empty-state copy block are composition idioms of the body — body children, not
+standalone components.
+
+### list-row
+
+Isomorphic rows inside a group. The container is an in-card inset on
+`gray-alpha-400` with the micro-corner exception `rounded-sm`; rows sit on
+`gray-200` at `9px 12px`, separated by a `1px` `gray-alpha-300` hairline. Slot
+order is identity → status → meta → actions, on a 12px column gap. Identity is
+`label-14` in `font-mono`, minimum column width 76px; the status slot is the
+existing `StatusBadge` — no new status badge, no dot added, so `### Badge`'s
+"Pair with text" rule stands. Meta is `label-12` in `gray-700`; the trailing
+action is a ghost `button-sm` — with one exception: a confirm-gated removal
+renders the destructive variant, so the row's only action cannot read as a
+harmless one-click.
+
+### step-dialog
+
+Multi-step entry. The panel surface inherits `ui/dialog`'s `DialogContent` —
+container radius through the bridge, `shadow-pop`, `sm:max-w-lg`, `p-6` — and
+re-derives none of it. Title on `heading-16`; description on `label-12` in
+`gray-700`. The step indicator is `label-12`: the current step in `brand-700`,
+the rest in `gray-700`, rendered only when `steps.length > 1`; an
+out-of-range `currentStep` clamps into the label range, so exactly one step is
+always current. The footer is
+right-aligned with a `spacing-2` gap. Disabled-while-submitting and the
+in-progress copy are a footer slot contract — the caller renders the disabled
+submit button and the in-progress copy; the shell holds no busy state.
 
 ## Voice & content
 
@@ -1142,6 +1257,8 @@ non-text UI bar ≥3:1). Machine-pinned for the core pairs in
 | body text `gray-1000` vs card `background-200` (text) | 15.8:1 | 16.9:1 |
 | secondary text `gray-900` vs card (text) | 8.5:1 | 11.0:1 |
 | muted `gray-700` vs card (text) | 5.9:1 | 6.5:1 |
+| list-row meta `gray-700` vs row fill `gray-200` (text) | 5.4:1 | 6.5:1 |
+| step-dialog copy `gray-700` vs panel `background-100` (text) | 6.5:1 | 7.1:1 |
 | brand accent `brand-700` vs page (text) | 10.8:1 | 5.4:1 |
 | brand accent `brand-700` vs card (text) | 9.8:1 | 4.9:1 |
 | button label `background-100` on `brand-700` fill (text) | 10.8:1 | 5.4:1 |

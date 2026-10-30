@@ -13,6 +13,7 @@
         if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
       } catch {}
     </script>
+    <link rel="icon" type="image/png" href="./icon.png" />
     <!--SPA_BOOT-->
     <style>
       /* Console chrome only — the workspace shell's Layout is deliberately not
@@ -21,7 +22,7 @@
          (DESIGN.md: page gutter spacing-6, card padding spacing-6, the
          PageHeader heading-24 title face); colours stay on the existing vars. */
       body {
-        font-family: "Geist Sans", system-ui, sans-serif;
+        font-family: var(--font-sans);
       }
       .admin {
         max-width: 1100px;
@@ -33,7 +34,7 @@
         align-items: baseline;
         justify-content: space-between;
         gap: var(--spacing-4);
-        border-bottom: 1px solid var(--gray-alpha-200);
+        border-bottom: 1px solid var(--gray-alpha-400);
         padding-bottom: var(--spacing-3);
       }
       .admin-header h1 {
@@ -61,8 +62,8 @@
         color: var(--gray-1000);
       }
       .admin-main {
-        border: 1px solid var(--gray-alpha-200);
-        border-radius: var(--rounded-sm);
+        border: 1px solid var(--gray-alpha-400);
+        border-radius: var(--rounded-md);
         /* Card default padding (DESIGN.md Spacing & Layout). */
         padding: var(--spacing-6);
       }

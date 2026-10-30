@@ -43,7 +43,7 @@ describe("StatusBadge", () => {
 
   test("label is caller-owned content", () => {
     expect(render("success")).toBe(
-      '<span class="inline-flex h-(--badge-height) items-center rounded-(--badge-radius) px-2 text-xs font-medium bg-(--badge-success-bg) text-(--badge-success-fg)">Active</span>',
+      '<span class="inline-flex h-(--badge-height) items-center rounded-(--badge-radius) px-2 text-xs tracking-(--typo-label-12-tracking) font-medium bg-(--badge-success-bg) text-(--badge-success-fg)" data-tone="success">Active</span>',
     );
   });
 
@@ -52,5 +52,13 @@ describe("StatusBadge", () => {
     expect(html).toContain('title="Paused reviews"');
     expect(html).toContain("bg-(--badge-warn-bg)");
     expect(html).toContain("ml-2");
+  });
+
+  test("a caller-supplied data-tone cannot override the tone oracle", () => {
+    const html = render("error", { "data-tone": "success" });
+    expect(html).toContain('data-tone="error"');
+    expect(html).not.toContain('data-tone="success"');
+    // Exactly one tone attribute survives the merge.
+    expect(html.split('data-tone="').length - 1).toBe(1);
   });
 });

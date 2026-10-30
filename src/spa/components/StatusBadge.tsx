@@ -28,11 +28,12 @@ export function StatusBadge({
   return (
     <span
       className={cn(
-        "inline-flex h-(--badge-height) items-center rounded-(--badge-radius) px-2 text-xs font-medium",
+        "inline-flex h-(--badge-height) items-center rounded-(--badge-radius) px-2 text-xs tracking-(--typo-label-12-tracking) font-medium",
         TONE_FACES[tone],
         className,
       )}
       {...props}
+      data-tone={tone}
     />
   );
 }

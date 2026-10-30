@@ -35,7 +35,16 @@ const cellClass = (html: string, content: string) =>
 describe("DataTable", () => {
   test("shell carries the container face; header row is the background-200 band", () => {
     const html = render({ columns, rows, rowKey: (row) => row.slug });
-    expect(html).toStartWith('<div class="overflow-hidden rounded-md border">');
+    // Container radius + hairline on the shell, and the row hairlines on the
+    // same token: bare `border` / `border-b` carry width only, so preflight
+    // leaves border-color at currentColor (DESIGN.md Table: hairline
+    // gray-alpha-400).
+    expect(html).toStartWith(
+      '<div class="overflow-hidden rounded-md border border-(--gray-alpha-400) ',
+    );
+    // The row hairline rides the same token; the rendered selector carries an
+    // escaped ampersand.
+    expect(html).toContain("[&amp;_tr]:border-(--gray-alpha-400)");
     expect(html).toContain("bg-(--background-200)");
     // Header band opts out of the primitive's row hover.
     expect(html).toContain("hover:bg-inherit");

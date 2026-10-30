@@ -95,7 +95,12 @@ type OmpSnapshot = {
 
 /** One builtin-tier entry spec. `sourceKey` = the models.dev snapshot key
  *  carrying the ecosystem metadata (absent → no ecosystem data; all fields
- *  local). `label`/`envName` are the omp-facing SSOT (runner contract). */
+ *  local). `label`/`envName` are the omp-facing SSOT (runner contract).
+ *
+ *  `baseUrl`/`api` on a builtin are ONLY the declaration prefill of a
+ *  console-only row (no probeable host of its own): its `{placeholder}` URL
+ *  shape and protocol, so the settings face can open the custom-provider
+ *  form from the catalog entry instead of restating either value. */
 type BuiltinSpec = {
   /** Selector-facing provider id (the catalog record key). */
   id: string;
@@ -103,6 +108,7 @@ type BuiltinSpec = {
   label: string;
   envName: string;
   baseUrl?: string | null;
+  api?: string;
   doc?: string | null;
   modelCount?: number;
 };
@@ -114,7 +120,18 @@ const BUILTIN_ORDER: BuiltinSpec[] = [
   { id: "openai", sourceKey: "openai", label: "OpenAI", envName: "OPENAI_API_KEY" },
   { id: "gemini", sourceKey: "google", label: "Google Gemini", envName: "GEMINI_API_KEY" },
   { id: "copilot", sourceKey: "github-copilot", label: "GitHub Copilot", envName: "COPILOT_GITHUB_TOKEN" },
-  { id: "azure-openai", sourceKey: "azure", label: "Azure OpenAI", envName: "AZURE_OPENAI_API_KEY" },
+  // Console-only builtins carry the declaration prefill the settings face
+  // opens the custom form with: azure's host is per-deployment and AI
+  // Gateway's path needs account + gateway ids, so neither has a probeable
+  // host of its own (provider-verify: `unsupported`).
+  {
+    id: "azure-openai",
+    sourceKey: "azure",
+    label: "Azure OpenAI",
+    envName: "AZURE_OPENAI_API_KEY",
+    baseUrl: "https://{resource}.openai.azure.com/openai/deployments/{deployment}",
+    api: "openai-completions",
+  },
   { id: "groq", sourceKey: "groq", label: "Groq", envName: "GROQ_API_KEY" },
   { id: "cerebras", sourceKey: "cerebras", label: "Cerebras", envName: "CEREBRAS_API_KEY" },
   { id: "xai", sourceKey: "xai", label: "xAI", envName: "XAI_API_KEY" },
@@ -127,7 +144,14 @@ const BUILTIN_ORDER: BuiltinSpec[] = [
   { id: "opencode", sourceKey: "opencode", label: "OpenCode", envName: "OPENCODE_API_KEY" },
   // cursor: not present in the models.dev snapshot — local metadata only.
   { id: "cursor", label: "Cursor", envName: "CURSOR_ACCESS_TOKEN", baseUrl: null, doc: "https://cursor.com/docs/api/overview" },
-  { id: "ai-gateway", sourceKey: "cloudflare-ai-gateway", label: "AI Gateway", envName: "AI_GATEWAY_API_KEY" },
+  {
+    id: "ai-gateway",
+    sourceKey: "cloudflare-ai-gateway",
+    label: "AI Gateway",
+    envName: "AI_GATEWAY_API_KEY",
+    baseUrl: "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway}",
+    api: "openai-completions",
+  },
   { id: "wafer-serverless", sourceKey: "wafer.ai", label: "Wafer Serverless", envName: "WAFER_SERVERLESS_API_KEY" },
   { id: "ark", sourceKey: "volcengine", label: "Ark", envName: "ARK_API_KEY" },
 ];
@@ -255,7 +279,7 @@ export function buildCatalog(
       tier: "builtin",
       envName: spec.envName,
       baseUrl: spec.baseUrl !== undefined ? spec.baseUrl : (source?.api ?? null),
-      api: null,
+      api: spec.api ?? null,
       models,
       doc: spec.doc !== undefined ? spec.doc : (source?.doc ?? null),
     };
@@ -529,10 +553,12 @@ export type ProviderCatalogEntry = {
    *  Null for template — materialized as a custom-provider declaration. */
   envName: string | null;
   /** Default API base URL. Template entries may carry a {account_id}
-   *  placeholder the save flow substitutes. */
+   *  placeholder the save flow substitutes; a console-only builtin carries
+   *  its declaration's URL shape (any {placeholder} is the operator's). */
   baseUrl: string | null;
   /** Custom-provider API protocol to materialize a template with (template
-   *  tier only; null for builtin). */
+   *  tier), or the declaration prefill of a console-only builtin: null for a
+   *  verifiable builtin, which needs no declaration. */
   api: string | null;
   /** Representative model ids (display/prefill metadata). */
   models: readonly string[];
