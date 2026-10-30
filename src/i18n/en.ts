@@ -391,6 +391,7 @@ export const en = {
     chainEmpty: "No models in the chain yet.",
     pickModel: "Select a model…",
     keyVerified: "Key verified — models cached.",
+    customKeyAdded: "Key added — it is only ever shown masked.",
     verify: {
       invalid_key: "That API key was rejected by the provider — nothing was stored.",
       unreachable: "The provider could not be reached — nothing was stored.",
@@ -457,6 +458,8 @@ export const en = {
       modelIdsTooMany: "Too many model ids ({count}) — at most {limit}. Nothing was stored.",
       modelIdTooLong: "Model ids are limited to {limit} characters each. Nothing was stored.",
       customProviderDeclRejected: "The custom provider was rejected — nothing was stored.",
+      customProviderUndeclared:
+        "{provider} is not a declared custom provider for this App — declare it before adding keys. Nothing was stored.",
       providerEndpointLocked:
         "{provider} already stores keys for its current endpoint — remove them before changing its base URL or API protocol. Nothing was stored.",
       templateUnknown: "Unknown provider template — nothing was stored.",

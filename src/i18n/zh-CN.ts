@@ -344,6 +344,7 @@ export const zhCN: Dictionary = {
     chainEmpty: "模型链中还没有模型。",
     pickModel: "选择模型…",
     keyVerified: "密钥已验证 — 模型已缓存。",
+    customKeyAdded: "已添加密钥 — 仅以掩码显示。",
     verify: {
       invalid_key: "该 API 密钥被 provider 拒绝 — 未存储任何内容。",
       unreachable: "无法连接 provider — 未存储任何内容。",
@@ -390,6 +391,7 @@ export const zhCN: Dictionary = {
       modelIdsTooMany: "模型 id 过多（{count} 个）— 最多 {limit} 个。未存储任何内容。",
       modelIdTooLong: "每个模型 id 最多 {limit} 个字符。未存储任何内容。",
       customProviderDeclRejected: "该自定义 provider 被拒绝 — 未存储任何内容。",
+      customProviderUndeclared: "{provider} 不是此 App 已声明的自定义 provider — 请先声明再添加密钥。未存储任何内容。",
       providerEndpointLocked:
         "{provider} 已为其当前端点存储了密钥 — 请先移除这些密钥再更改其 Base URL 或 API 协议。未存储任何内容。",
       templateUnknown: "未知的 provider 模板 — 未存储任何内容。",

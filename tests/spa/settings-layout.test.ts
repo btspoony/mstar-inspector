@@ -352,6 +352,45 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
   });
 });
 
+describe("custom-provider row add-key affordance", () => {
+  const page = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+  const customRow = page.slice(
+    page.indexOf("function ConfiguredCustomRow"),
+    page.indexOf("function AddProviderSection"),
+  );
+
+  test("the custom row offers Add key and posts the append op against the stored declaration", () => {
+    // The action is the shared add-key label (the built-in/template faces').
+    expect(customRow).toContain('t(locale, "settings.addKey")');
+    // Appending, not re-declaring: the op carries the id + the new key only,
+    // so no endpoint field can reach the declaration.
+    expect(customRow).toContain('op: "add-custom-provider-key"');
+    expect(customRow).toContain("provider_id: row.provider_id");
+    expect(customRow).not.toContain("base_url:");
+  });
+
+  test("the open form renders the pool's masked rows, one line per stored key", () => {
+    // The same masked face the built-in/template forms render — fed by the
+    // declaration's own rows out of keys[].
+    expect(page).toContain("storedKeys={providerKeyRows(payload.keys, row.provider_id)}");
+    expect(customRow).toContain("settings.keyEnding");
+    expect(customRow).toContain("storedKeys.map(");
+    // Success reports the appended key, never the key itself.
+    expect(customRow).toContain("settings.customKeyAdded");
+  });
+
+  test("custom add-key copy is dictionary-backed in both locales (action, success, cap)", () => {
+    expect(t("en", "settings.addKey")).toBe("Add key");
+    expect(t("zh_CN", "settings.addKey")).toBe("添加密钥");
+    expect(t("en", "settings.customKeyAdded")).toContain("shown masked");
+    expect(t("zh_CN", "settings.customKeyAdded")).toContain("掩码");
+    expect(t("en", "settings.error.providerKeyLimit")).toContain("maximum");
+    expect(t("zh_CN", "settings.error.providerKeyLimit")).toContain("已存满");
+    expect(t("en", "settings.error.customProviderUndeclared")).toContain("not a declared custom provider");
+    expect(t("zh_CN", "settings.error.customProviderUndeclared")).toContain("已声明");
+  });
+});
+
 describe("catalog provenance + eligibility messaging", () => {
   test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime harness", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
