@@ -31,6 +31,7 @@ import {
 } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import {
+  KEY_REJECTING_MODELS_PROBE_URLS,
   PROVIDER_VERIFY_ENDPOINTS,
   VERIFY_TIMEOUT_MS,
   VERIFY_USER_AGENT,
@@ -162,6 +163,14 @@ function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+/** A response carrying the URL and redirect flag a real fetch produces when it
+ *  followed a Location header (a stubbed Response cannot set either itself). */
+function redirected(response: Response, url: string): Response {
+  Object.defineProperty(response, "url", { value: url });
+  Object.defineProperty(response, "redirected", { value: true });
+  return response;
+}
+
 /** Every verify request's headers: the key's auth shape plus the two client
  *  headers (an explicit Accept and User-Agent) no request may go without. */
 function verifyHeaders(auth: Record<string, string>): Record<string, string> {
@@ -251,16 +260,9 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
     expect(Object.keys(PROVIDER_VERIFY_ENDPOINTS)).toHaveLength(19);
   });
 
-  test("unsupported built-ins are exactly azure-openai + ai-gateway + zai (the settings face's verifiable flag)", () => {
+  test("unsupported built-ins are exactly azure-openai + ai-gateway (the settings face's verifiable flag)", () => {
     const unsupported = PROVIDER_IDS.filter((id) => PROVIDER_VERIFY_ENDPOINTS[id]?.kind === "unsupported");
-    expect(unsupported).toEqual(["azure-openai", "zai", "ai-gateway"]);
-  });
-
-  test("the one provider without a probeable surface names the missing endpoint", () => {
-    const spec = PROVIDER_VERIFY_ENDPOINTS["zai"]!;
-    expect(spec.kind).toBe("unsupported");
-    if (spec.kind !== "unsupported") throw new Error("unreachable");
-    expect(spec.note).toContain("models");
+    expect(unsupported).toEqual(["azure-openai", "ai-gateway"]);
   });
 
   test("each builtin's 2xx means ok or only reachable — the shared allow-list decides", () => {
@@ -278,7 +280,7 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
       openrouter: false,
       kilo: false,
       mistral: true,
-      zai: false,
+      zai: true,
       umans: false,
       minimax: true,
       opencode: true,
@@ -288,6 +290,23 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
       xai: true,
       "wafer-serverless": true,
     });
+  });
+
+  test("the allow-list is the spec table's own marker — one definition, no copied URL list", () => {
+    // builtinProbeCanRejectKey ≡ spec exists ∧ kind ≠ unsupported ∧ keyRejecting.
+    for (const id of PROVIDER_IDS) {
+      const spec = PROVIDER_VERIFY_ENDPOINTS[id]!;
+      expect(builtinProbeCanRejectKey(id), id).toBe(spec.kind !== "unsupported" && spec.keyRejecting === true);
+    }
+    // The exported set is exactly the marked spec URLs plus the one documented
+    // supplement (TypeSafe): a hand-copied second list cannot survive this.
+    const marked = new Set(
+      Object.values(PROVIDER_VERIFY_ENDPOINTS).flatMap((spec) =>
+        spec.kind !== "unsupported" && spec.keyRejecting === true ? [spec.url] : [],
+      ),
+    );
+    marked.add("https://api.typesafe.ai/v1/models");
+    expect(new Set(Object.keys(KEY_REJECTING_MODELS_PROBE_URLS))).toEqual(marked);
   });
 
   test("every entry is a recognized spec kind (models | probe | unsupported)", () => {
@@ -302,7 +321,7 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
         // unsupported — per-resource-host / undocumented-endpoint providers
         // carry a documented note.
         expect(spec.note.length).toBeGreaterThan(10);
-        expect(["azure-openai", "zai", "ai-gateway"]).toContain(provider);
+        expect(["azure-openai", "ai-gateway"]).toContain(provider);
       }
     }
   });
@@ -361,7 +380,9 @@ describe("omp 18.13.3 validate data (vendored verify snapshot)", () => {
       // dashboard cannot), so the documented entry answers for that id.
       if (entry === undefined || entry.headersHook !== undefined) continue;
       derived += 1;
-      expect(spec).toEqual({ kind: "models", url: entry.url, auth: "bearer" });
+      // An omp validate entry returns 2xx only for a valid key, so it also
+      // carries the keyRejecting marker.
+      expect(spec).toEqual({ kind: "models", url: entry.url, auth: "bearer", keyRejecting: true });
     }
     // xai + wafer-serverless are supplied ONLY by that data (the documented
     // table deliberately omits them), so a broken derivation fails here.
@@ -370,23 +391,49 @@ describe("omp 18.13.3 validate data (vendored verify snapshot)", () => {
       kind: "models",
       url: "https://api.x.ai/v1/models",
       auth: "bearer",
+      keyRejecting: true,
     });
     expect(PROVIDER_VERIFY_ENDPOINTS["wafer-serverless"]).toEqual({
       kind: "models",
       url: "https://pass.wafer.ai/v1/models",
       auth: "bearer",
+      keyRejecting: true,
     });
   });
 });
 
 describe("validation-only invariant (no inference in the verify surface)", () => {
-  test("the module's source carries no chat-completion probe", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/dashboard/provider-verify.ts"), "utf8");
-    // The retired 1-token chat probes (kilo / zai / umans) must never return:
-    // no inference path, no probe body, no POST.
-    expect(source).not.toContain("chat/completions");
-    expect(source).not.toContain("max_tokens");
-    expect(source).not.toContain('method: "POST"');
+  test("a verification only ever requests the models/probe endpoint — never a chat/completions URL", async () => {
+    // I-000209: the invariant is the OUTBOUND REQUESTS, not the module's text.
+    // A stub fetch returns a 2xx for anything and records every URL it was
+    // asked for, so a verification that also tried an inference probe would
+    // show up here whatever the source reads like.
+    const requested: string[] = [];
+    const record: VerifyDeps["fetch"] = async (input) => {
+      requested.push(String(input));
+      return json(200, { data: [], models: [] });
+    };
+
+    for (const [provider, spec] of Object.entries(PROVIDER_VERIFY_ENDPOINTS)) {
+      if (spec.kind === "unsupported") continue;
+      requested.length = 0;
+      await verifyProviderKey({ fetch: record }, provider, PLAIN_KEY);
+      // Exactly one request, to the spec's own models/probe URL — and that URL
+      // is never an inference path (the retired kilo/zai/umans chat probes).
+      expect(requested, provider).toEqual([spec.url]);
+      expect(requested[0], provider).not.toMatch(/chat\/completions|completions|generateContent|invocations/);
+    }
+
+    // The custom path derives its own probe URL from the declared base and
+    // requests exactly that one.
+    requested.length = 0;
+    const custom = await verifyProviderKey({ fetch: record }, "my-gateway", PLAIN_KEY, {
+      baseUrl: "https://models.test/v1",
+      api: "openai-completions",
+      modelIds: ["m-1"],
+    });
+    expect(custom).toEqual({ ok: true, models: ["m-1"] });
+    expect(requested).toEqual(["https://models.test/v1/models"]);
   });
 
   test("every verifiable builtin issues exactly one GET carrying no body", async () => {
@@ -528,16 +575,55 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     }
   });
 
-  test("zai stays unsupported — its probe never runs (no documented models/usage endpoint)", async () => {
+  test("zai: Bearer GET /api/paas/v4/models — a measured 401 is invalid_key, never unsupported", async () => {
     const calls: FetchCall[] = [];
-    const result = await verifyProviderKey(
-      { fetch: mockFetch(json(200, { choices: [{ message: { content: "pong" } }] }), calls) },
-      "zai",
-      PLAIN_KEY,
-    );
-    expect(result).toEqual({ ok: false, reason: "unsupported_provider" });
-    expect(calls).toHaveLength(0);
-    expect(builtinProbeCanRejectKey("zai")).toBe(false);
+    const result = await verifyProviderKey({ fetch: mockFetch(json(401, { error: { code: "1000" } }), calls) }, "zai", "bogus");
+    expect(result).toEqual({ ok: false, reason: "invalid_key" });
+    expect(calls).toHaveLength(1);
+    const call = calls[0]!;
+    expect(call.url).toBe("https://api.z.ai/api/paas/v4/models");
+    expect(call.method).toBe("GET");
+    expect(call.headers).toEqual(verifyHeaders({ authorization: "Bearer bogus" }));
+    // Measured, not documented: only 401/403 reads as a rejected key.
+    expect(await verifyProviderKey({ fetch: mockFetch(json(500, {})) }, "zai", "bogus")).toEqual({
+      ok: false,
+      reason: "unexpected_response",
+    });
+    expect(await verifyProviderKey({ fetch: mockFetch(json(200, { data: [{ id: "glm-4.6" }] })) }, "zai", "bogus")).toEqual({
+      ok: true,
+      models: ["glm-4.6"],
+    });
+    expect(builtinProbeCanRejectKey("zai")).toBe(true);
+  });
+
+  test("a cross-origin redirect is unexpected_response on all three verify paths", async () => {
+    const crossOrigin = (url: string) => mockFetch(redirected(json(200, { data: [{ id: "m-1" }] }), url));
+    // models endpoint
+    expect(
+      await verifyProviderKey({ fetch: crossOrigin("https://evil.example/v1/models") }, "openai", PLAIN_KEY),
+    ).toEqual({ ok: false, reason: "unexpected_response" });
+    // identity probe
+    expect(
+      await verifyProviderKey({ fetch: crossOrigin("https://evil.example/user") }, "copilot", PLAIN_KEY),
+    ).toEqual({ ok: false, reason: "unexpected_response" });
+    // custom-provider probe
+    expect(
+      await verifyProviderKey({ fetch: crossOrigin("https://evil.example/v1/models") }, "my-custom", PLAIN_KEY, {
+        baseUrl: "https://api.example.com/v1",
+        api: "openai-completions",
+        modelIds: ["m1"],
+      }),
+    ).toEqual({ ok: false, reason: "unexpected_response" });
+  });
+
+  test("a same-origin redirect keeps the ordinary decision", async () => {
+    const ok = redirected(json(200, { data: [{ id: "m-1" }] }), "https://api.openai.com/v1/models");
+    expect(await verifyProviderKey({ fetch: mockFetch(ok) }, "openai", PLAIN_KEY)).toEqual({ ok: true, models: ["m-1"] });
+    const rejected = redirected(json(401, {}), "https://api.openai.com/v1/models");
+    expect(await verifyProviderKey({ fetch: mockFetch(rejected) }, "openai", PLAIN_KEY)).toEqual({
+      ok: false,
+      reason: "invalid_key",
+    });
   });
 
   test("openrouter verifies on its PUBLIC model list — the chain dropdown needs it — and records reachable", async () => {

@@ -19,10 +19,10 @@
  * Tab / outside-click to dismiss (the full ARIA 1.2 pattern is still not
  * required; the highlight scrolls into view — QC fix round).
  *
- * Unavailable entries stay listed and marked (`aria-disabled` + the
- * "unavailable on {image}" suffix) in BOTH groups — selecting one is a no-op,
- * and the AddProviderSection gate plus the server-side eligibility pre-check
- * keep them unsaveable.
+ * Unavailable entries stay listed and marked (the "unavailable on {image}"
+ * suffix + the dimmed face) in BOTH groups, and selecting one is allowed: the
+ * AddProviderDialog's configuration step states the reason and renders no form,
+ * with the server-side eligibility pre-check still refusing the save.
  */
 import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon } from "lucide-react";
@@ -137,19 +137,16 @@ export function ProviderComboboxPanel({
                   id={rowId}
                   role="option"
                   aria-selected={provider.id === value}
-                  aria-disabled={unavailable || undefined}
                   className={cn(
                     "flex w-full cursor-pointer items-center gap-2 rounded-sm py-1.5 pr-2 pl-2 text-sm select-none hover:bg-accent",
                     activeId === rowId && "bg-accent",
-                    unavailable && "pointer-events-none opacity-50",
+                    // Dimmed, not inert: discovery is the point (plan 103
+                    // task 4). The entry selects, and its configuration step
+                    // states the reason with no submit path.
+                    unavailable && "opacity-50",
                   )}
                   onMouseMove={() => onHoverOption?.(provider.id)}
-                  onClick={() => {
-                    // Unavailable stays unsaveable at every layer:
-                    // the row is inert here, gated again in AddProviderSection
-                    // (no form), and pre-checked server-side on save.
-                    if (!unavailable) onSelect(provider.id);
-                  }}
+                  onClick={() => onSelect(provider.id)}
                 >
                   <span className="min-w-0 flex-1 truncate">
                     {provider.label}
@@ -178,8 +175,9 @@ export function ProviderComboboxPanel({
  * it, so 「可选」 is keyboard-reachable (task-3 review fix); a highlight
  * change scrolls the row into view inside the height-capped list (QC fix
  * round). The selected entry
- * is surfaced by the check mark on its row (and by AddProviderSection's form
- * heading) — the input itself stays a query field and clears on selection.
+ * is surfaced by the check mark on its row (and by the add-provider dialog's
+ * configuration step) — the input itself stays a query field and clears on
+ * selection.
  */
 export function ProviderCombobox({
   locale,
@@ -294,9 +292,10 @@ export function ProviderCombobox({
             }
           } else if (event.key === "Enter" && open) {
             event.preventDefault();
-            // Same inert rule as the pointer path: an unavailable row never
-            // selects (the red line at every layer).
-            if (active && active.eligibility !== "unavailable") select(active.id);
+            // Unavailable rows select like any other (plan 103 task 4): the
+            // configuration step is where the reason and the absent submit
+            // path live, so discovery cannot dead-end at the picker.
+            if (active) select(active.id);
           }
         }}
       />

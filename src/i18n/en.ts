@@ -355,9 +355,6 @@ export const en = {
     apiKeyPlaceholder: "Paste the provider API key",
     keyEnding: "key ending {last4}",
     keyTooShort: "key too short to show a tail",
-    keyVerifiedAt: "verified {time}",
-    keyReachableAt: "endpoint reachable {time} — key not verified",
-    keyVerifyFailed: "verification failed",
     updated: "updated {time}",
     remove: "Remove",
     selectProvider: "Search model providers…",
@@ -391,7 +388,6 @@ export const en = {
     chainEmpty: "No models in the chain yet.",
     pickModel: "Select a model…",
     keyVerified: "Key verified — models cached.",
-    customKeyAdded: "Key added — it is only ever shown masked.",
     verify: {
       invalid_key: "That API key was rejected by the provider — nothing was stored.",
       unreachable: "The provider could not be reached — nothing was stored.",
@@ -504,7 +500,49 @@ export const en = {
     confirmDeleteBody: "This is a soft-delete. The App disappears from the list; reviews fail closed.",
     confirmDeleteButton: "Delete App",
     deleteSuccess: "App deleted. It has been removed from the Apps list.",
-    providers: "Providers",
+    providers: {
+      title: "Providers",
+      /** AC-10: exactly one verification label per key row, from the four store states. */
+      status: {
+        ok: "Verified",
+        reachable: "Endpoint reachable",
+        failed: "Verification failed",
+        unverified: "Not verified",
+      },
+      tier: { builtin: "Built-in", template: "Template", custom: "Custom" },
+      summary:
+        "{total} keys · {ok} verified · {reachable} endpoint reachable · {failed} failed · {unverified} unverified",
+      /** The singular pair (the `members.slotsLeftOne` convention: no plural helper). */
+      summaryOne:
+        "{total} key · {ok} verified · {reachable} endpoint reachable · {failed} failed · {unverified} unverified",
+      /** AC-11: the secondary timestamp slot — never part of the status label. */
+      verifiedAt: "verified {time}",
+      modelCount: "{count} models",
+      modelCountOne: "{count} model",
+      /** The two-step add-provider dialog: its indicator, its back step and its in-progress copy. */
+      stepPick: "Choose",
+      stepConfigure: "Configure",
+      back: "Back",
+      verifying: "Verifying…",
+      saving: "Saving…",
+      /** Add-key dialog: its title, its pool usage line, and the key ceiling. */
+      addKeyTo: "Add a key to {label}",
+      keyUsage: "{count} of {limit} keys stored.",
+      keyLimitReached: "This provider already holds {limit} keys — remove one before adding another.",
+      expand: "Expand",
+      collapse: "Collapse",
+      empty: "No keys yet — add the first key to use this provider in a model chain.",
+      /**
+       * Console-only branch: the built-in id is reserved by the store, so a
+       * user-supplied endpoint lives on a declaration with its own id. The
+       * copy never claims the provider console is the only path.
+       */
+      customEndpoint: "Configure a custom endpoint",
+      customEndpointCopy:
+        "{provider}'s built-in id is reserved — a custom endpoint needs its own id. This opens the declaration form with the provider's API protocol and base-URL shape filled in.",
+      customIdRequired: "{provider} is taken — enter a new id for this declaration.",
+      submitFailed: "That request failed before it reached the server — nothing was stored.",
+    },
     providersCopy:
       "The providers configured for this App — stored keys show masked, custom declarations show their base URL and models. Add Provider picks a catalog entry; keys are stored only after a successful verify.",
     noConfiguredProviders:
@@ -543,7 +581,8 @@ export const en = {
     useDefaultChain: "Default chain",
     confirmRemoveChainTitle: "Remove chain {name}?",
     confirmRemoveChainBody: "Seats using {name} fall back to the default chain.",
-    consoleOnly: "This provider can't be verified here — manage the key in the provider console.",
+    consoleOnly:
+      "This provider can't be verified here — its endpoint has no fixed host, so this built-in row takes no key.",
     confirmRemoveKeyTitle: "Remove the {provider} key ending {last4}?",
     confirmRemoveKeyBody:
       "The App's other {provider} keys stay. Selectors that depend on this key alone fail until you verify a replacement.",

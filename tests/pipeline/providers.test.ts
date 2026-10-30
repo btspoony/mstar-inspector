@@ -84,11 +84,28 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
     for (const [id, entry] of Object.entries(PROVIDER_CATALOG)) {
       if (entry.tier === "builtin") {
         expect(entry.envName, id).not.toBeNull();
-        expect(entry.api, id).toBeNull();
+        // A builtin carries an `api` only as the declaration prefill of a
+        // console-only row (the settings face opens the custom form with it).
+        if (entry.api !== null) expect([...CUSTOM_PROVIDER_API_IDS] as string[], id).toContain(entry.api);
       } else {
         expect(entry.envName, id).toBeNull();
         expect(entry.api, id).not.toBeNull();
       }
+    }
+  });
+
+  test("the console-only builtins carry the declaration prefill the settings face derives from", () => {
+    // Both are verify-`unsupported` (no probeable host of their own), so the
+    // add-provider console branch opens the custom form with these values
+    // instead of a dead end — one source, never a second hand-copied URL.
+    for (const [id, shape] of [
+      ["azure-openai", "https://{resource}.openai.azure.com/openai/deployments/{deployment}"],
+      ["ai-gateway", "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway}"],
+    ] as const) {
+      const entry = PROVIDER_CATALOG[id]!;
+      expect(entry.tier, id).toBe("builtin");
+      expect(entry.api, id).toBe("openai-completions");
+      expect(entry.baseUrl, id).toBe(shape);
     }
   });
 

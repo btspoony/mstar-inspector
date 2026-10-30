@@ -8,10 +8,10 @@
  * budget.
  *
  * Locked contract:
- * - version 0.3.5 (0.3.0 = the v0.3 value rebase; 0.3.1 = the font flip;
- * 0.3.2 = sidebar tint; 0.3.3 = stacked palette; 0.3.4 = deterministic
- * dark default — the prefers-color-scheme OS fallback is removed;
- * 0.3.5 = composition-primitive documentation),
+ * - version is a dotted numeric version and DESIGN.md's own description
+ *   carries the matching `v<version>` change-note (the pin is structural, so
+ *   a version bump updates one place — the document — and never re-pins this
+ *   test),
  *     defaultTheme dark; the theme mechanism is the manual
  *     data-theme override (navbar toggle); unset = dark default —
  *     the frontmatter keys were rewritten together with the
@@ -59,7 +59,8 @@ const L2_ACCENT_STEPS = ["700", "800", "900", "1000"] as const;
 const TYPO_FIELDS = ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"] as const;
 
 type DesignFrontmatter = {
-  version: string;
+  /** YAML yields a number for `0.4` and a string for `0.4.0`. */
+  version: string | number;
   description: string;
   defaultTheme: string;
   themeMechanism: string;
@@ -83,6 +84,14 @@ async function loadFrontmatter(): Promise<DesignFrontmatter> {
   const match = md.match(/^---\n([\s\S]*?)\n---\n/);
   if (!match) throw new Error("DESIGN.md is missing YAML frontmatter");
   return Bun.YAML.parse(match[1]!) as DesignFrontmatter;
+}
+
+/**
+ * The frontmatter version as text. YAML keeps `0.4` a number and `0.4.0` a
+ * string, so a structural check reads both forms the same way.
+ */
+function versionText(value: string | number): string {
+  return String(value);
 }
 
 function cssCustomProperties(block: string): Record<string, string> {
@@ -117,11 +126,13 @@ function extractBlock(css: string, openToken: string): string {
 describe("DESIGN.md L2 dual-theme tokens", () => {
   test("frontmatter version, default theme, and L1 name continuity", async () => {
     const fm = await loadFrontmatter();
-    // 0.3.4 = deterministic dark default (2026-09-16 user feedback round:
-    // the OS fallback branch is deleted from every value site); 0.3.5
-    // (2026-10-25) documents the composition primitives — no token value
-    // moved.
-    expect(fm.version).toBe("0.3.5");
+    const version = versionText(fm.version);
+    // The version pin is STRUCTURAL, not a literal: DESIGN.md's own version is
+    // a dotted numeric version, and its description carries the matching
+    // `v<version>` change-note. A bump (0.4 added the group-card / list-row /
+    // step-dialog specs) edits the document only — nothing to re-pin here.
+    expect(version).toMatch(/^\d+\.\d+(?:\.\d+)?$/);
+    expect(fm.description).toContain(`v${version}`);
     expect(fm.defaultTheme).toBe("dark");
     // Manual data-theme override (navbar toggle); unset = dark
     // default — top-level keys and themes: keys move together.

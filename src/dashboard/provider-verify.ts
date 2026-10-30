@@ -110,8 +110,8 @@ type VerifyAuth = "bearer" | "x-api-key" | "x-goog-api-key";
  *                 key stays console-managed (never an inference probe)
  */
 export type ProviderVerifySpec =
-  | { kind: "models"; url: string; auth: VerifyAuth; anthropicVersion?: boolean }
-  | { kind: "probe"; url: string; auth: VerifyAuth }
+  | { kind: "models"; url: string; auth: VerifyAuth; anthropicVersion?: boolean; keyRejecting?: true }
+  | { kind: "probe"; url: string; auth: VerifyAuth; keyRejecting?: true }
   | { kind: "unsupported"; note: string };
 
 /** omp's `validate "models-endpoint"` entries, by omp provider id (the
@@ -144,14 +144,20 @@ export function ompProviderIdFor(providerId: string): string {
 function ompVerifySpec(providerId: string): Extract<ProviderVerifySpec, { kind: "models" }> | undefined {
   const entry = OMP_MODELS_ENDPOINTS[ompProviderIdFor(providerId)];
   if (entry === undefined || entry.headersHook !== undefined) return undefined;
-  return { kind: "models", url: entry.url, auth: "bearer" };
+  // omp validates a pasted key against exactly this URL (2xx = valid), so the
+  // entry itself is the evidence that a bogus key is answered non-2xx.
+  return { kind: "models", url: entry.url, auth: "bearer", keyRejecting: true };
 }
 
 /**
  * The hand-documented specs for built-in ids omp 18.13.3 has no
  * `validate "models-endpoint"` entry for (DOCUMENTED_VERIFY_ENDPOINTS).
  * Cross-checked 2026-10-30; every row is a GET against a models or identity
- * endpoint — never an inference call:
+ * endpoint — never an inference call. Each models/probe row carries
+ * `keyRejecting: true` unless the endpoint answers a bogus key with 2xx
+ * (kilo / umans / openrouter publish their model list, so a 2xx there only
+ * proves reachability); that marker, derived below, IS the key-rejecting
+ * allow-list — never a second hand-copied URL list.
  *
  * | provider        | kind     | endpoint (auth)                                 | source |
  * |-----------------|----------|-------------------------------------------------|-------|
@@ -170,7 +176,7 @@ function ompVerifySpec(providerId: string): Extract<ProviderVerifySpec, { kind: 
  * | ai-gateway      | unsupported | —                                            | Cloudflare AI Gateway path needs account + gateway ids; key alone has no fixed host. |
  * | ark             | models   | https://ark.cn-beijing.volces.com/api/v3/models (Bearer) | OpenAI-compatible base confirmed (ark.cn-beijing.volces.com/api/v3); /models is the standard path — if Ark 404s it, move to probe [INFERENCE] |
  * | kilo            | models   | https://api.kilo.ai/api/gateway/models (Bearer) | documented gateway base (models.dev `kilo`); the model list is PUBLIC — a bogus key is answered 200 (probed 2026-10-30), so the probe records the weaker `reachable`, never `ok` |
- * | zai             | unsupported | —                                            | omp validates a Z.AI key with a chat completion, not a models endpoint, and Z.AI documents no list-models or usage endpoint. (`GET /api/paas/v4/models` answers 401 for a bogus key, but an undocumented surface needs a documented reference before it becomes verifiable — see the plan's constraint.) The key stays console-managed. |
+ * | zai             | models   | https://api.z.ai/api/paas/v4/models (Bearer) | MEASURED, not documented: outside the omp auth rules, a forged key returns 401 (measured 2026-10-30); re-measure if upstream changes. omp validates a Z.AI key with a chat completion, which this module must not do. |
  * | umans           | models   | https://api.code.umans.ai/v1/models (Bearer)    | documented app.umans.ai code base; the model list is PUBLIC — a bogus key is answered 200 (probed 2026-10-30), so the probe records the weaker `reachable`, never `ok` |
  *
  * xai and wafer-serverless are deliberately ABSENT: omp's vendored validate
@@ -179,32 +185,29 @@ function ompVerifySpec(providerId: string): Extract<ProviderVerifySpec, { kind: 
  * silently leaving a provider unverifiable).
  */
 const DOCUMENTED_VERIFY_ENDPOINTS: Record<string, ProviderVerifySpec> = {
-  anthropic: { kind: "models", url: "https://api.anthropic.com/v1/models", auth: "x-api-key", anthropicVersion: true },
-  openai: { kind: "models", url: "https://api.openai.com/v1/models", auth: "bearer" },
-  gemini: { kind: "models", url: "https://generativelanguage.googleapis.com/v1beta/models", auth: "x-goog-api-key" },
-  copilot: { kind: "probe", url: "https://api.github.com/user", auth: "bearer" },
+  anthropic: { kind: "models", url: "https://api.anthropic.com/v1/models", auth: "x-api-key", anthropicVersion: true, keyRejecting: true },
+  openai: { kind: "models", url: "https://api.openai.com/v1/models", auth: "bearer", keyRejecting: true },
+  gemini: { kind: "models", url: "https://generativelanguage.googleapis.com/v1beta/models", auth: "x-goog-api-key", keyRejecting: true },
+  copilot: { kind: "probe", url: "https://api.github.com/user", auth: "bearer", keyRejecting: true },
   "azure-openai": {
     kind: "unsupported",
     note: "Azure resource host is per-deployment (AZURE_OPENAI_ENDPOINT); the dashboard stores only the key — no probeable host",
   },
-  groq: { kind: "models", url: "https://api.groq.com/openai/v1/models", auth: "bearer" },
-  cerebras: { kind: "models", url: "https://api.cerebras.ai/v1/models", auth: "bearer" },
+  groq: { kind: "models", url: "https://api.groq.com/openai/v1/models", auth: "bearer", keyRejecting: true },
+  cerebras: { kind: "models", url: "https://api.cerebras.ai/v1/models", auth: "bearer", keyRejecting: true },
   openrouter: { kind: "models", url: "https://openrouter.ai/api/v1/models", auth: "bearer" },
   kilo: { kind: "models", url: "https://api.kilo.ai/api/gateway/models", auth: "bearer" },
-  mistral: { kind: "models", url: "https://api.mistral.ai/v1/models", auth: "bearer" },
-  zai: {
-    kind: "unsupported",
-    note: "omp validates a Z.AI key with a chat completion, and Z.AI documents no list-models or usage endpoint (an undocumented /api/paas/v4/models answers 401, but a documented surface is required)",
-  },
+  mistral: { kind: "models", url: "https://api.mistral.ai/v1/models", auth: "bearer", keyRejecting: true },
+  zai: { kind: "models", url: "https://api.z.ai/api/paas/v4/models", auth: "bearer", keyRejecting: true },
   umans: { kind: "models", url: "https://api.code.umans.ai/v1/models", auth: "bearer" },
-  minimax: { kind: "models", url: "https://api.minimax.io/v1/models", auth: "bearer" },
-  opencode: { kind: "models", url: "https://opencode.ai/zen/v1/models", auth: "bearer" },
-  cursor: { kind: "models", url: "https://api.cursor.com/v1/models", auth: "bearer" },
+  minimax: { kind: "models", url: "https://api.minimax.io/v1/models", auth: "bearer", keyRejecting: true },
+  opencode: { kind: "models", url: "https://opencode.ai/zen/v1/models", auth: "bearer", keyRejecting: true },
+  cursor: { kind: "models", url: "https://api.cursor.com/v1/models", auth: "bearer", keyRejecting: true },
   "ai-gateway": {
     kind: "unsupported",
     note: "Cloudflare AI Gateway path needs account + gateway ids; the key alone has no fixed host",
   },
-  ark: { kind: "models", url: "https://ark.cn-beijing.volces.com/api/v3/models", auth: "bearer" },
+  ark: { kind: "models", url: "https://ark.cn-beijing.volces.com/api/v3/models", auth: "bearer", keyRejecting: true },
 };
 
 /**
@@ -314,6 +317,22 @@ function warnTransportFailure(phase: "models" | "probe" | "custom", url: string,
 }
 
 /**
+ * Whether the response landed on another ORIGIN than the one requested. A
+ * cross-origin redirect is an unexpected response — the requested endpoint's
+ * answer is the only evidence a verify may trust, and a gateway that bounces
+ * the key elsewhere never proves it. Judged before the status code. A response
+ * with no URL (a synthetic Response, never a real fetch result) offers nothing
+ * to compare and is decided by its status.
+ */
+function responseLeftOrigin(res: Response, requestUrl: string): boolean {
+  try {
+    return new URL(res.url).origin !== new URL(requestUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Verify one BUILT-IN provider key against its list-models endpoint.
  * 401/403 → invalid_key; any other non-2xx → unexpected_response; 2xx with an
  * unparseable body → unexpected_response; 2xx with a parseable list (possibly
@@ -336,6 +355,9 @@ async function verifyModelsEndpoint(
   } catch (e) {
     warnTransportFailure("models", spec.url, e);
     return { ok: false, reason: "unreachable" };
+  }
+  if (responseLeftOrigin(res, spec.url)) {
+    return { ok: false, reason: "unexpected_response" };
   }
   if (res.status === 401 || res.status === 403) {
     return { ok: false, reason: "invalid_key" };
@@ -378,6 +400,9 @@ async function verifyProbe(
     warnTransportFailure("probe", spec.url, e);
     return { ok: false, reason: "unreachable" };
   }
+  if (responseLeftOrigin(res, spec.url)) {
+    return { ok: false, reason: "unexpected_response" };
+  }
   if (res.status === 401 || res.status === 403) {
     return { ok: false, reason: "invalid_key" };
   }
@@ -389,12 +414,12 @@ async function verifyProbe(
 
 /**
  * The probe URL a custom provider's declared base URL resolves to: EXACTLY one
- * `…/models` URL. A base already ending in `/models` keeps it; one ending in
- * `/v1` (or `/v1/`, or the bare origin) gets `/models`; any other path keeps
- * its prefix and gets `/v1/models` — the standard discovery path for both
- * OpenAI- and Anthropic-protocol providers. A declaration's query/fragment is
- * not part of the probe (it would only reach the provider's error paths).
- * null = unparseable, which the caller answers as `unreachable`.
+ * `…/models` URL. ONE rule, applied to the trailing-slash-stripped path: it
+ * already ends in `/models` → kept as is; it ends in `/v1` → `/models`
+ * appended; anything else (a bare origin included) → `/v1/models` appended —
+ * the standard discovery path for both OpenAI- and Anthropic-protocol
+ * providers. Query/fragment take no part in the probe (they would only reach
+ * the provider's error paths). null = unparseable, answered as `unreachable`.
  */
 function customModelsUrl(baseUrl: string): URL | null {
   let probe: URL;
@@ -417,48 +442,39 @@ function customModelsUrl(baseUrl: string): URL | null {
  * stays true for endpoints that only later start answering 2xx without a
  * credential.
  *
+ * DERIVED, never copied: every builtin spec marked `keyRejecting` contributes
+ * its own url (PROVIDER_VERIFY_ENDPOINTS is the single source of truth), plus
+ * the one custom/template supplement below. A spec stays UNMARKED when its
+ * endpoint answers a bogus key with 2xx: kilo and umans publish their model
+ * list, and OpenRouter's public catalog does too (its stricter
+ * `GET /api/v1/auth/key` probes the key but answers account data — no model
+ * list, so it can never fill the chain dropdown; the spec stays on the public
+ * catalog and records `reachable`).
+ *
  * Custom/template declarations are matched by the URL their base derives
  * (customProbeCanRejectKey judges the request path, not the declared host):
- * every entry below is the probe's FULL URL, so a declaration on a
- * key-rejecting host with another path (`/console`) derives a different URL
- * and stays unproven.
- *
- * Builtin entries are the same decision applied to the spec's own URL
- * (builtinProbeCanRejectKey): a models/identity endpoint the provider itself
- * gates on the credential. Probed 2026-10-30 with a bogus key — each answers
- * 400/401/403, never 2xx. Kilo, Umans and OpenRouter are deliberately ABSENT:
- * their model lists are public (200 for a bogus key), so a 2xx there proves
- * only reachability. OpenRouter's stricter `GET /api/v1/auth/key` probes the
- * key but answers account data — no model list, so it can never fill the
- * chain dropdown; the spec stays on the public catalog and records
- * `reachable`.
- *
- * TypeSafe's omp auth rule validates `GET https://api.typesafe.ai/v1/models`
- * and carries no public-endpoint note, so a bogus key is answered 401/403
- * there.
+ * each entry is the probe's FULL URL, so a declaration on a key-rejecting host
+ * with another path (`/console`) derives a different URL and stays unproven.
  *
  * shortcut: one endpoint per provider only, so every other custom/template
- * declaration lands `reachable`. Add an entry here only with evidence its
- * probe URL answers non-2xx for a bogus key.
+ * declaration lands `reachable`. Add a supplement only with evidence its probe
+ * URL answers non-2xx for a bogus key.
  */
-const KEY_REJECTING_MODELS_PROBE_URLS: Readonly<Record<string, true>> = {
-  // omp-validated / documented builtin endpoints (the table above).
-  "https://api.anthropic.com/v1/models": true,
-  "https://api.openai.com/v1/models": true,
-  "https://generativelanguage.googleapis.com/v1beta/models": true,
-  "https://api.github.com/user": true, // copilot's identity probe
-  "https://api.groq.com/openai/v1/models": true,
-  "https://api.cerebras.ai/v1/models": true,
-  "https://api.mistral.ai/v1/models": true,
-  "https://api.minimax.io/v1/models": true,
-  "https://opencode.ai/zen/v1/models": true,
-  "https://api.cursor.com/v1/models": true,
-  "https://ark.cn-beijing.volces.com/api/v3/models": true,
-  "https://api.x.ai/v1/models": true,
-  "https://pass.wafer.ai/v1/models": true,
-  // Custom/template: the one host with evidence of a key-rejecting models URL.
-  "https://api.typesafe.ai/v1/models": true,
-};
+const KEY_REJECTING_SUPPLEMENT_URLS: readonly string[] = [
+  // TypeSafe's omp auth rule validates GET https://api.typesafe.ai/v1/models
+  // and carries no public-endpoint note, so a bogus key is answered 401/403
+  // there.
+  "https://api.typesafe.ai/v1/models",
+];
+
+export const KEY_REJECTING_MODELS_PROBE_URLS: Readonly<Record<string, true>> = Object.fromEntries(
+  [
+    ...Object.values(PROVIDER_VERIFY_ENDPOINTS).flatMap((spec) =>
+      spec.kind !== "unsupported" && spec.keyRejecting === true ? [spec.url] : [],
+    ),
+    ...KEY_REJECTING_SUPPLEMENT_URLS,
+  ].map((url) => [url, true]),
+);
 
 /** Whether a custom-provider probe on this base URL can REJECT a bogus key. */
 export function customProbeCanRejectKey(baseUrl: string): boolean {
@@ -471,14 +487,14 @@ export function customProbeCanRejectKey(baseUrl: string): boolean {
 }
 
 /**
- * Whether a BUILTIN's probe can REJECT a bogus key — the same allow-list,
- * judged on the URL the spec requests. An `unsupported` provider (or an
- * unknown id) has no probe at all: false.
+ * Whether a BUILTIN's probe can REJECT a bogus key: the spec's own
+ * `keyRejecting` marker (the same single definition the allow-list derives
+ * from). An `unsupported` provider (or an unknown id) has no probe at all:
+ * false.
  */
 export function builtinProbeCanRejectKey(providerId: string): boolean {
   const spec = PROVIDER_VERIFY_ENDPOINTS[providerId];
-  if (spec === undefined || spec.kind === "unsupported") return false;
-  return Object.hasOwn(KEY_REJECTING_MODELS_PROBE_URLS, spec.url);
+  return spec !== undefined && spec.kind !== "unsupported" && spec.keyRejecting === true;
 }
 
 /**
@@ -518,6 +534,9 @@ async function verifyCustomProvider(
   } catch (e) {
     warnTransportFailure("custom", probe.toString(), e);
     return { ok: false, reason: "unreachable" };
+  }
+  if (responseLeftOrigin(res, probe.toString())) {
+    return { ok: false, reason: "unexpected_response" };
   }
   if (res.status === 401 || res.status === 403) {
     return { ok: false, reason: "invalid_key" };

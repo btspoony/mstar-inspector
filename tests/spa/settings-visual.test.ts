@@ -26,7 +26,12 @@ import { withLocation } from "./browser-stub";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "utf8");
-const settingsPage = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
+const settingsPageOnly = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
+/** The settings tab's source: the page plus the providers modules it composes. */
+const settingsTabSource =
+  settingsPageOnly +
+  readFileSync(join(spaRoot, "pages/settings-providers.tsx"), "utf8") +
+  readFileSync(join(spaRoot, "pages/providers-dialogs.tsx"), "utf8");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
 const pageHeader = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
@@ -120,16 +125,16 @@ describe("settings section rhythm (AD-591)", () => {
   test("the page picks tiers through props only — no per-block tier className assembly", () => {
     // The tier vocabulary lives in SectionCard.tsx alone; the page source
     // never spells tier classes or the data-tier attribute by hand.
-    expect(settingsPage).not.toContain("data-tier");
-    expect(settingsPage).not.toContain("shadow-none");
-    expect(settingsPage).not.toContain("gray-alpha-500");
+    expect(settingsTabSource).not.toContain("data-tier");
+    expect(settingsTabSource).not.toContain("shadow-none");
+    expect(settingsTabSource).not.toContain("gray-alpha-500");
   });
 
   test("identity/status cards re-parent onto the Tier 1 surface; runtime harness onto Tier 2", () => {
     const cardBlock = (start: string, end: string) => {
-      const from = settingsPage.indexOf(start);
+      const from = settingsTabSource.indexOf(start);
       expect(from, start).toBeGreaterThan(-1);
-      return settingsPage.slice(from, settingsPage.indexOf(end, from));
+      return settingsTabSource.slice(from, settingsTabSource.indexOf(end, from));
     };
     expect(cardBlock("export function AppInfoCard", "function HealthBody")).toContain(
       '<SectionCard tier="primary">',
@@ -137,27 +142,27 @@ describe("settings section rhythm (AD-591)", () => {
     expect(cardBlock("function RuntimeHarnessCard", "function RuntimeHarnessEditor")).toContain(
       '<SectionCard tier="secondary">',
     );
-    expect(cardBlock("function OpsCard", "function ProvidersCard")).toContain(
+    expect(cardBlock("function OpsCard", "function ChainsCard")).toContain(
       '<SectionCard tier="primary">',
     );
   });
 
   test("the two tier groups head the view: appInfo first, configuration second, spacing-8 apart", () => {
     // Group eyebrows resolve through the dictionary, in AD-591 zone order.
-    const appInfoPos = settingsPage.indexOf('label={t(locale, "settings.group.appInfo")}');
-    const configurationPos = settingsPage.indexOf('label={t(locale, "settings.group.configuration")}');
+    const appInfoPos = settingsTabSource.indexOf('label={t(locale, "settings.group.appInfo")}');
+    const configurationPos = settingsTabSource.indexOf('label={t(locale, "settings.group.configuration")}');
     expect(appInfoPos).toBeGreaterThan(-1);
     expect(configurationPos).toBeGreaterThan(appInfoPos);
     // Group-to-group rhythm rides the spacing token (DESIGN.md: large
     // between sections = spacing-8+).
-    expect(settingsPage).toContain('gap-(--spacing-8)');
+    expect(settingsTabSource).toContain('gap-(--spacing-8)');
     // Zone membership: the manage conditional (Ops/Health) stays inside the
     // identity group (before the configuration eyebrow), and the runtime
     // image card moves into the configuration group.
-    const managePos = settingsPage.indexOf("{payload.can_manage ? (");
+    const managePos = settingsTabSource.indexOf("{payload.can_manage ? (");
     expect(managePos).toBeGreaterThan(appInfoPos);
     expect(managePos).toBeLessThan(configurationPos);
-    const runtimePos = settingsPage.indexOf("<RuntimeHarnessCard");
+    const runtimePos = settingsTabSource.indexOf("<RuntimeHarnessCard");
     expect(runtimePos).toBeGreaterThan(configurationPos);
   });
 });
@@ -202,7 +207,7 @@ describe("settings heading idiom (QC convergence)", () => {
     expect(detailPage).toContain("<PageHeader");
     expect(detailPage).toContain("title={appDisplayName(payload.app)}");
     expect(detailPage).not.toContain("--typo-heading-24");
-    expect(settingsPage).not.toContain("--typo-heading-24");
+    expect(settingsTabSource).not.toContain("--typo-heading-24");
     // Card titles ride the heading-16 step instead — the detail face never
     // re-spells the page title at that size.
     const cardTitles = [...shell.matchAll(/data-slot="card-title" class="([^"]*)"/g)].map(
@@ -216,7 +221,7 @@ describe("settings heading idiom (QC convergence)", () => {
     // No raw Tailwind size utility reaches either rendered face.
     for (const [name, html] of [
       ["AppDetailView", shell],
-      ["SettingsPage", settingsPage],
+      ["SettingsPage", settingsTabSource],
     ] as const) {
       for (const utility of ["text-2xl", "text-xl", "text-lg"]) {
         expect(html, `${name} ${utility}`).not.toContain(utility);
@@ -233,14 +238,14 @@ describe("settings heading idiom (QC convergence)", () => {
     // in the T2 describe below). End anchors use the file's cardBlock
     // next-declaration pattern so prose near a signature can't break the pin.
     const cardBlock = (start: string, end: string) => {
-      const from = settingsPage.indexOf(start);
+      const from = settingsTabSource.indexOf(start);
       expect(from, start).toBeGreaterThan(-1);
-      return settingsPage.slice(from, settingsPage.indexOf(end, from));
+      return settingsTabSource.slice(from, settingsTabSource.indexOf(end, from));
     };
     for (const [card, next] of [
       ["export function AppInfoCard", "function HealthBody"],
       ["function RuntimeHarnessCard", "function RuntimeHarnessEditor"],
-      ["function OpsCard", "function ProvidersCard"],
+      ["function OpsCard", "function ChainsCard"],
     ] as const) {
       expect(cardBlock(card, next), card).toContain("<SectionCardTitle>");
     }
@@ -267,16 +272,16 @@ describe("group eyebrow copy (A8)", () => {
 
 describe("providers/chains/seats re-parent (AD-591)", () => {
   const cardBlock = (start: string, end: string) => {
-    const from = settingsPage.indexOf(start);
+    const from = settingsTabSource.indexOf(start);
     expect(from, start).toBeGreaterThan(-1);
-    return settingsPage.slice(from, settingsPage.indexOf(end, from));
+    return settingsTabSource.slice(from, settingsTabSource.indexOf(end, from));
   };
 
   test("the three configuration cards ride the Tier 2 surface through the prop, not hand-assembled faces", () => {
     // The page never spells tier classes (the T1 single-point pin above); the
     // three manage-face configuration cards re-parent exactly like the
     // runtime harness card did — one prop, zero per-block className assembly.
-    expect(cardBlock("function ProvidersCard", "function ConfiguredKeyRow")).toContain(
+    expect(cardBlock("function ProvidersCard", "function ProviderGroupCard")).toContain(
       '<SectionCard tier="secondary">',
     );
     expect(cardBlock("function ChainsCard", "function SeatsCard")).toContain(
@@ -286,12 +291,12 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
       '<SectionCard tier="secondary">',
     );
     // No raw <Card> remains: the whole settings page composes SectionCard.
-    expect(settingsPage).not.toContain("<Card>");
+    expect(settingsTabSource).not.toContain("<Card>");
   });
 
   test("each re-parented card titles through SectionCardTitle (the heading-16 step)", () => {
     for (const [card, next] of [
-      ["function ProvidersCard", "function ConfiguredKeyRow"],
+      ["function ProvidersCard", "function ProviderGroupCard"],
       ["function ChainsCard", "function SeatsCard"],
       ["function SeatsCard", "function DraftChainPanel"],
     ] as const) {
@@ -304,23 +309,23 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
     // ProviderConfigForm / CustomExpand / DraftChainPanel / SeatsCard field
     // (the combobox aria-labelledby picker label rides its own pinned idiom).
     const labelIdiom = 'className="flex flex-col gap-1.5 text-sm font-medium"';
-    expect(settingsPage.split(labelIdiom).length - 1).toBeGreaterThanOrEqual(8);
-    // Both configured-row kinds (the mirror rows) title at the label-14 form
-    // face and carry their meta at the compact xs muted face — one dialect.
-    const keyRow = cardBlock("function ConfiguredKeyRow", "function ConfiguredCustomRow");
-    const customRow = cardBlock("function ConfiguredCustomRow", "function AddProviderSection");
-    for (const [name, row] of [
-      ["key row", keyRow],
-      ["custom row", customRow],
-    ] as const) {
-      expect(row, name).toContain('<div className="text-sm font-medium">{label}</div>');
-      expect(row, name).toContain('className="text-xs text-muted-foreground"');
-    }
-    // Compactness pins stay structural: hairline + container radius + the
-    // padded row body (mirror-row compactness, faces retuned only).
-    for (const row of [keyRow, customRow]) {
-      expect(row).toContain("flex flex-wrap items-center justify-between gap-2 rounded-md border p-3");
-    }
+    expect(settingsTabSource.split(labelIdiom).length - 1).toBeGreaterThanOrEqual(8);
+    // The configured rows are the shared list-row / group-card composition
+    // (plan 102's components), never a hand-assembled row dialect: identity →
+    // status → meta → actions arrives through ListRow props, the pill through
+    // StatusBadge, the group chrome through GroupCard.
+    // The group card is the providers module's tail (plan 103 task 4 moved the
+    // forms into the dialog module), so the slice runs to the end of it.
+    const groupCard = settingsTabSource.slice(settingsTabSource.indexOf("function ProviderGroupCard"));
+    expect(groupCard).toContain("<GroupCard>");
+    expect(groupCard).toContain("<GroupCardHeader");
+    expect(groupCard).toContain("<GroupCardBody>");
+    expect(groupCard).toContain("<ListRowGroup>");
+    expect(groupCard).toContain("<ListRow");
+    expect(groupCard).toContain("<StatusBadge");
+    expect(settingsTabSource).toContain('from "../components/GroupCard"');
+    expect(settingsTabSource).toContain('from "../components/ListRow"');
+    expect(settingsTabSource).toContain('from "../components/StatusBadge"');
   });
 });
 
@@ -405,9 +410,9 @@ describe("composed load/error states (A6)", () => {
 
 describe("chains panel faces (review deferrals)", () => {
   test("the named-chain panel title rides the heading-16 token idiom (SectionCardTitle's face)", () => {
-    const chainsBody = settingsPage.slice(
-      settingsPage.indexOf("function ChainsCard"),
-      settingsPage.indexOf("function SeatsCard"),
+    const chainsBody = settingsTabSource.slice(
+      settingsTabSource.indexOf("function ChainsCard"),
+      settingsTabSource.indexOf("function SeatsCard"),
     );
     // The panel title now composes the shared SectionCardTitle
     // instead of re-spelling the heading-16 utility chain at the site.
@@ -422,21 +427,21 @@ describe("chains panel faces (review deferrals)", () => {
     // no dialog, no server op — so it rides the AD-552 local-edit face. The
     // named-chain header remove opens the confirm dialog (stored chain) and
     // keeps the destructive face.
-    const editorBody = settingsPage.slice(settingsPage.indexOf("function ChainEditor"));
+    const editorBody = settingsPageOnly.slice(settingsPageOnly.indexOf("function ChainEditor"));
     expect(editorBody).toContain('variant="outline"');
     expect(editorBody).toContain('onClick={() => setChain(chain.filter((_, i) => i !== index))}');
     expect(editorBody).not.toContain('variant="destructive"');
-    const chainsBody = settingsPage.slice(
-      settingsPage.indexOf("function ChainsCard"),
-      settingsPage.indexOf("function SeatsCard"),
+    const chainsBody = settingsTabSource.slice(
+      settingsTabSource.indexOf("function ChainsCard"),
+      settingsTabSource.indexOf("function SeatsCard"),
     );
     expect(chainsBody).toContain('variant="destructive" size="sm" onClick={() => onRemoveChain(tab.id)}');
   });
 
   test("the draft panel opens with a compact identity-field header; the controlled wiring is intact", () => {
-    const panelBody = settingsPage.slice(
-      settingsPage.indexOf("function DraftChainPanel"),
-      settingsPage.indexOf("function ChainEditor"),
+    const panelBody = settingsTabSource.slice(
+      settingsTabSource.indexOf("function DraftChainPanel"),
+      settingsTabSource.indexOf("function ChainEditor"),
     );
     // The name field is the panel's identity header: compact block (w-fit +
     // w-64, the invite-input idiom), label-above-control idiom preserved.
