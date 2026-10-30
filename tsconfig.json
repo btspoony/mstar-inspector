@@ -12,6 +12,11 @@
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
     "noUncheckedIndexedAccess": true,
+    // The vendored omp snapshots (scripts/provider-catalog/*.json) are typed
+    // runtime inputs: src/dashboard/provider-verify.ts imports the API-key
+    // provider union and the `validate "models-endpoint"` entries directly
+    // (esbuild/Bun bundle JSON natively; tsc needs this flag to accept it).
+    "resolveJsonModule": true,
     // Deliberate mirror of tsconfig.spa.json's paths block: bun test reads
     // only this root tsconfig, so component-level tests resolving the SPA's
     // "@/..." aliases need the mapping here. Root tsc itself is inert for

@@ -345,7 +345,10 @@ describe("GET /dashboard/api/apps/:appId/models", () => {
     ]);
 
     // (d) re-adding a key restores BOTH faces.
-    await store.addCustomProviderKey(app.id, "my-custom", sk("custom-ark-5555"));
+    await store.addCustomProviderKey(app.id, "my-custom", sk("custom-ark-5555"), {
+      base_url: decl.base_url,
+      api: decl.api,
+    });
     const restored = await getJson(MODELS, "mallory", env);
     const restoredBody = (await restored.json()) as ModelsBody;
     expect(restoredBody.groups.flatMap((group) => group.selectors)).toContain("my-custom/local-7b");
@@ -1355,7 +1358,10 @@ describe("multi-key provider pools (routes)", () => {
       key: PLAIN_KEY,
     });
     expect(declared.status).toBe(200);
-    await store.addCustomProviderKey(app.id, "my-custom", SECOND_KEY);
+    await store.addCustomProviderKey(app.id, "my-custom", SECOND_KEY, {
+      base_url: "https://example.com/v1",
+      api: "openai-completions",
+    });
 
     const removed = await postForm(SETTINGS + "/key/delete", "mallory", env, {
       provider: "my-custom",
@@ -1440,11 +1446,15 @@ describe("multi-key provider pools (routes)", () => {
       key: PLAIN_KEY,
     });
     expect(seededTemplate.status).toBe(200);
-    for (let i = 1; i < MAX_KEYS_PER_PROVIDER; i++) {
-      await store.addCustomProviderKey(app.id, "my-custom", sk(`custom-cap-${i}-${i}${i}${i}`));
-      await store.addCustomProviderKey(app.id, "workers-ai", sk(`workers-cap-${i}-${i}${i}${i}`));
-    }
     const declarations = await store.listCustomProviders(app.id);
+    const endpointOf = (providerId: string) => {
+      const decl = declarations.find((row) => row.provider_id === providerId)!;
+      return { base_url: decl.base_url, api: decl.api };
+    };
+    for (let i = 1; i < MAX_KEYS_PER_PROVIDER; i++) {
+      await store.addCustomProviderKey(app.id, "my-custom", sk(`custom-cap-${i}-${i}${i}${i}`), endpointOf("my-custom"));
+      await store.addCustomProviderKey(app.id, "workers-ai", sk(`workers-cap-${i}-${i}${i}${i}`), endpointOf("workers-ai"));
+    }
     const pools = await store.listCustomProviderKeys(app.id);
     expect(pools.filter((row) => row.provider === "my-custom")).toHaveLength(MAX_KEYS_PER_PROVIDER);
     expect(pools.filter((row) => row.provider === "workers-ai")).toHaveLength(MAX_KEYS_PER_PROVIDER);
@@ -1519,6 +1529,217 @@ describe("multi-key provider pools (routes)", () => {
     });
     // Neither refusal moved an existing row: the pool is byte-identical.
     expect((await store.listProviderKeys(app.id, "anthropic")).map((row) => row.keyId)).toEqual(before);
+  });
+});
+
+describe("POST settings op=add-custom-provider-key (custom pool append)", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  const SECOND_KEY = sk("ant-mallory-custom-second-7788");
+  const DECLARATION = {
+    op: "add-custom-provider",
+    provider_id: "my-custom",
+    base_url: "https://example.com/v1",
+    api: "openai-completions",
+    model_ids: "local-7b",
+    key: PLAIN_KEY,
+  };
+
+  async function declaredWorld() {
+    const world = await seededWorld();
+    mockStatus(200, { data: [] });
+    const declared = await postForm(SETTINGS, "mallory", makeEnv(world.db), DECLARATION);
+    expect(declared.status).toBe(200);
+    return world;
+  }
+
+  test("appends a key to the EXISTING declaration: the stored endpoint is probed and nothing is rewritten", async () => {
+    const { db, app } = await declaredWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const before = await store.listCustomProviders(app.id);
+
+    const spy = mockStatus(200, { data: [] });
+    // The form carries NO declaration fields the route could honour: base_url /
+    // api / model_ids are deliberately ignored, so an add-key POST can never
+    // move the endpoint under the credentials this pool already holds.
+    const added = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider-key",
+      provider_id: "my-custom",
+      base_url: "https://evil.example.com/v1",
+      api: "anthropic-messages",
+      model_ids: "other-model",
+      key: SECOND_KEY,
+    });
+    expect(added.status).toBe(200);
+    expect(await added.text()).toContain("Added another my-custom key for mallorys-app");
+    // Verification probed the STORED endpoint (the one the pool is bound to).
+    expect(spy).toHaveBeenCalledWith(
+      "https://example.com/v1/models",
+      expect.objectContaining({ method: "GET" }),
+    );
+    // The declaration is byte-identical — no rewrite, no endpoint change.
+    expect(await store.listCustomProviders(app.id)).toEqual(before);
+    // …and the pool now holds both keys, each addressable by its own id.
+    expect((await store.listCustomProviderKeys(app.id, "my-custom")).map((row) => row.keyId).sort()).toEqual(
+      [await keyIdOf(PLAIN_KEY), await keyIdOf(SECOND_KEY)].sort(),
+    );
+    // The append PERSISTED the verify outcome: a probe that passed never
+    // leaves the row unverified. `example.com` is no key-rejecting host, so
+    // the state is the weaker 'reachable'.
+    const secondId = await keyIdOf(SECOND_KEY);
+    const appended = (await store.listCustomProviderKeys(app.id, "my-custom")).find(
+      (row) => row.keyId === secondId,
+    )!;
+    expect(appended.verifiedStatus).toBe("reachable");
+    expect(appended.verifiedAt).toEqual(expect.any(String));
+    // The payload's masked per-key rows (what the custom row renders) carry both.
+    const body = (await (await getJson(SETTINGS_JSON, "mallory", makeEnv(db))).json()) as {
+      keys: Array<{ provider: string; last4: string }>;
+    };
+    expect(body.keys.filter((row) => row.provider === "my-custom").map((row) => row.last4).sort()).toEqual(
+      [PLAIN_KEY.slice(-4), SECOND_KEY.slice(-4)].sort(),
+    );
+  });
+
+  test("an appended key on an allow-listed endpoint records 'ok' — the declaration's own decision", async () => {
+    const { db, app } = await seededWorld();
+    mockStatus(200, { data: [] });
+    const declared = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider",
+      provider_id: "typesafe-gate",
+      base_url: "https://api.typesafe.ai",
+      api: "typesafe",
+      model_ids: "jev-latest",
+      key: PLAIN_KEY,
+    });
+    expect(declared.status).toBe(200);
+    mockStatus(200, { data: [] });
+    const added = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider-key",
+      provider_id: "typesafe-gate",
+      key: SECOND_KEY,
+    });
+    expect(added.status).toBe(200);
+    const secondId = await keyIdOf(SECOND_KEY);
+    const appended = (await createAppConfigStore(db, TEST_KEY).listCustomProviderKeys(app.id, "typesafe-gate")).find(
+      (row) => row.keyId === secondId,
+    )!;
+    // The derived probe URL is the allow-listed key-rejecting endpoint, so the
+    // 2xx proves the key.
+    expect(appended.verifiedStatus).toBe("ok");
+  });
+
+  test("a declaration moved while the verify is in flight refuses the old-endpoint key", async () => {
+    const { db, app } = await declaredWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const replacement = sk("ant-mallory-custom-replaced-3344");
+    // Hold the verify fetch open so the declaration can move underneath it.
+    const verifyStarted = Promise.withResolvers<void>();
+    const verifyGate = Promise.withResolvers<void>();
+    spyOn(globalThis, "fetch").mockImplementation(
+      (async () => {
+        verifyStarted.resolve();
+        await verifyGate.promise;
+        return new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof fetch,
+    );
+    const pending = postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider-key",
+      provider_id: "my-custom",
+      key: SECOND_KEY,
+    });
+    await verifyStarted.promise;
+    // The verified id is removed and re-created at ANOTHER endpoint while the
+    // old verification is still awaited.
+    await store.removeCustomProvider(app.id, "my-custom");
+    await store.upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "my-custom",
+        base_url: "https://replacement.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["local-7b"],
+      },
+      replacement,
+    );
+    verifyGate.resolve();
+    const refused = await pending;
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({
+      key: "settings.error.providerEndpointLocked",
+      params: { provider: "my-custom" },
+    });
+    // The credential verified against the OLD endpoint never entered the
+    // replacement pool, and the replacement declaration is untouched.
+    expect((await store.listCustomProviderKeys(app.id, "my-custom")).map((row) => row.keyId)).toEqual([
+      await keyIdOf(replacement),
+    ]);
+    expect((await store.listCustomProviders(app.id))[0]!.base_url).toBe("https://replacement.example.com/v1");
+  });
+
+  test("the ninth key is the keyed cap 400 — zero writes, pool byte-identical", async () => {
+    const { db, app } = await declaredWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const declared = (await store.listCustomProviders(app.id)).find((row) => row.provider_id === "my-custom")!;
+    for (let i = 1; i < MAX_KEYS_PER_PROVIDER; i++) {
+      await store.addCustomProviderKey(app.id, "my-custom", sk(`custom-append-${i}-${i}${i}${i}`), declared);
+    }
+    const before = await store.listCustomProviderKeys(app.id, "my-custom");
+    expect(before).toHaveLength(MAX_KEYS_PER_PROVIDER);
+    mockStatus(200, { data: [] });
+    const ninth = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider-key",
+      provider_id: "my-custom",
+      key: sk("custom-append-over-9999"),
+    });
+    expect(ninth.status).toBe(400);
+    expect(await ninth.json()).toMatchObject({
+      key: "settings.error.providerKeyLimit",
+      params: { provider: "my-custom", limit: MAX_KEYS_PER_PROVIDER },
+    });
+    expect(await store.listCustomProviderKeys(app.id, "my-custom")).toEqual(before);
+  });
+
+  test("a rejected key keeps the existing structured reason and writes nothing", async () => {
+    const { db, app } = await declaredWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const before = await store.listCustomProviderKeys(app.id, "my-custom");
+    mockStatus(401, {});
+    const rejected = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider-key",
+      provider_id: "my-custom",
+      key: SECOND_KEY,
+    });
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({ ok: false, reason: "invalid_key" });
+    expect(await store.listCustomProviderKeys(app.id, "my-custom")).toEqual(before);
+  });
+
+  test("an undeclared id — a built-in included — is refused and the built-in pool is never touched", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const spy = mockStatus(200, { data: [] });
+    for (const provider_id of ["my-custom", "anthropic"]) {
+      const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+        op: "add-custom-provider-key",
+        provider_id,
+        key: PLAIN_KEY,
+      });
+      expect(res.status, provider_id).toBe(400);
+      expect(await res.json()).toMatchObject({
+        key: "settings.error.customProviderUndeclared",
+        params: { provider: provider_id },
+      });
+    }
+    // A declaration-less id never reaches the provider at all.
+    expect(spy).not.toHaveBeenCalled();
+    expect(await store.listCustomProviderKeys(app.id)).toEqual([]);
+    expect(await store.listProviderKeys(app.id)).toEqual([]);
   });
 });
 

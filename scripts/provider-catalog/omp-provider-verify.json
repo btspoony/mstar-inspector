@@ -1,0 +1,60 @@
+{
+  "source": {
+    "package": "@oh-my-pi/pi-catalog",
+    "version": "18.13.3",
+    "extracted": "2026-10-30",
+    "upstream": [
+      "packages/catalog/src/compat/rules/auth/*.kdl — every `login \"api-key\"` block carrying a `validate \"models-endpoint\"` entry (28 in 18.13.3)",
+      "packages/ai/src/registry/engine/api-key.ts — a models-endpoint validate issues `GET <url>` with `Authorization: Bearer <key>` plus the headers hook's headers",
+      "packages/ai/src/registry/api-key-validation.ts — `validateApiKeyAgainstModelsEndpoint` (2xx = the key is valid)"
+    ],
+    "rules": [
+      "One record per omp auth rule that validates a pasted key against a models/identity endpoint. `id` is the omp provider id and `url` is the validated URL verbatim (a query string is part of it).",
+      "`headersHook` names the omp request-header hook applied on top of the Bearer header. Its headers are computed omp-side (a project id from the environment, a client fingerprint), so the dashboard cannot reproduce it.",
+      "omp's three headers hooks are cline-pass-client, coreweave-project and kimi-fingerprint; kimi-fingerprint rides a device-code login with no models-endpoint entry, so it contributes no record.",
+      "A provider whose omp rule validates with `chat-completions` or `anthropic-messages` (inference) has no record here — the dashboard never runs inference to check a key."
+    ],
+    "headersHooks": ["cline-pass-client", "coreweave-project", "kimi-fingerprint"]
+  },
+  "endpoints": [
+    { "id": "abliteration", "url": "https://api.abliteration.ai/v1/models" },
+    { "id": "aiand", "url": "https://api.aiand.com/v1/models" },
+    { "id": "baseten", "url": "https://inference.baseten.co/v1/models" },
+    { "id": "charm-hyper", "url": "https://hyper.charm.land/v1/credits" },
+    {
+      "id": "cline-pass",
+      "url": "https://api.cline.bot/api/v1/users/me",
+      "headersHook": "cline-pass-client"
+    },
+    { "id": "commandcode", "url": "https://api.commandcode.ai/alpha/whoami" },
+    { "id": "coralbricks", "url": "https://inference.coralbricks.ai/v1/models" },
+    {
+      "id": "coreweave",
+      "url": "https://api.inference.wandb.ai/v1/models",
+      "headersHook": "coreweave-project"
+    },
+    { "id": "deepseek", "url": "https://api.deepseek.com/v1/models" },
+    {
+      "id": "fireworks",
+      "url": "https://api.fireworks.ai/v1/accounts/fireworks/models?filter=supports_serverless%3Dtrue&pageSize=1"
+    },
+    { "id": "gmi-cloud", "url": "https://api.gmi-serving.com/v1/models" },
+    { "id": "helmcode", "url": "https://api.helmcode.com/v1/models" },
+    { "id": "meta", "url": "https://api.meta.ai/v1/models" },
+    { "id": "moonshot", "url": "https://api.moonshot.ai/v1/models" },
+    { "id": "nanogpt", "url": "https://nano-gpt.com/api/v1/models" },
+    { "id": "sakana", "url": "https://api.sakana.ai/v1/models" },
+    { "id": "sambanova", "url": "https://api.sambanova.ai/v1/models" },
+    { "id": "siliconflow-cn", "url": "https://api.siliconflow.cn/v1/models" },
+    { "id": "siliconflow", "url": "https://api.siliconflow.com/v1/models" },
+    { "id": "singularityapi-dev", "url": "https://api.singularityapi.dev/v1/models" },
+    { "id": "singularityapi-tech", "url": "https://api.singularityapi.tech/v1/models" },
+    { "id": "synthetic", "url": "https://api.synthetic.new/openai/v1/models" },
+    { "id": "together", "url": "https://api.together.xyz/v1/models" },
+    { "id": "typesafe", "url": "https://api.typesafe.ai/v1/models" },
+    { "id": "wafer-serverless", "url": "https://pass.wafer.ai/v1/models" },
+    { "id": "xai", "url": "https://api.x.ai/v1/models" },
+    { "id": "yolo-auto", "url": "https://yolo-auto.com/v1/models" },
+    { "id": "zenmux", "url": "https://zenmux.ai/api/v1/models" }
+  ]
+}

@@ -1317,7 +1317,9 @@ function ProvidersCard({
                   locale={locale}
                   row={row}
                   label={catalogById[row.provider_id]?.label ?? row.provider_id}
+                  storedKeys={providerKeyRows(payload.keys, row.provider_id)}
                   onPending={onPending}
+                  onSettings={onSettings}
                 />
               )}
             </Fragment>
@@ -1390,14 +1392,52 @@ function ConfiguredCustomRow({
   locale,
   row,
   label,
+  storedKeys,
   onPending,
+  onSettings,
 }: {
   locale: SpaBoot["locale"];
   row: Extract<ConfiguredProvider, { kind: "custom" }>;
   label: string;
+  /** EVERY stored key of this declaration's pool — the same masked rows the
+   *  built-in/template faces render, so a second key is visible before a third
+   *  is added. */
+  storedKeys: ProviderKeyRow[];
   onPending: (action: PendingAction) => void;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
+  const [addOpen, setAddOpen] = useState(false);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  /**
+   * Append ANOTHER key to this declaration's pool (the built-in/template
+   * faces' multi-key behaviour, which the custom row lacked): the declaration
+   * itself is untouched — the route verifies against the STORED endpoint and
+   * appends, so no endpoint field is offered here. A failed verify keeps the
+   * typed key for correction.
+   */
+  async function submit(): Promise<void> {
+    setBusy(true);
+    try {
+      const outcome = await onSettings({
+        op: "add-custom-provider-key",
+        provider_id: row.provider_id,
+        key,
+      });
+      setNotice(
+        outcome.kind === "success" ? { kind: "success", message: t(locale, "settings.customKeyAdded") } : outcome,
+      );
+      if (outcome.kind === "success") setKey("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
+    // Same shell as the key row (one compact dialect); the add-key form and the
+    // notice are `w-full` children so they wrap onto their own line.
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
       <div>
         <div className="text-sm font-medium">{label}</div>
@@ -1405,14 +1445,57 @@ function ConfiguredCustomRow({
           {row.provider_id} · {row.base_url} · {row.api} · {row.model_ids.join(", ")}
         </div>
       </div>
-      <Button
-        type="button"
-        variant="destructive"
-        size="sm"
-        onClick={() => onPending({ kind: "remove-custom", providerId: row.provider_id })}
-      >
-        {t(locale, "settings.remove")}
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-expanded={addOpen}
+          onClick={() => setAddOpen(!addOpen)}
+        >
+          <Plus aria-hidden="true" />
+          {t(locale, "settings.addKey")}
+        </Button>
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          onClick={() => onPending({ kind: "remove-custom", providerId: row.provider_id })}
+        >
+          {t(locale, "settings.remove")}
+        </Button>
+      </div>
+      {addOpen ? (
+        <form
+          className="flex w-full flex-col gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+        >
+          {storedKeys.map((stored) => (
+            <p key={stored.keyId} className="text-sm text-muted-foreground">
+              {stored.last4
+                ? t(locale, "settings.keyEnding", { last4: stored.last4 })
+                : t(locale, "settings.keyTooShort")}
+            </p>
+          ))}
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
+            {t(locale, "settings.apiKey")}
+            <Input
+              type="password"
+              value={key}
+              onChange={(event) => setKey(event.target.value)}
+              autoComplete="new-password"
+              placeholder={t(locale, "settings.apiKeyPlaceholder")}
+            />
+          </label>
+          <Button type="submit" disabled={busy}>{t(locale, "settings.addKey")}</Button>
+        </form>
+      ) : null}
+      <div className="w-full">
+        <NoticeRegion notice={notice} />
+      </div>
     </div>
   );
 }

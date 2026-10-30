@@ -88,11 +88,10 @@
  *     any crypto or write (input bounds; the settings route re-renders 400
  *     first — the guard here is the backstop for direct callers).
  *   - saveVerifiedKey is the verified analogue: the same per-key upsert with
- *     verified_at = now + verified_status = 'ok', plus THAT KEY's
- *     verified-model evidence row, as ONE atomic db.batch. (Built-in providers
- *     only: every built-in probe rejects a bogus key, so a 2xx there IS proof;
- *     the declaration-time custom path records 'reachable' instead unless its
- *     host is allow-listed as key-rejecting.)
+ *     verified_at = now plus verified_status 'ok' — or 'reachable' when the
+ *     builtin's probe URL is not known to reject a bogus key (one allow-list,
+ *     shared with the custom path) — plus THAT KEY's
+ *     verified-model evidence row, as ONE atomic db.batch.
  *   - deleteProviderKey removes ONE slot — and, when it actually removed that
  *     row, that key's OWN evidence row (a model only the removed credential
  *     could reach must not stay selectable; evidence is keyed by the
@@ -144,8 +143,9 @@
  *     manage per-App declarations of NON-built-in model providers (base URL
  *     + AL-23-1 api enum + model ids); the declaration holds NO key material
  *     — the key lives in `app_custom_provider_keys` under the same per-key
- *     AAD form, written by upsertCustomProvider (verified) or
- *     addCustomProviderKey (unverified), listed by listCustomProviderKeys
+ *     AAD form, written by upsertCustomProvider or
+ *     addCustomProviderKey (both verify-first callers: each records the same
+ *     ok/reachable state), listed by listCustomProviderKeys
  *     (masked) and decrypted only by getCustomProvidersForConsumer (the
  *     getAppConfig analogue — fail-loud on tamper). removeCustomProvider
  *     deletes the declaration AND its whole pool in one batch. A custom key
@@ -162,17 +162,18 @@
 import { createSecretbox } from "./secretbox";
 import { createAppsStore } from "./apps-store";
 import { sandboxImageHostIds } from "../contracts/sandbox-images";
-import { customProbeCanRejectKey } from "./provider-verify";
+import { builtinProbeCanRejectKey, customProbeCanRejectKey } from "./provider-verify";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
 
 /**
  * The store-enforced `verified_status` vocabulary (migration 0015; no CHECK
  * constraint — producer-enforced, the 0006/0012 precedent):
  *   - `ok`        the probe PROVED the submitted key (a bogus key is answered
- *                 401/403 there, which is what makes the 2xx meaningful)
- *   - `reachable` the probe only proved the ENDPOINT answered — the host is
- *                 not known to reject a bogus key (every custom/template
- *                 declaration except the allow-listed probes)
+ *                 non-2xx there, which is what makes the 2xx meaningful)
+ *   - `reachable` the probe only proved the ENDPOINT answered — the probe URL
+ *                 is not known to reject a bogus key (a custom/template
+ *                 declaration off the allow-list, or a builtin whose model
+ *                 list is public: kilo / umans)
  *   - `failed`    a recorded failed verify
  * NULL = never verified.
  */
@@ -1145,18 +1146,37 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   /**
    * A pool write that matched ZERO rows. A NEW key at MAX_KEYS_PER_PROVIDER is
-   * the common cause; for an OWNED pool the other cause is the declaration
-   * vanishing between the caller's read and this write — named explicitly so
-   * the removal race surfaces as a refusal instead of an orphan credential.
+   * the common cause; for an OWNED pool the other causes are the declaration
+   * vanishing between the caller's read and this write, or (when the statement
+   * carried `endpoint`) that declaration now naming another endpoint — named
+   * explicitly so each race surfaces as a refusal instead of an orphan or a
+   * misdirected credential.
    */
-  async function throwKeyRefusal(spec: KeyTable, appId: string, provider: string): Promise<never> {
+  async function throwKeyRefusal(
+    spec: KeyTable,
+    appId: string,
+    provider: string,
+    endpoint?: { base_url: string; api: string },
+  ): Promise<never> {
     if (spec.owner !== undefined) {
       const decl = await db
-        .prepare(`SELECT ${spec.owner.column} FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?`)
+        .prepare(`SELECT base_url, api FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?`)
         .bind(appId, provider)
-        .first<Record<string, string>>();
+        .first<{ base_url: string; api: string }>();
       if (decl === null) {
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(provider)} is not declared for this app`);
+      }
+      // With an endpoint predicate, an EXISTING declaration that still
+      // matches zero rows was pinned to another endpoint: the credential was
+      // verified somewhere this pool no longer points. Same precedence as
+      // throwCustomProviderRefusal — a full pool refuses the ninth key first.
+      if (endpoint !== undefined && (decl.base_url !== endpoint.base_url || decl.api !== endpoint.api)) {
+        const count = await db
+          .prepare(`SELECT COUNT(*) AS n FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?`)
+          .bind(appId, provider)
+          .first<{ n: number }>();
+        if ((count?.n ?? 0) >= MAX_KEYS_PER_PROVIDER) throw new ProviderKeyLimitError(provider);
+        throw new ProviderEndpointLockedError(provider);
       }
     }
     throw new ProviderKeyLimitError(provider);
@@ -1231,7 +1251,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     appId: string,
     provider: string,
     plainKey: string,
-    opts: { verifiedStatus: VerifiedStatus | null; models?: string[] },
+    opts: { verifiedStatus: VerifiedStatus | null; models?: string[]; endpoint?: { base_url: string; api: string } },
   ): Promise<void> {
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
       throw new ProviderKeyTooLongError();
@@ -1244,7 +1264,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     const keyStatement = keyInsertStatement(spec, appId, provider, keyId, keyEnc, opts);
     if (opts.models === undefined) {
       const res = await keyStatement.run();
-      if (res.meta.changes === 0) await throwKeyRefusal(spec, appId, provider);
+      if (res.meta.changes === 0) await throwKeyRefusal(spec, appId, provider, opts.endpoint);
       return;
     }
     const res = await db.batch([
@@ -1269,7 +1289,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           keyId,
         ),
     ]);
-    if (res[0]!.meta.changes === 0) await throwKeyRefusal(spec, appId, provider);
+    if (res[0]!.meta.changes === 0) await throwKeyRefusal(spec, appId, provider, opts.endpoint);
   }
 
   /** Mask one stored key row for a settings list face: decrypt, keep ONLY the tail. */
@@ -1414,7 +1434,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * Store one provider key AFTER successful verification: the VERIFIED
      * analogue of addProviderKey — encrypts with the SAME per-key AAD,
      * upserts that key's row with the verification bookkeeping (migration
-     * 0015: verified_at = now + verified_status = 'ok'), and upserts THAT
+     * 0015: verified_at = now + verified_status 'ok', or the weaker
+     * 'reachable' when this builtin's probe URL is NOT known to reject a bogus
+     * key — builtinProbeCanRejectKey, the same allow-list the custom path
+     * reads; a public model list answers 2xx for any bearer, so its 2xx proves
+     * reachability only), and upserts THAT
      * KEY's verified-model evidence row under the SELECTOR-FACING provider key
      * (modelCacheProviderKey — an `ark` BYOK key records under "ark-plan",
      * spec §6.1) as ONE atomic db.batch (D1 batch is transactional and the
@@ -1428,7 +1452,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * ProviderKeyLimitError for a NEW slot past MAX_KEYS_PER_PROVIDER.
      */
     saveVerifiedKey(appId: string, provider: string, plainKey: string, models: string[]): Promise<void> {
-      return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, { verifiedStatus: "ok", models });
+      return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, {
+        verifiedStatus: builtinProbeCanRejectKey(provider) ? "ok" : "reachable",
+        models,
+      });
     },
 
     /**
@@ -2042,15 +2069,32 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Add one key to a DECLARED custom provider's pool — the unverified path
-     * (upsertCustomProvider is the declaration-time verified one). The
+     * Add one key to a DECLARED custom provider's pool — the append face of a
+     * verify-first route, so the row carries the verification bookkeeping:
+     * verified_at = now with verified_status 'ok', or the weaker 'reachable'
+     * unless the declared base URL derives a models endpoint KNOWN to reject a
+     * bogus key (customProbeCanRejectKey — the same decision
+     * upsertCustomProvider makes, so a key appended here and one declared with
+     * The
      * declaration is read first: an undeclared provider id throws
      * InvalidCustomProviderError, because a key row without its declaration is
      * unreachable data and a silent orphan is worse than a loud refusal (the
      * "an unknown app_id is a caller bug" convention). Bounds/cap contract
-     * identical to addProviderKey.
+     * identical to addProviderKey. The declaration is never rewritten.
+     *
+     * `endpoint` is the `{base_url, api}` the key was VERIFIED against: the
+     * insert carries it as the same atomic predicate the declare route uses,
+     * so a declaration removed and re-created at another endpoint while the
+     * verification was in flight refuses the credential
+     * (ProviderEndpointLockedError) instead of adopting it. The status is
+     * derived from that verified URL, never from a later declaration read.
      */
-    async addCustomProviderKey(appId: string, providerId: string, plainKey: string): Promise<void> {
+    async addCustomProviderKey(
+      appId: string,
+      providerId: string,
+      plainKey: string,
+      endpoint: { base_url: string; api: string },
+    ): Promise<void> {
       const declared = await db
         .prepare(`SELECT provider_id FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
         .bind(appId, providerId)
@@ -2058,7 +2102,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       if (declared === null) {
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);
       }
-      await addKey(CUSTOM_KEY_TABLE, appId, providerId, plainKey, { verifiedStatus: null });
+      await addKey(CUSTOM_KEY_TABLE, appId, providerId, plainKey, {
+        verifiedStatus: customProbeCanRejectKey(endpoint.base_url) ? "ok" : "reachable",
+        endpoint,
+      });
     },
 
     /**

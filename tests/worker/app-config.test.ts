@@ -1883,7 +1883,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
     await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
-    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk("custom-ark-7777"));
+    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk("custom-ark-7777"), CUSTOM);
     const selectDeclaration = `SELECT base_url, api, model_ids, created_at, updated_at
        FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`;
     const before = db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id);
@@ -1976,11 +1976,14 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     // A second key joins the pool; order is (created_at, key_id) — the legacy
     // row was backdated, so it stays first.
     const second = sk("custom-ark-7777");
-    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, second);
+    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, second, CUSTOM);
     expect(rawCount(db, "app_custom_provider_keys")).toBe(2);
     const keys = await store.listCustomProviderKeys(app.id, CUSTOM.provider_id);
     expect(keys.map((key) => key.keyId)).toEqual([await keyIdOf(PLAIN_CUSTOM_KEY), await keyIdOf(second)]);
-    expect(keys.map((key) => key.verifiedStatus)).toEqual(["ok", null]);
+    // The append persists its verify outcome instead of leaving the row
+    // unverified: this declaration's base derives `/api/v3/v1/models`, which is
+    // not an allow-listed key-rejecting URL, so the new row is 'reachable'.
+    expect(keys.map((key) => key.verifiedStatus)).toEqual(["ok", "reachable"]);
     expect(JSON.stringify(keys)).not.toContain(PLAIN_CUSTOM_KEY);
     expect(await store.getCustomProvidersForConsumer(app.id)).toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY, second] },
@@ -1990,7 +1993,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect((await store.getCustomProvidersForConsumer(app.id))[0]!.api_keys).toEqual([PLAIN_CUSTOM_KEY]);
     expect(await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, "0".repeat(16))).toBe(false);
     // An undeclared provider id is a caller bug, never a silent slot.
-    await expect(store.addCustomProviderKey(app.id, "not-declared", second)).rejects.toThrow(
+    await expect(store.addCustomProviderKey(app.id, "not-declared", second, CUSTOM)).rejects.toThrow(
       InvalidCustomProviderError,
     );
   });
@@ -1999,7 +2002,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
     await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
-    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk("custom-ark-7777"));
+    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk("custom-ark-7777"), CUSTOM);
     expect(rawCount(db, "app_custom_provider_keys")).toBe(2);
     await expect(store.removeCustomProvider(app.id, "nope")).resolves.toBe(false);
     await expect(store.removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(true);
@@ -2015,7 +2018,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const store = configStore(db);
     await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     for (let i = 1; i < MAX_KEYS_PER_PROVIDER; i++) {
-      await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk(`custom-pool-key-${i}-${i}${i}${i}`));
+      await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk(`custom-pool-key-${i}-${i}${i}${i}`), CUSTOM);
     }
     expect(rawCount(db, "app_custom_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
     // Backdate the declaration so ANY write to it is visible: datetime('now')
@@ -2075,6 +2078,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
         app.id,
         CUSTOM.provider_id,
         sk("custom-orphan-3131"),
+        CUSTOM,
       ),
     ).rejects.toThrow(InvalidCustomProviderError);
     expect(rawCount(db, "app_custom_providers")).toBe(0);

@@ -352,6 +352,19 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
   });
 });
 
+describe("custom-provider add-key copy", () => {
+  test("custom add-key copy is dictionary-backed in both locales (action, success, cap)", () => {
+    expect(t("en", "settings.addKey")).toBe("Add key");
+    expect(t("zh_CN", "settings.addKey")).toBe("添加密钥");
+    expect(t("en", "settings.customKeyAdded")).toContain("shown masked");
+    expect(t("zh_CN", "settings.customKeyAdded")).toContain("掩码");
+    expect(t("en", "settings.error.providerKeyLimit")).toContain("maximum");
+    expect(t("zh_CN", "settings.error.providerKeyLimit")).toContain("已存满");
+    expect(t("en", "settings.error.customProviderUndeclared")).toContain("not a declared custom provider");
+    expect(t("zh_CN", "settings.error.customProviderUndeclared")).toContain("已声明");
+  });
+});
+
 describe("catalog provenance + eligibility messaging", () => {
   test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime harness", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");

@@ -2744,6 +2744,7 @@ const SETTINGS_400_KEYS = {
   modelIdsTooMany: "settings.error.modelIdsTooMany",
   modelIdTooLong: "settings.error.modelIdTooLong",
   customProviderDeclRejected: "settings.error.customProviderDeclRejected",
+  customProviderUndeclared: "settings.error.customProviderUndeclared",
   providerEndpointLocked: "settings.error.providerEndpointLocked",
   templateUnknown: "settings.error.templateUnknown",
   templateIncomplete: "settings.error.templateIncomplete",
@@ -3146,8 +3147,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // eligibility vs the App's selected image. Builtin ids in PROVIDER_IDS
       // order, then the template tier (the hand-curated workers-ai entry
       // followed by the snapshot breadth — the catalog's own key order).
-      // `verifiable: false` marks the console-only providers (azure-openai /
-      // ai-gateway — the old addKeyProviderIds filter); templates verify via
+      // `verifiable: false` marks the console-only providers (no probeable
+      // endpoint: azure-openai / ai-gateway / zai today — the old
+      // addKeyProviderIds filter); templates verify via
       // the custom probe, so always verifiable.
       // (AD-547): every entry also carries a display-only
       // `display_group` ("common" = the 5-entry 常用提供方 tier, "catalog" =
@@ -3722,6 +3724,90 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.github_app_id, `Declared custom provider ${providerId} for ${appDisplayName(gate.app)} — its key is stored encrypted and injected by environment variable name.`,
+    );
+  }
+  if (op === "add-custom-provider-key") {
+    // Append a key to an EXISTING custom declaration — the multi-key pool's
+    // missing entry point (a custom declaration could only grow by
+    // re-submitting the whole declaration form). The declaration is only READ:
+    // its base_url / api / model_ids are what the pool's keys were verified
+    // against, so this path cannot move the endpoint (no declaration rewrite,
+    // and the store's endpoint lock keeps holding for every other path).
+    // Verification runs FIRST: a rejected key returns the existing structured
+    // 400 and writes nothing.
+    const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
+    const plainKey = typeof form.key === "string" ? form.key.trim() : "";
+    if (providerId === "") {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdRequired);
+    }
+    if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerIdInvalid);
+    }
+    if (plainKey === "") {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyRequired);
+    }
+    if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyTooLong, {
+        count: plainKey.length,
+        limit: MAX_PROVIDER_KEY_LENGTH,
+      });
+    }
+    // A `!`-prefixed key would be run as a shell command by the review
+    // runtime's config-value resolver (packages/shared/src/credential-key.ts).
+    if (isCommandConfigKey(plainKey)) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyCommandPrefix);
+    }
+    const declared = (await store.listCustomProviders(gate.app.id)).find((row) => row.provider_id === providerId);
+    if (declared === undefined) {
+      return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.customProviderUndeclared, {
+        provider: providerId,
+      });
+    }
+    try {
+      const verified = await verifyProviderKey({ fetch: globalThis.fetch }, providerId, plainKey, {
+        baseUrl: declared.base_url,
+        api: declared.api,
+        modelIds: declared.model_ids,
+      });
+      if (!verified.ok) {
+        return settingsVerifyFailResponse(c, gate.app.github_app_id, verified.reason);
+      }
+      // The append persists the verify outcome: the store records 'ok' or the
+      // weaker 'reachable' from the SAME derived-URL decision the declaration
+      // path applies, so the row the operator just verified renders its state.
+      // The verified endpoint rides along: the insert is gated on the
+      // declaration still carrying it, so a declaration removed and re-created
+      // at another endpoint while the verification was in flight refuses this
+      // credential instead of adopting it.
+      await store.addCustomProviderKey(gate.app.id, providerId, plainKey, {
+        base_url: declared.base_url,
+        api: declared.api,
+      });
+    } catch (err) {
+      logSettingsFailure("add_custom_provider_key", gate.app.id, err);
+      // The declaration was removed between the read and the write — the same
+      // keyed 400, nothing stored.
+      if (err instanceof InvalidCustomProviderError) {
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.customProviderUndeclared, {
+          provider: providerId,
+        });
+      }
+      // The declaration now points at another endpoint than the one this key
+      // was verified against — the same keyed 400 the declare route answers.
+      if (err instanceof ProviderEndpointLockedError) {
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerEndpointLocked, {
+          provider: providerId,
+        });
+      }
+      if (err instanceof ProviderKeyLimitError) {
+        return settingsKeyLimitResponse(c, gate.app.github_app_id, providerId);
+      }
+      return settingsPostResponse(c, gate.app.github_app_id, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(
+      c,
+      gate.app.github_app_id,
+      `Added another ${providerId} key for ${appDisplayName(gate.app)} — it is only ever shown masked.`,
     );
   }
   if (op === "add-template-provider") {

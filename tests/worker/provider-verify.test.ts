@@ -33,11 +33,16 @@ import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import {
   PROVIDER_VERIFY_ENDPOINTS,
   VERIFY_TIMEOUT_MS,
+  VERIFY_USER_AGENT,
+  builtinProbeCanRejectKey,
   customProbeCanRejectKey,
+  ompProviderIdFor,
   verifyProviderKey,
   type VerifyDeps,
 } from "../../src/dashboard/provider-verify";
 import type { DashboardD1 } from "../../src/dashboard/users";
+import ompApiKeyProviders from "../../scripts/provider-catalog/omp-api-key-providers.json";
+import ompProviderVerify from "../../scripts/provider-catalog/omp-provider-verify.json";
 import { sk } from "../helpers/fake-secrets";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -156,6 +161,12 @@ function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+/** Every verify request's headers: the key's auth shape plus the two client
+ *  headers (an explicit Accept and User-Agent) no request may go without. */
+function verifyHeaders(auth: Record<string, string>): Record<string, string> {
+  return { ...auth, accept: "application/json", "user-agent": VERIFY_USER_AGENT };
+}
+
 /** A fetch that never resolves on its own — it rejects only when the request
  *  signal aborts (the module's AbortSignal.timeout firing). */
 const TIMEOUT_FETCH: VerifyDeps["fetch"] = ((_input, init) => {
@@ -239,9 +250,43 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
     expect(Object.keys(PROVIDER_VERIFY_ENDPOINTS)).toHaveLength(19);
   });
 
-  test("unsupported built-ins are exactly azure-openai + ai-gateway (the settings face's verifiable flag)", () => {
+  test("unsupported built-ins are exactly azure-openai + ai-gateway + zai (the settings face's verifiable flag)", () => {
     const unsupported = PROVIDER_IDS.filter((id) => PROVIDER_VERIFY_ENDPOINTS[id]?.kind === "unsupported");
-    expect(unsupported).toEqual(["azure-openai", "ai-gateway"]);
+    expect(unsupported).toEqual(["azure-openai", "zai", "ai-gateway"]);
+  });
+
+  test("the one provider without a probeable surface names the missing endpoint", () => {
+    const spec = PROVIDER_VERIFY_ENDPOINTS["zai"]!;
+    expect(spec.kind).toBe("unsupported");
+    if (spec.kind !== "unsupported") throw new Error("unreachable");
+    expect(spec.note).toContain("models");
+  });
+
+  test("each builtin's 2xx means ok or only reachable — the shared allow-list decides", () => {
+    // true = the provider answers non-2xx for a bogus key (probed 2026-10-30);
+    // false = no probe at all (unsupported) OR a probe whose PUBLIC model list
+    // answers 200 for any bearer, so its 2xx proves reachability only.
+    expect(Object.fromEntries(PROVIDER_IDS.map((id) => [id, builtinProbeCanRejectKey(id)]))).toEqual({
+      anthropic: true,
+      openai: true,
+      gemini: true,
+      copilot: true,
+      "azure-openai": false,
+      groq: true,
+      cerebras: true,
+      openrouter: false,
+      kilo: false,
+      mistral: true,
+      zai: false,
+      umans: false,
+      minimax: true,
+      opencode: true,
+      cursor: true,
+      "ai-gateway": false,
+      ark: true,
+      xai: true,
+      "wafer-serverless": true,
+    });
   });
 
   test("every entry is a recognized spec kind (models | probe | unsupported)", () => {
@@ -251,12 +296,12 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
         expect(["bearer", "x-api-key", "x-goog-api-key"]).toContain(spec.auth);
       } else if (spec.kind === "probe") {
         expect(spec.url.startsWith("https://")).toBe(true);
-        expect(["GET", "POST"]).toContain(spec.method);
         expect(["bearer", "x-api-key"]).toContain(spec.auth);
       } else {
-        // unsupported — per-resource-host providers carry a documented note
+        // unsupported — per-resource-host / undocumented-endpoint providers
+        // carry a documented note.
         expect(spec.note.length).toBeGreaterThan(10);
-        expect(["azure-openai", "ai-gateway"]).toContain(provider);
+        expect(["azure-openai", "zai", "ai-gateway"]).toContain(provider);
       }
     }
   });
@@ -271,6 +316,92 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
     const arkHost = getSandboxImage("omp")!.hosts.find((host) => host.catalogProviderId === "ark");
     expect(arkHost).toBeDefined();
     expect(modelCacheProviderKey("ark")).toBe(arkHost!.id);
+  });
+});
+
+// --- omp alignment: the vendored validate data and the no-inference invariant ---
+
+describe("omp 18.13.3 validate data (vendored verify snapshot)", () => {
+  test("the snapshot names its source version, extraction date and the three headers hooks", () => {
+    expect(ompProviderVerify.source.version).toBe("18.13.3");
+    expect(ompProviderVerify.source.extracted).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(ompProviderVerify.source.headersHooks).toEqual([
+      "cline-pass-client",
+      "coreweave-project",
+      "kimi-fingerprint",
+    ]);
+    // Every models-endpoint entry omp 18.13.3 carries is vendored verbatim.
+    expect(ompProviderVerify.endpoints).toHaveLength(28);
+    expect(ompProviderVerify.endpoints.find((entry) => entry.id === "coreweave")).toMatchObject({
+      url: "https://api.inference.wandb.ai/v1/models",
+      headersHook: "coreweave-project",
+    });
+  });
+
+  test("inspector ids resolve to omp ids through the union alias map — no second mapping", () => {
+    expect(ompProviderIdFor("gemini")).toBe("google");
+    expect(ompProviderIdFor("azure-openai")).toBe("azure");
+    expect(ompProviderIdFor("opencode")).toBe("opencode-zen");
+    // A builtin whose id IS its omp id resolves to itself; an unknown id too.
+    expect(ompProviderIdFor("xai")).toBe("xai");
+    expect(ompProviderIdFor("not-a-provider")).toBe("not-a-provider");
+    // The whole map, in the alias→catalog direction the verify surface reads.
+    for (const [ompId, catalogId] of Object.entries(ompApiKeyProviders.excluded.alias)) {
+      expect(ompProviderIdFor(catalogId)).toBe(ompId);
+    }
+  });
+
+  test("builtin specs come from that data wherever omp validates a plain-Bearer models endpoint", () => {
+    const byOmpId = new Map(ompProviderVerify.endpoints.map((entry) => [entry.id, entry]));
+    let derived = 0;
+    for (const [provider, spec] of Object.entries(PROVIDER_VERIFY_ENDPOINTS)) {
+      const entry = byOmpId.get(ompProviderIdFor(provider));
+      // A headers-hook entry is omp's own request (it computes hook headers the
+      // dashboard cannot), so the documented entry answers for that id.
+      if (entry === undefined || entry.headersHook !== undefined) continue;
+      derived += 1;
+      expect(spec).toEqual({ kind: "models", url: entry.url, auth: "bearer" });
+    }
+    // xai + wafer-serverless are supplied ONLY by that data (the documented
+    // table deliberately omits them), so a broken derivation fails here.
+    expect(derived).toBe(2);
+    expect(PROVIDER_VERIFY_ENDPOINTS["xai"]).toEqual({
+      kind: "models",
+      url: "https://api.x.ai/v1/models",
+      auth: "bearer",
+    });
+    expect(PROVIDER_VERIFY_ENDPOINTS["wafer-serverless"]).toEqual({
+      kind: "models",
+      url: "https://pass.wafer.ai/v1/models",
+      auth: "bearer",
+    });
+  });
+});
+
+describe("validation-only invariant (no inference in the verify surface)", () => {
+  test("the module's source carries no chat-completion probe", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/dashboard/provider-verify.ts"), "utf8");
+    // The retired 1-token chat probes (kilo / zai / umans) must never return:
+    // no inference path, no probe body, no POST.
+    expect(source).not.toContain("chat/completions");
+    expect(source).not.toContain("max_tokens");
+    expect(source).not.toContain('method: "POST"');
+  });
+
+  test("every verifiable builtin issues exactly one GET carrying no body", async () => {
+    for (const [provider, spec] of Object.entries(PROVIDER_VERIFY_ENDPOINTS)) {
+      if (spec.kind === "unsupported") continue;
+      expect(spec.url).not.toMatch(/completions|generateContent|invocations/);
+      const calls: FetchCall[] = [];
+      await verifyProviderKey(
+        { fetch: mockFetch(json(200, { data: [], models: [] }), calls) },
+        provider,
+        PLAIN_KEY,
+      );
+      expect(calls, provider).toHaveLength(1);
+      expect(calls[0]!.method, provider).toBe("GET");
+      expect(calls[0]!.body, provider).toBeUndefined();
+    }
   });
 });
 
@@ -289,7 +420,7 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     const call = calls[0]!;
     expect(call.url).toBe("https://api.openai.com/v1/models");
     expect(call.method).toBe("GET");
-    expect(call.headers).toEqual({ authorization: `Bearer ${PLAIN_KEY}` });
+    expect(call.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
   });
 
   test("anthropic: x-api-key + anthropic-version headers", async () => {
@@ -302,7 +433,7 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: true, models: ["claude-sonnet-4-6"] });
     const call = calls[0]!;
     expect(call.url).toBe("https://api.anthropic.com/v1/models");
-    expect(call.headers).toEqual({ "x-api-key": PLAIN_KEY, "anthropic-version": "2023-06-01" });
+    expect(call.headers).toEqual(verifyHeaders({ "x-api-key": PLAIN_KEY, "anthropic-version": "2023-06-01" }));
   });
 
   test("gemini: x-goog-api-key header (key never in the URL) + Gemini models[].name shape", async () => {
@@ -320,7 +451,7 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: true, models: ["gemini-2.5-flash", "gemini-3-pro"] });
     const call = calls[0]!;
     expect(call.url).toBe("https://generativelanguage.googleapis.com/v1beta/models");
-    expect(call.headers).toEqual({ "x-goog-api-key": PLAIN_KEY });
+    expect(call.headers).toEqual(verifyHeaders({ "x-goog-api-key": PLAIN_KEY }));
     expect(call.url.includes(PLAIN_KEY)).toBe(false);
   });
 
@@ -370,25 +501,72 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: true, models: [] });
     const call = calls[0]!;
     expect(call.url).toBe("https://api.github.com/user");
-    expect(call.headers).toEqual({ authorization: `Bearer ${PLAIN_KEY}` });
+    expect(call.method).toBe("GET");
+    expect(call.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
   });
 
-  test("probe provider (kilo): POSTs a 1-token chat body with Bearer auth", async () => {
+  test("kilo / umans verify on their PUBLIC models list (no inference) — a 2xx parses the list", async () => {
+    for (const [provider, url] of [
+      ["kilo", "https://api.kilo.ai/api/gateway/models"],
+      ["umans", "https://api.code.umans.ai/v1/models"],
+    ] as const) {
+      const calls: FetchCall[] = [];
+      const result = await verifyProviderKey(
+        { fetch: mockFetch(json(200, { data: [{ id: "m-1" }] }), calls) },
+        provider,
+        PLAIN_KEY,
+      );
+      expect(result, provider).toEqual({ ok: true, models: ["m-1"] });
+      expect(calls, provider).toHaveLength(1);
+      expect(calls[0]!.url, provider).toBe(url);
+      expect(calls[0]!.method, provider).toBe("GET");
+      expect(calls[0]!.headers, provider).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
+      // Public list: a 401 there is impossible, so the probe proves
+      // reachability only — the store records the weaker state.
+      expect(builtinProbeCanRejectKey(provider), provider).toBe(false);
+    }
+  });
+
+  test("zai stays unsupported — its probe never runs (no documented models/usage endpoint)", async () => {
     const calls: FetchCall[] = [];
     const result = await verifyProviderKey(
       { fetch: mockFetch(json(200, { choices: [{ message: { content: "pong" } }] }), calls) },
-      "kilo",
+      "zai",
       PLAIN_KEY,
     );
-    expect(result).toEqual({ ok: true, models: [] });
-    const call = calls[0]!;
-    expect(call.url).toBe("https://api.kilo.ai/api/gateway/chat/completions");
-    expect(call.method).toBe("POST");
-    expect(JSON.parse(call.body!)).toEqual({
-      model: "kilo-auto/small",
-      messages: [{ role: "user", content: "ping" }],
-      max_tokens: 1,
-    });
+    expect(result).toEqual({ ok: false, reason: "unsupported_provider" });
+    expect(calls).toHaveLength(0);
+    expect(builtinProbeCanRejectKey("zai")).toBe(false);
+  });
+
+  test("openrouter verifies on its PUBLIC model list — the chain dropdown needs it — and records reachable", async () => {
+    const calls: FetchCall[] = [];
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(200, { data: [{ id: "openai/gpt-5" }, { id: "anthropic/claude-4" }] }), calls) },
+      "openrouter",
+      PLAIN_KEY,
+    );
+    // Models ARE cached: /api/v1/auth/key would answer account data instead,
+    // leaving the cache empty and the model picker with nothing to offer.
+    expect(result).toEqual({ ok: true, models: ["openai/gpt-5", "anthropic/claude-4"] });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/models");
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
+    // The public catalog answers 200 for ANY bearer, so the store records the
+    // weaker reachable state — never ok.
+    expect(builtinProbeCanRejectKey("openrouter")).toBe(false);
+  });
+
+  test("openrouter: 401/403 on the model list is invalid_key (a bogus key never reads as ok)", async () => {
+    for (const status of [401, 403]) {
+      const result = await verifyProviderKey(
+        { fetch: mockFetch(json(status, { error: { message: "No auth credentials found" } })) },
+        "openrouter",
+        PLAIN_KEY,
+      );
+      expect(result, String(status)).toEqual({ ok: false, reason: "invalid_key" });
+    }
   });
 
   test("cursor: GET /v1/models is a MODELS endpoint — a 2xx list is parsed and cached (not discarded as probe-only)", async () => {
@@ -402,7 +580,7 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     const call = calls[0]!;
     expect(call.url).toBe("https://api.cursor.com/v1/models");
     expect(call.method).toBe("GET");
-    expect(call.headers).toEqual({ authorization: `Bearer ${PLAIN_KEY}` });
+    expect(call.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
   });
 
   test("cursor: 401 still maps to invalid_key (token rejected)", async () => {
@@ -449,29 +627,52 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: true, models: ["my-model-a", "my-model-b"] });
     const call = calls[0]!;
     expect(call.url).toBe("https://custom.example.com/v1/models");
-    expect(call.headers).toEqual({ authorization: `Bearer ${PLAIN_KEY}` });
+    expect(call.method).toBe("GET");
+    expect(call.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
   });
 
-  test("base URL without the /v1 suffix still probes {base}/v1/models", async () => {
-    const calls: FetchCall[] = [];
-    await verifyProviderKey(
-      { fetch: mockFetch(json(200, { data: [{ id: "m" }] }), calls) },
-      "custom",
-      PLAIN_KEY,
-      { ...CUSTOM, baseUrl: "https://custom.example.com" },
-    );
-    expect(calls[0]!.url).toBe("https://custom.example.com/v1/models");
+  // Every documented base-URL shape resolves to EXACTLY one well-formed
+  // models URL — the string-concatenation defects (a doubled `/models`, a
+  // query/fragment riding the probe) are gone.
+  test("base-URL shapes resolve to exactly one models URL (query and fragment never ride the probe)", async () => {
+    const cases: Array<[string, string]> = [
+      ["https://custom.example.com", "https://custom.example.com/v1/models"],
+      ["https://custom.example.com/", "https://custom.example.com/v1/models"],
+      ["https://custom.example.com/v1", "https://custom.example.com/v1/models"],
+      ["https://custom.example.com/v1/", "https://custom.example.com/v1/models"],
+      ["https://custom.example.com/v1/models", "https://custom.example.com/v1/models"],
+      ["https://custom.example.com/v1/models/", "https://custom.example.com/v1/models"],
+      ["https://custom.example.com/v1?x=1", "https://custom.example.com/v1/models"],
+      ["https://custom.example.com/v1#frag", "https://custom.example.com/v1/models"],
+      ["https://custom.example.com/#frag", "https://custom.example.com/v1/models"],
+      ["https://custom.example.com/api/proxy/v1", "https://custom.example.com/api/proxy/v1/models"],
+      ["https://api.typesafe.ai", "https://api.typesafe.ai/v1/models"],
+      ["https://API.TYPESAFE.AI/v1/", "https://api.typesafe.ai/v1/models"],
+    ];
+    for (const [baseUrl, expected] of cases) {
+      const calls: FetchCall[] = [];
+      await verifyProviderKey(
+        { fetch: mockFetch(json(200, { data: [] }), calls) },
+        "custom",
+        PLAIN_KEY,
+        { ...CUSTOM, baseUrl },
+      );
+      expect(calls[0]!.url, baseUrl).toBe(expected);
+    }
   });
 
-  test("base URL trailing slash is normalized (https://custom.example.com/v1/)", async () => {
-    const calls: FetchCall[] = [];
-    await verifyProviderKey(
-      { fetch: mockFetch(json(200, { data: [{ id: "m" }] }), calls) },
-      "custom",
-      PLAIN_KEY,
-      { ...CUSTOM, baseUrl: "https://custom.example.com/v1/" },
-    );
-    expect(calls[0]!.url).toBe("https://custom.example.com/v1/models");
+  test("an unparseable base URL is unreachable — never a throw, never a request", async () => {
+    for (const baseUrl of ["not a url", "//missing-scheme.example.com/v1", ""]) {
+      const calls: FetchCall[] = [];
+      const result = await verifyProviderKey(
+        { fetch: mockFetch(json(200, { data: [] }), calls) },
+        "custom",
+        PLAIN_KEY,
+        { ...CUSTOM, baseUrl },
+      );
+      expect(result, baseUrl).toEqual({ ok: false, reason: "unreachable" });
+      expect(calls, baseUrl).toHaveLength(0);
+    }
   });
 
   test("2xx with an unparseable body echoes the DECLARED model_ids (spec §6.1 回显)", async () => {
@@ -513,7 +714,7 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
       { ...CUSTOM, api: "anthropic-messages" },
     );
     expect(result).toEqual({ ok: true, models: CUSTOM.modelIds });
-    expect(calls[0]!.headers).toEqual({ "x-api-key": PLAIN_KEY, "anthropic-version": "2023-06-01" });
+    expect(calls[0]!.headers).toEqual(verifyHeaders({ "x-api-key": PLAIN_KEY, "anthropic-version": "2023-06-01" }));
   });
 
   test("typesafe custom provider uses the OpenAI-shaped Bearer probe on {baseUrl}/v1/models", async () => {
@@ -526,7 +727,7 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
     );
     expect(result).toEqual({ ok: true, models: CUSTOM.modelIds });
     expect(calls[0]!.url).toBe("https://custom.example.com/v1/models");
-    expect(calls[0]!.headers).toEqual({ authorization: `Bearer ${PLAIN_KEY}` });
+    expect(calls[0]!.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
   });
 
   test("timeout → unreachable", async () => {
@@ -648,6 +849,24 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     await expect(
       createSecretbox(TEST_KEY).decryptSecret(row.key_enc, `app_provider_keys.key_enc:${app.id}:openai:${row.key_id}`),
     ).resolves.toBe(PLAIN_KEY);
+  });
+
+  test("a builtin whose probe cannot reject a bogus key stamps 'reachable' — never 'ok'", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "public-builtin-app");
+    const store = configStore(db);
+    // Kilo's model list is public (200 for a bogus bearer), so the 2xx proved
+    // the ENDPOINT answered; the key itself is unproven.
+    await store.saveVerifiedKey(app.id, "kilo", PLAIN_KEY, ["kilo-auto/efficient"]);
+    const row = db.raw
+      .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE app_id = ?")
+      .get(app.id) as { verified_at: string | null; verified_status: string | null };
+    expect(row.verified_at).toMatch(SQLITE_TS_RE);
+    expect(row.verified_status).toBe("reachable");
+    // The model evidence is still recorded: the probe DID read the list.
+    expect(await store.getVerifiedModels(app.id)).toEqual([
+      { provider: "kilo", models: ["kilo-auto/efficient"], fetched_at: expect.stringMatching(SQLITE_TS_RE) },
+    ]);
   });
 
   test("getVerifiedModels orders by provider ascending and parses each models_json", async () => {
@@ -774,19 +993,28 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
 
   test("the allow-list matches the PROBED URL, not the host: only shapes deriving /v1/models qualify", () => {
     // Evidence for api.typesafe.ai names GET /v1/models exactly, and
-    // customModelsUrl appends the suffix to whatever the declaration carries.
-    for (const baseUrl of ["https://api.typesafe.ai", "https://api.typesafe.ai/", "https://api.typesafe.ai/v1", "https://API.TYPESAFE.AI/v1"]) {
-      expect(customProbeCanRejectKey(baseUrl)).toBe(true);
-    }
-    // Same host, derived probe elsewhere → unproven.
+    // customModelsUrl normalizes whatever the declaration carries into one
+    // well-formed models URL (its query/fragment is dropped, so it cannot send
+    // the key anywhere else).
     for (const baseUrl of [
-      "https://api.typesafe.ai/console",
+      "https://api.typesafe.ai",
+      "https://api.typesafe.ai/",
+      "https://api.typesafe.ai/v1",
+      "https://api.typesafe.ai/v1/",
+      "https://API.TYPESAFE.AI/v1",
       "https://api.typesafe.ai/#x",
       "https://api.typesafe.ai/v1?x=1",
+    ]) {
+      expect(customProbeCanRejectKey(baseUrl), baseUrl).toBe(true);
+    }
+    // Same host, a different PATH → the probe lands elsewhere → unproven.
+    for (const baseUrl of [
+      "https://api.typesafe.ai/console",
+      "https://api.typesafe.ai/v1/keys",
       "https://api.typesafe.ai:8443/v1",
       "http://api.typesafe.ai",
     ]) {
-      expect(customProbeCanRejectKey(baseUrl)).toBe(false);
+      expect(customProbeCanRejectKey(baseUrl), baseUrl).toBe(false);
     }
   });
 
