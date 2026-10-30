@@ -211,7 +211,7 @@ describe("save flow + 400 fallback contract", () => {
   test("the deselect emit and a same-value click never reach the wire; the selection mirrors the payload", () => {
     const controlBody = settingsPage.slice(
       settingsPage.indexOf("export function ReviewTriggerControl"),
-      settingsPage.indexOf("function ProvidersCard"),
+      settingsPage.indexOf("function ChainsCard"),
     );
     // Radix type="single" emits "" on deselect; "" (and any off-vocabulary
     // value) is refused before any POST — and an already-selected segment is

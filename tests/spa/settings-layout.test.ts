@@ -27,15 +27,24 @@ import {
 import {
   AppInfoCard,
   DraftChainPanel,
-  ProviderConfigForm,
   draftChainTabLabel,
   githubAppSettingsUrl,
 } from "../../src/spa/pages/SettingsPage";
+import { ProviderConfigForm } from "../../src/spa/pages/settings-providers";
 import type { SpaBoot } from "../../src/spa/boot";
 import { SupportNotice } from "../../src/spa/components/SupportNotice";
 import { AppDetailPage, AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
+
+/**
+ * The settings tab's source: the page plus the providers module it composes.
+ * The providers cluster lives in settings-providers.tsx (plan 103 task 2), so
+ * the tab's source pins read both documents.
+ */
+const readSettingsSource = () =>
+  readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8") +
+  readFileSync(join(import.meta.dir, "../../src/spa/pages/settings-providers.tsx"), "utf8");
 
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
@@ -79,7 +88,7 @@ const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
 
 describe("settings layout", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     expect(source).toContain("settings.ops");
     expect(source).toContain("can_manage");
     expect(source).toContain("${action.kind}");
@@ -98,7 +107,7 @@ describe("settings layout", () => {
   });
 
   test("destructive removes (key / custom provider) route through confirm dialogs like pause/delete", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     expect(source).toContain('kind: "remove-key"');
     expect(source).toContain('kind: "remove-custom"');
     expect(source).toContain("settings.confirmRemoveKeyTitle");
@@ -113,7 +122,7 @@ describe("settings layout", () => {
 
 describe("settings dropdowns", () => {
   test("chain and role editors are dropdowns, not free-text; add-key posts the JSON verify route", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     expect(source).toContain("/keys/verify");
     expect(source).toContain("settings.addToChain");
     expect(source).toContain("settings.useDefaultChain");
@@ -150,7 +159,7 @@ describe("settings dropdowns", () => {
 
 describe("runtime harness selector", () => {
   test("managers get a shadcn selector saved through op=save-sandbox-image; other members read-only", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // The editor posts the op with the selected registry id.
     expect(source).toContain('op: "save-sandbox-image"');
     expect(source).toContain("sandbox_image_id: selected");
@@ -205,7 +214,7 @@ describe("settings copy is dictionary-backed", () => {
   });
 
   test("SPA maps membership 400 code via t(), not English body prose", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     expect(source).toContain("settingsErrorMessage");
     expect(source).toContain("not_in_verified_models");
     expect(source).toContain("settings.membership.not_in_verified_models");
@@ -213,7 +222,7 @@ describe("settings copy is dictionary-backed", () => {
   });
 
   test("SPA maps unsupported_provider via t() and shows the console-only hint", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     expect(source).toContain("settings.verify.unsupported_provider");
     expect(source).toContain("settings.consoleOnly");
     expect(source).toContain("unsupported_provider");
@@ -222,7 +231,7 @@ describe("settings copy is dictionary-backed", () => {
 
 describe("configured providers + catalog add flow", () => {
   test("the providers card renders configured state only; the catalog is the Add Provider picker", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // Primary list = configured state (kind rows), never the catalog dump.
     expect(source).toContain("payload.configured_providers.map");
     expect(source).not.toContain("payload.provider_catalog.map");
@@ -234,7 +243,7 @@ describe("configured providers + catalog add flow", () => {
   });
 
   test("Add Provider: catalog selection drives the configuration form; custom path preserved", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // Header disclosure button → catalog select → selected provider's form.
     expect(source).toContain("settings.addProvider");
     expect(source).toContain("aria-expanded={addOpen}");
@@ -250,7 +259,7 @@ describe("configured providers + catalog add flow", () => {
   });
 
   test("a failed verify keeps the provider unconfigured and surfaces the structured reason", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     expect(source).toContain("verifyReasonMessage(locale, reason)");
     // Forms reset and close only on success — a rejected submit keeps the
     // typed input and the add selection while the background reload refreshes
@@ -265,7 +274,7 @@ describe("configured providers + catalog add flow", () => {
     // SUPERSEDE (App detail IA): load() lives on the AppDetailPage shell
     // now; the tab's op handlers keep the background-reload contract.
     const detail = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // load() defaults to the foreground (loading-flash) behavior; only the
     // background variant skips the "loading" flip.
     expect(detail).toContain("background = false");
@@ -311,7 +320,7 @@ describe("configured providers + catalog add flow", () => {
 });
 
 describe("multi-key provider rows (one row per key, no client-side fold)", () => {
-  const page = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+  const page = readSettingsSource();
 
   test("every configured key row is keyed by its key identity — two keys of one provider are two rows", () => {
     // React key: provider + key id. The bare provider collided as soon as a
@@ -367,7 +376,7 @@ describe("custom-provider add-key copy", () => {
 
 describe("catalog provenance + eligibility messaging", () => {
   test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime harness", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // Provenance: the catalog is generated, pinned metadata — not a live query.
     expect(source).toContain("settings.catalogProvenance");
     // Eligibility is judged against the App's SELECTED image id, never inferred.
@@ -383,13 +392,13 @@ describe("catalog provenance + eligibility messaging", () => {
   });
 
   test("an unavailable entry gets an explanation instead of a form — nothing can save it silently", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // The gate sits above ProviderConfigForm: unavailable → copy only, no submit path.
     expect(source).toContain('selected.eligibility === "unavailable"');
   });
 
   test("the catalog picker uses the aria-labelledby precedent; custom configured rows show the catalog label", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // MembersPage precedent: visible label span naming the picker — no
     // wrapping <label>. the span names the combobox input through
     // the labelledby prop (the aria-labelledby attribute itself moved into
@@ -712,7 +721,7 @@ describe("provider combobox", () => {
 
 describe("add-entry visibility + picker usability at breadth", () => {
   test("the Add Provider entry is a labeled, bordered control in the Providers card header", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // The entry lives in the card HEADER (CardAction slot) — visible without
     // scrolling; icon-only is not acceptable, the localized label rides the
     // button beside a plus glyph.
@@ -744,7 +753,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
     // Supersedes the "builtin SelectGroup precedes template
     // SelectGroup + <SelectContent className=\"max-h-72\">" pin — the Radix
     // Select left the add panel (AD-542); the chain/seat editors keep theirs.
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     expect(source).toContain("<ProviderCombobox");
     expect(source).not.toContain('<SelectContent className="max-h-72">');
     // AD-547 separation: grouping reads display_group inside the combobox
@@ -761,7 +770,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
   });
 
   test("the template form carries an editable prefilled base URL and a {account_id}-conditional account-id field", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // The override field is prefilled from the STORED declaration when the
     // provider already has one (else the catalog entry) and posts the optional
     // base_url override (empty string = use the catalog prefill).
@@ -866,7 +875,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
 
 describe("model chain tabs", () => {
   test("Default and named chains are peer shadcn tabs with a coherent selected state", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // The chain card is an accessible Radix tablist (roles + arrow-key nav via
     // the existing shadcn Tabs primitives), not a stacked list.
     expect(source).toContain("TabsList");
@@ -893,7 +902,7 @@ describe("model chain tabs", () => {
   });
 
   test("the Default tab never offers remove; add/create copy is dictionary-backed in both locales", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     const defaultContent = source.slice(
       source.indexOf("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>"),
       source.indexOf("{namedTabs.map((tab) => ("),
@@ -921,7 +930,7 @@ describe("model chain tabs", () => {
     // The ChainsCard panels mount through that exact wrapper (forceMount on
     // every TabsContent), so exactly one editor is visible per selected
     // trigger.
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     expect(source).toContain('import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";');
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     expect(chainsBody).toContain("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>");
@@ -931,7 +940,7 @@ describe("model chain tabs", () => {
 
 describe("chain draft peer tab", () => {
   test("+ 新建链 opens a draft peer tab: after the named tabs, auto-selected, never two drafts", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     // The entry mirrors the strip placement: outline button, plus
     // glyph, localized label (icon-only is not acceptable) — a TabsList
@@ -970,7 +979,7 @@ describe("chain draft peer tab", () => {
   });
 
   test("the add-chain control is a TabsList sibling: its source sits after the tablist close", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     // strip-level contract, structurally pinned (audit
     // F-10): the labels/props pins above cannot see WHERE the control sits —
@@ -987,7 +996,7 @@ describe("chain draft peer tab", () => {
   });
 
   test("the draft panel is the editor: name field first, model builder, save/discard, inline failure", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
     // The name field lives INSIDE the draft panel (first), reusing the
     // chainName keys — Default's panel never shows creation UI.
@@ -1042,7 +1051,7 @@ describe("chain draft peer tab", () => {
   });
 
   test("a failed post-create reload keeps the draft open: the create resolves the load-failed error, not success", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // Bugbot fix: POST success alone is not completion — the chain
     // is only usable once the awaited background reload lands it in the
     // payload. createDraftChain demotes a POST success whose reload failed to
@@ -1122,7 +1131,7 @@ describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
   });
 
   test("the lifted state, wiring and both close-time resets live in ChainsCard (AD-551)", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     // The name state lives in the card (the panel no longer owns it).
     expect(chainsBody).toContain('const [draftName, setDraftName] = useState("");');
@@ -1180,7 +1189,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
     );
 
   test("the save row renders save primary with actions right of it, only when actions exist", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     const editorBody = source.slice(source.indexOf("function ChainEditor"));
     // Conditional wrapper: with no actions the save button renders bare —
     // the AD-552 byte-equivalence guard for every other caller.
@@ -1231,7 +1240,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
 
 describe("seat assignment section", () => {
   test("seats are an independent titled card below chain management, not a section of the chains card", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // SeatsCard is its own card component, rendered after ChainsCard for
     // managers only (same authorization surface as chain editing).
     expect(source).toContain("function SeatsCard");
@@ -1248,7 +1257,7 @@ describe("seat assignment section", () => {
   });
 
   test("seat selects offer Default first, then current named tabs; values coerce before render and save", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // Options derive from the same tab model as the chain tabs.
     expect(source).toContain("modelChainTabs(payload.model_chains)");
     // Default is an explicit option (the reserved name, never a free-text
@@ -1311,7 +1320,7 @@ describe("seat assignment section", () => {
 
 describe("operational action hierarchy", () => {
   test("Disable is destructive-outline with reversible wording; Delete stays filled destructive behind its confirmation", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // The ops zone renders Disable through the destructive-outline family —
     // the red-outline variant is pinned to the disable action itself.
     expect(source).toContain(
@@ -1331,7 +1340,7 @@ describe("operational action hierarchy", () => {
     // Resume stays on the cva default variant — exact-pinned as a Button with
     // no variant attribute, so a regression to a destructive resume fails here.
     expect(source).toContain('<Button type="button" onClick={() => onPending({ kind: "resume" })}>');
-    const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ProvidersCard"));
+    const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ChainsCard"));
     expect(opsBody).toContain('variant="destructive-outline"');
     // The Disable confirm dialog's action button carries the plain verb; the
     // "(reversible)" parenthetical stays on the ops trigger copy only.
@@ -1419,7 +1428,7 @@ describe("App workflow boundaries", () => {
   });
 
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // Success is no longer silent — and since the inline-outcome rework it is section-scoped:
     // handlers resolve the saved outcome to the card that caused it.
     expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
@@ -1430,7 +1439,7 @@ describe("App workflow boundaries", () => {
   });
 
   test("configuration section headings are described and unlabeled selects are named", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // SUPERSEDE (App detail IA): the standalone install-health card retired
     // with the identity-only non-manager face — the health body now renders
     // only inside the manager OpsCard, which keeps its section descriptions.
@@ -1442,7 +1451,7 @@ describe("App workflow boundaries", () => {
   });
 
   test("empty states stay honest: unconfigured provider", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     expect(source).toContain("settings.noConfiguredProviders");
     expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
@@ -1459,7 +1468,7 @@ describe("notice channel (reviewer handoffs)", () => {
   });
 
   test("a deleted App reports its own irreversible outcome, not the generic saved notice", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // The delete branch pins the dedicated copy and skips the background
     // reload — the soft-deleted App's settings GET is a guaranteed 404, so
     // the generic path would overwrite the outcome with "Load failed."
@@ -1481,17 +1490,17 @@ describe("notice channel (reviewer handoffs)", () => {
 });
 
 describe("section-scoped op feedback", () => {
-  const settingsSource = () => readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-
   test("op outcomes resolve to the originating card; the top notice is page-level reload failure only", () => {
     // SUPERSEDE (App detail IA): load() — and with it the page-level notice
     // writes — lives on the AppDetailPage shell now.
     const detail = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
-    const source = settingsSource();
+    const source = readSettingsSource();
     // Handlers RESOLVE the outcome (OpNotice) instead of pushing to the page
     // channel — nothing outside load() writes the top notice anymore.
     expect(source).not.toContain("onNotice");
-    expect(source).toContain("type OpNotice =");
+    // The outcome type is declared once, beside the notice primitive it feeds.
+    const pageNoticeSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/PageNotice.tsx"), "utf8");
+    expect(pageNoticeSource).toContain("export type OpNotice =");
     expect(source).toContain("Promise<OpNotice>");
     // The only top-notice writes left are load()'s two background-failure
     // paths (parse failure + request failure) — the page-level
@@ -1534,12 +1543,13 @@ describe("section-scoped op feedback", () => {
   });
 
   test("each card owns an inline notice region: runtime harness, providers, chains, seats, ops", () => {
-    const source = settingsSource();
+    const source = readSettingsSource();
     // The shared local region component wraps PageNotice, so every region
     // inherits the banner's alert/status roles and notice tokens (WCAG
     // 4.1.3 — pinned on PageNotice.tsx itself in the notice-channel describe).
-    expect(source).toContain("function NoticeRegion");
-    expect(source).toContain("return <PageNotice kind={notice.kind} message={notice.message} />;");
+    const pageNoticeSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/PageNotice.tsx"), "utf8");
+    expect(pageNoticeSource).toContain("function NoticeRegion");
+    expect(pageNoticeSource).toContain("return <PageNotice kind={notice.kind} message={notice.message} />;");
     // Runtime image: region inside the editor, next to the save trigger.
     const runtimeBody = source.slice(
       source.indexOf("function RuntimeHarnessEditor"),
@@ -1547,7 +1557,7 @@ describe("section-scoped op feedback", () => {
     );
     expect(runtimeBody).toContain("<NoticeRegion notice={notice} />");
     // Ops zone: region directly under the pause/disable/delete button row.
-    const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ProvidersCard"));
+    const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ChainsCard"));
     expect(opsBody).toContain("<NoticeRegion notice={notice} />");
     // Providers: card region directly under the add panel serves the verify /
     // template forms only — moved the dialog-confirmed removes to
@@ -1567,7 +1577,7 @@ describe("section-scoped op feedback", () => {
   });
 
   test("the chains 400 renders inside the chains card (user-reported regression pin)", () => {
-    const source = settingsSource();
+    const source = readSettingsSource();
     // ChainEditor is shared by the Default tab, every named tab and the draft
     // panel — each instance resolves its save outcome into its OWN region,
     // inside the tabpanel, inside the chains card. A rejected save-chain /
@@ -1590,7 +1600,7 @@ describe("section-scoped op feedback", () => {
   });
 
   test("dialog-confirmed ops report into the card that owns the action", () => {
-    const source = settingsSource();
+    const source = readSettingsSource();
     // remove-chain → chains card; remove-key / remove-custom → the providers
     // card's row-local outcome; pause/resume/disable/enable/
     // delete (delete with its own copy) → ops zone. Each card renders its own
@@ -1613,7 +1623,7 @@ describe("section-scoped op feedback", () => {
   });
 
   test("provider remove outcomes render row-locally at the removed row's position (audit UI-45-05)", () => {
-    const source = settingsSource();
+    const source = readSettingsSource();
     // The outcome state carries the removed row's slot, captured in onConfirm
     // from the PRE-POST payload: the awaited background reload
     // drops the row from the payload before the outcome resolves, so the
@@ -1650,7 +1660,7 @@ describe("section-scoped op feedback", () => {
   });
 
   test("a stale delete's no-change outcome is a localized warning, never 'Changes saved.'", () => {
-    const source = settingsSource();
+    const source = readSettingsSource();
     // The remove routes answer the tolerant no-op as `changed: false`; the
     // shared op-outcome resolver renders the localized no-change copy with
     // warn styling (the row is still there — the region sits below it).
@@ -1669,7 +1679,7 @@ describe("section-scoped op feedback", () => {
   });
 
   test("save triggers carry a busy guard; every op replaces its region (stale-error rule)", () => {
-    const source = settingsSource();
+    const source = readSettingsSource();
     // One guard per form: the trigger disables while its own POST is in
     // flight (the confirm dialog's pre-existing disabled={busy} guard stays).
     const runtimeBody = source.slice(
@@ -1682,10 +1692,7 @@ describe("section-scoped op feedback", () => {
       source.indexOf("function CustomExpand"),
     );
     expect(providerFormBody).toContain("disabled={busy}");
-    const customBody = source.slice(
-      source.indexOf("function CustomExpand"),
-      source.indexOf("const DRAFT_CHAIN_TAB_ID"),
-    );
+    const customBody = source.slice(source.indexOf("function CustomExpand"));
     expect(customBody).toContain("disabled={busy}");
     const editorBody = source.slice(source.indexOf("function ChainEditor"));
     expect(editorBody).toContain("disabled={busy}");
@@ -1738,7 +1745,7 @@ describe("settings header typography", () => {
       join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"),
       "utf8",
     );
-    const tabSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const tabSource = readSettingsSource();
     expect(shellSource).toContain("<PageHeader");
     expect(shellSource).not.toContain("--typo-heading-24");
     expect(tabSource).not.toContain("--typo-heading-24");
@@ -1751,7 +1758,7 @@ describe("settings header typography", () => {
 
 describe("version footer", () => {
   test("the settings page footer renders the generated version surface via the dictionary", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // The display reads the generated single-writer surface (src/version.ts) —
     // never a second hardcoded version string in the SPA.
     expect(source).toContain('import { APP_VERSION } from "../../version";');
@@ -1774,17 +1781,14 @@ describe("version footer", () => {
 
 describe("custom-provider disclosure state", () => {
   test("the CustomExpand toggle exposes aria-expanded wired to the disclosure state (audit F-15-03)", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // Structural pin mirroring the AddProviderSection header-disclosure
     // precedent: the toggle carries aria-expanded bound to the
     // component's open-state prop — same element, exact-string pinned, so a
     // regression dropping the attribute (or binding it anywhere other than
     // the disclosure toggle) fails here. Single-state disclosure semantics
     // unchanged; the open/closed state is only made perceivable (WCAG 4.1.2).
-    const customBody = source.slice(
-      source.indexOf("function CustomExpand"),
-      source.indexOf("const DRAFT_CHAIN_TAB_ID"),
-    );
+    const customBody = source.slice(source.indexOf("function CustomExpand"));
     expect(customBody).toContain("onClick={onToggle} aria-expanded={expanded}");
     // The attribute stays live end to end: ProvidersCard owns the customOpen
     // disclosure state and hands it down as `expanded` / onToggle, so the
@@ -1963,7 +1967,7 @@ describe("GitHub App identity card", () => {
   });
 
   test("the card precedes the manage conditional — both faces see it", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // SUPERSEDE (App detail IA): the slug row is the AppDetailPage shell's
     // identity header now; inside the tab, the card ordering contract is
     // AppInfoCard → manage conditional.
@@ -2074,7 +2078,7 @@ describe("GitHub App identity card", () => {
     });
 
     test("refresh POSTs refresh-metadata by github_app_id; success reloads, failure resolves the keyed message and never reloads", () => {
-      const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+      const source = readSettingsSource();
       const cardBody = source.slice(
         source.indexOf("export function AppInfoCard"),
         source.indexOf("function HealthBody"),
@@ -2151,7 +2155,7 @@ describe("GitHub App identity card", () => {
 
 describe("GitHub App settings link wiring (AD-623)", () => {
   test("the page threads payload.can_manage into the card; the settings URL derives only through the helper", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // Presentation-layer threading only — the payload contract gains nothing.
     // Threading is presentation-only: the card gets the payload's own
     // `can_manage` and `workspace_id` (never a path-derived value).
@@ -2198,7 +2202,7 @@ describe("GitHub App settings link wiring (AD-623)", () => {
 
 describe("runtime harness row tightness", () => {
   test("select shell is content-adaptive; save button sits in the same flex-wrap row", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const source = readSettingsSource();
     // User-reported regression: the wrapper reserved min-w-64 (256px) while the
     // trigger only rendered short option content — a perceived gap between the
     // select and its save button. The shell must stay content-adaptive.
