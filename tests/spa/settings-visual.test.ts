@@ -315,11 +315,13 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
     ] as const) {
       expect(row, name).toContain('<div className="text-sm font-medium">{label}</div>');
       expect(row, name).toContain('className="text-xs text-muted-foreground"');
-    }
-    // Compactness pins stay structural: hairline + container radius + the
-    // padded row body (mirror-row compactness, faces retuned only).
-    for (const row of [keyRow, customRow]) {
-      expect(row).toContain("flex flex-wrap items-center justify-between gap-2 rounded-md border p-3");
+      // Compactness stays structural: hairline + container radius + the padded
+      // body on the row's outer box, and the compact one-line face (wrap +
+      // space-between + gap-2) on top of it. The custom row stacks its add-key
+      // form under that face, so the idioms are pinned separately rather than
+      // as one glued class string.
+      expect(row, name).toContain("rounded-md border p-3");
+      expect(row, name).toContain("flex flex-wrap items-center justify-between gap-2");
     }
   });
 });
