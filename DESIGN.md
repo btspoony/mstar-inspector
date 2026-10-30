@@ -1099,9 +1099,11 @@ the pill. A face never mixes the two vocabularies on one surface.
 ### group-card
 
 A set of children under one parent object (providers × keys is the first case).
-The surface, hairline and container radius are `### Card`'s — `background-200`
-fill, `gray-alpha-400` hairline, `rounded-md` — inherited through `ui/card`'s
-`Card`, not restated here. Card's symmetric 24px padding splits into a header
+The surface and container radius are `### Card`'s — `background-200` fill and
+`rounded-md` — inherited through `ui/card`'s `Card`, not restated here. The
+hairline is not inherited: `Card`'s bare `border` carries width only and
+preflight leaves `border-color` at `currentColor`, so the component sets
+`gray-alpha-400` itself. Card's symmetric 24px padding splits into a header
 band (`14px 16px`) and a body (`0 16px 14px`). No divider sits under the
 header: the separation is carried by the `list-row` container border inside the
 body. Title on `heading-16`; subtitle on `label-12` in `gray-700`; the header
@@ -1221,6 +1223,8 @@ non-text UI bar ≥3:1). Machine-pinned for the core pairs in
 | body text `gray-1000` vs card `background-200` (text) | 15.8:1 | 16.9:1 |
 | secondary text `gray-900` vs card (text) | 8.5:1 | 11.0:1 |
 | muted `gray-700` vs card (text) | 5.9:1 | 6.5:1 |
+| list-row meta `gray-700` vs row fill `gray-200` (text) | 5.4:1 | 6.5:1 |
+| step-dialog copy `gray-700` vs panel `background-100` (text) | 6.5:1 | 7.1:1 |
 | brand accent `brand-700` vs page (text) | 10.8:1 | 5.4:1 |
 | brand accent `brand-700` vs card (text) | 9.8:1 | 4.9:1 |
 | button label `background-100` on `brand-700` fill (text) | 10.8:1 | 5.4:1 |

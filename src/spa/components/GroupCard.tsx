@@ -1,11 +1,13 @@
 /**
  * Group card (DESIGN.md ### group-card): a set of children under one parent
- * object. The surface, hairline and container radius are ui/card's `Card` —
- * nothing is restated here; only Card's symmetric 24px padding is split into
- * the header band (`14px 16px`) and the body (`0 16px 14px`). No divider sits
- * under the header: the separation is carried by the caller's list-row
- * container. Purely presentational — the caller passes the StatusBadge, the
- * action buttons, the list rows and the empty-state copy.
+ * object. The surface and container radius are ui/card's `Card` — nothing is
+ * restated there; only Card's symmetric 24px padding is split into the header
+ * band (`14px 16px`) and the body (`0 16px 14px`). The hairline colour is NOT
+ * inherited: Card's bare `border` carries width only and preflight leaves
+ * `border-color` at currentColor, so the root supplies the token hairline. No
+ * divider sits under the header: the separation is carried by the caller's
+ * list-row container. Purely presentational — the caller passes the
+ * StatusBadge, the action buttons, the list rows and the empty-state copy.
  */
 import type { ComponentProps, ReactNode } from "react";
 import {
@@ -20,7 +22,11 @@ import { cn } from "@/lib/utils";
 
 export function GroupCard({ className, ...props }: ComponentProps<typeof Card>) {
   return (
-    <Card data-slot="group-card" className={cn("gap-0 p-0", className)} {...props} />
+    <Card
+      data-slot="group-card"
+      className={cn("gap-0 border-(--gray-alpha-400) p-0", className)}
+      {...props}
+    />
   );
 }
 

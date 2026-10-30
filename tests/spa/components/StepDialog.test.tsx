@@ -123,9 +123,52 @@ describe("StepDialog", () => {
       const footer = view.slot("dialog-footer");
       expect(footer?.textContent).toBe("CancelSave");
       expect(footer?.className).toContain("justify-end");
-      expect(footer?.className).toContain("gap-2");
+      // The step-dialog token, stated by this shell: the primitive's own
+      // `gap-2` default must not be what satisfies the footer-gap contract.
+      expect(footer?.className).toContain("gap-(--spacing-2)");
     } finally {
       await view.cleanup();
+    }
+  });
+
+  test("two steps may share a label: both render and only the index is current", async () => {
+    const original = console.error;
+    const errors: string[] = [];
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    try {
+      const view = await mount({ ...base, steps: ["Verify", "Verify"], currentStep: 1 });
+      try {
+        const items = view.steps();
+        expect(items.map((item) => item.textContent)).toEqual(["Verify", "Verify"]);
+        expect(items[1]?.getAttribute("aria-current")).toBe("step");
+        expect(items[0]?.getAttribute("aria-current")).toBeNull();
+        expect(errors.filter((error) => error.includes("same key"))).toEqual([]);
+      } finally {
+        await view.cleanup();
+      }
+    } finally {
+      console.error = original;
+    }
+  });
+
+  test("an out-of-range currentStep clamps: exactly one step stays current", async () => {
+    const high = await mount({ ...base, steps: ["Endpoint", "Key", "Verify"], currentStep: 9 });
+    try {
+      const items = high.steps();
+      expect(items[2]?.getAttribute("aria-current")).toBe("step");
+      expect(items.filter((item) => item.getAttribute("aria-current") === "step")).toHaveLength(1);
+    } finally {
+      await high.cleanup();
+    }
+    const low = await mount({ ...base, steps: ["Endpoint", "Key", "Verify"], currentStep: -4 });
+    try {
+      const items = low.steps();
+      expect(items[0]?.getAttribute("aria-current")).toBe("step");
+      expect(items.filter((item) => item.getAttribute("aria-current") === "step")).toHaveLength(1);
+    } finally {
+      await low.cleanup();
     }
   });
 

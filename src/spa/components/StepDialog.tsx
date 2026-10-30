@@ -7,7 +7,8 @@
  * rendered only when there is more than one step.
  *
  * Purely presentational: the footer belongs to the caller (cancel / submit
- * group) and this shell owns only its right alignment and the spacing-2 gap.
+ * group) and this shell owns only its right alignment and the spacing-2 gap,
+ * stated here rather than left to the primitive's default.
  * It holds no busy state — a disabled submit and the in-progress copy are the
  * caller's slot contract — and it never closes itself: `open` is the caller's.
  */
@@ -38,11 +39,16 @@ export function StepDialog({
   description?: ReactNode;
   /** Step labels; the indicator appears only when there are two or more. */
   steps?: readonly string[];
-  /** 0-based index of the current step. */
+  /** 0-based index of the current step; values outside the range clamp in. */
   currentStep?: number;
   footer: ReactNode;
   children: ReactNode;
 }) {
+  // The contract has no "no current step" state, so an out-of-range index
+  // clamps into the label range: exactly one step is always current.
+  const stepCount = steps?.length ?? 0;
+  const active = stepCount > 0 ? Math.min(Math.max(currentStep, 0), stepCount - 1) : -1;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -63,10 +69,11 @@ export function StepDialog({
           >
             {steps.map((step, index) => (
               <li
-                key={step}
+                // Labels are user copy and may repeat; only the position is stable.
+                key={index}
                 data-slot="step-dialog-step"
-                aria-current={index === currentStep ? "step" : undefined}
-                className={cn(index === currentStep ? "text-(--brand-700)" : "text-(--gray-700)")}
+                aria-current={index === active ? "step" : undefined}
+                className={cn(index === active ? "text-(--brand-700)" : "text-(--gray-700)")}
               >
                 {step}
               </li>
@@ -74,7 +81,7 @@ export function StepDialog({
           </ol>
         ) : null}
         {children}
-        <DialogFooter className="justify-end">{footer}</DialogFooter>
+        <DialogFooter className="justify-end gap-(--spacing-2)">{footer}</DialogFooter>
       </DialogContent>
     </Dialog>
   );

@@ -41,7 +41,11 @@ describe("GroupCard", () => {
   test("root is the card surface under the group-card slot, padding split off", () => {
     expect(html).toContain('data-slot="group-card"');
     expect(html).toContain("bg-card");
-    expect(html).toContain("gap-0 p-0");
+    expect(html).toContain("gap-0");
+    expect(html).toContain("p-0");
+    // Card's bare `border` is width only; without this the hairline paints in
+    // currentColor (gray-1000) instead of DESIGN.md's gray-alpha-400.
+    expect(html).toContain("border-(--gray-alpha-400)");
   });
 
   test("header carries the 14px 16px band padding", () => {
