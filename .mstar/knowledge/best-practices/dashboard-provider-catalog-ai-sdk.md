@@ -6,8 +6,8 @@ problem_type: best_practice
 category: best-practices
 severity: medium
 topic: app detail ops & providers
-tags: [provider-catalog, ai-sdk, models-dev, omp-providers, workers-ai, custom-providers, byok, zero-runtime-network]
-related_components: [src/pipeline/provider-catalog.ts, scripts/generate-provider-catalog.ts, src/dashboard/provider-verify.ts, src/dashboard/app-config-store.ts, src/contracts/provider-catalog.generated.ts]
+tags: [provider-catalog, ai-sdk, models-dev, omp-providers, workers-ai, custom-providers, byok, zero-runtime-network, provider-verify, validation-only, multi-key-pools]
+related_components: [src/pipeline/provider-catalog.ts, scripts/generate-provider-catalog.ts, scripts/provider-catalog/omp-provider-verify.json, src/dashboard/provider-verify.ts, src/dashboard/app-config-store.ts, src/dashboard/index.ts, src/contracts/provider-catalog.generated.ts]
 ---
 
 # Sourcing the provider catalog from models.dev (ai-sdk ecosystem) with a template tier
@@ -27,6 +27,19 @@ The BYOK dashboard hand-maintained a 19-entry provider map (`src/pipeline/provid
 - **`typesafe` protocol**: `CUSTOM_PROVIDER_API_IDS` carries it, and the custom verify probe treats it as the OpenAI-shaped Bearer `GET {base}/v1/models` path (omp's own TypeSafe discovery). Known limit: Command Code's public models endpoint answers 2xx without a valid key, so that probe cannot reject a bogus key — omp's `/alpha/whoami` check is deliberately out of scope.
 - **Mirror discipline**: the dashboard mirror (`PROVIDER_IDS` = builtin ids, `PROVIDER_META` = full catalog) re-exports the generated contract (structurally assigned), and parity tests lock the builtin set + generator id-regex grammar so a regen cannot silently desync the faces. Dashboard imports the `src/contracts` module, never the pipeline face (Q2 boundary).
 - **Secrets**: template materialization follows the existing verify-first custom-provider flow (key verified outbound before persist; secretbox envelope unchanged).
+
+## Verification surface: validation-only, omp-aligned (2026-10-30)
+
+A provider key is checked by a **GET** against a models/usage/identity endpoint — never by a chat completion. The verify module is the single surface (`src/dashboard/provider-verify.ts`), and it is built from two vendored omp snapshots:
+
+- `scripts/provider-catalog/omp-provider-verify.json` — every `validate "models-endpoint"` entry of omp 18.13.3 (28 entries; its header names the source version, the extraction date, the extraction rules and omp's three headers hooks). omp issues `GET <url>` + `Authorization: Bearer` for these, which is exactly the dashboard's `models` spec kind.
+- `scripts/provider-catalog/omp-api-key-providers.json` — the union snapshot whose `excluded.alias` map resolves omp ids to catalog ids (`google`→`gemini`, `azure`→`azure-openai`, `opencode-zen`→`opencode`). The verify surface **reads that one map inverted**; a second mapping is forbidden. Its state: entries with a `headersHook` are skipped (the hook's headers are computed omp-side — a project id from the environment, a client fingerprint — so a bare request is not the request omp validated), and an id omp does not validate keeps a hand-documented row in `DOCUMENTED_VERIFY_ENDPOINTS`.
+- The table is keyed by `PROVIDER_IDS_BUILTIN` and **throws at module load** for a builtin neither source covers. `kilo`, `zai`, `umans` are `unsupported` (omp validates them only with inference, and their model lists are public): the key stays console-managed, and the failure enum keeps its closed `unsupported_provider` reason.
+- Every request carries `Accept: application/json` and an explicit `User-Agent` (`VERIFY_USER_AGENT`); auth headers are unchanged. `x-opencode-session` is an omp SDK inference header and must never appear here.
+- Custom declarations: the probe URL comes from `new URL()` normalization of the declared base URL — a base whose path is `/`, `/v1`, `/v1/` or already ends in `/models` resolves to exactly one `…/models` URL, the declaration's query/fragment is dropped, and an unparseable base URL returns `unreachable` instead of throwing. The key-rejecting allow-list is judged on that derived probe URL, so a query/fragment suffix no longer changes the verdict.
+- Multi-key custom pools: `op=add-custom-provider-key` reads the stored declaration, verifies against ITS endpoint (so the route cannot move the endpoint), then appends through the store's `addCustomProviderKey` — no declaration rewrite, endpoint lock untouched, `MAX_KEYS_PER_PROVIDER` enforced. Known bound: the appended row is the store's unverified slot (no `verified_at`/`verified_status`), matching the settings face, which renders only the masked tail for pool rows.
+
+Tests that lock this: the verify suite's no-inference invariant (source scan + one GET/no-body per verifiable builtin), the base-URL shape table, the header assertions, and the route tests for append / cap / failed-verify / undeclared id.
 
 ## Display tier vs runner tier (dashboard-UX rework, AD-547)
 
