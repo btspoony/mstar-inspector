@@ -1980,7 +1980,10 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(rawCount(db, "app_custom_provider_keys")).toBe(2);
     const keys = await store.listCustomProviderKeys(app.id, CUSTOM.provider_id);
     expect(keys.map((key) => key.keyId)).toEqual([await keyIdOf(PLAIN_CUSTOM_KEY), await keyIdOf(second)]);
-    expect(keys.map((key) => key.verifiedStatus)).toEqual(["ok", null]);
+    // The append persists its verify outcome instead of leaving the row
+    // unverified: this declaration's base derives `/api/v3/v1/models`, which is
+    // not an allow-listed key-rejecting URL, so the new row is 'reachable'.
+    expect(keys.map((key) => key.verifiedStatus)).toEqual(["ok", "reachable"]);
     expect(JSON.stringify(keys)).not.toContain(PLAIN_CUSTOM_KEY);
     expect(await store.getCustomProvidersForConsumer(app.id)).toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY, second] },

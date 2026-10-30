@@ -3147,8 +3147,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
       // eligibility vs the App's selected image. Builtin ids in PROVIDER_IDS
       // order, then the template tier (the hand-curated workers-ai entry
       // followed by the snapshot breadth — the catalog's own key order).
-      // `verifiable: false` marks the console-only providers (azure-openai /
-      // ai-gateway — the old addKeyProviderIds filter); templates verify via
+      // `verifiable: false` marks the console-only providers (no probeable
+      // endpoint: azure-openai / ai-gateway / zai today — the old
+      // addKeyProviderIds filter); templates verify via
       // the custom probe, so always verifiable.
       // (AD-547): every entry also carries a display-only
       // `display_group` ("common" = the 5-entry 常用提供方 tier, "catalog" =
@@ -3771,10 +3772,9 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (!verified.ok) {
         return settingsVerifyFailResponse(c, gate.app.github_app_id, verified.reason);
       }
-      // simplify: the appended row lands as the store's UNVERIFIED slot (no
-      // per-key verified_at/verified_status); upgrade by giving
-      // addCustomProviderKey a verified variant when the settings face needs to
-      // render that row's verify time.
+      // The append persists the verify outcome: the store records 'ok' or the
+      // weaker 'reachable' from the SAME derived-URL decision the declaration
+      // path applies, so the row the operator just verified renders its state.
       await store.addCustomProviderKey(gate.app.id, providerId, plainKey);
     } catch (err) {
       logSettingsFailure("add_custom_provider_key", gate.app.id, err);

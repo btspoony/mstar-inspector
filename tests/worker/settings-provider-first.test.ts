@@ -1575,6 +1575,15 @@ describe("POST settings op=add-custom-provider-key (custom pool append)", () => 
     expect((await store.listCustomProviderKeys(app.id, "my-custom")).map((row) => row.keyId).sort()).toEqual(
       [await keyIdOf(PLAIN_KEY), await keyIdOf(SECOND_KEY)].sort(),
     );
+    // The append PERSISTED the verify outcome: a probe that passed never
+    // leaves the row unverified. `example.com` is no key-rejecting host, so
+    // the state is the weaker 'reachable'.
+    const secondId = await keyIdOf(SECOND_KEY);
+    const appended = (await store.listCustomProviderKeys(app.id, "my-custom")).find(
+      (row) => row.keyId === secondId,
+    )!;
+    expect(appended.verifiedStatus).toBe("reachable");
+    expect(appended.verifiedAt).toEqual(expect.any(String));
     // The payload's masked per-key rows (what the custom row renders) carry both.
     const body = (await (await getJson(SETTINGS_JSON, "mallory", makeEnv(db))).json()) as {
       keys: Array<{ provider: string; last4: string }>;
@@ -1582,6 +1591,34 @@ describe("POST settings op=add-custom-provider-key (custom pool append)", () => 
     expect(body.keys.filter((row) => row.provider === "my-custom").map((row) => row.last4).sort()).toEqual(
       [PLAIN_KEY.slice(-4), SECOND_KEY.slice(-4)].sort(),
     );
+  });
+
+  test("an appended key on an allow-listed endpoint records 'ok' — the declaration's own decision", async () => {
+    const { db, app } = await seededWorld();
+    mockStatus(200, { data: [] });
+    const declared = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider",
+      provider_id: "typesafe-gate",
+      base_url: "https://api.typesafe.ai",
+      api: "typesafe",
+      model_ids: "jev-latest",
+      key: PLAIN_KEY,
+    });
+    expect(declared.status).toBe(200);
+    mockStatus(200, { data: [] });
+    const added = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider-key",
+      provider_id: "typesafe-gate",
+      key: SECOND_KEY,
+    });
+    expect(added.status).toBe(200);
+    const secondId = await keyIdOf(SECOND_KEY);
+    const appended = (await createAppConfigStore(db, TEST_KEY).listCustomProviderKeys(app.id, "typesafe-gate")).find(
+      (row) => row.keyId === secondId,
+    )!;
+    // The derived probe URL is the allow-listed key-rejecting endpoint, so the
+    // 2xx proves the key.
+    expect(appended.verifiedStatus).toBe("ok");
   });
 
   test("the ninth key is the keyed cap 400 — zero writes, pool byte-identical", async () => {

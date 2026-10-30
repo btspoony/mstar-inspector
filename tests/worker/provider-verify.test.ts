@@ -34,6 +34,7 @@ import {
   PROVIDER_VERIFY_ENDPOINTS,
   VERIFY_TIMEOUT_MS,
   VERIFY_USER_AGENT,
+  builtinProbeCanRejectKey,
   customProbeCanRejectKey,
   ompProviderIdFor,
   verifyProviderKey,
@@ -249,18 +250,43 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
     expect(Object.keys(PROVIDER_VERIFY_ENDPOINTS)).toHaveLength(19);
   });
 
-  test("unsupported built-ins are exactly azure-openai + ai-gateway + the three former chat probes (the settings face's verifiable flag)", () => {
+  test("unsupported built-ins are exactly azure-openai + ai-gateway + zai (the settings face's verifiable flag)", () => {
     const unsupported = PROVIDER_IDS.filter((id) => PROVIDER_VERIFY_ENDPOINTS[id]?.kind === "unsupported");
-    expect(unsupported).toEqual(["azure-openai", "kilo", "zai", "umans", "ai-gateway"]);
+    expect(unsupported).toEqual(["azure-openai", "zai", "ai-gateway"]);
   });
 
-  test("every former chat-probe provider names the missing validate/usage endpoint", () => {
-    for (const provider of ["kilo", "zai", "umans"]) {
-      const spec = PROVIDER_VERIFY_ENDPOINTS[provider]!;
-      expect(spec.kind).toBe("unsupported");
-      if (spec.kind !== "unsupported") throw new Error("unreachable");
-      expect(spec.note).toContain("models");
-    }
+  test("the one provider without a probeable surface names the missing endpoint", () => {
+    const spec = PROVIDER_VERIFY_ENDPOINTS["zai"]!;
+    expect(spec.kind).toBe("unsupported");
+    if (spec.kind !== "unsupported") throw new Error("unreachable");
+    expect(spec.note).toContain("models");
+  });
+
+  test("each builtin's 2xx means ok or only reachable — the shared allow-list decides", () => {
+    // true = the provider answers non-2xx for a bogus key (probed 2026-10-30);
+    // false = no probe at all (unsupported) OR a probe whose PUBLIC model list
+    // answers 200 for any bearer, so its 2xx proves reachability only.
+    expect(Object.fromEntries(PROVIDER_IDS.map((id) => [id, builtinProbeCanRejectKey(id)]))).toEqual({
+      anthropic: true,
+      openai: true,
+      gemini: true,
+      copilot: true,
+      "azure-openai": false,
+      groq: true,
+      cerebras: true,
+      openrouter: true,
+      kilo: false,
+      mistral: true,
+      zai: false,
+      umans: false,
+      minimax: true,
+      opencode: true,
+      cursor: true,
+      "ai-gateway": false,
+      ark: true,
+      xai: true,
+      "wafer-serverless": true,
+    });
   });
 
   test("every entry is a recognized spec kind (models | probe | unsupported)", () => {
@@ -272,10 +298,10 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
         expect(spec.url.startsWith("https://")).toBe(true);
         expect(["bearer", "x-api-key"]).toContain(spec.auth);
       } else {
-        // unsupported — per-resource-host / no-key-rejecting-endpoint providers
+        // unsupported — per-resource-host / undocumented-endpoint providers
         // carry a documented note.
         expect(spec.note.length).toBeGreaterThan(10);
-        expect(["azure-openai", "ai-gateway", "kilo", "zai", "umans"]).toContain(provider);
+        expect(["azure-openai", "zai", "ai-gateway"]).toContain(provider);
       }
     }
   });
@@ -479,17 +505,60 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(call.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
   });
 
-  test("the retired chat probes (kilo / zai / umans) are unsupported — the probe never runs", async () => {
-    for (const provider of ["kilo", "zai", "umans"]) {
+  test("kilo / umans verify on their PUBLIC models list (no inference) — a 2xx parses the list", async () => {
+    for (const [provider, url] of [
+      ["kilo", "https://api.kilo.ai/api/gateway/models"],
+      ["umans", "https://api.code.umans.ai/v1/models"],
+    ] as const) {
       const calls: FetchCall[] = [];
       const result = await verifyProviderKey(
-        { fetch: mockFetch(json(200, { choices: [{ message: { content: "pong" } }] }), calls) },
+        { fetch: mockFetch(json(200, { data: [{ id: "m-1" }] }), calls) },
         provider,
         PLAIN_KEY,
       );
-      expect(result, provider).toEqual({ ok: false, reason: "unsupported_provider" });
-      expect(calls, provider).toHaveLength(0);
+      expect(result, provider).toEqual({ ok: true, models: ["m-1"] });
+      expect(calls, provider).toHaveLength(1);
+      expect(calls[0]!.url, provider).toBe(url);
+      expect(calls[0]!.method, provider).toBe("GET");
+      expect(calls[0]!.headers, provider).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
+      // Public list: a 401 there is impossible, so the probe proves
+      // reachability only — the store records the weaker state.
+      expect(builtinProbeCanRejectKey(provider), provider).toBe(false);
     }
+  });
+
+  test("zai stays unsupported — its probe never runs (no documented models/usage endpoint)", async () => {
+    const calls: FetchCall[] = [];
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(200, { choices: [{ message: { content: "pong" } }] }), calls) },
+      "zai",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: false, reason: "unsupported_provider" });
+    expect(calls).toHaveLength(0);
+    expect(builtinProbeCanRejectKey("zai")).toBe(false);
+  });
+
+  test("openrouter validates at /api/v1/auth/key — its public /api/v1/models answers 200 for any bearer", async () => {
+    const calls: FetchCall[] = [];
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(200, { data: { label: "sk-or-…", usage: 0, limit: null } }), calls) },
+      "openrouter",
+      PLAIN_KEY,
+    );
+    // An identity/usage probe: 2xx proves the key, models stay [] (the public
+    // catalog list is NOT scraped — it answers without a valid key at all).
+    expect(result).toEqual({ ok: true, models: [] });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/auth/key");
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
+    expect(builtinProbeCanRejectKey("openrouter")).toBe(true);
+  });
+
+  test("openrouter: 401 on /auth/key is invalid_key (a bogus key never reads as ok)", async () => {
+    const result = await verifyProviderKey({ fetch: mockFetch(json(401, { error: { message: "User not found." } })) }, "openrouter", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "invalid_key" });
   });
 
   test("cursor: GET /v1/models is a MODELS endpoint — a 2xx list is parsed and cached (not discarded as probe-only)", async () => {
@@ -772,6 +841,24 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     await expect(
       createSecretbox(TEST_KEY).decryptSecret(row.key_enc, `app_provider_keys.key_enc:${app.id}:openai:${row.key_id}`),
     ).resolves.toBe(PLAIN_KEY);
+  });
+
+  test("a builtin whose probe cannot reject a bogus key stamps 'reachable' — never 'ok'", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "public-builtin-app");
+    const store = configStore(db);
+    // Kilo's model list is public (200 for a bogus bearer), so the 2xx proved
+    // the ENDPOINT answered; the key itself is unproven.
+    await store.saveVerifiedKey(app.id, "kilo", PLAIN_KEY, ["kilo-auto/efficient"]);
+    const row = db.raw
+      .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE app_id = ?")
+      .get(app.id) as { verified_at: string | null; verified_status: string | null };
+    expect(row.verified_at).toMatch(SQLITE_TS_RE);
+    expect(row.verified_status).toBe("reachable");
+    // The model evidence is still recorded: the probe DID read the list.
+    expect(await store.getVerifiedModels(app.id)).toEqual([
+      { provider: "kilo", models: ["kilo-auto/efficient"], fetched_at: expect.stringMatching(SQLITE_TS_RE) },
+    ]);
   });
 
   test("getVerifiedModels orders by provider ascending and parses each models_json", async () => {

@@ -143,16 +143,16 @@ function ompVerifySpec(providerId: string): Extract<ProviderVerifySpec, { kind: 
  * | azure-openai    | unsupported | —                                            | Azure resource host is per-deployment (AZURE_OPENAI_ENDPOINT); the dashboard stores only the key — no probeable host. |
  * | groq            | models   | https://api.groq.com/openai/v1/models (Bearer)  | documented, OpenAI shape |
  * | cerebras        | models   | https://api.cerebras.ai/v1/models (Bearer)      | documented, OpenAI shape; omp validates a Cerebras key with a chat completion (inference), which the dashboard must not do |
- * | openrouter      | models   | https://openrouter.ai/api/v1/models (Bearer)    | documented (docs show Bearer on GET /api/v1/models) |
+ * | openrouter      | probe    | GET https://openrouter.ai/api/v1/auth/key (Bearer) | the same call omp's auth rule validates. `GET /api/v1/models` is the PUBLIC catalog (200 for any bearer — a bogus key would read as `ok`), so the key probe is /auth/key, which answers 401 for a bogus key |
  * | mistral         | models   | https://api.mistral.ai/v1/models (Bearer)       | documented, OpenAI shape |
  * | minimax         | models   | https://api.minimax.io/v1/models (Bearer)       | documented (platform.minimax.io list-models reference) |
  * | opencode        | models   | https://opencode.ai/zen/v1/models (Bearer)      | OpenCode Zen docs list the endpoint; auth presumed Bearer Zen key [INFERENCE] |
  * | cursor          | models   | GET https://api.cursor.com/v1/models (Bearer)   | Cloud Agents API (cursor.com/docs/api) exposes GET /v1/models — a 2xx list is cached (a real dropdown), 401 still maps to invalid_key; CURSOR_ACCESS_TOKEN rides the omp cursor provider (api2.cursor.sh proxy) at review time — a token rejected here but fine there should move this entry to the proxy surface [INFERENCE] |
  * | ai-gateway      | unsupported | —                                            | Cloudflare AI Gateway path needs account + gateway ids; key alone has no fixed host. |
  * | ark             | models   | https://ark.cn-beijing.volces.com/api/v3/models (Bearer) | OpenAI-compatible base confirmed (ark.cn-beijing.volces.com/api/v3); /models is the standard path — if Ark 404s it, move to probe [INFERENCE] |
- * | kilo            | unsupported | —                                            | omp's Kilo rule (custom hook) carries no models-endpoint validate entry and the gateway model list is public — no key-rejecting models/usage endpoint; the key stays console-managed. |
- * | zai             | unsupported | —                                            | omp validates a Z.AI key with a chat completion, not a models endpoint; Z.AI documents no key-rejecting list-models or usage endpoint. The key stays console-managed. |
- * | umans           | unsupported | —                                            | omp validates a Umans key with an Anthropic-messages completion; the Umans models list is public — no key-rejecting models/usage endpoint. The key stays console-managed. |
+ * | kilo            | models   | https://api.kilo.ai/api/gateway/models (Bearer) | documented gateway base (models.dev `kilo`); the model list is PUBLIC — a bogus key is answered 200 (probed 2026-10-30), so the probe records the weaker `reachable`, never `ok` |
+ * | zai             | unsupported | —                                            | omp validates a Z.AI key with a chat completion, not a models endpoint, and Z.AI documents no list-models or usage endpoint. (`GET /api/paas/v4/models` answers 401 for a bogus key, but an undocumented surface needs a documented reference before it becomes verifiable — see the plan's constraint.) The key stays console-managed. |
+ * | umans           | models   | https://api.code.umans.ai/v1/models (Bearer)    | documented app.umans.ai code base; the model list is PUBLIC — a bogus key is answered 200 (probed 2026-10-30), so the probe records the weaker `reachable`, never `ok` |
  *
  * xai and wafer-serverless are deliberately ABSENT: omp's vendored validate
  * data supplies both URLs, so PROVIDER_VERIFY_ENDPOINTS takes them from
@@ -170,20 +170,14 @@ const DOCUMENTED_VERIFY_ENDPOINTS: Record<string, ProviderVerifySpec> = {
   },
   groq: { kind: "models", url: "https://api.groq.com/openai/v1/models", auth: "bearer" },
   cerebras: { kind: "models", url: "https://api.cerebras.ai/v1/models", auth: "bearer" },
-  openrouter: { kind: "models", url: "https://openrouter.ai/api/v1/models", auth: "bearer" },
-  kilo: {
-    kind: "unsupported",
-    note: "omp's Kilo auth rule has no models-endpoint validate entry and the gateway model list is public — Kilo exposes no key-rejecting models or usage endpoint",
-  },
+  openrouter: { kind: "probe", url: "https://openrouter.ai/api/v1/auth/key", auth: "bearer" },
+  kilo: { kind: "models", url: "https://api.kilo.ai/api/gateway/models", auth: "bearer" },
   mistral: { kind: "models", url: "https://api.mistral.ai/v1/models", auth: "bearer" },
   zai: {
     kind: "unsupported",
-    note: "omp validates a Z.AI key with a chat completion, and Z.AI documents no key-rejecting list-models or usage endpoint",
+    note: "omp validates a Z.AI key with a chat completion, and Z.AI documents no list-models or usage endpoint (an undocumented /api/paas/v4/models answers 401, but a documented surface is required)",
   },
-  umans: {
-    kind: "unsupported",
-    note: "omp validates a Umans key with an Anthropic-messages completion and the Umans model list is public — no key-rejecting models or usage endpoint",
-  },
+  umans: { kind: "models", url: "https://api.code.umans.ai/v1/models", auth: "bearer" },
   minimax: { kind: "models", url: "https://api.minimax.io/v1/models", auth: "bearer" },
   opencode: { kind: "models", url: "https://opencode.ai/zen/v1/models", auth: "bearer" },
   cursor: { kind: "models", url: "https://api.cursor.com/v1/models", auth: "bearer" },
@@ -380,23 +374,52 @@ function customModelsUrl(baseUrl: string): URL | null {
 }
 
 /**
- * Models URLs that REJECT a bogus key, so a 2xx there proves the submitted
+ * Probe URLs that REJECT a bogus key, so a 2xx there proves the submitted
  * key. An ALLOW-list, never a deny-list: a URL missing here is unproven, not
  * public, and the caller records the weaker `reachable` state. That default
  * stays true for endpoints that only later start answering 2xx without a
  * credential.
  *
+ * Custom/template declarations are matched by the URL their base derives
+ * (customProbeCanRejectKey judges the request path, not the declared host):
+ * every entry below is the probe's FULL URL, so a declaration on a
+ * key-rejecting host with another path (`/console`) derives a different URL
+ * and stays unproven.
+ *
+ * Builtin entries are the same decision applied to the spec's own URL
+ * (builtinProbeCanRejectKey): a models/identity endpoint the provider itself
+ * gates on the credential. Probed 2026-10-30 with a bogus key — each answers
+ * 400/401/403, never 2xx. Kilo and Umans are deliberately ABSENT: their model
+ * lists are public (200 for a bogus key), so a 2xx there proves only
+ * reachability.
+ *
  * TypeSafe's omp auth rule validates `GET https://api.typesafe.ai/v1/models`
  * and carries no public-endpoint note, so a bogus key is answered 401/403
- * there. The evidence names ONE PATH, so the entry is the probe's full URL: a
- * declaration on that host with another path (`/console`) derives a different
- * probe URL and stays unproven.
+ * there.
  *
- * shortcut: one endpoint only, so every other custom/template declaration
- * lands `reachable`. Add an entry here only with evidence its models URL
- * answers 401/403 for a bogus key.
+ * shortcut: one endpoint per provider only, so every other custom/template
+ * declaration lands `reachable`. Add an entry here only with evidence its
+ * probe URL answers non-2xx for a bogus key.
  */
-const KEY_REJECTING_MODELS_PROBE_URLS: Readonly<Record<string, true>> = { "https://api.typesafe.ai/v1/models": true };
+const KEY_REJECTING_MODELS_PROBE_URLS: Readonly<Record<string, true>> = {
+  // omp-validated / documented builtin endpoints (the table above).
+  "https://api.anthropic.com/v1/models": true,
+  "https://api.openai.com/v1/models": true,
+  "https://generativelanguage.googleapis.com/v1beta/models": true,
+  "https://api.github.com/user": true, // copilot's identity probe
+  "https://api.groq.com/openai/v1/models": true,
+  "https://api.cerebras.ai/v1/models": true,
+  "https://openrouter.ai/api/v1/auth/key": true,
+  "https://api.mistral.ai/v1/models": true,
+  "https://api.minimax.io/v1/models": true,
+  "https://opencode.ai/zen/v1/models": true,
+  "https://api.cursor.com/v1/models": true,
+  "https://ark.cn-beijing.volces.com/api/v3/models": true,
+  "https://api.x.ai/v1/models": true,
+  "https://pass.wafer.ai/v1/models": true,
+  // Custom/template: the one host with evidence of a key-rejecting models URL.
+  "https://api.typesafe.ai/v1/models": true,
+};
 
 /** Whether a custom-provider probe on this base URL can REJECT a bogus key. */
 export function customProbeCanRejectKey(baseUrl: string): boolean {
@@ -406,6 +429,17 @@ export function customProbeCanRejectKey(baseUrl: string): boolean {
   // Unparseable input is unproven (the store refuses such a base URL first).
   if (probe === null) return false;
   return Object.hasOwn(KEY_REJECTING_MODELS_PROBE_URLS, probe.origin + probe.pathname);
+}
+
+/**
+ * Whether a BUILTIN's probe can REJECT a bogus key — the same allow-list,
+ * judged on the URL the spec requests. An `unsupported` provider (or an
+ * unknown id) has no probe at all: false.
+ */
+export function builtinProbeCanRejectKey(providerId: string): boolean {
+  const spec = PROVIDER_VERIFY_ENDPOINTS[providerId];
+  if (spec === undefined || spec.kind === "unsupported") return false;
+  return Object.hasOwn(KEY_REJECTING_MODELS_PROBE_URLS, spec.url);
 }
 
 /**
