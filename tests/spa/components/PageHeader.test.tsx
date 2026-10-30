@@ -38,7 +38,7 @@ describe("PageHeader", () => {
     });
     // One flex row carries the title and the action cluster; the wrapped
     // action reuses the baseline alignment instead of re-spelling the header.
-    expect(html).toContain("flex flex-wrap items-end justify-between gap-3");
+    expect(html).toContain("flex flex-wrap items-baseline justify-between gap-3");
     expect(html).toContain("<button type=\"submit\">Create App</button>");
     expect(html.indexOf("Create App")).toBeLessThan(html.indexOf("One per repository"));
   });

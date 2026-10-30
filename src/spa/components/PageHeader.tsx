@@ -27,7 +27,7 @@ export function PageHeader({
     <header className="flex flex-col gap-3">
       {backLink}
       <div className="flex flex-col gap-1.5">
-        <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
           <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">
             {title}
           </h1>

@@ -1630,7 +1630,10 @@ function ChainEditor({
       ) : (
         <ul className="flex flex-col gap-2">
           {chain.map((selector, index) => (
-            <li key={`${selector}-${index}`} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
+            <li
+              key={`${selector}-${index}`}
+              className="flex items-center justify-between gap-2 rounded-(--rounded-sm) border border-(--gray-alpha-400) bg-(--gray-200) px-3 py-2"
+            >
               <span className="font-mono text-sm">{selector}</span>
               {/* (review deferral): removing a selector edits
                   the UNSAVED local list — recoverable by re-picking, no
