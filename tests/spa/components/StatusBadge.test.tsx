@@ -53,4 +53,12 @@ describe("StatusBadge", () => {
     expect(html).toContain("bg-(--badge-warn-bg)");
     expect(html).toContain("ml-2");
   });
+
+  test("a caller-supplied data-tone cannot override the tone oracle", () => {
+    const html = render("error", { "data-tone": "success" });
+    expect(html).toContain('data-tone="error"');
+    expect(html).not.toContain('data-tone="success"');
+    // Exactly one tone attribute survives the merge.
+    expect(html.split('data-tone="').length - 1).toBe(1);
+  });
 });

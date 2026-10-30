@@ -32,8 +32,8 @@ export function StatusBadge({
         TONE_FACES[tone],
         className,
       )}
-      data-tone={tone}
       {...props}
+      data-tone={tone}
     />
   );
 }
