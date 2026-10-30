@@ -1,5 +1,5 @@
 /**
- * The three provider dialogs (plan 103 task 4) — the entry points that
+ * The three provider dialogs — the entry points that
  * replaced the inline panels, so the providers list never grows a form
  * (AC-4) and configuring a provider never leaves the settings tab (AC-5).
  *

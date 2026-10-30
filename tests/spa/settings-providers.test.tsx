@@ -1,5 +1,5 @@
 /**
- * The providers group view (plan 103 task 3): grouping, the per-key status
+ * The providers group view: grouping, the per-key status
  * label (AC-10) with its separate timestamp slot (AC-11), the tier badge, the
  * empty state of a keyless declaration, and the model-id disclosure's
  * aria-expanded / aria-controls pairing (AC-20 / I-000208).
@@ -164,8 +164,10 @@ describe("status label and timestamp (AC-10, AC-11)", () => {
         );
         const row = rowOf(html, "tail-1");
         const label = t(locale, `settings.providers.status.${status ?? "unverified"}`);
-        // One pill per row — the label, nothing else.
-        expect(row.split("class=\"inline-flex h-(--badge-height)").length - 1).toBe(1);
+        // One status pill per row — the label, nothing else. Asserted through
+        // the pill's tone attribute, not its design-token classes: a token
+        // rename is not a behaviour change.
+        expect(row.split('data-tone="').length - 1).toBe(1);
         expect(row).toContain(`>${label}</span>`);
         for (const other of cases) {
           if ((other.status ?? "unverified") === (status ?? "unverified")) continue;
@@ -191,12 +193,16 @@ describe("tier badge", () => {
         custom_providers: [{ provider_id: "my-gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: [] }],
       }),
     );
-    expect(html.split("bg-(--badge-warn-bg)").length - 1).toBe(1);
+    // Exactly one warning-toned pill on the page: the template tier.
+    expect(html.split('data-tone="warning"').length - 1).toBe(1);
+    const badgeIn = (label: string) => groupHeaderOf(html, label).match(/data-tone="([a-z]+)"/g);
+    expect(badgeIn("workers-ai label"), "template tier").toEqual(['data-tone="warning"']);
+    expect(badgeIn("anthropic label"), "builtin tier").toEqual(['data-tone="neutral"']);
+    expect(badgeIn("my-gateway"), "custom tier").toEqual(['data-tone="neutral"']);
+
     expect(groupOf(html, "workers-ai label")).toContain(t("en", "settings.providers.tier.template"));
     expect(groupOf(html, "anthropic label")).toContain(t("en", "settings.providers.tier.builtin"));
     expect(groupOf(html, "my-gateway")).toContain(t("en", "settings.providers.tier.custom"));
-    expect(groupOf(html, "anthropic label")).toContain("bg-(--badge-bg)");
-    expect(groupOf(html, "my-gateway")).toContain("bg-(--badge-bg)");
   });
 });
 
@@ -249,14 +255,14 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
     const html = render(
       managePayload({
         keys: [keyRow("p", "a")],
-        custom_providers: [{ provider_id: "my.gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: ["m1", "m2"] }],
+        custom_providers: [{ provider_id: "my-gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: ["m1", "m2"] }],
       }),
     );
     // Collapsed by default: the control states the state and names no region
     // that does not exist yet.
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("aria-controls");
-    expect(html).not.toContain('id="provider-models-my.gateway"');
+    expect(html).not.toContain('id="provider-models-my-gateway"');
     expect(html).toContain(`>${t("en", "settings.providers.expand")}</button>`);
   });
 
@@ -273,7 +279,7 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
             locale: "en" as const,
             payload: managePayload({
               custom_providers: [
-                { provider_id: "my.gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: ["m1", "m2"] },
+                { provider_id: "my-gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: ["m1", "m2"] },
               ],
             }),
             onVerify: async () => ({ kind: "success" as const, message: "" }),
@@ -299,8 +305,8 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
       const expanded = container.querySelector(`[aria-expanded="true"]`);
       if (!(expanded instanceof win.HTMLElement)) throw new Error("the control did not expand");
       const regionId = expanded.getAttribute("aria-controls");
-      expect(regionId).toBe("provider-models-my.gateway");
-      const region = regionId === null ? null : container.querySelector(`#${regionId.replace(/\./g, "\\.")}`);
+      expect(regionId).toBe("provider-models-my-gateway");
+      const region = regionId === null ? null : container.querySelector(`#${regionId}`);
       if (!(region instanceof win.HTMLElement)) throw new Error("the named region is missing");
       expect(region.textContent).toContain("m1");
       expect(region.textContent).toContain("m2");

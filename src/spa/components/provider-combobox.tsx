@@ -140,9 +140,9 @@ export function ProviderComboboxPanel({
                   className={cn(
                     "flex w-full cursor-pointer items-center gap-2 rounded-sm py-1.5 pr-2 pl-2 text-sm select-none hover:bg-accent",
                     activeId === rowId && "bg-accent",
-                    // Dimmed, not inert: discovery is the point (plan 103
-                    // task 4). The entry selects, and its configuration step
-                    // states the reason with no submit path.
+                    // Dimmed, not inert: discovery is the point. The entry
+                    // selects, and its configuration step states the reason with
+                    // no submit path.
                     unavailable && "opacity-50",
                   )}
                   onMouseMove={() => onHoverOption?.(provider.id)}
@@ -292,8 +292,8 @@ export function ProviderCombobox({
             }
           } else if (event.key === "Enter" && open) {
             event.preventDefault();
-            // Unavailable rows select like any other (plan 103 task 4): the
-            // configuration step is where the reason and the absent submit
+            // Unavailable rows select like any other: the configuration
+            // step is where the reason and the absent submit
             // path live, so discovery cannot dead-end at the picker.
             if (active) select(active.id);
           }

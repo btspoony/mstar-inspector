@@ -1,5 +1,5 @@
 /**
- * The three provider dialogs (plan 103 task 4): the two-step Add provider flow,
+ * The three provider dialogs: the two-step Add provider flow,
  * the add-key flow of an existing group, and the custom declaration.
  *
  * Mounted, because the panels live in Radix portals and the flows are stateful:

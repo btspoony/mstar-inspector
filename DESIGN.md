@@ -529,6 +529,14 @@ components:
     rounded: "{rounded.sm}"
     padding: "0 8px"
     height: 32px
+  # The SPA's ui/button `size="sm"` face (h-8 px-3 text-sm): 32px like
+  # button-small, but a 12px side pad and the 14px label. button-small is the
+  # SSR dashboard's 12px header face — the two are not interchangeable.
+  button-sm:
+    typography: "{typography.button-14}"
+    rounded: "{rounded.sm}"
+    padding: "0 12px"
+    height: 32px
   input:
     backgroundColor: "{colors.background-100}"
     textColor: "{colors.gray-1000}"
@@ -641,7 +649,7 @@ components:
     titleTypography: "{typography.heading-16}"
     subtitleTypography: "{typography.label-12}"
     subtitleTextColor: "{colors.gray-700}"
-    headerAction: "{components.button-small}"
+    headerAction: "{components.button-sm}"
   list-row:
     borderColor: "{colors.gray-alpha-400}"
     rounded: "{rounded.sm}"
@@ -654,8 +662,10 @@ components:
     statusSlot: "StatusBadge"
     metaTypography: "{typography.label-12}"
     metaTextColor: "{colors.gray-700}"
-    action: "{components.button-small}"
+    action: "{components.button-sm}"
     actionVariant: "ghost"
+    # Default ghost; a confirm-gated removal renders `destructive` — see
+    # ### list-row for the exception.
     slotOrder: "identity, status, meta, actions"
     columnGap: 12px
   step-dialog:
@@ -1010,7 +1020,9 @@ Variants: `button-primary` (brand-700, rendered on the SPA and SSR faces
 since the T3 bridge re-point + QC-round-1 SSR re-point), `button-danger`
 (red-700), `button-secondary` (surface +
 gray-400 border), `button-disabled` (gray-100 fill, gray-700 text,
-not-allowed). Size: default 40px; `button-small` 32px.
+not-allowed). Size: default 40px; `button-small` 32px (`12px` label, `0 8px`
+pad) on the SSR dashboard header; `button-sm` 32px (`h-8 px-3`, `button-14`)
+on the SPA.
 
 **States** (all enabled variants):
 
@@ -1109,8 +1121,8 @@ preflight leaves `border-color` at `currentColor`, so the component sets
 band (`14px 16px`) and a body (`0 16px 14px`). No divider sits under the
 header: the separation is carried by the `list-row` container border inside the
 body. Title on `heading-16`; subtitle on `label-12` in `gray-700`; the header
-action is the existing `button-small` (`32px` high, `rounded-sm`, `0 8px`
-padding). The `meta-line` (`api · base_url · N models [expand]`) and the
+action is `button-sm` (`32px` high, `rounded-sm`, `0 12px` padding,
+`button-14`). The `meta-line` (`api · base_url · N models [expand]`) and the
 empty-state copy block are composition idioms of the body — body children, not
 standalone components.
 
@@ -1123,7 +1135,9 @@ order is identity → status → meta → actions, on a 12px column gap. Identit
 `label-14` in `font-mono`, minimum column width 76px; the status slot is the
 existing `StatusBadge` — no new status badge, no dot added, so `### Badge`'s
 "Pair with text" rule stands. Meta is `label-12` in `gray-700`; the trailing
-action is a ghost `button-small`.
+action is a ghost `button-sm` — with one exception: a confirm-gated removal
+renders the destructive variant, so the row's only action cannot read as a
+harmless one-click.
 
 ### step-dialog
 
@@ -1131,7 +1145,9 @@ Multi-step entry. The panel surface inherits `ui/dialog`'s `DialogContent` —
 container radius through the bridge, `shadow-pop`, `sm:max-w-lg`, `p-6` — and
 re-derives none of it. Title on `heading-16`; description on `label-12` in
 `gray-700`. The step indicator is `label-12`: the current step in `brand-700`,
-the rest in `gray-700`, rendered only when `steps.length > 1`. The footer is
+the rest in `gray-700`, rendered only when `steps.length > 1`; an
+out-of-range `currentStep` clamps into the label range, so exactly one step is
+always current. The footer is
 right-aligned with a `spacing-2` gap. Disabled-while-submitting and the
 in-progress copy are a footer slot contract — the caller renders the disabled
 submit button and the in-progress copy; the shell holds no busy state.

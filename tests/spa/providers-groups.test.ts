@@ -1,5 +1,5 @@
 /**
- * `providerGroups` — the providers area's group derivation (plan 103, AC-1).
+ * `providerGroups` — the providers area's group derivation (AC-1).
  *
  * The contract is asserted clause by clause: group key, kind, declaration,
  * label, order and the total fallback. No DOM: the derivation is pure, so a

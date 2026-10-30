@@ -35,13 +35,13 @@ const TIER_FACE = {
 } as const satisfies Record<string, { tone: StatusTone; label: string }>;
 
 /**
- * Providers: grouped by provider id (plan 103 task 3) — one group card per
+ * Providers: grouped by provider id (the providers settings area) — one group card per
  * configured provider id, holding that provider's key rows. The group set is
  * the key pool ∪ the custom declarations (`providerGroups`); a catalog entry
  * with neither a key nor a declaration forms no group, because the catalog is
  * the discovery surface of the Add Provider flow, not configured state.
  *
- * The three configuration flows are dialogs (plan 103 task 4): the card header
+ * The three configuration flows are dialogs: the card header
  * opens Add Provider, each group header opens Add key for that group, and the
  * custom declaration opens from the Add Provider dialog's own secondary entry.
  * Opening any of them inserts nothing into this list (AC-4) and changes no
@@ -207,9 +207,10 @@ function ProviderGroupCard({
 }) {
   const [modelsOpen, setModelsOpen] = useState(false);
   const meta = groupMeta(group, catalog);
-  // The disclosure region's id uses the provider id verbatim: it is the
-  // store's slug grammar (`[a-z0-9][a-z0-9-]{0,63}`), and folding the
-  // characters outside that set would map two distinct ids onto one DOM id.
+  // The disclosure region's id uses the provider id verbatim. Custom provider
+  // ids are stored under the slug grammar (`[a-z0-9][a-z0-9-]{0,63}`), so no
+  // character needs escaping; folding would only merge two distinct ids into
+  // one DOM id.
   const modelsId = `provider-models-${group.providerId}`;
   const tier = TIER_FACE[group.kind];
 
