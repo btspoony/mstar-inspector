@@ -30,7 +30,7 @@ import {
   draftChainTabLabel,
   githubAppSettingsUrl,
 } from "../../src/spa/pages/SettingsPage";
-import { ProviderConfigForm } from "../../src/spa/pages/settings-providers";
+import { ProviderConfigForm } from "../../src/spa/pages/providers-dialogs";
 import type { SpaBoot } from "../../src/spa/boot";
 import { SupportNotice } from "../../src/spa/components/SupportNotice";
 import { AppDetailPage, AppDetailView } from "../../src/spa/pages/AppDetailPage";
@@ -38,13 +38,15 @@ import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
 
 /**
- * The settings tab's source: the page plus the providers module it composes.
- * The providers cluster lives in settings-providers.tsx (plan 103 task 2), so
- * the tab's source pins read both documents.
+ * The settings tab's source: the page plus the providers cluster it composes —
+ * the card module and the three dialogs (plan 103 task 4). The providers
+ * cluster lives in settings-providers.tsx / providers-dialogs.tsx (plan 103
+ * tasks 2 and 4), so the tab's source pins read all three documents.
  */
 const readSettingsSource = () =>
   readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8") +
-  readFileSync(join(import.meta.dir, "../../src/spa/pages/settings-providers.tsx"), "utf8");
+  readFileSync(join(import.meta.dir, "../../src/spa/pages/settings-providers.tsx"), "utf8") +
+  readFileSync(join(import.meta.dir, "../../src/spa/pages/providers-dialogs.tsx"), "utf8");
 
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
@@ -245,17 +247,19 @@ describe("configured providers + catalog add flow", () => {
 
   test("Add Provider: catalog selection drives the configuration form; custom path preserved", () => {
     const source = readSettingsSource();
-    // Header disclosure button → catalog select → selected provider's form.
+    // Header trigger → catalog picker → selected provider's form (plan 103
+    // task 4: the flow is a dialog, so the trigger advertises the overlay
+    // rather than an in-card expansion).
     expect(source).toContain("settings.addProvider");
-    expect(source).toContain("aria-expanded={addOpen}");
+    expect(source).toContain('aria-haspopup="dialog"');
     expect(source).toContain("selectedCatalogProvider");
     expect(source).toContain("providerFormKind");
     expect(source).toContain("settings.configureProvider");
     // Built-in and template materialization paths, mutations unchanged.
     expect(source).toContain("/keys/verify");
     expect(source).toContain('op: "add-template-provider"');
-    // CustomExpand stays for ids NOT in the catalog.
-    expect(source).toContain("CustomExpand");
+    // The custom declaration keeps its own flow, now a dialog of its own.
+    expect(source).toContain("CustomProviderDialog");
     expect(source).toContain('op: "add-custom-provider"');
   });
 
@@ -347,7 +351,7 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
   test("the key row renders the per-key verification state", () => {
     expect(page).toContain("settings.providers.status.ok");
     expect(page).toContain("settings.providers.status.failed");
-    const groupCard = page.slice(page.indexOf("function ProviderGroupCard"), page.indexOf("function AddProviderSection"));
+    const groupCard = page.slice(page.indexOf("function ProviderGroupCard"));
     expect(groupCard).toContain("key.verifiedStatus");
     // A probe that could not reject a bogus key renders the weaker
     // "reachable" state — never the "verified" claim: two distinct labels, and
@@ -516,8 +520,12 @@ describe("provider combobox", () => {
     expect(full.indexOf("Catalog templates")).toBeGreaterThan(full.indexOf("Common providers"));
     // The selected row carries aria-selected.
     expect(full).toContain('aria-selected="true"');
-    // The unavailable catalog row stays listed and marked, with the suffix.
-    expect(full).toContain('aria-disabled="true"');
+    // The unavailable catalog row stays listed and marked, with the suffix —
+    // and stays selectable (plan 103 task 4 reverses the old inert rule): it
+    // is dimmed, not disabled.
+    expect(full).not.toContain('aria-disabled="true"');
+    expect(full).not.toContain("pointer-events-none");
+    expect(full).toContain("opacity-50");
     expect(full).toContain("unavailable under omp");
     const narrowed = panel("gem", "gemini");
     // Narrowed to matching entries only — the common group keeps just Gemini
@@ -526,7 +534,7 @@ describe("provider combobox", () => {
     expect(narrowed).toContain("Google Gemini");
     expect(narrowed).toContain('aria-selected="true"');
     expect(narrowed).toContain("Gemini Image");
-    expect(narrowed).toContain('aria-disabled="true"');
+    expect(narrowed).toContain("opacity-50");
     expect(narrowed).toContain("unavailable under omp");
     expect(narrowed).not.toContain("Anthropic");
     expect(narrowed).not.toContain("OpenAI");
@@ -553,7 +561,7 @@ describe("provider combobox", () => {
         onSelect: () => {},
       }),
     );
-    expect(out).toContain('aria-disabled="true"');
+    expect(out).toContain("opacity-50");
     expect(out).toContain("unavailable under omp");
     expect(out.indexOf("Common providers")).toBeGreaterThan(-1);
     expect(out.indexOf("Catalog templates")).toBeGreaterThan(out.indexOf("Common providers"));
@@ -589,10 +597,11 @@ describe("provider combobox", () => {
     // Focus/typing opens, and every keystroke re-narrows the panel.
     expect(source).toContain("onFocus={() => setOpen(true)}");
     expect(source).toContain("setQuery(event.target.value);");
-    // Selection is inert for unavailable rows — the UI side of the red line
-    // (the server-side eligibility pre-check stays the last line of defense
-    // and is untouched).
-    expect(source).toContain("if (!unavailable) onSelect(provider.id);");
+    // An unavailable row SELECTS like any other (plan 103 task 4): the
+    // discovery entry must be reachable, and the add-provider dialog's
+    // configuration step is where the reason and the absent submit path live.
+    // The server-side eligibility pre-check stays the last line of defence.
+    expect(source).toContain("onClick={() => onSelect(provider.id)}");
   });
 
   test("keyboard selection: arrows walk the filtered list, Enter selects, highlight follows the filter, click re-opens after Esc (source pins, task-3 review fix)", () => {
@@ -607,10 +616,10 @@ describe("provider combobox", () => {
     expect(source).toContain('if (event.key === "ArrowDown" || event.key === "ArrowUp")');
     expect(source).toContain("Math.min(index + 1, visible.length - 1)");
     expect(source).toContain("Math.max(index - 1, 0)");
-    // Enter selects the highlighted row — and the unavailable red line holds
-    // on the keyboard path exactly as on the pointer path.
+    // Enter selects the highlighted row, unavailable included — the keyboard
+    // path carries no extra red line the pointer path does not.
     expect(source).toContain('event.key === "Enter" && open');
-    expect(source).toContain('if (active && active.eligibility !== "unavailable") select(active.id);');
+    expect(source).toContain("if (active) select(active.id);");
     // The input advertises the highlighted option while the list is open.
     expect(source).toContain("aria-activedescendant={open && active ? optionId(listboxId, active.id) : undefined}");
     // The highlight follows filter changes: every keystroke (and a selection)
@@ -736,26 +745,22 @@ describe("add-entry visibility + picker usability at breadth", () => {
     // The entry lives in the card HEADER (CardAction slot) — visible without
     // scrolling; icon-only is not acceptable, the localized label rides the
     // button beside a plus glyph.
-    const body = source.slice(
-      source.indexOf("function ProvidersCard"),
-      source.indexOf("function AddProviderSection"),
-    );
+    const body = source.slice(source.indexOf("function ProvidersCard"), source.indexOf("function groupMeta"));
     expect(body).toContain("<CardAction>");
     expect(body).toContain('variant="outline"');
-    expect(body).toContain("aria-expanded={addOpen}");
+    expect(body).toContain('aria-haspopup="dialog"');
     expect(body).toContain('{t(locale, "settings.addProvider")}');
     expect(body).toContain("<Plus");
-    expect(body).toContain("onClick={() => setAddOpen(!addOpen)}");
-    // The open panel is the card content's FIRST row — inside CardContent,
-    // above the configured rows.
+    expect(body).toContain("onClick={() => setAddOpen(true)}");
+    // AC-4: the flow is an overlay, not an expanded row — the card content
+    // holds the group list only, and the dialog is mounted beside it.
     const contentPos = body.indexOf("<CardContent");
-    const panelPos = body.indexOf("<AddProviderSection");
     const rowsPos = body.indexOf("groups.length === 0");
     expect(contentPos).toBeGreaterThan(-1);
-    expect(panelPos).toBeGreaterThan(contentPos);
-    expect(rowsPos).toBeGreaterThan(panelPos);
-    // The panel is driven by the header button; success still closes it via
-    // the shared onOpenChange channel.
+    expect(rowsPos).toBeGreaterThan(contentPos);
+    expect(body).not.toContain("<AddProviderSection");
+    // The dialog is driven by the header trigger; a completed flow reports
+    // through the shared outcome channel and closes through onOpenChange.
     expect(body).toContain("open={addOpen}");
     expect(body).toContain("onOpenChange={setAddOpen}");
   });
@@ -1699,12 +1704,11 @@ describe("section-scoped op feedback", () => {
       source.indexOf("function OpsCard"),
     );
     expect(runtimeBody).toContain("disabled={busy}");
-    const providerFormBody = source.slice(
-      source.indexOf("function ProviderConfigForm"),
-      source.indexOf("function CustomExpand"),
-    );
+    // ProviderConfigForm is the providers module's tail: the slice runs to the
+    // end of the composed source.
+    const providerFormBody = source.slice(source.indexOf("function ProviderConfigForm"));
     expect(providerFormBody).toContain("disabled={busy}");
-    const customBody = source.slice(source.indexOf("function CustomExpand"));
+    const customBody = source.slice(source.indexOf("function CustomProviderDialog"));
     expect(customBody).toContain("disabled={busy}");
     const editorBody = source.slice(source.indexOf("function ChainEditor"));
     expect(editorBody).toContain("disabled={busy}");
@@ -1791,26 +1795,29 @@ describe("version footer", () => {
   });
 });
 
-describe("custom-provider disclosure state", () => {
-  test("the CustomExpand toggle exposes aria-expanded wired to the disclosure state (audit F-15-03)", () => {
+describe("provider entry controls", () => {
+  test("every provider-flow entry is a labelled dialog trigger; no in-card disclosure is left", () => {
     const source = readSettingsSource();
-    // Structural pin mirroring the AddProviderSection header-disclosure
-    // precedent: the toggle carries aria-expanded bound to the
-    // component's open-state prop — same element, exact-string pinned, so a
-    // regression dropping the attribute (or binding it anywhere other than
-    // the disclosure toggle) fails here. Single-state disclosure semantics
-    // unchanged; the open/closed state is only made perceivable (WCAG 4.1.2).
-    const customBody = source.slice(source.indexOf("function CustomExpand"));
-    expect(customBody).toContain("onClick={onToggle} aria-expanded={expanded}");
-    // The attribute stays live end to end: ProvidersCard owns the customOpen
-    // disclosure state and hands it down as `expanded` / onToggle, so the
-    // attribute flips with the disclosure (mirrors the addOpen wiring pin).
+    // Plan 103 task 4 removed both inline panels (AddProviderSection's and
+    // CustomExpand's), so their aria-expanded disclosures are gone with them;
+    // the entry controls now advertise the overlay they open (WCAG 4.1.2), and
+    // the card body holds no expandable region.
     const providersBody = source.slice(
       source.indexOf("function ProvidersCard"),
-      source.indexOf("function ProviderGroupCard"),
+      source.indexOf("function groupMeta"),
     );
-    expect(providersBody).toContain("expanded={customOpen}");
-    expect(providersBody).toContain("onToggle={() => setCustomOpen(!customOpen)}");
+    expect(providersBody).toContain('aria-haspopup="dialog"');
+    expect(providersBody).not.toContain("aria-expanded=");
+    expect(source).not.toContain("CustomExpand");
+    expect(source).not.toContain("AddProviderSection");
+    // The add-key trigger sits in the group header beside the declaration's
+    // remove, so a second key never detours through the catalog again.
+    const groupCard = source.slice(source.indexOf("function ProviderGroupCard"));
+    expect(groupCard).toContain('aria-haspopup="dialog"');
+    expect(groupCard).toContain('t(locale, "settings.addKey")');
+    // The one disclosure that stays in the providers area is the model-id
+    // list, and it pairs aria-controls with its expanded state.
+    expect(groupCard).toContain("aria-controls={modelsOpen ? modelsId : undefined}");
   });
 });
 

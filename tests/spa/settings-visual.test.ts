@@ -27,9 +27,11 @@ import { withLocation } from "./browser-stub";
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "utf8");
 const settingsPageOnly = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
-/** The settings tab's source: the page plus the providers module it composes. */
+/** The settings tab's source: the page plus the providers modules it composes. */
 const settingsTabSource =
-  settingsPageOnly + readFileSync(join(spaRoot, "pages/settings-providers.tsx"), "utf8");
+  settingsPageOnly +
+  readFileSync(join(spaRoot, "pages/settings-providers.tsx"), "utf8") +
+  readFileSync(join(spaRoot, "pages/providers-dialogs.tsx"), "utf8");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
 const pageHeader = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
@@ -312,7 +314,9 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
     // (plan 102's components), never a hand-assembled row dialect: identity →
     // status → meta → actions arrives through ListRow props, the pill through
     // StatusBadge, the group chrome through GroupCard.
-    const groupCard = cardBlock("function ProviderGroupCard", "function AddProviderSection");
+    // The group card is the providers module's tail (plan 103 task 4 moved the
+    // forms into the dialog module), so the slice runs to the end of it.
+    const groupCard = settingsTabSource.slice(settingsTabSource.indexOf("function ProviderGroupCard"));
     expect(groupCard).toContain("<GroupCard>");
     expect(groupCard).toContain("<GroupCardHeader");
     expect(groupCard).toContain("<GroupCardBody>");

@@ -515,6 +515,16 @@ export const en = {
       /** AC-11: the secondary timestamp slot — never part of the status label. */
       verifiedAt: "verified {time}",
       modelCount: "{count} models",
+      /** The two-step add-provider dialog: its indicator, its back step and its in-progress copy. */
+      stepPick: "Choose",
+      stepConfigure: "Configure",
+      back: "Back",
+      verifying: "Verifying…",
+      saving: "Saving…",
+      /** Add-key dialog: its title, its pool usage line, and the key ceiling. */
+      addKeyTo: "Add a key to {label}",
+      keyUsage: "{count} of {limit} keys stored.",
+      keyLimitReached: "This provider already holds {limit} keys — remove one before adding another.",
       expand: "Expand",
       collapse: "Collapse",
       empty: "No keys yet — add the first key to use this provider in a model chain.",
