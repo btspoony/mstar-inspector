@@ -6,7 +6,8 @@
  * actions on a 12px column gap, and an omitted optional slot renders nothing.
  *
  * Purely presentational: the status slot is the caller's StatusBadge, the
- * action is the caller's ghost small button, and copy arrives through props.
+ * action is the caller's small button — ghost by default, `destructive` for a
+ * confirm-gated removal (DESIGN.md ### list-row) — and copy arrives through props.
  */
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
