@@ -279,6 +279,22 @@ function dedupeStrings(values: string[]): string[] {
 }
 
 /**
+ * Structured diagnostics for a transport failure or timeout. Carries only the
+ * phase, the URL actually requested and the error's name/message: the as-typed
+ * key and every request header stay out of logs by construction. A timeout is
+ * the same catch with `errName: "TimeoutError"` (AbortSignal.timeout rejects).
+ */
+function warnTransportFailure(phase: "models" | "probe" | "custom", url: string, e: unknown): void {
+  const err = e as { name?: string; message?: string } | null;
+  console.warn("provider-verify", {
+    phase,
+    url,
+    errName: err?.name,
+    errMessage: String(err?.message ?? e).slice(0, 200),
+  });
+}
+
+/**
  * Verify one BUILT-IN provider key against its list-models endpoint.
  * 401/403 → invalid_key; any other non-2xx → unexpected_response; 2xx with an
  * unparseable body → unexpected_response; 2xx with a parseable list (possibly
@@ -298,7 +314,8 @@ async function verifyModelsEndpoint(
       headers,
       signal: AbortSignal.timeout(deps.timeoutMs ?? VERIFY_TIMEOUT_MS),
     });
-  } catch {
+  } catch (e) {
+    warnTransportFailure("models", spec.url, e);
     return { ok: false, reason: "unreachable" };
   }
   if (res.status === 401 || res.status === 403) {
@@ -338,7 +355,8 @@ async function verifyProbe(
       headers: requestHeaders(spec.auth, key),
       signal: AbortSignal.timeout(deps.timeoutMs ?? VERIFY_TIMEOUT_MS),
     });
-  } catch {
+  } catch (e) {
+    warnTransportFailure("probe", spec.url, e);
     return { ok: false, reason: "unreachable" };
   }
   if (res.status === 401 || res.status === 403) {
@@ -478,7 +496,8 @@ async function verifyCustomProvider(
       headers,
       signal: AbortSignal.timeout(deps.timeoutMs ?? VERIFY_TIMEOUT_MS),
     });
-  } catch {
+  } catch (e) {
+    warnTransportFailure("custom", probe.toString(), e);
     return { ok: false, reason: "unreachable" };
   }
   if (res.status === 401 || res.status === 403) {
