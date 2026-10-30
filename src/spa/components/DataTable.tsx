@@ -36,7 +36,11 @@ export function DataTable<T>({
   if (rows.length === 0 && empty !== undefined) return <>{empty}</>;
 
   return (
-    <div className="overflow-hidden rounded-md border">
+    // The shell hairline is explicit: a bare `border` carries width only and
+    // preflight leaves border-color at currentColor, so the face supplies the
+    // gray-alpha-400 hairline itself (DESIGN.md Table). The row hairline rides
+    // the same token — the primitive's `border-b` sets width only.
+    <div className="overflow-hidden rounded-md border border-(--gray-alpha-400) [&_tr]:border-(--gray-alpha-400)">
       <Table>
         <TableHeader className="bg-(--background-200)">
           <TableRow className="hover:bg-inherit">
