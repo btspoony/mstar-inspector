@@ -231,6 +231,20 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
     expect(templateGroup).toContain(t("en", "settings.providers.modelCount", { count: 2 }));
   });
 
+  test("a one-key group and a one-model list read singular in en", () => {
+    const html = render(
+      managePayload({
+        provider_catalog: [catalogEntry("workers-ai", "template", { base_url: "https://api.test", api: "openai-completions", models: ["only"] })],
+        keys: [keyRow("workers-ai", "solo")],
+      }),
+    );
+    const group = groupOf(html, "workers-ai label");
+    expect(group).toContain("1 key ·");
+    expect(group).not.toContain("1 keys");
+    expect(group).toContain("1 model");
+    expect(group).not.toContain("1 models");
+  });
+
   test("the expand control names the model-id region it toggles", () => {
     const html = render(
       managePayload({
@@ -242,7 +256,7 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
     // that does not exist yet.
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("aria-controls");
-    expect(html).not.toContain('id="provider-models-my-gateway"');
+    expect(html).not.toContain('id="provider-models-my.gateway"');
     expect(html).toContain(`>${t("en", "settings.providers.expand")}</button>`);
   });
 
@@ -285,7 +299,7 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
       const expanded = container.querySelector(`[aria-expanded="true"]`);
       if (!(expanded instanceof win.HTMLElement)) throw new Error("the control did not expand");
       const regionId = expanded.getAttribute("aria-controls");
-      expect(regionId).toBe("provider-models-my-gateway");
+      expect(regionId).toBe("provider-models-my.gateway");
       const region = regionId === null ? null : container.querySelector(`#${regionId.replace(/\./g, "\\.")}`);
       if (!(region instanceof win.HTMLElement)) throw new Error("the named region is missing");
       expect(region.textContent).toContain("m1");

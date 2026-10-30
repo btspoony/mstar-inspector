@@ -438,8 +438,11 @@ export const zhCN: Dictionary = {
       },
       tier: { builtin: "内置", template: "模板", custom: "自定义" },
       summary: "{total} 个密钥 · {ok} 已验证 · {reachable} 端点可达 · {failed} 验证失败 · {unverified} 未验证",
+      /** 中文无单复数；与 summary 同形（type parity 要求两个键都在）。 */
+      summaryOne: "{total} 个密钥 · {ok} 已验证 · {reachable} 端点可达 · {failed} 验证失败 · {unverified} 未验证",
       verifiedAt: "{time} 验证通过",
       modelCount: "{count} 个模型",
+      modelCountOne: "{count} 个模型",
       stepPick: "选择",
       stepConfigure: "配置",
       back: "返回",

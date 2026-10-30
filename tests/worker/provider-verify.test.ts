@@ -403,13 +403,37 @@ describe("omp 18.13.3 validate data (vendored verify snapshot)", () => {
 });
 
 describe("validation-only invariant (no inference in the verify surface)", () => {
-  test("the module's source carries no chat-completion probe", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/dashboard/provider-verify.ts"), "utf8");
-    // The retired 1-token chat probes (kilo / zai / umans) must never return:
-    // no inference path, no probe body, no POST.
-    expect(source).not.toContain("chat/completions");
-    expect(source).not.toContain("max_tokens");
-    expect(source).not.toContain('method: "POST"');
+  test("a verification only ever requests the models/probe endpoint — never a chat/completions URL", async () => {
+    // I-000209: the invariant is the OUTBOUND REQUESTS, not the module's text.
+    // A stub fetch returns a 2xx for anything and records every URL it was
+    // asked for, so a verification that also tried an inference probe would
+    // show up here whatever the source reads like.
+    const requested: string[] = [];
+    const record: VerifyDeps["fetch"] = async (input) => {
+      requested.push(String(input));
+      return json(200, { data: [], models: [] });
+    };
+
+    for (const [provider, spec] of Object.entries(PROVIDER_VERIFY_ENDPOINTS)) {
+      if (spec.kind === "unsupported") continue;
+      requested.length = 0;
+      await verifyProviderKey({ fetch: record }, provider, PLAIN_KEY);
+      // Exactly one request, to the spec's own models/probe URL — and that URL
+      // is never an inference path (the retired kilo/zai/umans chat probes).
+      expect(requested, provider).toEqual([spec.url]);
+      expect(requested[0], provider).not.toMatch(/chat\/completions|completions|generateContent|invocations/);
+    }
+
+    // The custom path derives its own probe URL from the declared base and
+    // requests exactly that one.
+    requested.length = 0;
+    const custom = await verifyProviderKey({ fetch: record }, "my-gateway", PLAIN_KEY, {
+      baseUrl: "https://models.test/v1",
+      api: "openai-completions",
+      modelIds: ["m-1"],
+    });
+    expect(custom).toEqual({ ok: true, models: ["m-1"] });
+    expect(requested).toEqual(["https://models.test/v1/models"]);
   });
 
   test("every verifiable builtin issues exactly one GET carrying no body", async () => {

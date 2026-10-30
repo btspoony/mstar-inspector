@@ -512,9 +512,13 @@ export const en = {
       tier: { builtin: "Built-in", template: "Template", custom: "Custom" },
       summary:
         "{total} keys · {ok} verified · {reachable} endpoint reachable · {failed} failed · {unverified} unverified",
+      /** The singular pair (the `members.slotsLeftOne` convention: no plural helper). */
+      summaryOne:
+        "{total} key · {ok} verified · {reachable} endpoint reachable · {failed} failed · {unverified} unverified",
       /** AC-11: the secondary timestamp slot — never part of the status label. */
       verifiedAt: "verified {time}",
       modelCount: "{count} models",
+      modelCountOne: "{count} model",
       /** The two-step add-provider dialog: its indicator, its back step and its in-progress copy. */
       stepPick: "Choose",
       stepConfigure: "Configure",

@@ -142,7 +142,7 @@ describe("settings section rhythm (AD-591)", () => {
     expect(cardBlock("function RuntimeHarnessCard", "function RuntimeHarnessEditor")).toContain(
       '<SectionCard tier="secondary">',
     );
-    expect(cardBlock("function OpsCard", "function ProvidersCard")).toContain(
+    expect(cardBlock("function OpsCard", "function ChainsCard")).toContain(
       '<SectionCard tier="primary">',
     );
   });

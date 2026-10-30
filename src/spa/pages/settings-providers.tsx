@@ -207,9 +207,10 @@ function ProviderGroupCard({
 }) {
   const [modelsOpen, setModelsOpen] = useState(false);
   const meta = groupMeta(group, catalog);
-  // The disclosure region's id: provider ids are slugs, but a custom id is
-  // caller-supplied, so anything outside the id-safe set is folded to a dash.
-  const modelsId = `provider-models-${group.providerId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  // The disclosure region's id uses the provider id verbatim: it is the
+  // store's slug grammar (`[a-z0-9][a-z0-9-]{0,63}`), and folding the
+  // characters outside that set would map two distinct ids onto one DOM id.
+  const modelsId = `provider-models-${group.providerId}`;
   const tier = TIER_FACE[group.kind];
 
   return (
@@ -217,7 +218,11 @@ function ProviderGroupCard({
       <GroupCardHeader
         title={group.label}
         badge={<StatusBadge tone={tier.tone}>{t(locale, tier.label)}</StatusBadge>}
-        summary={t(locale, "settings.providers.summary", group.summary)}
+        summary={t(
+          locale,
+          group.summary.total === 1 ? "settings.providers.summaryOne" : "settings.providers.summary",
+          group.summary,
+        )}
         actions={
           <div className="flex items-center gap-(--spacing-2)">
             <Button type="button" variant="outline" size="sm" aria-haspopup="dialog" onClick={onAddKey}>
@@ -293,7 +298,13 @@ function ProviderGroupCard({
             <span aria-hidden="true">·</span>
             <span className="font-mono">{meta.baseUrl}</span>
             <span aria-hidden="true">·</span>
-            <span>{t(locale, "settings.providers.modelCount", { count: meta.modelIds.length })}</span>
+            <span>
+              {t(
+                locale,
+                meta.modelIds.length === 1 ? "settings.providers.modelCountOne" : "settings.providers.modelCount",
+                { count: meta.modelIds.length },
+              )}
+            </span>
             <button
               type="button"
               className="text-(--brand-700)"
