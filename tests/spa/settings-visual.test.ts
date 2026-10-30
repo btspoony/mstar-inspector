@@ -279,7 +279,7 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
     // The page never spells tier classes (the T1 single-point pin above); the
     // three manage-face configuration cards re-parent exactly like the
     // runtime harness card did — one prop, zero per-block className assembly.
-    expect(cardBlock("function ProvidersCard", "function ConfiguredKeyRow")).toContain(
+    expect(cardBlock("function ProvidersCard", "function ProviderGroupCard")).toContain(
       '<SectionCard tier="secondary">',
     );
     expect(cardBlock("function ChainsCard", "function SeatsCard")).toContain(
@@ -294,7 +294,7 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
 
   test("each re-parented card titles through SectionCardTitle (the heading-16 step)", () => {
     for (const [card, next] of [
-      ["function ProvidersCard", "function ConfiguredKeyRow"],
+      ["function ProvidersCard", "function ProviderGroupCard"],
       ["function ChainsCard", "function SeatsCard"],
       ["function SeatsCard", "function DraftChainPanel"],
     ] as const) {
@@ -308,22 +308,20 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
     // (the combobox aria-labelledby picker label rides its own pinned idiom).
     const labelIdiom = 'className="flex flex-col gap-1.5 text-sm font-medium"';
     expect(settingsTabSource.split(labelIdiom).length - 1).toBeGreaterThanOrEqual(8);
-    // Both configured-row kinds (the mirror rows) title at the label-14 form
-    // face and carry their meta at the compact xs muted face — one dialect.
-    const keyRow = cardBlock("function ConfiguredKeyRow", "function ConfiguredCustomRow");
-    const customRow = cardBlock("function ConfiguredCustomRow", "function AddProviderSection");
-    for (const [name, row] of [
-      ["key row", keyRow],
-      ["custom row", customRow],
-    ] as const) {
-      expect(row, name).toContain('<div className="text-sm font-medium">{label}</div>');
-      expect(row, name).toContain('className="text-xs text-muted-foreground"');
-    }
-    // Compactness pins stay structural: hairline + container radius + the
-    // padded row body (mirror-row compactness, faces retuned only).
-    for (const row of [keyRow, customRow]) {
-      expect(row).toContain("flex flex-wrap items-center justify-between gap-2 rounded-md border p-3");
-    }
+    // The configured rows are the shared list-row / group-card composition
+    // (plan 102's components), never a hand-assembled row dialect: identity →
+    // status → meta → actions arrives through ListRow props, the pill through
+    // StatusBadge, the group chrome through GroupCard.
+    const groupCard = cardBlock("function ProviderGroupCard", "function AddProviderSection");
+    expect(groupCard).toContain("<GroupCard>");
+    expect(groupCard).toContain("<GroupCardHeader");
+    expect(groupCard).toContain("<GroupCardBody>");
+    expect(groupCard).toContain("<ListRowGroup>");
+    expect(groupCard).toContain("<ListRow");
+    expect(groupCard).toContain("<StatusBadge");
+    expect(settingsTabSource).toContain('from "../components/GroupCard"');
+    expect(settingsTabSource).toContain('from "../components/ListRow"');
+    expect(settingsTabSource).toContain('from "../components/StatusBadge"');
   });
 });
 

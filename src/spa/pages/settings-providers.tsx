@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { useState } from "react";
 import { Plus } from "lucide-react";
 import { t } from "../../i18n";
 import { Button } from "@/components/ui/button";
@@ -11,8 +11,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { GroupCard, GroupCardBody, GroupCardHeader } from "../components/GroupCard";
+import { ListRow, ListRowGroup } from "../components/ListRow";
 import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
+import { StatusBadge, type StatusTone } from "../components/StatusBadge";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import {
@@ -20,19 +23,38 @@ import {
   providerKeyRows,
   selectedCatalogProvider,
   type CatalogProvider,
-  type ConfiguredProvider,
   type ProviderKeyRow,
   type SettingsManagePayload,
 } from "./data";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
+import { providerGroups, type ProviderGroup } from "./providers-groups";
 import type { PendingAction } from "./SettingsPage";
 
 /**
- * Providers: this card lists ONLY the App's configured providers —
- * a stored key (masked tail) or a saved custom-provider declaration. Catalog
- * entries are discovery metadata and appear solely inside the Add Provider
- * picker, whose selection determines the configuration form; the non-catalog
- * custom declaration path (CustomExpand) stays for ids outside the catalog.
+ * AC-10: exactly one verification label per key row, from the four store
+ * states. `reachable` is the weaker "the endpoint answered" claim and takes the
+ * accent tone; `unverified` is the NULL column.
+ */
+const KEY_STATUS = {
+  ok: { tone: "success", label: "settings.providers.status.ok" },
+  reachable: { tone: "brand", label: "settings.providers.status.reachable" },
+  failed: { tone: "error", label: "settings.providers.status.failed" },
+  unverified: { tone: "neutral", label: "settings.providers.status.unverified" },
+} as const satisfies Record<string, { tone: StatusTone; label: string }>;
+
+/** Tier badge faces: the template tier is the one gold surface. */
+const TIER_FACE = {
+  builtin: { tone: "neutral", label: "settings.providers.tier.builtin" },
+  template: { tone: "warning", label: "settings.providers.tier.template" },
+  custom: { tone: "neutral", label: "settings.providers.tier.custom" },
+} as const satisfies Record<string, { tone: StatusTone; label: string }>;
+
+/**
+ * Providers: grouped by provider id (plan 103 task 3) — one group card per
+ * configured provider id, holding that provider's key rows. The group set is
+ * the key pool ∪ the custom declarations (`providerGroups`); a catalog entry
+ * with neither a key nor a declaration forms no group, because the catalog is
+ * the discovery surface of the Add Provider panel, not configured state.
  *
  * The Add Provider entry is a labeled, bordered button in the card
  * header (CardAction slot) — the catalog breadth made discoverability the
@@ -54,9 +76,9 @@ export function ProvidersCard({
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onPending: (action: PendingAction) => void;
-  /** The add-flow (verify / template) outcomes — removes render row-local (below). */
+  /** The add-flow (verify / template) outcomes — removes render group-locally (below). */
   notice: OpNotice | null;
-  /** (audit UI-45-05): the remove-key / remove-custom outcome, rendered at the removed row's position. */
+  /** (audit UI-45-05): the remove-key / remove-custom outcome, rendered beside the group the removed row belonged to. */
   removeOutcome: { notice: OpNotice; slot: number } | null;
   /** Where the add-flow forms (verify / template) report their outcome. */
   onOutcome: (notice: OpNotice) => void;
@@ -65,24 +87,27 @@ export function ProvidersCard({
   const [customOpen, setCustomOpen] = useState(false);
   const catalogById: Record<string, CatalogProvider> = {};
   for (const provider of payload.provider_catalog) catalogById[provider.id] = provider;
-  // (audit UI-45-05): where the remove outcome renders inside the
-  // rows list. Success took the row away — the awaited reload has already
-  // dropped it — so the outcome renders in its former slot; a failure OR the
-  // tolerant no-op (warn: nothing was removed, the row is still there) renders
-  // directly below it (the field-error position). Clamped so a removed last
-  // row lands at the list's end, never out of bounds.
-  const removeSlot =
-    removeOutcome === null
-      ? -1
-      : Math.min(
-          removeOutcome.notice.kind === "success" ? removeOutcome.slot : removeOutcome.slot + 1,
-          payload.configured_providers.length,
-        );
+  const groups = providerGroups(payload);
+  // (audit UI-45-05, regrouped): the captured slot indexes the PRE-POST
+  // configured rows. A failure or the tolerant no-op leaves the row in place,
+  // so its provider names the group that renders the notice. A success took the
+  // row away and may have taken the whole group, so the notice renders under
+  // the add-flow region instead of pointing at a group that no longer exists.
+  const removedRow =
+    removeOutcome === null || removeOutcome.notice.kind === "success"
+      ? null
+      : (payload.configured_providers[removeOutcome.slot] ?? null);
+  const removedProviderId =
+    removedRow === null ? null : removedRow.kind === "key" ? removedRow.provider : removedRow.provider_id;
+  const orphanRemoveNotice =
+    removeOutcome === null || groups.some((group) => group.providerId === removedProviderId)
+      ? null
+      : removeOutcome.notice;
 
   return (
     <SectionCard tier="secondary">
       <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.providers")}</SectionCardTitle>
+        <SectionCardTitle>{t(locale, "settings.providers.title")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.providersCopy")}</CardDescription>
         <CardAction>
           <Button type="button" variant="outline" size="sm" aria-expanded={addOpen} onClick={() => setAddOpen(!addOpen)}>
@@ -104,44 +129,28 @@ export function ProvidersCard({
         {/* The card's region sits directly under the add panel: verify /
             template outcomes stay next to their submit button while the panel
             is open, and survive its success-close (unlike panel-local state).
-            The dialog-confirmed removes render row-locally below
-            instead — this region keeps only the add-flow outcomes. */}
+            The dialog-confirmed removes render beside their group below —
+            this region keeps only the add-flow outcomes. */}
         <NoticeRegion notice={notice} />
-        {payload.configured_providers.length === 0 ? (
+        {/* A removal whose group is gone has no row to sit beside; the notice
+            stays in the card so the outcome is never dropped. */}
+        <NoticeRegion notice={orphanRemoveNotice} />
+        {groups.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
         ) : (
-          payload.configured_providers.map((row, index) => (
-            <Fragment key={row.kind === "key" ? `${row.provider}:${row.key_id}` : row.provider_id}>
-              {/* (audit UI-45-05): the remove outcome renders in
-                  the removed row's position — at catalog scale the feedback
-                  is visible without scrolling away from the Remove control
-                  that produced it. The shared NoticeRegion inherits the
-                  the alert/status roles and notice tokens. */}
-              {index === removeSlot && removeOutcome ? <NoticeRegion notice={removeOutcome.notice} /> : null}
-              {row.kind === "key" ? (
-                <ConfiguredKeyRow
-                  locale={locale}
-                  row={row}
-                  label={catalogById[row.provider]?.label ?? row.provider}
-                  onPending={onPending}
-                />
-              ) : (
-                <ConfiguredCustomRow
-                  locale={locale}
-                  row={row}
-                  label={catalogById[row.provider_id]?.label ?? row.provider_id}
-                  storedKeys={providerKeyRows(payload.keys, row.provider_id)}
-                  onPending={onPending}
-                  onSettings={onSettings}
-                />
-              )}
-            </Fragment>
+          groups.map((group) => (
+            <ProviderGroupCard
+              key={group.providerId}
+              locale={locale}
+              group={group}
+              catalog={catalogById[group.providerId]}
+              removeNotice={
+                removeOutcome !== null && removedProviderId === group.providerId ? removeOutcome.notice : null
+              }
+              onPending={onPending}
+            />
           ))
         )}
-        {/* Trailing clamp: a removed last row's slot equals the list length. */}
-        {removeOutcome && removeSlot >= payload.configured_providers.length ? (
-          <NoticeRegion notice={removeOutcome.notice} />
-        ) : null}
         <CustomExpand
           locale={locale}
           payload={payload}
@@ -154,162 +163,153 @@ export function ProvidersCard({
   );
 }
 
-function ConfiguredKeyRow({
-  locale,
-  row,
-  label,
-  onPending,
-}: {
-  locale: SpaBoot["locale"];
-  row: Extract<ConfiguredProvider, { kind: "key" }>;
-  label: string;
-  onPending: (action: PendingAction) => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
-      <div>
-        <div className="text-sm font-medium">{label}</div>
-        <div className="text-xs text-muted-foreground">
-          {row.provider} ·{" "}
-          {row.last4 ? t(locale, "settings.keyEnding", { last4: row.last4 }) : t(locale, "settings.keyTooShort")}
-          {row.updated_at
-            ? ` · ${t(locale, "settings.updated", { time: formatRelativeTime(row.updated_at, locale) })}`
-            : ""}
-          {/* One row per stored key: the verification state is the row's own.
-              `reachable` is deliberately NOT "verified" — the probe only
-              proved the endpoint answered. */}
-          {row.verified_status === "ok" && row.verified_at
-            ? ` · ${t(locale, "settings.keyVerifiedAt", { time: formatRelativeTime(row.verified_at, locale) })}`
-            : row.verified_status === "reachable" && row.verified_at
-              ? ` · ${t(locale, "settings.keyReachableAt", { time: formatRelativeTime(row.verified_at, locale) })}`
-              : row.verified_status === "failed"
-                ? ` · ${t(locale, "settings.keyVerifyFailed")}`
-                : ""}
-        </div>
-      </div>
-      <Button
-        type="button"
-        variant="destructive"
-        size="sm"
-        onClick={() =>
-          onPending({ kind: "remove-key", provider: row.provider, keyId: row.key_id, last4: row.last4 })
-        }
-      >
-        {t(locale, "settings.remove")}
-      </Button>
-    </div>
-  );
+/**
+ * The endpoint summary a template / custom group can state: the stored
+ * declaration first (it is what the pool is actually bound to), the catalog
+ * entry as the prefill otherwise. A provider with no declaration and no
+ * catalog endpoint (a key-only fallback id) has nothing to state.
+ */
+function groupMeta(
+  group: ProviderGroup,
+  catalog: CatalogProvider | undefined,
+): { api: string; baseUrl: string; modelIds: string[] } | null {
+  if (group.kind === "builtin") return null;
+  const api = group.declaration?.api ?? catalog?.api ?? null;
+  const baseUrl = group.declaration?.base_url ?? catalog?.base_url ?? null;
+  if (api === null || baseUrl === null) return null;
+  return { api, baseUrl, modelIds: group.declaration?.model_ids ?? catalog?.models ?? [] };
 }
 
-function ConfiguredCustomRow({
+/**
+ * One provider group: header identity (label + tier badge + aggregate counts +
+ * the declaration's remove action), the key rows, the empty state of a
+ * declaration with no key yet, and the endpoint meta-line with its model-id
+ * disclosure (AC-20 / I-000208).
+ */
+function ProviderGroupCard({
   locale,
-  row,
-  label,
-  storedKeys,
+  group,
+  catalog,
+  removeNotice,
   onPending,
-  onSettings,
 }: {
   locale: SpaBoot["locale"];
-  row: Extract<ConfiguredProvider, { kind: "custom" }>;
-  label: string;
-  /** EVERY stored key of this declaration's pool — the same masked rows the
-   *  built-in/template faces render, so a second key is visible before a third
-   *  is added. */
-  storedKeys: ProviderKeyRow[];
+  group: ProviderGroup;
+  /** The catalog entry of this id, when the catalog knows it. */
+  catalog: CatalogProvider | undefined;
+  /** The remove outcome this group owns, or null. */
+  removeNotice: OpNotice | null;
   onPending: (action: PendingAction) => void;
-  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
-  const [addOpen, setAddOpen] = useState(false);
-  const [key, setKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<OpNotice | null>(null);
-
-  /**
-   * Append ANOTHER key to this declaration's pool (the built-in/template
-   * faces' multi-key behaviour, which the custom row lacked): the declaration
-   * itself is untouched — the route verifies against the STORED endpoint and
-   * appends, so no endpoint field is offered here. A failed verify keeps the
-   * typed key for correction.
-   */
-  async function submit(): Promise<void> {
-    setBusy(true);
-    try {
-      const outcome = await onSettings({
-        op: "add-custom-provider-key",
-        provider_id: row.provider_id,
-        key,
-      });
-      setNotice(
-        outcome.kind === "success" ? { kind: "success", message: t(locale, "settings.customKeyAdded") } : outcome,
-      );
-      if (outcome.kind === "success") setKey("");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const [modelsOpen, setModelsOpen] = useState(false);
+  const meta = groupMeta(group, catalog);
+  // The disclosure region's id: provider ids are slugs, but a custom id is
+  // caller-supplied, so anything outside the id-safe set is folded to a dash.
+  const modelsId = `provider-models-${group.providerId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  const tier = TIER_FACE[group.kind];
 
   return (
-    // Same shell as the key row (one compact dialect); the add-key form and the
-    // notice are `w-full` children so they wrap onto their own line.
-    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
-      <div>
-        <div className="text-sm font-medium">{label}</div>
-        <div className="text-xs text-muted-foreground">
-          {row.provider_id} · {row.base_url} · {row.api} · {row.model_ids.join(", ")}
-        </div>
-      </div>
-      <div className="flex items-center gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          aria-expanded={addOpen}
-          onClick={() => setAddOpen(!addOpen)}
-        >
-          <Plus aria-hidden="true" />
-          {t(locale, "settings.addKey")}
-        </Button>
-        <Button
-          type="button"
-          variant="destructive"
-          size="sm"
-          onClick={() => onPending({ kind: "remove-custom", providerId: row.provider_id })}
-        >
-          {t(locale, "settings.remove")}
-        </Button>
-      </div>
-      {addOpen ? (
-        <form
-          className="flex w-full flex-col gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void submit();
-          }}
-        >
-          {storedKeys.map((stored) => (
-            <p key={stored.keyId} className="text-sm text-muted-foreground">
-              {stored.last4
-                ? t(locale, "settings.keyEnding", { last4: stored.last4 })
-                : t(locale, "settings.keyTooShort")}
-            </p>
-          ))}
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            {t(locale, "settings.apiKey")}
-            <Input
-              type="password"
-              value={key}
-              onChange={(event) => setKey(event.target.value)}
-              autoComplete="new-password"
-              placeholder={t(locale, "settings.apiKeyPlaceholder")}
-            />
-          </label>
-          <Button type="submit" disabled={busy}>{t(locale, "settings.addKey")}</Button>
-        </form>
-      ) : null}
-      <div className="w-full">
-        <NoticeRegion notice={notice} />
-      </div>
-    </div>
+    <GroupCard>
+      <GroupCardHeader
+        title={group.label}
+        badge={<StatusBadge tone={tier.tone}>{t(locale, tier.label)}</StatusBadge>}
+        summary={t(locale, "settings.providers.summary", group.summary)}
+        actions={
+          group.declaration === null ? null : (
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={() => onPending({ kind: "remove-custom", providerId: group.providerId })}
+            >
+              {t(locale, "settings.remove")}
+            </Button>
+          )
+        }
+      />
+      <GroupCardBody>
+        <NoticeRegion notice={removeNotice} />
+        {group.keys.length === 0 ? (
+          <p className="rounded-(--rounded-sm) border border-(--gray-alpha-400) bg-(--gray-200) px-3 py-3.5 text-sm text-muted-foreground">
+            {t(locale, "settings.providers.empty")}
+          </p>
+        ) : (
+          <ListRowGroup>
+            {group.keys.map((key) => {
+              const status = KEY_STATUS[key.verifiedStatus ?? "unverified"];
+              return (
+                <ListRow
+                  key={key.keyId}
+                  identity={
+                    key.last4
+                      ? t(locale, "settings.keyEnding", { last4: key.last4 })
+                      : t(locale, "settings.keyTooShort")
+                  }
+                  status={<StatusBadge tone={status.tone}>{t(locale, status.label)}</StatusBadge>}
+                  // AC-11: the timestamp is this secondary slot, never the label.
+                  meta={
+                    key.verifiedStatus === "ok" && key.verifiedAt
+                      ? t(locale, "settings.providers.verifiedAt", {
+                          time: formatRelativeTime(key.verifiedAt, locale),
+                        })
+                      : key.updatedAt
+                        ? t(locale, "settings.updated", { time: formatRelativeTime(key.updatedAt, locale) })
+                        : null
+                  }
+                  actions={
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      onClick={() =>
+                        onPending({
+                          kind: "remove-key",
+                          provider: key.provider,
+                          keyId: key.keyId,
+                          last4: key.last4,
+                        })
+                      }
+                    >
+                      {t(locale, "settings.remove")}
+                    </Button>
+                  }
+                />
+              );
+            })}
+          </ListRowGroup>
+        )}
+        {meta ? (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="font-mono">{meta.api}</span>
+            <span aria-hidden="true">·</span>
+            <span className="font-mono">{meta.baseUrl}</span>
+            <span aria-hidden="true">·</span>
+            <span>{t(locale, "settings.providers.modelCount", { count: meta.modelIds.length })}</span>
+            <button
+              type="button"
+              className="text-(--brand-700)"
+              aria-expanded={modelsOpen}
+              // The region mounts only while open, so the control never names
+              // a missing element (the combobox precedent).
+              aria-controls={modelsOpen ? modelsId : undefined}
+              onClick={() => setModelsOpen(!modelsOpen)}
+            >
+              {t(locale, modelsOpen ? "settings.providers.collapse" : "settings.providers.expand")}
+            </button>
+          </div>
+        ) : null}
+        {meta && modelsOpen ? (
+          <ul
+            id={modelsId}
+            className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground"
+          >
+            {meta.modelIds.map((modelId) => (
+              <li key={modelId}>{modelId}</li>
+            ))}
+          </ul>
+        ) : null}
+      </GroupCardBody>
+    </GroupCard>
   );
 }
 

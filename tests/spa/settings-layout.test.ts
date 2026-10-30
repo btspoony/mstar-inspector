@@ -232,8 +232,9 @@ describe("settings copy is dictionary-backed", () => {
 describe("configured providers + catalog add flow", () => {
   test("the providers card renders configured state only; the catalog is the Add Provider picker", () => {
     const source = readSettingsSource();
-    // Primary list = configured state (kind rows), never the catalog dump.
-    expect(source).toContain("payload.configured_providers.map");
+    // Primary list = the groups derived from the key pool + declarations,
+    // never the catalog dump.
+    expect(source).toContain("providerGroups(payload)");
     expect(source).not.toContain("payload.provider_catalog.map");
     // Empty configured state is a valid UI with Add Provider as the path.
     expect(source).toContain("settings.noConfiguredProviders");
@@ -323,14 +324,16 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
   const page = readSettingsSource();
 
   test("every configured key row is keyed by its key identity — two keys of one provider are two rows", () => {
-    // React key: provider + key id. The bare provider collided as soon as a
-    // (App, provider) pool held a second key.
-    expect(page).toContain('key={row.kind === "key" ? `${row.provider}:${row.key_id}` : row.provider_id}');
+    // React keys: the group by provider id, the row by key id. The bare
+    // provider collided as soon as a (App, provider) pool held a second key.
+    expect(page).toContain("key={group.providerId}");
+    expect(page).toContain("key={key.keyId}");
     // Per-row delete carries the identity the route deletes by (plus the row's
     // tail for the confirm copy).
-    expect(page).toContain(
-      'onPending({ kind: "remove-key", provider: row.provider, keyId: row.key_id, last4: row.last4 })',
-    );
+    expect(page).toContain('kind: "remove-key",');
+    expect(page).toContain("provider: key.provider,");
+    expect(page).toContain("keyId: key.keyId,");
+    expect(page).toContain("last4: key.last4,");
     // …and the confirmed POST sends that identity (never a provider-only delete,
     // which would take the provider's other keys with it).
     expect(page).toContain("key_id: action.keyId");
@@ -342,16 +345,15 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
   });
 
   test("the key row renders the per-key verification state", () => {
-    expect(page).toContain("settings.keyVerifiedAt");
-    expect(page).toContain("settings.keyVerifyFailed");
-    const keyRow = page.slice(page.indexOf("function ConfiguredKeyRow"), page.indexOf("function ConfiguredCustomRow"));
-    expect(keyRow).toContain("row.verified_status");
+    expect(page).toContain("settings.providers.status.ok");
+    expect(page).toContain("settings.providers.status.failed");
+    const groupCard = page.slice(page.indexOf("function ProviderGroupCard"), page.indexOf("function AddProviderSection"));
+    expect(groupCard).toContain("key.verifiedStatus");
     // A probe that could not reject a bogus key renders the weaker
-    // "reachable" state — never the "verified at …" claim.
-    expect(keyRow).toContain("settings.keyReachableAt");
-    expect(keyRow.indexOf('row.verified_status === "reachable"')).toBeGreaterThan(
-      keyRow.indexOf('row.verified_status === "ok"'),
-    );
+    // "reachable" state — never the "verified" claim: two distinct labels, and
+    // the reachable one carries the accent tone.
+    expect(page).toContain('ok: { tone: "success", label: "settings.providers.status.ok" }');
+    expect(page).toContain('reachable: { tone: "brand", label: "settings.providers.status.reachable" }');
   });
 
   test("a provider's stored keys are listed whole — the add form never folds keys[] into one slot", () => {
@@ -365,8 +367,6 @@ describe("custom-provider add-key copy", () => {
   test("custom add-key copy is dictionary-backed in both locales (action, success, cap)", () => {
     expect(t("en", "settings.addKey")).toBe("Add key");
     expect(t("zh_CN", "settings.addKey")).toBe("添加密钥");
-    expect(t("en", "settings.customKeyAdded")).toContain("shown masked");
-    expect(t("zh_CN", "settings.customKeyAdded")).toContain("掩码");
     expect(t("en", "settings.error.providerKeyLimit")).toContain("maximum");
     expect(t("zh_CN", "settings.error.providerKeyLimit")).toContain("已存满");
     expect(t("en", "settings.error.customProviderUndeclared")).toContain("not a declared custom provider");
@@ -405,9 +405,11 @@ describe("catalog provenance + eligibility messaging", () => {
     // provider-combobox.tsx, superseding the old attribute pin).
     expect(source).toContain('id="settings-catalog-provider-label"');
     expect(source).toContain('labelledby="settings-catalog-provider-label"');
-    // Template-materialized configured rows resolve the human label via the
-    // catalog map (same pattern as key rows), keeping the raw id in the detail.
-    expect(source).toContain("catalogById[row.provider_id]?.label");
+    // Template-materialized and custom groups resolve the human label through
+    // the group derivation's catalog lookup, keeping the raw id as the fallback
+    // (the meta-line still states the raw endpoint + model ids).
+    const groupSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/providers-groups.ts"), "utf8");
+    expect(groupSource).toContain("catalogEntry?.label ?? providerId");
   });
 
   test("provenance copy is dictionary-backed in both locales", () => {
@@ -691,8 +693,8 @@ describe("provider combobox", () => {
   test("picker copy is dictionary-backed; zh picker copy carries no bare Provider (AC1 sweep)", () => {
     expect(t("en", "settings.provider")).toBe("Model provider");
     expect(t("zh_CN", "settings.provider")).toBe("模型提供方");
-    expect(t("en", "settings.providers")).toBe("Providers"); // en keeps the section title
-    expect(t("zh_CN", "settings.providers")).toBe("模型提供方");
+    expect(t("en", "settings.providers.title")).toBe("Providers"); // en keeps the section title
+    expect(t("zh_CN", "settings.providers.title")).toBe("模型提供方");
     expect(t("en", "settings.selectProvider")).toBe("Search model providers…");
     expect(t("zh_CN", "settings.selectProvider")).toBe("搜索模型提供方…");
     expect(t("en", "settings.noProviderMatch", { query: "zzz" })).toContain("zzz");
@@ -703,7 +705,16 @@ describe("provider combobox", () => {
     // unchanged).
     for (const key of [
       "settings.provider",
-      "settings.providers",
+      "settings.providers.title",
+      "settings.providers.status.ok",
+      "settings.providers.status.reachable",
+      "settings.providers.status.failed",
+      "settings.providers.status.unverified",
+      "settings.providers.tier.builtin",
+      "settings.providers.tier.template",
+      "settings.providers.tier.custom",
+      "settings.providers.expand",
+      "settings.providers.collapse",
       "settings.providersCopy",
       "settings.noConfiguredProviders",
       "settings.addProvider",
@@ -739,7 +750,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
     // above the configured rows.
     const contentPos = body.indexOf("<CardContent");
     const panelPos = body.indexOf("<AddProviderSection");
-    const rowsPos = body.indexOf("payload.configured_providers.length === 0");
+    const rowsPos = body.indexOf("groups.length === 0");
     expect(contentPos).toBeGreaterThan(-1);
     expect(panelPos).toBeGreaterThan(contentPos);
     expect(rowsPos).toBeGreaterThan(panelPos);
@@ -1211,11 +1222,13 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
     expect(defaultCall).not.toContain("actions={");
     const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
     expect(panelBody).toContain("actions={");
-    // Whole-file count (qc F1): `actions={` occurs exactly once in the page —
-    // the draft panel's discard injection. The Default AND named-chain
-    // ChainEditor callers both stay bare (the conditional above renders them
-    // byte-equivalent); a second actions-passing caller fails this count.
-    expect(source.match(/actions=\{/g)?.length).toBe(1);
+    // Scoped count (qc F1): `actions={` occurs exactly once in the draft
+    // panel — its discard injection. The Default AND named-chain ChainEditor
+    // callers both stay bare (the conditional above renders them
+    // byte-equivalent); a second actions-passing ChainEditor caller fails this
+    // count. (The providers group card's own `actions` slots belong to other
+    // components and are outside this slice.)
+    expect(panelBody.match(/actions=\{/g)?.length).toBe(1);
   });
 
   test("the discard is visibly styled without hover and sits in the save row (SSR)", () => {
@@ -1560,11 +1573,11 @@ describe("section-scoped op feedback", () => {
     const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ChainsCard"));
     expect(opsBody).toContain("<NoticeRegion notice={notice} />");
     // Providers: card region directly under the add panel serves the verify /
-    // template forms only — moved the dialog-confirmed removes to
-    // a row-local region (pinned in the F-08 test below).
+    // template forms only — the dialog-confirmed removes moved to a
+    // group-local region (pinned in the F-08 test below).
     const providersBody = source.slice(
       source.indexOf("function ProvidersCard"),
-      source.indexOf("function ConfiguredKeyRow"),
+      source.indexOf("function ProviderGroupCard"),
     );
     expect(providersBody).toContain("<NoticeRegion notice={notice} />");
     // Chains: card region below every tabpanel (dialog removes + draft
@@ -1622,7 +1635,7 @@ describe("section-scoped op feedback", () => {
     expect(source).toContain("onOutcome={setChainsNotice}");
   });
 
-  test("provider remove outcomes render row-locally at the removed row's position (audit UI-45-05)", () => {
+  test("provider remove outcomes render beside the removed row's group (audit UI-45-05)", () => {
     const source = readSettingsSource();
     // The outcome state carries the removed row's slot, captured in onConfirm
     // from the PRE-POST payload: the awaited background reload
@@ -1637,26 +1650,25 @@ describe("section-scoped op feedback", () => {
     expect(confirmBody).toContain("const slot = configuredKeySlot(configured, action.provider, action.keyId);");
     expect(confirmBody).toContain("configured.findIndex((row) => row.kind === \"custom\"");
     expect(confirmBody).toContain("slot: slot >= 0 ? slot : configured.length");
-    // The card renders the outcome inside the rows list at that position —
-    // through the shared NoticeRegion, so the row-local region inherits the
-    // roles (alert/status) and notice tokens.
+    // The card resolves that slot back to the provider it named, so the group
+    // card owning the row renders the outcome — through the shared
+    // NoticeRegion, so the group-local region inherits the roles
+    // (alert/status) and notice tokens.
     const providersBody = source.slice(
       source.indexOf("function ProvidersCard"),
-      source.indexOf("function ConfiguredKeyRow"),
+      source.indexOf("function ProviderGroupCard"),
     );
     expect(providersBody).toContain("removeOutcome: { notice: OpNotice; slot: number } | null");
+    expect(providersBody).toContain("payload.configured_providers[removeOutcome.slot] ?? null");
     expect(providersBody).toContain(
-      "{index === removeSlot && removeOutcome ? <NoticeRegion notice={removeOutcome.notice} /> : null}",
+      'removedRow.kind === "key" ? removedRow.provider : removedRow.provider_id',
     );
-    // Success took the row away, so the region renders in its former slot; a
-    // failure OR the tolerant no-op (nothing was removed) leaves the row in
-    // place, so the region renders directly below it (the field-error position).
-    expect(providersBody).toContain(
-      'removeOutcome.notice.kind === "success" ? removeOutcome.slot : removeOutcome.slot + 1',
-    );
-    // A removed last row's slot equals the list length — the trailing clamp
-    // keeps the outcome visible at the list's end instead of dropping it.
-    expect(providersBody).toContain("removeSlot >= payload.configured_providers.length");
+    expect(providersBody).toContain("removedProviderId === group.providerId ? removeOutcome.notice : null");
+    // A success took the row — and possibly the whole group — away, so the
+    // outcome falls back to the card's own region instead of pointing at a
+    // group that no longer exists.
+    expect(providersBody).toContain("orphanRemoveNotice");
+    expect(providersBody).toContain("<NoticeRegion notice={orphanRemoveNotice} />");
   });
 
   test("a stale delete's no-change outcome is a localized warning, never 'Changes saved.'", () => {
@@ -1795,7 +1807,7 @@ describe("custom-provider disclosure state", () => {
     // attribute flips with the disclosure (mirrors the addOpen wiring pin).
     const providersBody = source.slice(
       source.indexOf("function ProvidersCard"),
-      source.indexOf("function ConfiguredKeyRow"),
+      source.indexOf("function ProviderGroupCard"),
     );
     expect(providersBody).toContain("expanded={customOpen}");
     expect(providersBody).toContain("onToggle={() => setCustomOpen(!customOpen)}");

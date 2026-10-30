@@ -355,9 +355,6 @@ export const en = {
     apiKeyPlaceholder: "Paste the provider API key",
     keyEnding: "key ending {last4}",
     keyTooShort: "key too short to show a tail",
-    keyVerifiedAt: "verified {time}",
-    keyReachableAt: "endpoint reachable {time} — key not verified",
-    keyVerifyFailed: "verification failed",
     updated: "updated {time}",
     remove: "Remove",
     selectProvider: "Search model providers…",
@@ -391,7 +388,6 @@ export const en = {
     chainEmpty: "No models in the chain yet.",
     pickModel: "Select a model…",
     keyVerified: "Key verified — models cached.",
-    customKeyAdded: "Key added — it is only ever shown masked.",
     verify: {
       invalid_key: "That API key was rejected by the provider — nothing was stored.",
       unreachable: "The provider could not be reached — nothing was stored.",
@@ -504,7 +500,25 @@ export const en = {
     confirmDeleteBody: "This is a soft-delete. The App disappears from the list; reviews fail closed.",
     confirmDeleteButton: "Delete App",
     deleteSuccess: "App deleted. It has been removed from the Apps list.",
-    providers: "Providers",
+    providers: {
+      title: "Providers",
+      /** AC-10: exactly one verification label per key row, from the four store states. */
+      status: {
+        ok: "Verified",
+        reachable: "Endpoint reachable",
+        failed: "Verification failed",
+        unverified: "Not verified",
+      },
+      tier: { builtin: "Built-in", template: "Template", custom: "Custom" },
+      summary:
+        "{total} keys · {ok} verified · {reachable} endpoint reachable · {failed} failed · {unverified} unverified",
+      /** AC-11: the secondary timestamp slot — never part of the status label. */
+      verifiedAt: "verified {time}",
+      modelCount: "{count} models",
+      expand: "Expand",
+      collapse: "Collapse",
+      empty: "No keys yet — add the first key to use this provider in a model chain.",
+    },
     providersCopy:
       "The providers configured for this App — stored keys show masked, custom declarations show their base URL and models. Add Provider picks a catalog entry; keys are stored only after a successful verify.",
     noConfiguredProviders:
