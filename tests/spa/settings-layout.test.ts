@@ -401,12 +401,15 @@ describe("catalog provenance + eligibility messaging", () => {
     expect(source).toContain('selected.eligibility === "unavailable"');
   });
 
-  test("the catalog picker uses the aria-labelledby precedent; custom configured rows show the catalog label", () => {
+  test("the catalog picker names its combobox through the aria-labelledby precedent", () => {
     const source = readSettingsSource();
     // MembersPage precedent: visible label span naming the picker — no
     // wrapping <label>. the span names the combobox input through
     // the labelledby prop (the aria-labelledby attribute itself moved into
     // provider-combobox.tsx, superseding the old attribute pin).
+    // The configured-row label resolution this case used to name is covered at
+    // the behaviour level by providers-groups.test.ts ("the catalog label wins,
+    // the provider id is the fallback").
     expect(source).toContain('id="settings-catalog-provider-label"');
     expect(source).toContain('labelledby="settings-catalog-provider-label"');
   });

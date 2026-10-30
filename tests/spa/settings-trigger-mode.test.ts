@@ -40,13 +40,18 @@ const segment = (html: string, mode: string): string => {
  * The control mounted in happy-dom with the page's REAL save path
  * (`submitTriggerMode` → `postForm` → `fetch`), so a click's wire effect is
  * observable: `posted` is what reached `fetch`, one entry per POST.
+ *
+ * Every response is held until `release()` opens the gate, so a test can act
+ * inside the in-flight window — the one the control's busy gate exists for.
  */
 async function mountControl(mode: ReviewTriggerMode) {
   const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
   const posted: string[] = [];
   const realFetch = globalThis.fetch;
+  const gate = Promise.withResolvers<void>();
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     posted.push(`${String(input)} ${new URLSearchParams(String(init?.body ?? "")).toString()}`);
+    await gate.promise;
     return new Response("ok", { status: 200 });
   }) as unknown as typeof fetch;
 
@@ -66,13 +71,24 @@ async function mountControl(mode: ReviewTriggerMode) {
     );
     await act(async () => {});
   };
-  await draw(mode);
+
+  // A mount that throws must not leave the stub (or the window) installed for
+  // the rest of the process.
+  try {
+    await draw(mode);
+  } catch (error) {
+    globalThis.fetch = realFetch;
+    cleanup();
+    throw error;
+  }
 
   const seg = (target: string): DomElement | null =>
     container.querySelector(`button[title="${target}"]`);
   return {
     posted,
     checked: (target: string): string | null => seg(target)?.getAttribute("aria-checked") ?? null,
+    /** What Radix renders on a gated segment — the attribute, not a class. */
+    disabled: (target: string): boolean => seg(target)?.hasAttribute("disabled") ?? false,
     async click(target: string): Promise<void> {
       await act(async () => {
         seg(target)?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
@@ -80,7 +96,10 @@ async function mountControl(mode: ReviewTriggerMode) {
       await act(async () => {});
     },
     render: draw,
+    /** Open the gate: resolves the held response(s) and every later one. */
+    release: (): void => gate.resolve(),
     async close(): Promise<void> {
+      gate.resolve();
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;
       cleanup();
@@ -260,6 +279,43 @@ describe("save flow + 400 fallback contract", () => {
     }
   });
 
+  test("a second click during the in-flight POST never reaches the wire (the busy gate is load-bearing)", async () => {
+    // The regression this guards: without the gate, two rapid clicks on
+    // different segments both POST. The highlight then follows the first
+    // success while the server keeps the last write, so the shown selection
+    // and the stored mode diverge until the next reload.
+    const control = await mountControl("open");
+    try {
+      await control.click("every_push");
+      // The first POST is held by the stub — this is the in-flight window.
+      expect(control.posted).toHaveLength(1);
+      // The control is non-interactive for its whole duration (Radix renders
+      // `disabled` on every segment from the group's `disabled` prop).
+      for (const mode of REVIEW_TRIGGER_MODES) {
+        expect(control.disabled(mode), `disabled=${mode}`).toBe(true);
+      }
+
+      await control.click("manual");
+      // Still exactly one POST: the gate refused the second selection before
+      // the save handler ran.
+      expect(control.posted).toHaveLength(1);
+      expect(control.checked("every_push")).toBe("false");
+
+      control.release();
+      await act(async () => {});
+      // Settled: the one POST's success is what the highlight follows.
+      expect(control.posted).toEqual(["/dashboard/apps/1/review-trigger-mode mode=every_push"]);
+      expect(control.checked("every_push")).toBe("true");
+      expect(control.checked("manual")).toBe("false");
+      // The gate lifts with the save, so the next change is clickable again.
+      for (const mode of REVIEW_TRIGGER_MODES) {
+        expect(control.disabled(mode), `disabled=${mode} after settle`).toBe(false);
+      }
+    } finally {
+      await control.close();
+    }
+  });
+
   test("a deselect emit and a repeat click issue no request; the selection mirrors the payload", async () => {
     const control = await mountControl("open");
     try {
@@ -274,6 +330,8 @@ describe("save flow + 400 fallback contract", () => {
       // stored, so the highlight follows without waiting for the reload.
       await control.click("every_push");
       expect(control.posted).toEqual(["/dashboard/apps/1/review-trigger-mode mode=every_push"]);
+      control.release();
+      await act(async () => {});
       expect(control.checked("every_push")).toBe("true");
       expect(control.checked("open")).toBe("false");
 
