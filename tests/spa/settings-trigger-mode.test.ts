@@ -3,14 +3,15 @@
  * plan task 3): the segmented mode control + exact mention-string display
  * in the settings OpsCard, their i18n faces, and the save-flow contract.
  *
- * Harness: no DOM runner — SSR of the exported control (static markup,
- * the AppInfoCard/DraftChainPanel precedent) + source pins over
- * SettingsPage.tsx + pure-helper and dictionary pins.
+ * Harness: SSR of the exported control (static markup, the AppInfoCard/
+ * DraftChainPanel precedent) plus one happy-dom mount for the save flow,
+ * whose wire effect only a mounted Radix widget produces; pure-helper and
+ * dictionary pins elsewhere.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { type Element as DomElement } from "happy-dom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { REVIEW_TRIGGER_MODES as STORE_REVIEW_TRIGGER_MODES } from "../../src/dashboard/apps-store";
@@ -20,8 +21,7 @@ import {
   botMention,
   submitTriggerMode,
 } from "../../src/spa/pages/SettingsPage";
-
-const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+import { installDom } from "./dom";
 
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
@@ -35,6 +35,58 @@ const segment = (html: string, mode: string): string => {
   expect(at, `segment title="${mode}"`).toBeGreaterThan(-1);
   return html.slice(html.lastIndexOf("<button", at), html.indexOf("</button>", at));
 };
+
+/**
+ * The control mounted in happy-dom with the page's REAL save path
+ * (`submitTriggerMode` → `postForm` → `fetch`), so a click's wire effect is
+ * observable: `posted` is what reached `fetch`, one entry per POST.
+ */
+async function mountControl(mode: ReviewTriggerMode) {
+  const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+  const posted: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    posted.push(`${String(input)} ${new URLSearchParams(String(init?.body ?? "")).toString()}`);
+    return new Response("ok", { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const container = win.document.createElement("div");
+  win.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  const draw = async (stored: ReviewTriggerMode): Promise<void> => {
+    await act(async () =>
+      root.render(
+        createElement(ReviewTriggerControl, {
+          locale: "en",
+          slug: "acme",
+          mode: stored,
+          onTriggerMode: (next) => submitTriggerMode("1", next, "en", async () => true),
+        }),
+      ),
+    );
+    await act(async () => {});
+  };
+  await draw(mode);
+
+  const seg = (target: string): DomElement | null =>
+    container.querySelector(`button[title="${target}"]`);
+  return {
+    posted,
+    checked: (target: string): string | null => seg(target)?.getAttribute("aria-checked") ?? null,
+    async click(target: string): Promise<void> {
+      await act(async () => {
+        seg(target)?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      await act(async () => {});
+    },
+    render: draw,
+    async close(): Promise<void> {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    },
+  };
+}
 
 describe("review trigger vocabulary (duplication lock + mention grammar)", () => {
   test("the SPA vocabulary mirrors the store's frozen migration-0022 enum (drift fails here)", () => {
@@ -208,29 +260,34 @@ describe("save flow + 400 fallback contract", () => {
     }
   });
 
-  test("the deselect emit and a same-value click never reach the wire; the selection mirrors the payload", () => {
-    const controlBody = settingsPage.slice(
-      settingsPage.indexOf("export function ReviewTriggerControl"),
-      settingsPage.indexOf("function ChainsCard"),
-    );
-    // Radix type="single" emits "" on deselect; "" (and any off-vocabulary
-    // value) is refused before any POST — and an already-selected segment is
-    // a client-side no-op (the server's idempotent no-op stays reserved for
-    // the stale-payload case).
-    expect(controlBody).toContain("if (!isReviewTriggerMode(next) || next === selected) return;");
-    // Server-state mirror (the sandbox-image editor discipline): after the
-    // awaited background reload lands, the selection tracks the stored mode —
-    // a failed save reverts instead of leaving the optimistic value.
-    expect(controlBody).toContain("setSelected(mode);");
-    expect(controlBody).toContain("}, [mode]);");
-    // Success-path echo (never optimistic): the save updates the selection
-    // only after the POST resolves success (success = stored) — the highlight
-    // moves immediately on success, and a failure still resyncs via the mirror.
-    expect(controlBody).toContain('if (outcome.kind === "success") setSelected(next);');
-    // The save is busy-gated (one POST at a time) and reports into the
-    // control's own region, never the card's dialog-ops region.
-    expect(controlBody).toContain("disabled={busy}");
-    expect(controlBody).toContain("<NoticeRegion notice={notice} />");
+  test("a deselect emit and a repeat click issue no request; the selection mirrors the payload", async () => {
+    const control = await mountControl("open");
+    try {
+      // Radix type="single" emits "" when the active segment is clicked; the
+      // control refuses an off-vocabulary value before any POST (the server's
+      // idempotent no-op stays reserved for the stale-payload case).
+      await control.click("open");
+      expect(control.posted).toHaveLength(0);
+      expect(control.checked("open")).toBe("true");
+
+      // A real change posts the verbatim mode exactly once; success means
+      // stored, so the highlight follows without waiting for the reload.
+      await control.click("every_push");
+      expect(control.posted).toEqual(["/dashboard/apps/1/review-trigger-mode mode=every_push"]);
+      expect(control.checked("every_push")).toBe("true");
+      expect(control.checked("open")).toBe("false");
+
+      // Re-clicking the now-active segment is the same deselect no-op.
+      await control.click("every_push");
+      expect(control.posted).toHaveLength(1);
+
+      // The payload is the source of truth: a fresh stored mode re-mirrors.
+      await control.render("manual");
+      expect(control.checked("manual")).toBe("true");
+      expect(control.checked("every_push")).toBe("false");
+    } finally {
+      await control.close();
+    }
   });
 
   test("the keyed 400 key is a registered dictionary key with both locale faces (the resolver's input)", () => {
