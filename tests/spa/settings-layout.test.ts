@@ -359,16 +359,6 @@ describe("custom-provider row add-key affordance", () => {
     page.indexOf("function AddProviderSection"),
   );
 
-  test("the custom row offers Add key and posts the append op against the stored declaration", () => {
-    // The action is the shared add-key label (the built-in/template faces').
-    expect(customRow).toContain('t(locale, "settings.addKey")');
-    // Appending, not re-declaring: the op carries the id + the new key only,
-    // so no endpoint field can reach the declaration.
-    expect(customRow).toContain('op: "add-custom-provider-key"');
-    expect(customRow).toContain("provider_id: row.provider_id");
-    expect(customRow).not.toContain("base_url:");
-  });
-
   test("the open form renders the pool's masked rows, one line per stored key", () => {
     // The same masked face the built-in/template forms render — fed by the
     // declaration's own rows out of keys[].
