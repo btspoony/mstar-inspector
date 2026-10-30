@@ -44,6 +44,12 @@ describe("GroupCard", () => {
     expect(html).toContain("gap-0 p-0");
   });
 
+  test("header carries the 14px 16px band padding", () => {
+    const header = between('data-slot="card-header"', 'data-slot="card-content"');
+    expect(header).toContain("px-4");
+    expect(header).toContain("py-3.5");
+  });
+
   test("title and badge share the header title slot", () => {
     const title = between('data-slot="card-title"', 'data-slot="card-description"');
     expect(title).toContain("OpenAI");
