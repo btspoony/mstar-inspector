@@ -79,8 +79,9 @@ describe("visual discipline guard (plan 104 task 5)", () => {
     expect(matched(`style={{ color: "#fff" }}`)).toEqual(["#fff"]);
     // must NOT match
     expect(matched(`<div className="p-4 gap-2 grid-cols-3 -translate-y-1" />`)).toEqual([]);
-    expect(matched(`<div className="after:bottom-[-2px]" />`)).toEqual([]); // `[` followed by `-`, not a digit
-    expect(matched(`style={{ color: "rgba(255,255,255,0.5)", borderColor: "hsl(#22 3% 4%)" }}`)).toEqual([]);
+    expect(matched(`<div className="after:bottom-[-2px]" />`)).toEqual([]); // `[` followed by `-`, not a digit; same for CSS-var shorthand like text-(length:--typo-…)
+    // must NOT match; the rgba(/hsl( stripper is load-bearing here — #223 is a valid 3-digit hex
+    expect(matched(`style={{ color: "rgba(255,255,255,0.5)", borderColor: "hsl(#223 3% 4%)" }}`)).toEqual([]);
     expect(matched(`// #abcdef in a comment is still a violation`)).toEqual(["#abcdef"]); // guard: comments are not exempt
   });
 
