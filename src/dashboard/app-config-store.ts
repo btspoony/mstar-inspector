@@ -2075,8 +2075,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * unless the declared base URL derives a models endpoint KNOWN to reject a
      * bogus key (customProbeCanRejectKey — the same decision
      * upsertCustomProvider makes, so a key appended here and one declared with
-     * The
-     * declaration is read first: an undeclared provider id throws
+     * upsertCustomProvider record the same state). The declaration is read
+     * first: an undeclared provider id throws
      * InvalidCustomProviderError, because a key row without its declaration is
      * unreachable data and a silent orphan is worse than a loud refusal (the
      * "an unknown app_id is a caller bug" convention). Bounds/cap contract
