@@ -145,7 +145,12 @@ import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
 import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
-import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
+import {
+  PROVIDER_VERIFY_ENDPOINTS,
+  verifyFetch,
+  verifyProviderKey,
+  type VerifyFailureReason,
+} from "./provider-verify";
 import {
   countUsers,
   deleteWorkspaceMember,
@@ -3293,7 +3298,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
   }
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
-    const verified = await verifyProviderKey({ fetch: globalThis.fetch }, provider, plainKey);
+    const verified = await verifyProviderKey({ fetch: verifyFetch }, provider, plainKey);
     if (!verified.ok) {
       return c.json({ ok: false, reason: mapVerifyReason(verified.reason) }, 400);
     }
@@ -3405,7 +3410,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
     try {
-      const verified = await verifyProviderKey({ fetch: globalThis.fetch }, provider, plainKey);
+      const verified = await verifyProviderKey({ fetch: verifyFetch }, provider, plainKey);
       if (!verified.ok) {
         return settingsVerifyFailResponse(c, gate.app.github_app_id, verified.reason);
       }
@@ -3684,7 +3689,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     }
     try {
       const verified = await verifyProviderKey(
-        { fetch: globalThis.fetch },
+        { fetch: verifyFetch },
         providerId,
         plainKey,
         {
@@ -3764,7 +3769,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       });
     }
     try {
-      const verified = await verifyProviderKey({ fetch: globalThis.fetch }, providerId, plainKey, {
+      const verified = await verifyProviderKey({ fetch: verifyFetch }, providerId, plainKey, {
         baseUrl: declared.base_url,
         api: declared.api,
         modelIds: declared.model_ids,
@@ -3932,7 +3937,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const declModelIds = storedDeclaration?.model_ids ?? modelIds;
     try {
       const verified = await verifyProviderKey(
-        { fetch: globalThis.fetch },
+        { fetch: verifyFetch },
         templateId,
         plainKey,
         {

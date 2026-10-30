@@ -237,7 +237,10 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     return { failures24h, thresholdBreached, invitesExpired, webhook: "absent" };
   }
 
-  const fetchImpl = deps.fetchImpl ?? fetch;
+  // An arrow over a globalThis property call, never the bare `fetch` reference:
+  // calling a stored reference loses the global receiver and workerd's native
+  // fetch throws `Illegal invocation`. (Same contract as `verifyFetch`.)
+  const fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args));
   try {
     const response = await fetchImpl(deps.alertUrl, {
       method: "POST",

@@ -60,12 +60,31 @@ export type VerifyResult =
   | { ok: true; models: string[] }
   | { ok: false; reason: VerifyFailureReason };
 
+/**
+ * The transport shape this module calls. Deliberately narrower than
+ * `typeof fetch`: bun's global also declares a `preconnect` property, so a
+ * plain wrapper callable would not be assignable to the wide type. The runtime
+ * global fetch satisfies this shape.
+ */
+export type VerifyFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 /** Verification deps (injected for tests): outbound fetch + timeout override. */
 export type VerifyDeps = {
-  fetch: typeof fetch;
+  fetch: VerifyFetch;
   /** Request timeout in ms; defaults to VERIFY_TIMEOUT_MS. Tests shrink it. */
   timeoutMs?: number;
 };
+
+/**
+ * The runtime's own fetch, as a `VerifyDeps.fetch` value every call site can
+ * pass. MUST stay an arrow over a globalThis PROPERTY call: `deps.fetch(...)`
+ * invokes the stored function with `this = deps`, and workerd's native fetch
+ * throws `TypeError: Illegal invocation` for any receiver but the global — so
+ * `{ fetch: globalThis.fetch }` is the dereference that breaks. The arrow body
+ * re-reads `globalThis.fetch` per call, so the receiver is always the global
+ * and a swapped-in transport is honored.
+ */
+export const verifyFetch: VerifyDeps["fetch"] = (...args) => globalThis.fetch(...args);
 
 /** Custom-provider declaration face (subset of AppCustomProvider, spec §6.1). */
 export type CustomVerifyInput = {

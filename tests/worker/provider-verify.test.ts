@@ -15,7 +15,7 @@
  * (PROVIDER_VERIFY_ENDPOINTS ≡ PROVIDER_IDS — a future provider id must
  * get an explicit verify entry).
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
@@ -37,6 +37,7 @@ import {
   builtinProbeCanRejectKey,
   customProbeCanRejectKey,
   ompProviderIdFor,
+  verifyFetch,
   verifyProviderKey,
   type VerifyDeps,
 } from "../../src/dashboard/provider-verify";
@@ -604,6 +605,36 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
   test("unknown provider id → unsupported_provider", async () => {
     const result = await verifyProviderKey({ fetch: mockFetch(json(200, {})) }, "no-such-provider", PLAIN_KEY);
     expect(result).toEqual({ ok: false, reason: "unsupported_provider" });
+  });
+});
+
+// --- fetch binding contract ---
+
+describe("deps.fetch binding (workerd `Illegal invocation` regression)", () => {
+  /** The runtime shape that broke production: a native fetch that refuses a
+   *  receiver other than the global, exactly like workerd's. */
+  const strictGlobalFetch = function (this: unknown) {
+    if (this !== globalThis) throw new TypeError("Illegal invocation");
+    return Promise.resolve(json(200, { data: [{ id: "gpt-5" }] }));
+  };
+
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("verifyFetch keeps the global receiver: the built-in models spec verifies ok", async () => {
+    globalThis.fetch = strictGlobalFetch as unknown as typeof fetch;
+    const result = await verifyProviderKey({ fetch: verifyFetch }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: true, models: ["gpt-5"] });
+  });
+
+  test("a dereferenced global fetch is the bug: the same deps shape fails as unreachable", async () => {
+    globalThis.fetch = strictGlobalFetch as unknown as typeof fetch;
+    // `deps.fetch(...)` calls the stored reference with `this = deps` — the
+    // dereference every verify call site used to pass.
+    const result = await verifyProviderKey({ fetch: globalThis.fetch }, "openai", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "unreachable" });
   });
 });
 
