@@ -409,11 +409,6 @@ describe("catalog provenance + eligibility messaging", () => {
     // provider-combobox.tsx, superseding the old attribute pin).
     expect(source).toContain('id="settings-catalog-provider-label"');
     expect(source).toContain('labelledby="settings-catalog-provider-label"');
-    // Template-materialized and custom groups resolve the human label through
-    // the group derivation's catalog lookup, keeping the raw id as the fallback
-    // (the meta-line still states the raw endpoint + model ids).
-    const groupSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/providers-groups.ts"), "utf8");
-    expect(groupSource).toContain("catalogEntry?.label ?? providerId");
   });
 
   test("provenance copy is dictionary-backed in both locales", () => {

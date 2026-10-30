@@ -807,9 +807,10 @@ Kept from L1: `heading-24`, `heading-16`, `copy-16`, `copy-14`.
 - `copy-16` / `copy-14` — body and secondary copy.
 - `button-14` — button labels: the default control face and the SPA small
   button (`components.button-sm`).
-- `button-12` — the SSR dashboard header action (`components.button-small`,
-  12px label with a `0 8px` pad). Not a general small-button face; the SPA's
-  small button stays on `button-14`.
+- `button-12` — 12px labels: the SSR dashboard header action
+  (`components.button-small`, `0 8px` pad) and the SPA's `xs` ghost face
+  (`ui/button` `size="xs"` — `h-6`, `px-2`; the admin console's row slug
+  action). The SPA's small button is `components.button-sm` on `button-14`.
 - `mono-13` — ids, hashes, timestamps; use tabular figures.
 
 Dashboard numerals: `font-variant-numeric: tabular-nums` on counts, ids, and
@@ -1026,7 +1027,8 @@ since the T3 bridge re-point + QC-round-1 SSR re-point), `button-danger`
 gray-400 border), `button-disabled` (gray-100 fill, gray-700 text,
 not-allowed). Size: default 40px; `button-small` 32px (`12px` label, `0 8px`
 pad) on the SSR dashboard header; `button-sm` 32px (`h-8 px-3`, `button-14`)
-on the SPA.
+on the SPA; `xs` 24px (`h-6 px-2`, `button-12`) for the admin console's
+in-row ghost action.
 
 **States** (all enabled variants):
 
