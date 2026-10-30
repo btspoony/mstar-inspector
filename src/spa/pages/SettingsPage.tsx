@@ -1436,38 +1436,38 @@ function ConfiguredCustomRow({
   }
 
   return (
-    <div className="flex flex-col gap-2 rounded-md border p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <div className="text-sm font-medium">{label}</div>
-          <div className="text-xs text-muted-foreground">
-            {row.provider_id} · {row.base_url} · {row.api} · {row.model_ids.join(", ")}
-          </div>
+    // Same shell as the key row (one compact dialect); the add-key form and the
+    // notice are `w-full` children so they wrap onto their own line.
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
+      <div>
+        <div className="text-sm font-medium">{label}</div>
+        <div className="text-xs text-muted-foreground">
+          {row.provider_id} · {row.base_url} · {row.api} · {row.model_ids.join(", ")}
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            aria-expanded={addOpen}
-            onClick={() => setAddOpen(!addOpen)}
-          >
-            <Plus aria-hidden="true" />
-            {t(locale, "settings.addKey")}
-          </Button>
-          <Button
-            type="button"
-            variant="destructive"
-            size="sm"
-            onClick={() => onPending({ kind: "remove-custom", providerId: row.provider_id })}
-          >
-            {t(locale, "settings.remove")}
-          </Button>
-        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-expanded={addOpen}
+          onClick={() => setAddOpen(!addOpen)}
+        >
+          <Plus aria-hidden="true" />
+          {t(locale, "settings.addKey")}
+        </Button>
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          onClick={() => onPending({ kind: "remove-custom", providerId: row.provider_id })}
+        >
+          {t(locale, "settings.remove")}
+        </Button>
       </div>
       {addOpen ? (
         <form
-          className="flex flex-col gap-2"
+          className="flex w-full flex-col gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             void submit();
@@ -1493,7 +1493,9 @@ function ConfiguredCustomRow({
           <Button type="submit" disabled={busy}>{t(locale, "settings.addKey")}</Button>
         </form>
       ) : null}
-      <NoticeRegion notice={notice} />
+      <div className="w-full">
+        <NoticeRegion notice={notice} />
+      </div>
     </div>
   );
 }
