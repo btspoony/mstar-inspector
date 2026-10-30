@@ -626,9 +626,11 @@ components:
     rounded: "{rounded.sm}"
     height: 36px
   group-card:
-    # Surface inherited through ui/card's Card (### Card), not restated:
-    # background-200 fill, gray-alpha-400 hairline, rounded.md; Card's
-    # symmetric 24px padding is replaced by the two paddings below.
+    # Fill and radius are inherited through ui/card's Card (### Card).
+    # The hairline is NOT inherited: Card's `border` carries width only and
+    # preflight leaves border-color at currentColor, so the component sets
+    # gray-alpha-400 itself (same rule SectionCard documents per tier).
+    # Card's symmetric 24px padding is replaced by the two paddings below.
     backgroundColor: "{colors.background-200}"
     borderColor: "{colors.gray-alpha-400}"
     rounded: "{rounded.md}"
