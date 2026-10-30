@@ -454,6 +454,13 @@ export const zhCN: Dictionary = {
       expand: "展开",
       collapse: "收起",
       empty: "还没有密钥 — 添加第一个密钥后即可在模型链中使用。",
+      // 仅控制台分支：内置 id 已被存储层保留，用户自填的端点只能落在自
+      // 己的 id 上；文案不得声称控制台是唯一途径。
+      customEndpoint: "配置自定义端点",
+      customEndpointCopy:
+        "{provider} 的内置 id 已被保留 — 自定义端点需要使用自己的 id。点此打开声明表单，已填入该提供方的 API 协议与 Base URL 形态。",
+      customIdRequired: "{provider} 已被占用 — 请为此声明填写新的 id。",
+      submitFailed: "该请求未到达服务端即失败 — 未存储任何内容。",
     },
     providersCopy:
       "此 App 已配置的模型提供方 — 存储的密钥仅显示掩码尾号，自定义声明显示其 Base URL 与模型。添加模型提供方从目录选择开始；密钥仅在验证成功后存储。",
@@ -489,7 +496,7 @@ export const zhCN: Dictionary = {
     useDefaultChain: "Default 链",
     confirmRemoveChainTitle: "移除链 {name}？",
     confirmRemoveChainBody: "引用 {name} 的席位将回退到 Default 链。",
-    consoleOnly: "此 provider 无法在此验证 — 请在对应控制台管理密钥。",
+    consoleOnly: "此 provider 无法在此验证 — 其端点没有固定主机，因此这条内置条目不接受密钥。",
     confirmRemoveKeyTitle: "移除 {provider} 末尾为 {last4} 的密钥？",
     confirmRemoveKeyBody: "该 App 的其他 {provider} 密钥不受影响。仅依赖此密钥的选择器在你重新验证前会失败。",
     confirmRemoveCustomTitle: "移除 provider {provider}？",

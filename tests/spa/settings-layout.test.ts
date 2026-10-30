@@ -835,6 +835,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
         onSettings: noopSave,
         onOutcome: () => {},
         onDone: () => {},
+        onCustomEndpoint: () => {},
       }),
     );
     expect(html).toContain('value="https://stored.example.com/v1"');
@@ -868,6 +869,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
         onSettings: noopSave,
         onOutcome: () => {},
         onDone: () => {},
+        onCustomEndpoint: () => {},
       }),
     );
     // The stored endpoint substitutes the placeholder already: no

@@ -36,18 +36,26 @@ const CATALOG: CatalogProvider[] = [
   catalogEntry("anthropic", { label: "Anthropic", display_group: "common" }),
   // AC-16: a builtin that takes a key only — the console dead end is gone.
   catalogEntry("zai", { label: "Z.AI", display_group: "common" }),
+  // AC-18: the SHIPPED console-only builtins, verbatim from the settings
+  // payload — builtin tier, not verifiable, and carrying the declaration
+  // prefill (protocol + URL shape) the generator emits for them.
   catalogEntry("azure-openai", {
     label: "Azure OpenAI",
-    tier: "template",
-    eligibility: "template",
-    base_url: "https://acme.openai.azure.com/openai/v1",
+    verifiable: false,
+    base_url: "https://{resource}.openai.azure.com/openai/deployments/{deployment}",
     api: "openai-completions",
   }),
   catalogEntry("ai-gateway", {
     label: "AI Gateway",
+    verifiable: false,
+    base_url: "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway}",
+    api: "openai-completions",
+  }),
+  catalogEntry("workers-ai", {
+    label: "Cloudflare Workers AI",
     tier: "template",
     eligibility: "template",
-    base_url: "https://gateway.ai.cloudflare.com/v1/acme",
+    base_url: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
     api: "openai-completions",
   }),
   catalogEntry("mistral", { label: "Mistral", eligibility: "unavailable" }),
@@ -182,13 +190,18 @@ function addProvider(overrides: {
   onVerify?: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings?: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome?: (outcome: OpNotice) => void;
+  customApiIds?: string[];
 }) {
   return (open: boolean, onOpenChange: (open: boolean) => void) =>
     createElement(AddProviderDialog, {
       locale,
       open,
       onOpenChange,
-      payload: managePayload(),
+      payload: managePayload(
+        overrides.customApiIds === undefined
+          ? {}
+          : { custom_provider_api_ids: overrides.customApiIds },
+      ),
       onVerify: overrides.onVerify ?? (async () => notice("success", "added")),
       onSettings: overrides.onSettings ?? (async () => notice("success", "added")),
       onOutcome: overrides.onOutcome ?? (() => {}),
@@ -263,22 +276,96 @@ describe("AddProviderDialog — step 1 picks from the grouped catalog", () => {
   });
 });
 
-describe("AddProviderDialog — step 2 is the entry's requirements", () => {
-  test("a template entry renders the endpoint field, prefilled from the catalog (AC-18)", async () => {
-    for (const [id, label, baseUrl] of [
-      ["azure-openai", "Azure OpenAI", "https://acme.openai.azure.com/openai/v1"],
-      ["ai-gateway", "AI Gateway", "https://gateway.ai.cloudflare.com/v1/acme"],
-    ] as const) {
+describe("AddProviderDialog — the console-only builtins expose an endpoint path (AC-18)", () => {
+  // The SHIPPED rows: builtin tier, verifiable false. Their own id is reserved
+  // by the store, so the endpoint lives on a declaration with a user id.
+  const CONSOLE_ROWS = [
+    ["azure-openai", "Azure OpenAI", "https://{resource}.openai.azure.com/openai/deployments/{deployment}"],
+    ["ai-gateway", "AI Gateway", "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway}"],
+  ] as const;
+
+  test("a console-only builtin offers the custom-endpoint action instead of a dead end", async () => {
+    for (const [id, label] of CONSOLE_ROWS) {
       const view = await mount(addProvider({}));
       try {
         await view.pick(label);
-        const endpoint = view.dialog()?.querySelector("input");
-        expect(endpoint?.getAttribute("value"), id).toBe(baseUrl);
-        expect(view.dialog()?.textContent).toContain(t(locale, "settings.baseUrl"));
-        expect(view.submitButton(), id).not.toBeNull();
+        // The row itself stays console-only: no endpoint input, no submit.
+        expect(view.submitButton(), id).toBeNull();
+        expect(view.dialog()?.querySelector("input"), id).toBeNull();
+        expect(view.dialog()?.textContent).toContain(t(locale, "settings.consoleOnly"));
+        // The way out is an explicit action — copy alone was the finding.
+        const action = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
+          (button) => button.textContent === t(locale, "settings.providers.customEndpoint"),
+        );
+        expect(action, `${id} custom-endpoint action`).toBeDefined();
+        // The copy explains the reservation rather than claiming the console
+        // is the only path.
+        expect(view.dialog()?.textContent).toContain(
+          t(locale, "settings.providers.customEndpointCopy", { provider: label }),
+        );
       } finally {
         await view.cleanup();
       }
+    }
+  });
+
+  test("the action opens the declaration form prefilled with the entry's protocol and URL shape", async () => {
+    for (const [id, label, shape] of CONSOLE_ROWS) {
+      const calls: Array<Record<string, string>> = [];
+      // The seeded default protocol differs from the entry's own, so a
+      // dropped prefill cannot pass by landing on the first option.
+      const view = await mount(
+        addProvider({
+          customApiIds: ["anthropic-messages", "openai-completions"],
+          onSettings: async (fields) => {
+            calls.push(fields);
+            return notice("error", "kept open");
+          },
+        }),
+      );
+      try {
+        await view.pick(label);
+        const action = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
+          (button) => button.textContent === t(locale, "settings.providers.customEndpoint"),
+        );
+        await view.click(action ?? null);
+        expect(view.dialog()?.textContent, id).toContain(t(locale, "settings.addCustomProvider"));
+
+        const fields = view.dialog()?.querySelectorAll('input:not([type="password"])');
+        const idField = fields?.item(0) as HTMLInputElement | undefined;
+        // The id is the user's and clearly required — never the built-in one.
+        expect(idField?.value, id).toBe("");
+        expect(idField?.required, id).toBe(true);
+        expect(view.dialog()?.textContent).toContain(
+          t(locale, "settings.providers.customIdRequired", { provider: label }),
+        );
+
+        await view.type(idField ?? null, `${id}-direct`);
+        await view.submit();
+        expect(calls, id).toHaveLength(1);
+        expect(calls[0], id).toMatchObject({
+          op: "add-custom-provider",
+          provider_id: `${id}-direct`,
+          base_url: shape,
+          api: "openai-completions",
+        });
+      } finally {
+        await view.cleanup();
+      }
+    }
+  });
+
+  test("a template entry keeps the endpoint field, prefilled from the catalog", async () => {
+    const view = await mount(addProvider({}));
+    try {
+      await view.pick("Cloudflare Workers AI");
+      const endpoint = view.dialog()?.querySelector("input");
+      expect(endpoint?.getAttribute("value")).toBe(
+        "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+      );
+      expect(view.submitButton()).not.toBeNull();
+    } finally {
+      await view.cleanup();
     }
   });
 
@@ -392,6 +479,23 @@ describe("AddKeyDialog (AC-7, AC-19)", () => {
       expect(view.dialog()?.textContent).toContain("The provider could not be reached.");
       const field = view.dialog()?.querySelector('input[type="password"]') as HTMLInputElement | null;
       expect(field?.value).toBe("sk-second-key");
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  test("a rejecting submit prop lands in the inline region (qc3 S-2)", async () => {
+    const view = await mount(
+      addKey(1, () => {
+        throw new Error("transport exploded");
+      }),
+    );
+    try {
+      await view.type(view.dialog()?.querySelector('input[type="password"]') ?? null, "sk-fourth-key");
+      await view.submit();
+      expect(view.dialog()).not.toBeNull();
+      expect(view.dialog()?.textContent).toContain(t(locale, "settings.providers.submitFailed"));
+      expect(view.submitButton()?.disabled).toBe(false);
     } finally {
       await view.cleanup();
     }

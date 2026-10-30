@@ -41,6 +41,16 @@ import { NoticeRegion, type OpNotice } from "./PageNotice";
 const KEY_LIMIT = 8;
 
 /**
+ * A submit prop that REJECTS instead of resolving still has to land in the
+ * dialog's own inline region: the never-reject contract belongs to today's
+ * callers, so the rejection is caught here rather than surfacing as an
+ * unhandled rejection with a disabled form.
+ */
+function submitFailed(locale: SpaBoot["locale"]): OpNotice {
+  return { kind: "error", message: t(locale, "settings.providers.submitFailed") };
+}
+
+/**
  * Add provider: step 1 picks a catalog entry (grouped common / catalog in the
  * combobox panel; an `unavailable` entry stays selectable for discovery),
  * step 2 renders that entry's requirements. The unavailable step states the
@@ -66,6 +76,9 @@ export function AddProviderDialog({
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
+  // The catalog entry whose console branch handed over to the declaration
+  // form — its protocol and URL shape seed the custom dialog.
+  const [customPrefill, setCustomPrefill] = useState<CatalogProvider | null>(null);
   const selected = selectedCatalogProvider(payload.provider_catalog, selectedId);
   const imageId = payload.app.sandbox_image_id;
   const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
@@ -141,6 +154,13 @@ export function AddProviderDialog({
                   onSettings={onSettings}
                   onOutcome={report}
                   onDone={close}
+                  onCustomEndpoint={() => {
+                    // The built-in id stays reserved, so the declaration gets
+                    // its own id — the same custom form, seeded from this row.
+                    close();
+                    setCustomPrefill(selected);
+                    setCustomOpen(true);
+                  }}
                 />
               </>
             )}
@@ -172,6 +192,7 @@ export function AddProviderDialog({
                   // an id it has never heard of, so the custom flow takes over
                   // from here with the same payload.
                   close();
+                  setCustomPrefill(null);
                   setCustomOpen(true);
                 }}
               >
@@ -183,10 +204,20 @@ export function AddProviderDialog({
         )}
       </StepDialog>
       <CustomProviderDialog
+        // The prefill seeds state at mount, so a new source entry remounts.
+        key={customPrefill?.id ?? "custom"}
         locale={locale}
         open={customOpen}
-        onOpenChange={setCustomOpen}
+        onOpenChange={(next) => {
+          setCustomOpen(next);
+          if (!next) setCustomPrefill(null);
+        }}
         payload={payload}
+        prefill={
+          customPrefill === null || customPrefill.base_url === null
+            ? undefined
+            : { label: customPrefill.label, baseUrl: customPrefill.base_url, api: customPrefill.api }
+        }
         onSettings={onSettings}
         onOutcome={onOutcome}
       />
@@ -238,7 +269,12 @@ export function AddKeyDialog({
     inFlight.current = true;
     setBusy(true);
     try {
-      const outcome = await onVerify({ provider, key });
+      let outcome: OpNotice;
+      try {
+        outcome = await onVerify({ provider, key });
+      } catch {
+        outcome = submitFailed(locale);
+      }
       if (outcome.kind !== "success") {
         setNotice(outcome);
         return;
@@ -306,6 +342,7 @@ export function CustomProviderDialog({
   open,
   onOpenChange,
   payload,
+  prefill,
   onSettings,
   onOutcome,
 }: {
@@ -313,12 +350,17 @@ export function CustomProviderDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   payload: SettingsManagePayload;
+  /** A console-only catalog entry's declaration seed (protocol + URL shape). */
+  prefill?: { label: string; baseUrl: string; api: string | null };
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome: (notice: OpNotice) => void;
 }) {
+  const seedApi = prefill?.api ?? payload.custom_provider_api_ids[0] ?? "";
   const [providerId, setProviderId] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [api, setApi] = useState(payload.custom_provider_api_ids[0] ?? "");
+  // Seeded from the catalog entry the console branch handed over, so the
+  // endpoint shape is never retyped (and never restated as a second copy).
+  const [baseUrl, setBaseUrl] = useState(prefill?.baseUrl ?? "");
+  const [api, setApi] = useState(seedApi);
   const [modelIds, setModelIds] = useState("");
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
@@ -327,7 +369,8 @@ export function CustomProviderDialog({
 
   function close(): void {
     setProviderId("");
-    setBaseUrl("");
+    setBaseUrl(prefill?.baseUrl ?? "");
+    setApi(seedApi);
     setModelIds("");
     setKey("");
     setNotice(null);
@@ -339,14 +382,19 @@ export function CustomProviderDialog({
     inFlight.current = true;
     setBusy(true);
     try {
-      const outcome = await onSettings({
-        op: "add-custom-provider",
-        provider_id: providerId,
-        base_url: baseUrl,
-        api,
-        model_ids: modelIds,
-        key,
-      });
+      let outcome: OpNotice;
+      try {
+        outcome = await onSettings({
+          op: "add-custom-provider",
+          provider_id: providerId,
+          base_url: baseUrl,
+          api,
+          model_ids: modelIds,
+          key,
+        });
+      } catch {
+        outcome = submitFailed(locale);
+      }
       if (outcome.kind !== "success") {
         setNotice(outcome);
         return;
@@ -382,8 +430,18 @@ export function CustomProviderDialog({
         <NoticeRegion notice={notice} />
         <label className="flex flex-col gap-1.5 text-sm font-medium">
           {t(locale, "settings.providerId")}
-          <Input value={providerId} onChange={(event) => setProviderId(event.target.value)} autoComplete="off" />
+          <Input
+            value={providerId}
+            onChange={(event) => setProviderId(event.target.value)}
+            autoComplete="off"
+            required
+          />
         </label>
+        {prefill === undefined ? null : (
+          <p className="text-xs text-muted-foreground">
+            {t(locale, "settings.providers.customIdRequired", { provider: prefill.label })}
+          </p>
+        )}
         <label className="flex flex-col gap-1.5 text-sm font-medium">
           {t(locale, "settings.baseUrl")}
           <Input
@@ -453,6 +511,7 @@ export function ProviderConfigForm({
   onSettings,
   onOutcome,
   onDone,
+  onCustomEndpoint,
 }: {
   locale: SpaBoot["locale"];
   provider: CatalogProvider;
@@ -463,6 +522,8 @@ export function ProviderConfigForm({
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome: (notice: OpNotice) => void;
   onDone: () => void;
+  /** Console-only rows: hand the declaration to the custom form, prefilled. */
+  onCustomEndpoint: () => void;
 }) {
   const [key, setKey] = useState("");
   const [accountId, setAccountId] = useState("");
@@ -482,13 +543,18 @@ export function ProviderConfigForm({
     inFlight.current = true;
     setBusy(true);
     try {
-      const outcome = await onSettings({
-        op: "add-template-provider",
-        template_id: provider.id,
-        base_url: baseUrl,
-        account_id: accountId,
-        key,
-      });
+      let outcome: OpNotice;
+      try {
+        outcome = await onSettings({
+          op: "add-template-provider",
+          template_id: provider.id,
+          base_url: baseUrl,
+          account_id: accountId,
+          key,
+        });
+      } catch {
+        outcome = submitFailed(locale);
+      }
       onOutcome(outcome);
       if (outcome.kind === "success") {
         setKey("");
@@ -507,7 +573,12 @@ export function ProviderConfigForm({
     inFlight.current = true;
     setBusy(true);
     try {
-      const outcome = await onVerify({ provider: provider.id, key });
+      let outcome: OpNotice;
+      try {
+        outcome = await onVerify({ provider: provider.id, key });
+      } catch {
+        outcome = submitFailed(locale);
+      }
       onOutcome(outcome);
       if (outcome.kind === "success") {
         setKey("");
@@ -594,7 +665,21 @@ export function ProviderConfigForm({
   }
 
   if (formKind === "console") {
-    return <p className="text-sm text-muted-foreground">{t(locale, "settings.consoleOnly")}</p>;
+    // No endpoint field can live on this row: the store refuses a custom
+    // declaration whose id is a built-in id, so the row's own id can never
+    // carry a user endpoint. The action opens the declaration form under a
+    // user-chosen id, prefilled with this row's protocol and URL shape.
+    return (
+      <div className="flex flex-col gap-3">
+        <p className="text-sm text-muted-foreground">{t(locale, "settings.consoleOnly")}</p>
+        <Button type="button" variant="outline" onClick={onCustomEndpoint}>
+          {t(locale, "settings.providers.customEndpoint")}
+        </Button>
+        <p className="text-xs text-muted-foreground">
+          {t(locale, "settings.providers.customEndpointCopy", { provider: provider.label })}
+        </p>
+      </div>
+    );
   }
 
   return (

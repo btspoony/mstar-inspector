@@ -73,10 +73,12 @@ export type ProviderCatalogEntry = {
    *  Null for template — materialized as a custom-provider declaration. */
   envName: string | null;
   /** Default API base URL. Template entries may carry a {account_id}
-   *  placeholder the save flow substitutes. */
+   *  placeholder the save flow substitutes; a console-only builtin carries
+   *  its declaration's URL shape (any {placeholder} is the operator's). */
   baseUrl: string | null;
   /** Custom-provider API protocol to materialize a template with (template
-   *  tier only; null for builtin). */
+   *  tier), or the declaration prefill of a console-only builtin: null for a
+   *  verifiable builtin, which needs no declaration. */
   api: string | null;
   /** Representative model ids (display/prefill metadata). */
   models: readonly string[];
@@ -157,8 +159,8 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "label": "Azure OpenAI",
     "tier": "builtin",
     "envName": "AZURE_OPENAI_API_KEY",
-    "baseUrl": null,
-    "api": null,
+    "baseUrl": "https://{resource}.openai.azure.com/openai/deployments/{deployment}",
+    "api": "openai-completions",
     "models": [
       "claude-fable-5",
       "claude-fable-5-1",
@@ -328,8 +330,8 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
     "label": "AI Gateway",
     "tier": "builtin",
     "envName": "AI_GATEWAY_API_KEY",
-    "baseUrl": null,
-    "api": null,
+    "baseUrl": "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway}",
+    "api": "openai-completions",
     "models": [
       "alibaba/qwen3-max",
       "alibaba/qwen3.5-397b-a17b",
