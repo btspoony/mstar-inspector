@@ -259,7 +259,7 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     // Every pill the list emits, located by its rendered label.
     const pillClass = (overrides: Partial<AppsPayload["apps"][number]>, label: string) =>
       renderList([appRow(overrides)]).match(
-        new RegExp(`<span class="([^"]*)">${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</span>`),
+        new RegExp(`<span class="([^"]*)"[^>]*>${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</span>`),
       )?.[1] ?? "";
     for (const [overrides, label, tone] of [
       [{ status: "active", review_enabled: 1 }, t("en", "apps.status.active"), "success"],

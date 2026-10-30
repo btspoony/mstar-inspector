@@ -39,9 +39,9 @@ import { installDom } from "./dom";
 
 /**
  * The settings tab's source: the page plus the providers cluster it composes —
- * the card module and the three dialogs (plan 103 task 4). The providers
- * cluster lives in settings-providers.tsx / providers-dialogs.tsx (plan 103
- * tasks 2 and 4), so the tab's source pins read all three documents.
+ * the card module and the three dialogs. The providers cluster lives in
+ * settings-providers.tsx / providers-dialogs.tsx, so the tab's source pins
+ * read all three documents.
  */
 const readSettingsSource = () =>
   readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8") +
@@ -247,9 +247,9 @@ describe("configured providers + catalog add flow", () => {
 
   test("Add Provider: catalog selection drives the configuration form; custom path preserved", () => {
     const source = readSettingsSource();
-    // Header trigger → catalog picker → selected provider's form (plan 103
-    // task 4: the flow is a dialog, so the trigger advertises the overlay
-    // rather than an in-card expansion).
+    // Header trigger → catalog picker → selected provider's form (the flow is
+    // a dialog, so the trigger advertises the overlay rather than an in-card
+    // expansion).
     expect(source).toContain("settings.addProvider");
     expect(source).toContain('aria-haspopup="dialog"');
     expect(source).toContain("selectedCatalogProvider");
@@ -521,8 +521,7 @@ describe("provider combobox", () => {
     // The selected row carries aria-selected.
     expect(full).toContain('aria-selected="true"');
     // The unavailable catalog row stays listed and marked, with the suffix —
-    // and stays selectable (plan 103 task 4 reverses the old inert rule): it
-    // is dimmed, not disabled.
+    // and stays selectable — an unavailable row is dimmed, not disabled.
     expect(full).not.toContain('aria-disabled="true"');
     expect(full).not.toContain("pointer-events-none");
     expect(full).toContain("opacity-50");
@@ -597,7 +596,7 @@ describe("provider combobox", () => {
     // Focus/typing opens, and every keystroke re-narrows the panel.
     expect(source).toContain("onFocus={() => setOpen(true)}");
     expect(source).toContain("setQuery(event.target.value);");
-    // An unavailable row SELECTS like any other (plan 103 task 4): the
+    // An unavailable row SELECTS like any other: the
     // discovery entry must be reachable, and the add-provider dialog's
     // configuration step is where the reason and the absent submit path live.
     // The server-side eligibility pre-check stays the last line of defence.
@@ -1800,8 +1799,8 @@ describe("version footer", () => {
 describe("provider entry controls", () => {
   test("every provider-flow entry is a labelled dialog trigger; no in-card disclosure is left", () => {
     const source = readSettingsSource();
-    // Plan 103 task 4 removed both inline panels (AddProviderSection's and
-    // CustomExpand's), so their aria-expanded disclosures are gone with them;
+    // Both inline panels (AddProviderSection's and CustomExpand's) are gone,
+    // so their aria-expanded disclosures are gone with them;
     // the entry controls now advertise the overlay they open (WCAG 4.1.2), and
     // the card body holds no expandable region.
     const providersBody = source.slice(

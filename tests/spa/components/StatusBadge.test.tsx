@@ -43,7 +43,7 @@ describe("StatusBadge", () => {
 
   test("label is caller-owned content", () => {
     expect(render("success")).toBe(
-      '<span class="inline-flex h-(--badge-height) items-center rounded-(--badge-radius) px-2 text-xs tracking-(--typo-label-12-tracking) font-medium bg-(--badge-success-bg) text-(--badge-success-fg)">Active</span>',
+      '<span class="inline-flex h-(--badge-height) items-center rounded-(--badge-radius) px-2 text-xs tracking-(--typo-label-12-tracking) font-medium bg-(--badge-success-bg) text-(--badge-success-fg)" data-tone="success">Active</span>',
     );
   });
 

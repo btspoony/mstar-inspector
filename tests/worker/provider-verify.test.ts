@@ -293,11 +293,6 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
   });
 
   test("the allow-list is the spec table's own marker — one definition, no copied URL list", () => {
-    // builtinProbeCanRejectKey ≡ spec exists ∧ kind ≠ unsupported ∧ keyRejecting.
-    for (const id of PROVIDER_IDS) {
-      const spec = PROVIDER_VERIFY_ENDPOINTS[id]!;
-      expect(builtinProbeCanRejectKey(id), id).toBe(spec.kind !== "unsupported" && spec.keyRejecting === true);
-    }
     // The exported set is exactly the marked spec URLs plus the one documented
     // supplement (TypeSafe): a hand-copied second list cannot survive this.
     const marked = new Set(

@@ -311,11 +311,11 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
     const labelIdiom = 'className="flex flex-col gap-1.5 text-sm font-medium"';
     expect(settingsTabSource.split(labelIdiom).length - 1).toBeGreaterThanOrEqual(8);
     // The configured rows are the shared list-row / group-card composition
-    // (plan 102's components), never a hand-assembled row dialect: identity →
+    // (the shared components), never a hand-assembled row dialect: identity →
     // status → meta → actions arrives through ListRow props, the pill through
     // StatusBadge, the group chrome through GroupCard.
-    // The group card is the providers module's tail (plan 103 task 4 moved the
-    // forms into the dialog module), so the slice runs to the end of it.
+    // The group card is the providers module's tail (the forms live in the
+    // dialog module), so the slice runs to the end of it.
     const groupCard = settingsTabSource.slice(settingsTabSource.indexOf("function ProviderGroupCard"));
     expect(groupCard).toContain("<GroupCard>");
     expect(groupCard).toContain("<GroupCardHeader");

@@ -1,5 +1,5 @@
 /**
- * Group derivation for the providers settings area (plan 103 task 3).
+ * Group derivation for the providers settings area.
  *
  * Pure by contract: no `t()`, no relative time, no clock read. Counts and the
  * stored ISO stamps leave here untouched; formatting is the view layer's.
