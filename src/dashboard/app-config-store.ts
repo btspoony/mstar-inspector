@@ -1146,18 +1146,37 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   /**
    * A pool write that matched ZERO rows. A NEW key at MAX_KEYS_PER_PROVIDER is
-   * the common cause; for an OWNED pool the other cause is the declaration
-   * vanishing between the caller's read and this write — named explicitly so
-   * the removal race surfaces as a refusal instead of an orphan credential.
+   * the common cause; for an OWNED pool the other causes are the declaration
+   * vanishing between the caller's read and this write, or (when the statement
+   * carried `endpoint`) that declaration now naming another endpoint — named
+   * explicitly so each race surfaces as a refusal instead of an orphan or a
+   * misdirected credential.
    */
-  async function throwKeyRefusal(spec: KeyTable, appId: string, provider: string): Promise<never> {
+  async function throwKeyRefusal(
+    spec: KeyTable,
+    appId: string,
+    provider: string,
+    endpoint?: { base_url: string; api: string },
+  ): Promise<never> {
     if (spec.owner !== undefined) {
       const decl = await db
-        .prepare(`SELECT ${spec.owner.column} FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?`)
+        .prepare(`SELECT base_url, api FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?`)
         .bind(appId, provider)
-        .first<Record<string, string>>();
+        .first<{ base_url: string; api: string }>();
       if (decl === null) {
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(provider)} is not declared for this app`);
+      }
+      // With an endpoint predicate, an EXISTING declaration that still
+      // matches zero rows was pinned to another endpoint: the credential was
+      // verified somewhere this pool no longer points. Same precedence as
+      // throwCustomProviderRefusal — a full pool refuses the ninth key first.
+      if (endpoint !== undefined && (decl.base_url !== endpoint.base_url || decl.api !== endpoint.api)) {
+        const count = await db
+          .prepare(`SELECT COUNT(*) AS n FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?`)
+          .bind(appId, provider)
+          .first<{ n: number }>();
+        if ((count?.n ?? 0) >= MAX_KEYS_PER_PROVIDER) throw new ProviderKeyLimitError(provider);
+        throw new ProviderEndpointLockedError(provider);
       }
     }
     throw new ProviderKeyLimitError(provider);
@@ -1232,7 +1251,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     appId: string,
     provider: string,
     plainKey: string,
-    opts: { verifiedStatus: VerifiedStatus | null; models?: string[] },
+    opts: { verifiedStatus: VerifiedStatus | null; models?: string[]; endpoint?: { base_url: string; api: string } },
   ): Promise<void> {
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
       throw new ProviderKeyTooLongError();
@@ -1245,7 +1264,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     const keyStatement = keyInsertStatement(spec, appId, provider, keyId, keyEnc, opts);
     if (opts.models === undefined) {
       const res = await keyStatement.run();
-      if (res.meta.changes === 0) await throwKeyRefusal(spec, appId, provider);
+      if (res.meta.changes === 0) await throwKeyRefusal(spec, appId, provider, opts.endpoint);
       return;
     }
     const res = await db.batch([
@@ -1270,7 +1289,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           keyId,
         ),
     ]);
-    if (res[0]!.meta.changes === 0) await throwKeyRefusal(spec, appId, provider);
+    if (res[0]!.meta.changes === 0) await throwKeyRefusal(spec, appId, provider, opts.endpoint);
   }
 
   /** Mask one stored key row for a settings list face: decrypt, keep ONLY the tail. */
@@ -2056,23 +2075,36 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * unless the declared base URL derives a models endpoint KNOWN to reject a
      * bogus key (customProbeCanRejectKey — the same decision
      * upsertCustomProvider makes, so a key appended here and one declared with
-     * the declaration land the same state). The
+     * The
      * declaration is read first: an undeclared provider id throws
      * InvalidCustomProviderError, because a key row without its declaration is
      * unreachable data and a silent orphan is worse than a loud refusal (the
      * "an unknown app_id is a caller bug" convention). Bounds/cap contract
      * identical to addProviderKey. The declaration is never rewritten.
+     *
+     * `endpoint` is the `{base_url, api}` the key was VERIFIED against: the
+     * insert carries it as the same atomic predicate the declare route uses,
+     * so a declaration removed and re-created at another endpoint while the
+     * verification was in flight refuses the credential
+     * (ProviderEndpointLockedError) instead of adopting it. The status is
+     * derived from that verified URL, never from a later declaration read.
      */
-    async addCustomProviderKey(appId: string, providerId: string, plainKey: string): Promise<void> {
+    async addCustomProviderKey(
+      appId: string,
+      providerId: string,
+      plainKey: string,
+      endpoint: { base_url: string; api: string },
+    ): Promise<void> {
       const declared = await db
-        .prepare(`SELECT provider_id, base_url FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .prepare(`SELECT provider_id FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
         .bind(appId, providerId)
-        .first<{ provider_id: string; base_url: string }>();
+        .first<{ provider_id: string }>();
       if (declared === null) {
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);
       }
       await addKey(CUSTOM_KEY_TABLE, appId, providerId, plainKey, {
-        verifiedStatus: customProbeCanRejectKey(declared.base_url) ? "ok" : "reachable",
+        verifiedStatus: customProbeCanRejectKey(endpoint.base_url) ? "ok" : "reachable",
+        endpoint,
       });
     },
 

@@ -3775,13 +3775,27 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       // The append persists the verify outcome: the store records 'ok' or the
       // weaker 'reachable' from the SAME derived-URL decision the declaration
       // path applies, so the row the operator just verified renders its state.
-      await store.addCustomProviderKey(gate.app.id, providerId, plainKey);
+      // The verified endpoint rides along: the insert is gated on the
+      // declaration still carrying it, so a declaration removed and re-created
+      // at another endpoint while the verification was in flight refuses this
+      // credential instead of adopting it.
+      await store.addCustomProviderKey(gate.app.id, providerId, plainKey, {
+        base_url: declared.base_url,
+        api: declared.api,
+      });
     } catch (err) {
       logSettingsFailure("add_custom_provider_key", gate.app.id, err);
       // The declaration was removed between the read and the write — the same
       // keyed 400, nothing stored.
       if (err instanceof InvalidCustomProviderError) {
         return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.customProviderUndeclared, {
+          provider: providerId,
+        });
+      }
+      // The declaration now points at another endpoint than the one this key
+      // was verified against — the same keyed 400 the declare route answers.
+      if (err instanceof ProviderEndpointLockedError) {
+        return settings400Response(c, gate.app.github_app_id, SETTINGS_400_KEYS.providerEndpointLocked, {
           provider: providerId,
         });
       }
