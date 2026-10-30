@@ -143,7 +143,7 @@ function ompVerifySpec(providerId: string): Extract<ProviderVerifySpec, { kind: 
  * | azure-openai    | unsupported | —                                            | Azure resource host is per-deployment (AZURE_OPENAI_ENDPOINT); the dashboard stores only the key — no probeable host. |
  * | groq            | models   | https://api.groq.com/openai/v1/models (Bearer)  | documented, OpenAI shape |
  * | cerebras        | models   | https://api.cerebras.ai/v1/models (Bearer)      | documented, OpenAI shape; omp validates a Cerebras key with a chat completion (inference), which the dashboard must not do |
- * | openrouter      | probe    | GET https://openrouter.ai/api/v1/auth/key (Bearer) | the same call omp's auth rule validates. `GET /api/v1/models` is the PUBLIC catalog (200 for any bearer — a bogus key would read as `ok`), so the key probe is /auth/key, which answers 401 for a bogus key |
+ * | openrouter      | models   | https://openrouter.ai/api/v1/models (Bearer)    | documented public catalog: it answers 200 for any bearer, so the save records the weaker `reachable` (allow-list below) while the list still fills the chain dropdown. `GET /api/v1/auth/key` is the stricter check omp validates a key with, deliberately NOT this spec — it answers account data, so the verified-model cache would stay empty and OpenRouter would offer no selectable model |
  * | mistral         | models   | https://api.mistral.ai/v1/models (Bearer)       | documented, OpenAI shape |
  * | minimax         | models   | https://api.minimax.io/v1/models (Bearer)       | documented (platform.minimax.io list-models reference) |
  * | opencode        | models   | https://opencode.ai/zen/v1/models (Bearer)      | OpenCode Zen docs list the endpoint; auth presumed Bearer Zen key [INFERENCE] |
@@ -170,7 +170,7 @@ const DOCUMENTED_VERIFY_ENDPOINTS: Record<string, ProviderVerifySpec> = {
   },
   groq: { kind: "models", url: "https://api.groq.com/openai/v1/models", auth: "bearer" },
   cerebras: { kind: "models", url: "https://api.cerebras.ai/v1/models", auth: "bearer" },
-  openrouter: { kind: "probe", url: "https://openrouter.ai/api/v1/auth/key", auth: "bearer" },
+  openrouter: { kind: "models", url: "https://openrouter.ai/api/v1/models", auth: "bearer" },
   kilo: { kind: "models", url: "https://api.kilo.ai/api/gateway/models", auth: "bearer" },
   mistral: { kind: "models", url: "https://api.mistral.ai/v1/models", auth: "bearer" },
   zai: {
@@ -389,9 +389,12 @@ function customModelsUrl(baseUrl: string): URL | null {
  * Builtin entries are the same decision applied to the spec's own URL
  * (builtinProbeCanRejectKey): a models/identity endpoint the provider itself
  * gates on the credential. Probed 2026-10-30 with a bogus key — each answers
- * 400/401/403, never 2xx. Kilo and Umans are deliberately ABSENT: their model
- * lists are public (200 for a bogus key), so a 2xx there proves only
- * reachability.
+ * 400/401/403, never 2xx. Kilo, Umans and OpenRouter are deliberately ABSENT:
+ * their model lists are public (200 for a bogus key), so a 2xx there proves
+ * only reachability. OpenRouter's stricter `GET /api/v1/auth/key` probes the
+ * key but answers account data — no model list, so it can never fill the
+ * chain dropdown; the spec stays on the public catalog and records
+ * `reachable`.
  *
  * TypeSafe's omp auth rule validates `GET https://api.typesafe.ai/v1/models`
  * and carries no public-endpoint note, so a bogus key is answered 401/403
@@ -409,7 +412,6 @@ const KEY_REJECTING_MODELS_PROBE_URLS: Readonly<Record<string, true>> = {
   "https://api.github.com/user": true, // copilot's identity probe
   "https://api.groq.com/openai/v1/models": true,
   "https://api.cerebras.ai/v1/models": true,
-  "https://openrouter.ai/api/v1/auth/key": true,
   "https://api.mistral.ai/v1/models": true,
   "https://api.minimax.io/v1/models": true,
   "https://opencode.ai/zen/v1/models": true,

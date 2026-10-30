@@ -274,7 +274,7 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
       "azure-openai": false,
       groq: true,
       cerebras: true,
-      openrouter: true,
+      openrouter: false,
       kilo: false,
       mistral: true,
       zai: false,
@@ -539,26 +539,34 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     expect(builtinProbeCanRejectKey("zai")).toBe(false);
   });
 
-  test("openrouter validates at /api/v1/auth/key — its public /api/v1/models answers 200 for any bearer", async () => {
+  test("openrouter verifies on its PUBLIC model list — the chain dropdown needs it — and records reachable", async () => {
     const calls: FetchCall[] = [];
     const result = await verifyProviderKey(
-      { fetch: mockFetch(json(200, { data: { label: "sk-or-…", usage: 0, limit: null } }), calls) },
+      { fetch: mockFetch(json(200, { data: [{ id: "openai/gpt-5" }, { id: "anthropic/claude-4" }] }), calls) },
       "openrouter",
       PLAIN_KEY,
     );
-    // An identity/usage probe: 2xx proves the key, models stay [] (the public
-    // catalog list is NOT scraped — it answers without a valid key at all).
-    expect(result).toEqual({ ok: true, models: [] });
+    // Models ARE cached: /api/v1/auth/key would answer account data instead,
+    // leaving the cache empty and the model picker with nothing to offer.
+    expect(result).toEqual({ ok: true, models: ["openai/gpt-5", "anthropic/claude-4"] });
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/auth/key");
+    expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/models");
     expect(calls[0]!.method).toBe("GET");
     expect(calls[0]!.headers).toEqual(verifyHeaders({ authorization: `Bearer ${PLAIN_KEY}` }));
-    expect(builtinProbeCanRejectKey("openrouter")).toBe(true);
+    // The public catalog answers 200 for ANY bearer, so the store records the
+    // weaker reachable state — never ok.
+    expect(builtinProbeCanRejectKey("openrouter")).toBe(false);
   });
 
-  test("openrouter: 401 on /auth/key is invalid_key (a bogus key never reads as ok)", async () => {
-    const result = await verifyProviderKey({ fetch: mockFetch(json(401, { error: { message: "User not found." } })) }, "openrouter", PLAIN_KEY);
-    expect(result).toEqual({ ok: false, reason: "invalid_key" });
+  test("openrouter: 401/403 on the model list is invalid_key (a bogus key never reads as ok)", async () => {
+    for (const status of [401, 403]) {
+      const result = await verifyProviderKey(
+        { fetch: mockFetch(json(status, { error: { message: "No auth credentials found" } })) },
+        "openrouter",
+        PLAIN_KEY,
+      );
+      expect(result, String(status)).toEqual({ ok: false, reason: "invalid_key" });
+    }
   });
 
   test("cursor: GET /v1/models is a MODELS endpoint — a 2xx list is parsed and cached (not discarded as probe-only)", async () => {
