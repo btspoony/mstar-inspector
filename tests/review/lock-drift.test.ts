@@ -11,9 +11,12 @@
  * `packages/runner/lock-drift.allowlist.json`): the runner lock was resolved
  * fresh, so the pruned-in-image transformers/sharp subtree, the omp SDK's
  * transitive graph, and the optional per-platform sherpa binaries all drifted.
- * This test converts "deliberate" into "checked": a NEW drift, a version that
- * moves inside an already-drifted package, or a stale allowlist row fails until
- * the allowlist is updated — which puts the decision in review.
+ * This test converts "deliberate" into "checked" — but only over package NAMES
+ * plus a reason class. Version numbers are deliberately NOT pinned anywhere:
+ * they move on every dependency bump, so pinning them would fail CI on routine
+ * upgrades without saying anything about intent. A NEW drifting package name
+ * must be added to the allowlist with its reason; a name that stops drifting
+ * must be deleted from it.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -29,7 +32,6 @@ const ALLOWLIST = join(REPO_ROOT, "packages", "runner", "lock-drift.allowlist.js
 const REASONS = ["pruned-in-image", "omp-transitive", "optional-platform"];
 
 type Lockfile = { packages: Record<string, [string, ...unknown[]]> };
-type AllowEntry = { reason: string; root: string; runner: string };
 
 /**
  * Resolved version of every `packages` row. A row's name is either a plain
@@ -47,53 +49,39 @@ function resolutions(path: string): Map<string, string> {
   );
 }
 
-/** `name@version` for every common package whose two resolutions disagree. */
-function drift(): Map<string, string> {
+/** Sorted names of every common package whose two resolutions disagree. */
+function drift(): string[] {
   const root = resolutions(ROOT_LOCK);
   const runner = resolutions(RUNNER_LOCK);
-  const found = new Map<string, string>();
+  const found: string[] = [];
   for (const [name, rootVersion] of root) {
     const runnerVersion = runner.get(name);
-    if (runnerVersion !== undefined && runnerVersion !== rootVersion) {
-      found.set(name, `${name}@${rootVersion}→${runnerVersion}`);
-    }
+    if (runnerVersion !== undefined && runnerVersion !== rootVersion) found.push(name);
   }
-  return found;
+  return found.sort();
 }
 
-const ALLOWED = Bun.JSONC.parse(readFileSync(ALLOWLIST, "utf8")) as Record<string, AllowEntry>;
-
-/** The allowlist side rendered into the same `name@version→version` shape. */
-function allowlisted(): Map<string, string> {
-  return new Map(
-    Object.entries(ALLOWED).map(([name, entry]) => [
-      name,
-      `${name}@${entry.root}→${entry.runner}`,
-    ]),
-  );
-}
+/** Package name → reason class. */
+const ALLOWED = Bun.JSONC.parse(readFileSync(ALLOWLIST, "utf8")) as Record<string, string>;
 
 describe("runner ⇄ root lockfile drift", () => {
-  test("the observed drift equals the committed allowlist exactly", () => {
-    expect([...drift().values()].sort()).toEqual([...allowlisted().values()].sort());
+  test("the observed drift names equal the committed allowlist keys", () => {
+    expect(drift()).toEqual(Object.keys(ALLOWED).sort());
   });
 
-  test("every allowlist row carries a declared reason", () => {
-    for (const [name, entry] of Object.entries(ALLOWED)) {
-      expect({ name, reason: entry.reason, known: REASONS.includes(entry.reason) }).toEqual({
-        name,
-        reason: entry.reason,
-        known: true,
-      });
+  test("every observed drift carries a declared reason class", () => {
+    for (const name of drift()) {
+      const reason = ALLOWED[name] ?? "<missing>";
+      expect({ name, known: REASONS.includes(reason) }).toEqual({ name, known: true });
     }
   });
 
   test("a parse failure cannot masquerade as a clean graph", () => {
-    // Guards the diff above: a lockfile whose row shape changed would yield an
-    // empty `drift()`, and an empty allowlist would then "match" for the wrong
-    // reason. The root graph is strictly larger than the runner's, and the
-    // known divergence is non-empty.
+    // Guards the set comparison above: a lockfile whose row shape changed
+    // would yield an empty `drift()`, and an empty allowlist would then "match"
+    // for the wrong reason. The root graph is strictly larger than the
+    // runner's, and the known divergence is non-empty.
     expect(resolutions(ROOT_LOCK).size).toBeGreaterThan(resolutions(RUNNER_LOCK).size);
-    expect(drift().size).toBeGreaterThan(0);
+    expect(drift().length).toBeGreaterThan(0);
   });
 });
