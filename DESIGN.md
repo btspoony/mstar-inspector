@@ -805,7 +805,11 @@ Kept from L1: `heading-24`, `heading-16`, `copy-16`, `copy-14`.
 - `heading-16` — section titles, card titles.
 - `label-14` / `label-12` — nav, form labels, table headers, badges.
 - `copy-16` / `copy-14` — body and secondary copy.
-- `button-14` / `button-12` — button labels (default / small).
+- `button-14` — button labels: the default control face and the SPA small
+  button (`components.button-sm`).
+- `button-12` — the SSR dashboard header action (`components.button-small`,
+  12px label with a `0 8px` pad). Not a general small-button face; the SPA's
+  small button stays on `button-14`.
 - `mono-13` — ids, hashes, timestamps; use tabular figures.
 
 Dashboard numerals: `font-variant-numeric: tabular-nums` on counts, ids, and

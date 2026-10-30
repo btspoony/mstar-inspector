@@ -31,6 +31,7 @@ const PAGES_DIR = join(REPO, "src/spa/pages");
 const ADMIN_DIR = join(REPO, "src/spa/admin");
 const TARGETS: string[] = [
   join(REPO, "src/spa/Layout.tsx"),
+  join(REPO, "src/spa/pages.module.css"),
   join(REPO, "src/spa/admin.html"),
   join(REPO, "src/spa/index.html"),
   ...listFiles(PAGES_DIR).filter((f) => f.endsWith(".tsx") || f.endsWith(".ts")),
@@ -45,11 +46,19 @@ const HEX_OUTSIDE_FN = /#[0-9a-fA-F]{3,8}\b/g;
 const FN_SPAN = /\b(?:rgba|hsl)a?\([^)]*\)/g;
 /**
  * Default-palette Tailwind colour utility: `text-red-500`, `bg-zinc-100`,
- * `border-slate-700`. The utility prefix is part of the pattern, so a token
- * that merely carries a palette name (`bg-(--gray-200)`) cannot match.
+ * `border-slate-700`, `shadow-red-500`, `ring-offset-red-500`. The utility
+ * prefix is part of the pattern, so a token that merely carries a palette
+ * name (`bg-(--gray-200)`) cannot match.
+ *
+ * Every prefix here is a v4 utility that takes a colour (verified against
+ * tailwindcss 4.3.3: each emits `--tw-*-color` / a colour declaration).
+ * `ring-offset`, `inset-ring`, `inset-shadow`, `text-shadow`,
+ * `drop-shadow`, `scrollbar-thumb` and `scrollbar-track` are their own
+ * colour families — a bare `ring`/`shadow` prefix cannot match them because
+ * the lookbehind rejects the `-` before.
  */
 const PALETTE_UTILITY =
-  /(?<![\w-])(?:bg|text|border|ring|divide|fill|stroke|outline|decoration|caret|accent|placeholder|from|via|to)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b/g;
+  /(?<![\w-])(?:bg|text|border|ring|ring-offset|inset-ring|divide|fill|stroke|outline|decoration|caret|accent|placeholder|shadow|inset-shadow|text-shadow|drop-shadow|scrollbar-thumb|scrollbar-track|from|via|to)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b/g;
 
 /** Allow-list: starts empty. A hit here must be a proven false positive. */
 const ALLOW: string[] = [];
@@ -103,6 +112,27 @@ describe("visual discipline guard", () => {
       "border-slate-700",
     ]);
     expect(matched(`<div className="hover:bg-rose-50" />`)).toEqual(["bg-rose-50"]);
+    // must match (v4 colour-bearing shadow/ring families — each emits
+    // --tw-*-color; a bare `shadow`/`ring` prefix would miss them)
+    expect(
+      matched(
+        `<div className="shadow-red-500 inset-shadow-red-500 ring-offset-red-500 drop-shadow-red-500 text-shadow-red-500 inset-ring-red-500 scrollbar-thumb-red-500" />`,
+      ),
+    ).toEqual([
+      "shadow-red-500",
+      "inset-shadow-red-500",
+      "ring-offset-red-500",
+      "drop-shadow-red-500",
+      "text-shadow-red-500",
+      "inset-ring-red-500",
+      "scrollbar-thumb-red-500",
+    ]);
+    // must NOT match; the shadow/ring SIZE utilities carry no colour
+    expect(
+      matched(`<div className="shadow-sm inset-shadow-xs ring-offset-2 drop-shadow-lg ring-2" />`),
+    ).toEqual([]);
+    // must NOT match; token forms of the same families
+    expect(matched(`<div className="shadow-(--shadow-contact) ring-offset-(--gray-200)" />`)).toEqual([]);
     // must NOT match
     expect(matched(`<div className="p-4 gap-2 grid-cols-3 -translate-y-1" />`)).toEqual([]);
     expect(matched(`<div className="after:bottom-[-2px]" />`)).toEqual([]); // `[` followed by `-`, not a digit; same for CSS-var shorthand like text-(length:--typo-…)
