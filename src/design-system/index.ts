@@ -7,7 +7,29 @@
  * importing them directly, by alias subpath or by relative path, breaks the
  * boundary that `tests/design-system/boundary.test.ts` enforces.
  *
- * The re-export surface starts empty by design: the token sources land here in
- * plan 201 tasks 2-4, the primitives and patterns in plan 202.
+ * The token source (task 2) is the only thing exported so far; the generated
+ * CSS, fixture and preview are tasks 3-7, and the primitives and patterns
+ * arrive with plan 202.
  */
-export {};
+export {
+  OPS_SURFACE_ATTR,
+  THEMES,
+  UnresolvedTokenError,
+  opsSurface,
+  reducedMotionDurations,
+  resolveTheme,
+  themeVaryingSemantics,
+  tokenLayers,
+  tokenNames,
+} from "./tokens";
+export type {
+  ComponentName,
+  ComponentTokens,
+  OpsSurfaceToken,
+  PrimitiveName,
+  PrimitiveTokens,
+  SemanticName,
+  SemanticTokens,
+  ThemeName,
+  TokenLayers,
+} from "./tokens";
