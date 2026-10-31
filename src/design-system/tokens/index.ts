@@ -22,12 +22,20 @@ import type { SemanticName } from "./semantic";
 import { components } from "./components";
 
 export type { ThemeName } from "./primitives";
-export type { PrimitiveName, PrimitiveTokens } from "./primitives";
+export type {
+  PrimitiveName,
+  PrimitiveTokens,
+  SurvivorStep,
+  TransitionalStep,
+  TransitionalSteps,
+} from "./primitives";
+export { survivorSteps, transitionalSteps } from "./primitives";
 export type { SemanticName, SemanticTokens } from "./semantic";
 export type { ComponentName, ComponentTokens } from "./components";
 export type { OpsSurfaceToken } from "./surface-variants";
 export { OPS_SURFACE_ATTR, opsSurface } from "./surface-variants";
 export { reducedMotionDurations } from "./semantic";
+
 
 export const THEMES: readonly ThemeName[] = ["dark", "light"];
 

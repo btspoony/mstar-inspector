@@ -23,8 +23,10 @@ import {
   UnresolvedTokenError,
   opsSurface,
   resolveTheme,
+  survivorSteps,
   themeVaryingSemantics,
   tokenLayers,
+  transitionalSteps,
   tokenNames,
 } from "../../src/design-system/tokens";
 
@@ -57,24 +59,55 @@ const D14_SURVIVORS = [
   "purple-700",
 ] as const;
 
-/** D14 keeps these two only for `admin.html`; plan 204 removes them. */
-const D14_TRANSITIONAL = ["gray-800", "gray-alpha-200"] as const;
+/**
+ * D14a's transitional set: dropped by the band rule, kept only because a plan
+ * that has not run still consumes each one. The owner is the plan that closes
+ * it, and task 3 emits the declarations (with these comments) from the source.
+ */
+const D14A_TRANSITIONAL: readonly { name: string; owner: string }[] = [
+  { name: "gray-800", owner: "204 (admin.html)" },
+  { name: "gray-alpha-200", owner: "204 (admin.html)" },
+  { name: "brand-800", owner: "201 task 3 (shadcn bridge)" },
+  { name: "red-800", owner: "201 task 3 (shadcn bridge)" },
+  { name: "gray-100", owner: "201 task 3 (shadcn bridge)" },
+  { name: "gray-400", owner: "201 task 3 / 203 (SSR views.ts)" },
+  { name: "green-900", owner: "201 task 3 (tokens.css component block)" },
+  { name: "gray-500", owner: "202 (ui primitives)" },
+  { name: "gray-alpha-300", owner: "202 (ListRow)" },
+  { name: "amber-800", owner: "203 (SSR views.ts)" },
+  { name: "amber-900", owner: "203 (SSR views.ts)" },
+  { name: "red-900", owner: "203 (SSR views.ts) / 201 task 8" },
+  { name: "teal-700", owner: "203 (charts.css)" },
+  { name: "pink-700", owner: "203 (charts.css)" },
+];
 
-describe("palette reduction (D14)", () => {
-  test("the declared palette steps are the survivor set plus the two transitional steps", () => {
-    const declaredPalette = tokenNames().primitive.filter((name) => !name.startsWith("font-") && !name.startsWith("breakpoint-"));
+describe("palette reduction (D14 / D14a)", () => {
+  test("the declared palette steps are exactly 26 survivors plus 14 transitional", () => {
+    const declaredPalette = tokenNames()
+      .primitive.filter((name) => !name.startsWith("font-") && !name.startsWith("breakpoint-"));
     // Both directions, so a step added without a band and a survivor dropped by
     // accident both fail.
     expect([...declaredPalette].sort()).toEqual(
-      [...D14_SURVIVORS, ...D14_TRANSITIONAL].sort(),
+      [...D14_SURVIVORS, ...D14A_TRANSITIONAL.map((s) => s.name)].sort(),
     );
+    expect(declaredPalette).toHaveLength(40);
   });
 
-  test("teal and pink are gone entirely, and every survivor is actually consumed", () => {
-    const names = tokenNames().primitive;
-    expect(names.filter((n) => n.startsWith("teal-"))).toEqual([]);
-    expect(names.filter((n) => n.startsWith("pink-"))).toEqual([]);
+  test("the transitional set is exported as data with an owner per step", () => {
+    // Task 3 must be able to emit these declarations from the source rather
+    // than from a second hand-maintained list.
+    expect(transitionalSteps).toHaveLength(14);
+    expect(transitionalSteps.map((s) => ({ name: s.name as string, owner: s.owner }))).toEqual([
+      ...D14A_TRANSITIONAL,
+    ]);
+    for (const step of transitionalSteps) {
+      expect(step.owner.trim(), `--${step.name} has no owner`).not.toBe("");
+    }
+    expect(survivorSteps).toHaveLength(26);
+    expect([...survivorSteps].sort()).toEqual([...D14_SURVIVORS].sort());
+  });
 
+  test("every survivor is consumed by a layer; every transitional step is consumed by none", () => {
     const referenced = THEMES.flatMap((theme) => [
       ...Object.values(tokenLayers(theme).semantic),
       ...Object.values(tokenLayers(theme).component),
@@ -82,19 +115,32 @@ describe("palette reduction (D14)", () => {
     for (const step of D14_SURVIVORS) {
       expect(referenced, `--${step} survives but nothing consumes it`).toContain(`var(--${step})`);
     }
+    // A layer reference would make the step permanent by accident; the whole
+    // point of the transitional set is that its consumer is outside the module.
+    for (const step of transitionalSteps) {
+      expect(referenced, `--${step.name} is transitional, so no layer may consume it`).not.toContain(
+        `var(--${step.name})`,
+      );
+    }
   });
 
-  test("the transitional steps stay declared for admin.html and nothing else", () => {
-    // They are transitional precisely because their only consumer is outside
-    // the token layers; that consumer is what plan 204 re-tokens.
-    for (const step of D14_TRANSITIONAL) {
-      expect(tokenLayers("dark").primitive[step]).toBeString();
-      expect(tokenLayers("light").primitive[step]).toBeString();
-      const referenced = THEMES.flatMap((theme) => [
-        ...Object.values(tokenLayers(theme).semantic),
-        ...Object.values(tokenLayers(theme).component),
-      ]).join("\n");
-      expect(referenced, `--${step} is transitional, so no layer may consume it`).not.toContain(`var(--${step})`);
+  test("every transitional step is declared in both themes", () => {
+    for (const theme of THEMES) {
+      for (const step of transitionalSteps) {
+        expect(tokenLayers(theme).primitive[step.name], `${theme} --${step.name}`).toMatch(
+          /^#[0-9a-f]{3,8}$/i,
+        );
+      }
+    }
+  });
+
+  test("teal and pink survive only as transitional steps", () => {
+    // They are no longer a family with a live palette; D14 removed them from
+    // the bands and D14a keeps their single chart step each until plan 203.
+    const tealPink = tokenNames().primitive.filter((n) => n.startsWith("teal-") || n.startsWith("pink-"));
+    expect([...tealPink].sort()).toEqual(["pink-700", "teal-700"]);
+    for (const name of tealPink) {
+      expect(transitionalSteps.map((s) => s.name as string)).toContain(name);
     }
   });
 });

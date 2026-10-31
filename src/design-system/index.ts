@@ -18,9 +18,11 @@ export {
   opsSurface,
   reducedMotionDurations,
   resolveTheme,
+  survivorSteps,
   themeVaryingSemantics,
   tokenLayers,
   tokenNames,
+  transitionalSteps,
 } from "./tokens";
 export type {
   ComponentName,
@@ -30,6 +32,9 @@ export type {
   PrimitiveTokens,
   SemanticName,
   SemanticTokens,
+  SurvivorStep,
   ThemeName,
   TokenLayers,
+  TransitionalStep,
+  TransitionalSteps,
 } from "./tokens";

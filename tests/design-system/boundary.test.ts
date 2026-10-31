@@ -33,19 +33,34 @@ const ENTRY = "@design-system";
 /** `from "x"`, `import "x"`, `require("x")`, `import("x")` — capture group 1 is the specifier. */
 const SPECIFIER = /(?:from|import|require)\s*\(?\s*["']([^"']+)["']/g;
 
+/**
+ * Module files whose imports count as consumers: `.ts`, `.tsx`, `.mts`, `.mjs`,
+ * `.js`, `.jsx`, `.cjs`. A `.js`/`.mjs` consumer can still reach the module by
+ * path (a script, a config, a worker entry), so a scan that only saw
+ * `.ts`/`.tsx` would pass while such a file bypassed the single door.
+ */
+const MODULE_FILE = /\.m?[jt]sx?$/;
+
 /** True when `path` is the module root or lies anywhere beneath it. */
 function inModule(path: string): boolean {
   return path === MODULE_DIR || path.startsWith(MODULE_DIR + sep);
 }
 
-/** Violation rule label for one specifier, or `null` when it is legal. */
+/**
+ * Violation rule label for one specifier, or `null` when it is legal.
+ *
+ * Both branches resolve to an absolute path and are judged by `inModule`, so a
+ * bare specifier is compared as a path rather than by string prefix: a sibling
+ * like `src/design-system-utils` is a different module, while
+ * `src/design-system/../design-system/tokens` still lands inside this one.
+ */
 function violationFor(specifier: string, importer: string): string | null {
   if (specifier === ENTRY) return null;
   if (specifier.startsWith(`${ENTRY}/`)) return "deep-import";
   const target = specifier.startsWith(".")
     ? resolve(dirname(join(REPO, importer)), specifier)
-    : specifier.replace(/^\/+/, "");
-  return inModule(target) || target.startsWith("src/design-system") ? "path-into-module" : null;
+    : resolve(REPO, specifier.replace(/^\/+/, ""));
+  return inModule(target) ? "path-into-module" : null;
 }
 
 type Violation = { file: string; line: number; rule: string; specifier: string };
@@ -68,14 +83,14 @@ function scanContent(content: string, file: string): Violation[] {
   return violations;
 }
 
-/** Repo-relative `.ts`/`.tsx` files under `src/`, minus the module itself. */
+/** Repo-relative TS/JS module files under `src/`, minus the module itself. */
 function consumerFiles(dir: string = SCAN_ROOT): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) {
       if (!inModule(full)) out.push(...consumerFiles(full));
-    } else if (/\.tsx?$/.test(entry)) {
+    } else if (MODULE_FILE.test(entry)) {
       out.push(relative(REPO, full));
     }
   }
@@ -116,6 +131,15 @@ describe("design-system module boundary", () => {
     // must NOT match: unrelated specifiers the repo actually uses
     expect(matched(`import { Card } from "@/components/ui/card";\nimport React from "react";`)).toEqual([]);
     expect(matched(`export * from "./tokens";`, "src/contracts/index.ts")).toEqual([]);
+
+    // must NOT match: a sibling module whose name merely starts the same way —
+    // the prefix test this replaced reported it as a violation.
+    expect(matched(`import x from "src/design-system-utils";`)).toEqual([]);
+    expect(matched(`import x from "../design-system-utils/index.ts";`, "src/spa/lib/x.ts")).toEqual([]);
+    // must still match: a bare specifier that escapes and comes back in
+    expect(matched(`import x from "src/design-system/../design-system/tokens";`)).toEqual([
+      "path-into-module src/design-system/../design-system/tokens",
+    ]);
   });
 
   test("no consumer imports the module internals or bypasses the entry alias", () => {
