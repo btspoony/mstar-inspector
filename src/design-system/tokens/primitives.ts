@@ -113,21 +113,16 @@ const survivorLight: SurvivorColors = {
  * `green-900` left that way in task 3 — the bridge's hover faces and the
  * component-block notice foregrounds were their last readers — `teal-700`,
  * `pink-700` and `gray-alpha-300` left with plan 202 task 4, where the charts
- * moved onto the six closed slots and ListRow onto `border-subtle`, and
+ * moved onto the six closed slots and ListRow onto `border-subtle`;
  * `gray-500` left with plan 202 task 7, which replaced the last test class that
- * named it with a behaviour assertion.
+ * named it with a behaviour assertion; and `gray-100`, `gray-400`, `amber-800`,
+ * `amber-900` and `red-900` left with plan 203 task 7, where the SSR face's
+ * stylesheet moved onto the semantic layer and stopped reading raw steps.
  */
 const transitionalValues = {
   // admin.html's inline styles; plan 204 re-tokens that console.
   "gray-800": { dark: "#ccd5e1", light: "#3a4350", owner: "204 (admin.html)" },
   "gray-alpha-200": { dark: "#ffffff17", light: "#10192814", owner: "204 (admin.html)" },
-  // The SSR dashboard face, re-pointed onto semantics.
-  "gray-100": { dark: "#15181f", light: "#fafbfd", owner: "203 (SSR views.ts)" },
-  "gray-400": { dark: "#39404d", light: "#ccd4df", owner: "203 (SSR views.ts)" },
-  // The SSR face's notices.
-  "amber-800": { dark: "#fcd34d", light: "#92400e", owner: "203 (SSR views.ts)" },
-  "amber-900": { dark: "#fde68a", light: "#78350f", owner: "203 (SSR views.ts)" },
-  "red-900": { dark: "#fecaca", light: "#7f1d1d", owner: "203 (SSR views.ts)" },
 } as const;
 
 export type TransitionalStep = keyof typeof transitionalValues;

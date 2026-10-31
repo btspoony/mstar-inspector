@@ -26,25 +26,25 @@ describe("workspace creation page", () => {
     expect(source).not.toContain("useEffect");
   });
 
-  test("uses the ui kit (input + button + card), not native controls", () => {
+  test("uses the ui kit (input + button + flow section), not native controls", () => {
     const imported = /import \{([^}]*)\} from "@design-system";/.exec(source)?.[1] ?? "";
-    for (const component of ["Button", "Input", "CardContent", "CardHeader"]) {
+    for (const component of ["Button", "Input", "FlowSection"]) {
       expect(imported, component).toContain(component);
     }
     expect(source).not.toMatch(/<button[\s>]/);
     expect(source).not.toMatch(/<input[\s>]/);
   });
 
-  test("composes the page header and the shared card surface", () => {
-    // The page-title step and the two-tier card have ONE spelling each, and
-    // both live in the primitives; the invite row is the shared surface
-    // rather than a hand-assembled rounded box.
+  test("composes the page header and the shared section flow", () => {
+    // The page-title step, the section face and the invite row have ONE
+    // spelling each, and all of them live in the primitives — the same shell
+    // a workspace owner meets on every other page.
     expect(source).toContain("<PageHeader");
-    expect(source).toContain("<SectionCard");
-    expect(source).toContain("<SectionCardTitle");
+    expect(source).toContain("<FlowSection");
+    expect(source).toContain("<ListRow");
     expect(source).not.toContain("text-(length:--typo-heading-24-size)");
-    // The card-title face is SectionCardTitle's, not a per-page chain. (The
-    // invite block's own <h2> stays a section heading: no primitive owns it.)
+    // The section-title face is FlowSection's, not a per-page chain.
+    expect(source).not.toContain("text-(length:--typo-heading-16-size)");
     expect(source).not.toContain("CardTitle className=");
     expect(source).not.toContain("bg-card");
     expect(source).not.toContain("rounded-lg");

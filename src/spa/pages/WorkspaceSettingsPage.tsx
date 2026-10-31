@@ -25,7 +25,9 @@ export function WorkspaceSettingsPage({ boot }: { boot: SpaBoot }) {
       {/* The controls are owner-only on the server; a non-owner gets a refusal
           up front instead of an editable form whose save would 403. */}
       {membership?.role === "owner" ? (
-        <WorkspaceNameCard locale={boot.locale} storedName={membership.name} />
+        <div className="flex flex-col">
+          <WorkspaceNameCard locale={boot.locale} storedName={membership.name} />
+        </div>
       ) : (
         <p className="text-sm text-muted-foreground">{t(boot.locale, "workspace.settingsOwnerOnly")}</p>
       )}

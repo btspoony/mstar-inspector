@@ -11,7 +11,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t, type Locale } from "../../src/i18n";
-import { ProvidersCard } from "../../src/spa/pages/settings-providers";
+import { ProvidersSection } from "../../src/spa/pages/settings-providers";
 import type {
   CatalogProvider,
   ProviderKeyRow,
@@ -80,7 +80,7 @@ function managePayload(overrides: Partial<SettingsManagePayload> = {}): Settings
 
 function render(payload: SettingsManagePayload, locale: Locale = "en"): string {
   return renderToStaticMarkup(
-    createElement(ProvidersCard, {
+    createElement(ProvidersSection, {
       locale,
       payload,
       onVerify: async () => ({ kind: "success" as const, message: "" }),
@@ -275,7 +275,7 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
       const root = createRoot(container as unknown as Element);
       await act(async () => {
         root.render(
-          createElement(ProvidersCard, {
+          createElement(ProvidersSection, {
             locale: "en" as const,
             payload: managePayload({
               custom_providers: [

@@ -11,8 +11,8 @@
  * every focusable element.
  *
  * The composition pins live where the faces now live (PageHeader owns the
- * page-title step, DataTable the table shell + header band, SectionCard the
- * card faces) and assert the page keeps no second spelling of them.
+ * page-title step, FlowSection the section faces, DataTable the table shell +
+ * header band) and assert the page keeps no second spelling of them.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -101,10 +101,9 @@ describe("support page", () => {
 });
 
 describe("support page composition", () => {
-  test("composes the shared header, card and table primitives", () => {
+  test("composes the shared header, flow and table primitives", () => {
     expect(source).toContain("<PageHeader");
-    expect(source).toContain("<SectionCard");
-    expect(source).toContain("<SectionCardTitle");
+    expect(source).toContain("<FlowSection");
     expect(source).toContain("<DataTable");
     // The faces moved into the primitives: no second spelling survives here.
     expect(source).not.toContain("text-(length:--typo-heading-24-size)");

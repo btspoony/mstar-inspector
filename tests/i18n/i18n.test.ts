@@ -240,11 +240,37 @@ describe("App detail IA copy", () => {
     expect(isDictionaryKey("settings.backToApps")).toBe(false);
   });
 
-  test("the app-info group eyebrow key is renamed atomically; the old identity key is removed, not aliased", () => {
-    expect(t("en", "settings.group.appInfo")).toBe("App info");
-    expect(t("zh_CN", "settings.group.appInfo")).toBe("应用信息");
-    expect(isDictionaryKey("settings.group.appInfo")).toBe(true);
-    expect(isDictionaryKey("settings.group.identity")).toBe(false);
+  test("the installations section keys exist atomically; the retired eyebrow and sentence keys are removed, not aliased", () => {
+    for (const key of [
+      "settings.installations",
+      "settings.installationsAccount",
+      "settings.installationsId",
+      "settings.installationsLastSync",
+      "settings.installationsCount",
+      "settings.installationsCountOne",
+    ] as const) {
+      expect(isDictionaryKey(key), key).toBe(true);
+      expect(t("en", key).length, key).toBeGreaterThan(0);
+      expect(t("zh_CN", key).length, key).toBeGreaterThan(0);
+    }
+    // The identifier column must not repeat the section title it sits under:
+    // one word for both left the header indistinguishable from its heading.
+    for (const locale of ["en", "zh_CN"] as const) {
+      expect(t(locale, "settings.installationsId"), locale).not.toBe(
+        t(locale, "settings.installations"),
+      );
+    }
+    // The settings tab is a section flow now: the two tier-group eyebrow keys
+    // and the per-row installation sentence (replaced by the table's account /
+    // installation / last-sync columns) leave with it.
+    for (const key of [
+      "settings.group.appInfo",
+      "settings.group.configuration",
+      "settings.installation",
+      "settings.lastSeen",
+    ] as const) {
+      expect(isDictionaryKey(key), key).toBe(false);
+    }
   });
 
   test("the insights tab copy returns with the per-App view — window segments keep the 7/30/90 semantics", () => {

@@ -72,7 +72,7 @@ describe("generated tokens.css", () => {
     expect(css.slice(0, 400)).toContain("scripts/build-tokens.ts");
   });
 
-  test("declares 26 survivors and 7 transitional steps, and no other palette step", () => {
+  test("declares 26 survivors and 2 transitional steps, and no other palette step", () => {
     const declaredSteps = [
       ...Object.keys(ROOT),
       ...Object.keys(LIGHT),
@@ -81,7 +81,7 @@ describe("generated tokens.css", () => {
     expect(unique).toEqual(
       [...survivorSteps, ...transitionalSteps.map((s) => s.name)].sort(),
     );
-    expect(unique).toHaveLength(33);
+    expect(unique).toHaveLength(28);
   });
 
   test("every dark semantic and component declaration reaches :root at its source value", () => {

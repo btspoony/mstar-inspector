@@ -2,7 +2,8 @@
  * The design-system gate: one entry point, four links of one chain. CI runs this
  * and nothing else of the chain.
  *
- *   source → stylesheet   `scripts/build-tokens.ts --check`
+ *   source → stylesheet   `scripts/build-tokens.ts --check` (also emits the
+ *                         SSR face's token table, checked in the same run)
  *   source → fixture      `scripts/build-fixture.ts --check`
  *   fixture → DESIGN.md   `documentSync()` below
  *   source → preview      `scripts/build-design-preview.tsx --check`
@@ -53,7 +54,7 @@ const DESIGN_PATH = path.join(ROOT, "DESIGN.md");
  * document link is not one of them: it compares in-process, below.
  */
 const GENERATORS = [
-  { script: "scripts/build-tokens.ts", label: "source → stylesheet" },
+  { script: "scripts/build-tokens.ts", label: "source → stylesheet + SSR tokens" },
   { script: "scripts/build-fixture.ts", label: "source → fixture" },
   { script: "scripts/build-design-preview.tsx", label: "source → preview" },
 ] as const;

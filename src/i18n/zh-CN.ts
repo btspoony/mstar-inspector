@@ -118,6 +118,9 @@ export const zhCN: Dictionary = {
     findingsByCategory: "按类别统计的发现",
     trend: "趋势",
     recurringFindings: "重复出现的发现",
+    columnFinding: "问题",
+    columnReviews: "审查",
+    columnRepos: "仓库",
     noFindings: "此窗口内没有发现。",
     noRecurring: "此窗口内没有重复出现的发现。",
     finding: "{count} 个发现",
@@ -141,7 +144,13 @@ export const zhCN: Dictionary = {
   },
   apps: {
     heading: "应用",
+    /** 页头带的一行说明（同 en.ts 字段）。 */
+    headingDescription: "每个应用是一个 GitHub App；安装范围在应用详情里查看。",
     create: "创建 GitHub App",
+    /** 指标带：仅由 `AppsPayload` 可证的三个数字（见 en.ts 同名字段）。 */
+    metricApps: "应用",
+    metricEnabled: "已启用",
+    metricRejected24h: "24h 拒收",
     /** Create 控件不可用的原因（见 en.ts 同名字段）。 */
     createUnavailable: {
       role: "只有工作区所有者或管理员可以在此创建 App。",
@@ -295,11 +304,6 @@ export const zhCN: Dictionary = {
     noGrant: "当前没有生效的支持访问。",
   },
   settings: {
-    /** (AD-591) 分组 eyebrow 标签——应用信息/状态区与配置区（双语原子）。 */
-    group: {
-      appInfo: "应用信息",
-      configuration: "配置",
-    },
     changesSaved: "更改已保存。",
     removeNoChange: "未做任何更改 — 没有可移除的内容。",
     addKey: "添加密钥",
@@ -327,9 +331,13 @@ export const zhCN: Dictionary = {
     resumeReviews: "恢复审查",
     disconnected: "此 App 已断开连接 — 启用后即可审查。",
     lastWebhook: "最近 webhook：{time}",
+    installations: "安装",
+    installationsCount: "{count} 个安装",
+    installationsCountOne: "{count} 个安装",
+    installationsAccount: "账号",
+    installationsId: "安装 ID",
+    installationsLastSync: "最近同步",
     noInstallations: "还没有安装。",
-    installation: "安装 {id}",
-    lastSeen: "最近可见 {time}",
     recentDeliveries: "最近投递",
     recentDeliveriesCopy: "此 App 最近 5 次 webhook 投递 — 最新的在前。",
     noDeliveries: "还没有投递。",

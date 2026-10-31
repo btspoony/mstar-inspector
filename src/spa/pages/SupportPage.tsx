@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { t } from "../../i18n";
-import { Button, CardContent, CardDescription, CardHeader } from "@design-system";
+import { Button, FlowSection } from "@design-system";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { PageHeader } from "@/components/PageHeader";
-import { SectionCard, SectionCardTitle } from "@/components/SectionCard";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { ErrorState } from "../components/state/ErrorState";
@@ -66,39 +65,34 @@ export function SupportPage({ boot }: { boot: SpaBoot }) {
         <ErrorState locale={locale} onRetry={() => window.location.reload()} />
       ) : (
         <>
-          <SectionCard tier="primary" className="max-w-lg">
-            <CardHeader>
-              <SectionCardTitle>{view.workspace.name}</SectionCardTitle>
-              <CardDescription>{view.workspace.slug}</CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-1 text-sm">
-              <span className="text-muted-foreground">
-                {t(locale, "support.workspaceId")}: <span className="text-foreground">{view.workspace.id}</span>
-              </span>
-              <span className="text-muted-foreground">
-                {t(locale, "support.createdAt")}:{" "}
-                <span className="text-foreground tabular-nums">{view.workspace.created_at}</span>
-              </span>
-            </CardContent>
-          </SectionCard>
-          {view.grants.length > 0 ? (
-            <SectionCard tier="secondary" className="max-w-lg">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "support.grantsHeading")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-2 text-sm">
-                {view.grants.map((grant: SupportGrantRow) => (
-                  <span key={`${grant.operator_login}:${grant.expires_at}`} className="text-muted-foreground">
-                    {t(locale, "support.grantLine", {
-                      login: grant.operator_login,
-                      reason: grant.reason,
-                      expires: grant.expires_at,
-                    })}
-                  </span>
-                ))}
-              </CardContent>
-            </SectionCard>
-          ) : null}
+          <div className="flex flex-col">
+            <FlowSection title={view.workspace.name} subtitle={view.workspace.slug}>
+              <div className="flex flex-col gap-1 text-sm">
+                <span className="text-muted-foreground">
+                  {t(locale, "support.workspaceId")}: <span className="text-foreground">{view.workspace.id}</span>
+                </span>
+                <span className="text-muted-foreground">
+                  {t(locale, "support.createdAt")}:{" "}
+                  <span className="text-foreground tabular-nums">{view.workspace.created_at}</span>
+                </span>
+              </div>
+            </FlowSection>
+            {view.grants.length > 0 ? (
+              <FlowSection title={t(locale, "support.grantsHeading")}>
+                <div className="flex flex-col gap-2 text-sm">
+                  {view.grants.map((grant: SupportGrantRow) => (
+                    <span key={`${grant.operator_login}:${grant.expires_at}`} className="text-muted-foreground">
+                      {t(locale, "support.grantLine", {
+                        login: grant.operator_login,
+                        reason: grant.reason,
+                        expires: grant.expires_at,
+                      })}
+                    </span>
+                  ))}
+                </div>
+              </FlowSection>
+            ) : null}
+          </div>
           <DataTable columns={columns} rows={view.members} rowKey={(member) => member.github_login} />
           <div>
             <Button asChild variant="ghost" size="sm">

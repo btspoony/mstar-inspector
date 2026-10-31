@@ -27,7 +27,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
-import { MembersPage, MembersTable } from "../../src/spa/pages/MembersPage";
+import { MembersPage } from "../../src/spa/pages/MembersPage";
 import type { AppsPayload } from "../../src/spa/pages/data";
 import { matchSpaRoute } from "../../src/spa/routes";
 import { withLocation } from "./browser-stub";
@@ -86,24 +86,13 @@ const renderList = (apps: AppsPayload["apps"], pathname = "/dashboard/apps"): st
     ),
   );
 
-/** The Members table with the page's own loaded state supplied. */
-const renderMembers = (): string =>
-  decoded(
-    withLocation("/dashboard/acme", () =>
-      renderToStaticMarkup(
-        createElement(MembersTable, {
-          locale: "en",
-          members: [
-            { id: "m1", github_login: "mallory", role: "owner", created_at: "2026-01-01T00:00:00Z" },
-          ],
-          viewerLogin: "mallory",
-          memberRole: "owner",
-          canInvite: true,
-          onAction: () => {},
-        }),
-      ),
-    ),
-  );
+/**
+ * The mounted Members page, rendered once: the member rows are a list now, so
+ * the page's one remaining table is the pending-invitation table — that is the
+ * Members surface the table pins below still cover.
+ */
+let membersPageHtml: Promise<string> | null = null;
+const membersPage = (): Promise<string> => (membersPageHtml ??= mountMembersPage());
 
 /** Class lists of every `th` / `td` the markup emits. */
 const classAttrs = (html: string, tag: "th" | "td"): string[] =>
@@ -351,7 +340,7 @@ describe("v0.3 page face (A4/A5)", () => {
     }
   });
 
-  test("table header face: a semantic band + label-12 headers (DESIGN.md Table)", () => {
+  test("table header face: a semantic band + label-12 headers (DESIGN.md Table)", async () => {
     // Same ownership split as the page title: DataTable owns the shell and the
     // band, each page only composes it. The band must resolve through the
     // semantic layer — a primitive palette step here would be the pre-r3 face —
@@ -360,7 +349,7 @@ describe("v0.3 page face (A4/A5)", () => {
     // identical band, so the source pins forbid the second spelling explicitly.
     for (const [name, html] of [
       ["AppsPage", renderAppsPage()],
-      ["MembersPage", renderMembers()],
+      ["MembersPage", decoded(await membersPage())],
     ] as const) {
       const thead = html.match(/<thead[^>]*class="([^"]*)"/)?.[1] ?? "";
       expect(thead, name).not.toMatch(/--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-/);
@@ -408,12 +397,12 @@ describe("v0.3 page face (A4/A5)", () => {
 });
 
 describe("table horizontal padding (D5/A3)", () => {
-  test("head and cell ride the spacing-3 horizontal step (12px); vertical untouched", () => {
+  test("head and cell ride the spacing-3 horizontal step (12px); vertical untouched", async () => {
     // D5: one component-level raise benefits both Apps and Members tables —
     // asserted on the emitted th/td class lists of either table.
     for (const [name, html] of [
       ["AppsPage", renderList([appRow()])],
-      ["MembersPage", renderMembers()],
+      ["MembersPage", decoded(await membersPage())],
     ] as const) {
       const heads = classAttrs(html, "th");
       const cells = classAttrs(html, "td");
@@ -431,11 +420,11 @@ describe("table horizontal padding (D5/A3)", () => {
     }
   });
 
-  test("the 8px horizontal step is retired from every emitted head/cell class", () => {
+  test("the 8px horizontal step is retired from every emitted head/cell class", async () => {
     // Token-exact check: a regen reverting the primitives to upstream
     // px-2/p-2 fails, while token variants (px-2.5, sm:px-2) are not the
     // retired step.
-    for (const html of [renderList([appRow()]), renderMembers()]) {
+    for (const html of [renderList([appRow()]), decoded(await membersPage())]) {
       for (const attr of [...classAttrs(html, "th"), ...classAttrs(html, "td")]) {
         const tokens = attr.split(/\s+/);
         expect(tokens).not.toContain("px-2");
@@ -444,10 +433,10 @@ describe("table horizontal padding (D5/A3)", () => {
     }
   });
 
-  test("checkbox flush-right exception survives the padding raise", () => {
+  test("checkbox flush-right exception survives the padding raise", async () => {
     // The pr-0 escape hatch exists on both head and cell (shadcn convention),
     // which the emitted markup shows on either table.
-    for (const html of [renderList([appRow()]), renderMembers()]) {
+    for (const html of [renderList([appRow()]), decoded(await membersPage())]) {
       expect(classAttrs(html, "th").every((attr) => attr.includes("[&:has([role=checkbox])]:pr-0"))).toBe(
         true,
       );
@@ -697,5 +686,101 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
     // The retry control is present; AppsPage binds it to its own reload
     // (`onRetry={() => void load()}`), which this SSR face cannot click.
     expect(html).toContain(t("en", "common.retry"));
+  });
+});
+
+describe("Apps list metric band (payload-proved facts only)", () => {
+  /**
+   * Three Apps spanning both status axes: a running one, a paused one
+   * (`status: active` with review off) and a disabled one. Only the last is
+   * not enabled — pause is the review axis, not the enable/disable axis.
+   */
+  const APPS = [
+    appRow({
+      github_app_id: 1,
+      status: "active",
+      review_enabled: 1,
+      health: { latest: null, rejected24h: 2 },
+    }),
+    appRow({
+      github_app_id: 2,
+      status: "active",
+      review_enabled: 0,
+      health: { latest: null, rejected24h: 0 },
+    }),
+    appRow({
+      github_app_id: 3,
+      status: "disabled",
+      review_enabled: 1,
+      health: { latest: null, rejected24h: 1 },
+    }),
+  ];
+
+  /** The page's own loaded face under its workspace pathname. */
+  function renderFace(apps: AppsPayload["apps"], state: "ok" | "error" = "ok"): string {
+    return decoded(
+      withLocation("/dashboard/acme/apps", () =>
+        renderToStaticMarkup(
+          createElement(AppsView, {
+            locale: "en",
+            state,
+            payload:
+              state === "ok" ? { viewer: { login: "mallory", role: "admin" }, apps } : null,
+            canCreate: true,
+            unavailableReason: "",
+            onRetry: () => {},
+          }),
+        ),
+      ),
+    );
+  }
+
+  /** Each rendered metric as [key, value], in band order. */
+  const METRIC_CELL =
+    /data-slot="metric-key"[^>]*>([^<]*)<\/span><span data-slot="metric-value"[^>]*>([^<]*)</g;
+
+  test("three metric keys, each an AppsPayload fact", () => {
+    const html = renderFace(APPS);
+    expect([...html.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
+      [t("en", "apps.metricApps"), "3"],
+      [t("en", "apps.metricEnabled"), "2"],
+      [t("en", "apps.metricRejected24h"), "3"],
+    ]);
+    // Exactly three: an installation or repository count is not on the payload
+    // and can never join the band (compass D13).
+    expect(html.match(/data-slot="metric"/g)).toHaveLength(3);
+    // The header band carries its one-line description beside the title.
+    expect(html).toContain(`>${t("en", "apps.headingDescription")}</p>`);
+  });
+
+  test("the empty list keeps its guidance and reports three honest zeroes", () => {
+    const empty = renderFace([]);
+    expect(empty).toContain(t("en", "apps.emptyTitle"));
+    expect([...empty.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
+      [t("en", "apps.metricApps"), "0"],
+      [t("en", "apps.metricEnabled"), "0"],
+      [t("en", "apps.metricRejected24h"), "0"],
+    ]);
+  });
+
+  test("the error face has no facts to band and keeps its existing copy", () => {
+    const failed = renderFace([], "error");
+    expect(failed).not.toContain('data-slot="metric-band"');
+    expect(failed).toContain(t("en", "common.loadFailed"));
+  });
+
+  test("the row columns stay the five payload-proved facts", () => {
+    // The band is the only addition: the column set is unchanged, so no
+    // unproved count can arrive as a cell either.
+    const headers = [...renderList(APPS).matchAll(/<th [^>]*>([\s\S]*?)<\/th>/g)].map((cell) =>
+      (cell[1] ?? "").trim(),
+    );
+    expect(headers).toEqual([
+      t("en", "apps.tableName"),
+      t("en", "apps.tableStatus"),
+      t("en", "apps.tableHealth"),
+      t("en", "apps.tableCreator"),
+      t("en", "apps.detail"),
+    ]);
   });
 });

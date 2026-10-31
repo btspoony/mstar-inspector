@@ -21,8 +21,11 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  StatusBadge,
 } from "@design-system";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
+import { GroupCard, GroupCardBody, GroupCardHeader } from "@/components/GroupCard";
+import { ListRow, ListRowGroup } from "@/components/ListRow";
 import { PageHeader } from "@/components/PageHeader";
 import { StatCard, StatGrid } from "@/components/StatCard";
 import { fetchJson, postForm } from "../api";
@@ -296,12 +299,13 @@ export function leaveWorkspaceForDashboard(): void {
 }
 
 /**
- * The member list table, split out of the stateful page so a real row — the
- * "Joined" cell's relative text and its absolute-stamp tooltip included —
- * is assertable under static render (the `AppsView` precedent; the page's
+ * The member list — one group card of list rows: identity (login, the viewer's
+ * own row marked), the role pill, the join time with its absolute stamp as the
+ * tooltip, and the row's actions menu. Split out of the stateful page so a real
+ * row is assertable under static render (the `AppsView` precedent; the page's
  * own state lives in `useState`, so it renders as the skeleton under SSR).
  */
-export function MembersTable({
+export function MembersList({
   locale,
   members,
   viewerLogin,
@@ -318,86 +322,81 @@ export function MembersTable({
 }) {
   const ownerCount = members.filter((m) => m.role === "owner").length;
 
-  const columns: DataTableColumn<MemberRow>[] = [
-    {
-      header: t(locale, "members.tableLogin"),
-      cell: (member) => (
-        <span className="font-medium">
-          {member.github_login}
-          {viewerLogin !== null && member.github_login.toLowerCase() === viewerLogin.toLowerCase() ? (
-            <span className="ml-2 text-muted-foreground">({t(locale, "members.you")})</span>
-          ) : null}
-        </span>
-      ),
-    },
-    {
-      header: t(locale, "members.roleLabel"),
-      cell: (member) => t(locale, `members.role.${member.role}`),
-    },
-    {
-      header: t(locale, "members.tableJoined"),
-      // Shared relative-time copy (F-07); the raw SQLite UTC stamp stays
-      // reachable as the native tooltip.
-      cell: (member) => (
-        <span className="text-muted-foreground tabular-nums" title={member.created_at}>
-          {formatRelativeTime(member.created_at, locale)}
-        </span>
-      ),
-    },
-    {
-      header: t(locale, "members.tableActions"),
-      align: "right",
-      cell: (member) => {
-        if (
-          !canInvite ||
-          (viewerLogin !== null && member.github_login.toLowerCase() === viewerLogin.toLowerCase())
-        ) {
-          return null;
-        }
-        // Client-side mirror of the server guards: the sole owner
-        // cannot be demoted or removed; an `admin` may only remove
-        // plain members and may not change any role.
-        // The routes remain the SSOT (conditional UPDATE/DELETE
-        // close the race); this only greys out the actions the
-        // server would refuse anyway.
-        const soleOwner = member.role === "owner" && ownerCount === 1;
-        const roleBlocked = memberRole !== "owner";
-        const protectedMember = soleOwner || (memberRole === "admin" && member.role !== "member");
-        const nextRole: "admin" | "member" = member.role === "member" ? "admin" : "member";
-        return (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={t(locale, "members.actionsMenuLabel", { login: member.github_login })}
-              >
-                <MoreHorizontal />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                disabled={protectedMember || roleBlocked}
-                onSelect={() => onAction({ kind: "role", member, nextRole })}
-              >
-                {t(locale, member.role === "member" ? "members.makeAdmin" : "members.makeMember")}
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                variant="destructive"
-                disabled={protectedMember}
-                onSelect={() => onAction({ kind: "remove", member })}
-              >
-                {t(locale, "members.remove")}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        );
-      },
-    },
-  ];
-
-  return <DataTable columns={columns} rows={members} rowKey={(member) => member.id} />;
+  return (
+    <GroupCard>
+      <GroupCardHeader title={t(locale, "members.membersLabel")} />
+      <GroupCardBody>
+        <ListRowGroup>
+          {members.map((member) => {
+            const isViewer =
+              viewerLogin !== null && member.github_login.toLowerCase() === viewerLogin.toLowerCase();
+            // Client-side mirror of the server guards: the sole owner
+            // cannot be demoted or removed; an `admin` may only remove
+            // plain members and may not change any role.
+            // The routes remain the SSOT (conditional UPDATE/DELETE
+            // close the race); this only greys out the actions the
+            // server would refuse anyway.
+            const soleOwner = member.role === "owner" && ownerCount === 1;
+            const roleBlocked = memberRole !== "owner";
+            const protectedMember = soleOwner || (memberRole === "admin" && member.role !== "member");
+            const nextRole: "admin" | "member" = member.role === "member" ? "admin" : "member";
+            return (
+              <ListRow
+                key={member.id}
+                identity={
+                  <>
+                    {member.github_login}
+                    {isViewer ? (
+                      <span className="ml-2 text-(--text-muted)">({t(locale, "members.you")})</span>
+                    ) : null}
+                  </>
+                }
+                status={<StatusBadge tone="neutral">{t(locale, `members.role.${member.role}`)}</StatusBadge>}
+                // Shared relative-time copy (F-07); the raw SQLite UTC stamp
+                // stays reachable as the native tooltip.
+                meta={
+                  <span className="tabular-nums" title={member.created_at}>
+                    {`${t(locale, "members.tableJoined")} · ${formatRelativeTime(member.created_at, locale)}`}
+                  </span>
+                }
+                actions={
+                  canInvite && !isViewer ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={t(locale, "members.actionsMenuLabel", { login: member.github_login })}
+                        >
+                          <MoreHorizontal />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          disabled={protectedMember || roleBlocked}
+                          onSelect={() => onAction({ kind: "role", member, nextRole })}
+                        >
+                          {t(locale, member.role === "member" ? "members.makeAdmin" : "members.makeMember")}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          disabled={protectedMember}
+                          onSelect={() => onAction({ kind: "remove", member })}
+                        >
+                          {t(locale, "members.remove")}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : null
+                }
+              />
+            );
+          })}
+        </ListRowGroup>
+      </GroupCardBody>
+    </GroupCard>
+  );
 }
 
 export function MembersPage({ boot }: { boot: SpaBoot }) {
@@ -678,7 +677,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
               description={t(locale, canInvite ? "members.emptyDescription" : "members.emptyDescriptionMember")}
             />
           ) : (
-            <MembersTable
+            <MembersList
               locale={locale}
               members={members}
               viewerLogin={boot.login}

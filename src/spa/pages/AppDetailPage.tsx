@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
+import { MetricBand } from "@/components/MetricBand";
 import { SettingsView } from "./SettingsPage";
 import { AppInsightsTab } from "./AppInsightsTab";
 import { StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
@@ -331,21 +332,27 @@ export function AppDetailView({
     onSearch({ ...search, tab: next });
   }
 
+  // Header band metrics — only what the landed payload proves. An
+  // installation is an `app_installations` row, so the count is
+  // `installations.length` on the manager settings face and nowhere else:
+  // the identity-only payload carries no array, and this page derives no
+  // number it cannot read (compass D13).
+  const metrics = payload.can_manage
+    ? [{ key: t(locale, "settings.installations"), value: payload.installations.length }]
+    : [];
+
   return (
     <div className="flex flex-col gap-6">
       {/* Identity header — serves both tabs. The heading names the App by its
           GitHub display name (D6 fallback chain); the route `appId` stays the
-          address, never the visible identity. */}
+          address, never the visible identity. The subtitle carries the
+          creator, the action slot the status, and the metric band the one
+          installation figure the settings payload actually carries. */}
       <PageHeader
         title={appDisplayName(payload.app)}
-        actions={
-          <div className="flex flex-wrap items-center gap-3">
-            <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
-            <span className="text-sm text-muted-foreground">
-              {t(locale, "apps.by", { login: payload.app.created_by })}
-            </span>
-          </div>
-        }
+        description={t(locale, "apps.by", { login: payload.app.created_by })}
+        actions={<StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>}
+        metrics={<MetricBand metrics={metrics} />}
       />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       <Tabs value={tab} onValueChange={onTabChange}>
