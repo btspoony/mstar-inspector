@@ -49,6 +49,13 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # One entry point for the whole design-system chain: the stylesheet, the
+      # fixture, DESIGN.md's frontmatter and the preview page are each compared
+      # against the token source. `mstar design-md validate .` is local only —
+      # the CLI installs from GitHub, which CI must not depend on.
+      - name: Design system
+        run: bun scripts/design-system-check.ts
+
       - name: Build SPA
         run: bun run build:spa
 

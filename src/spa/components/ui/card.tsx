@@ -8,7 +8,7 @@ function Card({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="card"
       // rounded-xl resolves to the container tier via the bridge remap
-      // (--radius-lg/xl onto var(--rounded-md)); elevation is the tinted
+      // (--radius-lg/xl onto var(--radius-container)); elevation is the tinted
       // --shadow-card token.
       className={cn(
         "flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-(--shadow-card)",

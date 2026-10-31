@@ -1,65 +1,60 @@
 /**
- * DESIGN.md L2 dual-theme tokens ↔ src/spa/styles/tokens.css.
- * v0.3 value rebase (AD-573) — token names frozen, values swapped
- * (Signal Cyan brand, cool neutral retune, motion/elevation tokens, two-tier
- * radius per AD-571/573/574).
- * self-hosted Geist Sans (AD-572) — three-site font-stack parity,
- * @font-face contract (swap, latin-only range), and the vendored-binary size
- * budget.
+ * The token covenant, rewritten for v0.5: source → fixture → DESIGN.md.
  *
  * Locked contract:
- * - version is a dotted numeric version and DESIGN.md's own description
- *   carries the matching `v<version>` change-note (the pin is structural, so
- *   a version bump updates one place — the document — and never re-pins this
- *   test),
- *     defaultTheme dark; the theme mechanism is the manual
- *     data-theme override (navbar toggle); unset = dark default —
- *     the frontmatter keys were rewritten together with the
- * DESIGN.md body and pins the dated supersede note
- *   - L1 token names kept; v0.3 retunes the light neutrals (cool cast) while
- *     background-100/blue-700/red-700/amber-700 keep their recorded light hexes
- *   - top-level colors: === themes.dark.colors
- *   - both theme palettes share the same key set
- *   - tokens.css :root maps dark values; light applies only via
- *     :root[data-theme="light"] (the stored choice) — the earlier
- *     OS-light fallback branch is deleted
+ * - DESIGN.md's frontmatter agrees with the generated fixture — proven here
+ *   against the same comparator the gate runs (`documentSync`), and by
+ *   set-equality over each theme's colour map. The old hand-lists of light
+ *   hexes (KEPT_LIGHT/V03_LIGHT) and L2 accent steps died with the palette
+ *   they pinned; the fixture is the vocabulary now.
+ * - The palette the document carries is exactly the D14 survivor set plus
+ *   the D14a transitional live list, read from the token source — not a
+ *   second hand-maintained list.
+ * - `src/spa/styles/tokens.css` and the document agree because both equal
+ *   the fixture; light applies only via `:root[data-theme="light"]` (the
+ *   stored choice; the OS-light fallback branch is deleted).
+ * - Every `{path}` reference in `components:` resolves (design-md-spec §6)
+ *   — the CI-side twin of `mstar design-md validate .`, which stays local.
+ * - Appendix A's contrast dispositions hold as documented, including the
+ *   approved below-4.5 pairs.
+ *
+ * Version pins are structural (dotted numeric + matching `v<version>`
+ * change-note in the description), never literals.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
+import { survivorSteps, transitionalSteps } from "../../src/design-system/tokens";
+import { documentSync, parseFixture } from "../../scripts/design-system-check";
+
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
 const TOKENS_CSS = new URL("../../src/spa/styles/tokens.css", import.meta.url);
+const FIXTURE_PATH = new URL("../../src/design-system/fixture.json", import.meta.url);
+const VIEWS = new URL("../../src/dashboard/views.ts", import.meta.url);
 
 /** The DESIGN.md theme mechanism — frontmatter top level and themes: stay equal. */
 const THEME_MECHANISM = "manual data-theme override (navbar toggle); unset = dark default";
 /** Dated user authorization reversing the "no toggle" lock. */
 const SUPERSEDE_NOTE = "Supersedes the earlier theme lock (2026-09-04, user instruction)";
 
-/** Light hexes that survive the v0.3 retune unchanged. */
-const KEPT_LIGHT: Record<string, string> = {
-  "background-100": "#ffffff",
-  "blue-700": "#0066cc",
-  "red-700": "#b91c1c",
-  "amber-700": "#b45309",
-};
-
-/** v0.3 retuned light values (cool gray/background cast — AD-571 constraint 3). */
-const V03_LIGHT: Record<string, string> = {
-  "background-200": "#f3f5f8",
-  "gray-900": "#2f3742",
-  "gray-1000": "#0f141a",
-  "gray-alpha-400": "#10192824",
-  "brand-700": "#0e7490",
-};
-
-const L2_ACCENTS = ["blue", "red", "amber", "green", "teal", "purple", "pink"] as const;
-const L2_ACCENT_STEPS = ["700", "800", "900", "1000"] as const;
 const TYPO_FIELDS = ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"] as const;
+const TYPO_PROP: Readonly<Record<string, string>> = {
+  family: "fontFamily",
+  size: "fontSize",
+  weight: "fontWeight",
+  line: "lineHeight",
+  tracking: "letterSpacing",
+};
+const COLOR = /^(?:#[0-9a-f]{3,8}|oklch\()/i;
+/** A palette step declaration in the stylesheet: `background-100`, `gray-alpha-400`, `teal-700`. */
+const PALETTE_STEP = /^(?:background-\d00|gray-\d{3,4}|gray-alpha-\d{3,4}|brand-\d00|blue-\d00|red-\d{3,4}|amber-\d{3,4}|green-\d{3,4}|teal-\d00|purple-\d{3,4}|pink-\d{3,4})$/;
+/** The frontmatter reference grammar (design-md-spec §6): `{group.key}`, no component-to-component or spacing refs. */
+const REF = /^\{([a-z]+)\.([^}]+)\}$/;
 
 type DesignFrontmatter = {
-  /** YAML yields a number for `0.4` and a string for `0.4.0`. */
+  /** YAML keeps `0.5` a number and `0.5.0` a string. */
   version: string | number;
   description: string;
   defaultTheme: string;
@@ -79,6 +74,23 @@ type DesignFrontmatter = {
   components: Record<string, Record<string, string | number>>;
 };
 
+const THEMES = ["dark", "light"] as const;
+const FIXTURE = parseFixture(readFileSync(FIXTURE_PATH, "utf8"));
+
+/** Non-nullable layer snapshots; a missing layer fails the first comparison. */
+const DARK_SEMANTIC = FIXTURE.dark?.semantic!;
+const LIGHT_SEMANTIC = FIXTURE.light?.semantic!;
+const DARK_PRIMITIVE = FIXTURE.dark?.primitive!;
+const LIGHT_PRIMITIVE = FIXTURE.light?.primitive!;
+/** The component layer's geometry (heights, paddings) — theme-invariant. */
+const DARK_COMPONENT = FIXTURE.dark?.component!;
+
+/** Fixture colour values per theme: the two colour-bearing layers merged. */
+const FIXTURE_COLORS: Record<(typeof THEMES)[number], Record<string, string>> = {
+  dark: { ...DARK_PRIMITIVE, ...DARK_SEMANTIC },
+  light: { ...LIGHT_PRIMITIVE, ...LIGHT_SEMANTIC },
+};
+
 async function loadFrontmatter(): Promise<DesignFrontmatter> {
   const md = await Bun.file(DESIGN).text();
   const match = md.match(/^---\n([\s\S]*?)\n---\n/);
@@ -86,12 +98,15 @@ async function loadFrontmatter(): Promise<DesignFrontmatter> {
   return Bun.YAML.parse(match[1]!) as DesignFrontmatter;
 }
 
-/**
- * The frontmatter version as text. YAML keeps `0.4` a number and `0.4.0` a
- * string, so a structural check reads both forms the same way.
- */
-function versionText(value: string | number): string {
-  return String(value);
+
+/** The fixture's live colour names for one theme: primitive + semantic layers. */
+function liveColorNames(theme: (typeof THEMES)[number]): string[] {
+  // The component layer has no frontmatter slot; it never enters the map.
+  const entries =
+    theme === "dark"
+      ? [...Object.entries(DARK_PRIMITIVE), ...Object.entries(DARK_SEMANTIC)]
+      : [...Object.entries(LIGHT_PRIMITIVE), ...Object.entries(LIGHT_SEMANTIC)];
+  return entries.filter(([, value]) => COLOR.test(value)).map(([name]) => name);
 }
 
 function cssCustomProperties(block: string): Record<string, string> {
@@ -123,88 +138,153 @@ function extractBlock(css: string, openToken: string): string {
   throw new Error(`unbalanced block: ${openToken}`);
 }
 
-describe("DESIGN.md L2 dual-theme tokens", () => {
-  test("frontmatter version, default theme, and L1 name continuity", async () => {
+describe("source → fixture → DESIGN.md chain", () => {
+  test("the committed document is in sync with the fixture (the gate's own comparator)", async () => {
     const fm = await loadFrontmatter();
-    const version = versionText(fm.version);
-    // The version pin is STRUCTURAL, not a literal: DESIGN.md's own version is
-    // a dotted numeric version, and its description carries the matching
-    // `v<version>` change-note. A bump (0.4 added the group-card / list-row /
-    // step-dialog specs) edits the document only — nothing to re-pin here.
-    expect(version).toMatch(/^\d+\.\d+(?:\.\d+)?$/);
-    expect(fm.description).toContain(`v${version}`);
-    expect(fm.defaultTheme).toBe("dark");
-    // Manual data-theme override (navbar toggle); unset = dark
-    // default — top-level keys and themes: keys move together.
-    expect(fm.themeMechanism).toBe(THEME_MECHANISM);
-    expect(fm.themes.default).toBe("dark");
-    expect(fm.themes.mechanism).toBe(THEME_MECHANISM);
-    // The description states the same contract and carries the supersede note.
-    expect(fm.description).toContain("navbar theme toggle");
-    expect(fm.description).toContain(SUPERSEDE_NOTE);
-
-    for (const name of Object.keys(KEPT_LIGHT)) {
-      expect(fm.colors[name]).toBeDefined();
-      expect(fm.themes.dark.colors[name]).toBeDefined();
-      expect(fm.themes.light.colors[name]).toBe(KEPT_LIGHT[name]);
-    }
-    for (const [name, value] of Object.entries(V03_LIGHT)) {
-      expect(fm.themes.light.colors[name]).toBe(value);
-    }
+    expect(documentSync(FIXTURE, fm as unknown as Record<string, unknown>).ok).toBe(true);
   });
 
-  test("colors: is the dark default and both themes share keys", async () => {
+  test("each theme's colour map equals the fixture's live names, value for value", async () => {
     const fm = await loadFrontmatter();
+    for (const theme of THEMES) {
+      const declared = fm.themes[theme].colors;
+      const live = liveColorNames(theme);
+      // Both directions: nothing dropped, nothing invented.
+      expect(Object.keys(declared).sort(), `${theme} names`).toEqual([...live].sort());
+      for (const name of live) {
+        expect(declared[name], `${theme} ${name}`).toBe(FIXTURE_COLORS[theme][name]);
+      }
+    }
+    // Top-level colors: mirrors the dark default so {colors.X} refs resolve
+    // to the runtime default.
     expect(fm.colors).toEqual(fm.themes.dark.colors);
-    const darkKeys = Object.keys(fm.themes.dark.colors).sort();
-    const lightKeys = Object.keys(fm.themes.light.colors).sort();
-    expect(darkKeys).toEqual(lightKeys);
-    expect(darkKeys.length).toBeGreaterThanOrEqual(90);
   });
 
-  test("Level 2 color / type / spacing / rounded / component inventory", async () => {
+  test("the palette the document carries is the D14 survivors plus the D14a live list", async () => {
     const fm = await loadFrontmatter();
-    for (const step of ["100", "200", "300"]) {
-      expect(fm.colors[`background-${step}`]).toMatch(/^#/);
+    const expected = [...survivorSteps, ...transitionalSteps.map((step) => step.name)].sort();
+    const declared = Object.keys(fm.themes.dark.colors).filter((name) => PALETTE_STEP.test(name)).sort();
+    expect(declared).toEqual(expected);
+  });
+
+  test("typography, spacing, radius, motion and elevation match the fixture", async () => {
+    const fm = await loadFrontmatter();
+    const sem = DARK_SEMANTIC;
+    const light = LIGHT_SEMANTIC;
+
+    // Typography: every typo-* token lands on its role + property, exact value.
+    for (const [name, value] of Object.entries(sem)) {
+      const typo = /^typo-(.+)-(family|size|weight|line|tracking)$/.exec(name);
+      if (!typo) continue;
+      const prop = TYPO_PROP[typo[2] as string];
+      if (prop === undefined) throw new Error(`unknown typography property in ${name}`);
+      const held = fm.typography[typo[1]!]?.[prop];
+      expect(held, name).toBeDefined();
+      expect(String(held), name).toBe(value);
     }
-    for (let n = 100; n <= 1000; n += 100) {
-      expect(fm.colors[`gray-${n}`]).toMatch(/^#/);
+    // And nothing extra: the roles are exactly the fixture's.
+    const roles = new Set<string>();
+    for (const name of Object.keys(sem)) {
+      const role = /^typo-(.+)-(?:family|size|weight|line|tracking)$/.exec(name)?.[1];
+      if (role !== undefined) roles.add(role);
     }
-    for (let n = 100; n <= 600; n += 100) {
-      expect(fm.colors[`gray-alpha-${n}`]).toMatch(/^#/);
-    }
-    for (const accent of L2_ACCENTS) {
-      for (const step of L2_ACCENT_STEPS) {
-        expect(fm.colors[`${accent}-${step}`]).toMatch(/^#/);
-      }
+    expect(Object.keys(fm.typography).sort()).toEqual([...roles].sort());
+    for (const entry of Object.values(fm.typography)) {
+      expect(Object.keys(entry).sort()).toEqual([...TYPO_FIELDS].sort());
     }
 
-    const headings = Object.keys(fm.typography).filter((k) => k.startsWith("heading-"));
-    expect(headings.length).toBeGreaterThanOrEqual(3);
-    expect(fm.typography["label-14"]).toBeDefined();
-    expect(fm.typography["button-14"]).toBeDefined();
-    for (const token of ["heading-24", "heading-16", "copy-16", "copy-14", "label-14", "button-14"]) {
-      for (const field of TYPO_FIELDS) {
-        expect(fm.typography[token]?.[field]).toBeDefined();
-      }
+    const spacingFixture: Record<string, string> = {};
+    for (const [name, value] of Object.entries(sem)) {
+      const step = /^spacing-(.+)$/.exec(name)?.[1];
+      if (step !== undefined) spacingFixture[step] = value;
     }
-
+    const { base: _base, ...numbered } = fm.spacing;
+    expect(numbered).toEqual(spacingFixture);
     expect(fm.spacing.base).toBe("4px");
-    const numbered = Object.keys(fm.spacing).filter((k) => k !== "base");
-    expect(numbered.length).toBeGreaterThanOrEqual(9);
-    for (const k of ["sm", "md", "lg", "full"]) {
-      expect(fm.rounded[k]).toBeDefined();
-    }
 
-    for (const name of ["button-primary", "button-secondary", "button-danger", "button-disabled", "button-small", "input", "card", "badge", "table", "sidebar", "notice-success", "notice-warn", "notice-error"]) {
-      expect(fm.components[name]).toBeDefined();
+    expect(fm.rounded).toEqual({
+      sm: sem["radius-control"]!,
+      md: sem["radius-container"]!,
+      full: sem["radius-pill"]!,
+    });
+    expect(fm.motion).toEqual({
+      "duration-fast": sem["duration-fast"]!,
+      "duration-base": sem["duration-base"]!,
+      "duration-slow": sem["duration-slow"]!,
+      "ease-out": sem["ease-out"]!,
+      "ease-in-out": sem["ease-in-out"]!,
+      "reduced-motion":
+        "prefers-reduced-motion: reduce folds every duration to 1ms — entrances render their end state, transitions become immediate",
+    });
+    expect(fm.elevation).toEqual({
+      "shadow-card": { dark: sem["shadow-card"]!, light: light["shadow-card"]! },
+      "shadow-pop": { dark: sem["shadow-pop"]!, light: light["shadow-pop"]! },
+    });
+  });
+
+  test("every {path} reference in components: resolves (design-md-spec §6)", async () => {
+    const fm = await loadFrontmatter();
+    const groups = { colors: fm.colors, typography: fm.typography, rounded: fm.rounded };
+    for (const [name, entry] of Object.entries(fm.components)) {
+      for (const value of Object.values(entry)) {
+        if (typeof value !== "string") continue;
+        const ref = REF.exec(value);
+        if (ref === null) continue;
+        const group = ref[1]!;
+        const key = ref[2]!;
+        expect(Object.keys(groups), `${name}: ${value}`).toContain(group);
+        expect(Object.hasOwn(groups[group as keyof typeof groups], key), `${name}: ${value}`).toBe(true);
+      }
+    }
+    // The v0.5 entry set the document owns (the component layer's faces plus
+    // the pattern faces it documents). button-xs is the brief's named entry.
+    for (const name of [
+      "button-primary", "button-secondary", "button-ghost", "button-danger", "button-disabled",
+      "button-sm", "button-xs", "input", "card", "group-card", "list-row", "step-dialog",
+    ]) {
+      expect(fm.components[name], name).toBeDefined();
+    }
+  });
+
+  test("the button size faces restate the component layer's geometry", async () => {
+    // `documentSync` reports the component layer and control heights as
+    // unexpressed — `components:` is variant-shaped, and the spec has no size
+    // group — so nothing else stops the document restating a face the source
+    // does not have (I-000215). The size entries are compared here instead:
+    // height and padding against the component layer, the label against the
+    // typography step the entry names.
+    const fm = await loadFrontmatter();
+    for (const [size, label] of [["xs", "button-12"], ["sm", "button-14"]] as const) {
+      const entry = fm.components[`button-${size}`]!;
+      expect(entry.height, `button-${size} height`).toBe(DARK_COMPONENT[`button-height-${size}`]);
+      expect(entry.padding, `button-${size} padding`).toBe(DARK_COMPONENT[`button-padding-${size}`]);
+      expect(entry.typography, `button-${size} label`).toBe(`{typography.${label}}`);
+      expect(fm.typography[label]!.fontSize, label).toBe(DARK_SEMANTIC[`typo-${label}-size`]);
     }
   });
 });
 
-describe("src/spa/styles/tokens.css mapping", () => {
-  test("dark :root and the stored-light attribute branch match DESIGN.md palettes (no OS fallback)", async () => {
+describe("DESIGN.md theme and version contract", () => {
+  test("dotted version, matching change-note, dark default, manual toggle", async () => {
     const fm = await loadFrontmatter();
+    // YAML keeps `0.5` a number and `0.5.0` a string; both read the same.
+    const version = String(fm.version);
+    // The version pin is STRUCTURAL, not a literal: DESIGN.md's own version is
+    // a dotted numeric version, and its description carries the matching
+    // `v<version>` change-note. A bump edits the document only.
+    expect(version).toMatch(/^\d+\.\d+(?:\.\d+)?$/);
+    expect(fm.description).toContain(`v${version}`);
+    expect(fm.defaultTheme).toBe("dark");
+    expect(fm.themeMechanism).toBe(THEME_MECHANISM);
+    expect(fm.themes.default).toBe("dark");
+    expect(fm.themes.mechanism).toBe(THEME_MECHANISM);
+    expect(fm.description).toContain("navbar theme toggle");
+    expect(fm.description).toContain(SUPERSEDE_NOTE);
+  });
+});
+
+describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
+  test("dark :root and the stored-light branch match the fixture palettes (no OS fallback)", async () => {
     const css = await Bun.file(TOKENS_CSS).text();
 
     // v0.3.4 (2026-09-16): the prefers-color-scheme OS-light fallback is
@@ -215,99 +295,68 @@ describe("src/spa/styles/tokens.css mapping", () => {
     expect(css).not.toContain("prefers-color-scheme");
     expect(css).not.toContain(':root:not([data-theme="dark"])');
 
-    // color-scheme stays in sync per branch.
     expect(darkBlock).toContain("color-scheme: dark");
     expect(lightBlock).toContain("color-scheme: light");
 
     const darkVars = cssCustomProperties(darkBlock);
     const lightVars = cssCustomProperties(lightBlock);
 
-    for (const [name, value] of Object.entries(fm.themes.dark.colors)) {
-      expect(darkVars[name]).toBe(value);
+    // The stylesheet is generated from the same source as the fixture, and
+    // the document equals the fixture — so all three sites agree through
+    // the one shared truth, not by pairwise copying.
+    const darkPrimitive = FIXTURE.dark.primitive;
+    const lightPrimitive = FIXTURE.light.primitive;
+    if (darkPrimitive === undefined || lightPrimitive === undefined) throw new Error("fixture is missing a primitive layer");
+    for (const name of Object.keys(darkPrimitive).filter((n) => PALETTE_STEP.test(n))) {
+      expect(darkVars[name], `--${name}`).toBe(darkPrimitive[name]);
     }
-    // The single light branch carries the full light palette.
-    for (const [name, value] of Object.entries(fm.themes.light.colors)) {
-      expect(lightVars[name]).toBe(value);
+    for (const name of Object.keys(lightPrimitive).filter((n) => PALETTE_STEP.test(n))) {
+      expect(lightVars[name], `--${name}`).toBe(lightPrimitive[name]);
     }
   });
 
-  test("spacing, rounded, and component vars are present on :root", async () => {
+  test("transitional steps are declared with the plan that closes them", async () => {
+    const css = await Bun.file(TOKENS_CSS).text();
+    const dark = extractBlock(css, ":root {");
+    for (const step of transitionalSteps) {
+      // The declaration is what later plans compile against; the owner
+      // comment is the deadline, and it travels with the value.
+      expect(dark, `--${step.name} must stay declared`).toContain(`  --${step.name}: #`);
+      expect(dark, `--${step.name} needs its owner comment`).toMatch(
+        new RegExp(`closed by plan [^\\n]+[\\s\\S]{0,200}?\\n\\s*--${step.name}: `),
+      );
+    }
+  });
+
+  test("semantic, component and legacy names are present on :root", async () => {
     const css = await Bun.file(TOKENS_CSS).text();
     const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
 
-    expect(rootVars["spacing-base"]).toBe("4px");
     expect(rootVars["spacing-24"]).toBe("96px");
-    expect(rootVars["rounded-sm"]).toBe("8px");
-    expect(rootVars["rounded-md"]).toBe("12px");
-    expect(rootVars["rounded-lg"]).toBe("16px");
-    expect(rootVars["rounded-full"]).toBe("9999px");
-    expect(rootVars["button-primary-bg"]).toBe("var(--brand-700)");
-    expect(rootVars["button-danger-bg"]).toBe("var(--red-700)");
-    expect(rootVars["input-border"]).toBe("var(--gray-400)");
-    expect(rootVars["card-bg"]).toBe("var(--background-200)");
-    expect(rootVars["sidebar-bg"]).toBe("var(--background-200)");
-    expect(rootVars["notice-error-fg"]).toBe("var(--red-900)");
+    expect(rootVars["control-h-md"]).toBe("40px");
+    expect(rootVars["radius-control"]).toBe("8px");
+    expect(rootVars["radius-container"]).toBe("12px");
     expect(rootVars["typo-heading-24-size"]).toBe("24px");
-  });
-});
-
-describe("DESIGN.md v0.3 design-language tokens", () => {
-  test("Signal Cyan brand namespace is additive and dual-theme (AD-571/573)", async () => {
-    const fm = await loadFrontmatter();
-    for (const step of ["600", "700", "800"]) {
-      expect(fm.colors[`brand-${step}`]).toMatch(/^#/);
-      expect(fm.themes.dark.colors[`brand-${step}`]).toMatch(/^#/);
-      expect(fm.themes.light.colors[`brand-${step}`]).toMatch(/^#/);
-    }
-    // Locked direction: dark wears the bright cyan step, light the deep step.
-    expect(fm.themes.dark.colors["brand-700"]).toBe("#22d3ee");
-    expect(fm.themes.light.colors["brand-700"]).toBe("#0e7490");
+    // Component tokens name the semantic layer, never a palette step — this is
+    // the whole point of the re-point: the palette becomes droppable.
+    expect(rootVars["button-primary-bg"]).toBe("var(--tone-accent-solid)");
+    expect(rootVars["button-primary-fg"]).toBe("var(--on-brand)");
+    expect(rootVars["card-bg"]).toBe("var(--surface-card)");
+    expect(rootVars["notice-error-fg"]).toBe("var(--tone-danger-fg)");
+    expect(rootVars["sidebar-active-bg"]).toBe("var(--surface-overlay)");
   });
 
-  test("motion, elevation, and two-tier radius frontmatter contract (AD-574)", async () => {
-    const fm = await loadFrontmatter();
-    expect(fm.motion).toEqual({
-      "duration-fast": "120ms",
-      "duration-base": "160ms",
-      "duration-slow": "240ms",
-      "ease-out": "cubic-bezier(0.22, 1, 0.36, 1)",
-      "ease-in-out": "cubic-bezier(0.65, 0, 0.35, 1)",
-      "reduced-motion":
-        "prefers-reduced-motion: reduce folds every duration to 1ms — entrances render their end state, transitions become immediate",
-    });
-    expect(fm.elevation["shadow-card"]).toEqual({
-      dark: "0 1px 2px #02061766, 0 2px 8px #02061733",
-      light: "0 1px 2px #10192814, 0 2px 8px #1019280f",
-    });
-    expect(fm.elevation["shadow-pop"]).toEqual({
-      dark: "0 4px 12px #02061780, 0 16px 40px #02061759",
-      light: "0 4px 12px #1019281f, 0 16px 40px #10192829",
-    });
-    // Container tier sits exactly +4px above the control tier.
-    expect(fm.rounded).toEqual({ sm: "8px", md: "12px", lg: "16px", full: "9999px" });
-  });
-
-  test("motion/elevation/radius land in tokens.css with the reduced-motion fold", async () => {
+  test("motion and elevation land in tokens.css with the reduced-motion fold", async () => {
     const css = await Bun.file(TOKENS_CSS).text();
     const darkVars = cssCustomProperties(extractBlock(css, ":root {"));
     const lightVars = cssCustomProperties(extractBlock(css, ':root[data-theme="light"] {'));
 
-    // Motion is theme-independent on :root.
+    // Motion is theme-independent on :root; elevation carries dark on :root
+    // and light on the stored-light branch.
     expect(darkVars["duration-fast"]).toBe("120ms");
-    expect(darkVars["duration-base"]).toBe("160ms");
-    expect(darkVars["duration-slow"]).toBe("240ms");
-    expect(darkVars["ease-out"]).toBe("cubic-bezier(0.22, 1, 0.36, 1)");
     expect(darkVars["ease-in-out"]).toBe("cubic-bezier(0.65, 0, 0.35, 1)");
-
-    // Elevation: dark values on :root, light values on the stored-light branch.
-    expect(darkVars["shadow-card"]).toBe("0 1px 2px #02061766, 0 2px 8px #02061733");
-    expect(darkVars["shadow-pop"]).toBe("0 4px 12px #02061780, 0 16px 40px #02061759");
-    expect(lightVars["shadow-card"]).toBe("0 1px 2px #10192814, 0 2px 8px #1019280f");
-    expect(lightVars["shadow-pop"]).toBe("0 4px 12px #1019281f, 0 16px 40px #10192829");
-
-    // Two-tier radius (AD-574).
-    expect(darkVars["rounded-sm"]).toBe("8px");
-    expect(darkVars["rounded-md"]).toBe("12px");
+    expect(darkVars["shadow-pop"]).toBe("0 8px 24px #02061799, 0 2px 6px #02061766");
+    expect(lightVars["shadow-pop"]).toBe("0 8px 24px #1019281f, 0 2px 6px #10192814");
 
     // Reduced-motion fold: durations collapse to 1ms.
     const reduceVars = cssCustomProperties(extractBlock(css, "@media (prefers-reduced-motion: reduce) {"));
@@ -315,56 +364,78 @@ describe("DESIGN.md v0.3 design-language tokens", () => {
     expect(reduceVars["duration-base"]).toBe("1ms");
     expect(reduceVars["duration-slow"]).toBe("1ms");
   });
+});
 
-  test("core consumer pairs hold WCAG contrast in both themes (DESIGN.md appendix A)", async () => {
+describe("Appendix A contrast dispositions (D16)", () => {
+  // Ratios are computed over the document's own frontmatter (proven equal to
+  // the fixture above), on the face each pair actually sits on.
+  const lum = (hex: string): number => {
+    const [r, g, b] = [0, 2, 4]
+      .map((i) => parseInt(hex.slice(1 + i, 3 + i), 16) / 255)
+      .map((c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
+    return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+  };
+  const ratio = (a: string, b: string): number => {
+    const hi = Math.max(lum(a), lum(b));
+    const lo = Math.min(lum(a), lum(b));
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  test("text ladder holds the text bar; text-faint is the documented below-4.5 exception", async () => {
     const fm = await loadFrontmatter();
-    const lum = (hex: string): number => {
-      const [r, g, b] = [0, 2, 4]
-        .map((i) => parseInt(hex.slice(1 + i, 3 + i), 16) / 255)
-        .map((c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)));
-      return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
-    };
-    const ratio = (a: string, b: string): number => {
-      const hi = Math.max(lum(a), lum(b));
-      const lo = Math.min(lum(a), lum(b));
-      return (hi + 0.05) / (lo + 0.05);
-    };
-    const dark = fm.themes.dark.colors;
-    const light = fm.themes.light.colors;
-
-    // Text pairs (≥4.5:1).
-    const textPairs: [string, string, string][] = [
-      ["dark body vs page", dark["gray-1000"]!, dark["background-100"]!],
-      ["dark body vs card", dark["gray-1000"]!, dark["background-200"]!],
-      ["dark secondary vs card", dark["gray-900"]!, dark["background-200"]!],
-      ["dark brand vs page", dark["brand-700"]!, dark["background-100"]!],
-      ["dark brand vs card", dark["brand-700"]!, dark["background-200"]!],
-      ["light body vs page", light["gray-1000"]!, light["background-100"]!],
-      ["light body vs card", light["gray-1000"]!, light["background-200"]!],
-      ["light secondary vs page", light["gray-900"]!, light["background-100"]!],
-      ["light brand vs page", light["brand-700"]!, light["background-100"]!],
-      ["light brand vs card", light["brand-700"]!, light["background-200"]!],
-    ];
-    for (const [name, fg, bg] of textPairs) {
-      expect(ratio(fg, bg), name).toBeGreaterThanOrEqual(4.5);
+    for (const theme of THEMES) {
+      const c = fm.themes[theme].colors;
+      for (const token of ["text-primary", "text-secondary", "text-muted"]) {
+        expect(ratio(c[token]!, c["surface-card"]!), `${theme} ${token}`).toBeGreaterThanOrEqual(4.5);
+      }
+      // Faint is below 4.5 on the card face (3.76 dark / 4.47 light) — the
+      // documented "tertiary marks only, never body copy" constraint — and
+      // still clears the 3:1 bar it is held to.
+      expect(ratio(c["text-faint"]!, c["surface-card"]!), `${theme} text-faint on card`).toBeLessThan(4.5);
+      expect(ratio(c["text-faint"]!, c["surface-card"]!), `${theme} text-faint on card`).toBeGreaterThanOrEqual(3);
     }
+  });
 
-    // Chart/UI non-text fills vs card face (≥3:1) — the full chart series
-    // vocabulary incl. the gray-700 nit bars (charts.css .chart-fill-gray-700).
-    const fillPairs: [string, string, string][] = [
-      ["dark chart blue vs card", dark["blue-700"]!, dark["background-200"]!],
-      ["dark chart green vs card", dark["green-700"]!, dark["background-200"]!],
-      ["dark chart amber vs card", dark["amber-700"]!, dark["background-200"]!],
-      ["dark chart red vs card", dark["red-700"]!, dark["background-200"]!],
-      ["dark chart gray vs card", dark["gray-700"]!, dark["background-200"]!],
-      ["light chart blue vs card", light["blue-700"]!, light["background-200"]!],
-      ["light chart green vs card", light["green-700"]!, light["background-200"]!],
-      ["light chart amber vs card", light["amber-700"]!, light["background-200"]!],
-      ["light chart red vs card", light["red-700"]!, light["background-200"]!],
-      ["light chart gray vs card", light["gray-700"]!, light["background-200"]!],
-    ];
-    for (const [name, fg, bg] of fillPairs) {
-      expect(ratio(fg, bg), name).toBeGreaterThanOrEqual(3);
+  test("on-brand and the tone fg pairs hold the text bar in both themes", async () => {
+    const fm = await loadFrontmatter();
+    for (const theme of THEMES) {
+      const c = fm.themes[theme].colors;
+      expect(ratio(c["on-brand"]!, c["tone-accent-solid"]!), `${theme} on-brand`).toBeGreaterThanOrEqual(4.5);
+      for (const meaning of ["neutral", "accent", "success", "warn", "danger"]) {
+        expect(ratio(c[`tone-${meaning}-fg`]!, c[`tone-${meaning}-bg`]!), `${theme} ${meaning} fg`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  test("tone solid pairs: dark passes; light carries the recorded below-4.5 exceptions", async () => {
+    const fm = await loadFrontmatter();
+    // The label on a tone solid is the page ink (the tone fg is chosen to sit
+    // on the tint, not on its own solid step).
+    for (const meaning of ["neutral", "accent", "success", "warn", "danger"]) {
+      const dark = fm.themes.dark.colors;
+      expect(ratio(dark["surface-page"]!, dark[`tone-${meaning}-solid`]!), `dark ${meaning} solid`).toBeGreaterThanOrEqual(4.5);
+    }
+    const light = fm.themes.light.colors;
+    expect(ratio(light["surface-page"]!, light["tone-accent-solid"]!), "light accent solid").toBeGreaterThanOrEqual(4.5);
+    expect(ratio(light["surface-page"]!, light["tone-danger-solid"]!), "light danger solid").toBeGreaterThanOrEqual(4.5);
+    // D16's approved below-4.5 light solids: badge-scale faces, never
+    // running text — held to at least the 3:1 bar.
+    for (const meaning of ["neutral", "success", "warn"]) {
+      const r = ratio(light["surface-page"]!, light[`tone-${meaning}-solid`]!);
+      expect(r, `light ${meaning} solid`).toBeLessThan(4.5);
+      expect(r, `light ${meaning} solid`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  test("every chart mark clears the non-text bar on the card face", async () => {
+    const fm = await loadFrontmatter();
+    for (const theme of THEMES) {
+      const c = fm.themes[theme].colors;
+      for (let n = 1; n <= 6; n++) {
+        // Light chart-2-mark is the corrected number: 3.30 on v0.5's white
+        // surface-card (D16's 3.02 measured the old background-200 card).
+        expect(ratio(c[`chart-${n}-mark`]!, c["surface-card"]!), `${theme} chart-${n}-mark`).toBeGreaterThanOrEqual(3);
+      }
     }
   });
 });
@@ -375,21 +446,37 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   /** A5 sensitive subset — the only ui/ files allowed to drift from the copy-in. */
   const SUBSET = ["button", "card", "input", "table", "skeleton", "tabs", "sidebar", "select", "dropdown-menu", "dialog"];
 
-  test("brand re-point: primary/sidebar semantics anchor on brand-700; focus keeps blue-700", async () => {
+  test("bridge re-point: every value is a semantic token; focus stays on the blue duty", async () => {
     const css = await Bun.file(BRIDGE).text();
     const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
-    // The staged T1 seam closes: the primary action is Signal Cyan, hover
-    // holds the 800 step (dark brightens, light deepens — Appendix B).
-    expect(rootVars["primary"]).toBe("var(--brand-700)");
-    expect(rootVars["primary-hover"]).toBe("var(--brand-800)");
-    expect(rootVars["secondary-hover"]).toBe("var(--background-300)");
-    expect(rootVars["destructive-hover"]).toBe("var(--red-800)");
-    expect(rootVars["sidebar-primary"]).toBe("var(--brand-700)");
+    // The task-3 re-point: the accent arrives as `tone-accent-solid` and the
+    // label as `on-brand`, so the bridge never names a palette step. Hover is
+    // the component layer's approved one-step-quieter face.
+    expect(rootVars["primary"]).toBe("var(--tone-accent-solid)");
+    expect(rootVars["primary-hover"]).toBe("var(--button-primary-hover-bg)");
+    expect(rootVars["primary-foreground"]).toBe("var(--on-brand)");
+    expect(rootVars["secondary-hover"]).toBe("var(--surface-overlay)");
+    expect(rootVars["muted"]).toBe("var(--surface-inset)");
+    expect(rootVars["border"]).toBe("var(--border-default)");
+    expect(rootVars["destructive"]).toBe("var(--tone-danger-solid)");
+    expect(rootVars["sidebar-primary"]).toBe("var(--tone-accent-solid)");
     // Link/focus duty stays blue (AD-571) — including the sidebar ring
     // (QC round 1 F-003 revert); brand cyan never takes focus, and alerts
     // keep red/amber/green.
-    expect(rootVars["ring"]).toBe("var(--blue-700)");
-    expect(rootVars["sidebar-ring"]).toBe("var(--blue-700)");
+    expect(rootVars["ring"]).toBe("var(--focus-ring)");
+    expect(rootVars["sidebar-ring"]).toBe("var(--focus-ring)");
+
+    // No palette step may appear in the bridge: referencing one keeps that
+    // step alive past the plan that removes it.
+    expect(css).not.toMatch(/var\(--(?:background|gray|brand|red|blue|amber|green|teal|pink|purple)-/);
+
+    // The destructive hover derives from the solid rather than naming a step
+    // (the palette reduction removed the step the old hover used). An engine
+    // without `color-mix` must still get a valid value, so the plain solid is
+    // declared first and the derived face overrides it behind @supports.
+    expect(rootVars["destructive-hover"]).toBe(rootVars["destructive"]);
+    const guarded = extractBlock(css, "@supports (color: color-mix(in srgb, red, blue)) {");
+    expect(cssCustomProperties(guarded)["destructive-hover"]).toContain("color-mix(");
 
     // Theme coupling (QC round 1 F-001): the hover steps must exist as
     // --color-* keys in `@theme inline`. Tailwind v4 CSS-first config
@@ -406,18 +493,103 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
   });
 
-  test("radius bridge collapses onto the AD-574 two tiers; tokens button maps the brand", async () => {
+  test("radius bridge collapses onto the AD-574 two tiers; tokens button maps the accent tone", async () => {
     const css = await Bun.file(BRIDGE).text();
     const themeVars = cssCustomProperties(extractBlock(css, "@theme inline {"));
-    expect(themeVars["radius-sm"]).toBe("var(--rounded-sm)");
-    expect(themeVars["radius-md"]).toBe("var(--rounded-md)");
+    expect(themeVars["radius-sm"]).toBe("var(--radius-control)");
+    expect(themeVars["radius-md"]).toBe("var(--radius-container)");
     // lg/xl re-point onto the container step so copy-in card faces land
-    // without hand edits; --rounded-lg (16px) is legacy, declared only.
-    expect(themeVars["radius-lg"]).toBe("var(--rounded-md)");
-    expect(themeVars["radius-xl"]).toBe("var(--rounded-md)");
+    // without hand edits.
+    expect(themeVars["radius-lg"]).toBe("var(--radius-container)");
+    expect(themeVars["radius-xl"]).toBe("var(--radius-container)");
 
     const tokens = await Bun.file(TOKENS_CSS).text();
-    expect(cssCustomProperties(extractBlock(tokens, ":root {"))["button-primary-bg"]).toBe("var(--brand-700)");
+    expect(cssCustomProperties(extractBlock(tokens, ":root {"))["button-primary-bg"]).toBe(
+      "var(--tone-accent-solid)",
+    );
+  });
+
+  test("the destructive hover is a distinct face in both themes, and keeps its label readable", async () => {
+    // The derivation is a colour relationship, so assert the relationship:
+    // mixing toward the label face must move the fill away from the resting
+    // colour and keep the label above 4.5:1 on it, in both themes.
+    // The label is read from the component's own class list, not assumed: the
+    // chip the test measured used to be `on-brand` while the DOM painted
+    // `text-white` (M1/W-103), so the face under test is the face that renders.
+    const bridgeVars = cssCustomProperties(extractBlock(await Bun.file(BRIDGE).text(), ":root {"));
+    const tokens = await Bun.file(TOKENS_CSS).text();
+    const dark = cssCustomProperties(extractBlock(tokens, ":root {"));
+    const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
+    const destructiveVariant = /destructive:\s*\n?\s*"([^"]+)"/.exec(await Bun.file(join(UI_DIR, "button.tsx")).text())?.[1];
+    if (destructiveVariant === undefined) throw new Error("button.tsx declares no destructive variant");
+    // `bg-destructive` / `text-destructive-foreground` in the class list are the
+    // rendered faces; a raw colour (`text-white`) has no bridge key and fails here.
+    const fillClass = /(?:^|\s)bg-([a-z][a-z0-9-]*)(?=\s|$)/.exec(destructiveVariant)?.[1];
+    const labelClass = /(?:^|\s)text-([a-z][a-z0-9-]*)(?=\s|$)/.exec(destructiveVariant)?.[1];
+    expect(fillClass, "destructive variant must paint a token fill").toBeDefined();
+    expect(labelClass, "destructive variant must paint a token label").toBeDefined();
+    expect(destructiveVariant, "no `dark:` split — Tailwind's dark: is prefers-color-scheme, this app's theme is data-theme").not.toContain("dark:");
+
+    // The derived face lives in the @supports block; the plain solid in `:root`
+    // is its fallback.
+    const hoverExpression =
+      cssCustomProperties(
+        extractBlock(await Bun.file(BRIDGE).text(), "@supports (color: color-mix(in srgb, red, blue)) {"),
+      )["destructive-hover"]!;
+    const weightPercent = /color-mix\(in srgb,\s*var\(--tone-danger-solid\)\s+(\d+)%,\s*var\(--text-primary\)\)/
+      .exec(hoverExpression)?.[1];
+    // The derivation is a colour relationship; pinning the numbers would let a
+    // hand-written hex pass as "derived".
+    expect(weightPercent, "destructive hover must derive from the solid and the label face").toBeDefined();
+    expect(bridgeVars["destructive"]).toBe("var(--tone-danger-solid)");
+    expect(bridgeVars["destructive-hover"]).toBe("var(--tone-danger-solid)");
+
+    const srgb = (value: string): [number, number, number] => {
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16) / 255) as [number, number, number];
+      return [r, g, b];
+    };
+    const luminance = (hex: string): number => {
+      const [r, g, b] = srgb(hex).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)) as [
+        number,
+        number,
+        number,
+      ];
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const contrast = (a: string, b: string): number => {
+      const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+      return (hi + 0.05) / (lo + 0.05);
+    };
+    /** Resolve `var(--x)` chains against one theme's declarations. */
+    const resolve = (vars: Record<string, string>, name: string): string => {
+      let value = vars[name]!;
+      for (let hop = 0; hop < 8 && value.startsWith("var("); hop += 1) {
+        value = vars[/^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1] as string]!;
+      }
+      return value;
+    };
+    /** The mix the browser performs at paint time, computed. */
+    const blend = (solid: string, label: string, weight: number): string => {
+      const [s, t] = [srgb(solid), srgb(label)];
+      return `#${s
+        .map((c, i) => Math.round((c * weight + t[i]! * (1 - weight)) * 255).toString(16).padStart(2, "0"))
+        .join("")}`;
+    };
+
+    for (const vars of [dark, light]) {
+      // One map per theme: a bridge key points at a token, a token points at a
+      // primitive, and the chain ends in the hex the browser paints.
+      const chain = { ...vars, ...bridgeVars };
+      expect(chain[fillClass!], `bg-${fillClass} must name a bridge key`).toBeDefined();
+      expect(chain[labelClass!], `text-${labelClass} must name a bridge key`).toBeDefined();
+      const solid = resolve(chain, fillClass!);
+      const label = resolve(chain, labelClass!);
+      expect(label, `${labelClass} must resolve to a colour`).toMatch(/^#[0-9a-f]{3,8}$/i);
+      const hover = blend(solid, resolve(vars, "text-primary"), Number(weightPercent) / 100);
+      expect(hover, "hover must differ from the resting fill").not.toBe(solid);
+      expect(contrast(label, solid), `${labelClass} on the resting ${fillClass} face`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(label, hover), `${labelClass} on the hover face ${hover}`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   test("restyled subset carries v0.3 form: supersede marker, control radius, tinted elevation, token-eased transitions", async () => {
@@ -437,7 +609,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(button).toContain("active:bg-primary-hover");
     expect(button).toContain("duration-(--duration-base)");
     expect(button).toContain("ease-(--ease-in-out)");
-    // Link duty stays blue even though --primary is now brand cyan.
+    // Link duty stays blue even though --primary is now the accent tone.
     expect(button).toContain("text-(--blue-700)");
 
     const card = await Bun.file(join(UI_DIR, "card.tsx")).text();
@@ -485,7 +657,6 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
 
 describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
   const FONTS_CSS = new URL("../../src/spa/styles/fonts.css", import.meta.url);
-  const VIEWS = new URL("../../src/dashboard/views.ts", import.meta.url);
   const FONT_DIR = fileURLToPath(new URL("../../src/spa/assets/fonts/", import.meta.url));
   /** Geist first; the system entries keep zh and fallback-glyph duty. */
   const GEIST_STACK = '"Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
@@ -568,8 +739,7 @@ describe("DESIGN.md theme contract", () => {
     expect(md).toContain("documentElement.dataset.theme");
     expect(md).toContain(SUPERSEDE_NOTE);
     // v0.3.4: the cascade is the stored-light branch only — the OS-fallback
-    // selector is gone from every theme location (the two remaining
-    // "prefers-color-scheme" strings are the dated v0.3.4 version notes).
+    // selector is gone from every theme location.
     expect(md).toContain(':root[data-theme="light"]');
     expect(md).not.toContain(':root:not([data-theme="dark"])');
     // The lock wording is gone from every theme location.
@@ -596,8 +766,8 @@ describe("SSR STYLE token parity", () => {
   }
 
   test("shared hex tokens in tokens.css match src/dashboard/views.ts STYLE", async () => {
-    const css = await Bun.file(new URL("../../src/spa/styles/tokens.css", import.meta.url)).text();
-    const views = await Bun.file(new URL("../../src/dashboard/views.ts", import.meta.url)).text();
+    const css = await Bun.file(TOKENS_CSS).text();
+    const views = await Bun.file(VIEWS).text();
     const styleStart = views.indexOf("const STYLE = `<style>");
     const styleEnd = views.indexOf("`;", styleStart);
     expect(styleStart).toBeGreaterThan(0);
@@ -624,8 +794,8 @@ describe("SSR STYLE token parity", () => {
   });
 
   test("shared radius tokens in views.ts STYLE match tokens.css (three-site covenant)", async () => {
-    const css = await Bun.file(new URL("../../src/spa/styles/tokens.css", import.meta.url)).text();
-    const views = await Bun.file(new URL("../../src/dashboard/views.ts", import.meta.url)).text();
+    const css = await Bun.file(TOKENS_CSS).text();
+    const views = await Bun.file(VIEWS).text();
     const styleStart = views.indexOf("const STYLE = `<style>");
     const styleEnd = views.indexOf("`;", styleStart);
     const style = views.slice(styleStart, styleEnd);
@@ -633,14 +803,27 @@ describe("SSR STYLE token parity", () => {
     const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
     const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf(':root[data-theme="light"] {')));
 
+    // The stylesheet aliases the legacy radius names onto the semantic tiers
+    // while the SSR face still writes the raw value, so compare what each
+    // resolves to — `var()` chains followed, not the declaration strings.
+    const resolve = (vars: Record<string, string>, name: string): string | undefined => {
+      let value = vars[name];
+      for (let hop = 0; hop < 8 && value !== undefined; hop += 1) {
+        const ref = /^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1];
+        if (ref === undefined) break;
+        value = vars[ref];
+      }
+      return value;
+    };
+
     for (const name of ["rounded-sm", "rounded-md"]) {
-      expect(ssrRoot[name], name).toBe(cssRoot[name]);
+      expect(resolve(cssRoot, name), `--${name}`).toBe(ssrRoot[name]);
     }
   });
 
-  test("component var references stay synced: --button-primary-bg → --brand-700 on both faces (QC round 1 F-002)", async () => {
-    const css = await Bun.file(new URL("../../src/spa/styles/tokens.css", import.meta.url)).text();
-    const views = await Bun.file(new URL("../../src/dashboard/views.ts", import.meta.url)).text();
+  test("component var references stay synced: both faces paint the same primary fill", async () => {
+    const css = await Bun.file(TOKENS_CSS).text();
+    const views = await Bun.file(VIEWS).text();
     const styleStart = views.indexOf("const STYLE = `<style>");
     const style = views.slice(styleStart, views.indexOf("`;", styleStart));
 
@@ -649,14 +832,28 @@ describe("SSR STYLE token parity", () => {
     const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf(':root[data-theme="light"] {')));
     const ssrStoredLight = cssCustomPropertiesFromBlock(extractBlock(style, ':root[data-theme="light"] {'));
 
-    // The re-point: both faces reference the brand step, not a raw accent.
-    expect(cssRoot["button-primary-bg"], "tokens.css primary").toBe("var(--brand-700)");
-    expect(ssrRoot["button-primary-bg"], "SSR primary").toBe("var(--brand-700)");
+    // The SPA face names the accent job (`tone-accent-solid`); the SSR face,
+    // which a later plan migrates, still names the step that job resolves
+    // to. Both must land on the same colour, so follow the references
+    // instead of pinning one spelling of them.
+    const paint = (vars: Record<string, string>, name: string): string | undefined => {
+      let value = vars[name];
+      for (let hop = 0; hop < 8; hop += 1) {
+        const ref = value === undefined ? undefined : /^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1];
+        if (ref === undefined) break;
+        value = vars[ref];
+      }
+      return value;
+    };
 
-    // Reference-level sync — the hex-only parity test above cannot see a
-    // var reference drift, so pin the referenced --brand-700 per theme:
-    // every STYLE branch declares it and its value equals tokens.css.
-    expect(ssrRoot["brand-700"], "SSR dark brand-700").toBe(cssRoot["brand-700"]);
+    // The light branch only re-declares what differs, so resolving a light
+    // value means reading it over the dark cascade.
+    const lightCascade = { ...cssRoot, ...cssLight };
+
+    expect(cssRoot["button-primary-bg"], "tokens.css primary").toBe("var(--tone-accent-solid)");
+    expect(ssrRoot["button-primary-bg"], "SSR primary").toBe("var(--brand-700)");
+    expect(paint(cssRoot, "button-primary-bg"), "dark primary paint").toBe(ssrRoot["brand-700"]);
+    expect(paint(lightCascade, "button-primary-bg"), "light primary paint").toBe(cssLight["brand-700"]);
     expect(ssrStoredLight["brand-700"], "SSR stored-light brand-700").toBe(cssLight["brand-700"]);
   });
 });
