@@ -75,6 +75,13 @@ describe("login SSR face sync (A3 dual-track)", () => {
   const views = readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
   const tokens = readFileSync(join(spaRoot, "styles/tokens.css"), "utf8");
 
+  /** The stylesheet the auth faces actually ship. */
+  async function ssrStyle(): Promise<string> {
+    const { errorPage } = await import("../../src/dashboard/views");
+    const html = errorPage("boom");
+    return html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
+  }
+
   function declarations(block: string): Record<string, string> {
     const out: Record<string, string> = {};
     for (const m of block.matchAll(/--([a-z0-9-]+):\s*([^;]+);/g)) {
@@ -98,9 +105,8 @@ describe("login SSR face sync (A3 dual-track)", () => {
     throw new Error(`unbalanced block: ${open}`);
   }
 
-  test("STYLE --shadow-card is value-synced with tokens.css on every theme branch", () => {
-    const styleStart = views.indexOf("const STYLE = `<style>");
-    const style = views.slice(styleStart, views.indexOf("`;", styleStart));
+  test("the rendered STYLE --shadow-card matches tokens.css on every theme branch", async () => {
+    const style = await ssrStyle();
 
     const ssrRoot = declarations(balancedBlock(style, ":root {"));
     const ssrStoredLight = declarations(balancedBlock(style, ':root[data-theme="light"] {'));
@@ -132,13 +138,15 @@ describe("login SSR face sync (A3 dual-track)", () => {
     expect(views).toContain("export function manifestErrorPage");
   });
 
-  test("auth faces consume the card/elevation tokens, not raw hex", () => {
-    const authCss = views.slice(views.indexOf("main.auth {"), views.indexOf(".sections {"));
+  test("auth faces consume the card/elevation tokens, not raw hex", async () => {
+    const style = await ssrStyle();
+    const authCss = style.slice(style.indexOf("main.auth {"), style.indexOf("section {"));
     expect(authCss).toContain("var(--card-bg)");
     expect(authCss).toContain("var(--card-border)");
     expect(authCss).toContain("var(--card-radius)");
     expect(authCss).toContain("var(--shadow-card)");
-    expect(authCss).toContain("var(--brand-700)");
+    // The brand mark rides the accent tone, not the palette step behind it.
+    expect(authCss).toContain("var(--tone-accent-fg)");
     expect(authCss).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 

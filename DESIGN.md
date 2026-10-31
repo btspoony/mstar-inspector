@@ -1,7 +1,7 @@
 ---
 version: "0.5"
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. v0.5 rebuilds the document onto the generated fixture: the D14 band-rule palette (26 survivors plus the D14a transitional live list), a 126-token semantic layer that component and page code are migrating onto exclusively (plans 202–204; today the SSR face and a few SPA files still read primitive steps), and a component layer composed from it. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted); light is a first-class face, not a parity checkbox. Supersedes the earlier theme lock (2026-09-04, user instruction). Upstream direction: baseline reference → token source → generated stylesheet and fixture → this document; the document is raised onto the fixture, never the reverse."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. v0.5 rebuilds the document onto the generated fixture: the D14 band-rule palette (26 survivors plus the D14a transitional live list), a 126-token semantic layer that component and page code consume exclusively (plans 202–204; the SSR face landed with plan 203, a few SPA files still read primitive steps), and a component layer composed from it. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted); light is a first-class face, not a parity checkbox. Supersedes the earlier theme lock (2026-09-04, user instruction). Upstream direction: baseline reference → token source → generated stylesheet and fixture → this document; the document is raised onto the fixture, never the reverse."
 
 # Runtime default = dark. Top-level colors: mirrors themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -40,11 +40,6 @@ colors:
   # D14a transitional — closed by plan 204 (admin.html)
   gray-800: "#ccd5e1"
   gray-alpha-200: "#ffffff17"
-  gray-100: "#15181f"
-  gray-400: "#39404d"
-  amber-800: "#fcd34d"
-  amber-900: "#fde68a"
-  red-900: "#fecaca"
   # semantic — surfaces
   surface-page: "#0a0c10"
   surface-shell: "#0d1015"
@@ -134,11 +129,6 @@ themes:
       # D14a transitional — closed by plan 204 (admin.html)
       gray-800: "#ccd5e1"
       gray-alpha-200: "#ffffff17"
-      gray-100: "#15181f"
-      gray-400: "#39404d"
-      amber-800: "#fcd34d"
-      amber-900: "#fde68a"
-      red-900: "#fecaca"
       # semantic — surfaces
       surface-page: "#0a0c10"
       surface-shell: "#0d1015"
@@ -220,11 +210,6 @@ themes:
       # D14a transitional — closed by plan 204 (admin.html)
       gray-800: "#3a4350"
       gray-alpha-200: "#10192814"
-      gray-100: "#fafbfd"
-      gray-400: "#ccd4df"
-      amber-800: "#92400e"
-      amber-900: "#78350f"
-      red-900: "#7f1d1d"
       # semantic — surfaces
       surface-page: "#ffffff"
       surface-shell: "#f7f9fb"
@@ -571,17 +556,19 @@ one file under `themes:`.
 
 | Layer | Count | Contains | May reference |
 |-------|-------|----------|---------------|
-| primitive | 40 | 34 palette steps (26 survivors + 8 transitional), 2 font stacks, 4 breakpoints | nothing — raw values only |
+| primitive | 34 | 28 palette steps (26 survivors + 2 transitional), 2 font stacks, 4 breakpoints | nothing — raw values only |
 | semantic | 126 | 47 themed colours, 5 control/row heights, 3 radii, 9 spacing steps, 55 typography properties, 5 motion values, 2 shadows | the primitive layer |
 | component | 33 | button variants and sizes, the text field, the card | **the semantic layer only**, with two recorded carve-outs: `button-primary-hover-bg` names the primitive `brand-600` (the approved r3 hover — the accent fg equals the accent solid, so hovering through it would be invisible), and the padding values (`button-padding-xs/sm/md`, `field-padding`) are literals, not tokens |
 
 The boundary rule is the architecture's **target**, and plans 202–204 are what
 lands it: component and page code consume the **semantic** layer only
 (`var(--surface-card)`, never `var(--background-200)`). It is not a fact of the
-tree today — `src/spa/Layout.tsx`, `src/spa/pages.module.css`,
-`src/dashboard/views.ts` (the SSR face) and `src/spa/admin.html` still read
+tree today — `src/spa/pages.module.css` and `src/spa/admin.html` still read
 primitive steps, each is a task in those plans, and the guard for token usage
-arrives in the commit that migrates the last primitive reader.
+arrives in the commit that migrates the last primitive reader. The SSR face is
+the one surface that has landed: `src/dashboard/views.ts` paints from the
+semantic and component layers, reading the generated value table rather than a
+hand copy of the palette.
 
 What `tests/design-system/boundary.test.ts` enforces today is narrower than the
 rule: the **module import specifier** for TypeScript files under `src/` outside
@@ -623,20 +610,20 @@ observation, not an assertion. 62 of the 96 declared steps went that way.
 
 ### The D14a transitional live list
 
-Seven steps survive the band rule only because a later plan still reads them.
+Two steps survive the band rule only because a later plan still reads them.
 This is a **live list, not a fixed number**: a step belongs to it only while a
 consumer outside `src/design-system/` still reads it, and it leaves in the
 commit that migrates that last consumer (`brand-800`, `red-800` and
 `green-900` left that way; `gray-alpha-300`, `teal-700` and `pink-700` left
-with plan 202 task 4, and `gray-500` left with plan 202 task 7 once the last
-test class that named it was replaced by a behaviour assertion). The generated
-stylesheet prints the owner above every transitional declaration; that comment
-is authoritative.
+with plan 202 task 4, `gray-500` left with plan 202 task 7 once the last test
+class that named it was replaced by a behaviour assertion, and `gray-100`,
+`gray-400`, `amber-800`, `amber-900` and `red-900` left with plan 203 task 7,
+where the SSR face stopped reading raw steps). The generated stylesheet prints
+the owner above every transitional declaration; that comment is authoritative.
 
 | Step | Closed by |
 |------|-----------|
 | `gray-800`, `gray-alpha-200` | plan 204 (admin.html) |
-| `gray-100`, `gray-400`, `amber-800`, `amber-900`, `red-900` | plan 203 (SSR views.ts) |
 
 Nothing else may consume them; a new consumer of a transitional step is a
 defect, not a loophole.
@@ -904,8 +891,8 @@ placeholder must never look like a clickable primary). Sizes ride the height
 tokens: default `md` 40px (`0 14px`), `button-sm` 32px (`button-14` label,
 `0 12px`) — the SPA `ui/button` `size="sm"` face — and `button-xs` 24px
 (`button-12` label, `0 8px`) — the SPA `size="xs"` ghost face, the in-row
-action. The SSR dashboard's 32px header face is the legacy
-`button-small` spelling until plan 203 composes the component layer.
+action. The SSR dashboard's 32px header face reads the same size tokens
+(`button-height-sm`, `button-padding-sm`, `button-radius`).
 
 **States** (all enabled variants): hover steps the fill one plane
 (primary → `brand-600`, secondary → `surface-overlay`); active holds;
@@ -1043,8 +1030,9 @@ GitHub, so CI does not take on that network dependency). `bun run build:spa`
 is the build: it runs the preview generator (which refuses to emit a page it
 cannot draw) and then vite, so every build writes `dist/design-preview.html`
 beside the served `dist/spa/` tree. The SSR
-`views.ts` STYLE keeps its own copied subset value-synced by test until a
-later plan owns that face.
+`views.ts` STYLE carries the same chain's third output: its value table is
+generated from this source (`src/dashboard/ssr-tokens.generated.ts`), so the
+zero-build face paints what the SPA paints instead of copying it.
 
 ## shadcn/ui mapping layer
 

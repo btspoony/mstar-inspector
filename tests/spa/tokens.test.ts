@@ -368,8 +368,14 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     expect(rootVars["button-primary-bg"]).toBe("var(--tone-accent-solid)");
     expect(rootVars["button-primary-fg"]).toBe("var(--on-brand)");
     expect(rootVars["card-bg"]).toBe("var(--surface-card)");
-    expect(rootVars["notice-error-fg"]).toBe("var(--tone-danger-fg)");
-    expect(rootVars["sidebar-active-bg"]).toBe("var(--surface-overlay)");
+    // The legacy radius aliases still resolve onto the two tiers; the button
+    // sizing, notice-channel and sidebar-tint aliases left once the SSR face
+    // read the component layer directly.
+    expect(rootVars["rounded-sm"]).toBe("var(--radius-control)");
+    expect(rootVars["rounded-md"]).toBe("var(--radius-container)");
+    expect(rootVars["button-primary-height"]).toBeUndefined();
+    expect(rootVars["notice-error-fg"]).toBeUndefined();
+    expect(rootVars["sidebar-active-bg"]).toBeUndefined();
   });
 
   test("motion and elevation land in tokens.css with the reduced-motion fold", async () => {
@@ -765,7 +771,7 @@ describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
   test("the Geist stack is identical at all three value sites; mono stays system", async () => {
     const fm = await loadFrontmatter();
     const css = await Bun.file(TOKENS_CSS).text();
-    const views = await Bun.file(VIEWS).text();
+    const { errorPage } = await import("../../src/dashboard/views");
 
     for (const [name, fields] of Object.entries(fm.typography)) {
       if (name === "mono-13") continue;
@@ -775,8 +781,10 @@ describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
 
     expect(cssCustomProperties(extractBlock(css, ":root {"))["font-sans"]).toBe(GEIST_STACK);
 
-    const styleStart = views.indexOf("const STYLE = `<style>");
-    const style = views.slice(styleStart, views.indexOf("`;", styleStart));
+    // The SSR face declares the stack from the generated table, so the third
+    // site is the stylesheet it renders, not a literal in its source.
+    const html = errorPage("boom");
+    const style = html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
     expect(style.match(/--font-sans: ([^;]+);/)?.[1]).toBe(GEIST_STACK);
   });
 
@@ -822,104 +830,74 @@ describe("DESIGN.md theme contract", () => {
 });
 
 describe("SSR STYLE token parity", () => {
-  function cssCustomPropertiesFromBlock(block: string): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const m of block.matchAll(/--([a-z0-9-]+):\s*([^;]+);/gi)) {
-      out[m[1]!] = m[2]!.trim();
-    }
-    return out;
+  /** The stylesheet the SSR faces actually ship — rendered, never read from source. */
+  async function ssrStyle(): Promise<string> {
+    const { errorPage } = await import("../../src/dashboard/views");
+    const html = errorPage("boom");
+    const start = html.indexOf("<style>");
+    const end = html.indexOf("</style>");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    return html.slice(start, end);
   }
 
-  test("shared hex tokens in tokens.css match src/dashboard/views.ts STYLE", async () => {
-    const css = await Bun.file(TOKENS_CSS).text();
-    const views = await Bun.file(VIEWS).text();
-    const styleStart = views.indexOf("const STYLE = `<style>");
-    const styleEnd = views.indexOf("`;", styleStart);
-    expect(styleStart).toBeGreaterThan(0);
-    const style = views.slice(styleStart, styleEnd);
-
-    const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
-    const cssLight = cssCustomPropertiesFromBlock(extractBlock(css, ':root[data-theme="light"] {'));
-    // v0.3.4: the SSR STYLE has two branches — dark :root default and the
-    // stored-light attribute; the OS-light media branch is deleted.
-    const ssrLightAt = style.indexOf(':root[data-theme="light"] {');
-    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, ssrLightAt));
-    const ssrLight = cssCustomPropertiesFromBlock(style.slice(ssrLightAt));
-
-    for (const [name, value] of Object.entries(ssrRoot)) {
-      if (/^#[0-9a-f]{3,8}$/i.test(value)) {
-        expect(cssRoot[name]).toBe(value);
-      }
-    }
-    for (const [name, value] of Object.entries(ssrLight)) {
-      if (/^#[0-9a-f]{3,8}$/i.test(value)) {
-        expect(cssLight[name]).toBe(value);
-      }
-    }
-  });
-
-  test("shared radius tokens in views.ts STYLE match tokens.css (three-site covenant)", async () => {
-    const css = await Bun.file(TOKENS_CSS).text();
-    const views = await Bun.file(VIEWS).text();
-    const styleStart = views.indexOf("const STYLE = `<style>");
-    const styleEnd = views.indexOf("`;", styleStart);
-    const style = views.slice(styleStart, styleEnd);
-
-    const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
-    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf(':root[data-theme="light"] {')));
-
-    // The stylesheet aliases the legacy radius names onto the semantic tiers
-    // while the SSR face still writes the raw value, so compare what each
-    // resolves to — `var()` chains followed, not the declaration strings.
-    const resolve = (vars: Record<string, string>, name: string): string | undefined => {
-      let value = vars[name];
-      for (let hop = 0; hop < 8 && value !== undefined; hop += 1) {
-        const ref = /^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1];
-        if (ref === undefined) break;
-        value = vars[ref];
-      }
-      return value;
+  /** The dark block and the stored-light overrides, as the face declares them. */
+  function ssrBlocks(style: string): { dark: Record<string, string>; light: Record<string, string> } {
+    const lightAt = style.indexOf(':root[data-theme="light"] {');
+    expect(lightAt).toBeGreaterThan(0);
+    return {
+      dark: cssCustomProperties(style.slice(0, lightAt)),
+      light: cssCustomProperties(extractBlock(style.slice(lightAt), ':root[data-theme="light"] {')),
     };
+  }
 
-    for (const name of ["rounded-sm", "rounded-md"]) {
-      expect(resolve(cssRoot, name), `--${name}`).toBe(ssrRoot[name]);
-    }
-  });
-
-  test("component var references stay synced: both faces paint the same primary fill", async () => {
+  test("every declared token carries the value tokens.css resolves to, in its own theme", async () => {
+    const { dark: ssrDark, light: ssrLight } = ssrBlocks(await ssrStyle());
     const css = await Bun.file(TOKENS_CSS).text();
-    const views = await Bun.file(VIEWS).text();
-    const styleStart = views.indexOf("const STYLE = `<style>");
-    const style = views.slice(styleStart, views.indexOf("`;", styleStart));
-
-    const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
-    const cssLight = cssCustomPropertiesFromBlock(extractBlock(css, ':root[data-theme="light"] {'));
-    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf(':root[data-theme="light"] {')));
-    const ssrStoredLight = cssCustomPropertiesFromBlock(extractBlock(style, ':root[data-theme="light"] {'));
-
-    // The SPA face names the accent job (`tone-accent-solid`); the SSR face,
-    // which a later plan migrates, still names the step that job resolves
-    // to. Both must land on the same colour, so follow the references
-    // instead of pinning one spelling of them.
-    const paint = (vars: Record<string, string>, name: string): string | undefined => {
-      let value = vars[name];
-      for (let hop = 0; hop < 8; hop += 1) {
-        const ref = value === undefined ? undefined : /^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1];
-        if (ref === undefined) break;
-        value = vars[ref];
-      }
-      return value;
-    };
-
-    // The light branch only re-declares what differs, so resolving a light
-    // value means reading it over the dark cascade.
+    const cssRoot = cssCustomProperties(extractBlock(css, ":root {"));
+    const cssLight = cssCustomProperties(extractBlock(css, ':root[data-theme="light"] {'));
     const lightCascade = { ...cssRoot, ...cssLight };
 
-    expect(cssRoot["button-primary-bg"], "tokens.css primary").toBe("var(--tone-accent-solid)");
-    expect(ssrRoot["button-primary-bg"], "SSR primary").toBe("var(--brand-700)");
-    expect(paint(cssRoot, "button-primary-bg"), "dark primary paint").toBe(ssrRoot["brand-700"]);
-    expect(paint(lightCascade, "button-primary-bg"), "light primary paint").toBe(cssLight["brand-700"]);
-    expect(ssrStoredLight["brand-700"], "SSR stored-light brand-700").toBe(cssLight["brand-700"]);
+    // `--focus-halo` is the face's own composed shadow, not a token.
+    const names = Object.keys(ssrDark).filter((name) => name !== "focus-halo");
+    expect(names.length, "the face rendered no token").toBeGreaterThan(40);
+    for (const name of names) {
+      const dark = ssrDark[name] as string;
+      const light = ssrLight[name];
+      expect(resolve(cssRoot, name), `dark --${name}`).toBe(dark);
+      // Light re-declares only the names whose value differs; everything else
+      // must be genuinely theme-invariant, never a dropped override.
+      if (light === undefined) {
+        expect(resolve(lightCascade, name), `light --${name} (not re-declared)`).toBe(dark);
+      } else {
+        expect(light, `light --${name}`).toBe(resolve(lightCascade, name));
+      }
+    }
+  });
+
+  test("every token the stylesheet paints with is one it declares", async () => {
+    const style = await ssrStyle();
+    const { dark, light } = ssrBlocks(style);
+    const declared = new Set([...Object.keys(dark), ...Object.keys(light)]);
+    const used = [...new Set([...style.matchAll(/var\(--([a-z0-9-]+)\)/g)].map((m) => m[1] as string))];
+    expect(used.length, "the stylesheet references no token").toBeGreaterThan(20);
+    expect(used.filter((name) => !declared.has(name))).toEqual([]);
+  });
+
+  test("both faces paint the same primary fill from the component layer", async () => {
+    const { dark: ssrDark, light: ssrLight } = ssrBlocks(await ssrStyle());
+    const css = await Bun.file(TOKENS_CSS).text();
+    const cssRoot = cssCustomProperties(extractBlock(css, ":root {"));
+    const cssLight = cssCustomProperties(extractBlock(css, ':root[data-theme="light"] {'));
+    const lightCascade = { ...cssRoot, ...cssLight };
+
+    // Neither face names the fill directly any more: the SPA reads the
+    // component token and the SSR face inlines the value it resolves to. Both
+    // must land on the same colour in both themes.
+    expect(cssRoot["button-primary-bg"]).toBe("var(--tone-accent-solid)");
+    expect(resolve(ssrDark, "button-primary-bg")).toBe(resolve(cssRoot, "button-primary-bg"));
+    expect(resolve({ ...ssrDark, ...ssrLight }, "button-primary-bg")).toBe(
+      resolve(lightCascade, "button-primary-bg"),
+    );
   });
 });
-

@@ -69,20 +69,17 @@ const D14_SURVIVORS = [
  * `green-900` left in task 3; `gray-alpha-300`, `teal-700` and `pink-700` left
  * in task 4 (ListRow onto `border-subtle`, charts onto the six closed slots);
  * `gray-500` left in task 7, once the last test class that named it became a
- * behaviour assertion.
+ * behaviour assertion; `gray-100`, `gray-400`, `amber-800`, `amber-900` and
+ * `red-900` left with plan 203 task 7, when the SSR stylesheet moved onto the
+ * semantic layer and stopped naming raw steps.
  */
 const D14A_TRANSITIONAL: readonly { name: string; owner: string }[] = [
   { name: "gray-800", owner: "204 (admin.html)" },
   { name: "gray-alpha-200", owner: "204 (admin.html)" },
-  { name: "gray-100", owner: "203 (SSR views.ts)" },
-  { name: "gray-400", owner: "203 (SSR views.ts)" },
-  { name: "amber-800", owner: "203 (SSR views.ts)" },
-  { name: "amber-900", owner: "203 (SSR views.ts)" },
-  { name: "red-900", owner: "203 (SSR views.ts)" },
 ];
 
 describe("palette reduction (D14 / D14a)", () => {
-  test("the declared palette steps are exactly 26 survivors plus 7 transitional", () => {
+  test("the declared palette steps are exactly 26 survivors plus 2 transitional", () => {
     const declaredPalette = tokenNames()
       .primitive.filter((name) => !name.startsWith("font-") && !name.startsWith("breakpoint-"));
     // Both directions, so a step added without a band and a survivor dropped by
@@ -90,13 +87,13 @@ describe("palette reduction (D14 / D14a)", () => {
     expect([...declaredPalette].sort()).toEqual(
       [...D14_SURVIVORS, ...D14A_TRANSITIONAL.map((s) => s.name)].sort(),
     );
-    expect(declaredPalette).toHaveLength(33);
+    expect(declaredPalette).toHaveLength(28);
   });
 
   test("the transitional set is exported as data with an owner per step", () => {
     // Task 3 must be able to emit these declarations from the source rather
     // than from a second hand-maintained list.
-    expect(transitionalSteps).toHaveLength(7);
+    expect(transitionalSteps).toHaveLength(2);
     expect(transitionalSteps.map((s) => ({ name: s.name as string, owner: s.owner }))).toEqual([
       ...D14A_TRANSITIONAL,
     ]);

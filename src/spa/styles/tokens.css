@@ -60,21 +60,6 @@
   /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
      it leaves this set in the commit that migrates that consumer. */
   --gray-alpha-200: #ffffff17;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-100: #15181f;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-400: #39404d;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --amber-800: #fcd34d;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --amber-900: #fde68a;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --red-900: #fecaca;
 
   /* semantic · shared + dark */
   --control-h-xs: 24px;
@@ -242,42 +227,10 @@
 
   /* transitional names owned by later plans (202-204 migrate them;
      each declaration leaves with its last consumer) */
-  /* closed by plan 202-203 (views.ts, pages.module.css, admin.html) */
+  /* closed by plan 204 (admin.html, pages.module.css) */
   --rounded-sm: var(--radius-control);
-  /* closed by plan 202-203 (views.ts, pages.module.css, admin.html) */
+  /* closed by plan 204 (admin.html, pages.module.css) */
   --rounded-md: var(--radius-container);
-  /* closed by plan 203 (SSR views.ts) */
-  --button-primary-height: var(--control-h-md);
-  /* closed by plan 203 (SSR views.ts) */
-  --button-primary-padding: 0 12px;
-  /* closed by plan 203 (SSR views.ts) */
-  --button-primary-radius: var(--radius-control);
-  /* closed by plan 203 (SSR views.ts) */
-  --button-small-height: var(--control-h-sm);
-  /* closed by plan 203 (SSR views.ts) */
-  --button-small-padding: 0 8px;
-  /* closed by plan 203 (SSR views.ts) */
-  --button-small-radius: var(--radius-control);
-  /* closed by plan 203 (pages.module.css, SSR views.ts) */
-  --notice-success-bg: var(--tone-success-bg);
-  /* closed by plan 203 (pages.module.css, SSR views.ts) */
-  --notice-success-fg: var(--tone-success-fg);
-  /* closed by plan 203 (pages.module.css, SSR views.ts) */
-  --notice-success-border: var(--tone-success-border);
-  /* closed by plan 203 (pages.module.css, SSR views.ts) */
-  --notice-warn-bg: var(--tone-warn-bg);
-  /* closed by plan 203 (pages.module.css, SSR views.ts) */
-  --notice-warn-fg: var(--tone-warn-fg);
-  /* closed by plan 203 (pages.module.css, SSR views.ts) */
-  --notice-warn-border: var(--tone-warn-border);
-  /* closed by plan 203 (pages.module.css, SSR views.ts) */
-  --notice-error-bg: var(--tone-danger-bg);
-  /* closed by plan 203 (pages.module.css, SSR views.ts) */
-  --notice-error-fg: var(--tone-danger-fg);
-  /* closed by plan 203 (pages.module.css, SSR views.ts) */
-  --notice-error-border: var(--tone-danger-border);
-  /* closed by plan 203 (SSR views.ts) */
-  --sidebar-active-bg: var(--surface-overlay);
 }
 
 /* Stored manual choice — the only light face; unset stays dark. */
@@ -323,21 +276,6 @@
   /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
      it leaves this set in the commit that migrates that consumer. */
   --gray-alpha-200: #10192814;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-100: #fafbfd;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-400: #ccd4df;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --amber-800: #92400e;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --amber-900: #78350f;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
-     it leaves this set in the commit that migrates that consumer. */
-  --red-900: #7f1d1d;
 
   /* semantic · light (only the names whose declaration differs) */
   --surface-shell: #f7f9fb;
