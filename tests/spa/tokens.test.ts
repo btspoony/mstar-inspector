@@ -58,6 +58,32 @@ const L2_ACCENTS = ["blue", "red", "amber", "green", "teal", "purple", "pink"] a
 const L2_ACCENT_STEPS = ["700", "800", "900", "1000"] as const;
 const TYPO_FIELDS = ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"] as const;
 
+/**
+ * Compass D14's survivor bands, and D14a's transitional set. The generated
+ * stylesheet must declare these 40 steps and nothing else from the 96 it used
+ * to carry — the survivors because the semantic layer consumes them, the
+ * transitional ones because plans 202-204 still do.
+ */
+const SURVIVORS = [
+  "background-100", "background-200", "background-300",
+  "gray-200", "gray-600", "gray-700", "gray-900", "gray-1000",
+  "gray-alpha-400", "gray-alpha-500",
+  "brand-600", "brand-700", "blue-700",
+  "red-100", "red-400", "red-700",
+  "amber-100", "amber-400", "amber-600", "amber-700",
+  "green-100", "green-300", "green-400", "green-700", "green-800",
+  "purple-700",
+] as const;
+
+const TRANSITIONAL = [
+  "gray-800", "gray-alpha-200", "brand-800", "red-800", "gray-100", "gray-400",
+  "green-900", "gray-500", "gray-alpha-300", "amber-800", "amber-900", "red-900",
+  "teal-700", "pink-700",
+] as const;
+
+/** A palette step declaration in the stylesheet: `background-100`, `gray-alpha-400`, `teal-700`. */
+const PALETTE_STEP = /^(?:background-\d00|gray-\d{3,4}|gray-alpha-\d{3,4}|brand-\d00|blue-\d00|red-\d{3,4}|amber-\d{3,4}|green-\d{3,4}|teal-\d00|purple-\d{3,4}|pink-\d{3,4})$/;
+
 type DesignFrontmatter = {
   /** YAML yields a number for `0.4` and a string for `0.4.0`. */
   version: string | number;
@@ -222,34 +248,57 @@ describe("src/spa/styles/tokens.css mapping", () => {
     const darkVars = cssCustomProperties(darkBlock);
     const lightVars = cssCustomProperties(lightBlock);
 
-    for (const [name, value] of Object.entries(fm.themes.dark.colors)) {
-      expect(darkVars[name]).toBe(value);
+    // D14/D14a: the stylesheet declares the survivors plus the transitional
+    // set, so the steps it carries still agree with DESIGN.md value for value.
+    // DESIGN.md is raised onto the v0.5 palette in plan 201 task 8; the steps
+    // it has not been rewritten to carry yet are absent here by construction.
+    const declared = Object.keys(darkVars).filter((name) => PALETTE_STEP.test(name));
+    for (const name of declared) {
+      expect(fm.themes.dark.colors[name], `DESIGN.md dark ${name}`).toBe(darkVars[name]);
     }
-    // The single light branch carries the full light palette.
-    for (const [name, value] of Object.entries(fm.themes.light.colors)) {
-      expect(lightVars[name]).toBe(value);
+    // The single light branch carries the full light palette it declares.
+    for (const name of Object.keys(lightVars).filter((n) => PALETTE_STEP.test(n))) {
+      expect(fm.themes.light.colors[name], `DESIGN.md light ${name}`).toBe(lightVars[name]);
+    }
+    // Nothing the reduction removed may reappear: the survivors plus the 14
+    // transitional steps, and not one step more.
+    expect(declared.sort()).toEqual([...SURVIVORS, ...TRANSITIONAL].sort());
+  });
+
+  test("transitional steps are declared with the plan that closes them", async () => {
+    const css = await Bun.file(TOKENS_CSS).text();
+    const dark = extractBlock(css, ":root {");
+    for (const step of TRANSITIONAL) {
+      // The declaration is what plans 202/203 compile against; the owner
+      // comment is the deadline, and it travels with the value.
+      expect(dark, `--${step} must stay declared`).toContain(`  --${step}: #`);
+      expect(dark, `--${step} needs its owner comment`).toMatch(
+        new RegExp(`closed by plan [^\\n]+[\\s\\S]{0,200}?\\n\\s*--${step}: `),
+      );
     }
   });
 
-  test("spacing, rounded, and component vars are present on :root", async () => {
+  test("semantic, component and legacy names are present on :root", async () => {
     const css = await Bun.file(TOKENS_CSS).text();
     const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
 
-    expect(rootVars["spacing-base"]).toBe("4px");
     expect(rootVars["spacing-24"]).toBe("96px");
-    expect(rootVars["rounded-sm"]).toBe("8px");
-    expect(rootVars["rounded-md"]).toBe("12px");
-    expect(rootVars["rounded-lg"]).toBe("16px");
-    expect(rootVars["rounded-full"]).toBe("9999px");
-    expect(rootVars["button-primary-bg"]).toBe("var(--brand-700)");
-    expect(rootVars["button-danger-bg"]).toBe("var(--red-700)");
-    expect(rootVars["input-border"]).toBe("var(--gray-400)");
-    expect(rootVars["card-bg"]).toBe("var(--background-200)");
-    expect(rootVars["sidebar-bg"]).toBe("var(--background-200)");
-    expect(rootVars["notice-error-fg"]).toBe("var(--red-900)");
+    expect(rootVars["control-h-md"]).toBe("40px");
+    expect(rootVars["radius-control"]).toBe("8px");
+    expect(rootVars["radius-container"]).toBe("12px");
     expect(rootVars["typo-heading-24-size"]).toBe("24px");
+    // Component tokens name the semantic layer, never a palette step — this is
+    // the whole point of the re-point: the palette becomes droppable.
+    expect(rootVars["button-primary-bg"]).toBe("var(--tone-accent-solid)");
+    expect(rootVars["button-primary-fg"]).toBe("var(--on-brand)");
+    expect(rootVars["card-bg"]).toBe("var(--surface-card)");
+    // The transitional names plans 202-203 still read, aliased onto it.
+    expect(rootVars["rounded-sm"]).toBe("8px");
+    expect(rootVars["notice-error-fg"]).toBe("var(--tone-danger-fg)");
+    expect(rootVars["sidebar-active-bg"]).toBe("var(--surface-overlay)");
   });
 });
+
 
 describe("DESIGN.md v0.3 design-language tokens", () => {
   test("Signal Cyan brand namespace is additive and dual-theme (AD-571/573)", async () => {
@@ -300,14 +349,19 @@ describe("DESIGN.md v0.3 design-language tokens", () => {
     expect(darkVars["ease-in-out"]).toBe("cubic-bezier(0.65, 0, 0.35, 1)");
 
     // Elevation: dark values on :root, light values on the stored-light branch.
+    // The pop shadow is the r3 baseline's; DESIGN.md's frontmatter still
+    // carries the v0.3 pair and is raised onto the fixture in task 8.
     expect(darkVars["shadow-card"]).toBe("0 1px 2px #02061766, 0 2px 8px #02061733");
-    expect(darkVars["shadow-pop"]).toBe("0 4px 12px #02061780, 0 16px 40px #02061759");
+    expect(darkVars["shadow-pop"]).toBe("0 8px 24px #02061799, 0 2px 6px #02061766");
     expect(lightVars["shadow-card"]).toBe("0 1px 2px #10192814, 0 2px 8px #1019280f");
-    expect(lightVars["shadow-pop"]).toBe("0 4px 12px #1019281f, 0 16px 40px #10192829");
+    expect(lightVars["shadow-pop"]).toBe("0 8px 24px #1019281f, 0 2px 6px #10192814");
 
-    // Two-tier radius (AD-574).
-    expect(darkVars["rounded-sm"]).toBe("8px");
-    expect(darkVars["rounded-md"]).toBe("12px");
+    // Two-tier radius (AD-574): the semantic tiers carry the numbers, and the
+    // legacy names plans 202-203 read still resolve to them.
+    expect(darkVars["radius-control"]).toBe("8px");
+    expect(darkVars["radius-container"]).toBe("12px");
+    expect(darkVars["rounded-sm"]).toBe(darkVars["radius-control"]);
+    expect(darkVars["rounded-md"]).toBe(darkVars["radius-container"]);
 
     // Reduced-motion fold: durations collapse to 1ms.
     const reduceVars = cssCustomProperties(extractBlock(css, "@media (prefers-reduced-motion: reduce) {"));
@@ -375,21 +429,29 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   /** A5 sensitive subset — the only ui/ files allowed to drift from the copy-in. */
   const SUBSET = ["button", "card", "input", "table", "skeleton", "tabs", "sidebar", "select", "dropdown-menu", "dialog"];
 
-  test("brand re-point: primary/sidebar semantics anchor on brand-700; focus keeps blue-700", async () => {
+  test("bridge re-point: every value is a semantic token; focus stays on the blue duty", async () => {
     const css = await Bun.file(BRIDGE).text();
     const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
-    // The staged T1 seam closes: the primary action is Signal Cyan, hover
-    // holds the 800 step (dark brightens, light deepens — Appendix B).
-    expect(rootVars["primary"]).toBe("var(--brand-700)");
-    expect(rootVars["primary-hover"]).toBe("var(--brand-800)");
-    expect(rootVars["secondary-hover"]).toBe("var(--background-300)");
-    expect(rootVars["destructive-hover"]).toBe("var(--red-800)");
-    expect(rootVars["sidebar-primary"]).toBe("var(--brand-700)");
+    // The task-3 re-point: the accent arrives as `tone-accent-solid` and the
+    // label as `on-brand`, so the bridge never names a palette step. Hover is
+    // the component layer's approved one-step-quieter face.
+    expect(rootVars["primary"]).toBe("var(--tone-accent-solid)");
+    expect(rootVars["primary-hover"]).toBe("var(--button-primary-hover-bg)");
+    expect(rootVars["primary-foreground"]).toBe("var(--on-brand)");
+    expect(rootVars["secondary-hover"]).toBe("var(--surface-overlay)");
+    expect(rootVars["muted"]).toBe("var(--surface-inset)");
+    expect(rootVars["border"]).toBe("var(--border-default)");
+    expect(rootVars["destructive"]).toBe("var(--tone-danger-solid)");
+    expect(rootVars["sidebar-primary"]).toBe("var(--tone-accent-solid)");
     // Link/focus duty stays blue (AD-571) — including the sidebar ring
     // (QC round 1 F-003 revert); brand cyan never takes focus, and alerts
     // keep red/amber/green.
-    expect(rootVars["ring"]).toBe("var(--blue-700)");
-    expect(rootVars["sidebar-ring"]).toBe("var(--blue-700)");
+    expect(rootVars["ring"]).toBe("var(--focus-ring)");
+    expect(rootVars["sidebar-ring"]).toBe("var(--focus-ring)");
+
+    // No palette step may appear in the bridge: referencing one keeps that
+    // step alive past the plan that removes it.
+    expect(css).not.toMatch(/var\(--(?:background|gray|brand|red|blue|amber|green|teal|pink|purple)-/);
 
     // Theme coupling (QC round 1 F-001): the hover steps must exist as
     // --color-* keys in `@theme inline`. Tailwind v4 CSS-first config
@@ -406,18 +468,20 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
   });
 
-  test("radius bridge collapses onto the AD-574 two tiers; tokens button maps the brand", async () => {
+  test("radius bridge collapses onto the AD-574 two tiers; tokens button maps the accent tone", async () => {
     const css = await Bun.file(BRIDGE).text();
     const themeVars = cssCustomProperties(extractBlock(css, "@theme inline {"));
-    expect(themeVars["radius-sm"]).toBe("var(--rounded-sm)");
-    expect(themeVars["radius-md"]).toBe("var(--rounded-md)");
+    expect(themeVars["radius-sm"]).toBe("var(--radius-control)");
+    expect(themeVars["radius-md"]).toBe("var(--radius-container)");
     // lg/xl re-point onto the container step so copy-in card faces land
-    // without hand edits; --rounded-lg (16px) is legacy, declared only.
-    expect(themeVars["radius-lg"]).toBe("var(--rounded-md)");
-    expect(themeVars["radius-xl"]).toBe("var(--rounded-md)");
+    // without hand edits.
+    expect(themeVars["radius-lg"]).toBe("var(--radius-container)");
+    expect(themeVars["radius-xl"]).toBe("var(--radius-container)");
 
     const tokens = await Bun.file(TOKENS_CSS).text();
-    expect(cssCustomProperties(extractBlock(tokens, ":root {"))["button-primary-bg"]).toBe("var(--brand-700)");
+    expect(cssCustomProperties(extractBlock(tokens, ":root {"))["button-primary-bg"]).toBe(
+      "var(--tone-accent-solid)",
+    );
   });
 
   test("restyled subset carries v0.3 form: supersede marker, control radius, tinted elevation, token-eased transitions", async () => {
@@ -638,7 +702,7 @@ describe("SSR STYLE token parity", () => {
     }
   });
 
-  test("component var references stay synced: --button-primary-bg → --brand-700 on both faces (QC round 1 F-002)", async () => {
+  test("component var references stay synced: both faces paint the same primary fill", async () => {
     const css = await Bun.file(new URL("../../src/spa/styles/tokens.css", import.meta.url)).text();
     const views = await Bun.file(new URL("../../src/dashboard/views.ts", import.meta.url)).text();
     const styleStart = views.indexOf("const STYLE = `<style>");
@@ -649,14 +713,28 @@ describe("SSR STYLE token parity", () => {
     const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf(':root[data-theme="light"] {')));
     const ssrStoredLight = cssCustomPropertiesFromBlock(extractBlock(style, ':root[data-theme="light"] {'));
 
-    // The re-point: both faces reference the brand step, not a raw accent.
-    expect(cssRoot["button-primary-bg"], "tokens.css primary").toBe("var(--brand-700)");
-    expect(ssrRoot["button-primary-bg"], "SSR primary").toBe("var(--brand-700)");
+    // The SPA face names the accent job (`tone-accent-solid`); the SSR face,
+    // which plan 203 migrates, still names the step that job resolves to. Both
+    // must land on the same colour, so follow the references instead of pinning
+    // one spelling of them.
+    const paint = (vars: Record<string, string>, name: string): string | undefined => {
+      let value = vars[name];
+      for (let hop = 0; hop < 8; hop += 1) {
+        const ref = value === undefined ? undefined : /^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1];
+        if (ref === undefined) break;
+        value = vars[ref];
+      }
+      return value;
+    };
 
-    // Reference-level sync — the hex-only parity test above cannot see a
-    // var reference drift, so pin the referenced --brand-700 per theme:
-    // every STYLE branch declares it and its value equals tokens.css.
-    expect(ssrRoot["brand-700"], "SSR dark brand-700").toBe(cssRoot["brand-700"]);
+    // The light branch only re-declares what differs, so resolving a light
+    // value means reading it over the dark cascade.
+    const lightCascade = { ...cssRoot, ...cssLight };
+
+    expect(cssRoot["button-primary-bg"], "tokens.css primary").toBe("var(--tone-accent-solid)");
+    expect(ssrRoot["button-primary-bg"], "SSR primary").toBe("var(--brand-700)");
+    expect(paint(cssRoot, "button-primary-bg"), "dark primary paint").toBe(ssrRoot["brand-700"]);
+    expect(paint(lightCascade, "button-primary-bg"), "light primary paint").toBe(cssLight["brand-700"]);
     expect(ssrStoredLight["brand-700"], "SSR stored-light brand-700").toBe(cssLight["brand-700"]);
   });
 });

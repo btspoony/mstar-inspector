@@ -1,207 +1,111 @@
 /*
- * DESIGN.md token layer (with the later cascade restructure and the
- * v0.3 value rebase — AD-573 value-swap under frozen names).
+ * GENERATED FILE — do not edit.
+ *
+ * Emitted by `scripts/build-tokens.ts` from `src/design-system/tokens/`.
+ * Change the token source and run `bun scripts/build-tokens.ts`;
+ * `bun scripts/build-tokens.ts --check` fails on any hand edit here.
  *
  * Contract:
- *   - :root = themes.dark (console default; deterministic — with no stored
- *     choice every browser renders dark, the OS preference is not consulted;
- *     v0.3.4)
- *   - :root[data-theme="light"] = themes.light (stored manual choice; set
+ *   - :root = themes.dark (console default; unset renders dark in every
+ *     browser, the OS preference is not consulted)
+ *   - :root[data-theme="light"] = themes.light (stored manual choice, set
  *     pre-paint by the inline bootstrap in src/spa/index.html from
  *     localStorage["mstar.dashboard.theme"])
- *   - CSS variable names match DESIGN.md color token names so existing
- *     --background-100 / --gray-1000 / --blue-700 (views.ts STYLE) stay valid
- *     for pages that later import this file.
- *   - v0.3 additive namespaces (AD-573): --brand-* (Signal Cyan accent),
- *     --shadow-card / --shadow-pop (cool tinted elevation, theme-dependent),
- *     --duration-* / --ease-* (motion, theme-independent; the reduce media
- *     query at the end of this file folds durations to 1ms).
+ *   - :root[data-surface="ops"] = the D15 operator variant: the accent tone is
+ *     withheld whole, never a second component set
+ *   - the reduced-motion fold at the end collapses every duration to 1ms
  *
  * The SPA layout consumes this module. Do not build components here.
- * Three value sites stay in lockstep (machine-pinned in
- * tests/spa/tokens.test.ts): DESIGN.md frontmatter, this file, and the
- * src/dashboard/views.ts STYLE subset.
  */
 
 :root {
   color-scheme: dark;
 
-  /* colors — themes.dark (SSOT: DESIGN.md colors: / themes.dark.colors) */
+  /* primitives · dark (raw values only) */
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 900px;
+  --breakpoint-xl: 1280px;
   --background-100: #0a0c10;
   --background-200: #15181f;
   --background-300: #212630;
-  --gray-100: #15181f;
   --gray-200: #1b1f27;
-  --gray-300: #212630;
-  --gray-400: #39404d;
-  --gray-500: #4d5563;
   --gray-600: #6b7482;
   --gray-700: #8b95a3;
-  --gray-800: #ccd5e1;
   --gray-900: #a9b4c2;
   --gray-1000: #eef2f7;
-  --gray-alpha-100: #ffffff12;
-  --gray-alpha-200: #ffffff17;
-  --gray-alpha-300: #ffffff21;
   --gray-alpha-400: #ffffff2e;
   --gray-alpha-500: #ffffff3d;
-  --gray-alpha-600: #ffffff5c;
-  --gray-alpha-700: #ffffff8a;
-  --gray-alpha-800: #ffffffa3;
-  --gray-alpha-900: #ffffffc4;
-  --gray-alpha-1000: #ffffffe8;
-
-  /* brand — Signal Cyan accent (v0.3, AD-571; dark wears the bright step).
-     Never encodes alert semantics (red/amber/green stay authoritative). */
   --brand-600: #06b6d4;
   --brand-700: #22d3ee;
-  --brand-800: #67e8f9;
-
-  --blue-100: #0c1a2e;
-  --blue-200: #0f2744;
-  --blue-300: #163a5f;
-  --blue-400: #1e4d7a;
-  --blue-500: #2563a8;
-  --blue-600: #3b82f6;
   --blue-700: #4ea1ff;
-  --blue-800: #7ab8ff;
-  --blue-900: #93c5fd;
-  --blue-1000: #dbeafe;
   --red-100: #2a1215;
-  --red-200: #3b1219;
-  --red-300: #4c1d24;
   --red-400: #7f1d1d;
-  --red-500: #991b1b;
-  --red-600: #dc2626;
   --red-700: #f87171;
-  --red-800: #fca5a5;
-  --red-900: #fecaca;
-  --red-1000: #fee2e2;
   --amber-100: #27190a;
-  --amber-200: #3b250c;
-  --amber-300: #4c2f0c;
   --amber-400: #78350f;
-  --amber-500: #92400e;
   --amber-600: #d97706;
   --amber-700: #fbbf24;
-  --amber-800: #fcd34d;
-  --amber-900: #fde68a;
-  --amber-1000: #fef3c7;
   --green-100: #052e16;
-  --green-200: #0a3d1e;
   --green-300: #14532d;
   --green-400: #166534;
-  --green-500: #15803d;
-  --green-600: #22c55e;
   --green-700: #4ade80;
   --green-800: #86efac;
-  --green-900: #bbf7d0;
-  --green-1000: #dcfce7;
-  --teal-100: #042f2e;
-  --teal-200: #0a3d3b;
-  --teal-300: #115e59;
-  --teal-400: #0f766e;
-  --teal-500: #0d9488;
-  --teal-600: #14b8a6;
-  --teal-700: #2dd4bf;
-  --teal-800: #5eead4;
-  --teal-900: #99f6e4;
-  --teal-1000: #ccfbf1;
-  --purple-100: #2e1065;
-  --purple-200: #3b0764;
-  --purple-300: #4c1d95;
-  --purple-400: #6b21a8;
-  --purple-500: #7e22ce;
-  --purple-600: #9333ea;
   --purple-700: #c084fc;
-  --purple-800: #d8b4fe;
-  --purple-900: #e9d5ff;
-  --purple-1000: #f3e8ff;
-  --pink-100: #500724;
-  --pink-200: #6b0f31;
-  --pink-300: #9d174d;
-  --pink-400: #9d174d;
-  --pink-500: #be185d;
-  --pink-600: #db2777;
+  /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-800: #ccd5e1;
+  /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-alpha-200: #ffffff17;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
+     it leaves this set in the commit that migrates that consumer. */
+  --brand-800: #67e8f9;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
+     it leaves this set in the commit that migrates that consumer. */
+  --red-800: #fca5a5;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-100: #15181f;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 / 203 (SSR views.ts);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-400: #39404d;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 (tokens.css component block);
+     it leaves this set in the commit that migrates that consumer. */
+  --green-900: #bbf7d0;
+  /* D14a transitional — its last consumer is closed by plan 202 (ui primitives);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-500: #4d5563;
+  /* D14a transitional — its last consumer is closed by plan 202 (ListRow);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-alpha-300: #ffffff21;
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
+     it leaves this set in the commit that migrates that consumer. */
+  --amber-800: #fcd34d;
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
+     it leaves this set in the commit that migrates that consumer. */
+  --amber-900: #fde68a;
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts) / 201 task 8;
+     it leaves this set in the commit that migrates that consumer. */
+  --red-900: #fecaca;
+  /* D14a transitional — its last consumer is closed by plan 203 (charts.css);
+     it leaves this set in the commit that migrates that consumer. */
+  --teal-700: #2dd4bf;
+  /* D14a transitional — its last consumer is closed by plan 203 (charts.css);
+     it leaves this set in the commit that migrates that consumer. */
   --pink-700: #f472b6;
-  --pink-800: #f9a8d4;
-  --pink-900: #fbcfe8;
-  --pink-1000: #fce7f3;
 
-  /* typography primitives — sans is self-hosted Geist Sans (AD-572,
-     AD-572; @font-face in styles/fonts.css, latin woff2 + swap). zh and any
-     uncovered glyphs fall back to the system stack. */
-  --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-
-  --typo-heading-32-family: var(--font-sans);
-  --typo-heading-32-size: 32px;
-  --typo-heading-32-weight: 600;
-  --typo-heading-32-line: 1.2;
-  --typo-heading-32-tracking: -0.02em;
-
-  --typo-heading-24-family: var(--font-sans);
-  --typo-heading-24-size: 24px;
-  --typo-heading-24-weight: 600;
-  --typo-heading-24-line: 1.25;
-  --typo-heading-24-tracking: -0.01em;
-
-  --typo-heading-20-family: var(--font-sans);
-  --typo-heading-20-size: 20px;
-  --typo-heading-20-weight: 600;
-  --typo-heading-20-line: 1.3;
-  --typo-heading-20-tracking: -0.01em;
-
-  --typo-heading-16-family: var(--font-sans);
-  --typo-heading-16-size: 16px;
-  --typo-heading-16-weight: 600;
-  --typo-heading-16-line: 1.4;
-  --typo-heading-16-tracking: 0;
-
-  --typo-label-14-family: var(--font-sans);
-  --typo-label-14-size: 14px;
-  --typo-label-14-weight: 500;
-  --typo-label-14-line: 1.4;
-  --typo-label-14-tracking: 0;
-
-  --typo-label-12-family: var(--font-sans);
-  --typo-label-12-size: 12px;
-  --typo-label-12-weight: 500;
-  --typo-label-12-line: 1.4;
-  --typo-label-12-tracking: 0.01em;
-
-  --typo-copy-16-family: var(--font-sans);
-  --typo-copy-16-size: 16px;
-  --typo-copy-16-weight: 400;
-  --typo-copy-16-line: 1.6;
-  --typo-copy-16-tracking: 0;
-
-  --typo-copy-14-family: var(--font-sans);
-  --typo-copy-14-size: 14px;
-  --typo-copy-14-weight: 400;
-  --typo-copy-14-line: 1.55;
-  --typo-copy-14-tracking: 0;
-
-  --typo-button-14-family: var(--font-sans);
-  --typo-button-14-size: 14px;
-  --typo-button-14-weight: 500;
-  --typo-button-14-line: 1.4;
-  --typo-button-14-tracking: 0;
-
-  --typo-button-12-family: var(--font-sans);
-  --typo-button-12-size: 12px;
-  --typo-button-12-weight: 500;
-  --typo-button-12-line: 1.4;
-  --typo-button-12-tracking: 0;
-
-  --typo-mono-13-family: var(--font-mono);
-  --typo-mono-13-size: 13px;
-  --typo-mono-13-weight: 400;
-  --typo-mono-13-line: 1.5;
-  --typo-mono-13-tracking: 0;
-
-  /* spacing */
-  --spacing-base: 4px;
+  /* semantic · shared + dark */
+  --control-h-xs: 24px;
+  --control-h-sm: 32px;
+  --control-h-md: 40px;
+  --row-h-compact: 38px;
+  --row-h-comfort: 48px;
+  --radius-control: 8px;
+  --radius-container: 12px;
+  --radius-pill: 9999px;
   --spacing-1: 4px;
   --spacing-2: 8px;
   --spacing-3: 12px;
@@ -211,228 +115,324 @@
   --spacing-10: 40px;
   --spacing-16: 64px;
   --spacing-24: 96px;
-
-  /* rounded — two-tier system (AD-574): sm = control tier, md = container
-     tier (always +4px above control); full stays pill-only. lg (16px) is
-     legacy: kept declared for name continuity (AD-573) but no longer a
-     consumed tier — the shadcn bridge maps Tailwind lg/xl onto the md
-     container step. */
-  --rounded-sm: 8px;
-  --rounded-md: 12px;
-  --rounded-lg: 16px;
-  --rounded-full: 9999px;
-
-  /* motion (v0.3, theme-independent) — every duration/easing consumer folds
-     under prefers-reduced-motion via the media block at the end of this file */
+  --typo-heading-32-family: var(--font-sans);
+  --typo-heading-32-size: 32px;
+  --typo-heading-32-weight: 600;
+  --typo-heading-32-line: 1.2;
+  --typo-heading-32-tracking: -0.02em;
+  --typo-heading-24-family: var(--font-sans);
+  --typo-heading-24-size: 24px;
+  --typo-heading-24-weight: 600;
+  --typo-heading-24-line: 1.25;
+  --typo-heading-24-tracking: -0.01em;
+  --typo-heading-20-family: var(--font-sans);
+  --typo-heading-20-size: 20px;
+  --typo-heading-20-weight: 600;
+  --typo-heading-20-line: 1.3;
+  --typo-heading-20-tracking: -0.01em;
+  --typo-heading-16-family: var(--font-sans);
+  --typo-heading-16-size: 16px;
+  --typo-heading-16-weight: 600;
+  --typo-heading-16-line: 1.4;
+  --typo-heading-16-tracking: 0;
+  --typo-label-14-family: var(--font-sans);
+  --typo-label-14-size: 14px;
+  --typo-label-14-weight: 500;
+  --typo-label-14-line: 1.4;
+  --typo-label-14-tracking: 0;
+  --typo-label-12-family: var(--font-sans);
+  --typo-label-12-size: 12px;
+  --typo-label-12-weight: 500;
+  --typo-label-12-line: 1.4;
+  --typo-label-12-tracking: 0.01em;
+  --typo-copy-16-family: var(--font-sans);
+  --typo-copy-16-size: 16px;
+  --typo-copy-16-weight: 400;
+  --typo-copy-16-line: 1.6;
+  --typo-copy-16-tracking: 0;
+  --typo-copy-14-family: var(--font-sans);
+  --typo-copy-14-size: 14px;
+  --typo-copy-14-weight: 400;
+  --typo-copy-14-line: 1.55;
+  --typo-copy-14-tracking: 0;
+  --typo-button-14-family: var(--font-sans);
+  --typo-button-14-size: 14px;
+  --typo-button-14-weight: 500;
+  --typo-button-14-line: 1.4;
+  --typo-button-14-tracking: 0;
+  --typo-button-12-family: var(--font-sans);
+  --typo-button-12-size: 12px;
+  --typo-button-12-weight: 500;
+  --typo-button-12-line: 1.4;
+  --typo-button-12-tracking: 0;
+  --typo-mono-13-family: var(--font-mono);
+  --typo-mono-13-size: 13px;
+  --typo-mono-13-weight: 400;
+  --typo-mono-13-line: 1.5;
+  --typo-mono-13-tracking: 0;
   --duration-fast: 120ms;
   --duration-base: 160ms;
   --duration-slow: 240ms;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
-
-  /* elevation (v0.3) — cool tinted shadows, never pure black; dark stays
-     whisper-quiet because surface steps + hairlines carry definition */
+  --surface-page: var(--background-100);
+  --surface-shell: #0d1015;
+  --surface-raised: #12151b;
+  --surface-card: var(--background-200);
+  --surface-inset: var(--gray-200);
+  --surface-overlay: var(--background-300);
+  --border-subtle: #ffffff1a;
+  --border-default: var(--gray-alpha-400);
+  --border-strong: var(--gray-alpha-500);
+  --text-primary: var(--gray-1000);
+  --text-secondary: var(--gray-900);
+  --text-muted: var(--gray-700);
+  --text-faint: var(--gray-600);
+  --tone-neutral-bg: var(--gray-200);
+  --tone-neutral-border: var(--gray-alpha-400);
+  --tone-neutral-fg: var(--gray-900);
+  --tone-neutral-solid: var(--gray-700);
+  --tone-accent-bg: #042f2e;
+  --tone-accent-border: #155e75;
+  --tone-accent-fg: var(--brand-700);
+  --tone-accent-solid: var(--brand-700);
+  --tone-success-bg: var(--green-100);
+  --tone-success-border: var(--green-400);
+  --tone-success-fg: var(--green-700);
+  --tone-success-solid: var(--green-700);
+  --tone-warn-bg: var(--amber-100);
+  --tone-warn-border: var(--amber-400);
+  --tone-warn-fg: var(--amber-700);
+  --tone-warn-solid: var(--amber-700);
+  --tone-danger-bg: var(--red-100);
+  --tone-danger-border: var(--red-400);
+  --tone-danger-fg: var(--red-700);
+  --tone-danger-solid: var(--red-700);
+  --chart-1: var(--brand-600);
+  --chart-2: #16a34a;
+  --chart-3: var(--amber-600);
+  --chart-4: #dc2626;
+  --chart-5: #2563a8;
+  --chart-6: #9333ea;
+  --chart-1-mark: var(--brand-700);
+  --chart-2-mark: var(--green-700);
+  --chart-3-mark: var(--amber-700);
+  --chart-4-mark: var(--red-700);
+  --chart-5-mark: var(--blue-700);
+  --chart-6-mark: var(--purple-700);
+  --on-brand: #06222a;
+  --focus-ring: var(--blue-700);
   --shadow-card: 0 1px 2px #02061766, 0 2px 8px #02061733;
-  --shadow-pop: 0 4px 12px #02061780, 0 16px 40px #02061759;
+  --shadow-pop: 0 8px 24px #02061799, 0 2px 6px #02061766;
 
-  /* breakpoints (min-width) — documented in DESIGN.md; not applied here */
+  /* component — composed from the semantic layer */
+  --button-primary-bg: var(--tone-accent-solid);
+  --button-primary-fg: var(--on-brand);
+  --button-primary-border: var(--tone-accent-solid);
+  --button-primary-hover-bg: var(--brand-600);
+  --button-secondary-bg: var(--surface-card);
+  --button-secondary-fg: var(--text-primary);
+  --button-secondary-border: var(--border-strong);
+  --button-ghost-fg: var(--text-muted);
+  --button-danger-bg: var(--tone-danger-bg);
+  --button-danger-fg: var(--tone-danger-fg);
+  --button-danger-border: var(--tone-danger-border);
+  --button-disabled-bg: var(--surface-inset);
+  --button-disabled-fg: var(--text-faint);
+  --button-disabled-border: var(--border-default);
+  --button-height-xs: var(--control-h-xs);
+  --button-height-sm: var(--control-h-sm);
+  --button-height-md: var(--control-h-md);
+  --button-padding-xs: 0 8px;
+  --button-padding-sm: 0 12px;
+  --button-padding-md: 0 14px;
+  --button-radius: var(--radius-control);
+  --field-bg: var(--surface-page);
+  --field-fg: var(--text-primary);
+  --field-border: var(--border-default);
+  --field-placeholder: var(--text-faint);
+  --field-height: var(--control-h-md);
+  --field-padding: 0 12px;
+  --field-radius: var(--radius-control);
+  --card-bg: var(--surface-card);
+  --card-fg: var(--text-primary);
+  --card-border: var(--border-default);
+  --card-radius: var(--radius-container);
+  --card-padding: var(--spacing-6);
+
+  /* transitional names owned by later plans (202-204 migrate them;
+     each declaration leaves with its last consumer) */
+  /* closed by plan 202-203 (views.ts, pages.module.css, admin.html) */
+  --rounded-sm: 8px;
+  /* closed by plan 202-203 (views.ts, pages.module.css, admin.html) */
+  --rounded-md: 12px;
+  /* closed by plan 202 (StatusBadge) */
+  --rounded-full: var(--radius-pill);
+  /* closed by plan 202 (StatusBadge) */
+  --badge-bg: var(--surface-inset);
+  /* closed by plan 202 (StatusBadge) */
+  --badge-fg: var(--text-secondary);
+  /* closed by plan 202 (StatusBadge) */
+  --badge-radius: var(--radius-pill);
+  /* closed by plan 202 (StatusBadge) */
+  --badge-height: 20px;
+  /* closed by plan 202 (StatusBadge) */
+  --badge-success-bg: var(--tone-success-bg);
+  /* closed by plan 202 (StatusBadge) */
+  --badge-success-fg: var(--tone-success-fg);
+  /* closed by plan 202 (StatusBadge) */
+  --badge-warn-bg: var(--tone-warn-bg);
+  /* closed by plan 202 (StatusBadge) */
+  --badge-warn-fg: var(--tone-warn-fg);
+  /* closed by plan 202 (StatusBadge) */
+  --badge-error-bg: var(--tone-danger-bg);
+  /* closed by plan 202 (StatusBadge) */
+  --badge-error-fg: var(--tone-danger-fg);
+  /* closed by plan 203 (SSR views.ts) */
+  --button-primary-height: var(--control-h-md);
+  /* closed by plan 203 (SSR views.ts) */
+  --button-primary-padding: 0 12px;
+  /* closed by plan 203 (SSR views.ts) */
+  --button-primary-radius: var(--radius-control);
+  /* closed by plan 203 (SSR views.ts) */
+  --button-small-height: var(--control-h-sm);
+  /* closed by plan 203 (SSR views.ts) */
+  --button-small-padding: 0 8px;
+  /* closed by plan 203 (SSR views.ts) */
+  --button-small-radius: var(--radius-control);
+  /* closed by plan 203 (pages.module.css, SSR views.ts) */
+  --notice-success-bg: var(--tone-success-bg);
+  /* closed by plan 203 (pages.module.css, SSR views.ts) */
+  --notice-success-fg: var(--tone-success-fg);
+  /* closed by plan 203 (pages.module.css, SSR views.ts) */
+  --notice-success-border: var(--tone-success-border);
+  /* closed by plan 203 (pages.module.css, SSR views.ts) */
+  --notice-warn-bg: var(--tone-warn-bg);
+  /* closed by plan 203 (pages.module.css, SSR views.ts) */
+  --notice-warn-fg: var(--tone-warn-fg);
+  /* closed by plan 203 (pages.module.css, SSR views.ts) */
+  --notice-warn-border: var(--tone-warn-border);
+  /* closed by plan 203 (pages.module.css, SSR views.ts) */
+  --notice-error-bg: var(--tone-danger-bg);
+  /* closed by plan 203 (pages.module.css, SSR views.ts) */
+  --notice-error-fg: var(--tone-danger-fg);
+  /* closed by plan 203 (pages.module.css, SSR views.ts) */
+  --notice-error-border: var(--tone-danger-border);
+  /* closed by plan 203 (SSR views.ts) */
+  --sidebar-active-bg: var(--surface-overlay);
+}
+
+/* Stored manual choice — the only light face; unset stays dark. */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* primitives · light */
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --breakpoint-sm: 640px;
   --breakpoint-md: 768px;
   --breakpoint-lg: 900px;
   --breakpoint-xl: 1280px;
-
-  /* components — reference color vars so they follow the active theme.
-     button-primary carries the Signal Cyan brand (the staged-delivery
-     seam is closed; DESIGN.md button-primary declares brand-700). */
-  --button-primary-bg: var(--brand-700);
-  --button-primary-fg: var(--background-100);
-  --button-primary-height: 40px;
-  --button-primary-padding: 0 12px;
-  --button-primary-radius: var(--rounded-sm);
-
-  --button-secondary-bg: var(--background-200);
-  --button-secondary-fg: var(--gray-1000);
-  --button-secondary-border: var(--gray-400);
-  --button-secondary-height: 40px;
-  --button-secondary-padding: 0 12px;
-  --button-secondary-radius: var(--rounded-sm);
-
-  --button-danger-bg: var(--red-700);
-  --button-danger-fg: var(--background-100);
-  --button-danger-height: 40px;
-  --button-danger-padding: 0 12px;
-  --button-danger-radius: var(--rounded-sm);
-
-  --button-disabled-bg: var(--gray-100);
-  --button-disabled-fg: var(--gray-700);
-  --button-disabled-border: var(--gray-400);
-  --button-disabled-height: 40px;
-  --button-disabled-padding: 0 12px;
-  --button-disabled-radius: var(--rounded-sm);
-
-  --button-small-height: 32px;
-  --button-small-padding: 0 8px;
-  --button-small-radius: var(--rounded-sm);
-
-  --input-bg: var(--background-100);
-  --input-fg: var(--gray-1000);
-  --input-border: var(--gray-400);
-  --input-height: 40px;
-  --input-padding: 0 12px;
-  --input-radius: var(--rounded-sm);
-
-  --card-bg: var(--background-200);
-  --card-fg: var(--gray-1000);
-  --card-border: var(--gray-alpha-400);
-  --card-radius: var(--rounded-md);
-  --card-padding: 24px;
-
-  --badge-bg: var(--gray-200);
-  --badge-fg: var(--gray-900);
-  --badge-radius: var(--rounded-full);
-  --badge-padding: 2px 8px;
-  --badge-height: 20px;
-
-  --badge-success-bg: var(--green-100);
-  --badge-success-fg: var(--green-800);
-  --badge-warn-bg: var(--amber-100);
-  --badge-warn-fg: var(--amber-800);
-  --badge-error-bg: var(--red-100);
-  --badge-error-fg: var(--red-800);
-
-  --table-bg: var(--background-100);
-  --table-fg: var(--gray-1000);
-  --table-border: var(--gray-alpha-400);
-  --table-header-bg: var(--background-200);
-  --table-row-hover: var(--gray-100);
-
-  --sidebar-bg: var(--background-200);
-  --sidebar-fg: var(--gray-1000);
-  --sidebar-muted: var(--gray-900);
-  --sidebar-border: var(--gray-alpha-400);
-  --sidebar-active-bg: var(--background-300);
-  --sidebar-active-fg: var(--gray-1000);
-
-  --notice-success-bg: var(--green-100);
-  --notice-success-fg: var(--green-900);
-  --notice-success-border: var(--green-400);
-  --notice-warn-bg: var(--amber-100);
-  --notice-warn-fg: var(--amber-900);
-  --notice-warn-border: var(--amber-400);
-  --notice-error-bg: var(--red-100);
-  --notice-error-fg: var(--red-900);
-  --notice-error-border: var(--red-400);
-
-  --focus-ring: 0 0 0 2px var(--background-100), 0 0 0 4px var(--blue-700);
-}
-
-/* Stored manual choice — the only light face; unset stays dark (v0.3.4). */
-:root[data-theme="light"] {
-  color-scheme: light;
-
-  /* colors — themes.light (v0.3 retune: cool gray/background cast; blue-700/red-700/amber-700 values kept) */
   --background-100: #ffffff;
   --background-200: #f3f5f8;
   --background-300: #e4e9f0;
-  --gray-100: #fafbfd;
   --gray-200: #f3f5f8;
-  --gray-300: #e4e9f0;
-  --gray-400: #ccd4df;
-  --gray-500: #9aa5b4;
   --gray-600: #6d7889;
   --gray-700: #4e5969;
-  --gray-800: #3a4350;
   --gray-900: #2f3742;
   --gray-1000: #0f141a;
-  --gray-alpha-100: #1019280d;
-  --gray-alpha-200: #10192814;
-  --gray-alpha-300: #1019281a;
   --gray-alpha-400: #10192824;
   --gray-alpha-500: #10192836;
-  --gray-alpha-600: #10192852;
-  --gray-alpha-700: #10192873;
-  --gray-alpha-800: #1019288f;
-  --gray-alpha-900: #101928b8;
-  --gray-alpha-1000: #101928e6;
-
-  /* brand — Signal Cyan accent (light wears the deep step) */
   --brand-600: #0891b2;
   --brand-700: #0e7490;
-  --brand-800: #155e75;
-
-  /* elevation — light shadows tint with the cool #101928 base */
-  --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
-  --shadow-pop: 0 4px 12px #1019281f, 0 16px 40px #10192829;
-  --blue-100: #eff6ff;
-  --blue-200: #dbeafe;
-  --blue-300: #bfdbfe;
-  --blue-400: #93c5fd;
-  --blue-500: #60a5fa;
-  --blue-600: #3b82f6;
   --blue-700: #0066cc;
-  --blue-800: #0052a3;
-  --blue-900: #1e4a7a;
-  --blue-1000: #0c1a2e;
   --red-100: #fef2f2;
-  --red-200: #fee2e2;
-  --red-300: #fecaca;
   --red-400: #fca5a5;
-  --red-500: #f87171;
-  --red-600: #ef4444;
   --red-700: #b91c1c;
-  --red-800: #991b1b;
-  --red-900: #7f1d1d;
-  --red-1000: #450a0a;
   --amber-100: #fffbeb;
-  --amber-200: #fef3c7;
-  --amber-300: #fde68a;
   --amber-400: #fcd34d;
-  --amber-500: #fbbf24;
   --amber-600: #d97706;
   --amber-700: #b45309;
-  --amber-800: #92400e;
-  --amber-900: #78350f;
-  --amber-1000: #451a03;
   --green-100: #f0fdf4;
-  --green-200: #dcfce7;
   --green-300: #bbf7d0;
   --green-400: #86efac;
-  --green-500: #4ade80;
-  --green-600: #22c55e;
   --green-700: #16a34a;
   --green-800: #15803d;
-  --green-900: #166534;
-  --green-1000: #052e16;
-  --teal-100: #f0fdfa;
-  --teal-200: #ccfbf1;
-  --teal-300: #99f6e4;
-  --teal-400: #5eead4;
-  --teal-500: #2dd4bf;
-  --teal-600: #14b8a6;
-  --teal-700: #0d9488;
-  --teal-800: #0f766e;
-  --teal-900: #115e59;
-  --teal-1000: #042f2e;
-  --purple-100: #faf5ff;
-  --purple-200: #f3e8ff;
-  --purple-300: #e9d5ff;
-  --purple-400: #d8b4fe;
-  --purple-500: #c084fc;
-  --purple-600: #a855f7;
   --purple-700: #9333ea;
-  --purple-800: #7e22ce;
-  --purple-900: #6b21a8;
-  --purple-1000: #3b0764;
-  --pink-100: #fdf2f8;
-  --pink-200: #fce7f3;
-  --pink-300: #fbcfe8;
-  --pink-400: #f9a8d4;
-  --pink-500: #f472b6;
-  --pink-600: #ec4899;
+  /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-800: #3a4350;
+  /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-alpha-200: #10192814;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
+     it leaves this set in the commit that migrates that consumer. */
+  --brand-800: #155e75;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
+     it leaves this set in the commit that migrates that consumer. */
+  --red-800: #991b1b;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-100: #fafbfd;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 / 203 (SSR views.ts);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-400: #ccd4df;
+  /* D14a transitional — its last consumer is closed by plan 201 task 3 (tokens.css component block);
+     it leaves this set in the commit that migrates that consumer. */
+  --green-900: #166534;
+  /* D14a transitional — its last consumer is closed by plan 202 (ui primitives);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-500: #9aa5b4;
+  /* D14a transitional — its last consumer is closed by plan 202 (ListRow);
+     it leaves this set in the commit that migrates that consumer. */
+  --gray-alpha-300: #1019281a;
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
+     it leaves this set in the commit that migrates that consumer. */
+  --amber-800: #92400e;
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
+     it leaves this set in the commit that migrates that consumer. */
+  --amber-900: #78350f;
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts) / 201 task 8;
+     it leaves this set in the commit that migrates that consumer. */
+  --red-900: #7f1d1d;
+  /* D14a transitional — its last consumer is closed by plan 203 (charts.css);
+     it leaves this set in the commit that migrates that consumer. */
+  --teal-700: #0d9488;
+  /* D14a transitional — its last consumer is closed by plan 203 (charts.css);
+     it leaves this set in the commit that migrates that consumer. */
   --pink-700: #db2777;
-  --pink-800: #be185d;
-  --pink-900: #9d174d;
-  --pink-1000: #500724;
+
+  /* semantic · light (only the names whose declaration differs) */
+  --surface-shell: #f7f9fb;
+  --surface-raised: var(--background-200);
+  --surface-card: var(--background-100);
+  --surface-inset: var(--background-200);
+  --border-subtle: #1019280f;
+  --tone-neutral-fg: var(--gray-700);
+  --tone-neutral-solid: var(--gray-600);
+  --tone-accent-bg: #ecfeff;
+  --tone-accent-border: #a5f3fc;
+  --tone-success-border: var(--green-300);
+  --tone-success-fg: var(--green-800);
+  --tone-warn-border: #fde68a;
+  --tone-warn-solid: var(--amber-600);
+  --tone-danger-border: #fecaca;
+  --tone-danger-solid: #dc2626;
+  --on-brand: #ffffff;
+  --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
+  --shadow-pop: 0 8px 24px #1019281f, 0 2px 6px #10192814;
+}
+
+/* D15 operator surface variant: the accent tone is withheld, not restyled. */
+:root[data-surface="ops"] {
+  --tone-accent-bg: var(--tone-neutral-bg);
+  --tone-accent-border: var(--tone-neutral-border);
+  --tone-accent-fg: var(--tone-neutral-fg);
+  --tone-accent-solid: var(--tone-neutral-solid);
+  --button-primary-bg: var(--tone-neutral-bg);
+  --button-primary-fg: var(--text-primary);
+  --button-primary-border: var(--border-strong);
+  --button-primary-hover-bg: var(--surface-overlay);
 }
 
 /* Reduced-motion fold (DESIGN.md motion.reduced-motion): every duration

@@ -1,53 +1,66 @@
 /*
- * shadcn/ui theme bridge (with the v0.3 brand re-point).
- * Semantic CSS variables map to DESIGN.md / tokens.css names (tokens.css is read-only).
- * Theme resolves via tokens.css — dark on :root (unset = deterministic dark default, v0.3.4), light on :root[data-theme="light"]; values flow through the var chain unchanged.
+ * shadcn/ui theme bridge — Tailwind v4 `@theme inline` keys onto the semantic
+ * token layer (plan 201 task 3).
+ *
+ * Every value here is a semantic (or semantic-composed component) token from
+ * `src/design-system/tokens/`; no palette step name appears. The bridge exists
+ * only so shadcn's utility vocabulary (`bg-primary`, `text-muted-foreground`,
+ * `border-input`) resolves without a second set of values, and the `@theme
+ * inline` key set is deliberately unchanged so utility names stay stable for
+ * plan 202's migration.
+ *
+ * Theme resolves through tokens.css — dark on :root (unset = deterministic
+ * dark default), light on :root[data-theme="light"]; values flow through the
+ * var chain unchanged.
  */
 @import "tailwindcss";
 
 :root {
-  --background: var(--background-100);
-  --foreground: var(--gray-1000);
-  --card: var(--card-bg);
-  --card-foreground: var(--card-fg);
-  --popover: var(--background-200);
-  --popover-foreground: var(--gray-1000);
-  /* v0.3 brand re-point (AD-573): the primary action fill is
-     Signal Cyan (--brand-700); hover/active hold the 800 step (dark brightens,
-     light deepens — DESIGN.md Appendix B). --destructive-hover mirrors the
-     step so danger buttons stay symmetric. */
-  --primary: var(--brand-700);
-  --primary-hover: var(--brand-800);
-  --primary-foreground: var(--background-100);
-  --secondary: var(--button-secondary-bg);
-  --secondary-hover: var(--background-300);
-  --secondary-foreground: var(--button-secondary-fg);
-  --muted: var(--gray-100);
-  --muted-foreground: var(--gray-900);
-  --accent: var(--background-300);
-  --accent-foreground: var(--gray-1000);
-  --destructive: var(--red-700);
-  --destructive-hover: var(--red-800);
-  --destructive-foreground: var(--background-100);
-  --border: var(--gray-alpha-400);
-  --input: var(--input-border);
-  /* Focus ring stays blue-700 (DESIGN.md v0.3: link + focus are blue's
-     non-alert duty — brand cyan never takes them, alerts keep red/amber). */
-  --ring: var(--blue-700);
-  --radius: var(--rounded-sm);
+  --background: var(--surface-page);
+  --foreground: var(--text-primary);
+  --card: var(--surface-card);
+  --card-foreground: var(--text-primary);
+  --popover: var(--surface-raised);
+  --popover-foreground: var(--text-primary);
+  /* The accent tone: `tone-accent-solid` is the filled action face, and
+     `on-brand` is the label that flips with the theme (dark wears the bright
+     cyan step and takes ink; light takes white). Hover is the component
+     layer's `brand-600` step — the approved r3 hover, one step quieter than
+     the fill in dark and deeper in light. */
+  --primary: var(--tone-accent-solid);
+  --primary-hover: var(--button-primary-hover-bg);
+  --primary-foreground: var(--on-brand);
+  --secondary: var(--surface-card);
+  --secondary-hover: var(--surface-overlay);
+  --secondary-foreground: var(--text-primary);
+  --muted: var(--surface-inset);
+  --muted-foreground: var(--text-secondary);
+  --accent: var(--surface-overlay);
+  --accent-foreground: var(--text-primary);
+  --destructive: var(--tone-danger-solid);
+  /* shortcut: the closed palette holds no step below the danger solid, so the
+     destructive fill has no distinct hover face until plan 202 re-faces this
+     variant onto the tone outline (button-danger-bg/fg/border). Upgrade there. */
+  --destructive-hover: var(--tone-danger-solid);
+  --destructive-foreground: var(--on-brand);
+  --border: var(--border-default);
+  --input: var(--border-default);
+  /* Focus and links stay on the blue duty: the accent cyan never takes
+     focus, and alerts keep red/amber/green. */
+  --ring: var(--focus-ring);
+  --radius: var(--radius-control);
 
-  --sidebar: var(--sidebar-bg);
-  --sidebar-foreground: var(--sidebar-fg);
-  /* Brand re-point per the staged checklist; the sidebar active
-     tint derives through this bridge (AD-641, DESIGN.md Sidebar). */
-  --sidebar-primary: var(--brand-700);
-  --sidebar-primary-foreground: var(--background-100);
-  --sidebar-accent: var(--sidebar-active-bg);
-  --sidebar-accent-foreground: var(--sidebar-active-fg);
-  /* Sidebar focus follows the app-wide focus duty (QC round 1 F-003: revert
-     to blue-700 — DESIGN.md SSOT keeps blue on every focus face; the brand
-     cyan never takes focus, matching --ring above). */
-  --sidebar-ring: var(--blue-700);
+  --sidebar: var(--surface-shell);
+  --sidebar-foreground: var(--text-primary);
+  /* The sidebar's active tint derives through this key (AD-641). */
+  --sidebar-primary: var(--tone-accent-solid);
+  --sidebar-primary-foreground: var(--on-brand);
+  --sidebar-accent: var(--surface-overlay);
+  --sidebar-accent-foreground: var(--text-primary);
+  --sidebar-border: var(--border-default);
+  /* Sidebar focus follows the app-wide focus duty (QC round 1 F-003: blue on
+     every focus face), matching --ring above. */
+  --sidebar-ring: var(--focus-ring);
 }
 
 @theme inline {
@@ -87,12 +100,11 @@
   --color-sidebar-ring: var(--sidebar-ring);
   /* Radius = the AD-574 two-tier system: control tier 8px,
      container tier 12px. lg/xl collapse onto the container step so copy-in
-     rounded-xl card faces land on the container tier with zero hand edits;
-     --rounded-lg (16px) remains declared in tokens.css as a legacy value. */
-  --radius-sm: var(--rounded-sm);
-  --radius-md: var(--rounded-md);
-  --radius-lg: var(--rounded-md);
-  --radius-xl: var(--rounded-md);
+     rounded-xl card faces land on the container tier with zero hand edits. */
+  --radius-sm: var(--radius-control);
+  --radius-md: var(--radius-container);
+  --radius-lg: var(--radius-container);
+  --radius-xl: var(--radius-container);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
 }
@@ -108,6 +120,6 @@
 body {
   margin: 0;
   min-height: 100svh;
-  background: var(--background-100);
-  color: var(--gray-1000);
+  background: var(--surface-page);
+  color: var(--text-primary);
 }
