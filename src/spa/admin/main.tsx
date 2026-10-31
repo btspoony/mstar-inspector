@@ -54,7 +54,7 @@ export function App() {
 
   return (
     <div className="admin">
-      <header className="admin-header">
+      <header className="admin-header border-b border-(--border-default)">
         <div>
           <h1>{t(locale, "admin.header.title")}</h1>
           <p className="muted">{boot.login ?? t(locale, "admin.header.signedOut")}</p>
@@ -85,7 +85,9 @@ export function App() {
           </a>
         ))}
       </nav>
-      <main className="admin-main">{createElement(SCREENS[page.id], { locale })}</main>
+      <main className="admin-main rounded-(--radius-container) border border-(--border-default)">
+        {createElement(SCREENS[page.id], { locale })}
+      </main>
     </div>
   );
 }

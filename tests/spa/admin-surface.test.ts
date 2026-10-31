@@ -96,3 +96,25 @@ describe("the console's plain variant", () => {
     );
   });
 });
+
+describe("the console document's own styles", () => {
+  test("admin.html spells no colour, radius or hairline of its own", () => {
+    // The shell's frame is the document's only hand-written CSS. Every value
+    // in it has to be a token reference: a hex (or a palette step) re-introduces
+    // a second colour vocabulary, a `--rounded-*` alias re-spells the radius
+    // tiers, and a px width on a border is the hairline someone hand-corrected.
+    const rules = [
+      { rule: "colour literal", re: /#[0-9a-fA-F]{3,8}\b/ },
+      { rule: "palette step", re: /var\(--(?:gray|gray-alpha|brand|blue|red|amber|green|purple)-/ },
+      { rule: "legacy radius", re: /--rounded-[a-z]+/ },
+      { rule: "radius not a token", re: /border-radius:\s*(?!\s*var\()/ },
+      { rule: "hairline width", re: /(?:border|outline|box-shadow)[^;]*\b\d+(?:\.\d+)?px\b/ },
+    ];
+    const hits = ADMIN_HTML.split("\n").flatMap((line, index) =>
+      rules
+        .filter(({ re }) => re.test(line))
+        .map(({ rule }) => `src/spa/admin.html:${index + 1}: [${rule}] ${line.trim()}`),
+    );
+    expect(hits, `admin.html keeps no literal of its own:\n${hits.join("\n")}`).toEqual([]);
+  });
+});
