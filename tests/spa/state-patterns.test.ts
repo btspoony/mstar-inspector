@@ -135,7 +135,9 @@ describe("EmptyState (AD-582)", () => {
   test("composed guidance view on the Card surface — icon chip, title, description, action slot", () => {
     const out = emptyState({ icon: true, description: "Connect your first App.", action: true });
     expect(out).toContain("bg-card"); // restyled Card primitive surface
-    expect(out).toContain("shadow-(--shadow-card)"); // v0.3 tinted elevation token
+    // r3 (plan 202 task 2): a card is a hairline plus the surface step; the
+    // elevation tokens stay on overlays, never on content sitting on the page.
+    expect(out).not.toMatch(/shadow-/);
     expect(out).toContain('data-slot="empty-state-icon"');
     expect(out).toContain('data-testid="chosen-icon"'); // consumer-chosen node renders inside the chip
     expect(out).toContain('data-slot="empty-state-title"');

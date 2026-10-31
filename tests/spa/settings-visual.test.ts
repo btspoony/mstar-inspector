@@ -77,13 +77,15 @@ describe("SectionCard tier idiom (AD-591)", () => {
     expect(sectionCard).toMatch(/import \{[^}]*\bCard\b[^}]*\} from "@design-system";/);
     // The tier prop is the closed two-value union — no third tier can creep in.
     expect(sectionCard).toContain('type SectionTier = "primary" | "secondary"');
-    // Tier faces are spelled out exactly once.
-    expect(sectionCard.match(/border-\(--gray-alpha-500\)/g)?.length).toBe(1);
-    expect(sectionCard.match(/shadow-none/g)?.length).toBe(1);
-    // Tier 2's hairline color is explicit (qc2 F-001): the primitive's bare
-    // `border` carries width only — preflight leaves border-color at
-    // currentColor — so the secondary face must carry `border-border`.
-    expect(sectionCard).toContain('secondary: "shadow-none border-border"');
+    // Each tier face names a border colour token (the primitive's bare
+    // `border` is width only, and preflight would paint it in currentColor),
+    // and neither carries elevation — shadows belong to overlays.
+    const faces = [...sectionCard.matchAll(/(primary|secondary):\s*"([^"]*)"/g)];
+    expect(faces.map(([, tier]) => tier)).toEqual(["primary", "secondary"]);
+    for (const [, tier, face] of faces) {
+      expect(face, tier).toMatch(/border-\(--[\w-]+\)/);
+      expect(face, tier).not.toMatch(/shadow/);
+    }
     // Zero raw hex in the idiom file.
     expect(sectionCard).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
@@ -91,18 +93,15 @@ describe("SectionCard tier idiom (AD-591)", () => {
   test("tiers render distinct faces through the card primitive (SSR)", () => {
     const html = (tier: "primary" | "secondary") =>
       renderToStaticMarkup(createElement(SectionCard, { tier }, "content"));
-    // Primary keeps the primitive's elevation and takes the tinted border.
-    const primary = html("primary");
-    expect(primary).toContain('data-tier="primary"');
-    expect(primary).toContain('data-slot="card"');
-    expect(primary).toContain("border-(--gray-alpha-500)");
-    expect(primary).not.toContain("shadow-none");
-    // Secondary is flat on the token hairline (border-border → gray-alpha-400).
-    const secondary = html("secondary");
-    expect(secondary).toContain('data-tier="secondary"');
-    expect(secondary).toContain("shadow-none");
-    expect(secondary).toContain("border-border");
-    expect(secondary).not.toContain("border-(--gray-alpha-500)");
+    for (const tier of ["primary", "secondary"] as const) {
+      const markup = html(tier);
+      expect(markup).toContain(`data-tier="${tier}"`);
+      expect(markup).toContain('data-slot="card"');
+      // r3: an inline card is a hairline plus the surface step, never an
+      // elevated plane. Which hairline strength each tier takes is the
+      // surface-idioms test's assertion, not a pinned class here.
+      expect(markup).not.toMatch(/shadow-/);
+    }
   });
 
   test("SectionGroup renders the eyebrow rhythm label above the card stack (SSR)", () => {

@@ -43,9 +43,9 @@ describe("GroupCard", () => {
     expect(html).toContain("bg-card");
     expect(html).toContain("gap-0");
     expect(html).toContain("p-0");
-    // Card's bare `border` is width only; without this the hairline paints in
-    // currentColor (gray-1000) instead of DESIGN.md's gray-alpha-400.
-    expect(html).toContain("border-(--gray-alpha-400)");
+    // The hairline colour is the card primitive's; this wrapper restates no
+    // border colour of its own. `tests/design-system/surface-idioms.test.ts`
+    // resolves the inherited edge through tokens.css.
   });
 
   test("header carries the 14px 16px band padding", () => {

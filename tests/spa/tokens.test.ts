@@ -592,7 +592,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     }
   });
 
-  test("restyled subset carries v0.3 form: supersede marker, control radius, tinted elevation, token-eased transitions", async () => {
+  test("restyled subset carries v0.3 form: supersede marker, control radius, elevation on the overlay faces only, token-eased transitions", async () => {
     for (const name of SUBSET) {
       const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
       // Copy-in supersede marker — a future regen must not clobber silently.
@@ -616,8 +616,10 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(button).not.toMatch(/--(?:background|gray|brand|blue|red|amber|green|purple|teal|pink)-/);
 
     const card = await Bun.file(join(PRIMITIVES_DIR, "card.tsx")).text();
-    expect(card).toContain("shadow-(--shadow-card)");
-    expect(card).not.toMatch(/shadow-(sm|md|lg)\b/);
+    // r3 card rule (plan 202 task 2): definition is the hairline plus the
+    // surface step, so the resting card declares no box-shadow at all —
+    // elevation is the overlays' (asserted below, on the overlay faces).
+    expect(card).not.toMatch(/(?:^|["\s])shadow-/);
 
     for (const name of ["dropdown-menu", "select", "dialog"]) {
       const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();

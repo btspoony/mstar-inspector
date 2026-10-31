@@ -8,10 +8,12 @@
  * boundary that `tests/design-system/boundary.test.ts` enforces.
  *
  * Two tiers are exported: the token source (`./tokens`), and the primitives
- * (`./primitives`) that read the semantic layer. `cn` is exported beside them
- * because callers that compose their own faces need the same merge rule.
+ * (`./primitives`) that read the semantic layer, plus the composed patterns
+ * (`./patterns`) built from them. `cn` is exported beside them because callers
+ * that compose their own faces need the same merge rule.
  */
 export * from "./primitives";
+export * from "./patterns";
 export { cn } from "./cn";
 export {
   OPS_SURFACE_ATTR,

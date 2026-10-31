@@ -5,12 +5,17 @@
  * classNames per block. Composes the copy-in `ui/card.tsx` primitives (the
  * sanctioned wrapper extension surface; the copy-in files stay untouched).
  *
- * - tier "primary" — identity/status surface: the card primitive's resting
- *   elevation (`shadow-card`) over a one-step-tinted border.
- * - tier "secondary" — configuration surface: flat (no elevation) on the
- *   token hairline (`border-border` → `--border` = gray-alpha-400). The
- *   card primitive's bare `border` carries width only — preflight leaves
- *   border-color at currentColor — so the tier face must supply the color.
+ * The r3 rule the tiers now follow: a hairline plus the card's surface step
+ * carries the definition, and elevation is the overlays' job — no inline card
+ * lifts off the page. The tiers differ by hairline strength alone:
+ *
+ * - tier "primary" — identity/status surface: the emphasis hairline.
+ * - tier "secondary" — configuration surface: the standard hairline.
+ *
+ * Each face names its border colour token explicitly. The card primitive's
+ * bare `border` carries width only — preflight leaves `border-color` at
+ * currentColor — and relying on the primitive's own edge would make the tier
+ * distinction depend on a value this file does not state.
  *
  * `SectionCardTitle` upgrades the card title face to the heading-16 token
  * step (DESIGN.md: heading-16 = section/card titles). `SectionGroup` carries
@@ -25,8 +30,8 @@ type SectionTier = "primary" | "secondary";
 
 /** AD-591 tier faces — the only place tier styling is spelled out. */
 const TIER_FACES: Record<SectionTier, string> = {
-  primary: "border-(--gray-alpha-500)",
-  secondary: "shadow-none border-border",
+  primary: "border-(--border-strong)",
+  secondary: "border-(--border-default)",
 };
 
 export function SectionCard({
