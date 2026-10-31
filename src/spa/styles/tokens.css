@@ -60,21 +60,12 @@
   /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
      it leaves this set in the commit that migrates that consumer. */
   --gray-alpha-200: #ffffff17;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
-     it leaves this set in the commit that migrates that consumer. */
-  --brand-800: #67e8f9;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
-     it leaves this set in the commit that migrates that consumer. */
-  --red-800: #fca5a5;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --gray-100: #15181f;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 / 203 (SSR views.ts);
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --gray-400: #39404d;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 (tokens.css component block);
-     it leaves this set in the commit that migrates that consumer. */
-  --green-900: #bbf7d0;
   /* D14a transitional — its last consumer is closed by plan 202 (ui primitives);
      it leaves this set in the commit that migrates that consumer. */
   --gray-500: #4d5563;
@@ -87,7 +78,7 @@
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --amber-900: #fde68a;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts) / 201 task 8;
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --red-900: #fecaca;
   /* D14a transitional — its last consumer is closed by plan 203 (charts.css);
@@ -263,9 +254,9 @@
   /* transitional names owned by later plans (202-204 migrate them;
      each declaration leaves with its last consumer) */
   /* closed by plan 202-203 (views.ts, pages.module.css, admin.html) */
-  --rounded-sm: 8px;
+  --rounded-sm: var(--radius-control);
   /* closed by plan 202-203 (views.ts, pages.module.css, admin.html) */
-  --rounded-md: 12px;
+  --rounded-md: var(--radius-container);
   /* closed by plan 202 (StatusBadge) */
   --rounded-full: var(--radius-pill);
   /* closed by plan 202 (StatusBadge) */
@@ -365,21 +356,12 @@
   /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
      it leaves this set in the commit that migrates that consumer. */
   --gray-alpha-200: #10192814;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
-     it leaves this set in the commit that migrates that consumer. */
-  --brand-800: #155e75;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
-     it leaves this set in the commit that migrates that consumer. */
-  --red-800: #991b1b;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 (shadcn bridge);
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --gray-100: #fafbfd;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 / 203 (SSR views.ts);
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --gray-400: #ccd4df;
-  /* D14a transitional — its last consumer is closed by plan 201 task 3 (tokens.css component block);
-     it leaves this set in the commit that migrates that consumer. */
-  --green-900: #166534;
   /* D14a transitional — its last consumer is closed by plan 202 (ui primitives);
      it leaves this set in the commit that migrates that consumer. */
   --gray-500: #9aa5b4;
@@ -392,7 +374,7 @@
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --amber-900: #78350f;
-  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts) / 201 task 8;
+  /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --red-900: #7f1d1d;
   /* D14a transitional — its last consumer is closed by plan 203 (charts.css);

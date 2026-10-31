@@ -104,24 +104,27 @@ const survivorLight: SurvivorColors = {
  * that has not run yet still consumes them. `owner` names the plan that closes
  * the step — task 3's generator emits each declaration with this comment, so
  * the deadline travels with the value instead of living in a second list.
+ *
+ * This is a **live list, not a fixed number**: a step belongs here only while a
+ * consumer outside `src/design-system/` still reads it, and it leaves in the
+ * commit that migrates that last consumer. `brand-800`, `red-800` and
+ * `green-900` left that way in task 3 — the bridge's hover faces and the
+ * component-block notice foregrounds were their last readers.
  */
 const transitionalValues = {
   // admin.html's inline styles; plan 204 re-tokens that console.
   "gray-800": { dark: "#ccd5e1", light: "#3a4350", owner: "204 (admin.html)" },
   "gray-alpha-200": { dark: "#ffffff17", light: "#10192814", owner: "204 (admin.html)" },
-  // The shadcn bridge and the SSR dashboard face, re-pointed onto semantics.
-  "brand-800": { dark: "#67e8f9", light: "#155e75", owner: "201 task 3 (shadcn bridge)" },
-  "red-800": { dark: "#fca5a5", light: "#991b1b", owner: "201 task 3 (shadcn bridge)" },
-  "gray-100": { dark: "#15181f", light: "#fafbfd", owner: "201 task 3 (shadcn bridge)" },
-  "gray-400": { dark: "#39404d", light: "#ccd4df", owner: "201 task 3 / 203 (SSR views.ts)" },
-  "green-900": { dark: "#bbf7d0", light: "#166534", owner: "201 task 3 (tokens.css component block)" },
+  // The SSR dashboard face, re-pointed onto semantics.
+  "gray-100": { dark: "#15181f", light: "#fafbfd", owner: "203 (SSR views.ts)" },
+  "gray-400": { dark: "#39404d", light: "#ccd4df", owner: "203 (SSR views.ts)" },
   // Primitives and patterns rebuilt on the semantic layer.
   "gray-500": { dark: "#4d5563", light: "#9aa5b4", owner: "202 (ui primitives)" },
   "gray-alpha-300": { dark: "#ffffff21", light: "#1019281a", owner: "202 (ListRow)" },
   // Charts onto the closed slots, and the SSR face's notices.
   "amber-800": { dark: "#fcd34d", light: "#92400e", owner: "203 (SSR views.ts)" },
   "amber-900": { dark: "#fde68a", light: "#78350f", owner: "203 (SSR views.ts)" },
-  "red-900": { dark: "#fecaca", light: "#7f1d1d", owner: "203 (SSR views.ts) / 201 task 8" },
+  "red-900": { dark: "#fecaca", light: "#7f1d1d", owner: "203 (SSR views.ts)" },
   "teal-700": { dark: "#2dd4bf", light: "#0d9488", owner: "203 (charts.css)" },
   "pink-700": { dark: "#f472b6", light: "#db2777", owner: "203 (charts.css)" },
 } as const;

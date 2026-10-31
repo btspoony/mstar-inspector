@@ -60,9 +60,10 @@ const TYPO_FIELDS = ["fontFamily", "fontSize", "fontWeight", "lineHeight", "lett
 
 /**
  * Compass D14's survivor bands, and D14a's transitional set. The generated
- * stylesheet must declare these 40 steps and nothing else from the 96 it used
+ * stylesheet must declare these 37 steps and nothing else from the 96 it used
  * to carry — the survivors because the semantic layer consumes them, the
- * transitional ones because plans 202-204 still do.
+ * transitional ones because plans 202-204 still do. The transitional set is a
+ * live list: a step leaves in the commit that migrates its last consumer.
  */
 const SURVIVORS = [
   "background-100", "background-200", "background-300",
@@ -76,9 +77,8 @@ const SURVIVORS = [
 ] as const;
 
 const TRANSITIONAL = [
-  "gray-800", "gray-alpha-200", "brand-800", "red-800", "gray-100", "gray-400",
-  "green-900", "gray-500", "gray-alpha-300", "amber-800", "amber-900", "red-900",
-  "teal-700", "pink-700",
+  "gray-800", "gray-alpha-200", "gray-100", "gray-400", "gray-500",
+  "gray-alpha-300", "amber-800", "amber-900", "red-900", "teal-700", "pink-700",
 ] as const;
 
 /** A palette step declaration in the stylesheet: `background-100`, `gray-alpha-400`, `teal-700`. */
@@ -293,7 +293,8 @@ describe("src/spa/styles/tokens.css mapping", () => {
     expect(rootVars["button-primary-fg"]).toBe("var(--on-brand)");
     expect(rootVars["card-bg"]).toBe("var(--surface-card)");
     // The transitional names plans 202-203 still read, aliased onto it.
-    expect(rootVars["rounded-sm"]).toBe("8px");
+    expect(rootVars["rounded-sm"]).toBe("var(--radius-control)");
+    expect(rootVars["radius-control"]).toBe("8px");
     expect(rootVars["notice-error-fg"]).toBe("var(--tone-danger-fg)");
     expect(rootVars["sidebar-active-bg"]).toBe("var(--surface-overlay)");
   });
@@ -357,11 +358,11 @@ describe("DESIGN.md v0.3 design-language tokens", () => {
     expect(lightVars["shadow-pop"]).toBe("0 8px 24px #1019281f, 0 2px 6px #10192814");
 
     // Two-tier radius (AD-574): the semantic tiers carry the numbers, and the
-    // legacy names plans 202-203 read still resolve to them.
+    // legacy names plans 202-203 read alias them.
     expect(darkVars["radius-control"]).toBe("8px");
     expect(darkVars["radius-container"]).toBe("12px");
-    expect(darkVars["rounded-sm"]).toBe(darkVars["radius-control"]);
-    expect(darkVars["rounded-md"]).toBe(darkVars["radius-container"]);
+    expect(darkVars["rounded-sm"]).toBe("var(--radius-control)");
+    expect(darkVars["rounded-md"]).toBe("var(--radius-container)");
 
     // Reduced-motion fold: durations collapse to 1ms.
     const reduceVars = cssCustomProperties(extractBlock(css, "@media (prefers-reduced-motion: reduce) {"));
@@ -454,12 +455,12 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(css).not.toMatch(/var\(--(?:background|gray|brand|red|blue|amber|green|teal|pink|purple)-/);
 
     // The destructive hover derives from the solid rather than naming a step
-    // (the palette reduction removed the step the old hover used), and it must
-    // be a *different* face — a hover that paints the resting colour deletes
-    // the state without failing anything else.
-    expect(rootVars["destructive-hover"]).toContain("color-mix(");
-    expect(rootVars["destructive-hover"]).toContain("var(--tone-danger-solid)");
-    expect(rootVars["destructive-hover"]).not.toBe(rootVars["destructive"]);
+    // (the palette reduction removed the step the old hover used). An engine
+    // without `color-mix` must still get a valid value, so the plain solid is
+    // declared first and the derived face overrides it behind @supports.
+    expect(rootVars["destructive-hover"]).toBe(rootVars["destructive"]);
+    const guarded = extractBlock(css, "@supports (color: color-mix(in srgb, red, blue)) {");
+    expect(cssCustomProperties(guarded)["destructive-hover"]).toContain("color-mix(");
 
     // Theme coupling (QC round 1 F-001): the hover steps must exist as
     // --color-* keys in `@theme inline`. Tailwind v4 CSS-first config
@@ -503,13 +504,19 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const dark = cssCustomProperties(extractBlock(tokens, ":root {"));
     const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
 
-    const hoverExpression = bridgeVars["destructive-hover"]!;
+    // The derived face lives in the @supports block; the plain solid in `:root`
+    // is its fallback.
+    const hoverExpression =
+      cssCustomProperties(
+        extractBlock(await Bun.file(BRIDGE).text(), "@supports (color: color-mix(in srgb, red, blue)) {"),
+      )["destructive-hover"]!;
     const weightPercent = /color-mix\(in srgb,\s*var\(--tone-danger-solid\)\s+(\d+)%,\s*var\(--text-primary\)\)/
       .exec(hoverExpression)?.[1];
     // The derivation is a colour relationship; pinning the numbers would let a
     // hand-written hex pass as "derived".
     expect(weightPercent, "destructive hover must derive from the solid and the label face").toBeDefined();
     expect(bridgeVars["destructive"]).toBe("var(--tone-danger-solid)");
+    expect(bridgeVars["destructive-hover"]).toBe("var(--tone-danger-solid)");
 
     const srgb = (value: string): [number, number, number] => {
       const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16) / 255) as [number, number, number];
@@ -765,8 +772,21 @@ describe("SSR STYLE token parity", () => {
     const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
     const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf(':root[data-theme="light"] {')));
 
+    // The stylesheet aliases the legacy radius names onto the semantic tiers
+    // while the SSR face still writes the raw value, so compare what each
+    // resolves to — `var()` chains followed, not the declaration strings.
+    const resolve = (vars: Record<string, string>, name: string): string | undefined => {
+      let value = vars[name];
+      for (let hop = 0; hop < 8 && value !== undefined; hop += 1) {
+        const ref = /^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1];
+        if (ref === undefined) break;
+        value = vars[ref];
+      }
+      return value;
+    };
+
     for (const name of ["rounded-sm", "rounded-md"]) {
-      expect(ssrRoot[name], name).toBe(cssRoot[name]);
+      expect(resolve(cssRoot, name), `--${name}`).toBe(ssrRoot[name]);
     }
   });
 

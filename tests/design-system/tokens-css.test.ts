@@ -72,7 +72,7 @@ describe("generated tokens.css", () => {
     expect(css.slice(0, 400)).toContain("scripts/build-tokens.ts");
   });
 
-  test("declares 26 survivors and 14 transitional steps, and no other palette step", () => {
+  test("declares 26 survivors and 11 transitional steps, and no other palette step", () => {
     const declaredSteps = [
       ...Object.keys(ROOT),
       ...Object.keys(LIGHT),
@@ -81,7 +81,7 @@ describe("generated tokens.css", () => {
     expect(unique).toEqual(
       [...survivorSteps, ...transitionalSteps.map((s) => s.name)].sort(),
     );
-    expect(unique).toHaveLength(40);
+    expect(unique).toHaveLength(37);
   });
 
   test("every transitional declaration carries the plan that closes it", () => {

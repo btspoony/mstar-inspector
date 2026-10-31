@@ -63,26 +63,27 @@ const D14_SURVIVORS = [
  * D14a's transitional set: dropped by the band rule, kept only because a plan
  * that has not run still consumes each one. The owner is the plan that closes
  * it, and task 3 emits the declarations (with these comments) from the source.
+ *
+ * A live list, not a fixed number: a step leaves in the commit that migrates
+ * its last consumer outside `src/design-system/`. `brand-800`, `red-800` and
+ * `green-900` left in task 3.
  */
 const D14A_TRANSITIONAL: readonly { name: string; owner: string }[] = [
   { name: "gray-800", owner: "204 (admin.html)" },
   { name: "gray-alpha-200", owner: "204 (admin.html)" },
-  { name: "brand-800", owner: "201 task 3 (shadcn bridge)" },
-  { name: "red-800", owner: "201 task 3 (shadcn bridge)" },
-  { name: "gray-100", owner: "201 task 3 (shadcn bridge)" },
-  { name: "gray-400", owner: "201 task 3 / 203 (SSR views.ts)" },
-  { name: "green-900", owner: "201 task 3 (tokens.css component block)" },
+  { name: "gray-100", owner: "203 (SSR views.ts)" },
+  { name: "gray-400", owner: "203 (SSR views.ts)" },
   { name: "gray-500", owner: "202 (ui primitives)" },
   { name: "gray-alpha-300", owner: "202 (ListRow)" },
   { name: "amber-800", owner: "203 (SSR views.ts)" },
   { name: "amber-900", owner: "203 (SSR views.ts)" },
-  { name: "red-900", owner: "203 (SSR views.ts) / 201 task 8" },
+  { name: "red-900", owner: "203 (SSR views.ts)" },
   { name: "teal-700", owner: "203 (charts.css)" },
   { name: "pink-700", owner: "203 (charts.css)" },
 ];
 
 describe("palette reduction (D14 / D14a)", () => {
-  test("the declared palette steps are exactly 26 survivors plus 14 transitional", () => {
+  test("the declared palette steps are exactly 26 survivors plus 11 transitional", () => {
     const declaredPalette = tokenNames()
       .primitive.filter((name) => !name.startsWith("font-") && !name.startsWith("breakpoint-"));
     // Both directions, so a step added without a band and a survivor dropped by
@@ -90,13 +91,13 @@ describe("palette reduction (D14 / D14a)", () => {
     expect([...declaredPalette].sort()).toEqual(
       [...D14_SURVIVORS, ...D14A_TRANSITIONAL.map((s) => s.name)].sort(),
     );
-    expect(declaredPalette).toHaveLength(40);
+    expect(declaredPalette).toHaveLength(37);
   });
 
   test("the transitional set is exported as data with an owner per step", () => {
     // Task 3 must be able to emit these declarations from the source rather
     // than from a second hand-maintained list.
-    expect(transitionalSteps).toHaveLength(14);
+    expect(transitionalSteps).toHaveLength(11);
     expect(transitionalSteps.map((s) => ({ name: s.name as string, owner: s.owner }))).toEqual([
       ...D14A_TRANSITIONAL,
     ]);

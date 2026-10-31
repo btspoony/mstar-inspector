@@ -31,11 +31,12 @@ export interface LegacyToken {
 }
 
 export const legacyTokens: readonly LegacyToken[] = [
-  // Radius: the names the two-tier rule (AD-574) replaced. Values are literals
-  // because `tests/spa/tokens.test.ts` holds the SSR STYLE to the same raw
-  // value; the semantic tiers carry the same numbers.
-  { name: "rounded-sm", value: "8px", owner: RADIUS },
-  { name: "rounded-md", value: "12px", owner: RADIUS },
+  // Radius: the names the two-tier rule (AD-574) replaced, aliased onto the
+  // tiers rather than repeating their numbers. The SSR STYLE still declares the
+  // raw values, so `tests/spa/tokens.test.ts` resolves these references when it
+  // compares the two faces.
+  { name: "rounded-sm", value: v("radius-control"), owner: RADIUS },
+  { name: "rounded-md", value: v("radius-container"), owner: RADIUS },
   { name: "rounded-full", value: v("radius-pill"), owner: BADGE },
 
   // The status pill (`StatusBadge.tsx` consumes these through Tailwind's

@@ -44,8 +44,13 @@
      way the system already moves hovers — dark lifts (5.98:1 → 6.58:1 for the
      label), light deepens (4.83:1 → 5.83:1) — and never below 4.5:1.
      Mixing toward `surface-page` would invert that: it darkens on dark and
-     pales on light, which reads as a pressed state, not a hover. */
-  --destructive-hover: color-mix(in srgb, var(--tone-danger-solid) 88%, var(--text-primary));
+     pales on light, which reads as a pressed state, not a hover.
+
+     The plain solid stays as the declared value: an engine without `color-mix`
+     inherits a valid colour (a flat hover, not an invalid declaration that
+     would fall back to the resting fill through `unset`). The derived face
+     arrives in the guarded block at the end of this file. */
+  --destructive-hover: var(--tone-danger-solid);
   --destructive-foreground: var(--on-brand);
   --border: var(--border-default);
   --input: var(--border-default);
@@ -126,4 +131,14 @@ body {
   min-height: 100svh;
   background: var(--surface-page);
   color: var(--text-primary);
+}
+
+/* The derived destructive hover, for engines that support `color-mix`. The
+   fallback (the plain solid) is the `:root` declaration above; this guard only
+   replaces it where the function is understood, so an older engine keeps a
+   valid — if flat — hover instead of an invalid value. */
+@supports (color: color-mix(in srgb, red, blue)) {
+  :root {
+    --destructive-hover: color-mix(in srgb, var(--tone-danger-solid) 88%, var(--text-primary));
+  }
 }
