@@ -165,7 +165,19 @@ export const en = {
   },
   apps: {
     heading: "Apps",
+    /** The header band's one-line description (DESIGN.md header band). */
+    headingDescription: "Each row is one GitHub App; installation scope lives on the App detail.",
     create: "Create GitHub App",
+    /**
+     * The metric band. Three figures only, each proved by `AppsPayload`:
+     * the App count, the count whose status is not `disabled` (the
+     * enable/disable axis — a paused App is still enabled), and the sum of
+     * `health.rejected24h`. Installation and repository counts are not
+     * fields of that payload and are never shown (compass D13).
+     */
+    metricApps: "Apps",
+    metricEnabled: "Enabled",
+    metricRejected24h: "24h rejected",
     /**
      * Why the Create control is disabled. `role`: the caller is not
      * owner/admin of the workspace the page addresses. `workspace`: this

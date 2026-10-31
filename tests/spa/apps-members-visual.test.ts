@@ -699,3 +699,99 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
     expect(html).toContain(t("en", "common.retry"));
   });
 });
+
+describe("Apps list metric band (payload-proved facts only)", () => {
+  /**
+   * Three Apps spanning both status axes: a running one, a paused one
+   * (`status: active` with review off) and a disabled one. Only the last is
+   * not enabled — pause is the review axis, not the enable/disable axis.
+   */
+  const APPS = [
+    appRow({
+      github_app_id: 1,
+      status: "active",
+      review_enabled: 1,
+      health: { latest: null, rejected24h: 2 },
+    }),
+    appRow({
+      github_app_id: 2,
+      status: "active",
+      review_enabled: 0,
+      health: { latest: null, rejected24h: 0 },
+    }),
+    appRow({
+      github_app_id: 3,
+      status: "disabled",
+      review_enabled: 1,
+      health: { latest: null, rejected24h: 1 },
+    }),
+  ];
+
+  /** The page's own loaded face under its workspace pathname. */
+  function renderFace(apps: AppsPayload["apps"], state: "ok" | "error" = "ok"): string {
+    return decoded(
+      withLocation("/dashboard/acme/apps", () =>
+        renderToStaticMarkup(
+          createElement(AppsView, {
+            locale: "en",
+            state,
+            payload:
+              state === "ok" ? { viewer: { login: "mallory", role: "admin" }, apps } : null,
+            canCreate: true,
+            unavailableReason: "",
+            onRetry: () => {},
+          }),
+        ),
+      ),
+    );
+  }
+
+  /** Each rendered metric as [key, value], in band order. */
+  const METRIC_CELL =
+    /data-slot="metric-key"[^>]*>([^<]*)<\/span><span data-slot="metric-value"[^>]*>([^<]*)</g;
+
+  test("three metric keys, each an AppsPayload fact", () => {
+    const html = renderFace(APPS);
+    expect([...html.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
+      [t("en", "apps.metricApps"), "3"],
+      [t("en", "apps.metricEnabled"), "2"],
+      [t("en", "apps.metricRejected24h"), "3"],
+    ]);
+    // Exactly three: an installation or repository count is not on the payload
+    // and can never join the band (compass D13).
+    expect(html.match(/data-slot="metric"/g)).toHaveLength(3);
+    // The header band carries its one-line description beside the title.
+    expect(html).toContain(`>${t("en", "apps.headingDescription")}</p>`);
+  });
+
+  test("the empty list keeps its guidance and reports three honest zeroes", () => {
+    const empty = renderFace([]);
+    expect(empty).toContain(t("en", "apps.emptyTitle"));
+    expect([...empty.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
+      [t("en", "apps.metricApps"), "0"],
+      [t("en", "apps.metricEnabled"), "0"],
+      [t("en", "apps.metricRejected24h"), "0"],
+    ]);
+  });
+
+  test("the error face has no facts to band and keeps its existing copy", () => {
+    const failed = renderFace([], "error");
+    expect(failed).not.toContain('data-slot="metric-band"');
+    expect(failed).toContain(t("en", "common.loadFailed"));
+  });
+
+  test("the row columns stay the five payload-proved facts", () => {
+    // The band is the only addition: the column set is unchanged, so no
+    // unproved count can arrive as a cell either.
+    const headers = [...renderList(APPS).matchAll(/<th [^>]*>([\s\S]*?)<\/th>/g)].map((cell) =>
+      (cell[1] ?? "").trim(),
+    );
+    expect(headers).toEqual([
+      t("en", "apps.tableName"),
+      t("en", "apps.tableStatus"),
+      t("en", "apps.tableHealth"),
+      t("en", "apps.tableCreator"),
+      t("en", "apps.detail"),
+    ]);
+  });
+});

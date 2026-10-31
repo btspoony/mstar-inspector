@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { t } from "../../i18n";
 import { Button, StatusBadge } from "@design-system";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
+import { MetricBand } from "@/components/MetricBand";
 import { PageHeader } from "@/components/PageHeader";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
@@ -116,11 +117,36 @@ export function AppsView({
   const appsEmpty = state === "ok" && payload !== null && payload.apps.length === 0;
   const createAction = <CreateAppButton locale={locale} canCreate={canCreate} reason={unavailableReason} />;
 
+  // The metric band is payload arithmetic only — three figures `AppsPayload`
+  // can prove. An installation or repository count is not on that payload, so
+  // it can never join them (compass D13). "Enabled" is the status axis the
+  // App's own enable/disable actions name; a paused App is enabled but not
+  // reviewing, so `review_enabled` stays out of this figure.
+  const metrics =
+    state === "ok" && payload
+      ? [
+          { key: t(locale, "apps.metricApps"), value: payload.apps.length },
+          {
+            key: t(locale, "apps.metricEnabled"),
+            value: payload.apps.filter((app) => app.status !== "disabled").length,
+          },
+          {
+            key: t(locale, "apps.metricRejected24h"),
+            value: payload.apps.reduce((total, app) => total + app.health.rejected24h, 0),
+          },
+        ]
+      : [];
+
   return (
     <div className="flex flex-col gap-6">
       {/* One create-form instance on the page: while the empty state
           carries the action, the header yields its slot to it. */}
-      <PageHeader title={t(locale, "apps.heading")} actions={appsEmpty ? null : createAction} />
+      <PageHeader
+        title={t(locale, "apps.heading")}
+        description={t(locale, "apps.headingDescription")}
+        actions={appsEmpty ? null : createAction}
+        metrics={<MetricBand metrics={metrics} />}
+      />
       {state === "error" ? <ErrorState locale={locale} onRetry={onRetry} /> : null}
       {state === "ok" && payload ? (
         appsEmpty ? (
