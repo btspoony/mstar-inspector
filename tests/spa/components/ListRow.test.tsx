@@ -1,12 +1,12 @@
 /**
- * ListRow — DESIGN.md `list-row`: isomorphic rows in an in-card inset on the
- * `border-default` hairline at the control radius, rows on `surface-inset` at
- * `row-h-compact`, a `border-subtle` hairline between them, slots fixed as
- * identity → status → meta → actions.
+ * ListRow — DESIGN.md `list-row`: isomorphic rows in an in-card inset with a
+ * fixed slot order (identity → status → meta → actions), an omitted optional
+ * slot rendering nothing.
  *
  * Static render: every slot is a prop, so the emitted markup is asserted for
- * the group container, the slot order, the named row height and the semantic
- * token vocabulary (never a primitive palette step).
+ * the slot order, the rendered text and the trailing-action placement — never
+ * a design-token class. The inset, hairline and row-height vocabulary lives in
+ * `tests/design-system/surface-idioms.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
@@ -42,16 +42,16 @@ const between = (from: string, to: string) => {
 };
 
 describe("ListRowGroup", () => {
-  test("container is the in-card inset on the border-default hairline", () => {
+  test("container is the in-card inset group", () => {
     expect(html).toContain('data-slot="list-row-group"');
-    expect(html).toContain("border-(--border-default)");
-    expect(html).toContain("rounded-(--radius-control)");
+    expect(html).toContain("overflow-hidden");
     expect(html).not.toMatch(PRIMITIVE_STEP);
   });
 
-  test("rows are separated by the 1px border-subtle hairline", () => {
-    expect(html).toContain("divide-y");
-    expect(html).toContain("divide-(--border-subtle)");
+  test("rows are the group's children, divided from each other", () => {
+    const group = between('data-slot="list-row-group"', "");
+    expect(group).toContain("divide-y");
+    expect(group.match(/data-slot="list-row"/g)).toHaveLength(2);
   });
 });
 
@@ -67,26 +67,21 @@ describe("ListRow", () => {
     expect(meta).toBeLessThan(actions);
   });
 
-  test("identity rides label-14 in font-mono over a 76px minimum column", () => {
+  test("identity renders the caller's id on the mono stack", () => {
     const identity = between('data-slot="list-row-identity"', 'data-slot="list-row-status"');
+    expect(identity).toContain("sk-proj-…4f2a");
     expect(identity).toContain("font-mono");
     expect(identity).toContain("min-w-[76px]");
-    expect(identity).toContain("text-(length:--typo-label-14-size)");
   });
 
-  test("meta rides label-12 in the muted text token", () => {
+  test("meta renders the caller's line in its own slot", () => {
     const meta = between('data-slot="list-row-meta"', 'data-slot="list-row-actions"');
-    expect(meta).toContain("text-(length:--typo-label-12-size)");
-    expect(meta).toMatch(/text-\(--text-(?:muted|secondary|faint)\)/);
     expect(meta).toContain("Used 3 days ago");
   });
 
-  test("row fill, row-h-compact height, padding, column gap and trailing action placement", () => {
+  test("row padding, column gap and trailing action placement", () => {
     const row = between('data-slot="list-row"', 'data-slot="list-row-identity"');
-    // The fill is a semantic surface, and the height is the named token — not
-    // a hand-derived vertical padding.
-    expect(row).toMatch(/bg-\(--(?:surface|tone)-[a-z-]+\)/);
-    expect(row).toContain("h-(--row-h-compact)");
+    // A hand-derived vertical padding must never replace the row face.
     expect(row).not.toContain("py-[9px]");
     expect(row).toContain("px-3");
     expect(row).toContain("gap-3");

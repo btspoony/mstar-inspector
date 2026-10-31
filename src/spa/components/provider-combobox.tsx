@@ -136,6 +136,7 @@ export function ProviderComboboxPanel({
                   id={rowId}
                   role="option"
                   aria-selected={provider.id === value}
+                  data-active={activeId === rowId ? "true" : undefined}
                   className={cn(
                     "flex w-full cursor-pointer items-center gap-2 rounded-sm py-1.5 pr-2 pl-2 text-sm select-none hover:bg-accent",
                     activeId === rowId && "bg-accent",

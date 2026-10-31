@@ -1,11 +1,13 @@
 /**
  * GroupCard — DESIGN.md `group-card`: the ui/card surface with Card's
- * symmetric padding split into a header band (at least one `row-h-comfort`,
- * growing when a summary line is present) and a body (`0 16px 14px`),
- * title + badge, summary and action slots.
+ * symmetric padding split into a header band and a body, title + badge,
+ * summary and action slots.
  *
  * Static render: every input is a prop, so the emitted markup is asserted for
- * the slot, the header composition and the Task 1 token classes.
+ * the slot composition, the rendered text and the padding hand-off — never a
+ * design-token class. The surface and hairline colour are the Card primitive's
+ * contract, asserted in `tests/design-system/surface-idioms.test.ts` where the
+ * token vocabulary lives.
  */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
@@ -39,19 +41,17 @@ const between = (from: string, to: string) => {
 };
 
 describe("GroupCard", () => {
-  test("root is the card surface under the group-card slot, padding split off", () => {
+  test("root is the card surface with its padding handed to the slots", () => {
     expect(html).toContain('data-slot="group-card"');
-    expect(html).toContain("bg-card");
     expect(html).toContain("gap-0");
     expect(html).toContain("p-0");
-    // The hairline colour is the card primitive's; this wrapper restates no
-    // border colour of its own. `tests/design-system/surface-idioms.test.ts`
-    // resolves the inherited edge through tokens.css.
   });
 
-  test("header band is at least one named comfort row", () => {
+  test("the header band carries the title, badge and action", () => {
     const header = between('data-slot="card-header"', 'data-slot="card-content"');
-    expect(header).toContain("min-h-(--row-h-comfort)");
+    expect(header).toContain("OpenAI");
+    expect(header).toContain("3 keys");
+    expect(header).toContain("Add key");
     expect(header).toContain("px-4");
   });
 
@@ -59,7 +59,6 @@ describe("GroupCard", () => {
     const title = between('data-slot="card-title"', 'data-slot="card-description"');
     expect(title).toContain("OpenAI");
     expect(title).toContain("3 keys");
-    expect(title).toContain("text-(length:--typo-heading-16-size)");
   });
 
   test("actions render in the card-action position", () => {
@@ -67,13 +66,15 @@ describe("GroupCard", () => {
     expect(action).toContain("Add key");
   });
 
-  test("summary rides the label-12 step in the muted text token", () => {
+  test("summary rides the description slot after the title", () => {
     const description = between('data-slot="card-description"', 'data-slot="card-action"');
-    expect(description).toContain("text-(length:--typo-label-12-size)");
-    expect(description).toMatch(/text-\(--text-(?:muted|secondary|faint)\)/);
+    expect(description).toContain("api · api.openai.com · 3 models");
+    expect(html.indexOf('data-slot="card-title"')).toBeLessThan(
+      html.indexOf('data-slot="card-description"'),
+    );
   });
 
-  test("body carries the 0 16px 14px padding", () => {
+  test("body carries the card's padding hand-off", () => {
     const body = between('data-slot="card-content"', "");
     expect(body).toContain("px-4");
     expect(body).toContain("pt-0");

@@ -111,9 +111,11 @@ const survivorLight: SurvivorColors = {
  * consumer outside `src/design-system/` still reads it, and it leaves in the
  * commit that migrates that last consumer. `brand-800`, `red-800` and
  * `green-900` left that way in task 3 — the bridge's hover faces and the
- * component-block notice foregrounds were their last readers — and `teal-700`,
+ * component-block notice foregrounds were their last readers — `teal-700`,
  * `pink-700` and `gray-alpha-300` left with plan 202 task 4, where the charts
- * moved onto the six closed slots and ListRow onto `border-subtle`.
+ * moved onto the six closed slots and ListRow onto `border-subtle`, and
+ * `gray-500` left with plan 202 task 7, which replaced the last test class that
+ * named it with a behaviour assertion.
  */
 const transitionalValues = {
   // admin.html's inline styles; plan 204 re-tokens that console.
@@ -122,8 +124,6 @@ const transitionalValues = {
   // The SSR dashboard face, re-pointed onto semantics.
   "gray-100": { dark: "#15181f", light: "#fafbfd", owner: "203 (SSR views.ts)" },
   "gray-400": { dark: "#39404d", light: "#ccd4df", owner: "203 (SSR views.ts)" },
-  // Primitives rebuilt on the semantic layer.
-  "gray-500": { dark: "#4d5563", light: "#9aa5b4", owner: "202 (ui primitives)" },
   // The SSR face's notices.
   "amber-800": { dark: "#fcd34d", light: "#92400e", owner: "203 (SSR views.ts)" },
   "amber-900": { dark: "#fde68a", light: "#78350f", owner: "203 (SSR views.ts)" },

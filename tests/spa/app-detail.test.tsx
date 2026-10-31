@@ -203,7 +203,6 @@ describe("tab shell source contracts", () => {
     const bar = detailPage.slice(detailPage.indexOf("<TabsList"), detailPage.indexOf("</TabsList>"));
     expect(bar).toMatch(/<TabsList\s+variant="line"/);
     expect(bar).toContain("w-full");
-    expect(bar).toContain("border-b border-border");
     expect(bar).toContain("justify-start");
     // 40px bar is load-bearing: the class must carry the same variant-scoped
     // prefix as the component base (`group-data-[orientation=horizontal]/tabs:h-9`)
@@ -211,9 +210,9 @@ describe("tab shell source contracts", () => {
     // Tailwind v4 cascade and would ship a 36px bar.
     expect(bar).toContain("group-data-[orientation=horizontal]/tabs:h-10");
     expect(bar).not.toMatch(/(^|\s)h-10(\s|$)/);
-    expect(detailPage).toContain("text-(length:--typo-heading-16-size)");
-    expect(detailPage).toContain("leading-(--typo-heading-16-line)");
-    expect(detailPage).toContain("tracking-(--typo-heading-16-tracking)");
+    // The line face is opted into once; its hairline colour and the trigger's
+    // type step are the variant's face, asserted where the token vocabulary
+    // lives rather than as class strings here.
     // The line variant is set exactly once — this shell bar; no other face
     // in the page opts in (the chains panel keeps the component default).
     expect(detailPage.match(/variant="line"/g)?.length).toBe(1);

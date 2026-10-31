@@ -40,7 +40,6 @@
         "gray-alpha-200": "#ffffff17",
         "gray-100": "#15181f",
         "gray-400": "#39404d",
-        "gray-500": "#4d5563",
         "amber-800": "#fcd34d",
         "amber-900": "#fde68a",
         "red-900": "#fecaca"
@@ -248,7 +247,6 @@
         "gray-alpha-200": "#10192814",
         "gray-100": "#fafbfd",
         "gray-400": "#ccd4df",
-        "gray-500": "#9aa5b4",
         "amber-800": "#92400e",
         "amber-900": "#78350f",
         "red-900": "#7f1d1d"

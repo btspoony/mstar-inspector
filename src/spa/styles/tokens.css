@@ -66,9 +66,6 @@
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --gray-400: #39404d;
-  /* D14a transitional — its last consumer is closed by plan 202 (ui primitives);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-500: #4d5563;
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --amber-800: #fcd34d;
@@ -332,9 +329,6 @@
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --gray-400: #ccd4df;
-  /* D14a transitional — its last consumer is closed by plan 202 (ui primitives);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-500: #9aa5b4;
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --amber-800: #92400e;

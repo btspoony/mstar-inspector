@@ -1,12 +1,11 @@
 /**
- * DataTable — the one table shell, header face, row heights, composite cell
- * and empty slot.
+ * DataTable — the one table shell, header face, composite cell and empty slot.
  *
- * The assertions name the property, not a class: a hairline/band must resolve
- * through the semantic vocabulary (never a primitive palette step), and a row
- * must ride one of the two named row heights. Static render: columns and rows
- * are render props, so the test drives real cells and the page-owned empty
- * state without a DOM runner.
+ * The assertions name the rendered structure, the slot attributes and the text:
+ * the header band, the body rows, the alignment contract and both composite
+ * lines. The hairline / row-height vocabulary belongs to the table idiom in
+ * `tests/design-system/surface-idioms.test.ts`; nothing here pins a
+ * design-token class, so a token rename cannot false-fail a page behaviour.
  */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
@@ -36,40 +35,31 @@ const headClass = (html: string, label: string) =>
 const cellClass = (html: string, content: string) =>
   html.match(new RegExp(`<td [^>]*class="([^"]*)">${content}</td>`))?.[1] ?? "";
 
-const shellClass = (html: string) => html.match(/^<div class="([^"]*)"/)?.[1] ?? "";
 const rowTags = (html: string) => [...html.matchAll(/<tr[^>]*>/g)].map((m) => m[0]);
 
 /** A primitive palette step: `--gray-700`, `--background-200`, `--blue-700`. */
 const PRIMITIVE_STEP = /--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-[0-9a-z]+/;
 
 describe("DataTable", () => {
-  test("the shell is the container face with semantic hairlines, not palette steps", () => {
+  test("the shell wraps one table with a header band and no palette steps", () => {
     const html = render({ columns, rows, rowKey: (row) => row.slug });
-    const shell = shellClass(html);
-    // Container radius + a semantic hairline on the shell, and row hairlines
-    // on the same vocabulary: bare `border` / `border-b` carry width only, so
-    // preflight leaves border-color at currentColor (DESIGN.md Table).
-    expect(shell).toContain("rounded-md");
-    expect(shell).toMatch(/border-\(--border-(?:subtle|default|strong)\)/);
-    expect(shell).toContain("[&amp;_tr]:border-(--border-subtle)");
-    expect(shell).not.toMatch(PRIMITIVE_STEP);
-    // Header band is a semantic surface (DESIGN.md Table: `surface-raised`),
-    // and it opts out of the primitive's row hover.
-    const thead = html.match(/<thead[^>]*class="([^"]*)"/)?.[1] ?? "";
-    expect(thead).toMatch(/bg-\(--(?:surface|tone)-[a-z-]+\)/);
-    expect(thead).not.toMatch(PRIMITIVE_STEP);
-    expect(html).toContain("hover:bg-inherit");
+    expect(html).toStartWith("<div ");
+    expect(html.match(/<table/g)).toHaveLength(1);
+    expect(html).toMatch(/<thead[^>]*>.*>App<\/th>/);
+    expect(html).not.toMatch(PRIMITIVE_STEP);
   });
 
-  test("the header rides row-h-compact and every body row row-h-comfort", () => {
+  test("every body row renders its cells, under one header row", () => {
     const html = render({ columns, rows, rowKey: (row) => row.slug });
     const [header, ...body] = rowTags(html);
-    expect(header).toContain("h-(--row-h-compact)");
+    expect(header).toBeDefined();
     expect(body).toHaveLength(rows.length);
-    for (const row of body) expect(row).toContain("h-(--row-h-comfort)");
+    const thead = html.slice(html.indexOf("<thead"), html.indexOf("</thead>"));
+    expect(thead).toContain("<th");
+    expect(html.match(/<td/g)).toHaveLength(rows.length * columns.length);
   });
 
-  test("a page row class merges into the row face instead of replacing its height", () => {
+  test("a page row class merges into the row face", () => {
     const html = render({
       columns,
       rows,
@@ -77,15 +67,13 @@ describe("DataTable", () => {
       rowProps: (row) => ({ className: "cursor-pointer", id: `row-${row.slug}` }),
     });
     const [, firstRow] = rowTags(html);
-    expect(firstRow).toContain("h-(--row-h-comfort)");
     expect(firstRow).toContain("cursor-pointer");
     expect(html).toContain('id="row-demo"');
     expect(html).toContain('id="row-other"');
   });
 
-  test("headers ride the label-12 step and cells come from the render props", () => {
+  test("headers and cells come from the render props", () => {
     const html = render({ columns, rows, rowKey: (row) => row.slug });
-    expect(headClass(html, "App")).toContain("text-xs tracking-(--typo-label-12-tracking)");
     expect(html).toContain(">App</th>");
     expect(html).toContain(">Findings</th>");
     expect(html).toContain(">demo<");
@@ -123,11 +111,7 @@ describe("DataTable", () => {
     expect(html.slice(primary, meta)).toContain("demo");
     expect(html.slice(meta)).toContain("App 3");
     expect(html).toContain("App 7");
-    // The meta line is the quieter face: label-12 in a muted text token.
-    const metaClass = html.match(/<span data-slot="cell-meta" class="([^"]*)"/)?.[1] ?? "";
-    expect(metaClass).toContain("text-(length:--typo-label-12-size)");
-    expect(metaClass).toMatch(/text-\(--text-(?:muted|secondary|faint)\)/);
-    expect(metaClass).not.toMatch(PRIMITIVE_STEP);
+    expect(html).not.toMatch(PRIMITIVE_STEP);
   });
 
   test("empty slot replaces the table instead of a bare header band", () => {

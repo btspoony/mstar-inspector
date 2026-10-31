@@ -42,7 +42,6 @@ colors:
   gray-alpha-200: "#ffffff17"
   gray-100: "#15181f"
   gray-400: "#39404d"
-  gray-500: "#4d5563"
   amber-800: "#fcd34d"
   amber-900: "#fde68a"
   red-900: "#fecaca"
@@ -137,7 +136,6 @@ themes:
       gray-alpha-200: "#ffffff17"
       gray-100: "#15181f"
       gray-400: "#39404d"
-      gray-500: "#4d5563"
       amber-800: "#fcd34d"
       amber-900: "#fde68a"
       red-900: "#fecaca"
@@ -224,7 +222,6 @@ themes:
       gray-alpha-200: "#10192814"
       gray-100: "#fafbfd"
       gray-400: "#ccd4df"
-      gray-500: "#9aa5b4"
       amber-800: "#92400e"
       amber-900: "#78350f"
       red-900: "#7f1d1d"
@@ -626,19 +623,20 @@ observation, not an assertion. 62 of the 96 declared steps went that way.
 
 ### The D14a transitional live list
 
-Eight steps survive the band rule only because a later plan still reads them.
+Seven steps survive the band rule only because a later plan still reads them.
 This is a **live list, not a fixed number**: a step belongs to it only while a
 consumer outside `src/design-system/` still reads it, and it leaves in the
 commit that migrates that last consumer (`brand-800`, `red-800` and
 `green-900` left that way; `gray-alpha-300`, `teal-700` and `pink-700` left
-with plan 202 task 4). The generated stylesheet prints the owner
-above every transitional declaration; that comment is authoritative.
+with plan 202 task 4, and `gray-500` left with plan 202 task 7 once the last
+test class that named it was replaced by a behaviour assertion). The generated
+stylesheet prints the owner above every transitional declaration; that comment
+is authoritative.
 
 | Step | Closed by |
 |------|-----------|
 | `gray-800`, `gray-alpha-200` | plan 204 (admin.html) |
 | `gray-100`, `gray-400`, `amber-800`, `amber-900`, `red-900` | plan 203 (SSR views.ts) |
-| `gray-500` | plan 202 (ui primitives) |
 
 Nothing else may consume them; a new consumer of a transitional step is a
 defect, not a loophole.
