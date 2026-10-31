@@ -21,6 +21,7 @@
  * second page.
  *
  * Usage:
+ *   bun run build:spa                              # the build — runs this generator, then vite
  *   bun scripts/build-design-preview.ts            # write dist/design-preview.html
  *   bun scripts/build-design-preview.ts --check    # exit 1 when an entry is missing
  */
