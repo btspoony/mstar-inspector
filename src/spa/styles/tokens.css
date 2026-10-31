@@ -172,6 +172,7 @@
   --surface-card: var(--background-200);
   --surface-inset: var(--gray-200);
   --surface-overlay: var(--background-300);
+  --surface-scrim: #0a0c10cc;
   --border-subtle: #ffffff1a;
   --border-default: var(--gray-alpha-400);
   --border-strong: var(--gray-alpha-500);
@@ -389,6 +390,7 @@
   --surface-raised: var(--background-200);
   --surface-card: var(--background-100);
   --surface-inset: var(--background-200);
+  --surface-scrim: #101928cc;
   --border-subtle: #1019280f;
   --tone-neutral-fg: var(--gray-700);
   --tone-neutral-solid: var(--gray-600);

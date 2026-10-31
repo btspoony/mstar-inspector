@@ -56,6 +56,7 @@ colors:
   surface-card: "#15181f"
   surface-inset: "#1b1f27"
   surface-overlay: "#212630"
+  surface-scrim: "#0a0c10cc"
   border-subtle: "#ffffff1a"
   border-default: "#ffffff2e"
   border-strong: "#ffffff3d"
@@ -153,6 +154,7 @@ themes:
       surface-card: "#15181f"
       surface-inset: "#1b1f27"
       surface-overlay: "#212630"
+      surface-scrim: "#0a0c10cc"
       border-subtle: "#ffffff1a"
       border-default: "#ffffff2e"
       border-strong: "#ffffff3d"
@@ -242,6 +244,7 @@ themes:
       surface-card: "#ffffff"
       surface-inset: "#f3f5f8"
       surface-overlay: "#e4e9f0"
+      surface-scrim: "#101928cc"
       border-subtle: "#1019280f"
       border-default: "#10192824"
       border-strong: "#10192836"
@@ -675,6 +678,13 @@ rule honest:
 (pressed/selected planes, overlays). Dark steps the planes apart with light;
 light steps them with gray. Light `surface-card` is the page white itself —
 cards read by hairline and shadow, not by fill.
+
+`surface-scrim` is not a plane but the veil under an overlay: the page plane at
+80% in dark, and the ink base at the same 80% in light. It is one of the few
+tokens that does not invert with the theme, because a scrim must darken what
+sits behind it — a white veil would erase light's hairline-drawn cards and give
+the equally white card above it no separation. One name, two values; overlays
+read it, never a literal.
 
 ### Borders
 
