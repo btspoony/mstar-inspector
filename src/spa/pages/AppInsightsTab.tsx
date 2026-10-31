@@ -1,8 +1,17 @@
 import { useEffect, useState } from "react";
 import { t } from "../../i18n";
-import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  CardContent,
+  CardDescription,
+  CardHeader,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";

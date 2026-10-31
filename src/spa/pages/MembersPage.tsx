@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { t, type Locale } from "../../i18n";
-import { Button } from "@/components/ui/button";
 import {
+  Button,
   Dialog,
   DialogClose,
   DialogContent,
@@ -10,16 +10,18 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+  Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@design-system";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { PageHeader } from "@/components/PageHeader";
 import { StatCard, StatGrid } from "@/components/StatCard";

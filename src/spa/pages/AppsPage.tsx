@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { t } from "../../i18n";
-import { Button } from "@/components/ui/button";
+import { Button } from "@design-system";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { PageHeader } from "@/components/PageHeader";
 import { StatusBadge } from "@/components/StatusBadge";

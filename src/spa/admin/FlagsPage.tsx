@@ -10,16 +10,16 @@
  * cancel queued work.
  */
 import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
 import {
+  Button,
   Dialog,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Toggle } from "@/components/ui/toggle";
+  Toggle,
+} from "@design-system";
 import { t, type DictionaryKey } from "../../i18n";
 import type { Locale } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";

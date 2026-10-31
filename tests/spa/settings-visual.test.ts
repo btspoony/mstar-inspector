@@ -74,7 +74,7 @@ describe("SectionCard tier idiom (AD-591)", () => {
   test("the idiom is single-point: a hand-written wrapper composing ui/card, not a copy-in edit", () => {
     // AD-591: SectionCard lives in components/ (the extension surface), and
     // composes the copy-in Card primitive rather than forking it.
-    expect(sectionCard).toContain('import { Card, CardTitle } from "@/components/ui/card"');
+    expect(sectionCard).toMatch(/import \{[^}]*\bCard\b[^}]*\} from "@design-system";/);
     // The tier prop is the closed two-value union — no third tier can creep in.
     expect(sectionCard).toContain('type SectionTier = "primary" | "secondary"');
     // Tier faces are spelled out exactly once.

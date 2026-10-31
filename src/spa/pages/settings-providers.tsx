@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { Plus } from "lucide-react";
 import { t } from "../../i18n";
-import { Button } from "@/components/ui/button";
-import { CardAction, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
+import { Button, CardAction, CardContent, CardDescription, CardHeader } from "@design-system";
 import { GroupCard, GroupCardBody, GroupCardHeader } from "../components/GroupCard";
 import { ListRow, ListRowGroup } from "../components/ListRow";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";

@@ -8,10 +8,17 @@
  * its id and expiry are the server's to mint.
  */
 import { useState, type FormEvent } from "react";
-import { Button } from "@/components/ui/button";
-import { CardContent, CardHeader } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Button,
+  CardContent,
+  CardHeader,
+  Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@design-system";
 import { t, type Locale } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";

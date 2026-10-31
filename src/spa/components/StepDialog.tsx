@@ -20,8 +20,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
+  cn,
+} from "@design-system";
 
 export function StepDialog({
   open,

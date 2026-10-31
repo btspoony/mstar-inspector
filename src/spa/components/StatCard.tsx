@@ -6,7 +6,7 @@
  * standalone use. Both are props-only: pages pass resolved strings.
  */
 import type { ReactNode } from "react";
-import { cn } from "@/lib/utils";
+import { cn } from "@design-system";
 
 /**
  * The fill width is a static class ladder because Tailwind only compiles

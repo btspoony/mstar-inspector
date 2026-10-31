@@ -20,6 +20,16 @@
   },
   // src/design-system lives in this program (not the root one) so React-era
   // primitives and patterns compile with DOM lib; the DOM-free token sources
-  // remain reachable from the root program via scripts/** imports.
-  "include": ["src/spa", "src/i18n", "src/version.ts", "src/design-system", "tests/spa"]
+  // remain reachable from the root program via scripts/** imports. The
+  // preview generator and the design-system suite import primitives, so they
+  // live here too rather than dragging DOM lib into the worker program.
+  "include": [
+    "src/spa",
+    "src/i18n",
+    "src/version.ts",
+    "src/design-system",
+    "tests/spa",
+    "tests/design-system",
+    "scripts/build-design-preview.tsx",
+  ]
 }

@@ -2,9 +2,11 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
-import { Button } from "@/components/ui/button";
-import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import {
+  Button,
+  CardContent,
+  CardDescription,
+  CardHeader,
   Dialog,
   DialogClose,
   DialogContent,
@@ -12,9 +14,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import {
+  Input,
   Select,
   SelectContent,
   SelectGroup,
@@ -22,9 +22,13 @@ import {
   SelectLabel,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@design-system";
 import { AppAvatar } from "../components/AppAvatar";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
 import { postForm, putJson } from "../api";

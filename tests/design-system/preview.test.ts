@@ -12,6 +12,9 @@
  *    that shows nothing, and no one finds out.
  * 3. **The grid faces the brief names are all there**: tone × strength, the
  *    control heights, the operator-surface remap.
+ * 4. **Every exported primitive is accounted for**: a specimen per primitive,
+ *    and every export either paints its own `data-slot` or is declared
+ *    unpaintable (a Radix portal or a context root) with its reason.
  */
 import { describe, expect, test } from "bun:test";
 
@@ -122,8 +125,45 @@ describe("design-system preview", () => {
     expect(coverage.missing).toContain("light: no specimen for warn × solid");
   });
 
+  test("carries a specimen for every exported primitive, and accounts for the impaintable ones", () => {
+    // The primitive section closes in three directions at once: one specimen
+    // per primitive; every export either paints its own slot or is declared
+    // unpaintable with a reason; nothing declared outlives its export.
+    const coverage = previewCoverage(html);
+    expect(coverage.specimens).toBe(coverage.expectedSpecimens);
+    expect(coverage.expectedSpecimens).toBe(30);
+    expect(coverage.painted).toBe(coverage.expectedPainted);
+    expect(coverage.unpainted).toBe(coverage.expectedUnpainted);
+    // The count it compares is non-zero in both directions, so a page that
+    // rendered nothing could not pass as "everything is declared".
+    expect(coverage.expectedPainted).toBeGreaterThan(0);
+    expect(coverage.expectedUnpainted).toBeGreaterThan(0);
+  });
+
+  test("fails when a primitive specimen is missing from a theme", () => {
+    const dropped = html.split('data-primitive="Toggle"').join('data-primitive-dropped="Toggle"');
+    expect(dropped).not.toBe(html);
+
+    const coverage = previewCoverage(dropped);
+    expect(coverage.ok).toBe(false);
+    expect(coverage.missing).toContain("dark: no primitive specimen for Toggle");
+  });
+
+  test("fails when an exported primitive neither paints nor is declared", () => {
+    // Drop ToggleGroup's own slot: the export is still in the barrel, so the
+    // page owes either markup or a reason — and it now gives neither.
+    const stripped = html.split('data-slot="toggle-group"').join('data-slot="toggle-group-removed"');
+    expect(stripped).not.toBe(html);
+
+    const coverage = previewCoverage(stripped);
+    expect(coverage.ok).toBe(false);
+    expect(coverage.missing).toContain(
+      "dark: ToggleGroup neither paints its own slot nor is declared in UNPAINTED",
+    );
+  });
+
   test("names its generator, so a hand edit is visible", () => {
     expect(html).toContain("GENERATED — do not edit.");
-    expect(html).toContain("bun scripts/build-design-preview.ts");
+    expect(html).toContain("bun scripts/build-design-preview.tsx");
   });
 });

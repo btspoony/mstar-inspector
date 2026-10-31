@@ -12,8 +12,7 @@
  * loading indicator, folded under prefers-reduced-motion).
  */
 import { t, type Locale } from "../../../i18n";
-import { cn } from "@/lib/utils";
-import { Skeleton } from "@/components/ui/skeleton";
+import { cn, Skeleton } from "@design-system";
 
 export type SkeletonKind = "table" | "cards" | "forms";
 

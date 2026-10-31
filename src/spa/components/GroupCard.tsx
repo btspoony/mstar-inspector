@@ -17,8 +17,8 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card";
-import { cn } from "@/lib/utils";
+  cn,
+} from "@design-system";
 
 export function GroupCard({ className, ...props }: ComponentProps<typeof Card>) {
   return (

@@ -939,14 +939,19 @@ describe("model chain tabs", () => {
     // its own hidden attribute — the local TabsContent wrapper's
     // data-[state=inactive]:hidden class is what hides inactive editors
     // while keeping them mounted for edit-state preservation.
-    const tabsSource = readFileSync(join(import.meta.dir, "../../src/spa/components/ui/tabs.tsx"), "utf8");
+    const tabsSource = readFileSync(join(import.meta.dir, "../../src/design-system/primitives/tabs.tsx"), "utf8");
     const contentWrapper = tabsSource.slice(tabsSource.indexOf("function TabsContent"));
     expect(contentWrapper).toContain("data-[state=inactive]:hidden");
     // The ChainsCard panels mount through that exact wrapper (forceMount on
     // every TabsContent), so exactly one editor is visible per selected
     // trigger.
     const source = readSettingsSource();
-    expect(source).toContain('import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";');
+    // The four tab faces come from the design system's one door; the wrapper
+    // they mount through is the one asserted above.
+    const imported = /import \{([\s\S]*?)\} from "@design-system";/.exec(source)?.[1] ?? "";
+    for (const name of ["Tabs", "TabsContent", "TabsList", "TabsTrigger"]) {
+      expect(imported, name).toContain(name);
+    }
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     expect(chainsBody).toContain("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>");
     expect(chainsBody).toContain('<TabsContent key={tab.id} forceMount value={tab.id}>');
@@ -1370,7 +1375,7 @@ describe("operational action hierarchy", () => {
   });
 
   test("the destructive-outline variant is tokenized on the shadcn Button: red border, no raw hex fork", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/ui/button.tsx"), "utf8");
+    const source = readFileSync(join(import.meta.dir, "../../src/design-system/primitives/button.tsx"), "utf8");
     expect(source).toContain('"destructive-outline":');
     // Border, label, and hover tint come from the destructive token (the
     // DESIGN.md red scale via the shadcn theme bridge); the shared cva base
@@ -1378,8 +1383,10 @@ describe("operational action hierarchy", () => {
     const variantBlock = source.slice(source.indexOf('"destructive-outline":'), source.indexOf("secondary:"));
     expect(variantBlock).toContain("border-destructive");
     expect(variantBlock).toContain("text-destructive");
-    // Dark-mode focus-ring parity with the filled destructive variant.
-    expect(variantBlock).toContain("dark:focus-visible:ring-destructive/40");
+    // The variant owns its focus ring colour; a `dark:` split would fire on the
+    // OS preference, not the app's data-theme, so it must not exist.
+    expect(variantBlock).toContain("focus-visible:ring-destructive/20");
+    expect(variantBlock).not.toContain("dark:");
     expect(variantBlock).not.toContain("#");
   });
 

@@ -4,8 +4,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Moon, Sun } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { Button, SidebarInset, SidebarProvider } from "@design-system";
 import { t } from "../i18n";
 import type { SpaBoot } from "./boot";
 import { AppSidebar } from "./components/AppSidebar";

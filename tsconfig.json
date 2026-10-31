@@ -40,8 +40,16 @@
   // fails the same check CI runs.
   "include": ["src", "tests", "scripts"],
   // src/design-system rides the SPA program (tsconfig.spa.json) so primitives
-  // get DOM lib. The DOM-free token sources stay reachable from the root
-  // program through the imports scripts/** make — `exclude` only drops them as
-  // roots, it does not remove them from the program an import pulls in.
-  "exclude": ["src/spa", "tests/spa", "src/design-system"]
+  // get DOM lib. `exclude` only drops a path as a root — it does not remove it
+  // from the program an import pulls in — so everything that imports a
+  // primitive also rides the SPA program: the preview generator (which renders
+  // every primitive) and the design-system suite. The DOM-free token sources
+  // stay reachable from this program through the imports scripts/** make.
+  "exclude": [
+    "src/spa",
+    "tests/spa",
+    "src/design-system",
+    "tests/design-system",
+    "scripts/build-design-preview.tsx",
+  ]
 }

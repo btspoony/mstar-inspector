@@ -442,8 +442,8 @@ describe("Appendix A contrast dispositions (D16)", () => {
 
 describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   const BRIDGE = new URL("../../src/spa/styles/shadcn-theme.css", import.meta.url);
-  const UI_DIR = fileURLToPath(new URL("../../src/spa/components/ui/", import.meta.url));
-  /** A5 sensitive subset — the only ui/ files allowed to drift from the copy-in. */
+  const PRIMITIVES_DIR = fileURLToPath(new URL("../../src/design-system/primitives/", import.meta.url));
+  /** A5 sensitive subset — the only primitives allowed to drift from the copy-in. */
   const SUBSET = ["button", "card", "input", "table", "skeleton", "tabs", "sidebar", "select", "dropdown-menu", "dialog"];
 
   test("bridge re-point: every value is a semantic token; focus stays on the blue duty", async () => {
@@ -520,7 +520,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const tokens = await Bun.file(TOKENS_CSS).text();
     const dark = cssCustomProperties(extractBlock(tokens, ":root {"));
     const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
-    const destructiveVariant = /destructive:\s*\n?\s*"([^"]+)"/.exec(await Bun.file(join(UI_DIR, "button.tsx")).text())?.[1];
+    const destructiveVariant = /destructive:\s*\n?\s*"([^"]+)"/.exec(await Bun.file(join(PRIMITIVES_DIR, "button.tsx")).text())?.[1];
     if (destructiveVariant === undefined) throw new Error("button.tsx declares no destructive variant");
     // `bg-destructive` / `text-destructive-foreground` in the class list are the
     // rendered faces; a raw colour (`text-white`) has no bridge key and fails here.
@@ -594,7 +594,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
 
   test("restyled subset carries v0.3 form: supersede marker, control radius, tinted elevation, token-eased transitions", async () => {
     for (const name of SUBSET) {
-      const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
+      const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
       // Copy-in supersede marker — a future regen must not clobber silently.
       expect(source, name).toContain("Locally revised shadcn/ui copy-in (v0.3 restyle;");
       // Hard constraint #7 (architect tighten-up): transition-all is
@@ -602,42 +602,47 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       expect(source, name).not.toContain("transition-all");
     }
 
-    const button = await Bun.file(join(UI_DIR, "button.tsx")).text();
+    const button = await Bun.file(join(PRIMITIVES_DIR, "button.tsx")).text();
     expect(button).toContain("rounded-sm");
     expect(button).not.toContain("rounded-md");
     expect(button).toContain("hover:bg-primary-hover");
     expect(button).toContain("active:bg-primary-hover");
     expect(button).toContain("duration-(--duration-base)");
     expect(button).toContain("ease-(--ease-in-out)");
-    // Link duty stays blue even though --primary is now the accent tone.
-    expect(button).toContain("text-(--blue-700)");
+    // The link duty stays on the focus blue even though --primary is the accent
+    // tone. Asserted as "names no palette step" rather than as the class that
+    // carries it: the link face resolves through `focus-ring`, and re-pinning
+    // that class name would rebuild the oracle this migration removes.
+    expect(button).not.toMatch(/--(?:background|gray|brand|blue|red|amber|green|purple|teal|pink)-/);
 
-    const card = await Bun.file(join(UI_DIR, "card.tsx")).text();
+    const card = await Bun.file(join(PRIMITIVES_DIR, "card.tsx")).text();
     expect(card).toContain("shadow-(--shadow-card)");
     expect(card).not.toMatch(/shadow-(sm|md|lg)\b/);
 
     for (const name of ["dropdown-menu", "select", "dialog"]) {
-      const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
+      const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
       expect(source, name).toContain("shadow-(--shadow-pop)");
       expect(source, name).not.toMatch(/shadow-(md|lg)\b/);
     }
 
-    const input = await Bun.file(join(UI_DIR, "input.tsx")).text();
+    const input = await Bun.file(join(PRIMITIVES_DIR, "input.tsx")).text();
     expect(input).toContain("rounded-sm");
-    expect(input).toContain("hover:border-(--gray-500)");
+    // DESIGN.md "Input — States: hover holds the edge": the field must not
+    // recolour its edge on hover, whichever token it would have named.
+    expect(input).not.toMatch(/hover:border-/);
 
     // QC round 1 F-004: raw `transition-opacity` faces ride the duration +
     // easing tokens so the prefers-reduced-motion fold reaches them too.
-    const dialog = await Bun.file(join(UI_DIR, "dialog.tsx")).text();
+    const dialog = await Bun.file(join(PRIMITIVES_DIR, "dialog.tsx")).text();
     expect(dialog).toContain(
       "transition-opacity duration-(--duration-base) ease-(--ease-in-out)",
     );
-    const tabs = await Bun.file(join(UI_DIR, "tabs.tsx")).text();
+    const tabs = await Bun.file(join(PRIMITIVES_DIR, "tabs.tsx")).text();
     expect(tabs).toContain(
       "after:transition-opacity after:duration-(--duration-base) after:ease-(--ease-in-out)",
     );
 
-    const skeleton = await Bun.file(join(UI_DIR, "skeleton.tsx")).text();
+    const skeleton = await Bun.file(join(PRIMITIVES_DIR, "skeleton.tsx")).text();
     expect(skeleton).toContain("motion-reduce:animate-none");
   });
 
@@ -649,7 +654,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // sanitized marker wording, never the process-id literal the deleted
     // negative assertion carried.
     for (const name of ["toggle", "sheet"] as const) {
-      const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
+      const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
       expect(source, name).toContain("Locally revised shadcn/ui copy-in (motion-token sweep");
     }
   });

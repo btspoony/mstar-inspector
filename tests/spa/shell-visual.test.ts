@@ -32,13 +32,13 @@ import { WorkspaceSwitcher } from "../../src/spa/components/WorkspaceSwitcher";
 import { buildWorkspaceSwitcherModel } from "../../src/spa/shell";
 import { installDom } from "./dom";
 
-const uiDir = join(import.meta.dir, "../../src/spa/components/ui");
+const primitivesDir = join(import.meta.dir, "../../src/design-system/primitives");
 const spaRoot = join(import.meta.dir, "../../src/spa");
 
 const sources: Record<string, string> = {
-  sidebar: readFileSync(join(uiDir, "sidebar.tsx"), "utf8"),
-  sheet: readFileSync(join(uiDir, "sheet.tsx"), "utf8"),
-  toggle: readFileSync(join(uiDir, "toggle.tsx"), "utf8"),
+  sidebar: readFileSync(join(primitivesDir, "sidebar.tsx"), "utf8"),
+  sheet: readFileSync(join(primitivesDir, "sheet.tsx"), "utf8"),
+  toggle: readFileSync(join(primitivesDir, "toggle.tsx"), "utf8"),
 };
 
 /** Live `transition*` class carriers — comment prose is not a motion face. */

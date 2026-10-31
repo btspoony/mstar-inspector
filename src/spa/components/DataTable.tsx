@@ -9,8 +9,7 @@
  * replaced by it rather than rendered as a bare header band.
  */
 import type { ComponentProps, ReactNode } from "react";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { cn } from "@/lib/utils";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, cn } from "@design-system";
 
 export type DataTableColumn<T> = {
   header: ReactNode;

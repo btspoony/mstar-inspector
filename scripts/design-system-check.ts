@@ -5,7 +5,7 @@
  *   source → stylesheet   `scripts/build-tokens.ts --check`
  *   source → fixture      `scripts/build-fixture.ts --check`
  *   fixture → DESIGN.md   `documentSync()` below
- *   source → preview      `scripts/build-design-preview.ts --check`
+ *   source → preview      `scripts/build-design-preview.tsx --check`
  *
  * Every link is checked even when an earlier one is broken, so one run reports
  * the whole picture instead of the first failure. Exit 1 when any link is.
@@ -55,7 +55,7 @@ const DESIGN_PATH = path.join(ROOT, "DESIGN.md");
 const GENERATORS = [
   { script: "scripts/build-tokens.ts", label: "source → stylesheet" },
   { script: "scripts/build-fixture.ts", label: "source → fixture" },
-  { script: "scripts/build-design-preview.ts", label: "source → preview" },
+  { script: "scripts/build-design-preview.tsx", label: "source → preview" },
 ] as const;
 
 type Layer = Readonly<Record<string, string>>;

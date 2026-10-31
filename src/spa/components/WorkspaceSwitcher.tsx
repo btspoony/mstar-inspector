@@ -14,8 +14,8 @@
  */
 import { useState } from "react";
 import { ChevronDown, Plus } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import {
+  Button,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -24,7 +24,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@design-system";
 import type { SpaBoot } from "../boot";
 import { t, type DictionaryKey } from "../../i18n";
 import { navigate } from "../router";

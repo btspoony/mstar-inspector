@@ -3,30 +3,39 @@
  *
  * One static HTML file showing the whole system — every token in all three
  * layers, every tone × strength, every control height, the type roles, the
- * operator-surface remap and both themes — built from
- * `src/design-system/tokens/` alone. There is no template beside this file:
- * the generator holds the layout, and the content is derived, so the page
- * cannot describe a system the source has moved past.
+ * operator-surface remap, and a rendered specimen of every exported primitive
+ * in both themes — built from `src/design-system/` alone. There is no template
+ * beside this file: the generator holds the layout, and the content is derived,
+ * so the page cannot describe a system the source has moved past.
  *
  * Derivation alone cannot fail, so `--check` reads the page back and asserts
- * three separate things: one entry per declared token in each theme; the value
- * that entry prints is what the theme resolves to; and every token has a
- * specimen family the page can actually draw. The last one is what catches a
- * *new* token — a row is generated automatically, so an unknown kind would
- * otherwise pass as plain text and look previewed.
+ * four separate things: one entry per declared token in each theme; the value
+ * that entry prints is what the theme resolves to; every token has a specimen
+ * family the page can actually draw; and every exported primitive is accounted
+ * for — either its own `data-slot` appears in the markup (a specimen painted
+ * it) or it is declared unpaintable with a reason (`UNPAINTED`: a Radix portal,
+ * or a context root that renders no host node). The token-family rule catches
+ * a *new* token; the primitive rule catches a *new* export.
+ *
+ * The page carries no compiled Tailwind — the classes in the markup are inert
+ * here — so the primitive section is a structural proof (every export renders
+ * and is accounted for in both themes), not a pixel reference.
  *
  * The output is build material, not shipped code: `dist/` is untracked and
- * only `dist/spa/` is served. The primitives round extends this generator with
- * rendered components (`renderToStaticMarkup`, both themes); it does not add a
- * second page.
+ * only `dist/spa/` is served.
  *
  * Usage:
  *   bun run build:spa                              # the build — runs this generator, then vite
- *   bun scripts/build-design-preview.ts            # write dist/design-preview.html
- *   bun scripts/build-design-preview.ts --check    # exit 1 when an entry is missing
+ *   bun scripts/build-design-preview.tsx            # write dist/design-preview.html
+ *   bun scripts/build-design-preview.tsx --check    # exit 1 when an entry is missing
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+import type { ReactElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import * as primitives from "../src/design-system/primitives/index";
 
 import {
   OPS_SURFACE_ATTR,
@@ -320,6 +329,308 @@ function transitionalNames(): string[] {
   ];
 }
 
+/**
+ * Primitive coverage: one rendered specimen per primitive, and the exported
+ * faces the server renderer cannot paint.
+ *
+ * A specimen is a composition, not a singleton: a Radix face only mounts
+ * inside the part that owns it (a `SelectItem` lives in a `SelectContent`), and
+ * the page is only evidence if the face really rendered. One composition per
+ * primitive therefore covers every export that primitive offers.
+ *
+ * `renderToStaticMarkup` inherits one limit from Radix: a portal mounts its
+ * container in a layout effect, so nothing paints during server rendering.
+ * Those faces — and every context root, which renders no host node at all —
+ * are named in `UNPAINTED` with their reason. The check requires that set to be
+ * *exactly* the exports the markup did not paint, so a new export cannot pass
+ * unexplained and a reason cannot outlive the export it names.
+ */
+type UnpaintedReason = "Radix portal — the server renderer mounts no container" | "context root — renders no host node";
+
+const UNPAINTED: Readonly<Record<string, UnpaintedReason>> = {
+  // Dialogs: the trigger paints; everything behind the overlay is portalled.
+  Dialog: "context root — renders no host node",
+  DialogPortal: "Radix portal — the server renderer mounts no container",
+  DialogOverlay: "Radix portal — the server renderer mounts no container",
+  DialogContent: "Radix portal — the server renderer mounts no container",
+  DialogHeader: "Radix portal — the server renderer mounts no container",
+  DialogTitle: "Radix portal — the server renderer mounts no container",
+  DialogDescription: "Radix portal — the server renderer mounts no container",
+  DialogFooter: "Radix portal — the server renderer mounts no container",
+  DialogClose: "Radix portal — the server renderer mounts no container",
+  // Sheets reuse the dialog root and portal.
+  Sheet: "context root — renders no host node",
+  SheetContent: "Radix portal — the server renderer mounts no container",
+  SheetHeader: "Radix portal — the server renderer mounts no container",
+  SheetTitle: "Radix portal — the server renderer mounts no container",
+  SheetDescription: "Radix portal — the server renderer mounts no container",
+  SheetFooter: "Radix portal — the server renderer mounts no container",
+  SheetClose: "Radix portal — the server renderer mounts no container",
+  // Menus: the trigger paints; the menu body is portalled.
+  DropdownMenu: "context root — renders no host node",
+  DropdownMenuPortal: "Radix portal — the server renderer mounts no container",
+  DropdownMenuContent: "Radix portal — the server renderer mounts no container",
+  DropdownMenuGroup: "Radix portal — the server renderer mounts no container",
+  DropdownMenuLabel: "Radix portal — the server renderer mounts no container",
+  DropdownMenuItem: "Radix portal — the server renderer mounts no container",
+  DropdownMenuCheckboxItem: "Radix portal — the server renderer mounts no container",
+  DropdownMenuRadioGroup: "Radix portal — the server renderer mounts no container",
+  DropdownMenuRadioItem: "Radix portal — the server renderer mounts no container",
+  DropdownMenuSeparator: "Radix portal — the server renderer mounts no container",
+  DropdownMenuShortcut: "Radix portal — the server renderer mounts no container",
+  DropdownMenuSub: "context root — renders no host node",
+  DropdownMenuSubTrigger: "Radix portal — the server renderer mounts no container",
+  DropdownMenuSubContent: "Radix portal — the server renderer mounts no container",
+  // Selects: the trigger and its value paint; the item list is portalled.
+  Select: "context root — renders no host node",
+  SelectContent: "Radix portal — the server renderer mounts no container",
+  SelectGroup: "Radix portal — the server renderer mounts no container",
+  SelectLabel: "Radix portal — the server renderer mounts no container",
+  SelectItem: "Radix portal — the server renderer mounts no container",
+  SelectSeparator: "Radix portal — the server renderer mounts no container",
+  SelectScrollUpButton: "Radix portal — the server renderer mounts no container",
+  SelectScrollDownButton: "Radix portal — the server renderer mounts no container",
+  // Tooltips: the trigger paints; the root, its provider and the bubble do not.
+  Tooltip: "context root — renders no host node",
+  TooltipProvider: "context root — renders no host node",
+  TooltipContent: "Radix portal — the server renderer mounts no container",
+};
+
+/** Readable alias so the compositions below read as markup, not as a lookup. */
+const P = primitives;
+
+const SPECIMENS: Readonly<Record<string, ReactElement>> = {
+  Button: <P.Button>Button</P.Button>,
+  Card: (
+    <P.Card>
+      <P.CardHeader>
+        <P.CardTitle>Card</P.CardTitle>
+        <P.CardDescription>Card description</P.CardDescription>
+        <P.CardAction>action</P.CardAction>
+      </P.CardHeader>
+      <P.CardContent>Card content</P.CardContent>
+      <P.CardFooter>Card footer</P.CardFooter>
+    </P.Card>
+  ),
+  Dialog: (
+    <P.Dialog open>
+      <P.DialogTrigger>Open dialog</P.DialogTrigger>
+      <P.DialogPortal>
+        <P.DialogOverlay />
+        <P.DialogContent>
+          <P.DialogHeader>
+            <P.DialogTitle>Dialog</P.DialogTitle>
+            <P.DialogDescription>Dialog description</P.DialogDescription>
+          </P.DialogHeader>
+          <P.DialogFooter>
+            <P.DialogClose>Close</P.DialogClose>
+          </P.DialogFooter>
+        </P.DialogContent>
+      </P.DialogPortal>
+    </P.Dialog>
+  ),
+  DropdownMenu: (
+    <P.DropdownMenu open>
+      <P.DropdownMenuTrigger>Open menu</P.DropdownMenuTrigger>
+      <P.DropdownMenuPortal>
+        <P.DropdownMenuContent>
+          <P.DropdownMenuLabel>Menu</P.DropdownMenuLabel>
+          <P.DropdownMenuGroup>
+            <P.DropdownMenuItem>Item</P.DropdownMenuItem>
+            <P.DropdownMenuCheckboxItem checked>Checkbox</P.DropdownMenuCheckboxItem>
+            <P.DropdownMenuRadioGroup value="one">
+              <P.DropdownMenuRadioItem value="one">Radio</P.DropdownMenuRadioItem>
+            </P.DropdownMenuRadioGroup>
+            <P.DropdownMenuSub>
+              <P.DropdownMenuSubTrigger>Submenu</P.DropdownMenuSubTrigger>
+              <P.DropdownMenuSubContent>
+                <P.DropdownMenuItem>Nested</P.DropdownMenuItem>
+              </P.DropdownMenuSubContent>
+            </P.DropdownMenuSub>
+            <P.DropdownMenuSeparator />
+            <P.DropdownMenuShortcut>⌘K</P.DropdownMenuShortcut>
+          </P.DropdownMenuGroup>
+        </P.DropdownMenuContent>
+      </P.DropdownMenuPortal>
+    </P.DropdownMenu>
+  ),
+  Input: <P.Input placeholder="Input" />,
+  Select: (
+    <P.Select open>
+      <P.SelectTrigger>
+        <P.SelectValue placeholder="Select" />
+      </P.SelectTrigger>
+      <P.SelectContent>
+        <P.SelectScrollUpButton />
+        <P.SelectGroup>
+          <P.SelectLabel>Group</P.SelectLabel>
+          <P.SelectItem value="one">Item</P.SelectItem>
+          <P.SelectSeparator />
+        </P.SelectGroup>
+        <P.SelectScrollDownButton />
+      </P.SelectContent>
+    </P.Select>
+  ),
+  Separator: <P.Separator />,
+  Sheet: (
+    <P.Sheet open>
+      <P.SheetTrigger>Open sheet</P.SheetTrigger>
+      <P.SheetContent>
+        <P.SheetHeader>
+          <P.SheetTitle>Sheet</P.SheetTitle>
+          <P.SheetDescription>Sheet description</P.SheetDescription>
+        </P.SheetHeader>
+        <P.SheetFooter>
+          <P.SheetClose>Close</P.SheetClose>
+        </P.SheetFooter>
+      </P.SheetContent>
+    </P.Sheet>
+  ),
+  Sidebar: (
+    <P.SidebarProvider>
+      <P.Sidebar>
+        <P.SidebarHeader>
+          <P.SidebarInput placeholder="Search" />
+          <P.SidebarTrigger />
+        </P.SidebarHeader>
+        <P.SidebarContent>
+          <P.SidebarGroup>
+            <P.SidebarGroupLabel>Group</P.SidebarGroupLabel>
+            <P.SidebarGroupAction aria-label="Group action">+</P.SidebarGroupAction>
+            <P.SidebarGroupContent>
+              <P.SidebarMenu>
+                <P.SidebarMenuItem>
+                  <P.SidebarMenuButton>Menu button</P.SidebarMenuButton>
+                  <P.SidebarMenuAction aria-label="Menu action">…</P.SidebarMenuAction>
+                  <P.SidebarMenuBadge>3</P.SidebarMenuBadge>
+                </P.SidebarMenuItem>
+                <P.SidebarMenuItem>
+                  <P.SidebarMenuSkeleton showIcon />
+                </P.SidebarMenuItem>
+                <P.SidebarMenuItem>
+                  <P.SidebarMenuSub>
+                    <P.SidebarMenuSubItem>
+                      <P.SidebarMenuSubButton>Sub item</P.SidebarMenuSubButton>
+                    </P.SidebarMenuSubItem>
+                  </P.SidebarMenuSub>
+                </P.SidebarMenuItem>
+              </P.SidebarMenu>
+            </P.SidebarGroupContent>
+          </P.SidebarGroup>
+          <P.SidebarSeparator />
+        </P.SidebarContent>
+        <P.SidebarFooter>Footer</P.SidebarFooter>
+        <P.SidebarRail />
+      </P.Sidebar>
+      <P.SidebarInset>Inset</P.SidebarInset>
+    </P.SidebarProvider>
+  ),
+  Skeleton: <P.Skeleton />,
+  Table: (
+    <P.Table>
+      <P.TableCaption>Caption</P.TableCaption>
+      <P.TableHeader>
+        <P.TableRow>
+          <P.TableHead>Head</P.TableHead>
+        </P.TableRow>
+      </P.TableHeader>
+      <P.TableBody>
+        <P.TableRow>
+          <P.TableCell>Cell</P.TableCell>
+        </P.TableRow>
+      </P.TableBody>
+      <P.TableFooter>
+        <P.TableRow>
+          <P.TableCell>Footer</P.TableCell>
+        </P.TableRow>
+      </P.TableFooter>
+    </P.Table>
+  ),
+  Tabs: (
+    <P.Tabs defaultValue="one">
+      <P.TabsList>
+        <P.TabsTrigger value="one">One</P.TabsTrigger>
+      </P.TabsList>
+      <P.TabsContent value="one">Tabs content</P.TabsContent>
+    </P.Tabs>
+  ),
+  Toggle: <P.Toggle>Toggle</P.Toggle>,
+  ToggleGroup: (
+    <P.ToggleGroup type="single" defaultValue="one">
+      <P.ToggleGroupItem value="one">One</P.ToggleGroupItem>
+      <P.ToggleGroupItem value="two">Two</P.ToggleGroupItem>
+    </P.ToggleGroup>
+  ),
+  Tooltip: (
+    <P.TooltipProvider>
+      <P.Tooltip open>
+        <P.TooltipTrigger>Hover</P.TooltipTrigger>
+        <P.TooltipContent>Tooltip</P.TooltipContent>
+      </P.Tooltip>
+    </P.TooltipProvider>
+  ),
+};
+
+/** kebab name → `data-slot`, with the one component whose slot is not its name. */
+const SLOT_ALIAS: Readonly<Record<string, string>> = { SidebarProvider: "sidebar-wrapper" };
+
+const slotOf = (name: string): string =>
+  SLOT_ALIAS[name] ?? name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+
+/** The components the barrel exports: functions whose name is capitalised. */
+const exportedPrimitives = (): string[] =>
+  Object.entries(primitives)
+    .filter(([name, value]) => /^[A-Z]/.test(name) && typeof value === "function")
+    .map(([name]) => name);
+
+const SPECIMEN_HTML: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(SPECIMENS).map(([name, element]) => [name, renderToStaticMarkup(element)]),
+);
+
+/**
+ * The exports a markup string paints, by their own `data-slot`. Run against the
+ * specimens to produce the section's counts, and against a theme section by the
+ * check to prove the page carries them.
+ */
+const paintedPrimitives = (markup: string): string[] =>
+  exportedPrimitives().filter((name) => markup.includes(`data-slot="${slotOf(name)}"`));
+
+function primitiveSection(): string[] {
+  const exported = exportedPrimitives();
+  const markup = Object.values(SPECIMEN_HTML).join("");
+  const painted = paintedPrimitives(markup);
+  const unpainted = exported.filter((name) => !painted.includes(name));
+
+  return [
+    "<h2>Primitives</h2>",
+    `<p data-primitives="${exported.length}" data-painted="${painted.length}" data-unpainted="${unpainted.length}">` +
+      `${exported.length} exports across ${Object.keys(SPECIMENS).length} specimens: ` +
+      `${painted.length} paint their own slot; ${unpainted.length} are portal- or context-bound ` +
+      "and are listed once, below the themes. Class names stay inert here — this page carries no compiled Tailwind.</p>",
+    '<div class="primitives">',
+    ...Object.entries(SPECIMEN_HTML).map(
+      ([name, html]) =>
+        `<figure class="primitive" data-primitive="${name}">${html}<figcaption>${name}</figcaption></figure>`,
+    ),
+    "</div>",
+  ];
+}
+
+/** Faces the server renderer cannot paint, printed once with their reason. */
+function unpaintedSection(): string[] {
+  return [
+    "<h2>Unpainted primitive faces</h2>",
+    "<p>Rendered by the client only: a Radix portal mounts its container after hydration, and a context root has no host node. Their specimens above still mount them, so a broken primitive fails the build.</p>",
+    '<table><thead><tr><th scope="col">Export</th><th scope="col">Reason</th></tr></thead><tbody>',
+    ...Object.entries(UNPAINTED).map(
+      ([name, reason]) =>
+        `<tr data-unpainted-face="${name}" data-reason="${escapeHtml(reason)}">` +
+        `<th scope="row"><code>${name}</code></th><td>${escapeHtml(reason)}</td></tr>`,
+    ),
+    "</tbody></table>",
+  ];
+}
+
 const PAGE_CSS = `*, *::before, *::after { box-sizing: border-box; }
 html { color-scheme: dark light; }
 body { margin: 0; }
@@ -433,7 +744,21 @@ code { color: var(--text-secondary); font-family: var(--font-mono); font-size: 1
   border-radius: var(--radius-control);
   background: var(--surface-inset);
 }
-.type-sample { margin: 0 0 10px; }`;
+.type-sample { margin: 0 0 10px; }
+.primitives { display: flex; flex-wrap: wrap; gap: 12px; }
+.primitive {
+  flex: 0 1 auto;
+  min-width: 120px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+}
+.primitive figcaption {
+  margin-top: 8px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}`;
 
 /** One theme's resolved declarations, so each section renders itself. */
 function themeStyle(theme: ThemeName): string {
@@ -458,6 +783,7 @@ function themeSection(theme: ThemeName): string[] {
     `<h1>${theme}</h1>`,
     ...toneGrid(resolved.semantic),
     ...controlHeights(resolved.semantic),
+    ...primitiveSection(),
     ...typeSpecimens(resolved.semantic),
     ...LAYERS.flatMap((layer) => tokenTable(layer, resolved[layer])),
     ...operatorSurface(),
@@ -477,6 +803,7 @@ function transitionalSection(): string[] {
     "<h1>Transitional names</h1>",
     "<p>Alias declarations, theme-independent: each resolves through the token it names and leaves with the plan that closes it.</p>",
     ...transitionalNames(),
+    ...unpaintedSection(),
     "<h2>Reduced-motion fold — <code>prefers-reduced-motion: reduce</code></h2>",
     '<table><thead><tr><th scope="col">Token</th><th scope="col">Reduced</th></tr></thead><tbody>',
     ...Object.entries(reducedMotionDurations).map(
@@ -496,7 +823,7 @@ export function buildPreview(): string {
     "<!doctype html>",
     "<!--",
     "  GENERATED — do not edit.",
-    "  Emitted by `bun scripts/build-design-preview.ts` from `src/design-system/tokens/`,",
+    "  Emitted by `bun scripts/build-design-preview.tsx` from `src/design-system/tokens/`,",
     "  and checked by its `--check` mode. Change the token source and regenerate.",
     "-->",
     '<html lang="en">',
@@ -549,6 +876,15 @@ export interface PreviewCoverage {
   /** Operator-surface remaps, across both themes. */
   readonly remaps: number;
   readonly expectedRemaps: number;
+  /** Primitive specimens, across both themes. */
+  readonly specimens: number;
+  readonly expectedSpecimens: number;
+  /** Exported primitives whose own `data-slot` the markup paints. */
+  readonly painted: number;
+  readonly expectedPainted: number;
+  /** Faces that cannot paint on the server, listed once with their reason. */
+  readonly unpainted: number;
+  readonly expectedUnpainted: number;
   /** Transitional names, printed once as declarations. */
   readonly transitional: number;
   readonly expectedTransitional: number;
@@ -570,7 +906,19 @@ export function previewCoverage(html: string): PreviewCoverage {
 
   const missing: string[] = [];
   const wrong: { entry: string; page: string; source: string }[] = [];
-  const counts = { entries: 0, tonePairs: 0, controlHeights: 0, remaps: 0, transitional: 0, reducedMotion: 0 };
+  const counts = {
+    entries: 0,
+    tonePairs: 0,
+    controlHeights: 0,
+    remaps: 0,
+    specimens: 0,
+    painted: 0,
+    unpainted: 0,
+    transitional: 0,
+    reducedMotion: 0,
+  };
+  const exported = exportedPrimitives();
+  const unpaintedFaces = Object.keys(UNPAINTED);
 
   // `entryValues` keys by token name alone, so the layers must not share one.
   // They do not (each layer references the one beneath it, never declares its
@@ -592,6 +940,11 @@ export function previewCoverage(html: string): PreviewCoverage {
     if (sharedHtml.includes(`data-reduced-motion="${name}" data-value="${escapeHtml(value)}"`)) {
       counts.reducedMotion += 1;
     } else missing.push(`no reduced-motion entry for --${name} (${value})`);
+  }
+  for (const [name, reason] of Object.entries(UNPAINTED)) {
+    if (sharedHtml.includes(`data-unpainted-face="${name}" data-reason="${escapeHtml(reason)}"`)) {
+      counts.unpainted += 1;
+    } else missing.push(`no unpainted-ledger entry for ${name} (${reason})`);
   }
 
   for (const theme of THEMES) {
@@ -633,6 +986,28 @@ export function previewCoverage(html: string): PreviewCoverage {
       if (section.includes(`data-remap="${name}"`)) counts.remaps += 1;
       else missing.push(`${theme}: no operator-surface entry for --${name}`);
     }
+
+    for (const name of Object.keys(SPECIMENS)) {
+      if (section.includes(`data-primitive="${name}"`)) counts.specimens += 1;
+      else missing.push(`${theme}: no primitive specimen for ${name}`);
+    }
+
+    // Coverage is closed in both directions: an export the markup does not
+    // paint must be declared, and a declaration must still be unpaid.
+    const painted = paintedPrimitives(section);
+    counts.painted += painted.length;
+    for (const name of exported) {
+      if (!painted.includes(name) && !(name in UNPAINTED)) {
+        missing.push(`${theme}: ${name} neither paints its own slot nor is declared in UNPAINTED`);
+      }
+    }
+    for (const name of unpaintedFaces) {
+      if (!exported.includes(name)) {
+        missing.push(`${theme}: UNPAINTED names ${name}, which the barrel does not export`);
+      } else if (painted.includes(name)) {
+        missing.push(`${theme}: UNPAINTED names ${name}, but the markup paints it`);
+      }
+    }
   }
 
   const expected = {
@@ -640,6 +1015,9 @@ export function previewCoverage(html: string): PreviewCoverage {
     tonePairs: meanings.length * STRENGTHS.length * THEMES.length,
     controlHeights: heights.length * THEMES.length,
     remaps: remaps.length * THEMES.length,
+    specimens: Object.keys(SPECIMENS).length * THEMES.length,
+    painted: (exported.length - unpaintedFaces.length) * THEMES.length,
+    unpainted: unpaintedFaces.length,
     transitional: legacyTokens.length,
     reducedMotion: Object.keys(reducedMotionDurations).length,
   };
@@ -652,6 +1030,9 @@ export function previewCoverage(html: string): PreviewCoverage {
       counts.tonePairs === expected.tonePairs &&
       counts.controlHeights === expected.controlHeights &&
       counts.remaps === expected.remaps &&
+      counts.specimens === expected.specimens &&
+      counts.painted === expected.painted &&
+      counts.unpainted === expected.unpainted &&
       counts.transitional === expected.transitional &&
       counts.reducedMotion === expected.reducedMotion,
     entries: counts.entries,
@@ -662,6 +1043,12 @@ export function previewCoverage(html: string): PreviewCoverage {
     expectedControlHeights: expected.controlHeights,
     remaps: counts.remaps,
     expectedRemaps: expected.remaps,
+    specimens: counts.specimens,
+    expectedSpecimens: expected.specimens,
+    painted: counts.painted,
+    expectedPainted: expected.painted,
+    unpainted: counts.unpainted,
+    expectedUnpainted: expected.unpainted,
     transitional: counts.transitional,
     expectedTransitional: expected.transitional,
     reducedMotion: counts.reducedMotion,
@@ -689,16 +1076,21 @@ if (import.meta.main) {
         `${coverage.tonePairs}/${coverage.expectedTonePairs} tone × strength, ` +
         `${coverage.controlHeights}/${coverage.expectedControlHeights} control heights, ` +
         `${coverage.remaps}/${coverage.expectedRemaps} operator-surface remaps, ` +
+        `${coverage.specimens}/${coverage.expectedSpecimens} primitive specimens, ` +
+        `${coverage.painted}/${coverage.expectedPainted} painted primitive exports, ` +
+        `${coverage.unpainted}/${coverage.expectedUnpainted} declared unpainted, ` +
         `${coverage.transitional}/${coverage.expectedTransitional} transitional names)`,
     );
-    console.error("The page is derived from the token source: a gap here is a gap in this generator.");
+    console.error("The page is derived from the source: a gap here is a gap in this generator.");
     process.exit(1);
   }
 
   console.log(
     `design-preview: ${coverage.entries} token entries across ${THEMES.length} themes, ` +
       `${coverage.tonePairs} tone × strength, ${coverage.controlHeights} control heights, ` +
-      `${coverage.remaps} operator-surface remaps, ${coverage.transitional} transitional names`,
+      `${coverage.remaps} operator-surface remaps, ${coverage.transitional} transitional names, ` +
+      `${coverage.specimens} primitive specimens ` +
+      `(${coverage.painted} painted exports, ${coverage.unpainted} portal/context-bound and listed)`,
   );
 
   if (!process.argv.includes("--check")) {

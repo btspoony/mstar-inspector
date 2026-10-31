@@ -7,10 +7,12 @@
  * importing them directly, by alias subpath or by relative path, breaks the
  * boundary that `tests/design-system/boundary.test.ts` enforces.
  *
- * The token source (task 2) is the only thing exported so far; the generated
- * CSS, fixture and preview are tasks 3-7, and the primitives and patterns
- * arrive with plan 202.
+ * Two tiers are exported: the token source (`./tokens`), and the primitives
+ * (`./primitives`) that read the semantic layer. `cn` is exported beside them
+ * because callers that compose their own faces need the same merge rule.
  */
+export * from "./primitives";
+export { cn } from "./cn";
 export {
   OPS_SURFACE_ATTR,
   THEMES,

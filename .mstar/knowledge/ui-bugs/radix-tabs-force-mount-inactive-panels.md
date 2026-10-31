@@ -43,7 +43,7 @@ The app detail model-chains pass wanted chain editors to stay mounted across tab
 Add the hiding class on the local `TabsContent` wrapper (single consumer verified by grep first):
 
 ```tsx
-// src/spa/components/ui/tabs.tsx
+// src/design-system/primitives/tabs.tsx
 <TabsContent
   ...
   className={cn("flex-1 outline-none data-[state=inactive]:hidden", className)}

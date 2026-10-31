@@ -534,7 +534,7 @@ back up:
 3. **Generated artifacts** — `src/spa/styles/tokens.css`
    (`bun scripts/build-tokens.ts`), `src/design-system/fixture.json`
    (`bun scripts/build-fixture.ts`) and `dist/design-preview.html`
-   (`bun scripts/build-design-preview.ts`, which `bun run build:spa` runs
+   (`bun scripts/build-design-preview.tsx`, which `bun run build:spa` runs
    before vite), each with a `--check` drift mode.
    The two committed ones are never hand-edited; a regenerated diff that does
    not match fails the build. The preview is build material, so its check
@@ -1033,7 +1033,7 @@ their own beyond what the component layer already declares:
 
 The chain commands: `bun scripts/build-tokens.ts [--check]`,
 `bun scripts/build-fixture.ts [--check]`,
-`bun scripts/build-design-preview.ts [--check]`, and
+`bun scripts/build-design-preview.tsx [--check]`, and
 `bun scripts/design-system-check.ts` (all four links — the one entry point CI
 runs), plus `mstar design-md validate .` (local only; the CLI installs from
 GitHub, so CI does not take on that network dependency). `bun run build:spa`
@@ -1068,9 +1068,12 @@ palette step:
 | `--sidebar-primary` | `--tone-accent-solid` (the active-row tint derives through this key) |
 | `--sidebar-accent` | `--surface-overlay` |
 
-Copy-in components live under `src/spa/components/ui/` with
-`components.json` aliases (`@/components` → `src/spa/components`,
-`@/lib/utils` → `src/spa/lib/utils.ts`). Radix primitives use pinned
+The primitives live under `src/design-system/primitives/`, and consumers reach
+them one way only: the `@design-system` alias onto `src/design-system/index.ts`,
+mapped in `tsconfig.json`, `tsconfig.spa.json` and `vite.config.ts` (a deep
+import fails typecheck and falls through the dev-server regex). The module
+imports nothing from `src/spa/`; because it sits outside the Vite root,
+`shadcn-theme.css` names it as a Tailwind source. Radix primitives use pinned
 `@radix-ui/react-*` packages.
 
 ### Inspiration (awesome-design-md)

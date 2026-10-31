@@ -10,7 +10,7 @@
  * confirm-gated removal (DESIGN.md ### list-row) — and copy arrives through props.
  */
 import type { ReactNode } from "react";
-import { cn } from "@/lib/utils";
+import { cn } from "@design-system";
 
 export function ListRowGroup({ children, className }: { children: ReactNode; className?: string }) {
   return (

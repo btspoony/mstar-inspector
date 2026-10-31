@@ -27,8 +27,9 @@ describe("workspace creation page", () => {
   });
 
   test("uses the ui kit (input + button + card), not native controls", () => {
-    for (const component of ["input", "button", "card"]) {
-      expect(source).toContain(`@/components/ui/${component}`);
+    const imported = /import \{([^}]*)\} from "@design-system";/.exec(source)?.[1] ?? "";
+    for (const component of ["Button", "Input", "CardContent", "CardHeader"]) {
+      expect(imported, component).toContain(component);
     }
     expect(source).not.toMatch(/<button[\s>]/);
     expect(source).not.toMatch(/<input[\s>]/);

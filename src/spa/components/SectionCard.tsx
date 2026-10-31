@@ -19,8 +19,7 @@
  * All three are purely presentational: pages resolve `t()` themselves.
  */
 import type { ComponentProps, ReactNode } from "react";
-import { Card, CardTitle } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
+import { Card, CardTitle, cn } from "@design-system";
 
 type SectionTier = "primary" | "secondary";
 

@@ -7,7 +7,7 @@
  * alert: warnings stay amber, errors red, success green (DESIGN.md Colors).
  */
 import type { ComponentProps } from "react";
-import { cn } from "@/lib/utils";
+import { cn } from "@design-system";
 
 export type StatusTone = "neutral" | "success" | "warning" | "error" | "brand";
 

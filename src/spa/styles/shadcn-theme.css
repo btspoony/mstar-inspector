@@ -15,6 +15,13 @@
  */
 @import "tailwindcss";
 
+/* The primitives live outside the Vite root (`src/spa`), which is where
+   Tailwind v4's automatic content detection starts, so their class list is
+   invisible to the scanner until it is named here. Without this the migrated
+   controls keep their DOM and lose every utility — `whitespace-nowrap`,
+   `border-(--border-strong)`, the control heights — and nothing fails. */
+@source "../../design-system";
+
 :root {
   --background: var(--surface-page);
   --foreground: var(--text-primary);

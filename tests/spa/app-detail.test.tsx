@@ -35,7 +35,7 @@ import { AppInsightsTab, InsightsRecordsView } from "../../src/spa/pages/AppInsi
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
 const insightsTab = readFileSync(join(spaRoot, "pages/AppInsightsTab.tsx"), "utf8");
-const tabsWrapper = readFileSync(join(spaRoot, "components/ui/tabs.tsx"), "utf8");
+const tabsWrapper = readFileSync(join(import.meta.dir, "../../src/design-system/primitives/tabs.tsx"), "utf8");
 
 const IDENTITY_APP = {
   github_slug: "demo",
