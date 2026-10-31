@@ -16,6 +16,11 @@
  *
  * The flow-section idiom is the third: one plane divided by hairlines, so a
  * detail page composes sections without a card per section.
+ *
+ * The fourth is what the table, list-row and group-card comments hand off to
+ * this file: the named row heights. A row face names exactly one height, it is
+ * a declared `--row-h-*` step, and that step resolves to a length — a literal
+ * or an undeclared token fails here instead of only in a comment.
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
@@ -24,7 +29,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { FlowSection } from "../../src/design-system/patterns/flow-section";
 import { Card } from "../../src/design-system/primitives/card";
-import { GroupCard } from "../../src/spa/components/GroupCard";
+import { DataTable } from "../../src/spa/components/DataTable";
+import { GroupCard, GroupCardHeader } from "../../src/spa/components/GroupCard";
+import { ListRow } from "../../src/spa/components/ListRow";
 import { SectionCard } from "../../src/spa/components/SectionCard";
 import { EmptyState } from "../../src/spa/components/state/EmptyState";
 
@@ -91,6 +98,34 @@ function expectNoElevation(markup: string): void {
   expect(shadows, `inline surface declares ${shadows.join(" ")}`).toEqual([]);
 }
 
+/** The tags in a markup that paint `slot`, so a row can be located by the
+ *  identity it declares rather than by its position in the string. */
+function tagsOfSlot(markup: string, slot: string): string[] {
+  return [...markup.matchAll(new RegExp(`<[^>]*data-slot="${slot}"[^>]*>`, "g"))].map(
+    (match) => match[0],
+  );
+}
+
+/** A height utility that carries its height as a token: `h-(--x)` / `min-h-(--x)`. */
+const ROW_HEIGHT = /^(?:min-)?h-\((--[\w-]+)\)$/;
+
+/** A row face names exactly one height utility, it is the declared `--row-h-*`
+ *  step, and that step resolves to a length in `tokens.css`. A raw `h-10`, a
+ *  missing height or an undeclared token all fail here; returns the utility so
+ *  the caller can assert the min/grow form. */
+function expectRowHeight(tag: string, token: string, where: string): string {
+  const heights = classesOf(tag).filter((name) => /^(?:min-)?h-/.test(name));
+  expect(heights, `${where} names ${heights.join(" ") || "no"} height`).toHaveLength(1);
+  const utility = heights[0] ?? "";
+  const match = ROW_HEIGHT.exec(utility);
+  expect(match, `${where} height ${utility} carries no token`).not.toBeNull();
+  expect(match?.[1], `${where} sits on ${match?.[1]}, not ${token}`).toBe(token);
+  const value = resolveToken(token);
+  expect(value, `${token} is not declared in tokens.css`).not.toBe("");
+  expect(value, `${token} is not a length`).toMatch(/^\d+(?:\.\d+)?(?:px|rem)$/);
+  return utility;
+}
+
 /** Every card that sits on the page, rendered at its rest face. */
 const CARD_LAYER: ReadonlyArray<readonly [string, string]> = [
   ["Card", renderToStaticMarkup(createElement(Card, null, "content"))],
@@ -123,6 +158,48 @@ describe("card surface rule (r3)", () => {
     );
     expect(tiers[0]).toHaveLength(1);
     expect(tiers[0]).not.toEqual(tiers[1]);
+  });
+});
+
+describe("row heights (DESIGN.md Table, list-row, group-card)", () => {
+  // The three surfaces that sit on the named row steps. The classes are read
+  // off the rendered faces so a regression is caught where the page would
+  // wear it, and every height resolves through the declared token — the same
+  // oracle the hairlines use.
+  const table = renderToStaticMarkup(
+    createElement(DataTable<{ slug: string }>, {
+      columns: [{ header: "App", cell: (row) => row.slug }],
+      rows: [{ slug: "demo" }],
+      rowKey: (row) => row.slug,
+    }),
+  );
+  const [headRow = "", bodyRow = ""] = tagsOfSlot(table, "table-row");
+  const [listRow = ""] = tagsOfSlot(
+    renderToStaticMarkup(createElement(ListRow, { identity: "demo" })),
+    "list-row",
+  );
+  const [groupHeader = ""] = tagsOfSlot(
+    renderToStaticMarkup(createElement(GroupCardHeader, { title: "Apps" })),
+    "card-header",
+  );
+
+  test("the table header band sits on the compact step and its rows on the comfort step", () => {
+    expectRowHeight(headRow, "--row-h-compact", "DataTable header row");
+    expectRowHeight(bodyRow, "--row-h-comfort", "DataTable body row");
+  });
+
+  test("ListRow sits on the compact step", () => {
+    const utility = expectRowHeight(listRow, "--row-h-compact", "ListRow");
+    // A bare `h-` would pin the row and clip its content; the list row is a
+    // fixed face, so it names the height outright.
+    expect(utility).not.toMatch(/^min-h-/);
+  });
+
+  test("the GroupCard header band is at least one comfort row", () => {
+    const utility = expectRowHeight(groupHeader, "--row-h-comfort", "GroupCardHeader");
+    // `min-h-` is the documented growth contract: a header with a summary
+    // line grows past the comfort row.
+    expect(utility).toMatch(/^min-h-/);
   });
 });
 

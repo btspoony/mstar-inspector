@@ -41,6 +41,37 @@ const sources: Record<string, string> = {
   toggle: readFileSync(join(primitivesDir, "toggle.tsx"), "utf8"),
 };
 
+/** The two stylesheets that publish the vocabulary: the bridge keys a
+ *  `bg-<name>` utility can come from, and the declared token/motion names. */
+const themeCSS = readFileSync(join(spaRoot, "styles/shadcn-theme.css"), "utf8");
+const tokensCSS = readFileSync(join(spaRoot, "styles/tokens.css"), "utf8");
+
+/** The colour names the `@theme inline` bridge publishes. A fill outside this
+ *  set — `red-500`, `gray-700` — compiles only if the palette comes back. */
+const THEME_COLOURS = new Set(
+  [...themeCSS.matchAll(/^\s*--color-([\w-]+):/gm)].map((match) => match[1] ?? ""),
+);
+/** Every `--name` the generated stylesheet declares. */
+const DECLARED_TOKENS = new Set(
+  [...tokensCSS.matchAll(/(--[\w-]+)\s*:/g)].map((match) => match[1] ?? ""),
+);
+/** The declared motion steps as an alternation: `--duration-<name>` outside it
+ *  is a library default or a raw literal wearing a token-shaped name. */
+const DURATION = new RegExp(
+  `duration-\\(--duration-(?:${[
+    ...new Set([...tokensCSS.matchAll(/--duration-([\w-]+)\s*:/g)].map((match) => match[1] ?? "")),
+  ].join("|")})\\)`,
+);
+
+/** A fill names a published theme colour or a declared `(--token)` — never a
+ *  palette step. The `/alpha` suffix is allowed and asserted separately. */
+function expectSemanticFill(fill: string, where: string): void {
+  const name = fill.replace(/\/\d+$/, "");
+  const token = /^\((--[\w-]+)\)$/.exec(name)?.[1];
+  const known = token === undefined ? THEME_COLOURS.has(name) : DECLARED_TOKENS.has(token);
+  expect(known, `${where}: ${fill} names neither a theme colour nor a declared token`).toBe(true);
+}
+
 /** Live `transition*` class carriers — comment prose is not a motion face. */
 function transitionFaces(source: string): string[] {
   return source
@@ -64,7 +95,14 @@ describe("motion token sweep (routed from QC)", () => {
       const faces = transitionFaces(source);
       expect(faces.length).toBeGreaterThan(0);
       for (const face of faces) {
-        expect(face).toMatch(/duration-\(--duration-/);
+        // Every duration on the face, not one of them: a second, undeclared
+        // step beside a declared one used to satisfy a single `toMatch`, and
+        // `duration-(--duration-anything)` is a raw literal in token clothing.
+        const durations = [...face.matchAll(/duration-\(([^)]*)\)/g)].map(
+          (match) => `duration-(${match[1] ?? ""})`,
+        );
+        expect(durations.length, `${face} declares no duration`).toBeGreaterThan(0);
+        for (const duration of durations) expect(duration, face).toMatch(DURATION);
         expect(face).toMatch(/ease-\(--ease-/);
       }
     });
@@ -82,8 +120,8 @@ describe("motion token sweep (routed from QC)", () => {
   });
 
   test("sheet overlay and its close button keep their transition faces", () => {
-    expect(sources.sheet).toContain("transition duration-(--duration-");
-    expect(sources.sheet).toContain("transition-opacity duration-(--duration-");
+    expect(sources.sheet).toMatch(new RegExp(`transition ${DURATION.source}`));
+    expect(sources.sheet).toMatch(new RegExp(`transition-opacity ${DURATION.source}`));
   });
 
   test("toggle interaction face is tokenized", () => {
@@ -91,8 +129,7 @@ describe("motion token sweep (routed from QC)", () => {
   });
 
   test("reduced-motion fold still collapses every duration token to 1ms", () => {
-    const tokens = readFileSync(join(spaRoot, "styles/tokens.css"), "utf8");
-    const fold = tokens.match(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n\}/);
+    const fold = tokensCSS.match(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n\}/);
     expect(fold).not.toBeNull();
     expect(fold?.[0]).toContain("--duration-fast: 1ms");
     expect(fold?.[0]).toContain("--duration-base: 1ms");
@@ -123,8 +160,7 @@ describe("shell brand surfaces (A1/A2)", () => {
     // Trap-① discipline (knowledge ui-bugs/tailwind4-compiled-css-traps): the
     // named tint utility only compiles because the `@theme inline` block maps
     // the key — pin the mapping layer, not the compiled hex.
-    const theme = readFileSync(join(spaRoot, "styles/shadcn-theme.css"), "utf8");
-    expect(theme).toMatch(/--color-sidebar-primary:\s*var\(--sidebar-primary\)/);
+    expect(themeCSS).toMatch(/--color-sidebar-primary:\s*var\(--sidebar-primary\)/);
   });
 
   test("sidebar brand block is a typographic wordmark (no image/logo assets) on token classes", () => {
@@ -155,20 +191,28 @@ describe("sidebar hover hierarchy recipe (AD-622)", () => {
 
   test("menu-button cva block is locatable (pin integrity)", () => {
     expect(menuButtonBlock).toBeDefined();
-    expect(menuButtonBlock).toMatch(/hover:bg-[a-z0-9-]+/);
+    // Locatability only — the fill's vocabulary is the sibling tests' job, so
+    // this pin does not need to admit every utility a recipe could wear.
+    expect(menuButtonBlock).toContain("hover:bg-");
   });
 
   test("menu-button hover faces dim to the /40 accent tint (base + state-open + variants)", () => {
-    // Every hover fill in the recipe carries the /40 alpha — hover stays
-    // lighter than the press face; the exact bridge utility is the
-    // primitive's face, not this suite's oracle.
+    // Every hover fill in the recipe carries the /40 alpha and names a colour
+    // the theme layer publishes — hover stays lighter than the press face,
+    // and a raw palette step is not a fill this suite accepts.
     const hoverFills = [...(menuButtonBlock ?? "").matchAll(/hover:bg-([^\s"]+)/g)].map(
       (match) => match[1] ?? "",
     );
     expect(hoverFills.length).toBeGreaterThan(0);
-    for (const fill of hoverFills) expect(fill).toMatch(/\/40$/);
-    // …the open-state hover carries the same dim…
-    expect(menuButtonBlock).toMatch(/data-\[state=open\]:hover:bg-[^\s"]+\/40/);
+    for (const fill of hoverFills) {
+      expect(fill).toMatch(/\/40$/);
+      expectSemanticFill(fill, "menu-button hover");
+    }
+    // …the open-state hover carries the same dim, on the same vocabulary…
+    const openFill = /data-\[state=open\]:hover:bg-([^\s"]+)/.exec(menuButtonBlock ?? "")?.[1] ?? "";
+    expect(openFill, "no open-state hover fill").not.toBe("");
+    expect(openFill).toMatch(/\/40$/);
+    expectSemanticFill(openFill, "open-state hover");
     // …and a text brighten joins the dimmed fill.
     expect(menuButtonBlock).toMatch(/hover:text-[^\s"]+/);
     // No full-strength hover fill survives anywhere in the recipe (base,
@@ -179,12 +223,15 @@ describe("sidebar hover hierarchy recipe (AD-622)", () => {
   test("menu-button press face keeps its full-strength fill; the active face wears the brand tint (AD-622 untouched list)", () => {
     // AD-622's untouched list covers the press face; the v0.3.2 tint rework (AD-641)
     // supersedes the active-route face — text brighten + font-medium stay.
-    expect(menuButtonBlock).toMatch(/active:bg-[^\s"]+/);
     expect(menuButtonBlock).toMatch(/active:text-[^\s"]+/);
-    // Active is a state-driven tint that is not the press fill's alpha.
+    // Active is a state-driven tint that is not the press fill's alpha, and
+    // neither face may name a palette step.
     const activeFill = /data-\[active=true\]:bg-([^\s"]+)/.exec(menuButtonBlock ?? "")?.[1] ?? "";
     const pressFill = /active:bg-([^\s"]+)/.exec(menuButtonBlock ?? "")?.[1] ?? "";
-    expect(activeFill).not.toBe("");
+    expect(pressFill, "no press fill").not.toBe("");
+    expect(activeFill, "no active fill").not.toBe("");
+    expectSemanticFill(pressFill, "press face");
+    expectSemanticFill(activeFill, "active face");
     expect(activeFill).not.toBe(pressFill);
     expect(menuButtonBlock).toContain("data-[active=true]:font-medium");
   });
@@ -201,7 +248,14 @@ describe("sidebar hover hierarchy recipe (AD-622)", () => {
   });
 
   test("brand wordmark link rides the same tint recipe as the menu rows", () => {
-    expect(appSidebar).toMatch(/hover:bg-[^\s"]+\/40/);
+    const wordmarkFills = [...appSidebar.matchAll(/hover:bg-([^\s"]+)/g)].map(
+      (match) => match[1] ?? "",
+    );
+    expect(wordmarkFills.length).toBeGreaterThan(0);
+    for (const fill of wordmarkFills) {
+      expect(fill).toMatch(/\/40$/);
+      expectSemanticFill(fill, "wordmark hover");
+    }
     expect(appSidebar).toMatch(/hover:text-[^\s"]+/);
     // No translate / scale / shadow / ring / border on hover (AD-622): no
     // motion class may join the wordmark's hover face.

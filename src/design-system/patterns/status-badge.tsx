@@ -8,8 +8,10 @@
  * The tones are the token families' names. The retired call-site vocabulary
  * maps onto them one way: brand → accent, warning → warn, error → danger.
  *
- * `data-tone` and `data-strength` are written after `{...props}`: they are the
- * semantic identity, so a caller cannot spoof either through a spread.
+ * `data-slot` and the `data-tone` / `data-strength` pair are written after
+ * `{...props}`: they are the component's identity, so a caller cannot spoof
+ * any of them through a spread. The slot is what the preview's export ledger
+ * reads to prove this pattern is exercised, like every primitive's.
  */
 import type { ComponentProps } from "react";
 
@@ -68,6 +70,7 @@ export function StatusBadge({
         className,
       )}
       {...props}
+      data-slot="status-badge"
       data-tone={tone}
       data-strength={strength}
     />

@@ -2,8 +2,9 @@
  * AD-591 section idiom: the two-tier
  * surface system for long settings-style pages, defined ONCE here — a page
  * picks a tier through the `tier` prop and never hand-assembles tier
- * classNames per block. Composes the copy-in `ui/card.tsx` primitives (the
- * sanctioned wrapper extension surface; the copy-in files stay untouched).
+ * classNames per block. Composes `Card` from `@design-system`: the primitives
+ * are module internals, so the barrel is the only door (pinned by
+ * `tests/design-system/boundary.test.ts`).
  *
  * The r3 rule the tiers now follow: a hairline plus the card's surface step
  * carries the definition, and elevation is the overlays' job — no inline card

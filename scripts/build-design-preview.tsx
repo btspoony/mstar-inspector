@@ -3,22 +3,24 @@
  *
  * One static HTML file showing the whole system — every token in all three
  * layers, every tone × strength, every control height, the type roles, the
- * operator-surface remap, and a rendered specimen of every exported primitive
- * in both themes — built from `src/design-system/` alone. There is no template
+ * operator-surface remap, and a rendered specimen of every exported component
+ * (both tiers the barrel re-exports: primitives and patterns) in both themes —
+ * built from `src/design-system/` alone. There is no template
  * beside this file: the generator holds the layout, and the content is derived,
  * so the page cannot describe a system the source has moved past.
  *
  * Derivation alone cannot fail, so `--check` reads the page back and asserts
  * four separate things: one entry per declared token in each theme; the value
  * that entry prints is what the theme resolves to; every token has a specimen
- * family the page can actually draw; and every exported primitive is accounted
- * for — either its own `data-slot` appears in the markup (a specimen painted
- * it) or it is declared unpaintable with a reason (`UNPAINTED`: a Radix portal,
- * or a context root that renders no host node). The token-family rule catches
- * a *new* token; the primitive rule catches a *new* export.
+ * family the page can actually draw; and every exported component of either
+ * tier is accounted for — either its own `data-slot` appears in the markup (a
+ * specimen painted it) or it is declared unpaintable with a reason
+ * (`UNPAINTED`: a Radix portal, or a context root that renders no host node).
+ * The token-family rule catches a *new* token; the export rule catches a *new*
+ * component, in `primitives/` or in `patterns/`.
  *
  * The page carries no compiled Tailwind — the classes in the markup are inert
- * here — so the primitive section is a structural proof (every export renders
+ * here — so the component section is a structural proof (every export renders
  * and is accounted for in both themes), not a pixel reference.
  *
  * The output is build material, not shipped code: `dist/` is untracked and
@@ -35,6 +37,7 @@ import path from "node:path";
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import * as patterns from "../src/design-system/patterns/index";
 import * as primitives from "../src/design-system/primitives/index";
 
 import {
@@ -330,7 +333,7 @@ function transitionalNames(): string[] {
 }
 
 /**
- * Primitive coverage: one rendered specimen per primitive, and the exported
+ * Component coverage: one rendered specimen per primitive, and the exported
  * faces the server renderer cannot paint.
  *
  * A specimen is a composition, not a singleton: a Radix face only mounts
@@ -454,6 +457,11 @@ const SPECIMENS: Readonly<Record<string, ReactElement>> = {
       </P.DropdownMenuPortal>
     </P.DropdownMenu>
   ),
+  FlowSection: (
+    <patterns.FlowSection title="Flow section" subtitle="One plane, divided">
+      Body
+    </patterns.FlowSection>
+  ),
   Input: <P.Input placeholder="Input" />,
   Select: (
     <P.Select open>
@@ -526,6 +534,7 @@ const SPECIMENS: Readonly<Record<string, ReactElement>> = {
     </P.SidebarProvider>
   ),
   Skeleton: <P.Skeleton />,
+  StatusBadge: <patterns.StatusBadge tone="accent">Status</patterns.StatusBadge>,
   Table: (
     <P.Table>
       <P.TableCaption>Caption</P.TableCaption>
@@ -577,11 +586,19 @@ const SLOT_ALIAS: Readonly<Record<string, string>> = { SidebarProvider: "sidebar
 const slotOf = (name: string): string =>
   SLOT_ALIAS[name] ?? name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 
-/** The components the barrel exports: functions whose name is capitalised. */
-const exportedPrimitives = (): string[] =>
-  Object.entries(primitives)
-    .filter(([name, value]) => /^[A-Z]/.test(name) && typeof value === "function")
-    .map(([name]) => name);
+/** The two tiers the public barrel re-exports as components. The barrel's
+ *  token exports are values and types, not faces, so the ledger reads the
+ *  tier barrels — both of them: a pattern that ships undeclared is the same
+ *  gap as a primitive. */
+const TIERS = [primitives, patterns] as const;
+
+/** The components the tiers export: functions whose name is capitalised. */
+const exportedComponents = (): string[] =>
+  TIERS.flatMap((tier) =>
+    Object.entries(tier)
+      .filter(([name, value]) => /^[A-Z]/.test(name) && typeof value === "function")
+      .map(([name]) => name),
+  );
 
 const SPECIMEN_HTML: Readonly<Record<string, string>> = Object.fromEntries(
   Object.entries(SPECIMENS).map(([name, element]) => [name, renderToStaticMarkup(element)]),
@@ -592,17 +609,17 @@ const SPECIMEN_HTML: Readonly<Record<string, string>> = Object.fromEntries(
  * specimens to produce the section's counts, and against a theme section by the
  * check to prove the page carries them.
  */
-const paintedPrimitives = (markup: string): string[] =>
-  exportedPrimitives().filter((name) => markup.includes(`data-slot="${slotOf(name)}"`));
+const paintedComponents = (markup: string): string[] =>
+  exportedComponents().filter((name) => markup.includes(`data-slot="${slotOf(name)}"`));
 
 function primitiveSection(): string[] {
-  const exported = exportedPrimitives();
+  const exported = exportedComponents();
   const markup = Object.values(SPECIMEN_HTML).join("");
-  const painted = paintedPrimitives(markup);
+  const painted = paintedComponents(markup);
   const unpainted = exported.filter((name) => !painted.includes(name));
 
   return [
-    "<h2>Primitives</h2>",
+    "<h2>Primitives and patterns</h2>",
     `<p data-primitives="${exported.length}" data-painted="${painted.length}" data-unpainted="${unpainted.length}">` +
       `${exported.length} exports across ${Object.keys(SPECIMENS).length} specimens: ` +
       `${painted.length} paint their own slot; ${unpainted.length} are portal- or context-bound ` +
@@ -876,10 +893,10 @@ export interface PreviewCoverage {
   /** Operator-surface remaps, across both themes. */
   readonly remaps: number;
   readonly expectedRemaps: number;
-  /** Primitive specimens, across both themes. */
+  /** Component specimens, across both themes. */
   readonly specimens: number;
   readonly expectedSpecimens: number;
-  /** Exported primitives whose own `data-slot` the markup paints. */
+  /** Exported components whose own `data-slot` the markup paints. */
   readonly painted: number;
   readonly expectedPainted: number;
   /** Faces that cannot paint on the server, listed once with their reason. */
@@ -917,7 +934,7 @@ export function previewCoverage(html: string): PreviewCoverage {
     transitional: 0,
     reducedMotion: 0,
   };
-  const exported = exportedPrimitives();
+  const exported = exportedComponents();
   const unpaintedFaces = Object.keys(UNPAINTED);
 
   // `entryValues` keys by token name alone, so the layers must not share one.
@@ -994,7 +1011,7 @@ export function previewCoverage(html: string): PreviewCoverage {
 
     // Coverage is closed in both directions: an export the markup does not
     // paint must be declared, and a declaration must still be unpaid.
-    const painted = paintedPrimitives(section);
+    const painted = paintedComponents(section);
     counts.painted += painted.length;
     for (const name of exported) {
       if (!painted.includes(name) && !(name in UNPAINTED)) {
@@ -1076,8 +1093,8 @@ if (import.meta.main) {
         `${coverage.tonePairs}/${coverage.expectedTonePairs} tone × strength, ` +
         `${coverage.controlHeights}/${coverage.expectedControlHeights} control heights, ` +
         `${coverage.remaps}/${coverage.expectedRemaps} operator-surface remaps, ` +
-        `${coverage.specimens}/${coverage.expectedSpecimens} primitive specimens, ` +
-        `${coverage.painted}/${coverage.expectedPainted} painted primitive exports, ` +
+        `${coverage.specimens}/${coverage.expectedSpecimens} component specimens, ` +
+        `${coverage.painted}/${coverage.expectedPainted} painted component exports, ` +
         `${coverage.unpainted}/${coverage.expectedUnpainted} declared unpainted, ` +
         `${coverage.transitional}/${coverage.expectedTransitional} transitional names)`,
     );
@@ -1089,7 +1106,7 @@ if (import.meta.main) {
     `design-preview: ${coverage.entries} token entries across ${THEMES.length} themes, ` +
       `${coverage.tonePairs} tone × strength, ${coverage.controlHeights} control heights, ` +
       `${coverage.remaps} operator-surface remaps, ${coverage.transitional} transitional names, ` +
-      `${coverage.specimens} primitive specimens ` +
+      `${coverage.specimens} component specimens ` +
       `(${coverage.painted} painted exports, ${coverage.unpainted} portal/context-bound and listed)`,
   );
 

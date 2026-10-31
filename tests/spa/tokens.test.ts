@@ -21,7 +21,7 @@
  * Version pins are structural (dotted numeric + matching `v<version>`
  * change-note in the description), never literals.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
@@ -471,6 +471,29 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   const PRIMITIVES_DIR = fileURLToPath(new URL("../../src/design-system/primitives/", import.meta.url));
   /** A5 sensitive subset — the only primitives allowed to drift from the copy-in. */
   const SUBSET = ["button", "card", "input", "table", "skeleton", "tabs", "sidebar", "select", "dropdown-menu", "dialog"];
+
+  test("the theme entry names the design-system tier Tailwind cannot scan on its own", async () => {
+    const css = await Bun.file(BRIDGE).text();
+    const directives = [...css.matchAll(/@source\s+"([^"]+)"/g)].map((match) => match[1] ?? "");
+    // This line is the only content path outside the entry's own directory
+    // (the Vite root, `src/spa`). Deleting it keeps the DOM and drops every
+    // utility the migrated primitives wear, with a green build — so the check
+    // is that the directive exists, and that it points at a tree the scanner
+    // would otherwise miss.
+    expect(directives, "@source directives in shadcn-theme.css").toHaveLength(1);
+    const [directive = ""] = directives;
+    const target = new URL(directive, BRIDGE);
+    expect(
+      fileURLToPath(target).startsWith(fileURLToPath(new URL("../../src/spa/", import.meta.url))),
+      `${target} sits inside the automatic scan base, so the directive is a no-op`,
+    ).toBe(false);
+    // Both component tiers must be reachable: a path that lands one level off
+    // (or on a file) would scan nothing and fail the same silent way.
+    for (const tier of ["primitives", "patterns"]) {
+      const child = new URL(`${directive}/${tier}/index.ts`, BRIDGE);
+      expect(existsSync(child), `${child}`).toBe(true);
+    }
+  });
 
   test("bridge re-point: every value is a semantic token; focus stays on the blue duty", async () => {
     const css = await Bun.file(BRIDGE).text();
