@@ -244,7 +244,7 @@ function ProviderGroupCard({
       <GroupCardBody>
         <NoticeRegion notice={removeNotice} />
         {group.keys.length === 0 ? (
-          <p className="rounded-(--rounded-sm) border border-(--gray-alpha-400) bg-(--gray-200) px-3 py-3.5 text-sm text-muted-foreground">
+          <p className="rounded-(--radius-control) border border-(--border-default) bg-(--surface-inset) px-3 py-3.5 text-sm text-muted-foreground">
             {t(locale, "settings.providers.empty")}
           </p>
         ) : (
@@ -307,7 +307,7 @@ function ProviderGroupCard({
             </span>
             <button
               type="button"
-              className="text-(--brand-700)"
+              className="text-(--tone-accent-fg)"
               aria-expanded={modelsOpen}
               // The region mounts only while open, so the control never names
               // a missing element (the combobox precedent).

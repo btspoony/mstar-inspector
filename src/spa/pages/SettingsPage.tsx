@@ -1658,7 +1658,7 @@ function ChainEditor({
           {chain.map((selector, index) => (
             <li
               key={`${selector}-${index}`}
-              className="flex items-center justify-between gap-2 rounded-(--rounded-sm) border border-(--gray-alpha-400) bg-(--gray-200) px-3 py-2"
+              className="flex items-center justify-between gap-2 rounded-(--radius-control) border border-(--border-default) bg-(--surface-inset) px-3 py-2"
             >
               <span className="font-mono text-sm">{selector}</span>
               {/* (review deferral): removing a selector edits

@@ -27,7 +27,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
-import { MembersPage, MembersTable } from "../../src/spa/pages/MembersPage";
+import { MembersPage } from "../../src/spa/pages/MembersPage";
 import type { AppsPayload } from "../../src/spa/pages/data";
 import { matchSpaRoute } from "../../src/spa/routes";
 import { withLocation } from "./browser-stub";
@@ -86,24 +86,13 @@ const renderList = (apps: AppsPayload["apps"], pathname = "/dashboard/apps"): st
     ),
   );
 
-/** The Members table with the page's own loaded state supplied. */
-const renderMembers = (): string =>
-  decoded(
-    withLocation("/dashboard/acme", () =>
-      renderToStaticMarkup(
-        createElement(MembersTable, {
-          locale: "en",
-          members: [
-            { id: "m1", github_login: "mallory", role: "owner", created_at: "2026-01-01T00:00:00Z" },
-          ],
-          viewerLogin: "mallory",
-          memberRole: "owner",
-          canInvite: true,
-          onAction: () => {},
-        }),
-      ),
-    ),
-  );
+/**
+ * The mounted Members page, rendered once: the member rows are a list now, so
+ * the page's one remaining table is the pending-invitation table — that is the
+ * Members surface the table pins below still cover.
+ */
+let membersPageHtml: Promise<string> | null = null;
+const membersPage = (): Promise<string> => (membersPageHtml ??= mountMembersPage());
 
 /** Class lists of every `th` / `td` the markup emits. */
 const classAttrs = (html: string, tag: "th" | "td"): string[] =>
@@ -351,7 +340,7 @@ describe("v0.3 page face (A4/A5)", () => {
     }
   });
 
-  test("table header face: a semantic band + label-12 headers (DESIGN.md Table)", () => {
+  test("table header face: a semantic band + label-12 headers (DESIGN.md Table)", async () => {
     // Same ownership split as the page title: DataTable owns the shell and the
     // band, each page only composes it. The band must resolve through the
     // semantic layer — a primitive palette step here would be the pre-r3 face —
@@ -360,7 +349,7 @@ describe("v0.3 page face (A4/A5)", () => {
     // identical band, so the source pins forbid the second spelling explicitly.
     for (const [name, html] of [
       ["AppsPage", renderAppsPage()],
-      ["MembersPage", renderMembers()],
+      ["MembersPage", decoded(await membersPage())],
     ] as const) {
       const thead = html.match(/<thead[^>]*class="([^"]*)"/)?.[1] ?? "";
       expect(thead, name).not.toMatch(/--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-/);
@@ -408,12 +397,12 @@ describe("v0.3 page face (A4/A5)", () => {
 });
 
 describe("table horizontal padding (D5/A3)", () => {
-  test("head and cell ride the spacing-3 horizontal step (12px); vertical untouched", () => {
+  test("head and cell ride the spacing-3 horizontal step (12px); vertical untouched", async () => {
     // D5: one component-level raise benefits both Apps and Members tables —
     // asserted on the emitted th/td class lists of either table.
     for (const [name, html] of [
       ["AppsPage", renderList([appRow()])],
-      ["MembersPage", renderMembers()],
+      ["MembersPage", decoded(await membersPage())],
     ] as const) {
       const heads = classAttrs(html, "th");
       const cells = classAttrs(html, "td");
@@ -431,11 +420,11 @@ describe("table horizontal padding (D5/A3)", () => {
     }
   });
 
-  test("the 8px horizontal step is retired from every emitted head/cell class", () => {
+  test("the 8px horizontal step is retired from every emitted head/cell class", async () => {
     // Token-exact check: a regen reverting the primitives to upstream
     // px-2/p-2 fails, while token variants (px-2.5, sm:px-2) are not the
     // retired step.
-    for (const html of [renderList([appRow()]), renderMembers()]) {
+    for (const html of [renderList([appRow()]), decoded(await membersPage())]) {
       for (const attr of [...classAttrs(html, "th"), ...classAttrs(html, "td")]) {
         const tokens = attr.split(/\s+/);
         expect(tokens).not.toContain("px-2");
@@ -444,10 +433,10 @@ describe("table horizontal padding (D5/A3)", () => {
     }
   });
 
-  test("checkbox flush-right exception survives the padding raise", () => {
+  test("checkbox flush-right exception survives the padding raise", async () => {
     // The pr-0 escape hatch exists on both head and cell (shadcn convention),
     // which the emitted markup shows on either table.
-    for (const html of [renderList([appRow()]), renderMembers()]) {
+    for (const html of [renderList([appRow()]), decoded(await membersPage())]) {
       expect(classAttrs(html, "th").every((attr) => attr.includes("[&:has([role=checkbox])]:pr-0"))).toBe(
         true,
       );
