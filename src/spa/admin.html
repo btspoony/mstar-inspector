@@ -1,5 +1,12 @@
 <!doctype html>
-<html lang="en">
+<!--
+  The console is the D15 plain variant. `data-surface="ops"` sits on the
+  document root — not a page wrapper — so the generated re-map in tokens.css
+  reaches everything Radix portals mount on <body>: the flag-confirm dialog,
+  dropdowns, tooltips. The accent tone is withheld whole there; no page in
+  src/spa/admin/ forks a component to look plainer.
+-->
+<html lang="en" data-surface="ops">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
