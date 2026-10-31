@@ -7,12 +7,11 @@
  * 1. **The output is a pure function of the source.** Regenerating in-process
  *    and comparing against the committed file catches a hand edit the same way
  *    `--check` does, and it runs under `bun test` as well as in CI.
- * 2. **The transitional set is declared, with its owner.** Plans 202/203
- *    compile against those 11 steps until they migrate the last consumer;
- *    emitting survivors alone would break the build with no failing assertion
- *    until those plans run.
- * 3. **Nothing removed comes back.** The 59 steps D14 dropped must not appear
- *    as declarations, and no layer may reference a transitional step.
+ * 2. **The palette is exactly the survivor set.** The D14a transitional steps
+ *    closed with plan 204, whose admin.html migration removed their last
+ *    readers; the emitted palette is the 26 the bands consume and nothing else.
+ * 3. **Nothing removed comes back.** Neither the steps D14 dropped nor the
+ *    retired pre-redesign aliases reappear as declarations.
  * 4. **The theme contract survives**: `:root` dark, `[data-theme="light"]`
  *    stored-light only, the ops variant, and the reduced-motion fold.
  */
@@ -21,7 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
-import { legacyTokens, survivorSteps, tokenLayers, transitionalSteps } from "../../src/design-system/tokens";
+import { survivorSteps, tokenLayers } from "../../src/design-system/tokens";
 
 const REPO = new URL("../../", import.meta.url).pathname;
 const CSS_PATH = join(REPO, "src/spa/styles/tokens.css");
@@ -72,16 +71,14 @@ describe("generated tokens.css", () => {
     expect(css.slice(0, 400)).toContain("scripts/build-tokens.ts");
   });
 
-  test("declares 26 survivors and 2 transitional steps, and no other palette step", () => {
+  test("declares the 26 survivors, and no other palette step", () => {
     const declaredSteps = [
       ...Object.keys(ROOT),
       ...Object.keys(LIGHT),
     ].filter((name) => /^(?:background|gray|gray-alpha|brand|blue|red|amber|green|teal|purple|pink)-/.test(name));
     const unique = [...new Set(declaredSteps)].sort();
-    expect(unique).toEqual(
-      [...survivorSteps, ...transitionalSteps.map((s) => s.name)].sort(),
-    );
-    expect(unique).toHaveLength(28);
+    expect(unique).toEqual([...survivorSteps].sort());
+    expect(unique).toHaveLength(26);
   });
 
   test("every dark semantic and component declaration reaches :root at its source value", () => {
@@ -99,16 +96,6 @@ describe("generated tokens.css", () => {
     }
   });
 
-  test("every transitional declaration carries the plan that closes it", () => {
-    for (const step of transitionalSteps) {
-      // The owner comment is the deadline: it travels with the value, so a
-      // step cannot outlive its consumer unnoticed.
-      expect(css, `--${step.name}`).toContain(`closed by plan ${step.owner}`);
-      expect(ROOT[step.name], `--${step.name} in :root`).toMatch(/^#[0-9a-f]{3,8}$/i);
-      expect(LIGHT[step.name], `--${step.name} in light`).toMatch(/^#[0-9a-f]{3,8}$/i);
-    }
-  });
-
   test("no removed step reappears as a declaration", () => {
     const declared = new Set([...Object.keys(ROOT), ...Object.keys(LIGHT)]);
     // The families D14 emptied out entirely — after task 4 the chart steps
@@ -116,26 +103,8 @@ describe("generated tokens.css", () => {
     // pink may remain.
     for (const family of ["blue", "teal", "pink", "purple"]) {
       const survivors = survivorSteps.filter((step) => step.startsWith(`${family}-`));
-      const transitional = transitionalSteps
-        .map((step) => step.name)
-        .filter((step) => step.startsWith(`${family}-`));
       const alive = [...declared].filter((name) => name.startsWith(`${family}-`));
-      expect(alive.sort(), family).toEqual([...survivors, ...transitional].sort());
-    }
-  });
-
-  test("no layer references a transitional or legacy name", () => {
-    // A reference from inside the system would make the step permanent by
-    // accident; the whole point is that its consumer lives outside.
-    for (const theme of ["dark", "light"] as const) {
-      const layers = tokenLayers(theme);
-      const referenced = [...Object.values(layers.semantic), ...Object.values(layers.component)].join("\n");
-      for (const step of transitionalSteps) {
-        expect(referenced, `${theme} consumes --${step.name}`).not.toContain(`var(--${step.name})`);
-      }
-      for (const token of legacyTokens) {
-        expect(referenced, `${theme} consumes legacy --${token.name}`).not.toContain(`var(--${token.name})`);
-      }
+      expect(alive.sort(), family).toEqual([...survivors].sort());
     }
   });
 
@@ -165,16 +134,14 @@ describe("generated tokens.css", () => {
 
     expect(OPS["tone-accent-solid"]).toBe("var(--tone-neutral-solid)");
     expect(OPS["button-primary-bg"]).toBe("var(--tone-neutral-bg)");
-  });
 
-  test("legacy names are declared as references, and only for names a later plan closes", () => {
-    for (const token of legacyTokens) {
-      expect(ROOT[token.name], `--${token.name}`).toBe(token.value);
-      expect(css, `--${token.name} owner`).toContain(`closed by plan ${token.owner}`);
-      expect(token.owner.trim()).not.toBe("");
-      // A legacy value is a reference into the system or one of the plain
-      // geometry values the surface already declared — never a new colour.
-      expect(token.value).not.toMatch(/^#[0-9a-f]{3,8}$/i);
-    }
+    // Source order is load-bearing: `:root[data-theme="light"]` and
+    // `:root[data-surface="ops"]` both score 0-2-0, so only the later block
+    // wins. Emit ops first and the light branch repaints the console's accent
+    // tokens — a silent return of the tone D15 withholds.
+    const lightAt = css.indexOf(':root[data-theme="light"] {');
+    const opsAt = css.indexOf(':root[data-surface="ops"] {');
+    expect(lightAt).toBeGreaterThan(-1);
+    expect(opsAt).toBeGreaterThan(lightAt);
   });
 });

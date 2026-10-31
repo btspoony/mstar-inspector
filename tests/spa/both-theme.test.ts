@@ -1,10 +1,11 @@
 /**
- * Both-theme acceptance pass (plan 203, task 6).
+ * Both-theme acceptance pass (plan 203, task 6; extended by plan 204, task 4).
  *
- * Every customer-facing surface of the compass `## Surface census` is rendered
- * under `data-theme="light"` and the token vocabulary its markup carries is
- * checked against the token source. Each finding below is a way a surface ends
- * up working only in dark:
+ * Every customer-facing surface of the compass `## Surface census` — and now
+ * the operator console's four screens plus its shell — is rendered under
+ * `data-theme="light"` and the token vocabulary its markup carries is checked
+ * against the token source. Each finding below is a way a surface ends up
+ * working only in dark:
  *
  * 1. A colour named from the **primitive** layer — a palette step in a page.
  *    It paints, but it is not the page's layer to name.
@@ -34,6 +35,12 @@ import { act, createElement, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarProvider } from "@design-system";
+import { App as AdminApp } from "../../src/spa/admin/main";
+import { FlagsPage as AdminFlagsPage } from "../../src/spa/admin/FlagsPage";
+import { SupportGrantsPage as AdminSupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
+import { UsersPage as AdminUsersPage } from "../../src/spa/admin/UsersPage";
+import { WorkspacesPage as AdminWorkspacesPage } from "../../src/spa/admin/WorkspacesPage";
+import type { SpaBoot } from "../../src/spa/boot";
 import { AppSidebar } from "../../src/spa/components/AppSidebar";
 import type { ThemeName } from "../../src/design-system/tokens";
 import { resolveTheme, tokenNames } from "../../src/design-system/tokens";
@@ -118,11 +125,29 @@ const measured: Record<string, number> = {};
 const renderLight = (element: Parameters<typeof renderToStaticMarkup>[0]): string =>
   `<div data-theme="light">${renderToStaticMarkup(element)}</div>`;
 
-/** Mount a page whose contract lives in its effect, under the light attribute. */
-async function mountLight(element: ReactElement, path: string): Promise<string> {
+/**
+ * Mount a page whose contract lives in its effect, under the light attribute.
+ *
+ * `surface` is the console document's second root attribute (D15): the admin
+ * document carries both, so the pass renders those screens exactly as the
+ * server ships them. `boot` is the injected `window.__BOOT__` the console entry
+ * reads its locale and login from.
+ */
+async function mountLight(
+  element: ReactElement,
+  path: string,
+  { surface, boot }: { surface?: "ops"; boot?: SpaBoot } = {},
+): Promise<string> {
   const { win, cleanup } = installDom(`http://localhost${path}`);
   try {
     win.document.documentElement.dataset.theme = "light";
+    if (surface !== undefined) win.document.documentElement.dataset.surface = surface;
+    if (boot !== undefined) {
+      // `readBoot()` reads `window.__BOOT__`; installDom has just made the
+      // happy-dom window the global, so this is the Worker's injection channel.
+      const bootHost = globalThis as { window?: { __BOOT__?: SpaBoot } };
+      bootHost.window!.__BOOT__ = boot;
+    }
     const container = win.document.createElement("div");
     win.document.body.appendChild(container);
     const root = createRoot(container as unknown as Element);
@@ -275,6 +300,75 @@ const SUPPORT_VIEW = {
   grants: [{ operator_login: "operator", reason: "incident 42", expires_at: "2026-11-01 00:00:00" }],
 };
 
+/** The console's four reads, answered from one stub by path. */
+const ADMIN_FLAGS = [
+  { key: "review_global", enabled: true },
+  { key: "signup_open", enabled: false },
+];
+const ADMIN_WORKSPACES = [
+  {
+    id: "ws_0123456789abcdefghijkl",
+    name: "Acme",
+    slug: "acme",
+    ownerLogin: "octocat",
+    memberCount: 3,
+    pendingInviteCount: 1,
+    planId: "pro",
+    planName: "Pro",
+    includedMembers: 10,
+    createdAt: "2026-09-01T00:00:00Z",
+  },
+];
+const ADMIN_USERS = [
+  { login: "octocat", createdAt: "2026-08-26T09:41:00Z", workspaceCount: 1, activeGrantCount: 0, isOperator: true },
+];
+const ADMIN_GRANTS = [
+  {
+    id: "g1",
+    workspace_id: "ws_0123456789abcdefghijkl",
+    operator_login: "operator",
+    reason: "incident 42",
+    granted_by: "operator",
+    created_at: "2026-10-01T00:00:00Z",
+    expires_at: "2026-11-01T00:00:00Z",
+  },
+];
+
+/** The console's read stub: one payload per endpoint the console calls. */
+const adminApi = (url: string): unknown => {
+  if (url.includes("/workspaces")) return { workspaces: ADMIN_WORKSPACES };
+  if (url.includes("/users")) return { users: ADMIN_USERS };
+  if (url.includes("/support-grants")) return { grants: ADMIN_GRANTS };
+  return { flags: ADMIN_FLAGS };
+};
+
+/**
+ * Mount one console screen exactly as the server ships it: the stored-light
+ * root plus D15's `data-surface="ops"`, with the console's reads answered from
+ * `adminApi`. The ops attribute is part of the measurement, not a convenience —
+ * the console's real document carries it, and a token that only works because
+ * the variant is absent would not be caught here.
+ */
+async function mountAdmin(
+  element: ReactElement,
+  path: string,
+  boot?: SpaBoot,
+): Promise<string> {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
+    return new Response(JSON.stringify(adminApi(url)), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+  try {
+    return await mountLight(element, path, { surface: "ops", boot });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 type Surface = {
   readonly name: string;
   /** Copy the render must carry — proves the pass measured a real face. */
@@ -408,10 +502,48 @@ const SURFACES: readonly Surface[] = [
     marker: t("en", "login.signIn"),
     render: () => renderLight(createElement(LoginPage, { boot: { locale: "en", login: null, name: null } })),
   },
+  // Plan 204's census: the console's four screens plus the shell they mount in.
+  // Each marker is a loaded-face string, so a screen that fell back to its
+  // skeleton or error branch cannot pass the marker assertion.
+  {
+    name: "Console — shell",
+    marker: t("en", "admin.flags.effectReviewGlobal"),
+    render: () =>
+      mountAdmin(createElement(AdminApp), "/_internal_admin/flags", {
+        locale: "en",
+        login: "operator",
+        name: null,
+      }),
+  },
+  {
+    name: "Console — flags",
+    marker: t("en", "admin.flags.effectReviewGlobal"),
+    render: () => mountAdmin(createElement(AdminFlagsPage, { locale: "en" }), "/_internal_admin/flags"),
+  },
+  {
+    name: "Console — workspaces",
+    marker: t("en", "admin.workspaces.seatsColumn"),
+    render: () =>
+      mountAdmin(createElement(AdminWorkspacesPage, { locale: "en" }), "/_internal_admin/workspaces"),
+  },
+  {
+    name: "Console — users",
+    marker: t("en", "admin.users.githubColumn"),
+    render: () => mountAdmin(createElement(AdminUsersPage, { locale: "en" }), "/_internal_admin/users"),
+  },
+  {
+    name: "Console — support access",
+    marker: t("en", "admin.supportGrants.expiresColumn"),
+    render: () =>
+      mountAdmin(
+        createElement(AdminSupportGrantsPage, { locale: "en" }),
+        "/_internal_admin/support-grants",
+      ),
+  },
 ];
 
 describe("both-theme acceptance pass", () => {
-  test("the pass enumerates all eight customer-facing surfaces", () => {
+  test("the pass enumerates the eight customer faces and the console's five", () => {
     expect(SURFACES.map((surface) => surface.name)).toEqual([
       "Apps list",
       "App detail — settings",
@@ -421,6 +553,11 @@ describe("both-theme acceptance pass", () => {
       "Workspace setup",
       "Support",
       "Login",
+      "Console — shell",
+      "Console — flags",
+      "Console — workspaces",
+      "Console — users",
+      "Console — support access",
     ]);
   });
 
@@ -435,8 +572,13 @@ describe("both-theme acceptance pass", () => {
     }
     // Empty = no token is returned to plans 201/202.
     expect(findings).toEqual([]);
-    // The verdict names what it compared: 8 surfaces, this many references.
+    // The verdict names what it compared: 13 surfaces, this many references.
     expect(Object.keys(measured)).toHaveLength(SURFACES.length);
+    // The console's five are part of the verdict, not appended to it: each one
+    // rendered a token vocabulary of its own.
+    const consoleSurfaces = Object.entries(measured).filter(([name]) => name.startsWith("Console"));
+    expect(consoleSurfaces).toHaveLength(5);
+    for (const [name, count] of consoleSurfaces) expect(count, name).toBeGreaterThan(0);
     const total = Object.values(measured).reduce((sum, count) => sum + count, 0);
     expect(total).toBeGreaterThan(150);
   });

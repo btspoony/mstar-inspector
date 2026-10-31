@@ -31,6 +31,13 @@ import { ADMIN_PAGES, type AdminPageId } from "./pages";
  *
  * `SCREENS` is keyed by the page id union, so a screen without a page (or a
  * page without a screen) is a compile error rather than a blank route.
+ *
+ * The console is the D15 **plain variant**: `admin.html` carries
+ * `data-surface="ops"` on the document root, and that one re-map resolves the
+ * accent tone to its neutral counterpart and the primary action to neutral
+ * emphasis. Nothing here forks a component to look plainer — a fork would be
+ * the second component set the plan forbids. A surface the variant cannot
+ * express through tokens is a token gap to record, not a component to copy.
  */
 const SCREENS: Record<AdminPageId, ComponentType<{ locale: Locale }>> = {
   flags: FlagsPage,
@@ -47,7 +54,7 @@ export function App() {
 
   return (
     <div className="admin">
-      <header className="admin-header">
+      <header className="admin-header border-b border-(--border-default)">
         <div>
           <h1>{t(locale, "admin.header.title")}</h1>
           <p className="muted">{boot.login ?? t(locale, "admin.header.signedOut")}</p>
@@ -78,7 +85,9 @@ export function App() {
           </a>
         ))}
       </nav>
-      <main className="admin-main">{createElement(SCREENS[page.id], { locale })}</main>
+      <main className="admin-main rounded-(--radius-container) border border-(--border-default)">
+        {createElement(SCREENS[page.id], { locale })}
+      </main>
     </div>
   );
 }

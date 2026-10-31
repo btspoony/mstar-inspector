@@ -7,9 +7,9 @@
  *   set-equality over each theme's colour map. The old hand-lists of light
  *   hexes (KEPT_LIGHT/V03_LIGHT) and L2 accent steps died with the palette
  *   they pinned; the fixture is the vocabulary now.
- * - The palette the document carries is exactly the D14 survivor set plus
- *   the D14a transitional live list, read from the token source — not a
- *   second hand-maintained list.
+ * - The palette the document carries is exactly the D14 survivor set, read
+ *   from the token source — not a second hand-maintained list. (The D14a
+ *   transitional live list closed with plan 204; it is empty.)
  * - `src/spa/styles/tokens.css` and the document agree because both equal
  *   the fixture; light applies only via `:root[data-theme="light"]` (the
  *   stored choice; the OS-light fallback branch is deleted).
@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
-import { survivorSteps, transitionalSteps } from "../../src/design-system/tokens";
+import { survivorSteps } from "../../src/design-system/tokens";
 import { documentSync, parseFixture } from "../../scripts/design-system-check";
 
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
@@ -186,9 +186,9 @@ describe("source → fixture → DESIGN.md chain", () => {
     expect(fm.colors).toEqual(fm.themes.dark.colors);
   });
 
-  test("the palette the document carries is the D14 survivors plus the D14a live list", async () => {
+  test("the palette the document carries is the 26 D14 survivors", async () => {
     const fm = await loadFrontmatter();
-    const expected = [...survivorSteps, ...transitionalSteps.map((step) => step.name)].sort();
+    const expected = [...survivorSteps].sort();
     const declared = Object.keys(fm.themes.dark.colors).filter((name) => PALETTE_STEP.test(name)).sort();
     expect(declared).toEqual(expected);
   });
@@ -341,20 +341,7 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     }
   });
 
-  test("transitional steps are declared with the plan that closes them", async () => {
-    const css = await Bun.file(TOKENS_CSS).text();
-    const dark = extractBlock(css, ":root {");
-    for (const step of transitionalSteps) {
-      // The declaration is what later plans compile against; the owner
-      // comment is the deadline, and it travels with the value.
-      expect(dark, `--${step.name} must stay declared`).toContain(`  --${step.name}: #`);
-      expect(dark, `--${step.name} needs its owner comment`).toMatch(
-        new RegExp(`closed by plan [^\\n]+[\\s\\S]{0,200}?\\n\\s*--${step.name}: `),
-      );
-    }
-  });
-
-  test("semantic, component and legacy names are present on :root", async () => {
+  test("semantic and component names are present on :root, and no alias scaffold survives", async () => {
     const css = await Bun.file(TOKENS_CSS).text();
     const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
 
@@ -368,11 +355,11 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     expect(rootVars["button-primary-bg"]).toBe("var(--tone-accent-solid)");
     expect(rootVars["button-primary-fg"]).toBe("var(--on-brand)");
     expect(rootVars["card-bg"]).toBe("var(--surface-card)");
-    // The legacy radius aliases still resolve onto the two tiers; the button
-    // sizing, notice-channel and sidebar-tint aliases left once the SSR face
-    // read the component layer directly.
-    expect(rootVars["rounded-sm"]).toBe("var(--radius-control)");
-    expect(rootVars["rounded-md"]).toBe("var(--radius-container)");
+    // The pre-redesign radius aliases left with the page stylesheet that was
+    // their last reader (plan 204); the earlier alias groups left with the SSR
+    // face. A name coming back here would make a second vocabulary live again.
+    expect(rootVars["rounded-sm"]).toBeUndefined();
+    expect(rootVars["rounded-md"]).toBeUndefined();
     expect(rootVars["button-primary-height"]).toBeUndefined();
     expect(rootVars["notice-error-fg"]).toBeUndefined();
     expect(rootVars["sidebar-active-bg"]).toBeUndefined();
@@ -504,12 +491,14 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("bridge re-point: every value is a semantic token; focus stays on the blue duty", async () => {
     const css = await Bun.file(BRIDGE).text();
     const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
-    // The task-3 re-point: the accent arrives as `tone-accent-solid` and the
-    // label as `on-brand`, so the bridge never names a palette step. Hover is
-    // the component layer's approved one-step-quieter face.
-    expect(rootVars["primary"]).toBe("var(--tone-accent-solid)");
+    // The task-3 re-point: the bridge never names a palette step. The action
+    // pair goes through the component layer (`--primary` → `button-primary-bg`
+    // → `tone-accent-solid`), which is what lets the D15 ops variant reach the
+    // painted control; the next test proves that hop is invisible on the
+    // customer faces. Hover already followed the same route.
+    expect(rootVars["primary"]).toBe("var(--button-primary-bg)");
     expect(rootVars["primary-hover"]).toBe("var(--button-primary-hover-bg)");
-    expect(rootVars["primary-foreground"]).toBe("var(--on-brand)");
+    expect(rootVars["primary-foreground"]).toBe("var(--button-primary-fg)");
     expect(rootVars["secondary-hover"]).toBe("var(--surface-overlay)");
     expect(rootVars["muted"]).toBe("var(--surface-inset)");
     expect(rootVars["border"]).toBe("var(--border-default)");
@@ -546,6 +535,22 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // (AD-622): the hover tint consumes the sidebar-accent key at
     // /40 opacity — same dead-class trap, so the mapping is pinned too.
     expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
+  });
+
+  test("the primary bridge resolves to the accent pair off the ops surface", async () => {
+    // The extra component hop exists for the D15 variant. Off that surface it
+    // must be invisible, and that is a value claim: resolve both themes through
+    // the real files and compare against the pair the bridge used to name.
+    const bridge = cssCustomProperties(extractBlock(await Bun.file(BRIDGE).text(), ":root {"));
+    const tokens = await Bun.file(TOKENS_CSS).text();
+    const dark = { ...bridge, ...cssCustomProperties(extractBlock(tokens, ":root {")) };
+    const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
+    for (const [theme, vars] of [["dark", dark], ["light", light]] as const) {
+      expect(resolve(vars, "primary"), `${theme} --primary`).toBe(resolve(vars, "tone-accent-solid"));
+      expect(resolve(vars, "primary-foreground"), `${theme} --primary-foreground`).toBe(
+        resolve(vars, "on-brand"),
+      );
+    }
   });
 
   test("radius bridge collapses onto the AD-574 two tiers; tokens button maps the accent tone", async () => {

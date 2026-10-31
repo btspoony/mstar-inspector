@@ -12,8 +12,9 @@
  * the next generation, and step 2 of `scripts/design-system-check.ts` fails
  * until it is committed.
  *
- * `legacyTokens` is deliberately absent — it is not a layer (`legacy.ts`), it
- * is a list of pre-redesign names the transitional surfaces still read.
+ * When a name leaves the source it leaves the fixture in the same
+ * generation: the palette's D14a transitional set closed with plan 204, and the
+ * pre-redesign alias list retired with the page stylesheet that read it.
  *
  * Usage:
  *   bun scripts/build-fixture.ts           # write the fixture

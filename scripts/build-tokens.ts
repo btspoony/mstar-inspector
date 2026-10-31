@@ -4,14 +4,13 @@
  *
  * The token source under `src/design-system/tokens/` is the only hand-editable
  * half of the design system; both outputs are emitted from it:
- * primitives → semantics → components → the transitional names → the D15 ops
- * variant → the reduced-motion fold.
+ * primitives → semantics → components → the D15 ops variant → the
+ * reduced-motion fold.
  *
- * Two sets beyond the survivors: D14a's transitional palette steps (each with
- * the plan that closes it) and `legacyTokens`, the pre-redesign names surfaces
- * in plans 202-203 still read. Both come from the source as data, so the
- * generator holds no list of its own and a step leaves the output in the same
- * commit that migrates its last consumer.
+ * Nothing beyond the survivors: D14a's transitional palette steps closed with
+ * plan 204, and the pre-redesign radius aliases left in the same plan when
+ * `src/spa/pages.module.css` — their last reader — moved onto the tiers. The
+ * stylesheet declares only what the three layers and the ops variant hold.
  *
  * Only declarations that differ are re-emitted for the light face; a semantic
  * built from `var(--x)` follows the theme through the primitive it names.
@@ -30,7 +29,6 @@ import path from "node:path";
 import {
   OPS_SURFACE_ATTR,
   THEMES,
-  legacyTokens,
   opsSurface,
   reducedMotionDurations,
   resolveTheme,
@@ -106,19 +104,7 @@ function build(): string {
     "",
     "  /* component — composed from the semantic layer */",
     ...Object.entries(dark.component).map(([name, value]) => declaration(name, value)),
-    "",
   ];
-
-  if (legacyTokens.length > 0) {
-    lines.push(
-      "  /* transitional names owned by later plans (202-204 migrate them;",
-      "     each declaration leaves with its last consumer) */",
-      ...legacyTokens.flatMap((token) => [
-        `  /* closed by plan ${token.owner} */`,
-        declaration(token.name, token.value),
-      ]),
-    );
-  }
 
   lines.push(
     "}",

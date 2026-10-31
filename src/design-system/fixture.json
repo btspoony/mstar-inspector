@@ -35,9 +35,7 @@
         "green-400": "#166534",
         "green-700": "#4ade80",
         "green-800": "#86efac",
-        "purple-700": "#c084fc",
-        "gray-800": "#ccd5e1",
-        "gray-alpha-200": "#ffffff17"
+        "purple-700": "#c084fc"
       },
       "semantic": {
         "control-h-xs": "24px",
@@ -237,9 +235,7 @@
         "green-400": "#86efac",
         "green-700": "#16a34a",
         "green-800": "#15803d",
-        "purple-700": "#9333ea",
-        "gray-800": "#3a4350",
-        "gray-alpha-200": "#10192814"
+        "purple-700": "#9333ea"
       },
       "semantic": {
         "control-h-xs": "24px",

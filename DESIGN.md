@@ -1,7 +1,7 @@
 ---
 version: "0.5"
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. v0.5 rebuilds the document onto the generated fixture: the D14 band-rule palette (26 survivors plus the D14a transitional live list), a 126-token semantic layer that component and page code consume exclusively (plans 202–204; the SSR face landed with plan 203, a few SPA files still read primitive steps), and a component layer composed from it. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted); light is a first-class face, not a parity checkbox. Supersedes the earlier theme lock (2026-09-04, user instruction). Upstream direction: baseline reference → token source → generated stylesheet and fixture → this document; the document is raised onto the fixture, never the reverse."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. v0.5 rebuilds the document onto the generated fixture: the D14 band-rule palette (the 26 surviving steps), a 126-token semantic layer that component and page code consume exclusively (plans 202–204; the SSR face landed with plan 203, a few SPA files still read primitive steps), and a component layer composed from it. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted); light is a first-class face, not a parity checkbox. Supersedes the earlier theme lock (2026-09-04, user instruction). Upstream direction: baseline reference → token source → generated stylesheet and fixture → this document; the document is raised onto the fixture, never the reverse."
 
 # Runtime default = dark. Top-level colors: mirrors themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -37,9 +37,6 @@ colors:
   green-700: "#4ade80"
   green-800: "#86efac"
   purple-700: "#c084fc"
-  # D14a transitional — closed by plan 204 (admin.html)
-  gray-800: "#ccd5e1"
-  gray-alpha-200: "#ffffff17"
   # semantic — surfaces
   surface-page: "#0a0c10"
   surface-shell: "#0d1015"
@@ -126,9 +123,6 @@ themes:
       green-700: "#4ade80"
       green-800: "#86efac"
       purple-700: "#c084fc"
-      # D14a transitional — closed by plan 204 (admin.html)
-      gray-800: "#ccd5e1"
-      gray-alpha-200: "#ffffff17"
       # semantic — surfaces
       surface-page: "#0a0c10"
       surface-shell: "#0d1015"
@@ -207,9 +201,6 @@ themes:
       green-700: "#16a34a"
       green-800: "#15803d"
       purple-700: "#9333ea"
-      # D14a transitional — closed by plan 204 (admin.html)
-      gray-800: "#3a4350"
-      gray-alpha-200: "#10192814"
       # semantic — surfaces
       surface-page: "#ffffff"
       surface-shell: "#f7f9fb"
@@ -490,7 +481,7 @@ density, scannability, or dual-theme legibility. The audience is the operator
 who deployed the inspector — not a marketing surface.
 
 **v0.5** rebuilds this document onto the generated fixture. The palette is the
-band-rule reduction (26 survivor steps plus the transitional live list), the
+band-rule reduction (the 26 surviving steps), the
 semantic layer is the vocabulary every component consumes, and this file states
 what the machine truth already holds: where the two disagree, the fixture wins
 and this document is wrong.
@@ -556,28 +547,28 @@ one file under `themes:`.
 
 | Layer | Count | Contains | May reference |
 |-------|-------|----------|---------------|
-| primitive | 34 | 28 palette steps (26 survivors + 2 transitional), 2 font stacks, 4 breakpoints | nothing — raw values only |
+| primitive | 32 | 26 palette steps, 2 font stacks, 4 breakpoints | nothing — raw values only |
 | semantic | 126 | 47 themed colours, 5 control/row heights, 3 radii, 9 spacing steps, 55 typography properties, 5 motion values, 2 shadows | the primitive layer |
 | component | 33 | button variants and sizes, the text field, the card | **the semantic layer only**, with two recorded carve-outs: `button-primary-hover-bg` names the primitive `brand-600` (the approved r3 hover — the accent fg equals the accent solid, so hovering through it would be invisible), and the padding values (`button-padding-xs/sm/md`, `field-padding`) are literals, not tokens |
 
-The boundary rule is the architecture's **target**, and plans 202–204 are what
-lands it: component and page code consume the **semantic** layer only
-(`var(--surface-card)`, never `var(--background-200)`). It is not a fact of the
-tree today — `src/spa/pages.module.css` and `src/spa/admin.html` still read
-primitive steps, each is a task in those plans, and the guard for token usage
-arrives in the commit that migrates the last primitive reader. The SSR face is
-the one surface that has landed: `src/dashboard/views.ts` paints from the
+The boundary rule is a **fact** of the tree as of plan 204: component and page
+code consume the **semantic** layer only (`var(--surface-card)`, never
+`var(--background-200)`). The operator console migrated first (`admin.html`
+reads the semantic layer and the shared utility vocabulary), and the last
+page-layer stylesheet (`src/spa/pages.module.css`) followed in the same plan,
+so no file outside `src/design-system/` names a primitive palette step any more.
+The SSR face landed with plan 203: `src/dashboard/views.ts` paints from the
 semantic and component layers, reading the generated value table rather than a
 hand copy of the palette.
 
-What `tests/design-system/boundary.test.ts` enforces today is narrower than the
-rule: the **module import specifier** for TypeScript files under `src/` outside
-`src/design-system/` (`@design-system` only). It reads import statements, not
-CSS declarations or inline `style` attributes, so it cannot see a primitive
-variable in a stylesheet or an HTML file. The palette is nevertheless
-droppable — the D14 reduction deleted 62 of the 96 steps the old stylesheet
-declared without touching a component face. The generated stylesheet carries
-the whole contract.
+`tests/design-system/boundary.test.ts` enforces both halves: the **module import
+specifier** for TypeScript files under `src/` outside `src/design-system/`
+(`@design-system` only), and the **token layer** — no consumer file (`.ts`,
+`.tsx`, `.css`, `.html`) may name a palette step, with the generated stylesheet
+as the single declaration site. It reads source text, so a stylesheet, an HTML
+shell and an inline `style` attribute are all in scope. The palette is
+therefore droppable: the D14 reduction deleted 62 of the 96 steps the old
+stylesheet declared without touching a component face.
 
 ## Colors — palette by band rule (D14)
 
@@ -610,23 +601,39 @@ observation, not an assertion. 62 of the 96 declared steps went that way.
 
 ### The D14a transitional live list
 
-Two steps survive the band rule only because a later plan still reads them.
-This is a **live list, not a fixed number**: a step belongs to it only while a
-consumer outside `src/design-system/` still reads it, and it leaves in the
-commit that migrates that last consumer (`brand-800`, `red-800` and
-`green-900` left that way; `gray-alpha-300`, `teal-700` and `pink-700` left
-with plan 202 task 4, `gray-500` left with plan 202 task 7 once the last test
-class that named it was replaced by a behaviour assertion, and `gray-100`,
-`gray-400`, `amber-800`, `amber-900` and `red-900` left with plan 203 task 7,
-where the SSR face stopped reading raw steps). The generated stylesheet prints
-the owner above every transitional declaration; that comment is authoritative.
+**Closed by plan 204.** The list was the band rule's escape hatch: a step
+dropped by it survived only while a plan that had not run yet still read it,
+and it left in the commit that migrated that last consumer.
 
-| Step | Closed by |
-|------|-----------|
-| `gray-800`, `gray-alpha-200` | plan 204 (admin.html) |
+The last two were `gray-800` and `gray-alpha-200`, read only by
+`src/spa/admin.html`'s inline shell. Plan 204 moved that shell onto the
+semantic layer (`text-secondary`, `surface-overlay`, `text-muted`, plus the
+shared primitive's own hairline and radius utilities), so both declarations
+left the source, the generated stylesheet and this frontmatter in that one
+commit. Nothing in the tree names either step now, and `transitionalSteps` in
+`src/design-system/tokens/primitives.ts` is empty.
 
-Nothing else may consume them; a new consumer of a transitional step is a
-defect, not a loophole.
+The zero-reference searches recorded at that commit:
+
+```text
+$ grep -rnF -e "(--gray-800)" -e "(--gray-alpha-200)" src tests scripts
+(no output — no consumer, in code or in tests)
+
+$ grep -rnE -- "--(gray-800|gray-alpha-200)\s*:" src/spa/styles/tokens.css DESIGN.md src/design-system
+src/design-system/baseline/reference.html:43: … --gray-700: #8b95a3; --gray-800: #ccd5e1; --gray-900: …
+```
+
+The single declaration hit is the committed baseline reference
+(`src/design-system/baseline/reference.html`), which captures the palette as it
+stood before the reduction and keeps its own dump — it is the document the
+system was converged onto, not a declaration the app reads. Neither the token
+source, the generated stylesheet, this document nor any consumer names the two
+steps any more.
+
+The rule the empty list still states: a step may be added back only together
+with a named closing plan, and the generated stylesheet prints that owner above
+the declaration. A new consumer of a transitional step is a defect, not a
+loophole.
 
 ### Composition rule
 
@@ -730,7 +737,9 @@ Every value is a reference to a token that already exists — a literal here
 would be a new colour, which D15 forbids. The whole accent tone is withheld,
 not individual steps; admin code may not reference `tone-accent-*` or brand
 step names, and the generated `:root[data-surface="ops"]` block is asserted
-by test.
+by test. Requesting the accent *tone* is not naming a token: `StatusBadge
+tone="accent"` stays a legal call-site request, and this re-map is what
+withholds the paint.
 
 ## Control heights, rows and radii
 
@@ -1015,7 +1024,7 @@ their own beyond what the component layer already declares:
 |-----------|----------------|
 | `themes.<theme>.colors.X` | `--X` custom properties: dark on `:root`, light on `:root[data-theme="light"]` (`src/spa/styles/tokens.css`, generated) |
 | `spacing.N` | `--spacing-N` |
-| `rounded.sm` / `md` / `full` | `--radius-control` / `--radius-container` / `--radius-pill` (the `--rounded-*` names are transitional aliases) |
+| `rounded.sm` / `md` / `full` | `--radius-control` / `--radius-container` / `--radius-pill` |
 | `typography.T` | `--typo-T-*` |
 | `motion.X` | `--duration-*` / `--ease-*` on `:root` (theme-independent); the reduce media query folds durations to 1ms |
 | `elevation.shadow-*` | `--shadow-card`, `--shadow-pop` — dark on `:root`, light on the stored-light branch |
@@ -1045,7 +1054,7 @@ palette step:
 | `--background` / `--foreground` | `--surface-page` / `--text-primary` |
 | `--card` / `--card-foreground` | `--surface-card` / `--text-primary` |
 | `--popover` / `--popover-foreground` | `--surface-raised` / `--text-primary` |
-| `--primary` / `--primary-foreground` | `--tone-accent-solid` / `--on-brand` |
+| `--primary` / `--primary-foreground` | `--button-primary-bg` / `--button-primary-fg` |
 | `--primary-hover` | `--button-primary-hover-bg` (`brand-600`) |
 | `--secondary` / `--secondary-hover` | `--surface-card` / `--surface-overlay` |
 | `--muted` / `--muted-foreground` | `--surface-inset` / `--text-secondary` |
@@ -1058,6 +1067,13 @@ palette step:
 | `--sidebar` | `--surface-shell` |
 | `--sidebar-primary` | `--tone-accent-solid` (the active-row tint derives through this key) |
 | `--sidebar-accent` | `--surface-overlay` |
+
+The primary pair names the **component** tokens rather than the accent pair
+directly: `--primary` / `--primary-foreground` are what `Button`'s default
+variant paints, and the D15 ops variant re-maps `button-primary-*` alone, so
+this is the hop that makes the console's primary action quiet. Off the ops
+surface the pair resolves to `tone-accent-solid` / `on-brand` exactly as before
+(`tests/spa/tokens.test.ts` asserts the resolution, not the declaration).
 
 The primitives live under `src/design-system/primitives/`, and consumers reach
 them one way only: the `@design-system` alias onto `src/design-system/index.ts`,

@@ -1,5 +1,12 @@
 <!doctype html>
-<html lang="en">
+<!--
+  The console is the D15 plain variant. `data-surface="ops"` sits on the
+  document root — not a page wrapper — so the generated re-map in tokens.css
+  reaches everything Radix portals mount on <body>: the flag-confirm dialog,
+  dropdowns, tooltips. The accent tone is withheld whole there; no page in
+  src/spa/admin/ forks a component to look plainer.
+-->
+<html lang="en" data-surface="ops">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -17,10 +24,13 @@
     <!--SPA_BOOT-->
     <style>
       /* Console chrome only — the workspace shell's Layout is deliberately not
-         reused, so this document carries its own minimal frame. Spacing and
-         typography ride the same tokens the shipped primitives use
-         (DESIGN.md: page gutter spacing-6, card padding spacing-6, the
-         PageHeader heading-24 title face); colours stay on the existing vars. */
+         reused, so this document carries its own minimal frame. Every value
+         here is a semantic token: spacing and typography ride the same steps
+         the shipped primitives use (DESIGN.md: page gutter spacing-6, card
+         padding spacing-6, the PageHeader heading-24 title face), colours are
+         the semantic layer's, and the two hairlines plus the panel radius are
+         the shared primitive's own utilities on the elements below — this file
+         spells no width, radius or colour of its own. */
       body {
         font-family: var(--font-sans);
       }
@@ -34,7 +44,6 @@
         align-items: baseline;
         justify-content: space-between;
         gap: var(--spacing-4);
-        border-bottom: 1px solid var(--gray-alpha-400);
         padding-bottom: var(--spacing-3);
       }
       .admin-header h1 {
@@ -52,23 +61,23 @@
         flex-wrap: wrap;
       }
       .admin-nav a {
-        color: var(--gray-800);
+        color: var(--text-secondary);
         text-decoration: none;
         padding: var(--spacing-2) var(--spacing-3);
-        border-radius: var(--rounded-sm);
+        border-radius: var(--radius-control);
       }
       .admin-nav a[aria-current="page"] {
-        background: var(--gray-alpha-200);
-        color: var(--gray-1000);
+        /* The chrome's own active tint (DESIGN.md Sidebar / console chrome):
+           the neutral overlay plane, never the accent. */
+        background: var(--surface-overlay);
+        color: var(--text-primary);
       }
       .admin-main {
-        border: 1px solid var(--gray-alpha-400);
-        border-radius: var(--rounded-md);
         /* Card default padding (DESIGN.md Spacing & Layout). */
         padding: var(--spacing-6);
       }
       .muted {
-        color: var(--gray-700);
+        color: var(--text-muted);
         font-size: var(--typo-copy-14-size);
         line-height: var(--typo-copy-14-line);
         margin: var(--spacing-1) 0 0;

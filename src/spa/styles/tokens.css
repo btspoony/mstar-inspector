@@ -54,12 +54,6 @@
   --green-700: #4ade80;
   --green-800: #86efac;
   --purple-700: #c084fc;
-  /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-800: #ccd5e1;
-  /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-alpha-200: #ffffff17;
 
   /* semantic · shared + dark */
   --control-h-xs: 24px;
@@ -224,13 +218,6 @@
   --card-border: var(--border-default);
   --card-radius: var(--radius-container);
   --card-padding: var(--spacing-6);
-
-  /* transitional names owned by later plans (202-204 migrate them;
-     each declaration leaves with its last consumer) */
-  /* closed by plan 204 (admin.html, pages.module.css) */
-  --rounded-sm: var(--radius-control);
-  /* closed by plan 204 (admin.html, pages.module.css) */
-  --rounded-md: var(--radius-container);
 }
 
 /* Stored manual choice — the only light face; unset stays dark. */
@@ -270,12 +257,6 @@
   --green-700: #16a34a;
   --green-800: #15803d;
   --purple-700: #9333ea;
-  /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-800: #3a4350;
-  /* D14a transitional — its last consumer is closed by plan 204 (admin.html);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-alpha-200: #10192814;
 
   /* semantic · light (only the names whose declaration differs) */
   --surface-shell: #f7f9fb;

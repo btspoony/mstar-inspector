@@ -59,75 +59,33 @@ const D14_SURVIVORS = [
   "purple-700",
 ] as const;
 
-/**
- * D14a's transitional set: dropped by the band rule, kept only because a plan
- * that has not run still consumes each one. The owner is the plan that closes
- * it, and task 3 emits the declarations (with these comments) from the source.
- *
- * A live list, not a fixed number: a step leaves in the commit that migrates
- * its last consumer outside `src/design-system/`. `brand-800`, `red-800` and
- * `green-900` left in task 3; `gray-alpha-300`, `teal-700` and `pink-700` left
- * in task 4 (ListRow onto `border-subtle`, charts onto the six closed slots);
- * `gray-500` left in task 7, once the last test class that named it became a
- * behaviour assertion; `gray-100`, `gray-400`, `amber-800`, `amber-900` and
- * `red-900` left with plan 203 task 7, when the SSR stylesheet moved onto the
- * semantic layer and stopped naming raw steps.
- */
-const D14A_TRANSITIONAL: readonly { name: string; owner: string }[] = [
-  { name: "gray-800", owner: "204 (admin.html)" },
-  { name: "gray-alpha-200", owner: "204 (admin.html)" },
-];
-
-describe("palette reduction (D14 / D14a)", () => {
-  test("the declared palette steps are exactly 26 survivors plus 2 transitional", () => {
+describe("palette reduction (D14)", () => {
+  test("the declared palette steps are exactly the 26 survivors", () => {
     const declaredPalette = tokenNames()
       .primitive.filter((name) => !name.startsWith("font-") && !name.startsWith("breakpoint-"));
     // Both directions, so a step added without a band and a survivor dropped by
     // accident both fail.
-    expect([...declaredPalette].sort()).toEqual(
-      [...D14_SURVIVORS, ...D14A_TRANSITIONAL.map((s) => s.name)].sort(),
-    );
-    expect(declaredPalette).toHaveLength(28);
+    expect([...declaredPalette].sort()).toEqual([...D14_SURVIVORS].sort());
+    expect(declaredPalette).toHaveLength(26);
   });
 
-  test("the transitional set is exported as data with an owner per step", () => {
-    // Task 3 must be able to emit these declarations from the source rather
-    // than from a second hand-maintained list.
-    expect(transitionalSteps).toHaveLength(2);
-    expect(transitionalSteps.map((s) => ({ name: s.name as string, owner: s.owner }))).toEqual([
-      ...D14A_TRANSITIONAL,
-    ]);
-    for (const step of transitionalSteps) {
-      expect(step.owner.trim(), `--${step.name} has no owner`).not.toBe("");
-    }
+  test("the D14a transitional set is empty and the survivor set is whole", () => {
+    // The live list closed with plan 204: `gray-800` and `gray-alpha-200` left
+    // when `src/spa/admin.html` stopped reading raw steps. An entry here would
+    // have to name the plan that closes it, so the generator can print the
+    // deadline above the declaration.
+    expect(transitionalSteps).toEqual([]);
     expect(survivorSteps).toHaveLength(26);
     expect([...survivorSteps].sort()).toEqual([...D14_SURVIVORS].sort());
   });
 
-  test("every survivor is consumed by a layer; every transitional step is consumed by none", () => {
+  test("every survivor is consumed by a layer", () => {
     const referenced = THEMES.flatMap((theme) => [
       ...Object.values(tokenLayers(theme).semantic),
       ...Object.values(tokenLayers(theme).component),
     ]).join("\n");
     for (const step of D14_SURVIVORS) {
       expect(referenced, `--${step} survives but nothing consumes it`).toContain(`var(--${step})`);
-    }
-    // A layer reference would make the step permanent by accident; the whole
-    // point of the transitional set is that its consumer is outside the module.
-    for (const step of transitionalSteps) {
-      expect(referenced, `--${step.name} is transitional, so no layer may consume it`).not.toContain(
-        `var(--${step.name})`,
-      );
-    }
-  });
-
-  test("every transitional step is declared in both themes", () => {
-    for (const theme of THEMES) {
-      for (const step of transitionalSteps) {
-        expect(tokenLayers(theme).primitive[step.name], `${theme} --${step.name}`).toMatch(
-          /^#[0-9a-f]{3,8}$/i,
-        );
-      }
     }
   });
 
