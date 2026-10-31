@@ -252,6 +252,12 @@ describe("token layer boundary", () => {
  * primitive, pattern or page at a time. The module is walked too: the copy-in
  * primitives are where class strings actually live.
  *
+ * The rule is on the source text, comments included: the scan does not strip
+ * them. Stripping a `//` tail would also truncate a line before a real utility
+ * (a URL, a regular expression) and let the defect through, which is the one
+ * direction this guard exists to prevent — so prose rewords instead, writing
+ * "dark variant" where it means the idea.
+ *
  * Blind spot, by construction: a class name composed at runtime (`\`dark:${x}\``)
  * never appears whole in the source. Nothing prohibits that composition, and no
  * text scan could see it — the palette guard's blind spot, one variant over.
@@ -276,7 +282,7 @@ describe("theme mechanism boundary", () => {
     expect(hits, `sources split on the OS scheme instead of data-theme:\n${hits.join("\n")}`).toEqual([]);
   });
 
-  test("the dark: matcher is precise: the theme attribute and prose are legal", () => {
+  test("the dark: matcher is precise: the theme attribute and a JS ternary are legal", () => {
     const matches = (text: string) => [...text.matchAll(DARK_VARIANT)].length;
     expect(matches('className="dark:text-white dark:bg-black"')).toBe(2);
     // The arbitrary-property spelling is the same defect.
@@ -284,8 +290,9 @@ describe("theme mechanism boundary", () => {
     // A ternary picking a raw palette class is the palette guard's finding, not
     // this one: no variant is written.
     expect(matches("isDark ? 'bg-black' : 'bg-white'")).toBe(0);
-    // The theme is an attribute, and a comment may name the rule it forbids.
+    // The theme is an attribute. A comment is in scope by convention — the scan
+    // reads source text, so prose rewords instead of quoting the utility.
     expect(matches('document.documentElement.dataset.theme = "dark"')).toBe(0);
-    expect(matches("// never write a dark: utility here")).toBe(0);
+    expect(matches("// was dark:text-white before the migration")).toBe(1);
   });
 });

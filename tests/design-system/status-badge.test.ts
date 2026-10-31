@@ -19,9 +19,13 @@ import {
   type StatusStrength,
   type StatusTone,
 } from "../../src/design-system";
+import { PALETTE_UTILITY_SOURCE } from "../helpers/tailwind-palette";
 
 const TONES: readonly StatusTone[] = ["neutral", "accent", "success", "warn", "danger"];
 const STRENGTHS: readonly StatusStrength[] = ["quiet", "soft", "solid"];
+
+/** The palette the face must not name — the same list the both-theme pass runs. */
+const PALETTE_UTILITY = new RegExp(PALETTE_UTILITY_SOURCE);
 
 const render = (tone: StatusTone, extra: Record<string, unknown> = {}) =>
   renderToStaticMarkup(createElement(StatusBadge, { tone, ...extra }, "Active"));
@@ -59,11 +63,10 @@ describe("StatusBadge", () => {
 
         // No literal colour on any face: every paint is a token, or the
         // withheld `transparent` keyword. This is the negative the retired
-        // component test carried.
+        // component test carried, over the full Tailwind palette rather than a
+        // 13-family subset of it.
         expect(classes, face).not.toMatch(/#[0-9a-f]{3,8}\b/i);
-        expect(classes, face).not.toMatch(
-          /(?<![\w-])(?:bg|text|border)-(?:slate|gray|zinc|neutral|stone|red|amber|green|blue|white|black)\b/,
-        );
+        expect(classes, face).not.toMatch(PALETTE_UTILITY);
 
         if (strength === "quiet") {
           // The edge and the label carry the meaning; the fill is withheld.

@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
 import { survivorSteps } from "../../src/design-system/tokens";
-import { documentSync, danglingReferences, parseFixture, STYLESHEET_CONSUMERS } from "../../scripts/design-system-check";
+import { documentSync, danglingReferences, parseFixture, stylesheetConsumers } from "../../scripts/design-system-check";
 
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
 const TOKENS_CSS = new URL("../../src/spa/styles/tokens.css", import.meta.url);
@@ -537,24 +537,35 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
   });
 
-  test("every var() the hand-written stylesheets consume still names a token", () => {
-    // The bridge and the page module are the one consumer no generator link
-    // sees: nothing derives them, so a retired token leaves a `var()` that
-    // resolves to nothing, the utility reading it paints an unset colour, and
-    // all four generator links stay green. The gate runs this same function as
-    // its fifth link; these are the teeth.
-    for (const file of STYLESHEET_CONSUMERS) {
+  test("every var() the hand-written stylesheets and shells consume still names a token", () => {
+    // The set is derived from the tree, so the assertion below covers whatever
+    // stylesheet and HTML shell exists — not the two this link first listed.
+    const consumers = stylesheetConsumers();
+    expect(consumers.length).toBeGreaterThan(0);
+    for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
       expect(danglingReferences(file, css), file).toEqual([]);
     }
+    // The teeth, in one probe: `--retired-900` is mentioned by a commented-out
+    // declaration AND consumed with a fallback. Neither may excuse it — a
+    // comment declares nothing, and `var(--x, #fff)` still names `x`. Drop
+    // either half of the matcher and the finding disappears.
     const probe = danglingReferences(
       "probe.css",
-      ":root { --local: var(--surface-page); --gone: var(--retired-900); --hop: var(--local); --family: var(--font-sans); }",
+      [
+        ":root {",
+        "  --local: var(--surface-page);",
+        "  --family: var(--font-sans);",
+        "  --hop: var(--local);",
+        "  /* --retired-900: #fff; */",
+        "  --fallback: var(--retired-900, #fff);",
+        "}",
+      ].join("\n"),
     );
-    // A name the layers dropped is dangling in BOTH themes; a property the file
-    // declares itself, and a primitive family the bridge legitimately consumes,
-    // are not.
-    expect(probe.map(({ name, theme }) => `${theme}:${name}`)).toEqual(["dark:retired-900", "light:retired-900"]);
+    expect(probe.map(({ name, theme }) => `${theme}:${name}`)).toEqual([
+      "dark:retired-900",
+      "light:retired-900",
+    ]);
   });
 
   test("the primary bridge resolves to the accent pair off the ops surface", async () => {

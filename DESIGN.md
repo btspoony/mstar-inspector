@@ -1040,10 +1040,10 @@ The chain commands: `bun scripts/build-tokens.ts [--check]`,
 `bun scripts/build-fixture.ts [--check]`,
 `bun scripts/build-design-preview.tsx [--check]`, and
 `bun scripts/design-system-check.ts` (all five links — the four generated ones
-above, plus the hand-written stylesheets whose `var(--x)` targets must still
-exist — the one entry point CI runs), plus `mstar design-md validate .` (local
-only; the CLI installs from
-GitHub, so CI does not take on that network dependency). `bun run build:spa`
+above, plus every hand-written stylesheet and HTML shell under `src/spa`, whose
+`var(--x)` targets must still exist — the one entry point CI runs), plus
+`mstar design-md validate .` (local only; the CLI installs from GitHub, so CI
+does not take on that network dependency). `bun run build:spa`
 is the build: it runs the preview generator (which refuses to emit a page it
 cannot draw) and then vite, so every build writes `dist/design-preview.html`
 beside the served `dist/spa/` tree. The SSR

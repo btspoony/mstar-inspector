@@ -65,6 +65,7 @@ import { WorkspaceSettingsPage } from "../../src/spa/pages/WorkspaceSettingsPage
 import { WorkspaceSetupPage } from "../../src/spa/pages/WorkspaceSetupPage";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
+import { PALETTE_UTILITY_SOURCE } from "../helpers/tailwind-palette";
 
 const NAMES = tokenNames();
 const SEMANTIC = new Set(NAMES.semantic);
@@ -126,15 +127,12 @@ const INLINE_DECL = /--([a-z][a-z0-9-]*):/g;
  * A colour painted without naming a token, in the two spellings that carry no
  * token reference at all: a hex literal, and a Tailwind palette utility. Both
  * are the dark-only face this pass exists to catch, and neither closes a paren
- * group — which is exactly why the token probe alone passed them.
+ * group — which is exactly why the token probe alone passed them. The family
+ * list is shared with the StatusBadge face guard (`tests/helpers`), so the two
+ * cannot drift into covering different halves of Tailwind's palette.
  */
 const RAW_HEX = /#[0-9a-f]{3,8}\b/gi;
-const PALETTE_UTILITY = new RegExp(
-  "(?<![\\w-])(?:bg|text|border|ring|fill|stroke|from|via|to|outline|divide|placeholder|decoration)-" +
-    "(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\\d{2,3}(?![\\w-])" +
-    "|(?<![\\w-])(?:bg|text|border|ring|fill|stroke|from|via|to)-(?:black|white)(?![\\w-])",
-  "g",
-);
+const PALETTE_UTILITY = new RegExp(PALETTE_UTILITY_SOURCE, "g");
 /** The rendered attribute values a colour can be painted in. */
 const RENDERED_ATTRIBUTE = /\b(?:class|style)="([^"]*)"/g;
 

@@ -8,7 +8,8 @@
  *   fixture → DESIGN.md   `documentSync()` below
  *   source → preview      `scripts/build-design-preview.tsx --check`
  *   consumers → source    `danglingReferences()` below — every `var(--x)` a
- *                         hand-written stylesheet consumes names a token
+ *                         hand-written stylesheet or HTML shell under `src/spa`
+ *                         consumes names a token
  *
  * Every link is checked even when an earlier one is broken, so one run reports
  * the whole picture instead of the first failure. Exit 1 when any link is.
@@ -47,7 +48,7 @@
  * Usage:
  *   bun scripts/design-system-check.ts   # exit 1 on any broken link
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import type { ThemeName } from "../src/design-system/tokens";
@@ -56,6 +57,10 @@ import { THEMES, resolveTheme } from "../src/design-system/tokens";
 const ROOT = path.resolve(import.meta.dir, "..");
 const FIXTURE_PATH = path.join(ROOT, "src/design-system/fixture.json");
 const DESIGN_PATH = path.join(ROOT, "DESIGN.md");
+const SPA_ROOT = path.join(ROOT, "src/spa");
+/** The one stylesheet under `src/spa` the token source derives — link 1 owns it. */
+const GENERATED_STYLESHEET = "src/spa/styles/tokens.css";
+const CONSUMER_FILE = /\.(?:css|html)$/;
 
 /**
  * The links that are a `--check` run of a generator, in report order. The
@@ -68,18 +73,41 @@ const GENERATORS = [
 ] as const;
 
 /**
- * The hand-written stylesheets that consume tokens by name. They are the one
- * consumer no generator link sees: nothing derives them, so nothing notices
- * when a name they reference stops existing.
+ * Every hand-written stylesheet and HTML shell under `src/spa` — the consumers
+ * no generator link sees: nothing derives them, so nothing notices when a name
+ * they reference stops existing.
+ *
+ * Derived from the tree, not listed: a list is a guard whose coverage is its
+ * own contents, and the first cut of this link named two of the four consumers
+ * that already existed. A new stylesheet joins the link by existing.
+ * The generated stylesheet is the one exclusion — link 1 already proves it
+ * equals the token source.
  */
-export const STYLESHEET_CONSUMERS = [
-  "src/spa/styles/shadcn-theme.css",
-  "src/spa/pages.module.css",
-] as const;
+export function stylesheetConsumers(dir: string = SPA_ROOT): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = path.join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      out.push(...stylesheetConsumers(full));
+    } else if (CONSUMER_FILE.test(entry)) {
+      const file = path.relative(ROOT, full);
+      if (file !== GENERATED_STYLESHEET) out.push(file);
+    }
+  }
+  return out.sort();
+}
 
-const REFERENCE = /var\(--([a-z0-9-]+)\)/g;
+/**
+ * A `var()` reference, whether or not it carries a fallback: `var(--x)`,
+ * `var(--x, #fff)` and `var(--x , …)` all name `x`. Requiring the closing paren
+ * immediately after the name lost the fallback form, which is the one that
+ * hides a retired token behind a literal.
+ */
+const REFERENCE = /var\(--([a-z0-9-]+)[\s,)]/g;
 /** A custom property the stylesheet declares itself — the bridge's own keys. */
 const DECLARATION = /(?:^|[;{\s])(--[a-z0-9-]+)\s*:/g;
+/** A block comment declares nothing: a commented-out `--legacy-x:` is not a declaration. */
+const COMMENT = /\/\*[\s\S]*?\*\//g;
 
 export interface DanglingReference {
   readonly file: string;
@@ -92,10 +120,14 @@ export interface DanglingReference {
  * the file declares itself. Checked per theme rather than over the union: a name
  * one theme declares and the other does not is dangling in the other one, and
  * the union would hide exactly that.
+ *
+ * Comments are stripped before either match, so a retired name quoted in prose
+ * neither becomes a reference nor a self-declaration that suppresses the check.
  */
 export function danglingReferences(file: string, css: string): DanglingReference[] {
-  const local = new Set([...css.matchAll(DECLARATION)].map((match) => (match[1] as string).slice(2)));
-  const names = [...new Set([...css.matchAll(REFERENCE)].map((match) => match[1] as string))].sort();
+  const live = css.replace(COMMENT, "");
+  const local = new Set([...live.matchAll(DECLARATION)].map((match) => (match[1] as string).slice(2)));
+  const names = [...new Set([...live.matchAll(REFERENCE)].map((match) => match[1] as string))].sort();
   return THEMES.flatMap((theme) => {
     const layers = resolveTheme(theme);
     const known = new Set([
@@ -427,32 +459,40 @@ if (import.meta.main) {
     if (run.exitCode !== 0) brokenLinks.push(label);
   }
 
-  if (!existsSync(FIXTURE_PATH)) {
-    console.error(`fail  fixture → DESIGN.md: ${path.relative(ROOT, FIXTURE_PATH)} is missing; run \`bun scripts/build-fixture.ts\`.`);
-    process.exit(1);
-  }
-
+  // A missing or malformed fixture is a broken link, never an early exit: the
+  // consumer link below must still run, or this gate reports on a tree it only
+  // partly checked — and a link an earlier failure can skip reads as green.
   const sync = (() => {
     try {
+      if (!existsSync(FIXTURE_PATH)) {
+        throw new Error(`${path.relative(ROOT, FIXTURE_PATH)} is missing; run \`bun scripts/build-fixture.ts\`.`);
+      }
       return documentSync(parseFixture(readFileSync(FIXTURE_PATH, "utf8")), readFrontmatter());
     } catch (error) {
-      // A malformed fixture or frontmatter is a broken link too, not a crash:
-      // the message names the cause and the command that regenerates the file.
+      // The message names the cause and the command that regenerates the file.
       console.error(`fail  fixture → DESIGN.md: ${error instanceof Error ? error.message : String(error)}`);
-      process.exit(1);
+      return null;
     }
   })();
-  report(sync);
-  if (!sync.ok) brokenLinks.push("fixture → DESIGN.md");
+  if (sync === null) {
+    brokenLinks.push("fixture → DESIGN.md");
+  } else {
+    report(sync);
+    if (!sync.ok) brokenLinks.push("fixture → DESIGN.md");
+  }
 
-  const dangling = STYLESHEET_CONSUMERS.flatMap((file) =>
+  const consumers = stylesheetConsumers();
+  const dangling = consumers.flatMap((file) =>
     danglingReferences(file, readFileSync(path.join(ROOT, file), "utf8")),
   );
-  console.log(`${dangling.length === 0 ? "ok  " : "fail"}  consumers → source`);
+  // A walk that found no stylesheet proves nothing (wrong root, moved tree):
+  // that is a failure, not an empty pass.
+  console.log(`${consumers.length > 0 && dangling.length === 0 ? "ok  " : "fail"}  consumers → source`);
+  if (consumers.length === 0) console.log(`        no stylesheet found under ${path.relative(ROOT, SPA_ROOT)}`);
   for (const { file, name, theme } of dangling) {
     console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
   }
-  if (dangling.length > 0) brokenLinks.push("consumers → source");
+  if (consumers.length === 0 || dangling.length > 0) brokenLinks.push("consumers → source");
 
   if (brokenLinks.length > 0) {
     console.error(`\ndesign-system-check: ${brokenLinks.length} broken link(s): ${brokenLinks.join(", ")}`);
