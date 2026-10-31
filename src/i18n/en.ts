@@ -393,7 +393,7 @@ export const en = {
     installationsCount: "{count} installations",
     installationsCountOne: "{count} installation",
     installationsAccount: "Account",
-    installationsId: "Installation",
+    installationsId: "Installation ID",
     installationsLastSync: "Last sync",
     noInstallations: "No installations yet.",
     recentDeliveries: "Recent deliveries",

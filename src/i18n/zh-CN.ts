@@ -335,7 +335,7 @@ export const zhCN: Dictionary = {
     installationsCount: "{count} 个安装",
     installationsCountOne: "{count} 个安装",
     installationsAccount: "账号",
-    installationsId: "安装",
+    installationsId: "安装 ID",
     installationsLastSync: "最近同步",
     noInstallations: "还没有安装。",
     recentDeliveries: "最近投递",

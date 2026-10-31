@@ -31,8 +31,10 @@ export interface LegacyToken {
 
 export const legacyTokens: readonly LegacyToken[] = [
   // Radius: the names the two-tier rule (AD-574) replaced, aliased onto the
-  // tiers rather than repeating their numbers. `admin.html` and the SPA notice
-  // face still spell the old names; both leave with plan 204.
+  // tiers rather than repeating their numbers. Two files still spell the old
+  // names — `src/spa/admin.html` (plan 204 re-tokens that console) and the
+  // notice face in `src/spa/pages.module.css` — and the aliases leave in the
+  // commit that migrates the last of them.
   { name: "rounded-sm", value: v("radius-control"), owner: RADIUS },
   { name: "rounded-md", value: v("radius-container"), owner: RADIUS },
 ];

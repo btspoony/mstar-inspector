@@ -253,6 +253,13 @@ describe("App detail IA copy", () => {
       expect(t("en", key).length, key).toBeGreaterThan(0);
       expect(t("zh_CN", key).length, key).toBeGreaterThan(0);
     }
+    // The identifier column must not repeat the section title it sits under:
+    // one word for both left the header indistinguishable from its heading.
+    for (const locale of ["en", "zh_CN"] as const) {
+      expect(t(locale, "settings.installationsId"), locale).not.toBe(
+        t(locale, "settings.installations"),
+      );
+    }
     // The settings tab is a section flow now: the two tier-group eyebrow keys
     // and the per-row installation sentence (replaced by the table's account /
     // installation / last-sync columns) leave with it.
