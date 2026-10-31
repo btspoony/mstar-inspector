@@ -11,9 +11,10 @@
  * the tone background, `green-800`), tone-solids from family 700 (light may
  * take 600), chart marks from family 700.
  *
- * The D14a transitional set is empty as of plan 204; `transitionalValues`
- * below carries no members and its mechanism still governs how a step may be
- * kept alive.
+ * The D14a transitional set is empty as of plan 204: `transitionalSteps`
+ * below carries no members. The rule it encodes — a dropped step survives only
+ * while a named plan still reads it, and leaves in the commit that migrates
+ * that reader — is what keeps the palette from widening by accident.
  *
  * `tests/design-system/tokens.test.ts` pins both sets.
  */

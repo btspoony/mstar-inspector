@@ -19,7 +19,6 @@ export {
   OPS_SURFACE_ATTR,
   THEMES,
   UnresolvedTokenError,
-  legacyTokens,
   opsSurface,
   reducedMotionDurations,
   resolveTheme,

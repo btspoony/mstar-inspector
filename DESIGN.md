@@ -551,26 +551,24 @@ one file under `themes:`.
 | semantic | 126 | 47 themed colours, 5 control/row heights, 3 radii, 9 spacing steps, 55 typography properties, 5 motion values, 2 shadows | the primitive layer |
 | component | 33 | button variants and sizes, the text field, the card | **the semantic layer only**, with two recorded carve-outs: `button-primary-hover-bg` names the primitive `brand-600` (the approved r3 hover — the accent fg equals the accent solid, so hovering through it would be invisible), and the padding values (`button-padding-xs/sm/md`, `field-padding`) are literals, not tokens |
 
-The boundary rule is the architecture's **target**, and plans 202–204 are what
-lands it: component and page code consume the **semantic** layer only
-(`var(--surface-card)`, never `var(--background-200)`). It is not a fact of the
-tree today — `src/spa/pages.module.css` still reads `--gray-900` and the
-`--rounded-sm` alias, an unowned residual rather than a plan task, and the
-guard for token usage arrives in the commit that migrates the last primitive
-reader. The operator console landed with plan 204: `src/spa/admin.html` reads
-the semantic layer and the shared utilities only. The SSR face is
-the one surface that has landed: `src/dashboard/views.ts` paints from the
+The boundary rule is a **fact** of the tree as of plan 204: component and page
+code consume the **semantic** layer only (`var(--surface-card)`, never
+`var(--background-200)`). The operator console migrated first (`admin.html`
+reads the semantic layer and the shared utility vocabulary), and the last
+page-layer stylesheet (`src/spa/pages.module.css`) followed in the same plan,
+so no file outside `src/design-system/` names a primitive palette step any more.
+The SSR face landed with plan 203: `src/dashboard/views.ts` paints from the
 semantic and component layers, reading the generated value table rather than a
 hand copy of the palette.
 
-What `tests/design-system/boundary.test.ts` enforces today is narrower than the
-rule: the **module import specifier** for TypeScript files under `src/` outside
-`src/design-system/` (`@design-system` only). It reads import statements, not
-CSS declarations or inline `style` attributes, so it cannot see a primitive
-variable in a stylesheet or an HTML file. The palette is nevertheless
-droppable — the D14 reduction deleted 62 of the 96 steps the old stylesheet
-declared without touching a component face. The generated stylesheet carries
-the whole contract.
+`tests/design-system/boundary.test.ts` enforces both halves: the **module import
+specifier** for TypeScript files under `src/` outside `src/design-system/`
+(`@design-system` only), and the **token layer** — no consumer file (`.ts`,
+`.tsx`, `.css`, `.html`) may name a palette step, with the generated stylesheet
+as the single declaration site. It reads source text, so a stylesheet, an HTML
+shell and an inline `style` attribute are all in scope. The palette is
+therefore droppable: the D14 reduction deleted 62 of the 96 steps the old
+stylesheet declared without touching a component face.
 
 ## Colors — palette by band rule (D14)
 
@@ -1024,7 +1022,7 @@ their own beyond what the component layer already declares:
 |-----------|----------------|
 | `themes.<theme>.colors.X` | `--X` custom properties: dark on `:root`, light on `:root[data-theme="light"]` (`src/spa/styles/tokens.css`, generated) |
 | `spacing.N` | `--spacing-N` |
-| `rounded.sm` / `md` / `full` | `--radius-control` / `--radius-container` / `--radius-pill` (the `--rounded-*` names are transitional aliases) |
+| `rounded.sm` / `md` / `full` | `--radius-control` / `--radius-container` / `--radius-pill` |
 | `typography.T` | `--typo-T-*` |
 | `motion.X` | `--duration-*` / `--ease-*` on `:root` (theme-independent); the reduce media query folds durations to 1ms |
 | `elevation.shadow-*` | `--shadow-card`, `--shadow-pop` — dark on `:root`, light on the stored-light branch |

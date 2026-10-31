@@ -43,7 +43,6 @@ import * as primitives from "../src/design-system/primitives/index";
 import {
   OPS_SURFACE_ATTR,
   THEMES,
-  legacyTokens,
   opsSurface,
   reducedMotionDurations,
   resolveTheme,
@@ -308,27 +307,6 @@ function operatorSurface(): string[] {
     ),
     "</tbody></table>",
     "</div>",
-  ];
-}
-
-/**
- * The transitional names, once for the page: each is a declaration that
- * resolves through the token it names and leaves with the plan that closes it,
- * so printing it per theme would imply a second value that does not exist.
- */
-function transitionalNames(): string[] {
-  return [
-    "<h2>Transitional names — each leaves with the plan that closes it</h2>",
-    '<table><thead><tr><th scope="col">Name</th><th scope="col">Declared as</th><th scope="col">Closed by</th></tr></thead><tbody>',
-    ...legacyTokens.map(
-      (token) =>
-        `<tr data-legacy="${token.name}" data-value="${escapeHtml(token.value)}" ` +
-        `data-owner="${escapeHtml(token.owner)}">` +
-        `<th scope="row"><code>--${token.name}</code></th>` +
-        `<td><code>${escapeHtml(token.value)}</code></td>` +
-        `<td><code>${escapeHtml(token.owner)}</code></td></tr>`,
-    ),
-    "</tbody></table>",
   ];
 }
 
@@ -810,16 +788,16 @@ function themeSection(theme: ThemeName): string[] {
 }
 
 /**
- * Rendered once, in dark ink: each entry is an alias declaration, so it prints
- * the expression and its owner rather than a value that would differ by theme.
+ * Rendered once, in dark ink: the faces the theme sections cannot print — the
+ * component exports the server renderer cannot paint, and the reduced-motion
+ * fold. Neither varies by theme, so a per-theme copy would imply a second value
+ * that does not exist.
  */
-function transitionalSection(): string[] {
+function sharedSection(): string[] {
   return [
     "<!-- theme:shared -->",
     '<section class="theme" data-theme="dark">',
-    "<h1>Transitional names</h1>",
-    "<p>Alias declarations, theme-independent: each resolves through the token it names and leaves with the plan that closes it.</p>",
-    ...transitionalNames(),
+    "<h1>Shared faces</h1>",
     ...unpaintedSection(),
     "<h2>Reduced-motion fold — <code>prefers-reduced-motion: reduce</code></h2>",
     '<table><thead><tr><th scope="col">Token</th><th scope="col">Reduced</th></tr></thead><tbody>',
@@ -852,7 +830,7 @@ export function buildPreview(): string {
     "</head>",
     "<body>",
     ...THEMES.flatMap((theme) => themeSection(theme)),
-    ...transitionalSection(),
+    ...sharedSection(),
     "</body>",
     "</html>",
     "",
@@ -902,9 +880,6 @@ export interface PreviewCoverage {
   /** Faces that cannot paint on the server, listed once with their reason. */
   readonly unpainted: number;
   readonly expectedUnpainted: number;
-  /** Transitional names, printed once as declarations. */
-  readonly transitional: number;
-  readonly expectedTransitional: number;
   /** The reduced-motion fold, printed once. */
   readonly reducedMotion: number;
   readonly expectedReducedMotion: number;
@@ -931,7 +906,6 @@ export function previewCoverage(html: string): PreviewCoverage {
     specimens: 0,
     painted: 0,
     unpainted: 0,
-    transitional: 0,
     reducedMotion: 0,
   };
   const exported = exportedComponents();
@@ -949,10 +923,6 @@ export function previewCoverage(html: string): PreviewCoverage {
   const sharedClose = html.indexOf("<!-- /theme:shared -->");
   const sharedHtml =
     sharedOpen === -1 || sharedClose < sharedOpen ? "" : html.slice(sharedOpen, sharedClose);
-  for (const token of legacyTokens) {
-    if (sharedHtml.includes(`data-legacy="${token.name}"`)) counts.transitional += 1;
-    else missing.push(`no transitional entry for --${token.name} (closed by ${token.owner})`);
-  }
   for (const [name, value] of Object.entries(reducedMotionDurations)) {
     if (sharedHtml.includes(`data-reduced-motion="${name}" data-value="${escapeHtml(value)}"`)) {
       counts.reducedMotion += 1;
@@ -1035,7 +1005,6 @@ export function previewCoverage(html: string): PreviewCoverage {
     specimens: Object.keys(SPECIMENS).length * THEMES.length,
     painted: (exported.length - unpaintedFaces.length) * THEMES.length,
     unpainted: unpaintedFaces.length,
-    transitional: legacyTokens.length,
     reducedMotion: Object.keys(reducedMotionDurations).length,
   };
 
@@ -1050,7 +1019,6 @@ export function previewCoverage(html: string): PreviewCoverage {
       counts.specimens === expected.specimens &&
       counts.painted === expected.painted &&
       counts.unpainted === expected.unpainted &&
-      counts.transitional === expected.transitional &&
       counts.reducedMotion === expected.reducedMotion,
     entries: counts.entries,
     expectedEntries: expected.entries,
@@ -1066,8 +1034,6 @@ export function previewCoverage(html: string): PreviewCoverage {
     expectedPainted: expected.painted,
     unpainted: counts.unpainted,
     expectedUnpainted: expected.unpainted,
-    transitional: counts.transitional,
-    expectedTransitional: expected.transitional,
     reducedMotion: counts.reducedMotion,
     expectedReducedMotion: expected.reducedMotion,
     missing,
@@ -1095,8 +1061,7 @@ if (import.meta.main) {
         `${coverage.remaps}/${coverage.expectedRemaps} operator-surface remaps, ` +
         `${coverage.specimens}/${coverage.expectedSpecimens} component specimens, ` +
         `${coverage.painted}/${coverage.expectedPainted} painted component exports, ` +
-        `${coverage.unpainted}/${coverage.expectedUnpainted} declared unpainted, ` +
-        `${coverage.transitional}/${coverage.expectedTransitional} transitional names)`,
+        `${coverage.unpainted}/${coverage.expectedUnpainted} declared unpainted)`,
     );
     console.error("The page is derived from the source: a gap here is a gap in this generator.");
     process.exit(1);
@@ -1105,7 +1070,7 @@ if (import.meta.main) {
   console.log(
     `design-preview: ${coverage.entries} token entries across ${THEMES.length} themes, ` +
       `${coverage.tonePairs} tone × strength, ${coverage.controlHeights} control heights, ` +
-      `${coverage.remaps} operator-surface remaps, ${coverage.transitional} transitional names, ` +
+      `${coverage.remaps} operator-surface remaps, ` +
       `${coverage.specimens} component specimens ` +
       `(${coverage.painted} painted exports, ${coverage.unpainted} portal/context-bound and listed)`,
   );

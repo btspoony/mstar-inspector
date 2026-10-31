@@ -155,3 +155,64 @@ describe("design-system module boundary", () => {
     expect(violations, `design-system boundary violations:\n${message}`).toEqual([]);
   });
 });
+
+/**
+ * The second half of the same boundary: a consumer names the semantic and
+ * component layers (and the shadcn bridge keys), never a primitive palette
+ * step. This is the guard DESIGN.md promised for the commit that migrates the
+ * last primitive reader — plan 204's `pages.module.css` sweep was that commit.
+ *
+ * It reads source text in every syntax a reference is written in:
+ * `var(--gray-200)` in a stylesheet, `bg-(--gray-200)` in markup, and a
+ * `--gray-200:` declaration in an inline `style` attribute. The generated
+ * stylesheet is the palette's one declaration site; `src/design-system/` is
+ * where the layers are composed, so both are exempt.
+ */
+const PALETTE_DECLARATION_SITE = "src/spa/styles/tokens.css";
+const PALETTE_STEP = /--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-\d{2,3}\b/g;
+/** Every syntax a consumer can write a token reference in. */
+const TOKEN_CONSUMER_FILE = /\.(?:css|html|m?[jt]sx?)$/;
+
+/** Repo-relative consumer sources under `src/`, minus the module and the declaration site. */
+function tokenConsumerFiles(dir: string = SCAN_ROOT): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      if (!inModule(full)) out.push(...tokenConsumerFiles(full));
+    } else if (TOKEN_CONSUMER_FILE.test(entry)) {
+      const file = relative(REPO, full);
+      if (file !== PALETTE_DECLARATION_SITE) out.push(file);
+    }
+  }
+  return out;
+}
+
+describe("token layer boundary", () => {
+  test("no consumer names a primitive palette step", () => {
+    const files = tokenConsumerFiles();
+    // Guard against a scan that silently found nothing (wrong root, moved tree).
+    expect(files.length).toBeGreaterThan(0);
+
+    const hits = files.flatMap((file) =>
+      readFileSync(join(REPO, file), "utf8")
+        .split("\n")
+        .flatMap((line, index) =>
+          [...line.matchAll(PALETTE_STEP)].map(
+            (match) => `${file}:${index + 1}: [palette-step] ${match[0]}`,
+          ),
+        ),
+    );
+    expect(hits, `consumers name primitive palette steps:\n${hits.join("\n")}`).toEqual([]);
+  });
+
+  test("the matcher is precise: a semantic name and a bridge key are legal", () => {
+    expect([..."var(--surface-card) var(--border) var(--background)".matchAll(PALETTE_STEP)]).toEqual([]);
+    expect([..."var(--gray-200)".matchAll(PALETTE_STEP)].map((match) => match[0])).toEqual([
+      "--gray-200",
+    ]);
+    expect([..."bg-(--brand-700)".matchAll(PALETTE_STEP)].map((match) => match[0])).toEqual([
+      "--brand-700",
+    ]);
+  });
+});

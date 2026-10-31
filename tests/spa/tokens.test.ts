@@ -341,7 +341,7 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     }
   });
 
-  test("semantic, component and legacy names are present on :root", async () => {
+  test("semantic and component names are present on :root, and no alias scaffold survives", async () => {
     const css = await Bun.file(TOKENS_CSS).text();
     const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
 
@@ -355,11 +355,11 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     expect(rootVars["button-primary-bg"]).toBe("var(--tone-accent-solid)");
     expect(rootVars["button-primary-fg"]).toBe("var(--on-brand)");
     expect(rootVars["card-bg"]).toBe("var(--surface-card)");
-    // The legacy radius aliases still resolve onto the two tiers; the button
-    // sizing, notice-channel and sidebar-tint aliases left once the SSR face
-    // read the component layer directly.
-    expect(rootVars["rounded-sm"]).toBe("var(--radius-control)");
-    expect(rootVars["rounded-md"]).toBe("var(--radius-container)");
+    // The pre-redesign radius aliases left with the page stylesheet that was
+    // their last reader (plan 204); the earlier alias groups left with the SSR
+    // face. A name coming back here would make a second vocabulary live again.
+    expect(rootVars["rounded-sm"]).toBeUndefined();
+    expect(rootVars["rounded-md"]).toBeUndefined();
     expect(rootVars["button-primary-height"]).toBeUndefined();
     expect(rootVars["notice-error-fg"]).toBeUndefined();
     expect(rootVars["sidebar-active-bg"]).toBeUndefined();

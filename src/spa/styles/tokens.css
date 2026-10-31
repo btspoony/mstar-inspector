@@ -218,13 +218,6 @@
   --card-border: var(--border-default);
   --card-radius: var(--radius-container);
   --card-padding: var(--spacing-6);
-
-  /* transitional names owned by later plans (202-204 migrate them;
-     each declaration leaves with its last consumer) */
-  /* closed by plan 204 (admin.html, pages.module.css) */
-  --rounded-sm: var(--radius-control);
-  /* closed by plan 204 (admin.html, pages.module.css) */
-  --rounded-md: var(--radius-container);
 }
 
 /* Stored manual choice — the only light face; unset stays dark. */

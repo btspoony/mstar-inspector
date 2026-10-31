@@ -7,12 +7,11 @@
  * 1. **The output is a pure function of the source.** Regenerating in-process
  *    and comparing against the committed file catches a hand edit the same way
  *    `--check` does, and it runs under `bun test` as well as in CI.
- * 2. **The transitional set is declared, with its owner.** Plans 202/203
- *    compile against those 11 steps until they migrate the last consumer;
- *    emitting survivors alone would break the build with no failing assertion
- *    until those plans run.
- * 3. **Nothing removed comes back.** The 59 steps D14 dropped must not appear
- *    as declarations, and no layer may reference a transitional step.
+ * 2. **The palette is exactly the survivor set.** The D14a transitional steps
+ *    closed with plan 204, whose admin.html migration removed their last
+ *    readers; the emitted palette is the 26 the bands consume and nothing else.
+ * 3. **Nothing removed comes back.** Neither the steps D14 dropped nor the
+ *    retired pre-redesign aliases reappear as declarations.
  * 4. **The theme contract survives**: `:root` dark, `[data-theme="light"]`
  *    stored-light only, the ops variant, and the reduced-motion fold.
  */
@@ -21,7 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
-import { legacyTokens, survivorSteps, tokenLayers } from "../../src/design-system/tokens";
+import { survivorSteps, tokenLayers } from "../../src/design-system/tokens";
 
 const REPO = new URL("../../", import.meta.url).pathname;
 const CSS_PATH = join(REPO, "src/spa/styles/tokens.css");
@@ -109,18 +108,6 @@ describe("generated tokens.css", () => {
     }
   });
 
-  test("no layer references a legacy name", () => {
-    // A reference from inside the system would make the alias permanent by
-    // accident; the whole point is that its consumer lives outside.
-    for (const theme of ["dark", "light"] as const) {
-      const layers = tokenLayers(theme);
-      const referenced = [...Object.values(layers.semantic), ...Object.values(layers.component)].join("\n");
-      for (const token of legacyTokens) {
-        expect(referenced, `${theme} consumes legacy --${token.name}`).not.toContain(`var(--${token.name})`);
-      }
-    }
-  });
-
   test("the light branch re-declares only what differs", () => {
     // A full re-declaration would also work, but it hides which names are
     // genuinely theme-varying and doubles the surface a hand edit could drift
@@ -147,16 +134,5 @@ describe("generated tokens.css", () => {
 
     expect(OPS["tone-accent-solid"]).toBe("var(--tone-neutral-solid)");
     expect(OPS["button-primary-bg"]).toBe("var(--tone-neutral-bg)");
-  });
-
-  test("legacy names are declared as references, and only for names a later plan closes", () => {
-    for (const token of legacyTokens) {
-      expect(ROOT[token.name], `--${token.name}`).toBe(token.value);
-      expect(css, `--${token.name} owner`).toContain(`closed by plan ${token.owner}`);
-      expect(token.owner.trim()).not.toBe("");
-      // A legacy value is a reference into the system or one of the plain
-      // geometry values the surface already declared — never a new colour.
-      expect(token.value).not.toMatch(/^#[0-9a-f]{3,8}$/i);
-    }
   });
 });

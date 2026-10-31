@@ -34,8 +34,6 @@ export type { SemanticName, SemanticTokens } from "./semantic";
 export type { ComponentName, ComponentTokens } from "./components";
 export type { OpsSurfaceToken } from "./surface-variants";
 export { OPS_SURFACE_ATTR, opsSurface } from "./surface-variants";
-export type { LegacyToken } from "./legacy";
-export { legacyTokens } from "./legacy";
 export { reducedMotionDurations } from "./semantic";
 
 
