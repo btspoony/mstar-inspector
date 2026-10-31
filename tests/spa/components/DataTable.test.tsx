@@ -1,8 +1,12 @@
 /**
- * DataTable — the one table shell, header face, alignment rule and empty slot.
+ * DataTable — the one table shell, header face, row heights, composite cell
+ * and empty slot.
  *
- * Static render: columns and rows are render props, so the test drives real
- * cells and the page-owned empty state without a DOM runner.
+ * The assertions name the property, not a class: a hairline/band must resolve
+ * through the semantic vocabulary (never a primitive palette step), and a row
+ * must ride one of the two named row heights. Static render: columns and rows
+ * are render props, so the test drives real cells and the page-owned empty
+ * state without a DOM runner.
  */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
@@ -32,22 +36,51 @@ const headClass = (html: string, label: string) =>
 const cellClass = (html: string, content: string) =>
   html.match(new RegExp(`<td [^>]*class="([^"]*)">${content}</td>`))?.[1] ?? "";
 
+const shellClass = (html: string) => html.match(/^<div class="([^"]*)"/)?.[1] ?? "";
+const rowTags = (html: string) => [...html.matchAll(/<tr[^>]*>/g)].map((m) => m[0]);
+
+/** A primitive palette step: `--gray-700`, `--background-200`, `--blue-700`. */
+const PRIMITIVE_STEP = /--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-[0-9a-z]+/;
+
 describe("DataTable", () => {
-  test("shell carries the container face; header row is the background-200 band", () => {
+  test("the shell is the container face with semantic hairlines, not palette steps", () => {
     const html = render({ columns, rows, rowKey: (row) => row.slug });
-    // Container radius + hairline on the shell, and the row hairlines on the
-    // same token: bare `border` / `border-b` carry width only, so preflight
-    // leaves border-color at currentColor (DESIGN.md Table: hairline
-    // gray-alpha-400).
-    expect(html).toStartWith(
-      '<div class="overflow-hidden rounded-md border border-(--gray-alpha-400) ',
-    );
-    // The row hairline rides the same token; the rendered selector carries an
-    // escaped ampersand.
-    expect(html).toContain("[&amp;_tr]:border-(--gray-alpha-400)");
-    expect(html).toContain("bg-(--background-200)");
-    // Header band opts out of the primitive's row hover.
+    const shell = shellClass(html);
+    // Container radius + a semantic hairline on the shell, and row hairlines
+    // on the same vocabulary: bare `border` / `border-b` carry width only, so
+    // preflight leaves border-color at currentColor (DESIGN.md Table).
+    expect(shell).toContain("rounded-md");
+    expect(shell).toMatch(/border-\(--border-(?:subtle|default|strong)\)/);
+    expect(shell).toContain("[&amp;_tr]:border-(--border-subtle)");
+    expect(shell).not.toMatch(PRIMITIVE_STEP);
+    // Header band is a semantic surface (DESIGN.md Table: `surface-raised`),
+    // and it opts out of the primitive's row hover.
+    const thead = html.match(/<thead[^>]*class="([^"]*)"/)?.[1] ?? "";
+    expect(thead).toMatch(/bg-\(--(?:surface|tone)-[a-z-]+\)/);
+    expect(thead).not.toMatch(PRIMITIVE_STEP);
     expect(html).toContain("hover:bg-inherit");
+  });
+
+  test("the header rides row-h-compact and every body row row-h-comfort", () => {
+    const html = render({ columns, rows, rowKey: (row) => row.slug });
+    const [header, ...body] = rowTags(html);
+    expect(header).toContain("h-(--row-h-compact)");
+    expect(body).toHaveLength(rows.length);
+    for (const row of body) expect(row).toContain("h-(--row-h-comfort)");
+  });
+
+  test("a page row class merges into the row face instead of replacing its height", () => {
+    const html = render({
+      columns,
+      rows,
+      rowKey: (row) => row.slug,
+      rowProps: (row) => ({ className: "cursor-pointer", id: `row-${row.slug}` }),
+    });
+    const [, firstRow] = rowTags(html);
+    expect(firstRow).toContain("h-(--row-h-comfort)");
+    expect(firstRow).toContain("cursor-pointer");
+    expect(html).toContain('id="row-demo"');
+    expect(html).toContain('id="row-other"');
   });
 
   test("headers ride the label-12 step and cells come from the render props", () => {
@@ -70,6 +103,33 @@ describe("DataTable", () => {
     expect(cellClass(html, "demo")).not.toContain("text-right");
   });
 
+  test("a column with meta renders a composite cell: primary line, then meta line", () => {
+    const html = render({
+      columns: [
+        { header: "App", cell: (row) => row.slug, meta: (row) => `App ${row.count}` },
+        { header: "Findings", cell: (row) => row.count, align: "right" },
+      ],
+      rows,
+      rowKey: (row) => row.slug,
+    });
+    // One composite per row — the plain column stays a bare cell.
+    expect((html.match(/data-slot="cell-composite"/g) ?? []).length).toBe(rows.length);
+    const primary = html.indexOf('data-slot="cell-primary"');
+    const meta = html.indexOf('data-slot="cell-meta"');
+    expect(primary).toBeGreaterThan(-1);
+    expect(primary).toBeLessThan(meta);
+    // Both lines are assertable, in place: the primary content above, the
+    // meta line below.
+    expect(html.slice(primary, meta)).toContain("demo");
+    expect(html.slice(meta)).toContain("App 3");
+    expect(html).toContain("App 7");
+    // The meta line is the quieter face: label-12 in a muted text token.
+    const metaClass = html.match(/<span data-slot="cell-meta" class="([^"]*)"/)?.[1] ?? "";
+    expect(metaClass).toContain("text-(length:--typo-label-12-size)");
+    expect(metaClass).toMatch(/text-\(--text-(?:muted|secondary|faint)\)/);
+    expect(metaClass).not.toMatch(PRIMITIVE_STEP);
+  });
+
   test("empty slot replaces the table instead of a bare header band", () => {
     const html = render({
       columns,
@@ -85,17 +145,5 @@ describe("DataTable", () => {
     expect(html).toContain("<table");
     expect(html).toContain(">App</th>");
     expect(html).not.toContain("<td");
-  });
-
-  test("rowProps hands the page its own row face (class and attributes)", () => {
-    const html = render({
-      columns,
-      rows,
-      rowKey: (row) => row.slug,
-      rowProps: (row) => ({ className: "cursor-pointer", id: `row-${row.slug}` }),
-    });
-    expect(html).toMatch(/<tr [^>]*class="[^"]*cursor-pointer"/);
-    expect(html).toContain('id="row-demo"');
-    expect(html).toContain('id="row-other"');
   });
 });

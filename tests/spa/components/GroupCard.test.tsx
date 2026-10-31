@@ -1,7 +1,8 @@
 /**
- * GroupCard — DESIGN.md v0.4 `group-card`: the ui/card surface with Card's
- * symmetric padding split into a header band (`14px 16px`) and a body
- * (`0 16px 14px`), title + badge, summary and action slots.
+ * GroupCard — DESIGN.md `group-card`: the ui/card surface with Card's
+ * symmetric padding split into a header band (at least one `row-h-comfort`,
+ * growing when a summary line is present) and a body (`0 16px 14px`),
+ * title + badge, summary and action slots.
  *
  * Static render: every input is a prop, so the emitted markup is asserted for
  * the slot, the header composition and the Task 1 token classes.
@@ -48,10 +49,10 @@ describe("GroupCard", () => {
     // resolves the inherited edge through tokens.css.
   });
 
-  test("header carries the 14px 16px band padding", () => {
+  test("header band is at least one named comfort row", () => {
     const header = between('data-slot="card-header"', 'data-slot="card-content"');
+    expect(header).toContain("min-h-(--row-h-comfort)");
     expect(header).toContain("px-4");
-    expect(header).toContain("py-3.5");
   });
 
   test("title and badge share the header title slot", () => {
@@ -66,10 +67,10 @@ describe("GroupCard", () => {
     expect(action).toContain("Add key");
   });
 
-  test("summary rides the label-12 step in gray-700", () => {
+  test("summary rides the label-12 step in the muted text token", () => {
     const description = between('data-slot="card-description"', 'data-slot="card-action"');
     expect(description).toContain("text-(length:--typo-label-12-size)");
-    expect(description).toContain("text-(--gray-700)");
+    expect(description).toMatch(/text-\(--text-(?:muted|secondary|faint)\)/);
   });
 
   test("body carries the 0 16px 14px padding", () => {

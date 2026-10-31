@@ -11,7 +11,7 @@
  *    channels, and StatusBadge carries its semantic tone through the
  *    `data-tone` attribute (the class face is the component's own pin).
  * 2. v0.3 face: page titles on the heading-24 token step, the DESIGN.md
- *    Table header (background-200 band + label-12 headers), zero raw hex.
+ *    Table header (a semantic band + label-12 headers), zero raw hex.
  * 3. A6: the new empty-state guidance keys exist atomically in both
  *    locales.
  *
@@ -355,17 +355,21 @@ describe("v0.3 page face (A4/A5)", () => {
     }
   });
 
-  test("table header face: background-200 band + label-12 headers (DESIGN.md Table)", () => {
+  test("table header face: a semantic band + label-12 headers (DESIGN.md Table)", () => {
     // Same ownership split as the page title: DataTable owns the shell and the
-    // band, each page only composes it. Rendering alone cannot tell a composed
-    // table from a hand-rolled one that emits the identical band, so the
-    // source pins forbid the second spelling explicitly.
+    // band, each page only composes it. The band must resolve through the
+    // semantic layer — a primitive palette step here would be the pre-r3 face —
+    // so the assertion names the vocabulary, not one class string. Rendering
+    // alone cannot tell a composed table from a hand-rolled one that emits the
+    // identical band, so the source pins forbid the second spelling explicitly.
     for (const [name, html] of [
       ["AppsPage", renderAppsPage()],
       ["MembersPage", renderMembers()],
     ] as const) {
-      expect(html.match(/<thead[^>]*class="([^"]*)"/)?.[1], name).toContain("bg-(--background-200)");
-      expect(html.match(/--background-200/g), name).toHaveLength(1);
+      const thead = html.match(/<thead[^>]*class="([^"]*)"/)?.[1] ?? "";
+      expect(thead, name).toMatch(/bg-\(--(?:surface|tone)-[a-z-]+\)/);
+      expect(thead, name).not.toMatch(/--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-/);
+      expect(html.match(/<thead[^>]*bg-\(--/g), name).toHaveLength(1);
       const headers = classAttrs(html, "th");
       expect(headers.length, name).toBeGreaterThan(0);
       for (const header of headers) {
@@ -373,6 +377,7 @@ describe("v0.3 page face (A4/A5)", () => {
       }
       expect(PAGE_FACE_SOURCES[name]).toContain("<DataTable");
       // No page re-spells the band or the label-12 header step.
+      expect(PAGE_FACE_SOURCES[name], name).not.toContain("--surface-raised");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--background-200");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--typo-label-12-tracking");
     }
@@ -417,7 +422,10 @@ describe("table horizontal padding (D5/A3)", () => {
       const cells = classAttrs(html, "td");
       expect(heads.length, name).toBeGreaterThan(0);
       expect(cells.length, name).toBeGreaterThan(0);
-      for (const head of heads) expect(head.split(/\s+/), name).toContain("h-10");
+      // Vertical density is the named compact row height (DESIGN.md), not a
+      // raw scale class: the header row carries the token and each th fills it.
+      expect(html, name).toContain("h-(--row-h-compact)");
+      for (const head of heads) expect(head.split(/\s+/), name).toContain("h-full");
       for (const cell of cells) {
         expect(cell.split(/\s+/), name).toContain("px-3");
         expect(cell.split(/\s+/), name).toContain("py-2");
