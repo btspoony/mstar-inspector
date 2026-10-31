@@ -16,16 +16,16 @@
  * failure copy — a non-409 body is not this dialog's copy.
  */
 import { useState, type FormEvent } from "react";
-import { Button } from "@/components/ui/button";
 import {
+  Button,
   Dialog,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+  Input,
+} from "@design-system";
 import { t } from "../../i18n";
 import { postForm } from "../api";
 import type { SpaBoot } from "../boot";

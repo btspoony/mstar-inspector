@@ -142,6 +142,10 @@ export const en = {
     findingsByCategory: "Findings by category",
     trend: "Trend",
     recurringFindings: "Recurring findings",
+    /** The recurring-findings table's columns — the row's own facts only. */
+    columnFinding: "Finding",
+    columnReviews: "Reviews",
+    columnRepos: "Repos",
     noFindings: "No findings in this window.",
     noRecurring: "No recurring findings in this window.",
     finding: "{count} finding",
@@ -165,7 +169,19 @@ export const en = {
   },
   apps: {
     heading: "Apps",
+    /** The header band's one-line description (DESIGN.md header band). */
+    headingDescription: "Each row is one GitHub App; installation scope lives on the App detail.",
     create: "Create GitHub App",
+    /**
+     * The metric band. Three figures only, each proved by `AppsPayload`:
+     * the App count, the count whose status is not `disabled` (the
+     * enable/disable axis — a paused App is still enabled), and the sum of
+     * `health.rejected24h`. Installation and repository counts are not
+     * fields of that payload and are never shown (compass D13).
+     */
+    metricApps: "Apps",
+    metricEnabled: "Enabled",
+    metricRejected24h: "24h rejected",
     /**
      * Why the Create control is disabled. `role`: the caller is not
      * owner/admin of the workspace the page addresses. `workspace`: this
@@ -339,14 +355,6 @@ export const en = {
     noGrant: "No support access is active.",
   },
   settings: {
-    /**
-     * (AD-591): section-group eyebrow labels for the two tier
-     * zones — app info/status (Tier 1) and configuration (Tier 2).
-     */
-    group: {
-      appInfo: "App info",
-      configuration: "Configuration",
-    },
     changesSaved: "Changes saved.",
     removeNoChange: "Nothing changed — there was nothing to remove.",
     addKey: "Add key",
@@ -374,9 +382,20 @@ export const en = {
     resumeReviews: "Resume reviews",
     disconnected: "This App is disconnected — enable it to review.",
     lastWebhook: "Last webhook: {time}",
+    /**
+     * The installations section of the settings flow: heading, count subtitle
+     * and the table's three columns. `installations.length` is the only
+     * installation figure the product carries (compass D13); the settings
+     * payload has no per-installation repository count, so there is no
+     * repository column.
+     */
+    installations: "Installations",
+    installationsCount: "{count} installations",
+    installationsCountOne: "{count} installation",
+    installationsAccount: "Account",
+    installationsId: "Installation ID",
+    installationsLastSync: "Last sync",
     noInstallations: "No installations yet.",
-    installation: "installation {id}",
-    lastSeen: "last seen {time}",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy: "The last 5 webhook deliveries for this App — newest first.",
     noDeliveries: "No deliveries yet.",

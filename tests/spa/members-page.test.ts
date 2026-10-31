@@ -5,11 +5,11 @@
  * Executed contract: the page's read/refusal/visibility seams
  * (`loadMembersPage`, `postMemberWrite`, `inviteFailureNotice`,
  * `showsPendingInvites`), the dictionary copy they surface, and the rendered
- * member row (`MembersTable`). The previous ui-kit / column source pins were
+ * member row (`MembersList`). The previous ui-kit / column source pins were
  * deleted — they red-lined refactors without proving behaviour, and a
  * component whose state lives in `useState` renders as the loading skeleton
  * under SSR, so the page itself has no executable face here. The rendered
- * contract therefore hangs off the extracted `MembersTable`, which is the
+ * contract therefore hangs off the extracted `MembersList`, which is the
  * page's own markup with the state supplied.
  *
  * Every read and write hangs off the page's workspace base, and the page
@@ -34,7 +34,7 @@ import {
   inviteFailureNotice,
   leaveWorkspaceForDashboard,
   loadMembersPage,
-  MembersTable,
+  MembersList,
   postMemberWrite,
   showsPendingInvites,
 } from "../../src/spa/pages/MembersPage";
@@ -290,7 +290,7 @@ describe("members page shadcn rebuild", () => {
   });
 });
 
-describe("members table (rendered)", () => {
+describe("members list (rendered)", () => {
   const ROW: MemberRow = {
     id: "u1",
     github_login: "octocat",
@@ -298,12 +298,12 @@ describe("members table (rendered)", () => {
     created_at: "2026-01-02T03:04:05.678Z",
   };
 
-  test("the Joined cell shows the relative stamp and keeps the absolute one as its tooltip", () => {
+  test("one list row per member, carrying the login, role, join time and its absolute tooltip", () => {
     // Day granularity: the bucket cannot roll over inside one test run.
     const relative = formatRelativeTime(ROW.created_at, "en");
     expect(relative).toMatch(/\d+ days ago$/);
     const html = renderToStaticMarkup(
-      createElement(MembersTable, {
+      createElement(MembersList, {
         locale: "en",
         members: [ROW],
         viewerLogin: "octocat",
@@ -312,12 +312,31 @@ describe("members table (rendered)", () => {
         onAction: () => {},
       }),
     );
-    // Both faces of the same cell: the copy a reader sees, and the exact
-    // stamp the tooltip must still expose (losing the title is the silent
-    // regression this covers).
+    // One row per member on the group-card / list-row patterns.
+    expect(html.match(/data-slot="list-row"/g)).toHaveLength(1);
+    expect(html).toContain('data-slot="group-card"');
+    expect(html).toContain(`>${ROW.github_login}`);
+    expect(html).toContain(t("en", `members.role.${ROW.role}`));
+    // Both faces of the join time: the copy a reader sees, and the exact stamp
+    // the tooltip must still expose (losing the title is the silent regression
+    // this covers).
     expect(html).toContain(`title="${ROW.created_at}"`);
-    expect(html).toContain(`>${relative}<`);
-    expect(html).toContain(t("en", "members.tableJoined"));
+    expect(html).toContain(`${t("en", "members.tableJoined")} · ${relative}`);
+  });
+
+  test("the viewer's own row renders no actions menu", () => {
+    const html = renderToStaticMarkup(
+      createElement(MembersList, {
+        locale: "en",
+        members: [ROW],
+        viewerLogin: "octocat",
+        memberRole: "owner",
+        canInvite: true,
+        onAction: () => {},
+      }),
+    );
+    expect(html).toContain(`(${t("en", "members.you")})`);
+    expect(html).not.toContain(t("en", "members.actionsMenuLabel", { login: ROW.github_login }));
   });
 });
 

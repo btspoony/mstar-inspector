@@ -356,21 +356,28 @@ async function serveDocument(c: AdminContext): Promise<Response> {
  * values are plain text by contract. Both anchors must be present: a silent
  * no-op would ship an English document to a zh_CN operator, so a template
  * drift throws into the serveDocument error path instead.
+ *
+ * Both anchors match the tag, not a fixed attribute string: the document root
+ * carries attributes of its own (`data-surface="ops"` for the plain variant),
+ * and an exact-substring anchor made every locale throw once one appeared.
+ * Every attribute the template declares survives the substitution.
  */
 export function localizeDocument(html: string, locale: Locale): string {
   const lang = locale === "zh_CN" ? "zh-CN" : "en";
   const title = t(locale, "admin.documentTitle")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;");
-  if (!html.includes('<html lang="en">')) {
+  const langAnchor = /(<html[^>]*\slang=")en(")/;
+  if (!langAnchor.test(html)) {
     throw new Error("admin document is missing the `<html lang=\"en\">` locale anchor");
   }
-  if (!/<title>[^<]*<\/title>/.test(html)) {
+  const titleAnchor = /(<title[^>]*>)([^<]*)(<\/title>)/;
+  if (!titleAnchor.test(html)) {
     throw new Error("admin document is missing the `<title>` locale anchor");
   }
   return html
-    .replace('<html lang="en">', `<html lang="${lang}">`)
-    .replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`);
+    .replace(langAnchor, `$1${lang}$2`)
+    .replace(titleAnchor, (_match, open: string, _previous: string, close: string) => `${open}${title}${close}`);
 }
 
 const ADMIN_ROUTES: readonly AdminRoute[] = [

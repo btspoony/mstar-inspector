@@ -2,7 +2,7 @@
  * Settings ops zone, unified providers, chains UI.
  * No DOM runner — source-scan pins over SettingsPage.tsx and its primitives
  * plus pure data helpers (the home suite that shared this style is
- * retired). The AppInfoCard degradation face is additionally pinned
+ * retired). The AppInfoSection degradation face is additionally pinned
  * behaviorally through react-dom/server SSR of the exported card (no DOM
  * needed — static markup output).
  */
@@ -25,7 +25,7 @@ import {
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
 import {
-  AppInfoCard,
+  AppInfoSection,
   DraftChainPanel,
   draftChainTabLabel,
   githubAppSettingsUrl,
@@ -357,7 +357,7 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
     // "reachable" state — never the "verified" claim: two distinct labels, and
     // the reachable one carries the accent tone.
     expect(page).toContain('ok: { tone: "success", label: "settings.providers.status.ok" }');
-    expect(page).toContain('reachable: { tone: "brand", label: "settings.providers.status.reachable" }');
+    expect(page).toContain('reachable: { tone: "accent", label: "settings.providers.status.reachable" }');
   });
 
   test("a provider's stored keys are listed whole — the add form never folds keys[] into one slot", () => {
@@ -677,18 +677,18 @@ describe("provider combobox", () => {
     expect(full).toContain('id="lb-option-anthropic"');
     expect(full).toContain('id="lb-option-gemini"');
     expect(full).toContain('id="lb-option-gemini-image"');
-    // The highlighted row renders the standalone bg-accent token; every row
-    // always carries the hover: variant (8 rows → 8 substring occurrences,
-    // +1 only when a row is active).
-    expect(full.split("bg-accent").length - 1).toBe(8);
+    // Every visible provider is one listbox option with its deterministic id;
+    // none is keyboard-active until the panel is told which row it is.
+    expect(full.match(/role="option"/g)).toHaveLength(8);
+    expect(full).not.toContain('data-active="true"');
     const openaiAt = panel({ activeId: "lb-option-openai" });
-    expect(openaiAt.split("bg-accent").length - 1).toBe(9);
-    // …and the standalone token sits on the ACTIVE row, not its neighbours.
+    expect(openaiAt.match(/data-active="true"/g)).toHaveLength(1);
+    // …and the active state sits on the ACTIVE row, not its neighbours.
     const openaiRow = openaiAt.slice(
       openaiAt.indexOf('id="lb-option-openai"'),
       openaiAt.indexOf("</div>", openaiAt.indexOf('id="lb-option-openai"')),
     );
-    expect(openaiRow).toContain(" bg-accent");
+    expect(openaiRow).toContain('data-active="true"');
     // Zero-match state: the honest empty <p> carries the listbox id, so the
     // open input's aria-controls never dangles.
     const empty = panel({ query: "zzz-no-match" });
@@ -737,27 +737,27 @@ describe("provider combobox", () => {
 });
 
 describe("add-entry visibility + picker usability at breadth", () => {
-  test("the Add Provider entry is a labeled, bordered control in the Providers card header", () => {
+  test("the Add Provider entry is a labeled, bordered control heading the providers section", () => {
     const source = readSettingsSource();
-    // The entry lives in the card HEADER (CardAction slot) — visible without
-    // scrolling; icon-only is not acceptable, the localized label rides the
-    // button beside a plus glyph.
-    const body = source.slice(source.indexOf("function ProvidersCard"), source.indexOf("function groupMeta"));
-    expect(body).toContain("<CardAction>");
+    // The entry heads the section body — visible without scrolling; icon-only
+    // is not acceptable, the localized label rides the button beside a plus
+    // glyph. A flow section owns no action slot, so the trigger precedes the
+    // group list rather than sitting in a card header.
+    const body = source.slice(source.indexOf("function ProvidersSection"), source.indexOf("function groupMeta"));
+    expect(body).toContain("<FlowSection");
     expect(body).toContain('variant="outline"');
     expect(body).toContain('aria-haspopup="dialog"');
     expect(body).toContain('{t(locale, "settings.addProvider")}');
     expect(body).toContain("<Plus");
     expect(body).toContain("onClick={() => setAddOpen(true)}");
-    // AC-4: the flow is an overlay, not an expanded row — the card content
-    // holds the group list only, and the dialog is mounted beside it.
-    const contentPos = body.indexOf("<CardContent");
+    // AC-4: the flow is an overlay, not an expanded row — the section body
+    // holds the group list, and the dialog is mounted beside it.
+    const triggerPos = body.indexOf("onClick={() => setAddOpen(true)}");
     const rowsPos = body.indexOf("groups.length === 0");
-    expect(contentPos).toBeGreaterThan(-1);
-    expect(rowsPos).toBeGreaterThan(contentPos);
-    expect(body).not.toContain("<AddProviderSection");
-    // The dialog is driven by the header trigger; a completed flow reports
-    // through the shared outcome channel and closes through onOpenChange.
+    expect(rowsPos).toBeGreaterThan(triggerPos);
+    expect(body).not.toContain("<AddKeySection");
+    // The dialog is driven by that trigger; a completed flow reports through
+    // the shared outcome channel and closes through onOpenChange.
     expect(body).toContain("open={addOpen}");
     expect(body).toContain("onOpenChange={setAddOpen}");
   });
@@ -909,7 +909,7 @@ describe("model chain tabs", () => {
     expect(source).toContain("onRemoveChain(tab.id)");
     // after a successful create, the draft closes and the real
     // (stored-name) tab after the reload lands — the draft flow's success
-    // branch lives in the ChainsCard onCreated callback.
+    // branch lives in the ChainsSection onCreated callback.
     expect(source).toContain("setSelectedTab(created);");
     // Chain mutation ops stay as-is.
     expect(source).toContain('op: "remove-chain"');
@@ -939,15 +939,20 @@ describe("model chain tabs", () => {
     // its own hidden attribute — the local TabsContent wrapper's
     // data-[state=inactive]:hidden class is what hides inactive editors
     // while keeping them mounted for edit-state preservation.
-    const tabsSource = readFileSync(join(import.meta.dir, "../../src/spa/components/ui/tabs.tsx"), "utf8");
+    const tabsSource = readFileSync(join(import.meta.dir, "../../src/design-system/primitives/tabs.tsx"), "utf8");
     const contentWrapper = tabsSource.slice(tabsSource.indexOf("function TabsContent"));
     expect(contentWrapper).toContain("data-[state=inactive]:hidden");
-    // The ChainsCard panels mount through that exact wrapper (forceMount on
+    // The ChainsSection panels mount through that exact wrapper (forceMount on
     // every TabsContent), so exactly one editor is visible per selected
     // trigger.
     const source = readSettingsSource();
-    expect(source).toContain('import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";');
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    // The four tab faces come from the design system's one door; the wrapper
+    // they mount through is the one asserted above.
+    const imported = /import \{([\s\S]*?)\} from "@design-system";/.exec(source)?.[1] ?? "";
+    for (const name of ["Tabs", "TabsContent", "TabsList", "TabsTrigger"]) {
+      expect(imported, name).toContain(name);
+    }
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     expect(chainsBody).toContain("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>");
     expect(chainsBody).toContain('<TabsContent key={tab.id} forceMount value={tab.id}>');
   });
@@ -956,7 +961,7 @@ describe("model chain tabs", () => {
 describe("chain draft peer tab", () => {
   test("+ 新建链 opens a draft peer tab: after the named tabs, auto-selected, never two drafts", () => {
     const source = readSettingsSource();
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     // The entry mirrors the strip placement: outline button, plus
     // glyph, localized label (icon-only is not acceptable) — a TabsList
     // SIBLING in the strip row, never a trigger inside the role=tablist.
@@ -995,7 +1000,7 @@ describe("chain draft peer tab", () => {
 
   test("the add-chain control is a TabsList sibling: its source sits after the tablist close", () => {
     const source = readSettingsSource();
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     // strip-level contract, structurally pinned (audit
     // F-10): the labels/props pins above cannot see WHERE the control sits —
     // a regression nesting the add-chain button inside the role=tablist would
@@ -1055,7 +1060,7 @@ describe("chain draft peer tab", () => {
     // activeChainTabId (the tab-model pin) back to Default — and,
     // per AD-551, resets the lifted draft name so a reopened draft starts
     // blank (the old unmount-clears-name semantics, now explicit).
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     expect(chainsBody).toContain("<TabsContent forceMount value={DRAFT_CHAIN_TAB_ID}>");
     const discardPos = chainsBody.indexOf("onDiscard={() => {");
     expect(discardPos).toBeGreaterThan(-1);
@@ -1083,7 +1088,7 @@ describe("chain draft peer tab", () => {
     // The panel's onCreate is the reload-checked wrapper, not the raw shared
     // POST — and the reload signal itself comes from load()'s resolved flag,
     // carried through submitSettings' awaited background refresh.
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     expect(chainsBody).toContain("onCreate={onCreateDraft}");
     expect(source).toContain("const reloaded = await onReload({ background: true });");
     expect(source).toContain("Promise<OpNotice & { reloaded: boolean }>");
@@ -1145,9 +1150,9 @@ describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
     expect(panelHtml("")).toContain('value=""');
   });
 
-  test("the lifted state, wiring and both close-time resets live in ChainsCard (AD-551)", () => {
+  test("the lifted state, wiring and both close-time resets live in ChainsSection (AD-551)", () => {
     const source = readSettingsSource();
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     // The name state lives in the card (the panel no longer owns it).
     expect(chainsBody).toContain('const [draftName, setDraftName] = useState("");');
     // Controlled wiring: the panel edits the card's state, the trigger
@@ -1220,7 +1225,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
     // DraftChainPanel is the injecting caller; the Default editor's call
     // stays bare (named-tab editors pass no actions either — the conditional
     // above already renders them byte-equivalent).
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     const firstEditorPos = chainsBody.indexOf("<ChainEditor");
     const defaultCall = chainsBody.slice(firstEditorPos, chainsBody.indexOf("/>", firstEditorPos));
     expect(defaultCall).not.toContain("actions={");
@@ -1258,17 +1263,17 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
 describe("seat assignment section", () => {
   test("seats are an independent titled card below chain management, not a section of the chains card", () => {
     const source = readSettingsSource();
-    // SeatsCard is its own card component, rendered after ChainsCard for
+    // SeatsSection is its own card component, rendered after ChainsSection for
     // managers only (same authorization surface as chain editing).
-    expect(source).toContain("function SeatsCard");
-    expect(source.indexOf("function ChainsCard")).toBeLessThan(source.indexOf("function SeatsCard"));
-    expect(source.indexOf("<ChainsCard")).toBeLessThan(source.indexOf("<SeatsCard"));
+    expect(source).toContain("function SeatsSection");
+    expect(source.indexOf("function ChainsSection")).toBeLessThan(source.indexOf("function SeatsSection"));
+    expect(source.indexOf("<ChainsSection")).toBeLessThan(source.indexOf("<SeatsSection"));
     // The chains card no longer carries any seat control or seat save.
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     expect(chainsBody).not.toContain("settings.seats");
     expect(chainsBody).not.toContain('op: "save-roles"');
     // The seats card is titled and described through the dictionary.
-    const seatsBody = source.slice(source.indexOf("function SeatsCard"));
+    const seatsBody = source.slice(source.indexOf("function SeatsSection"));
     expect(seatsBody).toContain('t(locale, "settings.seats")');
     expect(seatsBody).toContain('t(locale, "settings.seatsCopy")');
   });
@@ -1288,10 +1293,10 @@ describe("seat assignment section", () => {
     expect(source).toContain('op: "save-roles"');
     expect(source).toContain("fields[`role_${role}`] = seatSelectValue(tabs, seats[role])");
     // The seat state re-derives from the payload ONLY when the offered
-    // chain-tab set changes (review fix): the SeatsCard effect dep is the
+    // chain-tab set changes (review fix): the SeatsSection effect dep is the
     // tab-id-set key, not the raw payload identities — unrelated-op
     // background reloads keep unsaved seat picks.
-    const seatsBody = source.slice(source.indexOf("function SeatsCard"));
+    const seatsBody = source.slice(source.indexOf("function SeatsSection"));
     expect(seatsBody).toContain("const tabIdSetKey = tabs.map((tab) => tab.id).join();");
     expect(seatsBody).toContain("seatRoleValues(payload.model_role_ids, payload.model_roles, tabs)");
     expect(seatsBody).toContain("}, [tabIdSetKey]);");
@@ -1357,7 +1362,7 @@ describe("operational action hierarchy", () => {
     // Resume stays on the cva default variant — exact-pinned as a Button with
     // no variant attribute, so a regression to a destructive resume fails here.
     expect(source).toContain('<Button type="button" onClick={() => onPending({ kind: "resume" })}>');
-    const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ChainsCard"));
+    const opsBody = source.slice(source.indexOf("function OpsSection"), source.indexOf("function ChainsSection"));
     expect(opsBody).toContain('variant="destructive-outline"');
     // The Disable confirm dialog's action button carries the plain verb; the
     // "(reversible)" parenthetical stays on the ops trigger copy only.
@@ -1369,17 +1374,16 @@ describe("operational action hierarchy", () => {
     expect(source).toContain("await onReload({ background: true })");
   });
 
-  test("the destructive-outline variant is tokenized on the shadcn Button: red border, no raw hex fork", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/ui/button.tsx"), "utf8");
+  test("the destructive-outline variant is tokenized on the shadcn Button: no raw hex fork", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/design-system/primitives/button.tsx"), "utf8");
     expect(source).toContain('"destructive-outline":');
-    // Border, label, and hover tint come from the destructive token (the
-    // DESIGN.md red scale via the shadcn theme bridge); the shared cva base
-    // supplies the 3px focus-visible ring — the variant only pins its color.
+    // The variant's border, label and hover tint resolve through the
+    // destructive token family; `tests/design-system/tokens.test.ts` owns that
+    // bridge contract and fails a raw colour that has no bridge key. Here the
+    // branch rules are pinned: no `dark:` split (it would fire on the OS
+    // preference, not the app's data-theme) and no literal colour.
     const variantBlock = source.slice(source.indexOf('"destructive-outline":'), source.indexOf("secondary:"));
-    expect(variantBlock).toContain("border-destructive");
-    expect(variantBlock).toContain("text-destructive");
-    // Dark-mode focus-ring parity with the filled destructive variant.
-    expect(variantBlock).toContain("dark:focus-visible:ring-destructive/40");
+    expect(variantBlock).not.toContain("dark:");
     expect(variantBlock).not.toContain("#");
   });
 
@@ -1459,7 +1463,7 @@ describe("App workflow boundaries", () => {
     const source = readSettingsSource();
     // SUPERSEDE (App detail IA): the standalone install-health card retired
     // with the identity-only non-manager face — the health body now renders
-    // only inside the manager OpsCard, which keeps its section descriptions.
+    // only inside the manager OpsSection, which keeps its section descriptions.
     expect(source).toContain('t(locale, "settings.recentDeliveriesCopy")');
     // Selects without a visible label get an accessible name (DESIGN.md L2
     // label audit) — the runtime-image selector and the chain model picker.
@@ -1522,12 +1526,12 @@ describe("section-scoped op feedback", () => {
     // The only top-notice writes left are load()'s two background-failure
     // paths (parse failure + request failure) — the page-level
     // channel for background reloads. Ops never land there; card-local
-    // notices (AppInfoCard's own `setNotice({ … })` outcome region) are that
+    // notices (AppInfoSection's own `setNotice({ … })` outcome region) are that
     // card's channel and are excluded here.
     expect(detail.match(/setNotice\(\{/g)?.length).toBe(2);
     const outsideInfoCard = source
-      .slice(0, source.indexOf("export function AppInfoCard"))
-      .concat(source.slice(source.indexOf("function HealthBody")));
+      .slice(0, source.indexOf("export function AppInfoSection"))
+      .concat(source.slice(source.indexOf("function InstallationsSection")));
     expect(outsideInfoCard).not.toContain("setNotice({");
     // Bugbot fix: a successful load() — foreground or background —
     // clears the page banner, so a recovered reload never leaves a stale
@@ -1570,26 +1574,26 @@ describe("section-scoped op feedback", () => {
     // Runtime image: region inside the editor, next to the save trigger.
     const runtimeBody = source.slice(
       source.indexOf("function RuntimeHarnessEditor"),
-      source.indexOf("function OpsCard"),
+      source.indexOf("function OpsSection"),
     );
     expect(runtimeBody).toContain("<NoticeRegion notice={notice} />");
     // Ops zone: region directly under the pause/disable/delete button row.
-    const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ChainsCard"));
+    const opsBody = source.slice(source.indexOf("function OpsSection"), source.indexOf("function ChainsSection"));
     expect(opsBody).toContain("<NoticeRegion notice={notice} />");
     // Providers: card region directly under the add panel serves the verify /
     // template forms only — the dialog-confirmed removes moved to a
     // group-local region (pinned in the F-08 test below).
     const providersBody = source.slice(
-      source.indexOf("function ProvidersCard"),
+      source.indexOf("function ProvidersSection"),
       source.indexOf("function ProviderGroupCard"),
     );
     expect(providersBody).toContain("<NoticeRegion notice={notice} />");
     // Chains: card region below every tabpanel (dialog removes + draft
     // success) — the editors' own regions are pinned in the regression test.
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     expect(chainsBody).toContain("<NoticeRegion notice={notice} />");
     // Seats: region inside the seat form, under its save button.
-    const seatsBody = source.slice(source.indexOf("function SeatsCard"), source.indexOf("function DraftChainPanel"));
+    const seatsBody = source.slice(source.indexOf("function SeatsSection"), source.indexOf("function DraftChainPanel"));
     expect(seatsBody).toContain("<NoticeRegion notice={notice} />");
   });
 
@@ -1611,7 +1615,7 @@ describe("section-scoped op feedback", () => {
     expect(regionPos).toBeGreaterThan(buttonPos);
     // Every chain panel mounts through ChainEditor (Default shown here; the
     // named-tab map and the draft panel reuse it in the same card).
-    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     expect(chainsBody).toContain("<ChainEditor");
     expect(chainsBody).toContain('onSave={(chain) => onSettings({ op: "save-chain", model_chain: chain })}');
   });
@@ -1659,7 +1663,7 @@ describe("section-scoped op feedback", () => {
     // NoticeRegion, so the group-local region inherits the roles
     // (alert/status) and notice tokens.
     const providersBody = source.slice(
-      source.indexOf("function ProvidersCard"),
+      source.indexOf("function ProvidersSection"),
       source.indexOf("function ProviderGroupCard"),
     );
     expect(providersBody).toContain("removeOutcome: { notice: OpNotice; slot: number } | null");
@@ -1700,7 +1704,7 @@ describe("section-scoped op feedback", () => {
     // flight (the confirm dialog's pre-existing disabled={busy} guard stays).
     const runtimeBody = source.slice(
       source.indexOf("function RuntimeHarnessEditor"),
-      source.indexOf("function OpsCard"),
+      source.indexOf("function OpsSection"),
     );
     expect(runtimeBody).toContain("disabled={busy}");
     // ProviderConfigForm is the providers module's tail: the slice runs to the
@@ -1711,7 +1715,7 @@ describe("section-scoped op feedback", () => {
     expect(customBody).toContain("disabled={busy}");
     const editorBody = source.slice(source.indexOf("function ChainEditor"));
     expect(editorBody).toContain("disabled={busy}");
-    const seatsBody = source.slice(source.indexOf("function SeatsCard"), source.indexOf("function DraftChainPanel"));
+    const seatsBody = source.slice(source.indexOf("function SeatsSection"), source.indexOf("function DraftChainPanel"));
     expect(seatsBody).toContain("disabled={busy}");
     // Stale-error rule (pinned): a region's content is replaced wholesale by
     // the next op targeting that same region — setters always receive the
@@ -1745,17 +1749,14 @@ describe("settings header typography", () => {
     );
     // Exactly one heading, and it is the heading-24 h1 carrying the slug.
     expect(shell.match(/<h1/g)).toHaveLength(1);
-    expect(shell).toContain(
-      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">Acme</h1>',
-    );
+    expect(shell).toContain('<h1 data-slot="page-header-title"');
+    expect(shell).toContain(">Acme</h1>");
     // Rendering alone cannot express OWNERSHIP — a shell inlining the same
-    // triple renders byte-identical markup — so the face's single home is
-    // pinned on source: PageHeader spells the triple, the shell composes
+    // markup renders byte-identical output — so the face's single home is
+    // pinned on source: PageHeader owns the title slot, the shell composes
     // <PageHeader>, and no page source carries a second copy.
     const pageHeader = readFileSync(join(import.meta.dir, "../../src/spa/components/PageHeader.tsx"), "utf8");
-    expect(pageHeader).toContain("text-(length:--typo-heading-24-size)");
-    expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
-    expect(pageHeader).toContain("tracking-(--typo-heading-24-tracking)");
+    expect(pageHeader).toContain('data-slot="page-header-title"');
     const shellSource = readFileSync(
       join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"),
       "utf8",
@@ -1780,9 +1781,9 @@ describe("version footer", () => {
     // Rendered value is the v-prefixed form, same shape as the /healthz field
     // and release tags, interpolated through the bilingual footer key.
     expect(source).toContain('{t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}');
-    // Footer slot reuses the page's muted small-print classes (existing token
-    // utilities — no new DESIGN.md tokens, no CSS changes).
-    expect(source).toContain('<p className="text-sm text-muted-foreground">');
+    // Footer slot is the page's small-print paragraph carrying the version
+    // copy; its tone is the page's own face, not a test oracle.
+    expect(source).toContain('<p className="text-sm');
   });
 
   test("the footer copy is dictionary-backed in both locales and carries the deployed version", () => {
@@ -1802,7 +1803,7 @@ describe("provider entry controls", () => {
     // the entry controls now advertise the overlay they open (WCAG 4.1.2), and
     // the card body holds no expandable region.
     const providersBody = source.slice(
-      source.indexOf("function ProvidersCard"),
+      source.indexOf("function ProvidersSection"),
       source.indexOf("function groupMeta"),
     );
     expect(providersBody).toContain('aria-haspopup="dialog"');
@@ -1832,7 +1833,7 @@ describe("GitHub App identity card", () => {
    */
   const html = (app: SettingsAppMeta, canManage = false): string =>
     renderToStaticMarkup(
-      createElement(AppInfoCard, { locale: "en", app, workspaceId: WORKSPACE_ID, canManage }),
+      createElement(AppInfoSection, { locale: "en", app, workspaceId: WORKSPACE_ID, canManage }),
     );
 
   /** The App's stable workspace id (never the route ref/slug). */
@@ -1988,8 +1989,8 @@ describe("GitHub App identity card", () => {
     const source = readSettingsSource();
     // SUPERSEDE (App detail IA): the slug row is the AppDetailPage shell's
     // identity header now; inside the tab, the card ordering contract is
-    // AppInfoCard → manage conditional.
-    const cardPos = source.indexOf("<AppInfoCard");
+    // AppInfoSection → manage conditional.
+    const cardPos = source.indexOf("<AppInfoSection");
     const managePos = source.indexOf("{payload.can_manage ? (");
     expect(cardPos).toBeGreaterThan(-1);
     expect(managePos).toBeGreaterThan(cardPos);
@@ -1997,8 +1998,8 @@ describe("GitHub App identity card", () => {
     // own null check inside the card body, and the link pins the new-tab +
     // noopener contract.
     const cardBody = source.slice(
-      source.indexOf("export function AppInfoCard"),
-      source.indexOf("function HealthBody"),
+      source.indexOf("export function AppInfoSection"),
+      source.indexOf("function InstallationsSection"),
     );
     expect(cardBody).toContain("app.github_name ? (");
     expect(cardBody).toContain("app.github_html_url ? (");
@@ -2033,7 +2034,7 @@ describe("GitHub App identity card", () => {
   describe("identity card force refresh (D5)", () => {
     const card = (canManage: boolean, onReload?: () => Promise<unknown>): string =>
       renderToStaticMarkup(
-        createElement(AppInfoCard, {
+        createElement(AppInfoSection, {
           locale: "en",
           app: meta({ github_name: "Acme Reviewer" }),
           workspaceId: WORKSPACE_ID,
@@ -2098,8 +2099,8 @@ describe("GitHub App identity card", () => {
     test("refresh POSTs refresh-metadata by github_app_id; success reloads, failure resolves the keyed message and never reloads", () => {
       const source = readSettingsSource();
       const cardBody = source.slice(
-        source.indexOf("export function AppInfoCard"),
-        source.indexOf("function HealthBody"),
+        source.indexOf("export function AppInfoSection"),
+        source.indexOf("function InstallationsSection"),
       );
       expect(cardBody).toContain("${apiBase()}/api/apps/${app.github_app_id}/refresh-metadata");
       // Manager-only gate + busy guard.
@@ -2135,7 +2136,7 @@ describe("GitHub App identity card", () => {
         const root = createRoot(container as unknown as Element);
         await act(async () =>
           root.render(
-            createElement(AppInfoCard, {
+            createElement(AppInfoSection, {
               locale: "en",
               app: meta({ github_name: "Acme Reviewer" }),
               workspaceId: WORKSPACE_ID,
@@ -2178,14 +2179,14 @@ describe("GitHub App settings link wiring (AD-623)", () => {
     // Threading is presentation-only: the card gets the payload's own
     // `can_manage` and `workspace_id` (never a path-derived value).
     expect(source).toContain(
-      "<AppInfoCard\n            locale={locale}\n            app={app}\n            workspaceId={payload.workspace_id}\n            canManage={payload.can_manage}\n            onReload={() => onReload({ background: true })}\n          />",
+      "<AppInfoSection\n          locale={locale}\n          app={app}\n          workspaceId={payload.workspace_id}\n          canManage={payload.can_manage}\n          onReload={() => onReload({ background: true })}\n        />",
     );
     // The card body routes the manager target through the pure helper (the
     // forbidden derivations — github_name / the local slug — cannot reach the
     // URL through it: it takes the html_url alone).
     const cardBody = source.slice(
-      source.indexOf("export function AppInfoCard"),
-      source.indexOf("function HealthBody"),
+      source.indexOf("export function AppInfoSection"),
+      source.indexOf("function InstallationsSection"),
     );
     expect(cardBody).toContain("githubAppSettingsUrl(app.github_html_url)");
     expect(cardBody).toContain("settingsHref ? \"settings.appInfoManageOnGithub\" : \"settings.appInfoViewOnGithub\"");
@@ -2226,7 +2227,7 @@ describe("runtime harness row tightness", () => {
     // select and its save button. The shell must stay content-adaptive.
     const runtimeBody = source.slice(
       source.indexOf("function RuntimeHarnessEditor"),
-      source.indexOf("function OpsCard"),
+      source.indexOf("function OpsSection"),
     );
     expect(runtimeBody).toContain('<div className="w-fit max-w-xs">');
     expect(runtimeBody).not.toContain("min-w-64");

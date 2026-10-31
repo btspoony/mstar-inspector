@@ -1,16 +1,19 @@
 /**
- * Step dialog (DESIGN.md v0.4 ### step-dialog): the multi-step entry shell.
- * The panel surface is `ui/dialog`'s `DialogContent` unchanged — container
- * radius through the bridge, `shadow-pop`, `sm:max-w-lg` and `p-6` are not
- * restated. Title on heading-16, description on label-12 in gray-700; the step
- * indicator is label-12, current step on brand-700 and the rest on gray-700,
- * rendered only when there is more than one step.
+ * Step dialog (DESIGN.md v0.5 ### step-dialog): the multi-step entry shell.
+ * The panel surface, the title face and the description face are `ui/dialog`'s
+ * `DialogContent` / `DialogTitle` / `DialogDescription` unchanged — container
+ * radius through the bridge, `shadow-pop`, `sm:max-w-lg`, the spacing-6
+ * padding, the heading-16 title and the label-12 muted description are not
+ * restated. This shell adds only the step indicator: label-12, current step on
+ * `tone-accent-fg` and the rest on `text-muted`, rendered only when there is
+ * more than one step, an out-of-range `currentStep` clamped in so exactly one
+ * step is always current.
  *
  * Purely presentational: the footer belongs to the caller (cancel / submit
- * group) and this shell owns only its right alignment and the spacing-2 gap,
- * stated here rather than left to the primitive's default.
- * It holds no busy state — a disabled submit and the in-progress copy are the
- * caller's slot contract — and it never closes itself: `open` is the caller's.
+ * group) and this shell owns only its right alignment, on the primitive's
+ * spacing-2 gap. It holds no busy state — a disabled submit and the
+ * in-progress copy are the caller's slot contract — and it never closes
+ * itself: `open` is the caller's.
  */
 import type { ReactNode } from "react";
 import {
@@ -20,8 +23,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
+  cn,
+} from "@design-system";
 
 export function StepDialog({
   open,
@@ -53,14 +56,8 @@ export function StepDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle className="text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">
-            {title}
-          </DialogTitle>
-          {description ? (
-            <DialogDescription className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) text-(--gray-700)">
-              {description}
-            </DialogDescription>
-          ) : null}
+          <DialogTitle>{title}</DialogTitle>
+          {description ? <DialogDescription>{description}</DialogDescription> : null}
         </DialogHeader>
         {steps && steps.length > 1 ? (
           <ol
@@ -73,7 +70,9 @@ export function StepDialog({
                 key={index}
                 data-slot="step-dialog-step"
                 aria-current={index === active ? "step" : undefined}
-                className={cn(index === active ? "text-(--brand-700)" : "text-(--gray-700)")}
+                className={cn(
+                  index === active ? "text-(--tone-accent-fg)" : "text-(--text-muted)",
+                )}
               >
                 {step}
               </li>
@@ -81,7 +80,7 @@ export function StepDialog({
           </ol>
         ) : null}
         {children}
-        <DialogFooter className="justify-end gap-(--spacing-2)">{footer}</DialogFooter>
+        <DialogFooter className="justify-end">{footer}</DialogFooter>
       </DialogContent>
     </Dialog>
   );

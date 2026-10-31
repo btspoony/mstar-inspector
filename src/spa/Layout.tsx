@@ -4,8 +4,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Moon, Sun } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { Button, SidebarInset, SidebarProvider } from "@design-system";
 import { t } from "../i18n";
 import type { SpaBoot } from "./boot";
 import { AppSidebar } from "./components/AppSidebar";
@@ -56,7 +55,10 @@ function effectiveTheme(): Theme {
 }
 
 function LoginChrome({ children }: { children: ReactNode }) {
-  return <div className="min-h-svh bg-background text-foreground font-sans">{children}</div>;
+  // The r3 page plane under the centered card; the pre-paint `data-theme`
+  // bootstrap in index.html is what carries the stored light/dark choice here,
+  // exactly as it does under the shell.
+  return <div className="min-h-svh bg-(--surface-page) text-(--text-primary) font-sans">{children}</div>;
 }
 
 function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
@@ -83,12 +85,12 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
     <SidebarProvider defaultOpen className="h-svh overflow-hidden print:h-auto print:overflow-visible">
       <AppSidebar model={sidebar} />
       <SidebarInset className="h-svh overflow-hidden print:h-auto print:overflow-visible">
-        {/* v0.3 (DESIGN.md): navbar sits on background-200, one step above the
-            page canvas, matching the sidebar chrome layer. Two clusters: the
+        {/* v0.3 (DESIGN.md): navbar sits on the raised surface, one step above
+            the page canvas, matching the sidebar chrome layer. Two clusters: the
             workspace switcher names what the whole shell is scoped to (left),
             the account/locale/theme controls stay right. Control states
             (hover/active/focus-visible) come from the restyled ghost Button. */}
-        <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-(--background-200) px-4">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-(--surface-raised) px-4">
           <div className="flex min-w-0 items-center gap-2">
             <WorkspaceSwitcher model={switcher} boot={boot} />
           </div>

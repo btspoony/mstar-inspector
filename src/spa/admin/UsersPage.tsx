@@ -12,9 +12,9 @@
 import { useState } from "react";
 import { t } from "../../i18n";
 import type { Locale } from "../../i18n";
+import { StatusBadge } from "@design-system";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { PageHeader } from "../components/PageHeader";
-import { StatusBadge } from "../components/StatusBadge";
 import { EmptyState } from "../components/state/EmptyState";
 import { readUsers, useLoaded, type UserRow } from "./api";
 import { ConsolePath, Screen } from "./screen";
@@ -39,7 +39,12 @@ export function UsersPage({ locale }: { locale: Locale }) {
       header: t(locale, "admin.users.identityColumn"),
       cell: (row) => (
         <div className="flex flex-wrap items-center gap-2">
-          {row.isOperator ? <StatusBadge tone="brand">{t(locale, "admin.users.identityOperator")}</StatusBadge> : null}
+          {row.isOperator ? (
+            // The one emphasised identity. The accent request is the semantic
+            // face; the console's D15 re-map withholds the tone, so the surface
+            // stays the only place plainness is decided.
+            <StatusBadge tone="accent">{t(locale, "admin.users.identityOperator")}</StatusBadge>
+          ) : null}
           {row.activeGrantCount > 0 ? (
             <StatusBadge tone="neutral">
               {t(locale, "admin.users.identitySupport", { count: row.activeGrantCount })}

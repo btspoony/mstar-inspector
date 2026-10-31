@@ -12,17 +12,21 @@
  * dialog only carries the value.
  */
 import { useState, type FormEvent } from "react";
-import { Button } from "@/components/ui/button";
 import {
+  Button,
   Dialog,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+  Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@design-system";
 import { t, type DictionaryKey } from "../../i18n";
 import type { Locale } from "../../i18n";
 import { DataTable, type DataTableColumn } from "../components/DataTable";

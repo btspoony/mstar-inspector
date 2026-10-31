@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AppSidebar } from "../../../src/spa/components/AppSidebar";
-import { SidebarProvider } from "../../../src/spa/components/ui/sidebar";
+import { SidebarProvider } from "@design-system";
 import type { SidebarModel } from "../../../src/spa/shell";
 
 const model: SidebarModel = { brand: "Brand", brandHref: "/dashboard", navLabel: "Nav", items: [] };

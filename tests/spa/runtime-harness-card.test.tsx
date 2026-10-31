@@ -1,21 +1,23 @@
 /**
- * The runtime-harness settings card, asserted on the static markup in both
- * locales: the card names the runtime harness (never the image), the
+ * The runtime-harness settings section, asserted on the static markup in both
+ * locales: the section names the runtime harness (never the image), the
  * description interpolates the persisted registry id, and the selector lists
- * the registry ids from the payload.
+ * the registry ids from the payload. The section also carries the review
+ * trigger control (cadence belongs to how reviews run), so its save and slug
+ * arrive as props here.
  */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { SettingsManagePayload } from "../../src/spa/pages/data";
-import { RuntimeHarnessCard } from "../../src/spa/pages/SettingsPage";
+import { RuntimeHarnessSection } from "../../src/spa/pages/SettingsPage";
 
-// The card reads only these three payload fields; the rest of the manage
-// payload belongs to the sibling cards.
+// The section reads only these payload fields; the rest of the manage
+// payload belongs to the sibling sections.
 const payload = (sandboxImageId: string): SettingsManagePayload =>
   ({
     can_manage: true,
-    app: { sandbox_image_id: sandboxImageId },
+    app: { sandbox_image_id: sandboxImageId, github_slug: "acme", review_trigger_mode: "every_push" },
     sandbox_images: [
       { id: "omp", enabled: true },
       { id: "legacy", enabled: false },
@@ -26,10 +28,15 @@ const noop = async () => ({ kind: "success" as const, message: "" });
 
 const render = (locale: "en" | "zh_CN", sandboxImageId: string): string =>
   renderToStaticMarkup(
-    createElement(RuntimeHarnessCard, { locale, payload: payload(sandboxImageId), onSettings: noop }),
+    createElement(RuntimeHarnessSection, {
+      locale,
+      payload: payload(sandboxImageId),
+      onSettings: noop,
+      onTriggerMode: noop,
+    }),
   );
 
-describe("runtime harness card (SSR)", () => {
+describe("runtime harness section (SSR)", () => {
   test("the English face names the runtime harness, not the image", () => {
     const html = render("en", "omp");
     expect(html).toContain("Runtime harness");

@@ -8,7 +8,7 @@
  */
 import { CircleAlert } from "lucide-react";
 import { t, type Locale } from "../../../i18n";
-import { Button } from "@/components/ui/button";
+import { Button } from "@design-system";
 
 export function ErrorState({
   locale,

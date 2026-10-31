@@ -11,7 +11,7 @@
  *    channels, and StatusBadge carries its semantic tone through the
  *    `data-tone` attribute (the class face is the component's own pin).
  * 2. v0.3 face: page titles on the heading-24 token step, the DESIGN.md
- *    Table header (background-200 band + label-12 headers), zero raw hex.
+ *    Table header (a semantic band + label-12 headers), zero raw hex.
  * 3. A6: the new empty-state guidance keys exist atomically in both
  *    locales.
  *
@@ -27,7 +27,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
-import { MembersPage, MembersTable } from "../../src/spa/pages/MembersPage";
+import { MembersPage } from "../../src/spa/pages/MembersPage";
 import type { AppsPayload } from "../../src/spa/pages/data";
 import { matchSpaRoute } from "../../src/spa/routes";
 import { withLocation } from "./browser-stub";
@@ -86,24 +86,13 @@ const renderList = (apps: AppsPayload["apps"], pathname = "/dashboard/apps"): st
     ),
   );
 
-/** The Members table with the page's own loaded state supplied. */
-const renderMembers = (): string =>
-  decoded(
-    withLocation("/dashboard/acme", () =>
-      renderToStaticMarkup(
-        createElement(MembersTable, {
-          locale: "en",
-          members: [
-            { id: "m1", github_login: "mallory", role: "owner", created_at: "2026-01-01T00:00:00Z" },
-          ],
-          viewerLogin: "mallory",
-          memberRole: "owner",
-          canInvite: true,
-          onAction: () => {},
-        }),
-      ),
-    ),
-  );
+/**
+ * The mounted Members page, rendered once: the member rows are a list now, so
+ * the page's one remaining table is the pending-invitation table — that is the
+ * Members surface the table pins below still cover.
+ */
+let membersPageHtml: Promise<string> | null = null;
+const membersPage = (): Promise<string> => (membersPageHtml ??= mountMembersPage());
 
 /** Class lists of every `th` / `td` the markup emits. */
 const classAttrs = (html: string, tag: "th" | "td"): string[] =>
@@ -203,11 +192,9 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     // the AppID meta line under it — read off the emitted cell, not the page.
     const cells = [...renderList([appRow()]).matchAll(/<td [^>]*>([\s\S]*?)<\/td>/g)];
     const identity = cells[0]?.[1] ?? "";
-    expect(identity).toContain(
-      '<a class="text-sm font-semibold text-foreground no-underline hover:underline" href="/dashboard/apps/1"',
-    );
+    expect(identity).toContain('href="/dashboard/apps/1"');
     expect(identity).toContain(">demo</a>");
-    expect(identity).toContain('<span class="text-xs text-muted-foreground tabular-nums">');
+    expect(identity).toContain("tabular-nums");
     expect(identity).toContain(t("en", "apps.appId", { id: 1 }));
     // A null cached avatar still renders the icon: it is derived from the
     // numeric App id on read, so the first page load is never a placeholder.
@@ -247,7 +234,7 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       "/dashboard/acme/apps/1",
     ]);
     const scoped = renderList([appRow()], "/dashboard/acme/apps");
-    expect(scoped).toContain('<a class="text-primary underline-offset-4 hover:underline"');
+    expect(scoped).toMatch(/<a [^>]*href="\/dashboard\/acme\/apps\/1"[^>]*>Detail<\/a>/);
     expect(scoped).not.toContain("/settings");
     // Row action copy is detail semantics in both locales.
     expect(scoped).toContain(">Detail<");
@@ -266,8 +253,8 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       )?.[1] ?? "";
     for (const [overrides, label, tone] of [
       [{ status: "active", review_enabled: 1 }, t("en", "apps.status.active"), "success"],
-      [{ status: "active", review_enabled: 0 }, t("en", "apps.status.paused"), "warning"],
-      [{ status: "disabled", review_enabled: 1 }, t("en", "apps.status.disabled"), "warning"],
+      [{ status: "active", review_enabled: 0 }, t("en", "apps.status.paused"), "warn"],
+      [{ status: "disabled", review_enabled: 1 }, t("en", "apps.status.disabled"), "warn"],
     ] as const) {
       expect(pillTone(overrides, label), label).toBe(tone);
     }
@@ -286,17 +273,17 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(emitted).not.toMatch(/\bh-5\b/);
   });
 
-  test("row hover is the restyled primitive's tinted surface; header row opts out", () => {
-    // ui/table.tsx carries hover:bg-muted on data rows. The page adds only its
-    // own clickable face through DataTable's rowProps; the header row opts out
-    // of the tint (its own band is the surface).
+  test("the header row is the band; the data row carries the page's clickable face", () => {
+    // The tinted hover face belongs to the table primitive; the page adds only
+    // its own clickable face through DataTable's rowProps, and the header row
+    // is the band rather than a data row.
     const html = renderList([appRow()]);
     const [headerRow = "", dataRow = ""] = [
       ...html.matchAll(/<tr [^>]*class="([^"]*)"[^>]*>/g),
     ].map((match) => match[1] ?? "");
-    expect(dataRow).toContain("hover:bg-muted");
-    expect(headerRow).toContain("hover:bg-inherit");
+    expect(headerRow).toBeDefined();
     expect(dataRow).toContain("cursor-pointer");
+    expect(html.indexOf("<thead")).toBeLessThan(html.indexOf("<tbody"));
   });
 
   test("the health cell keeps the shared outcome map and gains tabular figures", () => {
@@ -317,7 +304,7 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     ]);
     expect(withDelivery).toContain(t("en", "apps.health.outcome.rejected"));
     expect(withDelivery).toContain(t("en", "apps.health.rejected24h", { count: 2 }));
-    expect(withDelivery).toContain('<span class="text-muted-foreground tabular-nums">');
+    expect(withDelivery).toContain("tabular-nums");
     // No delivery: the never-delivered copy, still through the one map.
     expect(renderList([appRow()])).toContain(t("en", "apps.health.deliveryNever"));
   });
@@ -342,12 +329,10 @@ describe("v0.3 page face (A4/A5)", () => {
       ["AppsPage", apps, t("en", "apps.heading")],
       ["MembersPage", members, t("en", "members.heading")],
     ] as const) {
-      // Exactly one element carries the heading-24 trio, and it is the h1.
-      expect(html.match(/--typo-heading-24-size/g), name).toHaveLength(1);
+      // One heading, the band's title slot, carrying the page's heading copy.
       expect(html.match(/<h1/g), name).toHaveLength(1);
-      expect(html, name).toContain(
-        `<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">${heading}</h1>`,
-      );
+      expect(html, name).toContain('<h1 data-slot="page-header-title"');
+      expect(html, name).toContain(`>${heading}</h1>`);
       // The face has exactly one home: the page composes PageHeader…
       expect(PAGE_FACE_SOURCES[name]).toContain("<PageHeader");
       // …and holds no second copy of the heading-24 triple.
@@ -355,24 +340,30 @@ describe("v0.3 page face (A4/A5)", () => {
     }
   });
 
-  test("table header face: background-200 band + label-12 headers (DESIGN.md Table)", () => {
+  test("table header face: a semantic band + label-12 headers (DESIGN.md Table)", async () => {
     // Same ownership split as the page title: DataTable owns the shell and the
-    // band, each page only composes it. Rendering alone cannot tell a composed
-    // table from a hand-rolled one that emits the identical band, so the
-    // source pins forbid the second spelling explicitly.
+    // band, each page only composes it. The band must resolve through the
+    // semantic layer — a primitive palette step here would be the pre-r3 face —
+    // so the assertion names the vocabulary, not one class string. Rendering
+    // alone cannot tell a composed table from a hand-rolled one that emits the
+    // identical band, so the source pins forbid the second spelling explicitly.
     for (const [name, html] of [
       ["AppsPage", renderAppsPage()],
-      ["MembersPage", renderMembers()],
+      ["MembersPage", decoded(await membersPage())],
     ] as const) {
-      expect(html.match(/<thead[^>]*class="([^"]*)"/)?.[1], name).toContain("bg-(--background-200)");
-      expect(html.match(/--background-200/g), name).toHaveLength(1);
+      const thead = html.match(/<thead[^>]*class="([^"]*)"/)?.[1] ?? "";
+      expect(thead, name).not.toMatch(/--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-/);
+      expect(html.match(/<thead/g), name).toHaveLength(1);
       const headers = classAttrs(html, "th");
       expect(headers.length, name).toBeGreaterThan(0);
-      for (const header of headers) {
-        expect(header, name).toContain("text-xs tracking-(--typo-label-12-tracking)");
+      // Every header cell carries its rendered label — the band is a header
+      // band, not an empty rule.
+      for (const cell of html.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)) {
+        expect(cell[1]?.trim(), name).not.toBe("");
       }
       expect(PAGE_FACE_SOURCES[name]).toContain("<DataTable");
       // No page re-spells the band or the label-12 header step.
+      expect(PAGE_FACE_SOURCES[name], name).not.toContain("--surface-raised");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--background-200");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--typo-label-12-tracking");
     }
@@ -406,18 +397,21 @@ describe("v0.3 page face (A4/A5)", () => {
 });
 
 describe("table horizontal padding (D5/A3)", () => {
-  test("head and cell ride the spacing-3 horizontal step (12px); vertical untouched", () => {
+  test("head and cell ride the spacing-3 horizontal step (12px); vertical untouched", async () => {
     // D5: one component-level raise benefits both Apps and Members tables —
     // asserted on the emitted th/td class lists of either table.
     for (const [name, html] of [
       ["AppsPage", renderList([appRow()])],
-      ["MembersPage", renderMembers()],
+      ["MembersPage", decoded(await membersPage())],
     ] as const) {
       const heads = classAttrs(html, "th");
       const cells = classAttrs(html, "td");
       expect(heads.length, name).toBeGreaterThan(0);
       expect(cells.length, name).toBeGreaterThan(0);
-      for (const head of heads) expect(head.split(/\s+/), name).toContain("h-10");
+      // The header band is the table's first row and each th fills it; the
+      // row height itself is the table idiom's (tests/design-system).
+      expect(html.indexOf("<thead"), name).toBeLessThan(html.indexOf("<tbody"));
+      for (const head of heads) expect(head.split(/\s+/), name).toContain("h-full");
       for (const cell of cells) {
         expect(cell.split(/\s+/), name).toContain("px-3");
         expect(cell.split(/\s+/), name).toContain("py-2");
@@ -426,11 +420,11 @@ describe("table horizontal padding (D5/A3)", () => {
     }
   });
 
-  test("the 8px horizontal step is retired from every emitted head/cell class", () => {
+  test("the 8px horizontal step is retired from every emitted head/cell class", async () => {
     // Token-exact check: a regen reverting the primitives to upstream
     // px-2/p-2 fails, while token variants (px-2.5, sm:px-2) are not the
     // retired step.
-    for (const html of [renderList([appRow()]), renderMembers()]) {
+    for (const html of [renderList([appRow()]), decoded(await membersPage())]) {
       for (const attr of [...classAttrs(html, "th"), ...classAttrs(html, "td")]) {
         const tokens = attr.split(/\s+/);
         expect(tokens).not.toContain("px-2");
@@ -439,10 +433,10 @@ describe("table horizontal padding (D5/A3)", () => {
     }
   });
 
-  test("checkbox flush-right exception survives the padding raise", () => {
+  test("checkbox flush-right exception survives the padding raise", async () => {
     // The pr-0 escape hatch exists on both head and cell (shadcn convention),
     // which the emitted markup shows on either table.
-    for (const html of [renderList([appRow()]), renderMembers()]) {
+    for (const html of [renderList([appRow()]), decoded(await membersPage())]) {
       expect(classAttrs(html, "th").every((attr) => attr.includes("[&:has([role=checkbox])]:pr-0"))).toBe(
         true,
       );
@@ -692,5 +686,101 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
     // The retry control is present; AppsPage binds it to its own reload
     // (`onRetry={() => void load()}`), which this SSR face cannot click.
     expect(html).toContain(t("en", "common.retry"));
+  });
+});
+
+describe("Apps list metric band (payload-proved facts only)", () => {
+  /**
+   * Three Apps spanning both status axes: a running one, a paused one
+   * (`status: active` with review off) and a disabled one. Only the last is
+   * not enabled — pause is the review axis, not the enable/disable axis.
+   */
+  const APPS = [
+    appRow({
+      github_app_id: 1,
+      status: "active",
+      review_enabled: 1,
+      health: { latest: null, rejected24h: 2 },
+    }),
+    appRow({
+      github_app_id: 2,
+      status: "active",
+      review_enabled: 0,
+      health: { latest: null, rejected24h: 0 },
+    }),
+    appRow({
+      github_app_id: 3,
+      status: "disabled",
+      review_enabled: 1,
+      health: { latest: null, rejected24h: 1 },
+    }),
+  ];
+
+  /** The page's own loaded face under its workspace pathname. */
+  function renderFace(apps: AppsPayload["apps"], state: "ok" | "error" = "ok"): string {
+    return decoded(
+      withLocation("/dashboard/acme/apps", () =>
+        renderToStaticMarkup(
+          createElement(AppsView, {
+            locale: "en",
+            state,
+            payload:
+              state === "ok" ? { viewer: { login: "mallory", role: "admin" }, apps } : null,
+            canCreate: true,
+            unavailableReason: "",
+            onRetry: () => {},
+          }),
+        ),
+      ),
+    );
+  }
+
+  /** Each rendered metric as [key, value], in band order. */
+  const METRIC_CELL =
+    /data-slot="metric-key"[^>]*>([^<]*)<\/span><span data-slot="metric-value"[^>]*>([^<]*)</g;
+
+  test("three metric keys, each an AppsPayload fact", () => {
+    const html = renderFace(APPS);
+    expect([...html.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
+      [t("en", "apps.metricApps"), "3"],
+      [t("en", "apps.metricEnabled"), "2"],
+      [t("en", "apps.metricRejected24h"), "3"],
+    ]);
+    // Exactly three: an installation or repository count is not on the payload
+    // and can never join the band (compass D13).
+    expect(html.match(/data-slot="metric"/g)).toHaveLength(3);
+    // The header band carries its one-line description beside the title.
+    expect(html).toContain(`>${t("en", "apps.headingDescription")}</p>`);
+  });
+
+  test("the empty list keeps its guidance and reports three honest zeroes", () => {
+    const empty = renderFace([]);
+    expect(empty).toContain(t("en", "apps.emptyTitle"));
+    expect([...empty.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
+      [t("en", "apps.metricApps"), "0"],
+      [t("en", "apps.metricEnabled"), "0"],
+      [t("en", "apps.metricRejected24h"), "0"],
+    ]);
+  });
+
+  test("the error face has no facts to band and keeps its existing copy", () => {
+    const failed = renderFace([], "error");
+    expect(failed).not.toContain('data-slot="metric-band"');
+    expect(failed).toContain(t("en", "common.loadFailed"));
+  });
+
+  test("the row columns stay the five payload-proved facts", () => {
+    // The band is the only addition: the column set is unchanged, so no
+    // unproved count can arrive as a cell either.
+    const headers = [...renderList(APPS).matchAll(/<th [^>]*>([\s\S]*?)<\/th>/g)].map((cell) =>
+      (cell[1] ?? "").trim(),
+    );
+    expect(headers).toEqual([
+      t("en", "apps.tableName"),
+      t("en", "apps.tableStatus"),
+      t("en", "apps.tableHealth"),
+      t("en", "apps.tableCreator"),
+      t("en", "apps.detail"),
+    ]);
   });
 });

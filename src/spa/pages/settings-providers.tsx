@@ -1,12 +1,9 @@
 import { useState } from "react";
 import { Plus } from "lucide-react";
 import { t } from "../../i18n";
-import { Button } from "@/components/ui/button";
-import { CardAction, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
+import { Button, FlowSection, StatusBadge, type StatusTone } from "@design-system";
 import { GroupCard, GroupCardBody, GroupCardHeader } from "../components/GroupCard";
 import { ListRow, ListRowGroup } from "../components/ListRow";
-import { SectionCard, SectionCardTitle } from "../components/SectionCard";
-import { StatusBadge, type StatusTone } from "../components/StatusBadge";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import type { CatalogProvider, SettingsManagePayload } from "./data";
@@ -22,15 +19,16 @@ import type { PendingAction } from "./SettingsPage";
  */
 const KEY_STATUS = {
   ok: { tone: "success", label: "settings.providers.status.ok" },
-  reachable: { tone: "brand", label: "settings.providers.status.reachable" },
-  failed: { tone: "error", label: "settings.providers.status.failed" },
+  // The probe could not reject the key: the accent tone, not success.
+  reachable: { tone: "accent", label: "settings.providers.status.reachable" },
+  failed: { tone: "danger", label: "settings.providers.status.failed" },
   unverified: { tone: "neutral", label: "settings.providers.status.unverified" },
 } as const satisfies Record<string, { tone: StatusTone; label: string }>;
 
 /** Tier badge faces: the template tier is the one gold surface. */
 const TIER_FACE = {
   builtin: { tone: "neutral", label: "settings.providers.tier.builtin" },
-  template: { tone: "warning", label: "settings.providers.tier.template" },
+  template: { tone: "warn", label: "settings.providers.tier.template" },
   custom: { tone: "neutral", label: "settings.providers.tier.custom" },
 } as const satisfies Record<string, { tone: StatusTone; label: string }>;
 
@@ -47,7 +45,7 @@ const TIER_FACE = {
  * Opening any of them inserts nothing into this list (AC-4) and changes no
  * route (AC-5); the per-row removes keep their confirmation dialog.
  */
-export function ProvidersCard({
+export function ProvidersSection({
   locale,
   payload,
   onVerify,
@@ -92,13 +90,15 @@ export function ProvidersCard({
       : removeOutcome.notice;
 
   return (
-    <SectionCard tier="secondary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.providers.title")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.providersCopy")}</CardDescription>
-        <CardAction>
-          {/* A dialog trigger, not a disclosure: aria-haspopup names the
-              overlay, and no region of this card is expanded by it. */}
+    <FlowSection
+      title={t(locale, "settings.providers.title")}
+      subtitle={t(locale, "settings.providersCopy")}
+    >
+      <div className="flex flex-col gap-3">
+        {/* A dialog trigger, not a disclosure: aria-haspopup names the
+            overlay, and no region of this section is expanded by it. The
+            flow section owns no action slot, so the trigger heads the body. */}
+        <div className="flex flex-wrap items-center justify-end">
           <Button
             type="button"
             variant="outline"
@@ -109,15 +109,14 @@ export function ProvidersCard({
             <Plus aria-hidden="true" />
             {t(locale, "settings.addProvider")}
           </Button>
-        </CardAction>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        {/* The card's region sits under the header: a completed flow's outcome
-            survives the dialog's success-close (dialog-local state does not).
-            A failed submit stays inside the dialog that produced it. */}
+        </div>
+        {/* The section's region sits under the title: a completed flow's
+            outcome survives the dialog's success-close (dialog-local state
+            does not). A failed submit stays inside the dialog that produced
+            it. */}
         <NoticeRegion notice={notice} />
         {/* A removal whose group is gone has no row to sit beside; the notice
-            stays in the card so the outcome is never dropped. */}
+            stays in the section so the outcome is never dropped. */}
         <NoticeRegion notice={orphanRemoveNotice} />
         {groups.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
@@ -138,7 +137,7 @@ export function ProvidersCard({
             />
           ))
         )}
-      </CardContent>
+      </div>
       <AddProviderDialog
         locale={locale}
         open={addOpen}
@@ -160,7 +159,7 @@ export function ProvidersCard({
         onVerify={onVerify}
         onOutcome={onOutcome}
       />
-    </SectionCard>
+    </FlowSection>
   );
 }
 
@@ -245,7 +244,7 @@ function ProviderGroupCard({
       <GroupCardBody>
         <NoticeRegion notice={removeNotice} />
         {group.keys.length === 0 ? (
-          <p className="rounded-(--rounded-sm) border border-(--gray-alpha-400) bg-(--gray-200) px-3 py-3.5 text-sm text-muted-foreground">
+          <p className="rounded-(--radius-control) border border-(--border-default) bg-(--surface-inset) px-3 py-3.5 text-sm text-muted-foreground">
             {t(locale, "settings.providers.empty")}
           </p>
         ) : (
@@ -308,7 +307,7 @@ function ProviderGroupCard({
             </span>
             <button
               type="button"
-              className="text-(--brand-700)"
+              className="text-(--tone-accent-fg)"
               aria-expanded={modelsOpen}
               // The region mounts only while open, so the control never names
               // a missing element (the combobox precedent).

@@ -1,10 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { t, type DictionaryKey } from "../../i18n";
-import { Button } from "@/components/ui/button";
+import { Button, FlowSection, Input } from "@design-system";
+import { ListRow, ListRowGroup } from "@/components/ListRow";
 import { PageHeader } from "@/components/PageHeader";
-import { SectionCard, SectionCardTitle } from "@/components/SectionCard";
-import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
@@ -117,7 +115,10 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <PageHeader title={t(locale, "workspace.setupHeading")} />
+      <PageHeader
+        title={t(locale, "workspace.setupHeading")}
+        description={t(locale, "workspace.setupDescription")}
+      />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       {/* The `self-hosted` first-account line: the boot carries `emptyInstance`
           only for the sign-in that created this instance's first account, so
@@ -125,65 +126,54 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
       {boot.emptyInstance === true ? (
         <p className="text-sm text-muted-foreground">{t(locale, "workspace.emptyInstance")}</p>
       ) : null}
-      {/* Pending invitations are the boot-built discovery surface (MF-2):
-          an invited login sees the invites above the create form — accepting
-          joins the workspace, so creation stays only for the uninvited. */}
-      {boot.pendingInvites !== undefined && boot.pendingInvites.length > 0 ? (
-        <div className="flex max-w-lg flex-col gap-3">
-          <h2 className="font-semibold text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">
-            {t(locale, "workspace.invitesHeading")}
-          </h2>
-          <p className="text-sm text-muted-foreground">{t(locale, "workspace.invitesDescription")}</p>
-          <ul className="flex flex-col gap-3">
-            {boot.pendingInvites.map((invite) => (
-              <li key={invite.inviteId}>
-                <SectionCard tier="secondary">
-                  <CardContent className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-col gap-0.5">
-                      <p className="text-sm font-medium">{invite.workspaceRef}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {t(locale, "workspace.inviteMeta", {
-                          role: t(locale, `members.role.${invite.role}`),
-                          expires: formatRelativeTime(invite.expiresAt, locale),
-                        })}
-                      </p>
-                    </div>
-                    <Button onClick={() => void onAccept(invite)} disabled={acceptingId !== null}>
+      <div className="flex flex-col">
+        {/* Pending invitations are the boot-built discovery surface (MF-2):
+            an invited login meets the invites above the create form —
+            accepting joins the workspace, so creation stays only for the
+            uninvited. */}
+        {boot.pendingInvites !== undefined && boot.pendingInvites.length > 0 ? (
+          <FlowSection
+            title={t(locale, "workspace.invitesHeading")}
+            subtitle={t(locale, "workspace.invitesDescription")}
+          >
+            <ListRowGroup>
+              {boot.pendingInvites.map((invite) => (
+                <ListRow
+                  key={invite.inviteId}
+                  identity={invite.workspaceRef}
+                  meta={t(locale, "workspace.inviteMeta", {
+                    role: t(locale, `members.role.${invite.role}`),
+                    expires: formatRelativeTime(invite.expiresAt, locale),
+                  })}
+                  actions={
+                    <Button size="sm" onClick={() => void onAccept(invite)} disabled={acceptingId !== null}>
                       {t(locale, "workspace.inviteAccept")}
                     </Button>
-                  </CardContent>
-                </SectionCard>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      <SectionCard tier="primary" className="max-w-lg">
-        <CardHeader>
-          <SectionCardTitle>{t(locale, "workspace.setupHeading")}</SectionCardTitle>
-          <CardDescription>{t(locale, "workspace.setupDescription")}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onCreate(event)}>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium" htmlFor="workspace-name">
-                {t(locale, "workspace.nameLabel")}
-              </label>
-              <Input
-                id="workspace-name"
-                className="w-64"
-                autoComplete="off"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder={t(locale, "workspace.namePlaceholder")}
-              />
-            </div>
-            <Button type="submit" disabled={busy}>
-              {t(locale, "workspace.create")}
-            </Button>
-          </form>
-        </CardContent>
-      </SectionCard>
+                  }
+                />
+              ))}
+            </ListRowGroup>
+          </FlowSection>
+        ) : null}
+        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onCreate(event)}>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium" htmlFor="workspace-name">
+              {t(locale, "workspace.nameLabel")}
+            </label>
+            <Input
+              id="workspace-name"
+              className="w-64"
+              autoComplete="off"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder={t(locale, "workspace.namePlaceholder")}
+            />
+          </div>
+          <Button type="submit" disabled={busy}>
+            {t(locale, "workspace.create")}
+          </Button>
+        </form>
+      </div>
     </div>
   );
 }

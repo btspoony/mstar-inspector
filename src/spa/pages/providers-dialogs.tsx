@@ -15,15 +15,15 @@
  */
 import { useRef, useState } from "react";
 import { t } from "../../i18n";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
+  Button,
+  Input,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@design-system";
 import type { SpaBoot } from "../boot";
 import { ProviderCombobox } from "../components/provider-combobox";
 import { StepDialog } from "../components/StepDialog";

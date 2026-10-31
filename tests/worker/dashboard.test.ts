@@ -2408,6 +2408,15 @@ describe("/dashboard placeholder lock + legacy home retirement", () => {
 describe("SSR views honor the stored theme (F-13)", () => {
   const readViews = () => readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
 
+  /**
+   * The stylesheet as shipped. The token values are generated, so they live in
+   * the rendered page, not in the source text.
+   */
+  function renderedStyle(): string {
+    const html = errorPage("boom");
+    return html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
+  }
+
   /** Extract the balanced `{...}` block introduced by `openToken`. */
   function blockAfter(source: string, openToken: string): string {
     const at = source.indexOf(openToken);
@@ -2424,23 +2433,21 @@ describe("SSR views honor the stored theme (F-13)", () => {
     throw new Error(`unbalanced block: ${openToken}`);
   }
 
-  test("STYLE carries a stored-light branch with the v0.3 recorded light hexes (values-only rebase, names frozen)", () => {
-    const light = blockAfter(readViews(), ':root[data-theme="light"] {');
+  test("STYLE carries a stored-light branch with the semantic names of the light theme", () => {
+    // The face paints from the semantic layer now: the values come from the
+    // generated table, and the branch re-declares only the names that differ.
+    const light = blockAfter(renderedStyle(), ':root[data-theme="light"] {');
     expect(light).toContain("color-scheme: light");
-    for (const hex of [
-      "--background-100: #ffffff",
-      "--background-200: #f3f5f8",
-      "--gray-100: #fafbfd",
-      "--gray-400: #ccd4df",
-      "--gray-700: #4e5969",
-      "--gray-900: #2f3742",
-      "--gray-1000: #0f141a",
-      "--gray-alpha-400: #10192824",
-      "--blue-700: #0066cc",
-      "--red-700: #b91c1c",
-      "--amber-700: #b45309",
+    for (const declaration of [
+      "--surface-page: #ffffff",
+      "--surface-raised: #f3f5f8",
+      "--text-primary: #0f141a",
+      "--text-secondary: #2f3742",
+      "--border-default: #10192824",
+      "--tone-danger-fg: #b91c1c",
+      "--tone-warn-fg: #b45309",
     ]) {
-      expect(light, hex).toContain(hex);
+      expect(light, declaration).toContain(declaration);
     }
   });
 
@@ -2453,11 +2460,12 @@ describe("SSR views honor the stored theme (F-13)", () => {
   });
 
   test("explicit stored-dark branch is a no-op and dark stays the :root default", () => {
-    const dark = blockAfter(readViews(), ':root[data-theme="dark"] {');
+    const style = renderedStyle();
+    const dark = blockAfter(style, ':root[data-theme="dark"] {');
     expect(dark.trim()).toBe("");
-    const root = blockAfter(readViews(), ":root {");
+    const root = blockAfter(style, ":root {");
     expect(root).toContain("color-scheme: dark");
-    expect(root).toContain("--background-100: #0a0c10");
+    expect(root).toContain("--surface-page: #0a0c10");
   });
 
   test("every SSR face inlines the pre-paint theme bootstrap before STYLE", () => {

@@ -1,8 +1,7 @@
 import { useEffect } from "react";
 import { t } from "../../i18n";
 import styles from "../pages.module.css";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle } from "@design-system";
 import { Logo } from "../components/AppSidebar";
 import type { SpaBoot } from "../boot";
 

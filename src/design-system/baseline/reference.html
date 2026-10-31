@@ -1,0 +1,895 @@
+<!doctype html>
+<!--
+  Baseline reference — the approved design surface for iteration v1.5-design-system.
+
+  Origin:   the design-system prototype (2026-10-31); only this copy is tracked.
+  Revision: r3 (2026-10-31) — the data-honesty correction; r2 was the
+            user-confirmed drafting baseline and r3 re-presented no design choice.
+  Copied:   2026-10-31. Verbatim apart from this header; nothing in the source
+            was environment-specific, so nothing was redacted.
+
+  Read-only from here on. This file is the design, not a spec: where it and
+  the design compass (the 2026-10-31 direction record) disagree, the compass
+  wins (D10 route faces, D14 palette counts). Its sample figures are
+  illustrations, never data.
+-->
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Prototype — Design System 层重建 + 全站视觉升级 (v1.5-design-system) · r3</title>
+<style>
+  /* ============================================================
+     Prototype token layer — r2.
+
+     LEFT side of every A/B pair uses TODAY's tokens (DESIGN.md v0.4 /
+     tokens.css) and TODAY's data shape. RIGHT side uses the PROPOSED
+     v0.5 semantic layer, both themes.
+
+     r2 corrections from user feedback:
+       * an App is one GitHub App serving MANY repos through
+         app_installations — the list row is an App, not a repo;
+       * upgrade intensity raised: bigger page title, wider rhythm,
+         the metric band promoted to its own plane;
+       * light theme is a first-class face, not a parity checkbox.
+     ============================================================ */
+
+  :root {
+    /* --- primitives (unchanged values; the palette get slimmer later) --- */
+    --background-100: #0a0c10;
+    --background-200: #15181f;
+    --background-300: #212630;
+    --gray-200: #1b1f27; --gray-400: #39404d; --gray-600: #6b7482;
+    --gray-700: #8b95a3; --gray-800: #ccd5e1; --gray-900: #a9b4c2; --gray-1000: #eef2f7;
+    --gray-alpha-400: #ffffff2e; --gray-alpha-500: #ffffff3d;
+    --brand-600: #06b6d4; --brand-700: #22d3ee;
+    --green-100: #052e16; --green-400: #166534; --green-700: #4ade80; --green-800: #86efac;
+    --amber-100: #27190a; --amber-400: #78350f; --amber-700: #fbbf24; --amber-800: #fcd34d;
+    --red-100: #2a1215;   --red-400: #7f1d1d;   --red-700: #f87171;   --red-800: #fca5a5;
+
+    --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    /* --- v0.5 semantic layer, dark (default) --- */
+    --surface-page: #0a0c10;
+    --surface-shell: #0d1015;   /* the app shell band behind nav+header */
+    --surface-raised: #12151b;
+    --surface-card: #15181f;
+    --surface-inset: #1b1f27;
+    --surface-overlay: #212630;
+
+    --border-subtle: #ffffff1a;
+    --border-default: #ffffff2e;
+    --border-strong: #ffffff3d;
+
+    --text-primary: #eef2f7;
+    --text-secondary: #a9b4c2;
+    --text-muted: #8b95a3;
+    --text-faint: #6b7482;
+
+    --tone-neutral-bg: #1b1f27;   --tone-neutral-border: #ffffff2e;
+    --tone-neutral-fg: #a9b4c2;   --tone-neutral-solid: #8b95a3;
+    --tone-accent-bg: #042f2e;    --tone-accent-border: #155e75;
+    --tone-accent-fg: #22d3ee;    --tone-accent-solid: #22d3ee;
+    --tone-success-bg: #052e16;   --tone-success-border: #166534;
+    --tone-success-fg: #4ade80;   --tone-success-solid: #4ade80;
+    --tone-warn-bg: #27190a;      --tone-warn-border: #78350f;
+    --tone-warn-fg: #fbbf24;      --tone-warn-solid: #fbbf24;
+    --tone-danger-bg: #2a1215;    --tone-danger-border: #7f1d1d;
+    --tone-danger-fg: #f87171;    --tone-danger-solid: #f87171;
+
+    --chart-1: #06b6d4; --chart-2: #16a34a; --chart-3: #d97706;
+    --chart-4: #dc2626; --chart-5: #2563a8; --chart-6: #9333ea;
+
+    /* brand foreground — dark wears the light cyan face, so the label is ink */
+    --on-brand: #06222a;
+
+    --control-h-xs: 24px; --control-h-sm: 32px; --control-h-md: 40px;
+    --row-h-compact: 38px; --row-h-comfort: 48px;
+
+    --radius-control: 8px; --radius-container: 12px; --radius-pill: 9999px;
+    --shadow-pop: 0 8px 24px #02061799, 0 2px 6px #02061766;
+  }
+
+  /* --- v0.5 semantic layer, light --- */
+  :root[data-theme="light"], [data-theme="light"] {
+    color: #0f141a;
+    --surface-page: #ffffff;
+    --surface-shell: #f7f9fb;
+    --surface-raised: #f3f5f8;
+    --surface-card: #ffffff;
+    --surface-inset: #f3f5f8;
+    --surface-overlay: #e4e9f0;
+
+    --border-subtle: #1019280f;
+    --border-default: #10192824;
+    --border-strong: #10192836;
+
+    --text-primary: #0f141a;
+    --text-secondary: #2f3742;
+    --text-muted: #4e5969;
+    --text-faint: #6d7889;
+
+    --tone-neutral-bg: #f3f5f8;   --tone-neutral-border: #10192824;
+    --tone-neutral-fg: #4e5969;   --tone-neutral-solid: #6d7889;
+    --tone-accent-bg: #ecfeff;    --tone-accent-border: #a5f3fc;
+    --tone-accent-fg: #0e7490;    --tone-accent-solid: #0e7490;
+    --tone-success-bg: #f0fdf4;   --tone-success-border: #bbf7d0;
+    --tone-success-fg: #15803d;   --tone-success-solid: #16a34a;
+    --tone-warn-bg: #fffbeb;      --tone-warn-border: #fde68a;
+    --tone-warn-fg: #b45309;      --tone-warn-solid: #d97706;
+    --tone-danger-bg: #fef2f2;    --tone-danger-border: #fecaca;
+    --tone-danger-fg: #b91c1c;    --tone-danger-solid: #dc2626;
+
+    --chart-1: #0891b2; --chart-2: #16a34a; --chart-3: #d97706;
+    --chart-4: #dc2626; --chart-5: #2563a8; --chart-6: #9333ea;
+
+    --brand-700: #0e7490; --brand-600: #0891b2;
+    --on-brand: #ffffff;
+
+    --shadow-pop: 0 8px 24px #1019281f, 0 2px 6px #10192814;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface-page); color: var(--text-primary);
+    font: 14px/1.55 var(--font-sans);
+    padding: 40px 24px 120px;
+    transition: background var(--duration-base, 160ms) ease;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  h1 { font-size: 24px; margin: 0 0 6px; letter-spacing: -0.02em; font-weight: 600; }
+  h2 { font-size: 18px; margin: 56px 0 4px; letter-spacing: -0.015em; font-weight: 600; }
+  h3 { font-size: 11.5px; margin: 28px 0 10px; color: var(--text-muted);
+       text-transform: uppercase; letter-spacing: .1em; font-weight: 600; }
+  p { margin: 10px 0; color: var(--text-secondary); max-width: 80ch; }
+  .lede { color: var(--text-muted); margin-bottom: 26px; }
+  code, .mono { font-family: var(--font-mono); font-size: 11.5px; }
+  code { background: var(--surface-inset); padding: 1px 5px; border-radius: 4px; color: var(--text-secondary); }
+
+  .tag { display:inline-block; padding:1px 7px; border-radius:5px; font-size:11px; font-weight:600;
+         border:1px solid var(--border-strong); color:var(--text-muted); vertical-align:3px; }
+  .tag.draft { border-color: var(--tone-warn-border); color: var(--tone-warn-fg); }
+
+  .note { border-left: 3px solid var(--brand-700); background: color-mix(in srgb, var(--tone-accent-bg) 55%, var(--surface-page));
+          padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; }
+  .warn-note { border-left: 3px solid var(--tone-warn-solid); background: var(--tone-warn-bg);
+               padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; }
+  .note b, .warn-note b { color: var(--text-primary); }
+  ul { margin: 8px 0; padding-left: 20px; color: var(--text-secondary); }
+  li { margin: 6px 0; }
+
+  table.doc { width:100%; border-collapse: collapse; font-size: 12.5px; margin-top: 12px; }
+  table.doc th, table.doc td { text-align:left; padding: 9px 11px;
+    border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
+  table.doc th { color: var(--text-muted); font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .06em; }
+  table.doc td.num { font-variant-numeric: tabular-nums; text-align: right; color: var(--text-primary); }
+  table.doc tr:last-child td { border-bottom: 0; }
+
+  /* --- A/B frame --- */
+  .ab { display:grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 16px; }
+  @media (max-width: 1040px) { .ab { grid-template-columns: 1fr; } }
+  .pane { border: 1px solid var(--border-default); border-radius: var(--radius-container);
+          overflow: hidden; background: var(--surface-card); }
+  .pane-h { display:flex; align-items:center; justify-content:space-between; gap:10px;
+            padding: 10px 14px; background: var(--surface-raised);
+            border-bottom: 1px solid var(--border-default); }
+  .pane-h .lbl { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+                 color: var(--text-muted); }
+  .pane-h .old { color: var(--tone-danger-fg); }
+  .pane-h .new { color: var(--tone-success-fg); }
+  .pane-b { padding: 16px; }
+
+  /* ============================================================
+     BEFORE — today's vocabulary, today's density.
+     ============================================================ */
+  .old-shell { background: var(--background-100); border-radius: 10px; padding: 16px; }
+  .old-card { background: var(--background-200); border: 1px solid var(--gray-alpha-400);
+              border-radius: 12px; padding: 20px; margin-bottom: 12px; }
+  .old-card:last-child { margin-bottom: 0; }
+  .old-t { font-size: 14px; font-weight: 600; color: var(--gray-1000); }
+  .old-s { font-size: 12px; color: var(--gray-700); margin-top: 3px; }
+  .old-meta { font-family: var(--font-mono); font-size: 11.5px; color: var(--gray-600); margin-top: 10px; }
+  .old-badge { display:inline-flex; align-items:center; gap:5px; padding: 2px 8px; border-radius: 9999px;
+               font-size: 11px; font-weight: 600; background: var(--gray-200); color: var(--gray-900); height: 20px; }
+  .old-badge.ok { background: var(--green-100); color: var(--green-800); }
+  .old-btn { display:inline-flex; align-items:center; height: 40px; padding: 0 12px; border-radius: 8px;
+             border: 1px solid var(--gray-400); background: var(--background-200); color: var(--gray-1000);
+             font: inherit; font-size: 14px; font-weight: 500; }
+  .old-btn.small { height: 32px; padding: 0 8px; font-size: 12px; }
+  .old-row { display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; }
+  .old-kv { display:grid; grid-template-columns: 90px 1fr; gap: 4px 12px;
+            font-family: var(--font-mono); font-size: 11.5px; color: var(--gray-600); margin-top: 12px; }
+
+  /* ============================================================
+     AFTER — v0.5, raised intensity.
+     ============================================================ */
+  .new-shell { background: var(--surface-page); }
+
+  /* app shell: nav rail keeps its own plane, header band separated */
+  .app { display:grid; grid-template-columns: 188px 1fr; min-height: 440px; background: var(--surface-page); }
+  .app.full { grid-template-columns: 1fr; }
+  .side { background: var(--surface-shell); border-right: 1px solid var(--border-subtle); padding: 14px 0; }
+  .side .grp { font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+               color: var(--text-faint); padding: 14px 16px 6px; }
+  .side a { display:flex; align-items:center; gap: 9px; padding: 8px 14px 8px 16px; color: var(--text-muted);
+            text-decoration: none; font-size: 13px; border-left: 2px solid transparent; }
+  .side a:hover { color: var(--text-primary); background: var(--surface-raised); }
+  .side a.on { color: var(--text-primary); background: var(--surface-raised);
+               border-left-color: var(--brand-700); font-weight: 500; }
+  .side .ws { margin: 0 12px 14px; padding: 9px 11px; border: 1px solid var(--border-default);
+              border-radius: var(--radius-control); display:flex; align-items:center; gap: 9px;
+              background: var(--surface-card); }
+  .side .ws .av { width: 22px; height: 22px; border-radius: 6px; background: var(--tone-accent-bg);
+                  border: 1px solid var(--tone-accent-border); color: var(--tone-accent-fg);
+                  display:grid; place-items: center; font-size: 10px; font-weight: 700; }
+  .side .ws .n { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* page header band — the raised plane that separates chrome from content */
+  .page-head { background: var(--surface-shell); border-bottom: 1px solid var(--border-subtle);
+               padding: 22px 24px 0; }
+  .page-head .row1 { display:flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+  .page-head .title { font-size: 22px; font-weight: 600; letter-spacing: -0.022em; line-height: 1.2; }
+  .page-head .sub { font-size: 12.5px; color: var(--text-muted); margin-top: 4px; }
+
+  /* metric band: its own strip under the title, separated by a hairline */
+  .metrics { display:flex; gap: 0; margin-top: 20px; border-top: 1px solid var(--border-subtle); }
+  .metric { flex: 1; padding: 13px 18px 15px 0; }
+  .metric + .metric { padding-left: 18px; border-left: 1px solid var(--border-subtle); }
+  .metric .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-faint); }
+  .metric .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums;
+               letter-spacing: -0.025em; margin-top: 3px; line-height: 1.15; }
+  .metric .v small { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-left: 4px; letter-spacing: 0; }
+  .metric.bad .v { color: var(--tone-danger-fg); }
+
+  .page-body { padding: 20px 24px 24px; }
+
+  /* data list */
+  .list { border: 1px solid var(--border-default); border-radius: var(--radius-control);
+          overflow: hidden; background: var(--surface-card); }
+  .lrow { display: grid; align-items: center; gap: 14px; padding: 0 14px;
+          height: var(--row-h-comfort); border-bottom: 1px solid var(--border-subtle); }
+  .lrow:last-child { border-bottom: 0; }
+  .lrow.head { height: var(--row-h-compact); background: var(--surface-raised); }
+  .lrow.head span { font-size: 10.5px; font-weight: 600; letter-spacing: .08em;
+                    text-transform: uppercase; color: var(--text-faint); }
+  .lrow.apps { grid-template-columns: 30px minmax(0,1.5fr) minmax(0,1.1fr) auto auto; }
+  .lrow .name { font-size: 13.5px; font-weight: 500; color: var(--text-primary);
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow .id { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted);
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow .when { font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+                white-space: nowrap; text-align: right; }
+  .applogo { width: 26px; height: 26px; border-radius: 7px; display:grid; place-items: center;
+             font-size: 11px; font-weight: 700; background: var(--surface-overlay);
+             color: var(--text-secondary); border: 1px solid var(--border-default); }
+  /* installation summary cell: App → N accounts → M repos */
+  .inst { font-size: 12px; color: var(--text-secondary); white-space: nowrap;
+          overflow: hidden; text-overflow: ellipsis; }
+  .inst b { font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+  .inst span { color: var(--text-faint); }
+
+  /* tone pills: 5 meanings × 3 strengths */
+  .pill { display:inline-flex; align-items:center; gap: 5px; height: 20px; padding: 0 8px;
+          border-radius: var(--radius-pill); font-size: 11px; font-weight: 600;
+          border: 1px solid; white-space: nowrap; }
+  .pill .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .t-neutral { background: var(--tone-neutral-bg); border-color: var(--tone-neutral-border); color: var(--tone-neutral-fg); }
+  .t-accent  { background: var(--tone-accent-bg);  border-color: var(--tone-accent-border);  color: var(--tone-accent-fg); }
+  .t-success { background: var(--tone-success-bg); border-color: var(--tone-success-border); color: var(--tone-success-fg); }
+  .t-warn    { background: var(--tone-warn-bg);    border-color: var(--tone-warn-border);    color: var(--tone-warn-fg); }
+  .t-danger  { background: var(--tone-danger-bg);  border-color: var(--tone-danger-border);  color: var(--tone-danger-fg); }
+  .pill.quiet { background: transparent; }
+  .pill.quiet.t-neutral { border-color: var(--border-default); }
+  .pill.solid { color: var(--surface-page); border-color: transparent; }
+  .pill.solid.t-success { background: var(--tone-success-solid); }
+  .pill.solid.t-warn { background: var(--tone-warn-solid); }
+  .pill.solid.t-danger { background: var(--tone-danger-solid); }
+  .pill.solid.t-accent { background: var(--tone-accent-solid); }
+  .pill.solid.t-neutral { background: var(--tone-neutral-solid); }
+
+  /* buttons */
+  .btn { display:inline-flex; align-items:center; gap: 6px; font: inherit; font-size: 12.5px;
+         font-weight: 500; padding: 0 12px; height: var(--control-h-sm);
+         border-radius: var(--radius-control); border: 1px solid var(--border-strong);
+         background: var(--surface-card); color: var(--text-primary); cursor: pointer; white-space: nowrap; }
+  .btn:hover { border-color: var(--border-strong); background: var(--surface-inset); }
+  .btn.primary { background: var(--brand-700); border-color: var(--brand-700); color: var(--on-brand); font-weight: 600; }
+  .btn.primary:hover { background: var(--brand-600); border-color: var(--brand-600); }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--text-muted); padding: 0 8px; }
+  .btn.ghost:hover { color: var(--text-primary); background: var(--surface-inset); }
+  .btn.xs { height: var(--control-h-xs); padding: 0 8px; font-size: 11.5px; }
+  .btn.md { height: var(--control-h-md); padding: 0 14px; font-size: 14px; }
+  .btn.danger { color: var(--tone-danger-fg); background: var(--tone-danger-bg); border-color: var(--tone-danger-border); }
+
+  /* page tabs */
+  .tabs { display:flex; gap: 22px; border-bottom: 1px solid var(--border-subtle); padding: 0 24px;
+          background: var(--surface-shell); }
+  .tabs a { text-decoration:none; color: var(--text-muted); font-size: 14px; font-weight: 500;
+            padding: 11px 0 10px; border-bottom: 2px solid transparent; }
+  .tabs a.on { color: var(--text-primary); border-bottom-color: var(--brand-700); }
+
+  /* detail sections — flow, not card soup */
+  .detail { display: grid; gap: 0; }
+  .sect { padding: 18px 0; border-bottom: 1px solid var(--border-subtle); }
+  .sect:first-child { padding-top: 4px; }
+  .sect:last-child { border-bottom: 0; padding-bottom: 0; }
+  .sect-h { display:flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+  .sect-h .t { font-size: 14px; font-weight: 600; color: var(--text-primary); letter-spacing: -0.005em; }
+  .sect-h .s { font-size: 11.5px; color: var(--text-muted); }
+  .kv { display:grid; grid-template-columns: 146px 1fr; gap: 9px 16px; font-size: 12.5px; margin: 0; }
+  .kv dt { color: var(--text-faint); }
+  .kv dd { margin: 0; color: var(--text-secondary); font-family: var(--font-mono); font-size: 11.5px;
+           overflow-wrap: anywhere; }
+  .kv dd.plain { font-family: var(--font-sans); font-size: 12.5px; }
+
+  /* installation table inside a section */
+  .minitable { width:100%; border-collapse: collapse; font-size: 12px; }
+  .minitable th { text-align:left; font-size: 10.5px; font-weight: 600; letter-spacing:.07em;
+                  text-transform: uppercase; color: var(--text-faint); padding: 0 10px 7px 0; }
+  .minitable td { padding: 7px 10px 7px 0; border-top: 1px solid var(--border-subtle);
+                  color: var(--text-secondary); font-family: var(--font-mono); font-size: 11.5px; }
+  .minitable td.plain { font-family: var(--font-sans); font-size: 12px; }
+
+  /* chart */
+  .chart { background: var(--surface-raised); border: 1px solid var(--border-subtle);
+           border-radius: var(--radius-control); padding: 14px 16px 12px; }
+  .chart .ch-h { display:flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+  .chart .ch-h .t { font-size: 12.5px; font-weight: 600; }
+  .chart .ch-h .l { display:flex; gap: 14px; }
+  .lg { display:inline-flex; align-items:center; gap: 5px; font-size: 10.5px; color: var(--text-muted); }
+  .lg .sw { width: 8px; height: 8px; border-radius: 2px; }
+  .bars { display:flex; align-items:flex-end; gap: 4px; height: 84px; }
+  .bars .col { flex: 1; display:flex; flex-direction: column; justify-content:flex-end; gap: 1px; }
+  .bars .col i { display:block; border-radius: 1px; }
+
+  .layers { display:grid; gap: 9px; margin-top: 14px; }
+  .layer { display:grid; grid-template-columns: 130px 1fr; gap: 16px; align-items: start;
+           border: 1px solid var(--border-default); border-radius: var(--radius-control);
+           padding: 12px 14px; background: var(--surface-card); }
+  .layer .nm { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .layer .nm.prim { color: var(--text-faint); }
+  .layer .nm.sem { color: var(--tone-accent-fg); }
+  .layer .nm.comp { color: var(--tone-success-fg); }
+  .layer .bd { font-size: 12px; color: var(--text-secondary); }
+  .layer .bd code { font-size: 11px; }
+
+  .foot { margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--border-subtle);
+          font-size: 11.5px; color: var(--text-faint); }
+
+  /* theme preview pair */
+  .pair { display:grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 1040px) { .pair { grid-template-columns: 1fr; } }
+  .theme-box { border: 1px solid var(--border-default); border-radius: var(--radius-container);
+               overflow: hidden; }
+  .theme-cap { padding: 7px 12px; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+               color: var(--text-muted); background: var(--surface-raised);
+               border-bottom: 1px solid var(--border-default); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Design System 层重建 + 全站视觉升级 <span class="tag">r3 · 已确认</span></h1>
+  <p class="lede">迭代 <code>v1.5-design-system</code> · 2026-10-31 · 本文件是 §1.2.5 原型，确认后即成为本迭代的 baseline</p>
+
+  <div class="note">
+    <b>一句话提案：</b>把「一堆 CSS 变量 + 一份说明文档」变成<strong>真正的 design system</strong> ——
+    独立目录、三层 token（primitive → semantic → component）、从 baseline 单向生成的机器可读 fixture、CI 严格校验；
+    在此基础上把全站视觉<strong>明显升级</strong>：页面骨架更明确、层级平面更清晰、数据密度更舒适，明暗双主题同等对待。
+    保留 Signal Cyan 与暗色默认，不换品牌语言。
+  </div>
+
+  <div class="note">
+    <b>修订记录</b>
+    <ul>
+      <li><b>r1</b> — 首次呈现：三层 token、目录结构、列表页/详情页对比。</li>
+      <li><b>r2</b>（当前）— 按你的反馈修正三处：
+        <b>(1)</b> 列表页数据模型纠正 —— 一行是一个 <b>App（GitHub App）</b>，一个 App 通过
+        <code>app_installations</code> 服务<b>多个账号下的多个仓库</b>，仓库不是列表行的身份；
+        <b>(2)</b> 升级力度加大 —— 页头独立成带、指标带独立成型、标题 22px、行高 48；
+        <b>(3)</b> 亮色主题升为一等公民，给出完整语义层映射与并排对照。</li>
+      <li><b>r3</b>（当前）— <b>数据诚实性修正</b>：列表与安装表移除了载荷证明不了的数字。
+        <code>AppsPayload</code> 没有安装数、也没有仓库数，所以列表只展示它能证明的字段
+        （身份、状态、最近投递、24h 拒收）；安装表的「仓库」列删掉，因为设置载荷里没有它。
+        视觉语言与布局不变，去掉的是编造的数据。</li>
+    </ul>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>1. 诊断：为什么现在不算 design system</h2>
+
+  <table class="doc">
+    <thead><tr><th>层</th><th>现状</th><th>判定</th></tr></thead>
+    <tbody>
+      <tr><td><b>baseline</b></td>
+        <td>你认可的设计稿在 <code>.mstar/…/prototypes/provider-ux.html</code></td>
+        <td>gitignored —— 不在仓库里，无法收敛、无法被 CI 读取</td></tr>
+      <tr><td><b>fixture</b></td>
+        <td><code>DESIGN.md</code> 1326 行手写；<code>tokens.css</code> 351 个变量手抄</td>
+        <td>无生成器、无 check mode，两边靠人眼对齐</td></tr>
+      <tr><td><b>契约自洽</b></td>
+        <td><code>mstar design-md validate .</code> <b>exit 1</b></td>
+        <td>3 个 <code>{path}</code> 引用解析不到</td></tr>
+      <tr><td><b>边界</b></td>
+        <td>tokens 在 <code>styles/</code>、primitives 在 <code>components/ui/</code>、业务组件与页面平铺</td>
+        <td>没有 design system 边界，页面可绕开 primitives 直写色阶</td></tr>
+    </tbody>
+  </table>
+
+  <h3>色板：351 个变量，真实消费约 60 个</h3>
+  <table class="doc">
+    <thead><tr><th>色族</th><th>定义</th><th>真实消费</th><th>结论</th></tr></thead>
+    <tbody>
+      <tr><td>gray / gray-alpha</td><td class="num">21</td><td class="num">167 处</td><td>在用，但缺语义层</td></tr>
+      <tr><td>blue</td><td class="num">10</td><td class="num">1 阶</td><td>9 阶死重量</td></tr>
+      <tr><td>red / amber / green</td><td class="num">30</td><td class="num">各 2–3 阶</td><td>只用到 100/400/700/800</td></tr>
+      <tr><td>teal / purple / pink</td><td class="num">30</td><td class="num">各 1 阶（仅图表）</td><td>27 阶死重量</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>2. 独立目录 + 单向生成链</h2>
+
+  <div class="layers">
+    <div class="layer"><div class="nm prim">baseline</div>
+      <div class="bd"><code>src/design-system/baseline/reference.html</code> —— 从 <code>.mstar</code> 移入、tracked、CI 可读。
+        它是设计的权威；文档与 fixture 都从它派生。</div></div>
+    <div class="layer"><div class="nm sem">tokens（唯一可写源）</div>
+      <div class="bd"><code>src/design-system/tokens/</code> —— primitive / semantic / component 三层 TypeScript 字面量；
+        <code>tokens.css</code> 由它生成，不再手改。</div></div>
+    <div class="layer"><div class="nm comp">primitives + patterns</div>
+      <div class="bd"><code>primitives/</code>（现 <code>components/ui/</code> 迁入）+ <code>patterns/</code>
+        （GroupCard / ListRow / StepDialog / DataTable / StatusBadge）；业务页只能从 <code>design-system/index.ts</code> 取件。</div></div>
+    <div class="layer"><div class="nm prim">fixture</div>
+      <div class="bd"><code>fixture.json</code> —— 由 tokens 源生成，供 <code>mstar design-md validate</code> 与 CI 比对；<code>--check</code> 失败即红。</div></div>
+    <div class="layer"><div class="nm sem">预览页</div>
+      <div class="bd"><code>scripts/build-design-preview.ts</code> → 构建期静态 HTML（不进 runtime）；每个 token、组件、状态、双主题都在一页上。</div></div>
+    <div class="layer"><div class="nm comp">DESIGN.md</div>
+      <div class="bd">升 <b>v0.5</b>，由 fixture 反哺；frontmatter 与 fixture 一致性由 CI 强制。</div></div>
+  </div>
+  <p style="margin-top:14px">方向单向：<code>baseline → tokens → fixture → DESIGN.md</code>。反向修改一律判缺陷。</p>
+
+  <!-- ============================================================ -->
+  <h2>3. Token 架构：补上缺失的语义层</h2>
+
+  <p>现在只有 primitive（<code>--gray-800</code>）与 component（<code>--card-border</code>）两层，
+     中间语义层是空的 —— 组件靠记忆选色阶。这是「看起来像设计系统、用起来不像」的根因。</p>
+
+  <div class="layers">
+    <div class="layer"><div class="nm prim">primitive</div>
+      <div class="bd"><code>--gray-1000</code>、<code>--brand-700</code>、<code>--red-400</code> … 只代表色值。<b>96 个色阶只保留 32 个被消费的</b>（另加 2 个过渡阶，待 admin 迁移后删除）。</div></div>
+    <div class="layer"><div class="nm sem">semantic ← 新增</div>
+      <div class="bd"><code>--surface-{page,shell,raised,card,inset,overlay}</code>、
+        <code>--border-{subtle,default,strong}</code>、
+        <code>--text-{primary,secondary,muted,faint}</code>、
+        <code>--tone-{neutral,accent,success,warn,danger}-{bg,border,fg,solid}</code>。
+        <b>组件只准引用这一层。</b></div></div>
+    <div class="layer"><div class="nm comp">component</div>
+      <div class="bd">由语义层组装，数量大幅减少。</div></div>
+  </div>
+
+  <table class="doc">
+    <thead><tr><th>乱点</th><th>现在</th><th>v0.5</th></tr></thead>
+    <tbody>
+      <tr><td>表面命名打架</td><td><code>background-100/200/300</code> 与 <code>gray-100/200/300</code> 是同样三个值、两套名字</td><td>页面只认 <code>surface-*</code> 六档；旧名删除，不留别名</td></tr>
+      <tr><td>状态表达</td><td>四个组件各拼各的 badge，边框有无不统一</td><td><code>tone-*</code> 五义四属性 + 三档强度</td></tr>
+      <tr><td>控件高度</td><td>40 / 32 / 24 散落三处，无名</td><td><code>--control-h-xs/sm/md</code> + <code>--row-h-compact/comfort</code></td></tr>
+      <tr><td>圆角</td><td>sm 8 / md 12 / lg 16（16 已无人使用）</td><td><code>--radius-control/container/pill</code>，删掉 16</td></tr>
+      <tr><td>图表色</td><td>「传任何 <code>-700</code> 都行」，7 个色阶靠注释约束</td><td><code>--chart-1…6</code> 封闭序列</td></tr>
+      <tr><td>双主题</td><td>light 是暗色的色值镜像，页面未验证</td><td>两套语义层完整映射，页面同等验收</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>4. 列表页：一行是一个 App，不是一个仓库</h2>
+
+  <div class="warn-note">
+    <b>数据模型更正：</b>本系统的单位是 <b>App（GitHub App）</b>。
+    一个 App 通过 <code>app_installations</code> 被安装到多个账号，每个安装覆盖该账号下的多个仓库。
+    r1 把 <code>btspoony/mstar-inspector</code> 当成行身份，是错的。
+    <br /><br />
+    <b>但列表载荷证明不了数量：</b><code>AppsPayload</code> 只有 App 身份、状态、最近投递与
+    <code>rejected24h</code>，<b>没有安装数，也没有仓库数</b>。所以 r3 的列表只展示它能证明的字段 ——
+    仓库范围在应用详情的安装表里，而那里同样只列账号、installation 与最近同步。
+    编造一个数字比少一列更糟。
+  </div>
+
+  <div class="ab">
+    <div class="pane">
+      <div class="pane-h"><span class="lbl old">现在</span><span class="lbl">卡片 × N · 无汇总</span></div>
+      <div class="pane-b">
+        <div class="old-shell">
+          <div class="old-card">
+            <div class="old-row">
+              <div><div class="old-t">mstar-inspector</div><div class="old-s">App 4482910</div></div>
+              <div><span class="old-badge ok">● 已启用</span></div>
+            </div>
+            <div class="old-meta">最近事件 pull_request · 6 分钟前 · 24h 拒收 0</div>
+            <div style="margin-top:14px"><button class="old-btn small">查看详情</button></div>
+          </div>
+          <div class="old-card">
+            <div class="old-row">
+              <div><div class="old-t">mstar-reviewer</div><div class="old-s">App 4482918</div></div>
+              <div><span class="old-badge">● 已停用</span></div>
+            </div>
+            <div class="old-meta">最近事件 installation · 2 小时前 · 24h 拒收 0</div>
+            <div style="margin-top:14px"><button class="old-btn small">查看详情</button></div>
+          </div>
+          <div class="old-card">
+            <div class="old-row">
+              <div><div class="old-t">btang-lab</div><div class="old-s">App 4482925</div></div>
+              <div><span class="old-badge ok">● 已启用</span></div>
+            </div>
+            <div class="old-meta">最近事件 pull_request · 3 天前 · 24h 拒收 2</div>
+            <div style="margin-top:14px"><button class="old-btn small">查看详情</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane">
+      <div class="pane-h"><span class="lbl new">v0.5</span><span class="lbl">页头带 + 指标带 + 数据行</span></div>
+      <div class="pane-b" style="padding:0; background: var(--surface-page)">
+        <div class="new-shell">
+          <div class="app full">
+            <div class="page-head">
+              <div class="row1">
+                <div>
+                  <div class="title">应用</div>
+                  <div class="sub">每个应用是一个 GitHub App；安装范围在应用详情里查看</div>
+                </div>
+                <button class="btn primary md">创建应用</button>
+              </div>
+              <div class="metrics">
+                <div class="metric"><div class="k">应用</div><div class="v">3</div></div>
+                <div class="metric"><div class="k">已启用</div><div class="v">2</div></div>
+                <div class="metric"><div class="k">审查关闭</div><div class="v">1</div></div>
+                <div class="metric bad"><div class="k">24h 拒收</div><div class="v">2</div></div>
+              </div>
+            </div>
+            <div class="page-body">
+              <div class="list">
+                <div class="lrow apps head">
+                  <span></span><span>应用</span><span>状态</span><span>最近投递</span><span style="text-align:right">24h 拒收</span>
+                </div>
+                <div class="lrow apps">
+                  <div class="applogo">M</div>
+                  <div><div class="name">mstar-inspector</div><div class="id">app 4482910</div></div>
+                  <div><span class="pill t-success"><i class="dot"></i>已启用</span></div>
+                  <div class="when">pull_request · 6 分钟前</div>
+                  <div class="when">0</div>
+                </div>
+                <div class="lrow apps">
+                  <div class="applogo">R</div>
+                  <div><div class="name">mstar-reviewer</div><div class="id">app 4482918</div></div>
+                  <div><span class="pill t-neutral"><i class="dot"></i>已停用</span></div>
+                  <div class="when">installation · 2 小时前</div>
+                  <div class="when">0</div>
+                </div>
+                <div class="lrow apps">
+                  <div class="applogo">B</div>
+                  <div><div class="name">btang-lab</div><div class="id">app 4482925</div></div>
+                  <div><span class="pill t-success"><i class="dot"></i>已启用</span></div>
+                  <div class="when">pull_request · 3 天前</div>
+                  <div class="when" style="color: var(--tone-warn-fg)">2</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>5. 详情页：Tab + 分区流，而不是卡片汤</h2>
+
+  <p>实际结构是「应用设置 / 洞察」两个 Tab（洞察仅管理者可见）。设置页现在是
+     <code>SectionCard</code> 逐张堆叠，主次不分；升级为<strong>单一内容平面 + 发丝线分区</strong>，
+     只有真正需要框住的对象（表格、代码块、弹层）才上边框。</p>
+
+  <div class="ab">
+    <div class="pane">
+      <div class="pane-h"><span class="lbl old">现在</span><span class="lbl">SectionCard × 5</span></div>
+      <div class="pane-b">
+        <div class="old-shell">
+          <div class="old-card" style="padding:16px">
+            <div class="old-t">应用信息</div>
+            <div class="old-s">身份与创建者</div>
+            <div class="old-kv"><span>app_id</span><span>4482910</span><span>created_by</span><span>btspoony</span></div>
+          </div>
+          <div class="old-card" style="padding:16px">
+            <div class="old-t">运行与 Harness</div>
+            <div class="old-s">沙箱镜像 · 触发方式</div>
+            <div class="old-kv"><span>trigger</span><span>every_push</span><span>image</span><span>sandbox-1.0</span></div>
+          </div>
+          <div class="old-card" style="padding:16px">
+            <div class="old-t">运维</div>
+            <div class="old-s">Webhook 投递 · 拒收</div>
+          </div>
+          <div class="old-card" style="padding:16px">
+            <div class="old-t">模型链</div>
+            <div class="old-s">3 组 / 7 个密钥</div>
+          </div>
+          <div class="old-card" style="padding:16px; margin-bottom:0">
+            <div class="old-t">席位</div>
+            <div class="old-s">三席审查配置</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane">
+      <div class="pane-h"><span class="lbl new">v0.5</span><span class="lbl">页头带 + Tab + 分区流</span></div>
+      <div class="pane-b" style="padding:0; background: var(--surface-page)">
+        <div class="new-shell">
+          <div class="page-head" style="padding-bottom:0">
+            <div class="row1">
+              <div>
+                <div class="title">mstar-inspector</div>
+                <div class="sub">app 4482910 · 由 btspoony 创建</div>
+              </div>
+              <div style="display:flex; gap:8px; align-items:center">
+                <span class="pill t-success"><i class="dot"></i>已启用</span>
+                <button class="btn xs">在 GitHub 打开</button>
+              </div>
+            </div>
+          </div>
+          <div class="tabs">
+            <a href="#" class="on">应用设置</a>
+            <a href="#">洞察</a>
+          </div>
+          <div class="page-body">
+            <div class="detail">
+              <div class="sect">
+                <div class="sect-h"><span class="t">应用信息</span><span class="s">GitHub 侧身份缓存，24h 同步</span></div>
+                <dl class="kv">
+                  <dt>GitHub App ID</dt><dd>4482910</dd>
+                  <dt>Slug</dt><dd>mstar-inspector</dd>
+                  <dt>创建者</dt><dd class="plain">btspoony</dd>
+                </dl>
+              </div>
+              <div class="sect">
+                <div class="sect-h"><span class="t">安装</span><span class="s">2 个账号</span></div>
+                <table class="minitable">
+                  <tr><th>账号</th><th>installation</th><th>最近同步</th></tr>
+                  <tr><td class="plain">btspoony</td><td>81504921</td><td>6 分钟前</td></tr>
+                  <tr><td class="plain">btang-lab</td><td>81504933</td><td>18 分钟前</td></tr>
+                </table>
+              </div>
+              <div class="sect">
+                <div class="sect-h"><span class="t">运行与 Harness</span><span class="s">每次推送自动触发</span></div>
+                <dl class="kv">
+                  <dt>触发方式</dt><dd class="plain">每次推送</dd>
+                  <dt>沙箱镜像</dt><dd>sandbox-1.0 · 最近拉取 2 小时前</dd>
+                </dl>
+              </div>
+              <div class="sect">
+                <div class="sect-h"><span class="t">模型链</span><span class="s">3 组 · 7 个密钥</span></div>
+                <dl class="kv">
+                  <dt>主用</dt><dd class="plain">Z.AI · glm-4.6 <span class="pill quiet t-success" style="margin-left:8px">已验证</span></dd>
+                  <dt>备用</dt><dd class="plain">Anthropic · claude-sonnet-4.5</dd>
+                </dl>
+              </div>
+              <div class="sect">
+                <div class="sect-h" style="margin-bottom:8px"><span class="t" style="color: var(--tone-danger-fg)">停用应用</span></div>
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:14px">
+                  <span style="font-size:12px; color: var(--text-muted)">停用后停止接收该 App 的推送事件，历史审查保留</span>
+                  <button class="btn danger xs">停用</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>6. 状态系统：五义 × 三档强度</h2>
+
+  <p><code>solid</code> 只留给「必须立刻看见的那一个状态」，同屏最多一次。</p>
+
+  <table class="doc">
+    <thead><tr><th>语义</th><th>fill（默认）</th><th>quiet（次级/已解决）</th><th>solid（唯一焦点）</th></tr></thead>
+    <tbody>
+      <tr><td>neutral</td><td><span class="pill t-neutral"><i class="dot"></i>草稿</span></td><td><span class="pill quiet t-neutral"><i class="dot"></i>草稿</span></td><td><span class="pill solid t-neutral">草稿</span></td></tr>
+      <tr><td>accent</td><td><span class="pill t-accent"><i class="dot"></i>运行中</span></td><td><span class="pill quiet t-accent"><i class="dot"></i>运行中</span></td><td><span class="pill solid t-accent">运行中</span></td></tr>
+      <tr><td>success</td><td><span class="pill t-success"><i class="dot"></i>已启用</span></td><td><span class="pill quiet t-success"><i class="dot"></i>已验证</span></td><td><span class="pill solid t-success">已启用</span></td></tr>
+      <tr><td>warn</td><td><span class="pill t-warn"><i class="dot"></i>待确认</span></td><td><span class="pill quiet t-warn"><i class="dot"></i>待确认</span></td><td><span class="pill solid t-warn">待确认</span></td></tr>
+      <tr><td>danger</td><td><span class="pill t-danger"><i class="dot"></i>失败</span></td><td><span class="pill quiet t-danger"><i class="dot"></i>已恢复</span></td><td><span class="pill solid t-danger">失败</span></td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>7. 导航、控件与图表</h2>
+
+  <div class="ab">
+    <div class="pane">
+      <div class="pane-h"><span class="lbl">侧栏分组 + 左侧 accent 指示</span></div>
+      <div class="pane-b" style="padding:0">
+        <div class="app">
+          <div class="side">
+            <div class="ws"><div class="av">M</div><div class="n">mstar-inspector</div></div>
+            <div class="grp">工作区</div>
+            <a href="#" class="on">应用</a>
+            <a href="#">成员</a>
+            <div class="grp">设置</div>
+            <a href="#">模型提供方</a>
+            <a href="#">工作区设置</a>
+            <div class="grp">支持</div>
+            <a href="#">帮助与工单</a>
+          </div>
+          <div style="padding: 18px">
+            <div style="font-size:10.5px; color: var(--text-faint); text-transform:uppercase; letter-spacing:.08em">控件高度三档</div>
+            <div style="margin-top:10px; display:flex; gap: 8px; align-items:center">
+              <button class="btn primary">主操作</button>
+              <button class="btn">次级</button>
+              <button class="btn ghost">文字</button>
+              <button class="btn xs">xs · 24</button>
+            </div>
+            <div style="margin-top:12px; display:flex; gap: 8px; align-items:center">
+              <button class="btn md">md · 40</button>
+              <button class="btn danger xs">危险</button>
+              <span class="pill quiet t-warn">只描边</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane">
+      <div class="pane-h"><span class="lbl">图表：封闭 6 色序列</span></div>
+      <div class="pane-b">
+        <div class="chart">
+          <div class="ch-h">
+            <span class="t">近 14 天审查结论</span>
+            <span class="l">
+              <span class="lg"><i class="sw" style="background: var(--chart-1)"></i>ship it</span>
+              <span class="lg"><i class="sw" style="background: var(--chart-3)"></i>should-fix</span>
+              <span class="lg"><i class="sw" style="background: var(--chart-4)"></i>must-fix</span>
+            </span>
+          </div>
+          <div class="bars">
+            <div class="col"><i style="height:24px;background:var(--chart-4)"></i><i style="height:32px;background:var(--chart-3)"></i><i style="height:18px;background:var(--chart-1)"></i></div>
+            <div class="col"><i style="height:12px;background:var(--chart-4)"></i><i style="height:28px;background:var(--chart-3)"></i><i style="height:34px;background:var(--chart-1)"></i></div>
+            <div class="col"><i style="height:0px;background:var(--chart-4)"></i><i style="height:20px;background:var(--chart-3)"></i><i style="height:48px;background:var(--chart-1)"></i></div>
+            <div class="col"><i style="height:16px;background:var(--chart-4)"></i><i style="height:14px;background:var(--chart-3)"></i><i style="height:42px;background:var(--chart-1)"></i></div>
+            <div class="col"><i style="height:8px;background:var(--chart-4)"></i><i style="height:24px;background:var(--chart-3)"></i><i style="height:38px;background:var(--chart-1)"></i></div>
+            <div class="col"><i style="height:0px;background:var(--chart-4)"></i><i style="height:10px;background:var(--chart-3)"></i><i style="height:56px;background:var(--chart-1)"></i></div>
+            <div class="col"><i style="height:20px;background:var(--chart-4)"></i><i style="height:22px;background:var(--chart-3)"></i><i style="height:28px;background:var(--chart-1)"></i></div>
+            <div class="col"><i style="height:6px;background:var(--chart-4)"></i><i style="height:26px;background:var(--chart-3)"></i><i style="height:44px;background:var(--chart-1)"></i></div>
+          </div>
+        </div>
+        <p style="font-size:11.5px; margin-top:12px">轴与网格 <code>--border-subtle</code>，文字 <code>--text-faint</code>；
+          序列只允许 <code>--chart-1…6</code>，越界由类型拒绝。</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>8. 亮色主题：一等公民</h2>
+
+  <p>下面两块是<strong>同一份语义层</strong>在两个主题下的输出 —— 组件代码一行不改，只切换
+     <code>[data-theme]</code>。亮色不是把暗色值反过来，而是独立选定：
+     表面靠<b>层级差</b>而不是阴影，状态色用<b>深色文字 + 浅色底</b>保证对比度。</p>
+
+  <div class="pair">
+    <div class="theme-box">
+      <div class="theme-cap">dark · 默认</div>
+      <div style="background: var(--surface-page); padding: 0">
+        <div class="page-head" style="padding: 16px 18px 0">
+          <div class="row1">
+            <div><div class="title" style="font-size:18px">应用</div><div class="sub">GitHub App 与安装范围</div></div>
+            <button class="btn primary">创建应用</button>
+          </div>
+          <div class="metrics" style="margin-top:14px">
+            <div class="metric"><div class="k">应用</div><div class="v" style="font-size:18px">3</div></div>
+            <div class="metric"><div class="k">安装账号</div><div class="v" style="font-size:18px">6</div></div>
+            <div class="metric bad"><div class="k">24h 拒收</div><div class="v" style="font-size:18px">2</div></div>
+          </div>
+        </div>
+        <div class="page-body" style="padding: 14px 18px 18px">
+          <div class="list">
+            <div class="lrow apps" style="grid-template-columns: 26px 1fr auto auto; height: 40px">
+              <div class="applogo">M</div>
+              <div><div class="name">mstar-inspector</div></div>
+              <div><span class="pill t-success"><i class="dot"></i>已启用</span></div>
+              <div class="when">6 分钟前</div>
+            </div>
+            <div class="lrow apps" style="grid-template-columns: 26px 1fr auto auto; height: 40px; border-bottom:0">
+              <div class="applogo">R</div>
+              <div><div class="name">mstar-reviewer</div></div>
+              <div><span class="pill t-neutral"><i class="dot"></i>已停用</span></div>
+              <div class="when">2 小时前</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="theme-box" data-theme="light">
+      <div class="theme-cap">light · 同等验收</div>
+      <div style="background: var(--surface-page); padding: 0">
+        <div class="page-head" style="padding: 16px 18px 0">
+          <div class="row1">
+            <div><div class="title" style="font-size:18px">应用</div><div class="sub">GitHub App 与安装范围</div></div>
+            <button class="btn primary">创建应用</button>
+          </div>
+          <div class="metrics" style="margin-top:14px">
+            <div class="metric"><div class="k">应用</div><div class="v" style="font-size:18px">3</div></div>
+            <div class="metric"><div class="k">安装账号</div><div class="v" style="font-size:18px">6</div></div>
+            <div class="metric bad"><div class="k">24h 拒收</div><div class="v" style="font-size:18px">2</div></div>
+          </div>
+        </div>
+        <div class="page-body" style="padding: 14px 18px 18px">
+          <div class="list">
+            <div class="lrow apps" style="grid-template-columns: 26px 1fr auto auto; height: 40px">
+              <div class="applogo">M</div>
+              <div><div class="name">mstar-inspector</div></div>
+              <div><span class="pill t-success"><i class="dot"></i>已启用</span></div>
+              <div class="when">6 分钟前</div>
+            </div>
+            <div class="lrow apps" style="grid-template-columns: 26px 1fr auto auto; height: 40px; border-bottom:0">
+              <div class="applogo">R</div>
+              <div><div class="name">mstar-reviewer</div></div>
+              <div><span class="pill t-neutral"><i class="dot"></i>已停用</span></div>
+              <div class="when">2 小时前</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2>9. 门禁：让系统不会退回去</h2>
+
+  <table class="doc">
+    <thead><tr><th>门禁</th><th>检查什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>tokens --check</code></td><td><code>tokens.css</code> 与 TS 源一致；无未定义引用；无未使用变量</td></tr>
+      <tr><td><code>fixture --check</code></td><td><code>fixture.json</code> 与 tokens 源一致</td></tr>
+      <tr><td><code>design-md validate</code></td><td>frontmatter <code>{path}</code> 全部可解析；light/dark 同名同集合</td></tr>
+      <tr><td><code>design-system-boundary</code></td><td>页面不得引用色阶名或颜色字面量，只能用语义层与 patterns</td></tr>
+      <tr><td><code>preview --check</code></td><td>预览页每个 token / 组件 / 状态 / 双主题都有条目</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============================================================ -->
+  <h2>10. 范围 / 非目标 / 风险</h2>
+
+  <h3>范围内</h3>
+  <ul>
+    <li>新建 <code>src/design-system/</code>：tokens 源（三层）、primitives、patterns、baseline、fixture、预览页生成器</li>
+    <li>三层 token 重构：96 个声明色阶收敛到 26 个存活阶（+2 过渡阶）；<code>teal</code> / <code>pink</code> 整族移除；<b>彻底重命名，不留别名</b></li>
+    <li>八个客户侧路由面视觉升级（见 compass「Surface census」）：应用列表 / 应用详情（设置 + 洞察）/ 成员 / 工作区设置 / 登录 / 工作区创建 / 支持 —— 模型提供方是应用设置里的一节，不是独立页面；外加 admin console 一个运营入口</li>
+    <li>明暗双主题同等验收</li>
+    <li><code>DESIGN.md</code> 升 v0.5，修掉 3 个 ref 违规，补 <code>button-xs</code> 等缺失条目</li>
+    <li>五道 CI 门禁；关掉 5 条 design 相关 open issue</li>
+  </ul>
+
+  <h3>非目标</h3>
+  <ul>
+    <li>不改信息架构、路由、权限、接口契约、数据模型</li>
+    <li>不换品牌色、不换字体、不引入 UI 框架、不引入 Storybook</li>
+    <li>不改暗/亮切换机制（现有 <code>data-theme</code> 手动切换保留）</li>
+  </ul>
+
+  <h3>风险</h3>
+  <ul>
+    <li><b>表面重命名会碰到每一处样式</b> —— codemod 批量替换 + 边界门禁兜底</li>
+    <li><b>视觉回归难自动断言</b> —— 结构靠 fixture 与门禁，视觉判断交给你在 PR 预览过目</li>
+    <li><b>色板瘦身可能砍掉仍在用的阶</b> —— 每个删除项先跑消费统计，零引用才删</li>
+    <li><b>亮色主题同等升级会放大工作量</b> —— 每个面都要两遍验收，故客户面与运营面分两批交付（2026-11-01）</li>
+  </ul>
+
+  <div class="foot">
+    Prototype r3 · 确认后锁定为 baseline · 最终数值以 <code>src/design-system/tokens/</code> 与 fixture 为准
+  </div>
+</div>
+</body>
+</html>

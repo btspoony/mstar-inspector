@@ -134,8 +134,10 @@ describe("PageSkeleton (AD-582)", () => {
 describe("EmptyState (AD-582)", () => {
   test("composed guidance view on the Card surface — icon chip, title, description, action slot", () => {
     const out = emptyState({ icon: true, description: "Connect your first App.", action: true });
-    expect(out).toContain("bg-card"); // restyled Card primitive surface
-    expect(out).toContain("shadow-(--shadow-card)"); // v0.3 tinted elevation token
+    expect(out).toContain('data-slot="empty-state"'); // the shared Card primitive surface
+    // r3 (2026-10-31): a card is a hairline plus the surface step; the
+    // elevation tokens stay on overlays, never on content sitting on the page.
+    expect(out).not.toMatch(/shadow-/);
     expect(out).toContain('data-slot="empty-state-icon"');
     expect(out).toContain('data-testid="chosen-icon"'); // consumer-chosen node renders inside the chip
     expect(out).toContain('data-slot="empty-state-title"');

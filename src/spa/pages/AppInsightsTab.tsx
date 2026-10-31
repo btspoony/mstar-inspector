@@ -1,12 +1,19 @@
 import { useEffect, useState } from "react";
 import { t } from "../../i18n";
-import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  FlowSection,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
-import { SectionCard, SectionCardTitle } from "../components/SectionCard";
+import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import {
@@ -24,6 +31,7 @@ import {
   type InsightsSummary,
 } from "./data";
 import { StackedBarChart, type StackedSeries } from "@/components/charts/StackedBarChart";
+import type { ChartSlot } from "@/components/charts/chartSlots";
 import { TrendChart } from "@/components/charts/TrendChart";
 
 /**
@@ -181,55 +189,54 @@ export function AppInsightsTab({
 }
 
 /**
- * AD-561/AD-601: severity → DESIGN.md token series fills as
- * charts.css fill classes consumed by StackedBarChart — the AD-601-frozen
- * semantic family (must-fix=red-700 / should-fix=amber-700 / nit=gray-700);
- * colors ride class rules into the token layer (never presentation
- * attributes, never raw hex). The API zero-fills exactly these three
- * merge-class keys per bucket, so unknown severity keys never enter the
- * series. Labels stay the raw engine slugs — the aggregate card's visible
- * face carried them unlocalized already (same product ruling as the
- * category slugs below).
+ * AD-561: severity → the D14 closed chart vocabulary, as slots — the page owns
+ * the semantics, the chart owns the faces. Red/amber keep their hue families
+ * (must-fix=4, should-fix=3); nit takes the blue family (5), the neutral
+ * data-series tone the old gray-700 filled (gray is not in the palette). The
+ * API zero-fills exactly these three merge-class keys per bucket, so unknown
+ * severity keys never enter the series. Labels stay the raw engine slugs — the
+ * aggregate card's visible face carried them unlocalized already (same product
+ * ruling as the category slugs below).
  */
-export const SEVERITY_BAR_COLORS: Record<string, string> = {
-  "must-fix": "chart-fill-red-700",
-  "should-fix": "chart-fill-amber-700",
-  nit: "chart-fill-gray-700",
+export const SEVERITY_SLOTS: Record<string, ChartSlot> = {
+  "must-fix": 4,
+  "should-fix": 3,
+  nit: 5,
 };
 
 /** The fixed severity stack, bottom → top: must-fix, should-fix, nit. */
-const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_BAR_COLORS).map(([key, fillClass]) => ({
+const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_SLOTS).map(([key, slot]) => ({
   key,
   label: key,
-  fillClass,
+  slot,
 }));
 
 /**
- * AD-653 category palette: the known engine slugs take Δhue-distinct
- * families from the 700-step {teal, purple, pink} candidates (red/amber
- * stay severity-owned; blue-700 keeps its neutral data-series duty and is
- * deliberately NOT assigned to a single known category). Slugs outside this
- * map (long-tail vocabulary) ride the neutral blue-700 tone; the
- * "uncategorized" fallback (NULL/unknown) is the gray-700 series, stacked
- * last.
+ * AD-653 category palette on the same six slots: the known engine slugs keep a
+ * Δhue-distinct family each (DEBT=1 cyan, the teal successor; DOCS=6 purple;
+ * SEC=4 red, the pink successor). Slugs outside this map (long-tail
+ * vocabulary) ride the neutral blue slot (5) — deliberately NOT assigned to a
+ * single known category — and the "uncategorized" fallback (NULL/unknown)
+ * takes the remaining amber slot (3), stacked last. No two categories in one
+ * chart share a slot.
  */
-export const CATEGORY_FILL_CLASSES: Record<string, string> = {
-  DEBT: "chart-fill-teal-700",
-  DOCS: "chart-fill-purple-700",
-  SEC: "chart-fill-pink-700",
+export const CATEGORY_SLOTS: Record<string, ChartSlot> = {
+  DEBT: 1,
+  DOCS: 6,
+  SEC: 4,
 };
 /** Neutral data-series default (the retired BarChart's fallback tone). */
-const CATEGORY_TAIL_FILL_CLASS = "chart-fill-blue-700";
+const CATEGORY_TAIL_SLOT: ChartSlot = 5;
 /** Store-merged fallback key for NULL/unknown categories. */
 export const UNCATEGORIZED_KEY = "uncategorized";
-const UNCATEGORIZED_FILL_CLASS = "chart-fill-gray-700";
+const UNCATEGORIZED_SLOT: ChartSlot = 3;
 
 /**
  * Category series from the window-level union key set of the
  * `findings_distribution` grids — the legend lists exactly the categories
  * present somewhere in the window, in stack order: known slugs (palette
- * order), remaining slugs (payload ASC order) on the neutral tone, the
- * gray fallback last (topmost segment). Key presence is the derivation
+ * order), remaining slugs (payload ASC order) on the neutral slot, the
+ * fallback last (topmost segment). Key presence is the derivation
  * face; seriesWithFindings applies the zero-count legend filter on top.
  */
 function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: SpaBoot["locale"]): StackedSeries[] {
@@ -238,20 +245,20 @@ function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: 
     for (const key of Object.keys(bucket.by_category)) observed.add(key);
   }
   const series: StackedSeries[] = [];
-  for (const [key, fillClass] of Object.entries(CATEGORY_FILL_CLASSES)) {
-    if (observed.has(key)) series.push({ key, label: key, fillClass });
+  for (const [key, slot] of Object.entries(CATEGORY_SLOTS)) {
+    if (observed.has(key)) series.push({ key, label: key, slot });
   }
   for (const key of observed) {
     // "" never labels a series (schema-permitted, QC F-004) — it
     // merges into the fallback key below.
-    if (key === "" || key === UNCATEGORIZED_KEY || key in CATEGORY_FILL_CLASSES) continue;
-    series.push({ key, label: key, fillClass: CATEGORY_TAIL_FILL_CLASS });
+    if (key === "" || key === UNCATEGORIZED_KEY || key in CATEGORY_SLOTS) continue;
+    series.push({ key, label: key, slot: CATEGORY_TAIL_SLOT });
   }
   if (observed.has(UNCATEGORIZED_KEY) || observed.has("")) {
     series.push({
       key: UNCATEGORIZED_KEY,
       label: t(locale, "insights.uncategorized"),
-      fillClass: UNCATEGORIZED_FILL_CLASS,
+      slot: UNCATEGORIZED_SLOT,
     });
   }
   return series;
@@ -294,9 +301,13 @@ function seriesWithFindings(
 }
 
 /**
- * The four insights stat sections — pure `t()` + data rendering, no
- * window/router access, so tests can static-render it (the AppInfoCard
- * idiom). Faces carried over verbatim from the retired global page.
+ * The insights body — pure `t()` + data rendering, no window/router access,
+ * so tests can static-render it (the AppInfoSection idiom). One content plane
+ * divided by hairlines: the window's review health, the two findings charts,
+ * the trend and the recurring-findings table. The chart series stay the
+ * closed six-slot vocabulary (fill = `--chart-{n}`, legend swatch =
+ * `--chart-{n}-mark`); the recurring findings are a data table whose columns
+ * are the row's own facts — title, review count, repos.
  */
 export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data: InsightsSummary }) {
   const windowLabel = t(locale, data.window_days === 1 ? "insights.lastDay" : "insights.lastDays", {
@@ -322,126 +333,102 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
       count: trendTotals.findings,
     }),
   });
-  // The merged distribution grid both cards consume ("" merged into the
+  // The merged distribution grid both charts consume ("" merged into the
   // uncategorized key); the zero-count legend filter reads the same grid
   // the charts render.
   const distribution = chartBuckets(data.findings_distribution);
+  const findingColumns: DataTableColumn<InsightsSummary["recurring_top"][number]>[] = [
+    {
+      header: t(locale, "insights.columnFinding"),
+      cell: (row) => <span className="font-medium">{row.title_sample}</span>,
+    },
+    {
+      header: t(locale, "insights.columnReviews"),
+      align: "right",
+      cell: (row) => <span className="tabular-nums">{row.count}</span>,
+    },
+    {
+      header: t(locale, "insights.columnRepos"),
+      cell: (row) => <span className="text-muted-foreground">{row.repos.join(", ")}</span>,
+    },
+  ];
+
+  if (empty) {
+    // The composed zero-review empty state — no-action variant (reviews
+    // arrive via installed Apps). No axis, no empty chart frame.
+    return (
+      <EmptyState
+        title={t(locale, "insights.emptyTitle")}
+        description={t(locale, "insights.emptyDescription")}
+      />
+    );
+  }
 
   return (
-    <>
-      {empty ? (
-        // The composed zero-review empty state — no-action variant
-        // (reviews arrive via installed Apps).
-        <EmptyState
-          title={t(locale, "insights.emptyTitle")}
-          description={t(locale, "insights.emptyDescription")}
-        />
-      ) : (
-        <>
-          <SectionCard tier="primary">
-            <CardHeader>
-              <SectionCardTitle>{t(locale, "insights.heading")}</SectionCardTitle>
-              <CardDescription>
-                {t(locale, "insights.window", { label: `${windowLabel}${repoLabel}` })}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-1 text-sm">
-              <p className="tabular-nums">{t(locale, "insights.reviewsTotal", { count: data.reviews_total })}</p>
-              <p className="tabular-nums">{t(locale, "insights.verdicts", { line: verdictLine(data) })}</p>
-            </CardContent>
-          </SectionCard>
-          {/* AD-591 rhythm: the four stat cards are one Tier 2 group. */}
-          <div className="flex flex-col gap-6">
-            <SectionCard tier="secondary">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "insights.findingsBySeverity")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent>
-                {data.findings_by_severity.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
-                ) : (
-                  <StackedBarChart
-                    ariaLabel={t(locale, "insights.findingsBySeverity")}
-                    buckets={distribution}
-                    series={seriesWithFindings(SEVERITY_SERIES, distribution)}
-                  />
-                )}
-              </CardContent>
-            </SectionCard>
-            <SectionCard tier="secondary">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "insights.findingsByCategory")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent>
-                {data.findings_by_category.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
-                ) : (
-                  <StackedBarChart
-                    ariaLabel={t(locale, "insights.findingsByCategory")}
-                    buckets={distribution}
-                    series={seriesWithFindings(categorySeries(data.findings_distribution, locale), distribution)}
-                  />
-                )}
-              </CardContent>
-            </SectionCard>
-            <SectionCard tier="secondary">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "insights.trend")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent>
-                {/* Defensive: reviews_total > 0 implies a non-empty grid on
-                    both windows (zero-filled), so this face is reachable
-                    only on a drifted payload — the readable empty state stays. */}
-                {trendPoints.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noReviews")}</p>
-                ) : (
-                  <div className="flex flex-col gap-3">
-                    <p className="text-sm text-muted-foreground">{trendSummary}</p>
-                    <TrendChart
-                      ariaLabel={t(locale, "insights.trend")}
-                      seriesLabels={{
-                        reviews: t(locale, "insights.seriesReviews"),
-                        findings: t(locale, "insights.seriesFindings"),
-                      }}
-                      points={trendPoints.map((row) => ({
-                        week: row.bucket_start,
-                        reviews: row.reviews,
-                        findings: row.findings,
-                      }))}
-                    />
-                  </div>
-                )}
-              </CardContent>
-            </SectionCard>
-            <SectionCard tier="secondary">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "insights.recurringFindings")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent>
-                {data.recurring_top.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noRecurring")}</p>
-                ) : (
-                  <ul className="flex flex-col">
-                    {data.recurring_top.map((row) => (
-                      <li
-                        key={row.fingerprint}
-                        className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
-                      >
-                        <strong className="text-sm font-medium">{row.title_sample}</strong>
-                        <span className="text-sm text-muted-foreground tabular-nums">
-                          {t(locale, row.count === 1 ? "insights.review" : "insights.reviews", { count: row.count })}
-                          {" · "}
-                          {row.repos.join(", ")}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </CardContent>
-            </SectionCard>
+    <div className="flex flex-col">
+      <FlowSection
+        title={t(locale, "insights.heading")}
+        subtitle={t(locale, "insights.window", { label: `${windowLabel}${repoLabel}` })}
+      >
+        <div className="flex flex-col gap-1 text-sm">
+          <p className="tabular-nums">{t(locale, "insights.reviewsTotal", { count: data.reviews_total })}</p>
+          <p className="tabular-nums">{t(locale, "insights.verdicts", { line: verdictLine(data) })}</p>
+        </div>
+      </FlowSection>
+      <FlowSection title={t(locale, "insights.findingsBySeverity")}>
+        {data.findings_by_severity.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
+        ) : (
+          <StackedBarChart
+            ariaLabel={t(locale, "insights.findingsBySeverity")}
+            buckets={distribution}
+            series={seriesWithFindings(SEVERITY_SERIES, distribution)}
+          />
+        )}
+      </FlowSection>
+      <FlowSection title={t(locale, "insights.findingsByCategory")}>
+        {data.findings_by_category.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
+        ) : (
+          <StackedBarChart
+            ariaLabel={t(locale, "insights.findingsByCategory")}
+            buckets={distribution}
+            series={seriesWithFindings(categorySeries(data.findings_distribution, locale), distribution)}
+          />
+        )}
+      </FlowSection>
+      <FlowSection title={t(locale, "insights.trend")}>
+        {/* Defensive: reviews_total > 0 implies a non-empty grid on both
+            windows (zero-filled), so this face is reachable only on a
+            drifted payload — the readable empty state stays. */}
+        {trendPoints.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "insights.noReviews")}</p>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-muted-foreground">{trendSummary}</p>
+            <TrendChart
+              ariaLabel={t(locale, "insights.trend")}
+              seriesLabels={{
+                reviews: t(locale, "insights.seriesReviews"),
+                findings: t(locale, "insights.seriesFindings"),
+              }}
+              points={trendPoints.map((row) => ({
+                week: row.bucket_start,
+                reviews: row.reviews,
+                findings: row.findings,
+              }))}
+            />
           </div>
-        </>
-      )}
-    </>
+        )}
+      </FlowSection>
+      <FlowSection title={t(locale, "insights.recurringFindings")}>
+        <DataTable
+          columns={findingColumns}
+          rows={data.recurring_top}
+          rowKey={(row) => row.fingerprint}
+          empty={<p className="text-sm text-muted-foreground">{t(locale, "insights.noRecurring")}</p>}
+        />
+      </FlowSection>
+    </div>
   );
 }
