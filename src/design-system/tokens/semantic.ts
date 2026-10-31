@@ -28,7 +28,7 @@ const v = (name: string): string => `var(--${name})`;
  * Semantic values that do not vary by theme: heights, radii, spacing,
  * typography, motion.
  */
-export const commonSemantics = {
+const commonSemantics = {
   "control-h-xs": "24px",
   "control-h-sm": "32px",
   "control-h-md": "40px",
