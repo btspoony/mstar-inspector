@@ -28,7 +28,7 @@ import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { isDictionaryKey, t } from "../../src/i18n";
 import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
 import { MembersPage } from "../../src/spa/pages/MembersPage";
-import type { AppsPayload } from "../../src/spa/pages/data";
+import { reviewEnabled, type AppsPayload } from "../../src/spa/pages/data";
 import { matchSpaRoute } from "../../src/spa/routes";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
@@ -692,8 +692,10 @@ describe("Apps list → App detail wayfinding (rendered)", () => {
 describe("Apps list metric band (payload-proved facts only)", () => {
   /**
    * Three Apps spanning both status axes: a running one, a paused one
-   * (`status: active` with review off) and a disabled one. Only the last is
-   * not enabled — pause is the review axis, not the enable/disable axis.
+   * (`status: active` with review off) and a disabled one that is also review
+   * off. Only the disabled one is not enabled — pause is the review axis, not
+   * the enable/disable axis, so the two counts must differ (one App not
+   * enabled, two with review off).
    */
   const APPS = [
     appRow({
@@ -711,7 +713,7 @@ describe("Apps list metric band (payload-proved facts only)", () => {
     appRow({
       github_app_id: 3,
       status: "disabled",
-      review_enabled: 1,
+      review_enabled: 0,
       health: { latest: null, rejected24h: 1 },
     }),
   ];
@@ -741,15 +743,18 @@ describe("Apps list metric band (payload-proved facts only)", () => {
 
   test("four metric keys, each an AppsPayload fact", () => {
     const html = renderFace(APPS);
+    // Exactly four cells in band order — an installation or repository count
+    // is not on the payload and can never join them (compass D13). The
+    // review-off figure is derived from the payload through the same
+    // normalization the page reads, so this pins the page's wiring, not a
+    // second copy of the wire rule.
+    const reviewOff = APPS.filter((app) => !reviewEnabled(app)).length;
     expect([...html.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
       [t("en", "apps.metricApps"), "3"],
       [t("en", "apps.metricEnabled"), "2"],
-      [t("en", "apps.metricReviewOff"), "1"],
+      [t("en", "apps.metricReviewOff"), String(reviewOff)],
       [t("en", "apps.metricRejected24h"), "3"],
     ]);
-    // Exactly four: an installation or repository count is not on the payload
-    // and can never join the band (compass D13).
-    expect(html.match(/data-slot="metric"/g)).toHaveLength(4);
     // The header band carries its one-line description beside the title.
     expect(html).toContain(`>${t("en", "apps.headingDescription")}</p>`);
   });

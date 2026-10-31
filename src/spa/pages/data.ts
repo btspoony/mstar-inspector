@@ -489,15 +489,23 @@ export function canInviteMembers(role: WorkspaceRole | null): boolean {
 }
 
 /**
+ * Is reviewing switched on for this App? The two wire representations of
+ * `review_enabled` — raw integer on the apps list face (dashboard/index.ts),
+ * boolean on the settings face (`!== 0` coercion) — are normalized here, so
+ * every reader shares one derivation: the pause axis (`isPaused`), the Apps
+ * band's review-off count, and the status pill.
+ */
+export function reviewEnabled(app: { review_enabled: number | boolean }): boolean {
+  return typeof app.review_enabled === "boolean" ? app.review_enabled : app.review_enabled !== 0;
+}
+
+/**
  * Paused = active but reviews switched off (one predicate for
- * both faces). The two wire representations of `review_enabled` — raw
- * integer on the apps list face (dashboard/index.ts), boolean on the
- * settings face (`!== 0` coercion) — are normalized here, so the App status
- * pill and SettingsPage's OpsCard share one derivation.
+ * both faces) — over the same normalization, so the App status pill and
+ * SettingsPage's OpsCard share one derivation.
  */
 export function isPaused(app: { status: string; review_enabled: number | boolean }): boolean {
-  const enabled = typeof app.review_enabled === "boolean" ? app.review_enabled : app.review_enabled !== 0;
-  return app.status === "active" && !enabled;
+  return app.status === "active" && !reviewEnabled(app);
 }
 
 /**
