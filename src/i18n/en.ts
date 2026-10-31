@@ -142,6 +142,10 @@ export const en = {
     findingsByCategory: "Findings by category",
     trend: "Trend",
     recurringFindings: "Recurring findings",
+    /** The recurring-findings table's columns — the row's own facts only. */
+    columnFinding: "Finding",
+    columnReviews: "Reviews",
+    columnRepos: "Repos",
     noFindings: "No findings in this window.",
     noRecurring: "No recurring findings in this window.",
     finding: "{count} finding",

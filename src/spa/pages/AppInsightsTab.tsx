@@ -1,9 +1,7 @@
 import { useEffect, useState } from "react";
 import { t } from "../../i18n";
 import {
-  CardContent,
-  CardDescription,
-  CardHeader,
+  FlowSection,
   Select,
   SelectContent,
   SelectItem,
@@ -15,7 +13,7 @@ import {
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
-import { SectionCard, SectionCardTitle } from "../components/SectionCard";
+import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import {
@@ -303,9 +301,13 @@ function seriesWithFindings(
 }
 
 /**
- * The four insights stat sections — pure `t()` + data rendering, no
- * window/router access, so tests can static-render it (the AppInfoCard
- * idiom). Faces carried over verbatim from the retired global page.
+ * The insights body — pure `t()` + data rendering, no window/router access,
+ * so tests can static-render it (the AppInfoSection idiom). One content plane
+ * divided by hairlines: the window's review health, the two findings charts,
+ * the trend and the recurring-findings table. The chart series stay the
+ * closed six-slot vocabulary (fill = `--chart-{n}`, legend swatch =
+ * `--chart-{n}-mark`); the recurring findings are a data table whose columns
+ * are the row's own facts — title, review count, repos.
  */
 export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data: InsightsSummary }) {
   const windowLabel = t(locale, data.window_days === 1 ? "insights.lastDay" : "insights.lastDays", {
@@ -331,126 +333,102 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
       count: trendTotals.findings,
     }),
   });
-  // The merged distribution grid both cards consume ("" merged into the
+  // The merged distribution grid both charts consume ("" merged into the
   // uncategorized key); the zero-count legend filter reads the same grid
   // the charts render.
   const distribution = chartBuckets(data.findings_distribution);
+  const findingColumns: DataTableColumn<InsightsSummary["recurring_top"][number]>[] = [
+    {
+      header: t(locale, "insights.columnFinding"),
+      cell: (row) => <span className="font-medium">{row.title_sample}</span>,
+    },
+    {
+      header: t(locale, "insights.columnReviews"),
+      align: "right",
+      cell: (row) => <span className="tabular-nums">{row.count}</span>,
+    },
+    {
+      header: t(locale, "insights.columnRepos"),
+      cell: (row) => <span className="text-muted-foreground">{row.repos.join(", ")}</span>,
+    },
+  ];
+
+  if (empty) {
+    // The composed zero-review empty state — no-action variant (reviews
+    // arrive via installed Apps). No axis, no empty chart frame.
+    return (
+      <EmptyState
+        title={t(locale, "insights.emptyTitle")}
+        description={t(locale, "insights.emptyDescription")}
+      />
+    );
+  }
 
   return (
-    <>
-      {empty ? (
-        // The composed zero-review empty state — no-action variant
-        // (reviews arrive via installed Apps).
-        <EmptyState
-          title={t(locale, "insights.emptyTitle")}
-          description={t(locale, "insights.emptyDescription")}
-        />
-      ) : (
-        <>
-          <SectionCard tier="primary">
-            <CardHeader>
-              <SectionCardTitle>{t(locale, "insights.heading")}</SectionCardTitle>
-              <CardDescription>
-                {t(locale, "insights.window", { label: `${windowLabel}${repoLabel}` })}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-1 text-sm">
-              <p className="tabular-nums">{t(locale, "insights.reviewsTotal", { count: data.reviews_total })}</p>
-              <p className="tabular-nums">{t(locale, "insights.verdicts", { line: verdictLine(data) })}</p>
-            </CardContent>
-          </SectionCard>
-          {/* AD-591 rhythm: the four stat cards are one Tier 2 group. */}
-          <div className="flex flex-col gap-6">
-            <SectionCard tier="secondary">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "insights.findingsBySeverity")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent>
-                {data.findings_by_severity.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
-                ) : (
-                  <StackedBarChart
-                    ariaLabel={t(locale, "insights.findingsBySeverity")}
-                    buckets={distribution}
-                    series={seriesWithFindings(SEVERITY_SERIES, distribution)}
-                  />
-                )}
-              </CardContent>
-            </SectionCard>
-            <SectionCard tier="secondary">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "insights.findingsByCategory")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent>
-                {data.findings_by_category.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
-                ) : (
-                  <StackedBarChart
-                    ariaLabel={t(locale, "insights.findingsByCategory")}
-                    buckets={distribution}
-                    series={seriesWithFindings(categorySeries(data.findings_distribution, locale), distribution)}
-                  />
-                )}
-              </CardContent>
-            </SectionCard>
-            <SectionCard tier="secondary">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "insights.trend")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent>
-                {/* Defensive: reviews_total > 0 implies a non-empty grid on
-                    both windows (zero-filled), so this face is reachable
-                    only on a drifted payload — the readable empty state stays. */}
-                {trendPoints.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noReviews")}</p>
-                ) : (
-                  <div className="flex flex-col gap-3">
-                    <p className="text-sm text-muted-foreground">{trendSummary}</p>
-                    <TrendChart
-                      ariaLabel={t(locale, "insights.trend")}
-                      seriesLabels={{
-                        reviews: t(locale, "insights.seriesReviews"),
-                        findings: t(locale, "insights.seriesFindings"),
-                      }}
-                      points={trendPoints.map((row) => ({
-                        week: row.bucket_start,
-                        reviews: row.reviews,
-                        findings: row.findings,
-                      }))}
-                    />
-                  </div>
-                )}
-              </CardContent>
-            </SectionCard>
-            <SectionCard tier="secondary">
-              <CardHeader>
-                <SectionCardTitle>{t(locale, "insights.recurringFindings")}</SectionCardTitle>
-              </CardHeader>
-              <CardContent>
-                {data.recurring_top.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noRecurring")}</p>
-                ) : (
-                  <ul className="flex flex-col">
-                    {data.recurring_top.map((row) => (
-                      <li
-                        key={row.fingerprint}
-                        className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
-                      >
-                        <strong className="text-sm font-medium">{row.title_sample}</strong>
-                        <span className="text-sm text-muted-foreground tabular-nums">
-                          {t(locale, row.count === 1 ? "insights.review" : "insights.reviews", { count: row.count })}
-                          {" · "}
-                          {row.repos.join(", ")}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </CardContent>
-            </SectionCard>
+    <div className="flex flex-col">
+      <FlowSection
+        title={t(locale, "insights.heading")}
+        subtitle={t(locale, "insights.window", { label: `${windowLabel}${repoLabel}` })}
+      >
+        <div className="flex flex-col gap-1 text-sm">
+          <p className="tabular-nums">{t(locale, "insights.reviewsTotal", { count: data.reviews_total })}</p>
+          <p className="tabular-nums">{t(locale, "insights.verdicts", { line: verdictLine(data) })}</p>
+        </div>
+      </FlowSection>
+      <FlowSection title={t(locale, "insights.findingsBySeverity")}>
+        {data.findings_by_severity.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
+        ) : (
+          <StackedBarChart
+            ariaLabel={t(locale, "insights.findingsBySeverity")}
+            buckets={distribution}
+            series={seriesWithFindings(SEVERITY_SERIES, distribution)}
+          />
+        )}
+      </FlowSection>
+      <FlowSection title={t(locale, "insights.findingsByCategory")}>
+        {data.findings_by_category.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
+        ) : (
+          <StackedBarChart
+            ariaLabel={t(locale, "insights.findingsByCategory")}
+            buckets={distribution}
+            series={seriesWithFindings(categorySeries(data.findings_distribution, locale), distribution)}
+          />
+        )}
+      </FlowSection>
+      <FlowSection title={t(locale, "insights.trend")}>
+        {/* Defensive: reviews_total > 0 implies a non-empty grid on both
+            windows (zero-filled), so this face is reachable only on a
+            drifted payload — the readable empty state stays. */}
+        {trendPoints.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "insights.noReviews")}</p>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-muted-foreground">{trendSummary}</p>
+            <TrendChart
+              ariaLabel={t(locale, "insights.trend")}
+              seriesLabels={{
+                reviews: t(locale, "insights.seriesReviews"),
+                findings: t(locale, "insights.seriesFindings"),
+              }}
+              points={trendPoints.map((row) => ({
+                week: row.bucket_start,
+                reviews: row.reviews,
+                findings: row.findings,
+              }))}
+            />
           </div>
-        </>
-      )}
-    </>
+        )}
+      </FlowSection>
+      <FlowSection title={t(locale, "insights.recurringFindings")}>
+        <DataTable
+          columns={findingColumns}
+          rows={data.recurring_top}
+          rowKey={(row) => row.fingerprint}
+          empty={<p className="text-sm text-muted-foreground">{t(locale, "insights.noRecurring")}</p>}
+        />
+      </FlowSection>
+    </div>
   );
 }

@@ -30,7 +30,7 @@ import {
 } from "../../src/spa/pages/data";
 import { AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
 import { apiBase } from "../../src/spa/workspace-base";
-import { AppInsightsTab, InsightsRecordsView } from "../../src/spa/pages/AppInsightsTab";
+import { AppInsightsTab, CATEGORY_SLOTS, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/spa/pages/AppInsightsTab";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
@@ -324,6 +324,12 @@ describe("tab shell source contracts", () => {
     expect(insightsTab).toContain("INSIGHTS_WINDOWS.map");
     expect(insightsTab).toContain("insightsRepoOptions(");
     expect(insightsTab).toContain('from "./data"');
+    // The repo selector keeps its behaviour: the value goes through the kept
+    // helper, "all" stays the default option, and the options are the
+    // window's repos in the helper's order.
+    expect(insightsTab).toContain("value={insightsRepoSelectValue(search.repo)}");
+    expect(insightsTab).toContain("<SelectItem value={INSIGHTS_REPO_ALL}>");
+    expect(insightsTab).toContain("repoChoices.map((repo) => (");
   });
 });
 
@@ -360,6 +366,56 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     expect(html).toContain("Trend");
     expect(html).toContain("Recurring findings");
     expect(html).toContain("recharts-surface");
+  });
+
+  test("the records face is one section flow; the findings table keeps its three columns", () => {
+    const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data }));
+    // One content plane divided by hairlines — health, the two findings
+    // charts, the trend and the recurring findings.
+    expect(html.match(/data-slot="flow-section"/g) ?? []).toHaveLength(5);
+    for (const title of [
+      "Review health",
+      "Findings by severity",
+      "Findings by category",
+      "Trend",
+      "Recurring findings",
+    ]) {
+      expect(html, title).toContain(`>${title}</h2>`);
+    }
+    // The recurring findings are the shared table: one column per row fact,
+    // no column the payload does not carry.
+    expect(html).toContain('data-slot="table"');
+    for (const header of [
+      t("en", "insights.columnFinding"),
+      t("en", "insights.columnReviews"),
+      t("en", "insights.columnRepos"),
+    ]) {
+      expect(html, header).toContain(`>${header}</th>`);
+    }
+    expect(html).toContain(">Off-by-one</span>");
+    expect(html).toContain(">acme/web</span>");
+  });
+
+  test("chart series fill from --chart-{n} and legend swatches from --chart-{n}-mark (D14 split)", () => {
+    const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data }));
+    const fills = [...new Set([...html.matchAll(/chart-fill-(\d)/g)].map((match) => match[1]!))];
+    const swatches = [...new Set([...html.matchAll(/chart-legend-swatch chart-swatch-(\d)/g)].map((match) => match[1]!))];
+    expect(fills.length).toBeGreaterThan(0);
+    expect(swatches.length).toBeGreaterThan(0);
+    // The surface maps semantics onto the page's slots only: the severity
+    // and category charts paint their declared slug's slot, and the trend's
+    // two series keep the pair the chart fixes.
+    for (const slot of [SEVERITY_SLOTS["must-fix"], CATEGORY_SLOTS.DEBT, 5, 3]) {
+      expect(fills, `fill ${slot}`).toContain(String(slot));
+      expect(swatches, `swatch ${slot}`).toContain(String(slot));
+    }
+    // Each slot the surface paints has both faces in the stylesheet: the
+    // large fill on the quiet `--chart-{n}`, the small mark on `-mark`.
+    const css = readFileSync(join(spaRoot, "components/charts/charts.css"), "utf8");
+    for (const slot of [...fills, ...swatches]) {
+      expect(css, slot).toContain(`.chart-fill-${slot} { fill: var(--chart-${slot}); }`);
+      expect(css, slot).toContain(`.chart-swatch-${slot} { background-color: var(--chart-${slot}-mark); }`);
+    }
   });
 
   test("the zero-review window renders the composed empty state, never a bare axis", () => {
