@@ -5,12 +5,16 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 const spaRoot = fileURLToPath(new URL("./src/spa", import.meta.url));
+const designSystemRoot = fileURLToPath(new URL("./src/design-system", import.meta.url));
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
       "@": spaRoot,
+      // Single door into the design system: the module's own index.ts. The
+      // boundary test rejects any other specifier shape.
+      "@design-system": designSystemRoot,
     },
   },
   root: "src/spa",

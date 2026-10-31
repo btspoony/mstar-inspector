@@ -14,8 +14,12 @@
     "noUncheckedIndexedAccess": true,
     "types": ["vite/client", "bun"],
     "paths": {
-      "@/*": ["./src/spa/*"]
+      "@/*": ["./src/spa/*"],
+      "@design-system": ["./src/design-system/index.ts"]
     }
   },
-  "include": ["src/spa", "src/i18n", "src/version.ts", "tests/spa"]
+  // src/design-system lives in this program (not the root one) so React-era
+  // primitives and patterns compile with DOM lib; the DOM-free token sources
+  // remain reachable from the root program via scripts/** imports.
+  "include": ["src/spa", "src/i18n", "src/version.ts", "src/design-system", "tests/spa"]
 }

@@ -25,7 +25,10 @@
     // written relative to this file ("."-prefixed): TypeScript 7 accepts no
     // other form and rejects a bare target with TS5090.
     "paths": {
-      "@/*": ["./src/spa/*"]
+      "@/*": ["./src/spa/*"],
+      // The design system's single public entry. No `@design-system/*` mapping:
+      // a deep import must fail typecheck, not resolve.
+      "@design-system": ["./src/design-system/index.ts"]
     }
   },
   // `scripts` rides the root program for the same reason `tests` does: a
@@ -36,5 +39,9 @@
   // database this codebase removed. Any future omission in scripts/** now
   // fails the same check CI runs.
   "include": ["src", "tests", "scripts"],
-  "exclude": ["src/spa", "tests/spa"]
+  // src/design-system rides the SPA program (tsconfig.spa.json) so primitives
+  // get DOM lib. The DOM-free token sources stay reachable from the root
+  // program through the imports scripts/** make — `exclude` only drops them as
+  // roots, it does not remove them from the program an import pulls in.
+  "exclude": ["src/spa", "tests/spa", "src/design-system"]
 }
