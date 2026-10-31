@@ -82,6 +82,8 @@ const DARK_SEMANTIC = FIXTURE.dark?.semantic!;
 const LIGHT_SEMANTIC = FIXTURE.light?.semantic!;
 const DARK_PRIMITIVE = FIXTURE.dark?.primitive!;
 const LIGHT_PRIMITIVE = FIXTURE.light?.primitive!;
+/** The component layer's geometry (heights, paddings) — theme-invariant. */
+const DARK_COMPONENT = FIXTURE.dark?.component!;
 
 /** Fixture colour values per theme: the two colour-bearing layers merged. */
 const FIXTURE_COLORS: Record<(typeof THEMES)[number], Record<string, string>> = {
@@ -241,6 +243,23 @@ describe("source → fixture → DESIGN.md chain", () => {
       "button-sm", "button-xs", "input", "card", "group-card", "list-row", "step-dialog",
     ]) {
       expect(fm.components[name], name).toBeDefined();
+    }
+  });
+
+  test("the button size faces restate the component layer's geometry", async () => {
+    // `documentSync` reports the component layer and control heights as
+    // unexpressed — `components:` is variant-shaped, and the spec has no size
+    // group — so nothing else stops the document restating a face the source
+    // does not have (I-000215). The size entries are compared here instead:
+    // height and padding against the component layer, the label against the
+    // typography step the entry names.
+    const fm = await loadFrontmatter();
+    for (const [size, label] of [["xs", "button-12"], ["sm", "button-14"]] as const) {
+      const entry = fm.components[`button-${size}`]!;
+      expect(entry.height, `button-${size} height`).toBe(DARK_COMPONENT[`button-height-${size}`]);
+      expect(entry.padding, `button-${size} padding`).toBe(DARK_COMPONENT[`button-padding-${size}`]);
+      expect(entry.typography, `button-${size} label`).toBe(`{typography.${label}}`);
+      expect(fm.typography[label]!.fontSize, label).toBe(DARK_SEMANTIC[`typo-${label}-size`]);
     }
   });
 });
