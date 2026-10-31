@@ -737,7 +737,9 @@ Every value is a reference to a token that already exists — a literal here
 would be a new colour, which D15 forbids. The whole accent tone is withheld,
 not individual steps; admin code may not reference `tone-accent-*` or brand
 step names, and the generated `:root[data-surface="ops"]` block is asserted
-by test.
+by test. Requesting the accent *tone* is not naming a token: `StatusBadge
+tone="accent"` stays a legal call-site request, and this re-map is what
+withholds the paint.
 
 ## Control heights, rows and radii
 
@@ -1052,7 +1054,7 @@ palette step:
 | `--background` / `--foreground` | `--surface-page` / `--text-primary` |
 | `--card` / `--card-foreground` | `--surface-card` / `--text-primary` |
 | `--popover` / `--popover-foreground` | `--surface-raised` / `--text-primary` |
-| `--primary` / `--primary-foreground` | `--tone-accent-solid` / `--on-brand` |
+| `--primary` / `--primary-foreground` | `--button-primary-bg` / `--button-primary-fg` |
 | `--primary-hover` | `--button-primary-hover-bg` (`brand-600`) |
 | `--secondary` / `--secondary-hover` | `--surface-card` / `--surface-overlay` |
 | `--muted` / `--muted-foreground` | `--surface-inset` / `--text-secondary` |
@@ -1065,6 +1067,13 @@ palette step:
 | `--sidebar` | `--surface-shell` |
 | `--sidebar-primary` | `--tone-accent-solid` (the active-row tint derives through this key) |
 | `--sidebar-accent` | `--surface-overlay` |
+
+The primary pair names the **component** tokens rather than the accent pair
+directly: `--primary` / `--primary-foreground` are what `Button`'s default
+variant paints, and the D15 ops variant re-maps `button-primary-*` alone, so
+this is the hop that makes the console's primary action quiet. Off the ops
+surface the pair resolves to `tone-accent-solid` / `on-brand` exactly as before
+(`tests/spa/tokens.test.ts` asserts the resolution, not the declaration).
 
 The primitives live under `src/design-system/primitives/`, and consumers reach
 them one way only: the `@design-system` alias onto `src/design-system/index.ts`,

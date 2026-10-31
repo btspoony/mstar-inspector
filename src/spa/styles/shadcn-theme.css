@@ -33,10 +33,17 @@
      `on-brand` is the label that flips with the theme (dark wears the bright
      cyan step and takes ink; light takes white). Hover is the component
      layer's `brand-600` step — the approved r3 hover, one step quieter than
-     the fill in dark and deeper in light. */
-  --primary: var(--tone-accent-solid);
+     the fill in dark and deeper in light.
+     The action pair goes through the component tokens rather than naming the
+     accent directly, because that is the layer the D15 ops variant re-maps:
+     `Button`'s default variant paints `bg-primary` / `text-primary-foreground`,
+     so pointing these at `tone-accent-solid` / `on-brand` would leave the
+     console's primary action filled with the ops solid and labelled `on-brand`
+     while its hover followed the variant. Off the ops surface both routes
+     resolve identically. */
+  --primary: var(--button-primary-bg);
   --primary-hover: var(--button-primary-hover-bg);
-  --primary-foreground: var(--on-brand);
+  --primary-foreground: var(--button-primary-fg);
   --secondary: var(--surface-card);
   --secondary-hover: var(--surface-overlay);
   --secondary-foreground: var(--text-primary);

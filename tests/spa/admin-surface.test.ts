@@ -7,10 +7,11 @@
  * they mount on `<body>` and inherit the root's custom properties. The
  * generated block then withholds the accent tone whole.
  *
- * Three assertions, because the rule breaks three ways: the attribute leaves
- * the document root, the generated block stops re-mapping a token, or admin
- * code names the tone (or a brand step) the variant withholds and its own
- * colours win over the re-map.
+ * Four assertions, because the rule breaks four ways: the attribute leaves
+ * the document root, the generated block stops re-mapping a token, the bridge
+ * stops resolving through those tokens (so the re-map never reaches the
+ * painted control), or admin code names the tone (or a brand step) the variant
+ * withholds and its own colours win over the re-map.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
@@ -22,21 +23,50 @@ const REPO = new URL("../../", import.meta.url).pathname;
 const ADMIN_HTML_PATH = join(REPO, "src/spa/admin.html");
 const ADMIN_DIR = join(REPO, "src/spa/admin");
 const CSS_PATH = join(REPO, "src/spa/styles/tokens.css");
+const BRIDGE_PATH = join(REPO, "src/spa/styles/shadcn-theme.css");
+const BUTTON_PATH = join(REPO, "src/design-system/primitives/button.tsx");
 
 const ADMIN_HTML = readFileSync(ADMIN_HTML_PATH, "utf8");
 const CSS = readFileSync(CSS_PATH, "utf8");
 
-/** The declarations of the generated ops block, parsed out of the stylesheet. */
-function opsBlock(): Record<string, string> {
-  const at = CSS.indexOf(':root[data-surface="ops"] {');
-  if (at === -1) throw new Error("generated stylesheet has no ops block");
-  const open = CSS.indexOf("{", at);
-  const end = CSS.indexOf("\n}", open);
+/** The declarations of the first block whose selector is `selector`. */
+function block(css: string, selector: string): Record<string, string> {
+  const at = css.indexOf(selector);
+  if (at === -1) throw new Error(`stylesheet has no ${selector}`);
+  const open = css.indexOf("{", at);
+  const end = css.indexOf("\n}", open);
   const out: Record<string, string> = {};
-  for (const match of CSS.slice(open + 1, end).matchAll(/--([a-z0-9-]+):\s*([^;]+);/g)) {
+  for (const match of css.slice(open + 1, end).matchAll(/--([a-z0-9-]+):\s*([^;]+);/g)) {
     out[match[1]!] = match[2]!.trim();
   }
   return out;
+}
+
+/** The declarations of the generated ops block, parsed out of the stylesheet. */
+function opsBlock(): Record<string, string> {
+  return block(CSS, ':root[data-surface="ops"] {');
+}
+
+/** One `var(--x)` chain resolved inside a merged declaration map. */
+function resolve(vars: Record<string, string>, name: string): string {
+  let value = vars[name];
+  for (let hop = 0; hop < 8 && value?.startsWith("var("); hop += 1) {
+    value = vars[/^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1] ?? ""];
+  }
+  if (value === undefined) throw new Error(`--${name} is not declared`);
+  return value;
+}
+
+/**
+ * The declarations the console's document resolves against. `data-theme` and
+ * `data-surface` selectors both score 0-2-0, so the merge order is the
+ * stylesheet's source order: bridge, root, the stored-light branch, then ops.
+ */
+function consoleVars(theme: "dark" | "light"): Record<string, string> {
+  const bridge = block(readFileSync(BRIDGE_PATH, "utf8"), ":root {");
+  const base = { ...bridge, ...block(CSS, ":root {") };
+  const light = theme === "light" ? block(CSS, ':root[data-theme="light"] {') : {};
+  return { ...base, ...light, ...opsBlock() };
 }
 
 /** `src/spa/admin/**` plus the document — the console's whole surface. */
@@ -73,11 +103,36 @@ describe("the console's plain variant", () => {
     expect(ops["button-primary-hover-bg"]).toBe("var(--surface-overlay)");
   });
 
+  test("the console's primary action paints the quiet pair", () => {
+    // The classes the default variant actually wears — `bg-primary` and
+    // `text-primary-foreground` — are read from the component, so a renamed
+    // utility fails here instead of passing on an assumption. `<Button>` with
+    // no `variant` prop (every console submit and the flag confirm) is this
+    // face.
+    const variant = /default:\s*"([^"]+)"/.exec(readFileSync(BUTTON_PATH, "utf8"))?.[1];
+    const fillKey = /(?:^|\s)bg-([a-z][a-z0-9-]*)(?=\s|$)/.exec(variant ?? "")?.[1];
+    const labelKey = /(?:^|\s)text-([a-z][a-z0-9-]*)(?=\s|$)/.exec(variant ?? "")?.[1];
+    expect(fillKey, "the default variant paints a token fill").toBeDefined();
+    expect(labelKey, "the default variant paints a token label").toBeDefined();
+
+    // Painted, not declared: resolve the pair through the same cascade the
+    // document uses. The declared ops block reaching `button-primary-*` is not
+    // enough — before this bridge hop it left the fill on `tone-neutral-solid`.
+    for (const theme of ["dark", "light"] as const) {
+      const vars = consoleVars(theme);
+      expect(resolve(vars, fillKey!), `${theme} ops fill`).toBe(resolve(vars, "tone-neutral-bg"));
+      expect(resolve(vars, labelKey!), `${theme} ops label`).toBe(resolve(vars, "text-primary"));
+    }
+  });
+
   test("no admin file names the withheld tone or a brand step", () => {
     const files = adminFiles();
     // A scan that found nothing to scan is not a pass.
     expect(files.length).toBeGreaterThan(1);
 
+    // A `tone="accent"` prop is a semantic request for the emphasis face, not
+    // the token name this guard forbids — the surface re-map withholds the
+    // paint, and the painted pair is asserted above.
     const forbidden = [
       { rule: "tone-accent-*", re: /tone-accent-/ },
       { rule: "brand step", re: /\bbrand-\d{2,3}\b/ },

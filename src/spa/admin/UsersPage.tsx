@@ -40,10 +40,10 @@ export function UsersPage({ locale }: { locale: Locale }) {
       cell: (row) => (
         <div className="flex flex-wrap items-center gap-2">
           {row.isOperator ? (
-            // Plain variant: the console never asks for the accent tone, so the
-            // operator pill is the neutral face — the label ("Operator") is
-            // what separates it from a plain account.
-            <StatusBadge tone="neutral">{t(locale, "admin.users.identityOperator")}</StatusBadge>
+            // The one emphasised identity. The accent request is the semantic
+            // face; the console's D15 re-map withholds the tone, so the surface
+            // stays the only place plainness is decided.
+            <StatusBadge tone="accent">{t(locale, "admin.users.identityOperator")}</StatusBadge>
           ) : null}
           {row.activeGrantCount > 0 ? (
             <StatusBadge tone="neutral">

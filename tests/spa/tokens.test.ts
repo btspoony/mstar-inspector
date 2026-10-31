@@ -491,12 +491,14 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("bridge re-point: every value is a semantic token; focus stays on the blue duty", async () => {
     const css = await Bun.file(BRIDGE).text();
     const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
-    // The task-3 re-point: the accent arrives as `tone-accent-solid` and the
-    // label as `on-brand`, so the bridge never names a palette step. Hover is
-    // the component layer's approved one-step-quieter face.
-    expect(rootVars["primary"]).toBe("var(--tone-accent-solid)");
+    // The task-3 re-point: the bridge never names a palette step. The action
+    // pair goes through the component layer (`--primary` → `button-primary-bg`
+    // → `tone-accent-solid`), which is what lets the D15 ops variant reach the
+    // painted control; the next test proves that hop is invisible on the
+    // customer faces. Hover already followed the same route.
+    expect(rootVars["primary"]).toBe("var(--button-primary-bg)");
     expect(rootVars["primary-hover"]).toBe("var(--button-primary-hover-bg)");
-    expect(rootVars["primary-foreground"]).toBe("var(--on-brand)");
+    expect(rootVars["primary-foreground"]).toBe("var(--button-primary-fg)");
     expect(rootVars["secondary-hover"]).toBe("var(--surface-overlay)");
     expect(rootVars["muted"]).toBe("var(--surface-inset)");
     expect(rootVars["border"]).toBe("var(--border-default)");
@@ -533,6 +535,22 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // (AD-622): the hover tint consumes the sidebar-accent key at
     // /40 opacity — same dead-class trap, so the mapping is pinned too.
     expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
+  });
+
+  test("the primary bridge resolves to the accent pair off the ops surface", async () => {
+    // The extra component hop exists for the D15 variant. Off that surface it
+    // must be invisible, and that is a value claim: resolve both themes through
+    // the real files and compare against the pair the bridge used to name.
+    const bridge = cssCustomProperties(extractBlock(await Bun.file(BRIDGE).text(), ":root {"));
+    const tokens = await Bun.file(TOKENS_CSS).text();
+    const dark = { ...bridge, ...cssCustomProperties(extractBlock(tokens, ":root {")) };
+    const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
+    for (const [theme, vars] of [["dark", dark], ["light", light]] as const) {
+      expect(resolve(vars, "primary"), `${theme} --primary`).toBe(resolve(vars, "tone-accent-solid"));
+      expect(resolve(vars, "primary-foreground"), `${theme} --primary-foreground`).toBe(
+        resolve(vars, "on-brand"),
+      );
+    }
   });
 
   test("radius bridge collapses onto the AD-574 two tiers; tokens button maps the accent tone", async () => {

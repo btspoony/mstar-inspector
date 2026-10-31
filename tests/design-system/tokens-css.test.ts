@@ -134,5 +134,14 @@ describe("generated tokens.css", () => {
 
     expect(OPS["tone-accent-solid"]).toBe("var(--tone-neutral-solid)");
     expect(OPS["button-primary-bg"]).toBe("var(--tone-neutral-bg)");
+
+    // Source order is load-bearing: `:root[data-theme="light"]` and
+    // `:root[data-surface="ops"]` both score 0-2-0, so only the later block
+    // wins. Emit ops first and the light branch repaints the console's accent
+    // tokens — a silent return of the tone D15 withholds.
+    const lightAt = css.indexOf(':root[data-theme="light"] {');
+    const opsAt = css.indexOf(':root[data-surface="ops"] {');
+    expect(lightAt).toBeGreaterThan(-1);
+    expect(opsAt).toBeGreaterThan(lightAt);
   });
 });

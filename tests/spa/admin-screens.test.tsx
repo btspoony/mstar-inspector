@@ -612,12 +612,14 @@ describe("Users screen", () => {
     expect(rowContaining(surface, "octocat")?.textContent).toContain("2026-08-26");
     expect(rowContaining(surface, "ops")?.textContent).toContain("Support (2)");
     expect(rowContaining(surface, "yuki")?.textContent).toContain("User");
-    // Plain variant: the console asks for no accent tone at all — the operator
-    // pill is neutral like the rest, and its label carries the meaning.
-    expect(surface.container.querySelectorAll('[data-tone="accent"]')).toHaveLength(0);
+    // One accent request: the operator identity. The console's plain variant is
+    // the surface re-map, not a second tone choice at the call site, so this
+    // pill names the emphasis and no other row does. The painted pair is
+    // resolved in admin-surface.test.ts; here the call site is what shows.
+    expect(surface.container.querySelectorAll('[data-tone="accent"]')).toHaveLength(1);
     expect(
       rowContaining(surface, "octocat")?.querySelector('[data-slot="status-badge"]')?.getAttribute("data-tone"),
-    ).toBe("neutral");
+    ).toBe("accent");
     await surface.close();
   });
 
