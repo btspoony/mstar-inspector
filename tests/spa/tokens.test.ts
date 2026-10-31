@@ -453,6 +453,14 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // step alive past the plan that removes it.
     expect(css).not.toMatch(/var\(--(?:background|gray|brand|red|blue|amber|green|teal|pink|purple)-/);
 
+    // The destructive hover derives from the solid rather than naming a step
+    // (the palette reduction removed the step the old hover used), and it must
+    // be a *different* face — a hover that paints the resting colour deletes
+    // the state without failing anything else.
+    expect(rootVars["destructive-hover"]).toContain("color-mix(");
+    expect(rootVars["destructive-hover"]).toContain("var(--tone-danger-solid)");
+    expect(rootVars["destructive-hover"]).not.toBe(rootVars["destructive"]);
+
     // Theme coupling (QC round 1 F-001): the hover steps must exist as
     // --color-* keys in `@theme inline`. Tailwind v4 CSS-first config
     // generates utilities from theme keys only, so an unmapped :root var
@@ -482,6 +490,66 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(cssCustomProperties(extractBlock(tokens, ":root {"))["button-primary-bg"]).toBe(
       "var(--tone-accent-solid)",
     );
+  });
+
+  test("the destructive hover is a distinct face in both themes, and keeps its label readable", async () => {
+    // The derivation is a colour relationship, so assert the relationship:
+    // mixing toward the label face must move the fill away from the resting
+    // colour and keep --on-brand above 4.5:1 on it, in both themes.
+    // The declaration lives in the bridge; the colours it mixes live in the
+    // generated stylesheet, so resolve each from its own authority.
+    const bridgeVars = cssCustomProperties(extractBlock(await Bun.file(BRIDGE).text(), ":root {"));
+    const tokens = await Bun.file(TOKENS_CSS).text();
+    const dark = cssCustomProperties(extractBlock(tokens, ":root {"));
+    const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
+
+    const hoverExpression = bridgeVars["destructive-hover"]!;
+    const weightPercent = /color-mix\(in srgb,\s*var\(--tone-danger-solid\)\s+(\d+)%,\s*var\(--text-primary\)\)/
+      .exec(hoverExpression)?.[1];
+    // The derivation is a colour relationship; pinning the numbers would let a
+    // hand-written hex pass as "derived".
+    expect(weightPercent, "destructive hover must derive from the solid and the label face").toBeDefined();
+    expect(bridgeVars["destructive"]).toBe("var(--tone-danger-solid)");
+
+    const srgb = (value: string): [number, number, number] => {
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16) / 255) as [number, number, number];
+      return [r, g, b];
+    };
+    const luminance = (hex: string): number => {
+      const [r, g, b] = srgb(hex).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)) as [
+        number,
+        number,
+        number,
+      ];
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const contrast = (a: string, b: string): number => {
+      const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+      return (hi + 0.05) / (lo + 0.05);
+    };
+    /** Resolve `var(--x)` chains against one theme's declarations. */
+    const resolve = (vars: Record<string, string>, name: string): string => {
+      let value = vars[name]!;
+      for (let hop = 0; hop < 8 && value.startsWith("var("); hop += 1) {
+        value = vars[/^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1] as string]!;
+      }
+      return value;
+    };
+    /** The mix the browser performs at paint time, computed. */
+    const blend = (solid: string, label: string, weight: number): string => {
+      const [s, t] = [srgb(solid), srgb(label)];
+      return `#${s
+        .map((c, i) => Math.round((c * weight + t[i]! * (1 - weight)) * 255).toString(16).padStart(2, "0"))
+        .join("")}`;
+    };
+
+    for (const vars of [dark, light]) {
+      const solid = resolve(vars, "tone-danger-solid");
+      const label = resolve(vars, "on-brand");
+      const hover = blend(solid, resolve(vars, "text-primary"), Number(weightPercent) / 100);
+      expect(hover, "hover must differ from the resting fill").not.toBe(solid);
+      expect(contrast(label, hover), `label on the hover face ${hover}`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   test("restyled subset carries v0.3 form: supersede marker, control radius, tinted elevation, token-eased transitions", async () => {

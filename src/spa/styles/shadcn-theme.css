@@ -38,10 +38,14 @@
   --accent: var(--surface-overlay);
   --accent-foreground: var(--text-primary);
   --destructive: var(--tone-danger-solid);
-  /* shortcut: the closed palette holds no step below the danger solid, so the
-     destructive fill has no distinct hover face until plan 202 re-faces this
-     variant onto the tone outline (button-danger-bg/fg/border). Upgrade there. */
-  --destructive-hover: var(--tone-danger-solid);
+  /* Hover derives from the solid instead of naming a step: the palette
+     reduction removed the `red-800` the old hover used, and reintroducing one
+     would undo D14. Mixing 12% of the label face into the fill moves it the
+     way the system already moves hovers — dark lifts (5.98:1 → 6.58:1 for the
+     label), light deepens (4.83:1 → 5.83:1) — and never below 4.5:1.
+     Mixing toward `surface-page` would invert that: it darkens on dark and
+     pales on light, which reads as a pressed state, not a hover. */
+  --destructive-hover: color-mix(in srgb, var(--tone-danger-solid) 88%, var(--text-primary));
   --destructive-foreground: var(--on-brand);
   --border: var(--border-default);
   --input: var(--border-default);

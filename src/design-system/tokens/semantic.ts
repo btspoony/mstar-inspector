@@ -17,6 +17,20 @@
  * value equals that step in that theme; otherwise it carries the literal (a
  * literal is the approved r3 value with no surviving step — never a nearby
  * step re-snapped to fit).
+ *
+ * Two carve-outs, because the rule alone would misread them:
+ *
+ * - **Chart fills are theme-fixed literals.** D14 approved a quiet 600-step
+ *   fill for every slot, and `chart-2`/`chart-4`/`chart-5`/`chart-6` have no
+ *   surviving step at all. Where a fill *does* equal a surviving step in the
+ *   light theme (`chart-3` = `amber-600`, the same hex in both themes), the
+ *   literal is still the authority: the two values coincide, they are not
+ *   linked, so a later change to that step must not move a chart fill. Only
+ *   `chart-1` follows the theme, through `brand-600`.
+ * - **`on-brand` is a fixed label face, not a palette reference.** It states
+ *   "the label that sits on the accent fill" — ink on dark's bright cyan,
+ *   white on light's deep cyan — so it carries the approved literal per theme
+ *   even where a surviving step happens to hold the same value.
  */
 
 import type { ThemeName } from "./primitives";
@@ -163,11 +177,14 @@ const darkSemantics = {
   "tone-danger-fg": v("red-700"),
   "tone-danger-solid": v("red-700"),
 
-  // Fill faces are theme-fixed: the quiet 600 step the approved charts use.
-  // Only chart-1 follows the theme, through brand-600.
+  // Fill faces are theme-fixed literals: the quiet 600 step the approved
+  // charts use, written as the literal per the composition rule's carve-out.
+  // `amber-600` is a surviving step with the same value in both themes, but the
+  // fill keeps its literal so it cannot follow that step later. Only chart-1
+  // follows the theme, through brand-600.
   "chart-1": v("brand-600"),
   "chart-2": "#16a34a",
-  "chart-3": v("amber-600"),
+  "chart-3": "#d97706",
   "chart-4": "#dc2626",
   "chart-5": "#2563a8",
   "chart-6": "#9333ea",
@@ -234,7 +251,7 @@ const lightSemantics: Readonly<Record<SemanticColorName, string>> = {
 
   "chart-1": v("brand-600"),
   "chart-2": "#16a34a",
-  "chart-3": v("amber-600"),
+  "chart-3": "#d97706",
   "chart-4": "#dc2626",
   "chart-5": "#2563a8",
   "chart-6": "#9333ea",
