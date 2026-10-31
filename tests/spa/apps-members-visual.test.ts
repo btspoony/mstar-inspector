@@ -739,26 +739,28 @@ describe("Apps list metric band (payload-proved facts only)", () => {
   const METRIC_CELL =
     /data-slot="metric-key"[^>]*>([^<]*)<\/span><span data-slot="metric-value"[^>]*>([^<]*)</g;
 
-  test("three metric keys, each an AppsPayload fact", () => {
+  test("four metric keys, each an AppsPayload fact", () => {
     const html = renderFace(APPS);
     expect([...html.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
       [t("en", "apps.metricApps"), "3"],
       [t("en", "apps.metricEnabled"), "2"],
+      [t("en", "apps.metricReviewOff"), "1"],
       [t("en", "apps.metricRejected24h"), "3"],
     ]);
-    // Exactly three: an installation or repository count is not on the payload
+    // Exactly four: an installation or repository count is not on the payload
     // and can never join the band (compass D13).
-    expect(html.match(/data-slot="metric"/g)).toHaveLength(3);
+    expect(html.match(/data-slot="metric"/g)).toHaveLength(4);
     // The header band carries its one-line description beside the title.
     expect(html).toContain(`>${t("en", "apps.headingDescription")}</p>`);
   });
 
-  test("the empty list keeps its guidance and reports three honest zeroes", () => {
+  test("the empty list keeps its guidance and reports four honest zeroes", () => {
     const empty = renderFace([]);
     expect(empty).toContain(t("en", "apps.emptyTitle"));
     expect([...empty.matchAll(METRIC_CELL)].map((cell) => [cell[1] ?? "", cell[2] ?? ""])).toEqual([
       [t("en", "apps.metricApps"), "0"],
       [t("en", "apps.metricEnabled"), "0"],
+      [t("en", "apps.metricReviewOff"), "0"],
       [t("en", "apps.metricRejected24h"), "0"],
     ]);
   });

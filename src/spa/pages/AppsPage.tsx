@@ -117,11 +117,11 @@ export function AppsView({
   const appsEmpty = state === "ok" && payload !== null && payload.apps.length === 0;
   const createAction = <CreateAppButton locale={locale} canCreate={canCreate} reason={unavailableReason} />;
 
-  // The metric band is payload arithmetic only — three figures `AppsPayload`
+  // The metric band is payload arithmetic only — four figures `AppsPayload`
   // can prove. An installation or repository count is not on that payload, so
   // it can never join them (compass D13). "Enabled" is the status axis the
   // App's own enable/disable actions name; a paused App is enabled but not
-  // reviewing, so `review_enabled` stays out of this figure.
+  // reviewing, so `review_enabled` gets its own count instead of joining it.
   const metrics =
     state === "ok" && payload
       ? [
@@ -129,6 +129,10 @@ export function AppsView({
           {
             key: t(locale, "apps.metricEnabled"),
             value: payload.apps.filter((app) => app.status !== "disabled").length,
+          },
+          {
+            key: t(locale, "apps.metricReviewOff"),
+            value: payload.apps.filter((app) => app.review_enabled === 0).length,
           },
           {
             key: t(locale, "apps.metricRejected24h"),

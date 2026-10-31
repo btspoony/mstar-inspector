@@ -147,9 +147,10 @@ export const zhCN: Dictionary = {
     /** 页头带的一行说明（同 en.ts 字段）。 */
     headingDescription: "每个应用是一个 GitHub App；安装范围在应用详情里查看。",
     create: "创建 GitHub App",
-    /** 指标带：仅由 `AppsPayload` 可证的三个数字（见 en.ts 同名字段）。 */
+    /** 指标带：仅由 `AppsPayload` 可证的四个数字（见 en.ts 同名字段）。 */
     metricApps: "应用",
     metricEnabled: "已启用",
+    metricReviewOff: "审查关闭",
     metricRejected24h: "24h 拒收",
     /** Create 控件不可用的原因（见 en.ts 同名字段）。 */
     createUnavailable: {
