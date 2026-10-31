@@ -173,14 +173,16 @@ export const en = {
     headingDescription: "Each row is one GitHub App; installation scope lives on the App detail.",
     create: "Create GitHub App",
     /**
-     * The metric band. Three figures only, each proved by `AppsPayload`:
-     * the App count, the count whose status is not `disabled` (the
-     * enable/disable axis — a paused App is still enabled), and the sum of
-     * `health.rejected24h`. Installation and repository counts are not
-     * fields of that payload and are never shown (compass D13).
+     * The metric band. Four figures, each proved by `AppsPayload`: the App
+     * count, the count whose status is not `disabled` (the enable/disable
+     * axis — a paused App is still enabled), the count whose `review_enabled`
+     * is 0 (the pause axis, the field's own value), and the sum of
+     * `health.rejected24h`. Installation and repository counts are not fields
+     * of that payload and are never shown (compass D13).
      */
     metricApps: "Apps",
     metricEnabled: "Enabled",
+    metricReviewOff: "Review off",
     metricRejected24h: "24h rejected",
     /**
      * Why the Create control is disabled. `role`: the caller is not
