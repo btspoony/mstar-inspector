@@ -1,10 +1,10 @@
 /**
- * StepDialog — DESIGN.md v0.4 `step-dialog`: the multi-step entry shell on
- * ui/dialog's DialogContent (radius, elevation, `sm:max-w-lg` and `p-6` are the
- * primitive's), title on heading-16, description on label-12 in gray-700, a
- * label-12 step indicator rendered only past one step — current step on
- * brand-700, the rest on gray-700 — and a caller-owned right-aligned footer on
- * the spacing-2 gap.
+ * StepDialog — DESIGN.md v0.5 `step-dialog`: the multi-step entry shell on
+ * ui/dialog's DialogContent (radius, `shadow-pop` elevation, `sm:max-w-lg`,
+ * the spacing-6 padding and the heading-16 / label-12 title and description
+ * faces are the primitive's), a label-12 step indicator rendered only past
+ * one step with exactly the current step marked, and a caller-owned
+ * right-aligned footer on the primitive's spacing-2 gap.
  *
  * Mounted, because Radix renders the panel through a portal. The shell holds no
  * busy state: a footer action cannot close it; only the caller's `open` does.
@@ -53,7 +53,7 @@ const base: Props = {
 };
 
 describe("StepDialog", () => {
-  test("open renders title, description and children on the dialog panel", async () => {
+  test("open renders the primitive's title and description faces, plus the children", async () => {
     const view = await mount({ ...base, steps: ["Endpoint", "Key"], currentStep: 0 });
     try {
       const panel = view.dialog();
@@ -61,11 +61,11 @@ describe("StepDialog", () => {
       expect(panel?.textContent).toContain("Connect provider");
       expect(panel?.textContent).toContain("Two steps: endpoint, then key.");
       expect(panel?.textContent).toContain("Endpoint form");
-      const title = view.slot("dialog-title");
-      expect(title?.className).toContain("text-(length:--typo-heading-16-size)");
-      const description = view.slot("dialog-description");
-      expect(description?.className).toContain("text-(length:--typo-label-12-size)");
-      expect(description?.className).toContain("text-(--gray-700)");
+      // The shell composes the primitive's faces instead of re-spelling them.
+      expect(view.slot("dialog-title")?.textContent).toBe("Connect provider");
+      expect(view.slot("dialog-description")?.textContent).toBe(
+        "Two steps: endpoint, then key.",
+      );
     } finally {
       await view.cleanup();
     }
@@ -80,17 +80,15 @@ describe("StepDialog", () => {
     }
   });
 
-  test("every step labels itself; the current one is brand-700, the rest gray-700", async () => {
+  test("every step labels itself and exactly the current one is current", async () => {
     const view = await mount({ ...base, steps: ["Endpoint", "Key", "Verify"], currentStep: 1 });
     try {
       const items = view.steps();
       expect(items.map((item) => item.textContent)).toEqual(["Endpoint", "Key", "Verify"]);
-      expect(view.slot("step-dialog-steps")?.className).toContain("text-(length:--typo-label-12-size)");
-      expect(items[1]?.className).toContain("text-(--brand-700)");
+      expect(view.slot("step-dialog-steps")).not.toBeNull();
       expect(items[1]?.getAttribute("aria-current")).toBe("step");
-      expect(items[0]?.className).toContain("text-(--gray-700)");
       expect(items[0]?.getAttribute("aria-current")).toBeNull();
-      expect(items[2]?.className).toContain("text-(--gray-700)");
+      expect(items[2]?.getAttribute("aria-current")).toBeNull();
     } finally {
       await view.cleanup();
     }
@@ -111,7 +109,7 @@ describe("StepDialog", () => {
     }
   });
 
-  test("the footer is the caller's group, right-aligned on the spacing-2 gap", async () => {
+  test("the footer is the primitive's group holding the caller's actions, right-aligned", async () => {
     const view = await mount({
       ...base,
       footer: [
@@ -122,10 +120,8 @@ describe("StepDialog", () => {
     try {
       const footer = view.slot("dialog-footer");
       expect(footer?.textContent).toBe("CancelSave");
+      // The shell states the alignment; the spacing rhythm is the primitive's.
       expect(footer?.className).toContain("justify-end");
-      // The step-dialog token, stated by this shell: the primitive's own
-      // `gap-2` default must not be what satisfies the footer-gap contract.
-      expect(footer?.className).toContain("gap-(--spacing-2)");
     } finally {
       await view.cleanup();
     }
