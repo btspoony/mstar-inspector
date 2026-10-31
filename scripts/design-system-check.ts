@@ -1,5 +1,5 @@
 /**
- * The design-system gate: one entry point, four links of one chain. CI runs this
+ * The design-system gate: one entry point, five links of one chain. CI runs this
  * and nothing else of the chain.
  *
  *   source → stylesheet   `scripts/build-tokens.ts --check` (also emits the
@@ -7,9 +7,17 @@
  *   source → fixture      `scripts/build-fixture.ts --check`
  *   fixture → DESIGN.md   `documentSync()` below
  *   source → preview      `scripts/build-design-preview.tsx --check`
+ *   consumers → source    `danglingReferences()` below — every `var(--x)` a
+ *                         hand-written stylesheet consumes names a token
  *
  * Every link is checked even when an earlier one is broken, so one run reports
  * the whole picture instead of the first failure. Exit 1 when any link is.
+ *
+ * The consumers link is the one the four generator links cannot make. A
+ * generator compares committed output against the source it is derived from; a
+ * hand-written stylesheet is derived from nothing, so retiring a token leaves
+ * its `var(--x)` resolving to nothing, the Tailwind utility that reads it
+ * painting an unset colour, and all four generator links green.
  *
  * `mstar design-md validate .` is deliberately **not** here: the CLI installs
  * from GitHub, so CI would gain an unpinned network dependency. It stays a
@@ -43,7 +51,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import type { ThemeName } from "../src/design-system/tokens";
-import { THEMES } from "../src/design-system/tokens";
+import { THEMES, resolveTheme } from "../src/design-system/tokens";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const FIXTURE_PATH = path.join(ROOT, "src/design-system/fixture.json");
@@ -58,6 +66,48 @@ const GENERATORS = [
   { script: "scripts/build-fixture.ts", label: "source → fixture" },
   { script: "scripts/build-design-preview.tsx", label: "source → preview" },
 ] as const;
+
+/**
+ * The hand-written stylesheets that consume tokens by name. They are the one
+ * consumer no generator link sees: nothing derives them, so nothing notices
+ * when a name they reference stops existing.
+ */
+export const STYLESHEET_CONSUMERS = [
+  "src/spa/styles/shadcn-theme.css",
+  "src/spa/pages.module.css",
+] as const;
+
+const REFERENCE = /var\(--([a-z0-9-]+)\)/g;
+/** A custom property the stylesheet declares itself — the bridge's own keys. */
+const DECLARATION = /(?:^|[;{\s])(--[a-z0-9-]+)\s*:/g;
+
+export interface DanglingReference {
+  readonly file: string;
+  readonly name: string;
+  readonly theme: ThemeName;
+}
+
+/**
+ * Every `var(--x)` in `css` that names neither a token of `theme` nor a property
+ * the file declares itself. Checked per theme rather than over the union: a name
+ * one theme declares and the other does not is dangling in the other one, and
+ * the union would hide exactly that.
+ */
+export function danglingReferences(file: string, css: string): DanglingReference[] {
+  const local = new Set([...css.matchAll(DECLARATION)].map((match) => (match[1] as string).slice(2)));
+  const names = [...new Set([...css.matchAll(REFERENCE)].map((match) => match[1] as string))].sort();
+  return THEMES.flatMap((theme) => {
+    const layers = resolveTheme(theme);
+    const known = new Set([
+      ...Object.keys(layers.primitive),
+      ...Object.keys(layers.semantic),
+      ...Object.keys(layers.component),
+    ]);
+    return names
+      .filter((name) => !known.has(name) && !local.has(name))
+      .map((name) => ({ file, name, theme }));
+  });
+}
 
 type Layer = Readonly<Record<string, string>>;
 export type Fixture = Readonly<Record<ThemeName, Readonly<Record<string, Layer>>>>;
@@ -394,6 +444,15 @@ if (import.meta.main) {
   })();
   report(sync);
   if (!sync.ok) brokenLinks.push("fixture → DESIGN.md");
+
+  const dangling = STYLESHEET_CONSUMERS.flatMap((file) =>
+    danglingReferences(file, readFileSync(path.join(ROOT, file), "utf8")),
+  );
+  console.log(`${dangling.length === 0 ? "ok  " : "fail"}  consumers → source`);
+  for (const { file, name, theme } of dangling) {
+    console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
+  }
+  if (dangling.length > 0) brokenLinks.push("consumers → source");
 
   if (brokenLinks.length > 0) {
     console.error(`\ndesign-system-check: ${brokenLinks.length} broken link(s): ${brokenLinks.join(", ")}`);

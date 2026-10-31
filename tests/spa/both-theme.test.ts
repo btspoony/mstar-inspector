@@ -8,8 +8,10 @@
  * against the token source. Each finding below is a way a surface ends up
  * working only in dark:
  *
- * 1. A colour named from the **primitive** layer — a palette step in a page.
- *    It paints, but it is not the page's layer to name.
+ * 1. A colour the page names instead of the token layer: a **primitive** palette
+ *    step (`bg-(--gray-200)`), a raw hex (`#9ca3af`), or a Tailwind palette
+ *    utility (`text-neutral-400`, `bg-black`). It paints, but it cannot invert,
+ *    and it is not the page's layer to name.
  * 2. A name declared nowhere (or not in both themes). It renders as
  *    `currentColor`, which looks correct exactly where another theme's value
  *    happened to be inherited.
@@ -29,6 +31,12 @@
  * happy-dom resolves no `var()` chain, so a rendered DOM cannot be asked for
  * computed colours. The observable is the token vocabulary the render carries —
  * which is exactly what a page owns.
+ *
+ * The colour probe reads rendered `class` and `style` values only. A colour that
+ * reaches the paint any other way — a rule in a stylesheet, an SVG presentation
+ * attribute, a class name composed at runtime — is invisible to it; the
+ * stylesheet forms belong to `tests/design-system/boundary.test.ts`, which names
+ * its own limits. Nothing here claims to see them.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -114,6 +122,22 @@ const TOKEN_REF = /--([a-z][a-z0-9-]*)\)/g;
 /** A custom property declared inline by the markup that then consumes it. */
 const INLINE_DECL = /--([a-z][a-z0-9-]*):/g;
 
+/**
+ * A colour painted without naming a token, in the two spellings that carry no
+ * token reference at all: a hex literal, and a Tailwind palette utility. Both
+ * are the dark-only face this pass exists to catch, and neither closes a paren
+ * group — which is exactly why the token probe alone passed them.
+ */
+const RAW_HEX = /#[0-9a-f]{3,8}\b/gi;
+const PALETTE_UTILITY = new RegExp(
+  "(?<![\\w-])(?:bg|text|border|ring|fill|stroke|from|via|to|outline|divide|placeholder|decoration)-" +
+    "(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\\d{2,3}(?![\\w-])" +
+    "|(?<![\\w-])(?:bg|text|border|ring|fill|stroke|from|via|to)-(?:black|white)(?![\\w-])",
+  "g",
+);
+/** The rendered attribute values a colour can be painted in. */
+const RENDERED_ATTRIBUTE = /\b(?:class|style)="([^"]*)"/g;
+
 const isColour = (value: string | undefined): boolean => value !== undefined && /^#[0-9a-f]{3,8}$/i.test(value);
 
 /** Token references measured per surface — the coverage count behind the verdict. */
@@ -163,14 +187,31 @@ async function mountLight(
   }
 }
 
+/** The colours one surface paints without naming a token — finding 1, raw form. */
+function rawColourFindings(surface: string, markup: string): string[] {
+  const findings: string[] = [];
+  for (const [, value] of markup.matchAll(RENDERED_ATTRIBUTE)) {
+    for (const [hit] of (value as string).matchAll(RAW_HEX)) {
+      findings.push(`${surface}: ${hit} is a raw colour, not a token`);
+    }
+    for (const [hit] of (value as string).matchAll(PALETTE_UTILITY)) {
+      findings.push(`${surface}: ${hit} is a Tailwind palette utility`);
+    }
+  }
+  return findings;
+}
+
 /** Everything one surface's markup says about the token contract. */
 function surfaceFindings(surface: string, markup: string): string[] {
+  const findings = rawColourFindings(surface, markup);
   const names = [...new Set([...markup.matchAll(TOKEN_REF)].map((match) => match[1] as string))].sort();
   measured[surface] = names.length;
   // A probe that matched nothing is not a pass: every surface names tokens.
-  if (names.length === 0) return [`${surface}: rendered no token reference`];
+  if (names.length === 0) {
+    findings.push(`${surface}: rendered no token reference`);
+    return findings;
+  }
 
-  const findings: string[] = [];
   const inline = new Set([...markup.matchAll(INLINE_DECL)].map((match) => match[1] as string));
   for (const name of names) {
     const dark = tokenValue("dark", name);
@@ -595,6 +636,27 @@ describe("both-theme acceptance pass", () => {
     // value across the themes are exactly the D14 chart fills.
     const themeFixed = NAMES.semantic.filter((name) => isColour(DARK[name]) && DARK[name] === LIGHT[name]);
     expect(themeFixed.sort()).toEqual(Object.keys(THEME_FIXED).sort());
+  });
+
+  test("the colour probe catches what the token probe could not see", () => {
+    // Each seeded surface below named no token at all, so it produced an empty
+    // finding list: that is the hole this probe closes. A palette utility and a
+    // hex literal are the two spellings a dark-only face actually takes.
+    expect(surfaceFindings("probe", '<div class="text-neutral-400">probe</div>')).toEqual([
+      "probe: text-neutral-400 is a Tailwind palette utility",
+      "probe: rendered no token reference",
+    ]);
+    expect(surfaceFindings("probe", '<div class="bg-(--surface-card) bg-black">probe</div>')).toEqual([
+      "probe: bg-black is a Tailwind palette utility",
+    ]);
+    expect(
+      surfaceFindings("probe", '<div class="text-(--text-primary)" style="color:#9ca3af">probe</div>'),
+    ).toEqual(["probe: #9ca3af is a raw colour, not a token"]);
+    // The token spellings stay legal: a token reference is not a palette
+    // utility, even where the two names collide (`neutral` is a tone family).
+    expect(surfaceFindings("probe", '<div class="border-(--tone-neutral-border) bg-transparent">probe</div>')).toEqual(
+      [],
+    );
   });
 
   test("the sidebar chrome the signed-in surfaces sit on is theme-complete too", () => {

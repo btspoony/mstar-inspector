@@ -563,12 +563,15 @@ The SSR face landed with the dashboard surface pass (2026-11-01):
 semantic and component layers, reading the generated value table rather than a
 hand copy of the palette.
 
-`tests/design-system/boundary.test.ts` enforces both halves: the **module import
-specifier** for TypeScript files under `src/` outside `src/design-system/`
-(`@design-system` only), and the **token layer** — no consumer file (`.ts`,
-`.tsx`, `.css`, `.html`) may name a palette step, with the generated stylesheet
-as the single declaration site. It reads source text, so a stylesheet, an HTML
-shell and an inline `style` attribute are all in scope. The palette is
+`tests/design-system/boundary.test.ts` enforces three things: the **module
+import specifier** for TypeScript files under `src/` outside `src/design-system/`
+(`@design-system` only); the **token layer** — no consumer file (`.ts`, `.tsx`,
+`.css`, `.html`) may name a palette step, with the generated stylesheet as the
+single declaration site; and the **theme mechanism** — no file under `src/`,
+the module included, may write a `dark:` variant, because the theme is the
+`data-theme` attribute and Tailwind's `dark:` follows the OS preference
+instead. The first two read source text, so a stylesheet, an HTML shell and an
+inline `style` attribute are all in scope. The palette is
 therefore droppable: the D14 reduction deleted 62 of the 96 steps the old
 stylesheet declared without touching a component face.
 
@@ -1036,8 +1039,10 @@ their own beyond what the component layer already declares:
 The chain commands: `bun scripts/build-tokens.ts [--check]`,
 `bun scripts/build-fixture.ts [--check]`,
 `bun scripts/build-design-preview.tsx [--check]`, and
-`bun scripts/design-system-check.ts` (all four links — the one entry point CI
-runs), plus `mstar design-md validate .` (local only; the CLI installs from
+`bun scripts/design-system-check.ts` (all five links — the four generated ones
+above, plus the hand-written stylesheets whose `var(--x)` targets must still
+exist — the one entry point CI runs), plus `mstar design-md validate .` (local
+only; the CLI installs from
 GitHub, so CI does not take on that network dependency). `bun run build:spa`
 is the build: it runs the preview generator (which refuses to emit a page it
 cannot draw) and then vite, so every build writes `dist/design-preview.html`

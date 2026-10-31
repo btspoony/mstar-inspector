@@ -20,8 +20,10 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { SectionCard } from "../../src/spa/components/SectionCard";
-import { PageNotice } from "../../src/spa/pages/PageNotice";
+import { PageNotice, type OpNotice } from "../../src/spa/pages/PageNotice";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
+import type { SettingsManagePayload } from "../../src/spa/pages/data";
+import { ProvidersSection } from "../../src/spa/pages/settings-providers";
 import { withLocation } from "./browser-stub";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
@@ -37,7 +39,7 @@ const pageHeader = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
 /** A manage-face settings payload, so the detail shell renders its real body. */
-const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
+const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
   workspace_id: "ws_0123456789abcdefghijkl",
   app: {
@@ -68,6 +70,37 @@ const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
   sandbox_images: [{ id: "omp", enabled: true }],
   installations: [],
   deliveries: [],
+});
+
+/**
+ * The same payload with one configured provider: the precondition for the group
+ * card the providers section renders.
+ */
+const providersPayload = (): SettingsManagePayload => ({
+  ...detailPayload(),
+  keys: [
+    {
+      provider: "openai",
+      keyId: "0123456789abcdef",
+      last4: "abcd",
+      updatedAt: null,
+      verifiedAt: null,
+      verifiedStatus: null,
+    },
+  ],
+  provider_catalog: [
+    {
+      id: "openai",
+      label: "OpenAI",
+      tier: "builtin",
+      base_url: null,
+      api: null,
+      models: [],
+      verifiable: true,
+      eligibility: "builtin",
+      display_group: "common",
+    },
+  ],
 });
 
 describe("SectionCard tier idiom (AD-591)", () => {
@@ -278,7 +311,26 @@ describe("configuration sections (providers / chains / seats)", () => {
     expect(groupCard).toContain("<StatusBadge");
     expect(settingsTabSource).toContain('from "../components/GroupCard"');
     expect(settingsTabSource).toContain('from "../components/ListRow"');
-    expect(settingsTabSource).toMatch(/import \{[^}]*\bStatusBadge\b[^}]*\} from "@design-system"/);
+    // The pill reaches the group card by composition, not by an import line's
+    // spelling: the rendered card carries the TIER as its own status badge. The
+    // per-key pills below it are a different slot, so the label is what
+    // separates the two — `data-slot` alone would be satisfied by either.
+    expect(
+      renderToStaticMarkup(
+        createElement(ProvidersSection, {
+          locale: "en",
+          payload: providersPayload(),
+          onVerify: async (): Promise<OpNotice> => ({ kind: "success", message: "" }),
+          onSettings: async (): Promise<OpNotice> => ({ kind: "success", message: "" }),
+          onPending: () => {},
+          notice: null,
+          removeOutcome: null,
+          onOutcome: () => {},
+        }),
+      ),
+    ).toContain(
+      `data-slot="status-badge" data-tone="neutral" data-strength="soft">${t("en", "settings.providers.tier.builtin")}</span>`,
+    );
   });
 });
 

@@ -16,7 +16,6 @@ export * from "./primitives";
 export * from "./patterns";
 export { cn } from "./cn";
 export {
-  OPS_SURFACE_ATTR,
   THEMES,
   UnresolvedTokenError,
   opsSurface,

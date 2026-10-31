@@ -8,6 +8,8 @@
  * exists to establish, so this guard rejects them.
  *
  * Scope: every TypeScript file under `src/` outside `src/design-system/`.
+ * The theme-mechanism guard at the end is the one exception: a class string is
+ * not an import, so the module's copy-in primitives are in its scope too.
  * Deliberately out of scope:
  * - `src/design-system/**` itself — internals import each other freely;
  * - `scripts/**` — the generation chain (tasks 3-7) reads the DOM-free token
@@ -49,6 +51,27 @@ function inModule(path: string): boolean {
 }
 
 /**
+ * Repo-relative files under `src/` whose name passes `match`, skipping any
+ * directory `skip` vetoes. The walks below differ only in that predicate, so a
+ * new one cannot quietly scan a different tree from the ones beside it.
+ */
+function sourceFiles(
+  { match, skip }: { match: RegExp; skip?: (dir: string) => boolean },
+  dir: string = SCAN_ROOT,
+): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      if (skip?.(full) !== true) out.push(...sourceFiles({ match, skip }, full));
+    } else if (match.test(entry)) {
+      out.push(relative(REPO, full));
+    }
+  }
+  return out;
+}
+
+/**
  * Violation rule label for one specifier, or `null` when it is legal.
  *
  * Both branches resolve to an absolute path and are judged by `inModule`, so a
@@ -83,20 +106,6 @@ function scanContent(content: string, file: string): Violation[] {
     });
   }
   return violations;
-}
-
-/** Repo-relative TS/JS module files under `src/`, minus the module itself. */
-function consumerFiles(dir: string = SCAN_ROOT): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      if (!inModule(full)) out.push(...consumerFiles(full));
-    } else if (MODULE_FILE.test(entry)) {
-      out.push(relative(REPO, full));
-    }
-  }
-  return out;
 }
 
 describe("design-system module boundary", () => {
@@ -145,7 +154,7 @@ describe("design-system module boundary", () => {
   });
 
   test("no consumer imports the module internals or bypasses the entry alias", () => {
-    const files = consumerFiles();
+    const files = sourceFiles({ match: MODULE_FILE, skip: inModule });
     // Guard against a scan that silently found nothing (wrong root, moved tree).
     expect(files.length).toBeGreaterThan(0);
     expect(files.filter((file) => inModule(join(REPO, file)))).toEqual([]);
@@ -194,24 +203,11 @@ const PALETTE_STEP = new RegExp(
 /** Every syntax a consumer can write a token reference in. */
 const TOKEN_CONSUMER_FILE = /\.(?:css|html|m?[jt]sx?)$/;
 
-/** Repo-relative consumer sources under `src/`, minus the module and the declaration site. */
-function tokenConsumerFiles(dir: string = SCAN_ROOT): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      if (!inModule(full)) out.push(...tokenConsumerFiles(full));
-    } else if (TOKEN_CONSUMER_FILE.test(entry)) {
-      const file = relative(REPO, full);
-      if (file !== PALETTE_DECLARATION_SITE) out.push(file);
-    }
-  }
-  return out;
-}
-
 describe("token layer boundary", () => {
   test("no consumer names a primitive palette step", () => {
-    const files = tokenConsumerFiles();
+    const files = sourceFiles({ match: TOKEN_CONSUMER_FILE, skip: inModule }).filter(
+      (file) => file !== PALETTE_DECLARATION_SITE,
+    );
     // Guard against a scan that silently found nothing (wrong root, moved tree).
     expect(files.length).toBeGreaterThan(0);
 
@@ -242,5 +238,54 @@ describe("token layer boundary", () => {
     // and a family the D14 reduction retired whole.
     expect(matches("var(--gray-1000)")).toEqual(["--gray-1000"]);
     expect(matches("var(--teal-700)")).toEqual(["--teal-700"]);
+  });
+});
+
+/**
+ * The third guard on the same boundary: Tailwind's `dark:` variant keys off
+ * `prefers-color-scheme`, while this app's theme is the `data-theme` attribute
+ * the generated stylesheet defines. A `dark:` utility therefore paints the OS
+ * preference instead of the stored theme — the defect the 2026-11-01 migration
+ * removed from twenty-one utilities at once. The rule lives in
+ * `.mstar/knowledge/best-practices/tailwind-dark-variant-vs-data-theme.md`; this
+ * is the repo-wide guard it asks for, so a `dark:` cannot re-enter one
+ * primitive, pattern or page at a time. The module is walked too: the copy-in
+ * primitives are where class strings actually live.
+ *
+ * Blind spot, by construction: a class name composed at runtime (`\`dark:${x}\``)
+ * never appears whole in the source. Nothing prohibits that composition, and no
+ * text scan could see it — the palette guard's blind spot, one variant over.
+ */
+const DARK_VARIANT = /(?<![\w-])dark:[a-z[(]/g;
+
+describe("theme mechanism boundary", () => {
+  test("no source file writes a dark: variant", () => {
+    const files = sourceFiles({ match: TOKEN_CONSUMER_FILE });
+    // Guard against a scan that silently found nothing (wrong root, moved tree).
+    expect(files.length).toBeGreaterThan(0);
+
+    const hits = files.flatMap((file) =>
+      readFileSync(join(REPO, file), "utf8")
+        .split("\n")
+        .flatMap((line, index) =>
+          [...line.matchAll(DARK_VARIANT)].map(
+            (match) => `${file}:${index + 1}: [dark-variant] ${line.trim()}`,
+          ),
+        ),
+    );
+    expect(hits, `sources split on the OS scheme instead of data-theme:\n${hits.join("\n")}`).toEqual([]);
+  });
+
+  test("the dark: matcher is precise: the theme attribute and prose are legal", () => {
+    const matches = (text: string) => [...text.matchAll(DARK_VARIANT)].length;
+    expect(matches('className="dark:text-white dark:bg-black"')).toBe(2);
+    // The arbitrary-property spelling is the same defect.
+    expect(matches('["dark:[color:var(--x)]"]')).toBe(1);
+    // A ternary picking a raw palette class is the palette guard's finding, not
+    // this one: no variant is written.
+    expect(matches("isDark ? 'bg-black' : 'bg-white'")).toBe(0);
+    // The theme is an attribute, and a comment may name the rule it forbids.
+    expect(matches('document.documentElement.dataset.theme = "dark"')).toBe(0);
+    expect(matches("// never write a dark: utility here")).toBe(0);
   });
 });
