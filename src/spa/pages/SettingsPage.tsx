@@ -980,14 +980,14 @@ export async function submitWorkspaceName(
  * Renames the workspace — owner-only, enforced by the server (the page gates
  * on the role before rendering it). Its value is the workspace's STORED name,
  * resolved through the live membership list, so a value captured at mount
- * cannot go stale. The card has no path to rewrite: the URL is the id.
+ * cannot go stale. The control has no path to rewrite: the URL is the id.
  */
 export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["locale"]; storedName: string }) {
   // Only what the operator has typed is local; the display falls back to the
   // stored name, so an external change lands without a mount-time copy.
   const [draft, setDraft] = useState<string | null>(null);
   const name = draft ?? storedName;
-  // Card-local channel: an op outcome never rides the page-level notice.
+  // Section-local channel: an op outcome never rides the page-level notice.
   const [nameNotice, setNameNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
   const renameMembership = useRenameMembership();
@@ -1015,34 +1015,29 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
   }
 
   return (
-    <SectionCard tier="secondary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "workspace.nameHeading")}</SectionCardTitle>
-        <CardDescription>{t(locale, "workspace.nameDescription")}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="workspace-name">
-              {t(locale, "workspace.nameLabel")}
-            </label>
-            <Input
-              id="workspace-name"
-              className="w-64"
-              autoComplete="off"
-              value={name}
-              onChange={(event) => setDraft(event.target.value)}
-            />
-          </div>
-          <Button type="submit" disabled={busy}>
-            {t(locale, "workspace.nameSave")}
-          </Button>
-        </form>
-        <div className="mt-3">
-          <NoticeRegion notice={nameNotice} />
+    <FlowSection
+      title={t(locale, "workspace.nameHeading")}
+      subtitle={t(locale, "workspace.nameDescription")}
+    >
+      <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-medium" htmlFor="workspace-name">
+            {t(locale, "workspace.nameLabel")}
+          </label>
+          <Input
+            id="workspace-name"
+            className="w-64"
+            autoComplete="off"
+            value={name}
+            onChange={(event) => setDraft(event.target.value)}
+          />
         </div>
-      </CardContent>
-    </SectionCard>
+        <Button type="submit" disabled={busy}>
+          {t(locale, "workspace.nameSave")}
+        </Button>
+      </form>
+      <NoticeRegion notice={nameNotice} />
+    </FlowSection>
   );
 }
 
