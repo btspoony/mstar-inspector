@@ -5,8 +5,10 @@
   Origin:   the design-system prototype (2026-10-31); only this copy is tracked.
   Revision: r3 (2026-10-31) — the data-honesty correction; r2 was the
             user-confirmed drafting baseline and r3 re-presented no design choice.
-  Copied:   2026-10-31. Verbatim apart from this header; nothing in the source
-            was environment-specific, so nothing was redacted.
+            Completed 2026-11-01: the two theme panels' band and the sandbox-image
+            line still carried figures no payload produces; both corrected in place.
+  Copied:   2026-10-31. Verbatim apart from this header and that completion;
+            nothing in the source was environment-specific, so nothing was redacted.
 
   Read-only from here on. This file is the design, not a spec: where it and
   the design compass (the 2026-10-31 direction record) disagree, the compass
@@ -394,7 +396,9 @@
       <li><b>r3</b>（当前）— <b>数据诚实性修正</b>：列表与安装表移除了载荷证明不了的数字。
         <code>AppsPayload</code> 没有安装数、也没有仓库数，所以列表只展示它能证明的字段
         （身份、状态、最近投递、24h 拒收）；安装表的「仓库」列删掉，因为设置载荷里没有它。
-        视觉语言与布局不变，去掉的是编造的数据。</li>
+        视觉语言与布局不变，去掉的是编造的数据。
+        2026-11-01 补齐同一修正漏掉的两处：§8 两块主题面板的指标带（「安装账号」换成列表
+        自己的四项），以及详情页沙箱镜像的「最近拉取」时间（设置载荷里没有它）。</li>
     </ul>
   </div>
 
@@ -664,7 +668,7 @@
                 <div class="sect-h"><span class="t">运行与 Harness</span><span class="s">每次推送自动触发</span></div>
                 <dl class="kv">
                   <dt>触发方式</dt><dd class="plain">每次推送</dd>
-                  <dt>沙箱镜像</dt><dd>sandbox-1.0 · 最近拉取 2 小时前</dd>
+                  <dt>沙箱镜像</dt><dd>sandbox-1.0</dd>
                 </dl>
               </div>
               <div class="sect">
@@ -788,7 +792,8 @@
           </div>
           <div class="metrics" style="margin-top:14px">
             <div class="metric"><div class="k">应用</div><div class="v" style="font-size:18px">3</div></div>
-            <div class="metric"><div class="k">安装账号</div><div class="v" style="font-size:18px">6</div></div>
+            <div class="metric"><div class="k">已启用</div><div class="v" style="font-size:18px">2</div></div>
+            <div class="metric"><div class="k">审查关闭</div><div class="v" style="font-size:18px">1</div></div>
             <div class="metric bad"><div class="k">24h 拒收</div><div class="v" style="font-size:18px">2</div></div>
           </div>
         </div>
@@ -821,7 +826,8 @@
           </div>
           <div class="metrics" style="margin-top:14px">
             <div class="metric"><div class="k">应用</div><div class="v" style="font-size:18px">3</div></div>
-            <div class="metric"><div class="k">安装账号</div><div class="v" style="font-size:18px">6</div></div>
+            <div class="metric"><div class="k">已启用</div><div class="v" style="font-size:18px">2</div></div>
+            <div class="metric"><div class="k">审查关闭</div><div class="v" style="font-size:18px">1</div></div>
             <div class="metric bad"><div class="k">24h 拒收</div><div class="v" style="font-size:18px">2</div></div>
           </div>
         </div>
