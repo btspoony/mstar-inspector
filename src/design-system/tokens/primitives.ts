@@ -3,8 +3,10 @@
  * semantic layer names the jobs.
  *
  * The colour palette is compass D14/D14a: the 96 steps `tokens.css` declared
- * are reduced to the 26 the semantic bands consume, plus 11 **transitional**
- * steps that still have live consumers owned by later plans. Bands, not a
+ * are reduced to the 26 the semantic bands consume, plus the **transitional**
+ * steps that still have live consumers owned by later plans (a live list, not
+ * a fixed number — it shrinks in the commit that migrates each last
+ * consumer). Bands, not a
  * hand-picked list, decide the survivors — surfaces from the neutral solids
  * ladder, text from `gray-600/700/900/1000`, hairlines from
  * `gray-alpha-400/500`, tone-backgrounds from each family's 100 step,
@@ -109,7 +111,9 @@ const survivorLight: SurvivorColors = {
  * consumer outside `src/design-system/` still reads it, and it leaves in the
  * commit that migrates that last consumer. `brand-800`, `red-800` and
  * `green-900` left that way in task 3 — the bridge's hover faces and the
- * component-block notice foregrounds were their last readers.
+ * component-block notice foregrounds were their last readers — and `teal-700`,
+ * `pink-700` and `gray-alpha-300` left with plan 202 task 4, where the charts
+ * moved onto the six closed slots and ListRow onto `border-subtle`.
  */
 const transitionalValues = {
   // admin.html's inline styles; plan 204 re-tokens that console.
@@ -118,15 +122,12 @@ const transitionalValues = {
   // The SSR dashboard face, re-pointed onto semantics.
   "gray-100": { dark: "#15181f", light: "#fafbfd", owner: "203 (SSR views.ts)" },
   "gray-400": { dark: "#39404d", light: "#ccd4df", owner: "203 (SSR views.ts)" },
-  // Primitives and patterns rebuilt on the semantic layer.
+  // Primitives rebuilt on the semantic layer.
   "gray-500": { dark: "#4d5563", light: "#9aa5b4", owner: "202 (ui primitives)" },
-  "gray-alpha-300": { dark: "#ffffff21", light: "#1019281a", owner: "202 (ListRow)" },
-  // Charts onto the closed slots, and the SSR face's notices.
+  // The SSR face's notices.
   "amber-800": { dark: "#fcd34d", light: "#92400e", owner: "203 (SSR views.ts)" },
   "amber-900": { dark: "#fde68a", light: "#78350f", owner: "203 (SSR views.ts)" },
   "red-900": { dark: "#fecaca", light: "#7f1d1d", owner: "203 (SSR views.ts)" },
-  "teal-700": { dark: "#2dd4bf", light: "#0d9488", owner: "203 (charts.css)" },
-  "pink-700": { dark: "#f472b6", light: "#db2777", owner: "203 (charts.css)" },
 } as const;
 
 export type TransitionalStep = keyof typeof transitionalValues;

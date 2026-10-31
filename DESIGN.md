@@ -43,12 +43,9 @@ colors:
   gray-100: "#15181f"
   gray-400: "#39404d"
   gray-500: "#4d5563"
-  gray-alpha-300: "#ffffff21"
   amber-800: "#fcd34d"
   amber-900: "#fde68a"
   red-900: "#fecaca"
-  teal-700: "#2dd4bf"
-  pink-700: "#f472b6"
   # semantic — surfaces
   surface-page: "#0a0c10"
   surface-shell: "#0d1015"
@@ -141,12 +138,9 @@ themes:
       gray-100: "#15181f"
       gray-400: "#39404d"
       gray-500: "#4d5563"
-      gray-alpha-300: "#ffffff21"
       amber-800: "#fcd34d"
       amber-900: "#fde68a"
       red-900: "#fecaca"
-      teal-700: "#2dd4bf"
-      pink-700: "#f472b6"
       # semantic — surfaces
       surface-page: "#0a0c10"
       surface-shell: "#0d1015"
@@ -231,12 +225,9 @@ themes:
       gray-100: "#fafbfd"
       gray-400: "#ccd4df"
       gray-500: "#9aa5b4"
-      gray-alpha-300: "#1019281a"
       amber-800: "#92400e"
       amber-900: "#78350f"
       red-900: "#7f1d1d"
-      teal-700: "#0d9488"
-      pink-700: "#db2777"
       # semantic — surfaces
       surface-page: "#ffffff"
       surface-shell: "#f7f9fb"
@@ -583,7 +574,7 @@ one file under `themes:`.
 
 | Layer | Count | Contains | May reference |
 |-------|-------|----------|---------------|
-| primitive | 43 | 37 palette steps (26 survivors + 11 transitional), 2 font stacks, 4 breakpoints | nothing — raw values only |
+| primitive | 40 | 34 palette steps (26 survivors + 8 transitional), 2 font stacks, 4 breakpoints | nothing — raw values only |
 | semantic | 126 | 47 themed colours, 5 control/row heights, 3 radii, 9 spacing steps, 55 typography properties, 5 motion values, 2 shadows | the primitive layer |
 | component | 33 | button variants and sizes, the text field, the card | **the semantic layer only**, with two recorded carve-outs: `button-primary-hover-bg` names the primitive `brand-600` (the approved r3 hover — the accent fg equals the accent solid, so hovering through it would be invisible), and the padding values (`button-padding-xs/sm/md`, `field-padding`) are literals, not tokens |
 
@@ -600,7 +591,7 @@ rule: the **module import specifier** for TypeScript files under `src/` outside
 `src/design-system/` (`@design-system` only). It reads import statements, not
 CSS declarations or inline `style` attributes, so it cannot see a primitive
 variable in a stylesheet or an HTML file. The palette is nevertheless
-droppable — the D14 reduction deleted 59 of the 96 steps the old stylesheet
+droppable — the D14 reduction deleted 62 of the 96 steps the old stylesheet
 declared without touching a component face. The generated stylesheet carries
 the whole contract.
 
@@ -623,23 +614,24 @@ survivors; survivors decide the palette:
 **Survivors (26):** `background-100/200/300`; `gray-200/600/700/900/1000`;
 `gray-alpha-400/500`; `brand-600/700`; `blue-700`; `red-100/400/700`;
 `amber-100/400/600/700`; `green-100/300/400/700/800`; `purple-700`. The teal
-and pink families are removed **except `teal-700` and `pink-700`**: those two
-steps are on the transitional list below because `src/spa/components/charts/charts.css`
-still fills from them, and they leave with plan 203, which migrates that file
-onto the six closed chart slots.
+and pink families are gone entirely: their last two steps left with plan 202
+task 4, which moved `src/spa/components/charts/charts.css` onto the six closed
+chart slots (the chart fills carry their own theme-fixed literals — see the
+chart split below — so no palette step answers a chart family any more).
 
 Every removed step recorded the D14 zero-reference search before it left
 (`grep -rnF "(--<step>)" src tests scripts` and the declaration-site search
 over `tokens.css`, `DESIGN.md` and `src/design-system`, both empty) — an
-observation, not an assertion. 59 of the 96 declared steps went that way.
+observation, not an assertion. 62 of the 96 declared steps went that way.
 
 ### The D14a transitional live list
 
-Eleven steps survive the band rule only because a later plan still reads them.
+Eight steps survive the band rule only because a later plan still reads them.
 This is a **live list, not a fixed number**: a step belongs to it only while a
 consumer outside `src/design-system/` still reads it, and it leaves in the
 commit that migrates that last consumer (`brand-800`, `red-800` and
-`green-900` left that way already). The generated stylesheet prints the owner
+`green-900` left that way; `gray-alpha-300`, `teal-700` and `pink-700` left
+with plan 202 task 4). The generated stylesheet prints the owner
 above every transitional declaration; that comment is authoritative.
 
 | Step | Closed by |
@@ -647,8 +639,6 @@ above every transitional declaration; that comment is authoritative.
 | `gray-800`, `gray-alpha-200` | plan 204 (admin.html) |
 | `gray-100`, `gray-400`, `amber-800`, `amber-900`, `red-900` | plan 203 (SSR views.ts) |
 | `gray-500` | plan 202 (ui primitives) |
-| `gray-alpha-300` | plan 202 (ListRow) |
-| `teal-700`, `pink-700` | plan 203 (charts.css) |
 
 Nothing else may consume them; a new consumer of a transitional step is a
 defect, not a loophole.

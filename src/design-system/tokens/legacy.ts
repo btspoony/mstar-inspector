@@ -21,7 +21,6 @@ const RADIUS = "202-203 (views.ts, pages.module.css, admin.html)";
 const CONTROL = "203 (SSR views.ts)";
 const NOTICES = "203 (pages.module.css, SSR views.ts)";
 const SIDEBAR = "203 (SSR views.ts)";
-const STATCARD = "202 (StatCard)";
 
 export interface LegacyToken {
   readonly name: string;
@@ -37,7 +36,6 @@ export const legacyTokens: readonly LegacyToken[] = [
   // compares the two faces.
   { name: "rounded-sm", value: v("radius-control"), owner: RADIUS },
   { name: "rounded-md", value: v("radius-container"), owner: RADIUS },
-  { name: "rounded-full", value: v("radius-pill"), owner: STATCARD },
 
   // Control sizing on the SSR face, until plan 203 composes the component layer.
   { name: "button-primary-height", value: v("control-h-md"), owner: CONTROL },

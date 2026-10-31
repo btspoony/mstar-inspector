@@ -69,9 +69,6 @@
   /* D14a transitional — its last consumer is closed by plan 202 (ui primitives);
      it leaves this set in the commit that migrates that consumer. */
   --gray-500: #4d5563;
-  /* D14a transitional — its last consumer is closed by plan 202 (ListRow);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-alpha-300: #ffffff21;
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --amber-800: #fcd34d;
@@ -81,12 +78,6 @@
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --red-900: #fecaca;
-  /* D14a transitional — its last consumer is closed by plan 203 (charts.css);
-     it leaves this set in the commit that migrates that consumer. */
-  --teal-700: #2dd4bf;
-  /* D14a transitional — its last consumer is closed by plan 203 (charts.css);
-     it leaves this set in the commit that migrates that consumer. */
-  --pink-700: #f472b6;
 
   /* semantic · shared + dark */
   --control-h-xs: 24px;
@@ -258,8 +249,6 @@
   --rounded-sm: var(--radius-control);
   /* closed by plan 202-203 (views.ts, pages.module.css, admin.html) */
   --rounded-md: var(--radius-container);
-  /* closed by plan 202 (StatCard) */
-  --rounded-full: var(--radius-pill);
   /* closed by plan 203 (SSR views.ts) */
   --button-primary-height: var(--control-h-md);
   /* closed by plan 203 (SSR views.ts) */
@@ -346,9 +335,6 @@
   /* D14a transitional — its last consumer is closed by plan 202 (ui primitives);
      it leaves this set in the commit that migrates that consumer. */
   --gray-500: #9aa5b4;
-  /* D14a transitional — its last consumer is closed by plan 202 (ListRow);
-     it leaves this set in the commit that migrates that consumer. */
-  --gray-alpha-300: #1019281a;
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --amber-800: #92400e;
@@ -358,12 +344,6 @@
   /* D14a transitional — its last consumer is closed by plan 203 (SSR views.ts);
      it leaves this set in the commit that migrates that consumer. */
   --red-900: #7f1d1d;
-  /* D14a transitional — its last consumer is closed by plan 203 (charts.css);
-     it leaves this set in the commit that migrates that consumer. */
-  --teal-700: #0d9488;
-  /* D14a transitional — its last consumer is closed by plan 203 (charts.css);
-     it leaves this set in the commit that migrates that consumer. */
-  --pink-700: #db2777;
 
   /* semantic · light (only the names whose declaration differs) */
   --surface-shell: #f7f9fb;

@@ -41,12 +41,9 @@
         "gray-100": "#15181f",
         "gray-400": "#39404d",
         "gray-500": "#4d5563",
-        "gray-alpha-300": "#ffffff21",
         "amber-800": "#fcd34d",
         "amber-900": "#fde68a",
-        "red-900": "#fecaca",
-        "teal-700": "#2dd4bf",
-        "pink-700": "#f472b6"
+        "red-900": "#fecaca"
       },
       "semantic": {
         "control-h-xs": "24px",
@@ -252,12 +249,9 @@
         "gray-100": "#fafbfd",
         "gray-400": "#ccd4df",
         "gray-500": "#9aa5b4",
-        "gray-alpha-300": "#1019281a",
         "amber-800": "#92400e",
         "amber-900": "#78350f",
-        "red-900": "#7f1d1d",
-        "teal-700": "#0d9488",
-        "pink-700": "#db2777"
+        "red-900": "#7f1d1d"
       },
       "semantic": {
         "control-h-xs": "24px",

@@ -72,7 +72,7 @@ describe("generated tokens.css", () => {
     expect(css.slice(0, 400)).toContain("scripts/build-tokens.ts");
   });
 
-  test("declares 26 survivors and 11 transitional steps, and no other palette step", () => {
+  test("declares 26 survivors and 8 transitional steps, and no other palette step", () => {
     const declaredSteps = [
       ...Object.keys(ROOT),
       ...Object.keys(LIGHT),
@@ -81,7 +81,7 @@ describe("generated tokens.css", () => {
     expect(unique).toEqual(
       [...survivorSteps, ...transitionalSteps.map((s) => s.name)].sort(),
     );
-    expect(unique).toHaveLength(37);
+    expect(unique).toHaveLength(34);
   });
 
   test("every dark semantic and component declaration reaches :root at its source value", () => {
@@ -111,8 +111,9 @@ describe("generated tokens.css", () => {
 
   test("no removed step reappears as a declaration", () => {
     const declared = new Set([...Object.keys(ROOT), ...Object.keys(LIGHT)]);
-    // The families D14 emptied out entirely; their single transitional chart
-    // steps are the only exception, and they are asserted above.
+    // The families D14 emptied out entirely — after task 4 the chart steps
+    // that used to survive transitionally are gone too, so nothing of teal or
+    // pink may remain.
     for (const family of ["blue", "teal", "pink", "purple"]) {
       const survivors = survivorSteps.filter((step) => step.startsWith(`${family}-`));
       const transitional = transitionalSteps
