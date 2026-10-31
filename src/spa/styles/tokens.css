@@ -258,28 +258,8 @@
   --rounded-sm: var(--radius-control);
   /* closed by plan 202-203 (views.ts, pages.module.css, admin.html) */
   --rounded-md: var(--radius-container);
-  /* closed by plan 202 (StatusBadge) */
+  /* closed by plan 202 (StatCard) */
   --rounded-full: var(--radius-pill);
-  /* closed by plan 202 (StatusBadge) */
-  --badge-bg: var(--surface-inset);
-  /* closed by plan 202 (StatusBadge) */
-  --badge-fg: var(--text-secondary);
-  /* closed by plan 202 (StatusBadge) */
-  --badge-radius: var(--radius-pill);
-  /* closed by plan 202 (StatusBadge) */
-  --badge-height: 20px;
-  /* closed by plan 202 (StatusBadge) */
-  --badge-success-bg: var(--tone-success-bg);
-  /* closed by plan 202 (StatusBadge) */
-  --badge-success-fg: var(--tone-success-fg);
-  /* closed by plan 202 (StatusBadge) */
-  --badge-warn-bg: var(--tone-warn-bg);
-  /* closed by plan 202 (StatusBadge) */
-  --badge-warn-fg: var(--tone-warn-fg);
-  /* closed by plan 202 (StatusBadge) */
-  --badge-error-bg: var(--tone-danger-bg);
-  /* closed by plan 202 (StatusBadge) */
-  --badge-error-fg: var(--tone-danger-fg);
   /* closed by plan 203 (SSR views.ts) */
   --button-primary-height: var(--control-h-md);
   /* closed by plan 203 (SSR views.ts) */

@@ -14,7 +14,7 @@ import {
   GroupCardBody,
   GroupCardHeader,
 } from "../../../src/spa/components/GroupCard";
-import { StatusBadge } from "../../../src/spa/components/StatusBadge";
+import { StatusBadge } from "../../../src/design-system";
 
 const html = renderToStaticMarkup(
   createElement(

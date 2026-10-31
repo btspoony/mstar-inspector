@@ -194,9 +194,9 @@ describe("tier badge", () => {
       }),
     );
     // Exactly one warning-toned pill on the page: the template tier.
-    expect(html.split('data-tone="warning"').length - 1).toBe(1);
+    expect(html.split('data-tone="warn"').length - 1).toBe(1);
     const badgeIn = (label: string) => groupHeaderOf(html, label).match(/data-tone="([a-z]+)"/g);
-    expect(badgeIn("workers-ai label"), "template tier").toEqual(['data-tone="warning"']);
+    expect(badgeIn("workers-ai label"), "template tier").toEqual(['data-tone="warn"']);
     expect(badgeIn("anthropic label"), "builtin tier").toEqual(['data-tone="neutral"']);
     expect(badgeIn("my-gateway"), "custom tier").toEqual(['data-tone="neutral"']);
 

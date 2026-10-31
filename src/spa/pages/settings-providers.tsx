@@ -1,11 +1,18 @@
 import { useState } from "react";
 import { Plus } from "lucide-react";
 import { t } from "../../i18n";
-import { Button, CardAction, CardContent, CardDescription, CardHeader } from "@design-system";
+import {
+  Button,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  StatusBadge,
+  type StatusTone,
+} from "@design-system";
 import { GroupCard, GroupCardBody, GroupCardHeader } from "../components/GroupCard";
 import { ListRow, ListRowGroup } from "../components/ListRow";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
-import { StatusBadge, type StatusTone } from "../components/StatusBadge";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import type { CatalogProvider, SettingsManagePayload } from "./data";
@@ -21,15 +28,16 @@ import type { PendingAction } from "./SettingsPage";
  */
 const KEY_STATUS = {
   ok: { tone: "success", label: "settings.providers.status.ok" },
-  reachable: { tone: "brand", label: "settings.providers.status.reachable" },
-  failed: { tone: "error", label: "settings.providers.status.failed" },
+  // The probe could not reject the key: the accent tone, not success.
+  reachable: { tone: "accent", label: "settings.providers.status.reachable" },
+  failed: { tone: "danger", label: "settings.providers.status.failed" },
   unverified: { tone: "neutral", label: "settings.providers.status.unverified" },
 } as const satisfies Record<string, { tone: StatusTone; label: string }>;
 
 /** Tier badge faces: the template tier is the one gold surface. */
 const TIER_FACE = {
   builtin: { tone: "neutral", label: "settings.providers.tier.builtin" },
-  template: { tone: "warning", label: "settings.providers.tier.template" },
+  template: { tone: "warn", label: "settings.providers.tier.template" },
   custom: { tone: "neutral", label: "settings.providers.tier.custom" },
 } as const satisfies Record<string, { tone: StatusTone; label: string }>;
 

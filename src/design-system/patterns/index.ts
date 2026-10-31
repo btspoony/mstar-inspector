@@ -4,3 +4,4 @@
  * these through `@design-system`, never by path.
  */
 export * from "./flow-section";
+export * from "./status-badge";

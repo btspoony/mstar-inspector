@@ -324,7 +324,7 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
     expect(groupCard).toContain("<StatusBadge");
     expect(settingsTabSource).toContain('from "../components/GroupCard"');
     expect(settingsTabSource).toContain('from "../components/ListRow"');
-    expect(settingsTabSource).toContain('from "../components/StatusBadge"');
+    expect(settingsTabSource).toMatch(/import \{[^}]*\bStatusBadge\b[^}]*\} from "@design-system"/);
   });
 });
 

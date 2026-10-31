@@ -266,8 +266,8 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       )?.[1] ?? "";
     for (const [overrides, label, tone] of [
       [{ status: "active", review_enabled: 1 }, t("en", "apps.status.active"), "success"],
-      [{ status: "active", review_enabled: 0 }, t("en", "apps.status.paused"), "warning"],
-      [{ status: "disabled", review_enabled: 1 }, t("en", "apps.status.disabled"), "warning"],
+      [{ status: "active", review_enabled: 0 }, t("en", "apps.status.paused"), "warn"],
+      [{ status: "disabled", review_enabled: 1 }, t("en", "apps.status.disabled"), "warn"],
     ] as const) {
       expect(pillTone(overrides, label), label).toBe(tone);
     }

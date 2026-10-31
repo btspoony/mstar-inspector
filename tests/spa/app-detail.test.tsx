@@ -162,14 +162,14 @@ describe("tab shell rendering (static SSR)", () => {
     // component's token-backed tone.
     const manage = renderDetail(managePayload, true);
     expect(manage).toContain(t("en", "apps.status.active"));
-    expect(manage).toContain("bg-(--badge-success-bg)");
+    expect(manage).toContain('data-tone="success"');
     expect(appStatusPill("en", { status: "active", review_enabled: 0 })).toEqual({
       label: t("en", "apps.status.paused"),
-      tone: "warning",
+      tone: "warn",
     });
     expect(appStatusPill("en", { status: "disabled", review_enabled: 1 })).toEqual({
       label: t("en", "apps.status.disabled"),
-      tone: "warning",
+      tone: "warn",
     });
   });
 

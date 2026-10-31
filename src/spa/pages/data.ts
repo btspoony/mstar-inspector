@@ -503,12 +503,12 @@ export function isPaused(app: { status: string; review_enabled: number | boolean
 /**
  * The App status pill's copy + tone, derived once for both faces that show it
  * (the Apps list and the App detail shell). The face itself belongs to
- * `components/StatusBadge`; only what a status MEANS lives here.
+ * `StatusBadge` in `@design-system`; only what a status MEANS lives here.
  */
 export function appStatusPill(
   locale: Locale,
   app: { status: string; review_enabled: number | boolean },
-): { label: string; tone: "success" | "warning" } {
+): { label: string; tone: "success" | "warn" } {
   const paused = isPaused(app);
   return {
     label:
@@ -517,7 +517,7 @@ export function appStatusPill(
         : paused
           ? t(locale, "apps.status.paused")
           : t(locale, "apps.status.active"),
-    tone: app.status === "disabled" || paused ? "warning" : "success",
+    tone: app.status === "disabled" || paused ? "warn" : "success",
   };
 }
 

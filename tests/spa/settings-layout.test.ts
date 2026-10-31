@@ -357,7 +357,7 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
     // "reachable" state — never the "verified" claim: two distinct labels, and
     // the reachable one carries the accent tone.
     expect(page).toContain('ok: { tone: "success", label: "settings.providers.status.ok" }');
-    expect(page).toContain('reachable: { tone: "brand", label: "settings.providers.status.reachable" }');
+    expect(page).toContain('reachable: { tone: "accent", label: "settings.providers.status.reachable" }');
   });
 
   test("a provider's stored keys are listed whole — the add form never folds keys[] into one slot", () => {

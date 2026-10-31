@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ListRow, ListRowGroup } from "../../../src/spa/components/ListRow";
-import { StatusBadge } from "../../../src/spa/components/StatusBadge";
+import { StatusBadge } from "../../../src/design-system";
 
 const html = renderToStaticMarkup(
   createElement(
