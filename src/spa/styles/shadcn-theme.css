@@ -1,13 +1,13 @@
 /*
  * shadcn/ui theme bridge — Tailwind v4 `@theme inline` keys onto the semantic
- * token layer (plan 201 task 3).
+ * token layer (the design-system rebuild, 2026-10-31).
  *
  * Every value here is a semantic (or semantic-composed component) token from
  * `src/design-system/tokens/`; no palette step name appears. The bridge exists
  * only so shadcn's utility vocabulary (`bg-primary`, `text-muted-foreground`,
  * `border-input`) resolves without a second set of values, and the `@theme
  * inline` key set is deliberately unchanged so utility names stay stable for
- * plan 202's migration.
+ * the component rebuild's migration (2026-10-31).
  *
  * Theme resolves through tokens.css — dark on :root (unset = deterministic
  * dark default), light on :root[data-theme="light"]; values flow through the

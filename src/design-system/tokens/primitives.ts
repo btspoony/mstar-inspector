@@ -11,7 +11,7 @@
  * the tone background, `green-800`), tone-solids from family 700 (light may
  * take 600), chart marks from family 700.
  *
- * The D14a transitional set is empty as of plan 204: `transitionalSteps`
+ * The D14a transitional set is empty as of 2026-11-01: `transitionalSteps`
  * below carries no members. The rule it encodes — a dropped step survives only
  * while a named plan still reads it, and leaves in the commit that migrates
  * that reader — is what keeps the palette from widening by accident.
@@ -110,10 +110,10 @@ const survivorLight: SurvivorColors = {
  * and the generator prints it above the declaration, so the deadline travels
  * with the value instead of living in a second list.
  *
- * The set is **empty**: plan 204 migrated `gray-800` and `gray-alpha-200` when
- * `src/spa/admin.html` stopped reading raw steps, which was their last
- * consumer. The zero-reference searches that closed them are recorded in
- * DESIGN.md § The D14a transitional live list.
+ * The set is **empty**: the console migration (2026-11-01) retired `gray-800`
+ * and `gray-alpha-200` when `src/spa/admin.html` stopped reading raw steps,
+ * which was their last consumer. The zero-reference searches that closed them
+ * are recorded in DESIGN.md § The D14a transitional live list.
  */
 export type TransitionalStep = never;
 export type TransitionalSteps = readonly {

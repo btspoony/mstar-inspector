@@ -1,5 +1,5 @@
 /**
- * The console's plain variant (compass D15; plan 204 task 1).
+ * The console's plain variant (compass D15; console migration, 2026-11-01).
  *
  * "Plainer" is one re-map, never a second component set: `data-surface="ops"`
  * on `src/spa/admin.html`'s `<html>` puts every Radix portal — the

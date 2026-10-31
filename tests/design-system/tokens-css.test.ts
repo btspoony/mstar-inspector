@@ -1,5 +1,5 @@
 /**
- * The generated stylesheet contract (plan 201, task 3).
+ * The generated stylesheet contract (design-system rebuild, 2026-10-31).
  *
  * `bun scripts/build-tokens.ts --check` is the drift gate; these assertions are
  * the parts of the emission a check run cannot state by itself:
@@ -8,7 +8,7 @@
  *    and comparing against the committed file catches a hand edit the same way
  *    `--check` does, and it runs under `bun test` as well as in CI.
  * 2. **The palette is exactly the survivor set.** The D14a transitional steps
- *    closed with plan 204, whose admin.html migration removed their last
+ *    closed 2026-11-01, when the console migration removed their last
  *    readers; the emitted palette is the 26 the bands consume and nothing else.
  * 3. **Nothing removed comes back.** Neither the steps D14 dropped nor the
  *    retired pre-redesign aliases reappear as declarations.

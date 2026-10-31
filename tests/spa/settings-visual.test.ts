@@ -333,7 +333,7 @@ describe("notice face (A5)", () => {
     expect(css).toContain("display: flex");
     expect(css).toContain("gap: var(--spacing-2)");
     // Token discipline: the notice reads the tone system directly — the
-    // --notice-* aliases retired with plan 203 task 7.
+    // --notice-* aliases retired with the dashboard surface pass (2026-11-01).
     expect(css).toContain("var(--tone-success-border)");
     expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });

@@ -1,5 +1,6 @@
 /**
- * Both-theme acceptance pass (plan 203, task 6; extended by plan 204, task 4).
+ * Both-theme acceptance pass (dashboard surface pass, 2026-11-01; the console
+ * joined it the same day).
  *
  * Every customer-facing surface of the compass `## Surface census` — and now
  * the operator console's four screens plus its shell — is rendered under
@@ -502,7 +503,7 @@ const SURFACES: readonly Surface[] = [
     marker: t("en", "login.signIn"),
     render: () => renderLight(createElement(LoginPage, { boot: { locale: "en", login: null, name: null } })),
   },
-  // Plan 204's census: the console's four screens plus the shell they mount in.
+  // The 2026-11-01 census: the console's four screens plus the shell they mount in.
   // Each marker is a loaded-face string, so a screen that fell back to its
   // skeleton or error branch cannot pass the marker assertion.
   {

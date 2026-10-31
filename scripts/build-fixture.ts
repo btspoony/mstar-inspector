@@ -13,7 +13,7 @@
  * until it is committed.
  *
  * When a name leaves the source it leaves the fixture in the same
- * generation: the palette's D14a transitional set closed with plan 204, and the
+ * generation: the palette's D14a transitional set closed 2026-11-01, and the
  * pre-redesign alias list retired with the page stylesheet that read it.
  *
  * Usage:

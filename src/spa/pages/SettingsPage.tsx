@@ -713,7 +713,7 @@ export function AppInfoSection({
  * and the recent deliveries. One row is one installation, and its facts are
  * exactly `account_login`, `installation_id` and `seen_at` — the payload
  * carries no per-installation repository count, so no repository column
- * exists (plan 203 task 2; compass D13).
+ * exists (dashboard surface pass, 2026-11-01; compass D13).
  */
 export function InstallationsSection({
   locale,

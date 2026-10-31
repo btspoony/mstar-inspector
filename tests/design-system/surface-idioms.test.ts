@@ -1,5 +1,5 @@
 /**
- * Surface idioms (plan 202, task 2).
+ * Surface idioms (r3 shell rebuild, 2026-10-31).
  *
  * The r3 rule these assert is a property, not a class name: a card is defined
  * by a hairline plus a surface step, and its edge colour must be a declared

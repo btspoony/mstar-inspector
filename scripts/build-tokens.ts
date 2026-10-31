@@ -1,6 +1,6 @@
 /**
  * Generator for `src/spa/styles/tokens.css` and
- * `src/dashboard/ssr-tokens.generated.ts` (plan 201, task 3).
+ * `src/dashboard/ssr-tokens.generated.ts` (design-system rebuild, 2026-10-31).
  *
  * The token source under `src/design-system/tokens/` is the only hand-editable
  * half of the design system; both outputs are emitted from it:
@@ -8,7 +8,7 @@
  * reduced-motion fold.
  *
  * Nothing beyond the survivors: D14a's transitional palette steps closed with
- * plan 204, and the pre-redesign radius aliases left in the same plan when
+ * 2026-11-01, and the pre-redesign radius aliases left in the same sweep when
  * `src/spa/pages.module.css` — their last reader — moved onto the tiers. The
  * stylesheet declares only what the three layers and the ops variant hold.
  *

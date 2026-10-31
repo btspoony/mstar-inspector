@@ -1,5 +1,5 @@
 /**
- * Module boundary guard for `src/design-system/` (plan 201, task 1).
+ * Module boundary guard for `src/design-system/` (design-system rebuild, 2026-10-31).
  *
  * Product source reaches the design system one way only: the `@design-system`
  * alias, which every program maps onto `src/design-system/index.ts`. A second
@@ -162,7 +162,7 @@ describe("design-system module boundary", () => {
  * The second half of the same boundary: a consumer names the semantic and
  * component layers (and the shadcn bridge keys), never a primitive palette
  * step. This is the guard DESIGN.md promised for the commit that migrates the
- * last primitive reader — plan 204's `pages.module.css` sweep was that commit.
+ * last primitive reader — the 2026-11-01 `pages.module.css` sweep was that commit.
  *
  * It reads source text in every syntax a reference is written in:
  * `var(--gray-200)` in a stylesheet, `bg-(--gray-200)` in markup, and a

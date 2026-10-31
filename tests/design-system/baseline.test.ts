@@ -1,5 +1,5 @@
 /**
- * The committed baseline reference (plan 201, task 5).
+ * The committed baseline reference (design-system rebuild, 2026-10-31).
  *
  * A baseline that lives only in gitignored `.mstar/` cannot be converged onto:
  * a clean checkout has no reference, and any comparator that reads it either
@@ -33,7 +33,7 @@ describe("baseline reference", () => {
 
   test("names its origin, revision and date", () => {
     const header = /<!doctype html>\s*<!--([\s\S]*?)-->/.exec(readFileSync(BASELINE, "utf8"))?.[1] ?? "";
-    expect(header).toContain("prototypes/design-system.html");
+    expect(header).toContain("Origin:   the design-system prototype");
     expect(header).toContain("r3");
     expect(header).toContain("2026-10-31");
   });

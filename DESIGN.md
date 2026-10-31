@@ -1,7 +1,7 @@
 ---
 version: "0.5"
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. v0.5 rebuilds the document onto the generated fixture: the D14 band-rule palette (the 26 surviving steps), a 126-token semantic layer that component and page code consume exclusively (plans 202–204; the SSR face landed with plan 203, a few SPA files still read primitive steps), and a component layer composed from it. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted); light is a first-class face, not a parity checkbox. Supersedes the earlier theme lock (2026-09-04, user instruction). Upstream direction: baseline reference → token source → generated stylesheet and fixture → this document; the document is raised onto the fixture, never the reverse."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. v0.5 rebuilds the document onto the generated fixture: the D14 band-rule palette (the 26 surviving steps), a 126-token semantic layer that component and page code consume exclusively (the rebuild ran 2026-10-31 → 2026-11-01; the SSR face landed in the dashboard surface pass, a few SPA files still read primitive steps), and a component layer composed from it. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted); light is a first-class face, not a parity checkbox. Supersedes the earlier theme lock (2026-09-04, user instruction). Upstream direction: baseline reference → token source → generated stylesheet and fixture → this document; the document is raised onto the fixture, never the reverse."
 
 # Runtime default = dark. Top-level colors: mirrors themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -551,13 +551,15 @@ one file under `themes:`.
 | semantic | 126 | 47 themed colours, 5 control/row heights, 3 radii, 9 spacing steps, 55 typography properties, 5 motion values, 2 shadows | the primitive layer |
 | component | 33 | button variants and sizes, the text field, the card | **the semantic layer only**, with two recorded carve-outs: `button-primary-hover-bg` names the primitive `brand-600` (the approved r3 hover — the accent fg equals the accent solid, so hovering through it would be invisible), and the padding values (`button-padding-xs/sm/md`, `field-padding`) are literals, not tokens |
 
-The boundary rule is a **fact** of the tree as of plan 204: component and page
+The boundary rule is a **fact** of the tree as of 2026-11-01 (the console
+migration): component and page
 code consume the **semantic** layer only (`var(--surface-card)`, never
 `var(--background-200)`). The operator console migrated first (`admin.html`
 reads the semantic layer and the shared utility vocabulary), and the last
 page-layer stylesheet (`src/spa/pages.module.css`) followed in the same plan,
 so no file outside `src/design-system/` names a primitive palette step any more.
-The SSR face landed with plan 203: `src/dashboard/views.ts` paints from the
+The SSR face landed with the dashboard surface pass (2026-11-01):
+`src/dashboard/views.ts` paints from the
 semantic and component layers, reading the generated value table rather than a
 hand copy of the palette.
 
@@ -589,10 +591,11 @@ survivors; survivors decide the palette:
 **Survivors (26):** `background-100/200/300`; `gray-200/600/700/900/1000`;
 `gray-alpha-400/500`; `brand-600/700`; `blue-700`; `red-100/400/700`;
 `amber-100/400/600/700`; `green-100/300/400/700/800`; `purple-700`. The teal
-and pink families are gone entirely: their last two steps left with plan 202
-task 4, which moved `src/spa/components/charts/charts.css` onto the six closed
-chart slots (the chart fills carry their own theme-fixed literals — see the
-chart split below — so no palette step answers a chart family any more).
+and pink families are gone entirely: their last two steps left with the
+chart-vocabulary closure (2026-10-31), which moved
+`src/spa/components/charts/charts.css` onto the six closed chart slots (the
+chart fills carry their own theme-fixed literals — see the chart split below —
+so no palette step answers a chart family any more).
 
 Every removed step recorded the D14 zero-reference search before it left
 (`grep -rnF "(--<step>)" src tests scripts` and the declaration-site search
@@ -601,13 +604,13 @@ observation, not an assertion. 62 of the 96 declared steps went that way.
 
 ### The D14a transitional live list
 
-**Closed by plan 204.** The list was the band rule's escape hatch: a step
+**Closed 2026-11-01.** The list was the band rule's escape hatch: a step
 dropped by it survived only while a plan that had not run yet still read it,
 and it left in the commit that migrated that last consumer.
 
 The last two were `gray-800` and `gray-alpha-200`, read only by
-`src/spa/admin.html`'s inline shell. Plan 204 moved that shell onto the
-semantic layer (`text-secondary`, `surface-overlay`, `text-muted`, plus the
+`src/spa/admin.html`'s inline shell. The console migration moved that shell
+onto the semantic layer (`text-secondary`, `surface-overlay`, `text-muted`, plus the
 shared primitive's own hairline and radius utilities), so both declarations
 left the source, the generated stylesheet and this frontmatter in that one
 commit. Nothing in the tree names either step now, and `transitionalSteps` in

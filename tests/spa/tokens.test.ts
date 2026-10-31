@@ -9,7 +9,7 @@
  *   they pinned; the fixture is the vocabulary now.
  * - The palette the document carries is exactly the D14 survivor set, read
  *   from the token source — not a second hand-maintained list. (The D14a
- *   transitional live list closed with plan 204; it is empty.)
+ *   transitional live list closed 2026-11-01; it is empty.)
  * - `src/spa/styles/tokens.css` and the document agree because both equal
  *   the fixture; light applies only via `:root[data-theme="light"]` (the
  *   stored choice; the OS-light fallback branch is deleted).
@@ -356,7 +356,7 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     expect(rootVars["button-primary-fg"]).toBe("var(--on-brand)");
     expect(rootVars["card-bg"]).toBe("var(--surface-card)");
     // The pre-redesign radius aliases left with the page stylesheet that was
-    // their last reader (plan 204); the earlier alias groups left with the SSR
+    // their last reader (2026-11-01); the earlier alias groups left with the SSR
     // face. A name coming back here would make a second vocabulary live again.
     expect(rootVars["rounded-sm"]).toBeUndefined();
     expect(rootVars["rounded-md"]).toBeUndefined();
@@ -679,7 +679,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(button).not.toMatch(/--(?:background|gray|brand|blue|red|amber|green|purple|teal|pink)-/);
 
     const card = await Bun.file(join(PRIMITIVES_DIR, "card.tsx")).text();
-    // r3 card rule (plan 202 task 2): definition is the hairline plus the
+    // r3 card rule (2026-10-31): definition is the hairline plus the
     // surface step, so the resting card declares no box-shadow at all —
     // elevation is the overlays' (asserted below, on the overlay faces).
     expect(card).not.toMatch(/(?:^|["\s])shadow-/);

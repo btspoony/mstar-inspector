@@ -1,5 +1,5 @@
 /**
- * The generated fixture contract (plan 201, task 4).
+ * The generated fixture contract (design-system rebuild, 2026-10-31).
  *
  * The load-bearing assertions, as opposed to descriptive ones:
  *

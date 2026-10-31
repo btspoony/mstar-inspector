@@ -1,5 +1,5 @@
 /**
- * Token source contract (plan 201, task 2).
+ * Token source contract (design-system rebuild, 2026-10-31).
  *
  * The load-bearing assertions, as opposed to descriptive ones:
  *
@@ -70,7 +70,7 @@ describe("palette reduction (D14)", () => {
   });
 
   test("the D14a transitional set is empty and the survivor set is whole", () => {
-    // The live list closed with plan 204: `gray-800` and `gray-alpha-200` left
+    // The live list closed 2026-11-01: `gray-800` and `gray-alpha-200` left
     // when `src/spa/admin.html` stopped reading raw steps. An entry here would
     // have to name the plan that closes it, so the generator can print the
     // deadline above the declaration.
@@ -90,9 +90,10 @@ describe("palette reduction (D14)", () => {
   });
 
   test("the teal and pink families are gone", () => {
-    // D14 removed them from the bands; plan 202 task 4 migrated charts.css onto
-    // the six closed slots, which was their last consumer, so no step of either
-    // family is declared any more — not even transitionally.
+    // D14 removed them from the bands; the chart-vocabulary closure
+    // (2026-10-31) migrated charts.css onto the six closed slots, which was
+    // their last consumer, so no step of either family is declared any more
+    // — not even transitionally.
     const tealPink = tokenNames().primitive.filter((n) => n.startsWith("teal-") || n.startsWith("pink-"));
     expect(tealPink).toEqual([]);
   });
