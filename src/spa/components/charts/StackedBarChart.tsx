@@ -13,9 +13,10 @@
  * component reads each series value as
  * `by_severity[key] ?? by_category[key] ?? 0`, so it stays generic over
  * the two distribution grids. `series` is the closed vocabulary: the PAGE
- * maps semantics → fill classes and unknown keys never enter the array —
- * the component never invents a color. Each entry renders one
- * `<Bar dataKey fillClass stackId>` in array order (first = bottom of the
+ * maps semantics → a D14 slot (`slot: ChartSlot`, 1–6) and unknown keys never
+ * enter the array — the component never invents a color, and a value outside
+ * the six slots does not typecheck. Each entry renders one
+ * `<Bar dataKey stackId>` in array order (first = bottom of the
  * stack = first legend item; legend order = stack order).
  *
  * Render discipline (knowledge
@@ -25,10 +26,11 @@
  * ResponsiveContainer. The width number comes from useContainerWidth —
  * the measured container width client-side, the designed 560 default on
  * the static/SSR face (v0.3.4 round: true-size rendering, no viewBox
- * upscale on wide cards). Series colors ride charts.css `.chart-fill-*`
- * class rules only — never presentation-attribute var(), never raw hex.
- * Legend = the HTML legend row (`.chart-legend` + `.chart-swatch-*`
- * background-color twins derived from the series fill classes), NOT
+ * upscale on wide cards). Series colors ride charts.css `.chart-fill-{n}` /
+ * `.chart-swatch-{n}` class rules only — never presentation-attribute var(),
+ * never raw hex; the fill reads the slot's quiet face, the legend swatch its
+ * `-mark` face. Legend = the HTML legend row (`.chart-legend` +
+ * `.chart-swatch-{n}`), NOT
  * recharts `<Legend>` (architect ruling — same face as
  * TrendChart). The tooltip is the recharts default content token-styled
  * via contentStyle/labelStyle/itemStyle (itemStyle mandatory — recharts'
@@ -50,17 +52,18 @@
  */
 import { Bar as RBar, BarChart as RBarChart, Tooltip, XAxis, YAxis } from "recharts";
 import "./charts.css";
+import { chartClasses, type ChartSlot } from "./chartSlots";
 import { formatDateLabel } from "./dateLabel";
 import { useContainerWidth } from "./useContainerWidth";
 
-/** One closed-vocabulary stacked series: the page-mapped label + fill class. */
+/** One closed-vocabulary stacked series: the page-mapped label + chart slot. */
 export interface StackedSeries {
   /** Distribution grid key (`by_severity` / `by_category`). */
   key: string;
   /** Legend + tooltip name — the raw engine slug or the uncategorized i18n label. */
   label: string;
-  /** charts.css fill class (`chart-fill-*`); the swatch twin derives from it. */
-  fillClass: string;
+  /** The D14 slot (1–6); the component derives the fill and mark class names. */
+  slot: ChartSlot;
 }
 
 /**
@@ -74,11 +77,6 @@ export interface DistributionBucket {
   granularity: "day" | "week";
   by_severity: Record<string, number>;
   by_category: Record<string, number>;
-}
-
-/** The HTML-legend swatch twin of a series fill class: chart-fill-* → chart-swatch-*. */
-function swatchClass(fillClass: string): string {
-  return fillClass.replace(/^chart-fill-/, "chart-swatch-");
 }
 
 const LEGEND_H = 24;
@@ -130,7 +128,10 @@ export function StackedBarChart({
       <div className="chart-legend">
         {series.map((s) => (
           <span key={s.key} className="chart-legend-item">
-            <span className={`chart-legend-swatch ${swatchClass(s.fillClass)}`} aria-hidden="true" />
+            <span
+              className={`chart-legend-swatch ${chartClasses(s.slot).swatch}`}
+              aria-hidden="true"
+            />
             <span className="chart-legend-label">{s.label}</span>
           </span>
         ))}
@@ -162,15 +163,15 @@ export function StackedBarChart({
             border: "1px solid var(--border)",
             borderRadius: "6px",
           }}
-          labelStyle={{ color: "var(--gray-1000)", fontWeight: 500 }}
-          itemStyle={{ color: "var(--gray-900)" }}
+          labelStyle={{ color: "var(--text-primary)", fontWeight: 500 }}
+          itemStyle={{ color: "var(--text-secondary)" }}
         />
         {series.map((s) => (
           <RBar
             key={s.key}
             dataKey={s.key}
             name={s.label}
-            className={s.fillClass}
+            className={chartClasses(s.slot).fill}
             stackId={STACK_ID}
             isAnimationActive={false}
           />

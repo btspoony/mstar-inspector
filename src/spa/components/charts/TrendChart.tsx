@@ -10,23 +10,22 @@
  * The public API is unchanged: `{ points, seriesLabels, ariaLabel }`
  * (the locale prop retired with the pinned M/D date format, 2026-09-16).
  *
- * Series colors (AD-561 dual-series function, AD-601 recalibration — the
- * exact original pair): reviews=blue-700, findings=amber-700, applied via
- * the shared charts.css fill classes (B3 class discipline — no
- * presentation-attribute var(), no raw hex; the 700 values are ≥3:1 vs the
- * v0.3 card faces in both themes, Δhue ≈ 169°/184°). blue-700 is a
- * data-series tone, not the link/focus duty and never brand expression.
- * The legend row above the chart keeps the original face (10×10 rounded
- * swatch + weight-500 label); the swatches are HTML spans carrying the
- * charts.css background-color twins of the series fills.
+ * Series colors (D14 closed vocabulary): reviews ride slot 5 (blue family),
+ * findings slot 3 (amber family) — the hue pair AD-601 fixed, now expressed as
+ * a slot instead of a palette step. Bars paint the slot's quiet fill face;
+ * the legend swatches paint its `-mark` face (the family 700 step), because a
+ * full bar in the mark step reads as a warning light. Colours ride the
+ * charts.css class rules only (B3 class discipline — no presentation-attribute
+ * var(), no raw hex). The legend row above the chart keeps the original face
+ * (10×10 rounded swatch + weight-500 label).
  *
  * Axes (AC1): x = bucket-start categories (the `week` field) formatted by
  * the shared formatDateLabel (dateLabel.ts) — the pinned numeric `M/D`
  * form in every locale (2026-09-16 user-feedback pin); more than 8 buckets
  * thin to every-other labels via the axis interval (even indices — the
  * first bucket always stays labeled). y = integer counts
- * (allowDecimals={false}). Both axis lines ride the gray-alpha-400 token
- * through charts.css.
+ * (allowDecimals={false}). Both axis lines ride `border-default` through
+ * charts.css.
  *
  * Fixed dimensions (AD-621): numeric width/height props, never
  * ResponsiveContainer. The width number comes from useContainerWidth —
@@ -56,6 +55,7 @@
  */
 import { Bar as RBar, BarChart as RBarChart, Tooltip, XAxis, YAxis } from "recharts";
 import "./charts.css";
+import { chartClasses } from "./chartSlots";
 import { formatDateLabel } from "./dateLabel";
 import { useContainerWidth } from "./useContainerWidth";
 
@@ -72,6 +72,10 @@ const PAD_R = 8;
 const AXIS_H = 20;
 const Y_AXIS_W = 28;
 const X_LABEL_MAX_VISIBLE = 8;
+
+/** D14 slots: reviews ride the blue family (5), findings the amber one (3). */
+const REVIEWS = chartClasses(5);
+const FINDINGS = chartClasses(3);
 
 export function TrendChart({
   points,
@@ -92,11 +96,11 @@ export function TrendChart({
     <div ref={containerRef}>
       <div className="chart-legend">
         <span className="chart-legend-item">
-          <span className="chart-legend-swatch chart-swatch-blue-700" aria-hidden="true" />
+          <span className={`chart-legend-swatch ${REVIEWS.swatch}`} aria-hidden="true" />
           <span className="chart-legend-label">{seriesLabels.reviews}</span>
         </span>
         <span className="chart-legend-item">
-          <span className="chart-legend-swatch chart-swatch-amber-700" aria-hidden="true" />
+          <span className={`chart-legend-swatch ${FINDINGS.swatch}`} aria-hidden="true" />
           <span className="chart-legend-label">{seriesLabels.findings}</span>
         </span>
       </div>
@@ -127,14 +131,14 @@ export function TrendChart({
             border: "1px solid var(--border)",
             borderRadius: "6px",
           }}
-          labelStyle={{ color: "var(--gray-1000)", fontWeight: 500 }}
-          itemStyle={{ color: "var(--gray-900)" }}
+          labelStyle={{ color: "var(--text-primary)", fontWeight: 500 }}
+          itemStyle={{ color: "var(--text-secondary)" }}
         />
-        <RBar dataKey="reviews" name={seriesLabels.reviews} className="chart-fill-blue-700" isAnimationActive={false} />
+        <RBar dataKey="reviews" name={seriesLabels.reviews} className={REVIEWS.fill} isAnimationActive={false} />
         <RBar
           dataKey="findings"
           name={seriesLabels.findings}
-          className="chart-fill-amber-700"
+          className={FINDINGS.fill}
           isAnimationActive={false}
         />
       </RBarChart>
