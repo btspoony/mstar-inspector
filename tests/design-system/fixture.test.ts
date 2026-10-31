@@ -94,52 +94,72 @@ describe("generated fixture", () => {
 });
 
 describe("document-sync check", () => {
-  test("names the token and both values when the document disagrees", () => {
+  test("the committed DESIGN.md is in sync with the fixture (v0.5 rewrite)", () => {
+    // The v0.5 rewrite raised the document onto the fixture, so the gate is
+    // green on a clean tree — pinned here so a regression fails the suite,
+    // not just the local check run.
     const report = documentSync(FIXTURE, designFrontmatter());
-
-    // At this commit DESIGN.md is still v0.4 and the semantic layer has no
-    // frontmatter slot yet. The rewrite that raises it lands in a later task;
-    // until then this check is red on purpose, never slackened to go green.
-    expect(report.ok).toBe(false);
-    expect(report.divergences.length).toBeGreaterThan(0);
-
-    for (const divergence of report.divergences) {
-      expect(divergence.token).toMatch(/^(primitive|semantic|component)\/\S+ \[(dark|light)\]$/);
-      expect(divergence.at).not.toBe("");
-      expect(typeof divergence.fixture).toBe("string");
-    }
-    const disagreeing = report.divergences.filter((d) => d.document !== undefined);
-    expect(disagreeing.length).toBeGreaterThan(0);
-    for (const d of disagreeing) expect(d.document).not.toBe(d.fixture);
-
-    // Both directions: the document also still declares palette steps the
-    // source dropped, and a rewrite from the fixture has to remove them.
-    expect(report.stale.length).toBeGreaterThan(0);
-    for (const s of report.stale) {
-      expect(s.at).toMatch(/^themes\.(dark|light)\.colors\.\S+$/);
-      expect(typeof s.document).toBe("string");
-    }
+    expect(report.ok).toBe(true);
+    expect(report.divergences).toEqual([]);
+    expect(report.stale).toEqual([]);
+    expect(report.compared).toBeGreaterThan(0);
+    // The three slotless classes stay reported with their reasons, never
+    // silently dropped: 12 font/breakpoint + 10 control/row height + 66
+    // component-layer tokens.
+    expect(Object.keys(report.unexpressed)).toHaveLength(3);
+    expect(Object.values(report.unexpressed).reduce((a, b) => a + b, 0)).toBe(88);
   });
 
-  test("a frontmatter corrected onto the fixture clears exactly that entry", () => {
-    // Proves the comparison is a real read of the document rather than a
-    // constant: patching the path the report named makes that one divergence
-    // disappear and leaves every other alone.
+  test("names the token and both values when a frontmatter value is doctored", () => {
+    // Teeth for the disagreeing direction: corrupt one committed value and
+    // the report must name the token, the path, and both values.
     const frontmatter = designFrontmatter();
-    const before = documentSync(FIXTURE, frontmatter);
-    const target = before.divergences.find((d) => d.at.startsWith("elevation."));
-    if (target === undefined) throw new Error("expected an elevation divergence to patch");
+    const darkColors = (frontmatter.themes as Record<string, { colors: Record<string, string> }>).dark?.colors;
+    if (darkColors === undefined) throw new Error("no themes.dark.colors group to doctor");
+    const doctored = structuredClone(frontmatter);
+    (doctored.themes as Record<string, { colors: Record<string, string> }>).dark!.colors["surface-page"] = "#000000";
 
-    const [group, shadow, theme] = target.at.split(".") as [string, string, string];
-    const patched = structuredClone(frontmatter);
-    const entry = patched[group];
-    if (typeof entry !== "object" || entry === null) throw new Error(`no ${group} group in frontmatter`);
-    const pair = Reflect.get(entry, shadow);
-    if (typeof pair !== "object" || pair === null) throw new Error(`no ${group}.${shadow} entry`);
-    Reflect.set(pair, theme, target.fixture);
+    const report = documentSync(FIXTURE, doctored);
+    expect(report.ok).toBe(false);
+    const hit = report.divergences.find((d) => d.at === "themes.dark.colors.surface-page");
+    expect(hit).toBeDefined();
+    expect(hit?.document).toBe("#000000");
+    expect(hit?.fixture).toBe(darkColors["surface-page"]);
+    // Nothing else moved: one doctored value is exactly one divergence.
+    expect(report.divergences).toHaveLength(1);
+  });
 
-    const after = documentSync(FIXTURE, patched);
-    expect(after.divergences.map((d) => d.at)).not.toContain(target.at);
-    expect(after.divergences.length).toBe(before.divergences.length - 1);
+  test("names a palette step the source dropped that the document still declares", () => {
+    // Teeth for the stale direction — the one the D14 reduction leaves
+    // behind whenever a rewrite lags the source.
+    const doctored = designFrontmatter();
+    const dark = (doctored.themes as Record<string, { colors: Record<string, string> }>).dark;
+    if (dark === undefined) throw new Error("no themes.dark.colors group to doctor");
+    dark.colors["gray-300"] = "#212630";
+
+    const report = documentSync(FIXTURE, doctored);
+    expect(report.ok).toBe(false);
+    expect(report.stale.map((s) => s.at)).toContain("themes.dark.colors.gray-300");
+    expect(report.stale).toHaveLength(1);
+  });
+
+  test("a doctored elevation entry reports exactly that divergence, and restoring it clears it", () => {
+    // Proves the comparison is a real read of the document rather than a
+    // constant: doctoring one shadow value adds exactly one divergence, and
+    // writing the fixture's value back restores the green report.
+    const frontmatter = designFrontmatter();
+    const doctored = structuredClone(frontmatter);
+    const pair = (doctored.elevation as Record<string, Record<string, string>>)["shadow-pop"];
+    if (pair === undefined) throw new Error("no elevation.shadow-pop entry to doctor");
+    const before = pair.dark;
+    pair.dark = `${pair.dark} 0 0 1px #000000`;
+
+    const doctoredReport = documentSync(FIXTURE, doctored);
+    expect(doctoredReport.ok).toBe(false);
+    expect(doctoredReport.divergences.map((d) => d.at)).toEqual(["elevation.shadow-pop.dark"]);
+
+    pair.dark = before!;
+    expect(documentSync(FIXTURE, doctored)).toEqual(documentSync(FIXTURE, frontmatter));
+    expect(documentSync(FIXTURE, doctored).ok).toBe(true);
   });
 });
