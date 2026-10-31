@@ -532,10 +532,13 @@ back up:
 2. **Token source** — `src/design-system/tokens/`, the only hand-editable
    artifact of the system. Three layers, both themes, TypeScript-checked.
 3. **Generated artifacts** — `src/spa/styles/tokens.css`
-   (`bun scripts/build-tokens.ts`) and `src/design-system/fixture.json`
-   (`bun scripts/build-fixture.ts`), each with a `--check` drift mode. They
-   are never hand-edited; a regenerated diff that does not match the
-   committed file fails the build.
+   (`bun scripts/build-tokens.ts`), `src/design-system/fixture.json`
+   (`bun scripts/build-fixture.ts`) and `dist/design-preview.html`
+   (`bun scripts/build-design-preview.ts`), each with a `--check` drift mode.
+   The two committed ones are never hand-edited; a regenerated diff that does
+   not match fails the build. The preview is build material, so its check
+   asserts coverage instead: every declared token carries an entry, in both
+   themes, at its resolved value, with a specimen its family can draw.
 4. **This document** — raised onto the fixture, never the reverse. The
    `fixture → DESIGN.md` link of `bun scripts/design-system-check.ts`
    compares every fixture token that has a frontmatter slot, both ways: a
@@ -1013,8 +1016,11 @@ their own beyond what the component layer already declares:
 | `components.C` | `--button-*` / `--field-*` / `--card-*`, referencing semantic vars only |
 
 The chain commands: `bun scripts/build-tokens.ts [--check]`,
-`bun scripts/build-fixture.ts [--check]`, `bun scripts/design-system-check.ts`
-(all three links), `mstar design-md validate .` (local). The SSR
+`bun scripts/build-fixture.ts [--check]`,
+`bun scripts/build-design-preview.ts [--check]`, and
+`bun scripts/design-system-check.ts` (all four links — the one entry point CI
+runs), plus `mstar design-md validate .` (local only; the CLI installs from
+GitHub, so CI does not take on that network dependency). The SSR
 `views.ts` STYLE keeps its own copied subset value-synced by test until a
 later plan owns that face.
 

@@ -1,12 +1,18 @@
 /**
- * The design-system gate: one entry point, three links of one chain.
+ * The design-system gate: one entry point, four links of one chain. CI runs this
+ * and nothing else of the chain.
  *
  *   source → stylesheet   `scripts/build-tokens.ts --check`
  *   source → fixture      `scripts/build-fixture.ts --check`
  *   fixture → DESIGN.md   `documentSync()` below
+ *   source → preview      `scripts/build-design-preview.ts --check`
  *
  * Every link is checked even when an earlier one is broken, so one run reports
  * the whole picture instead of the first failure. Exit 1 when any link is.
+ *
+ * `mstar design-md validate .` is deliberately **not** here: the CLI installs
+ * from GitHub, so CI would gain an unpinned network dependency. It stays a
+ * local second gate; this file's document link covers the drift CI can see.
  *
  * The document link reads the **frontmatter**, not the body: the frontmatter is
  * the token SSOT, and a prose mention that happens to carry a stale value is a
@@ -36,8 +42,15 @@ const ROOT = path.resolve(import.meta.dir, "..");
 const FIXTURE_PATH = path.join(ROOT, "src/design-system/fixture.json");
 const DESIGN_PATH = path.join(ROOT, "DESIGN.md");
 
-/** The chain's first two links, in the order the data flows. */
-const GENERATORS = ["scripts/build-tokens.ts", "scripts/build-fixture.ts"] as const;
+/**
+ * The links that are a `--check` run of a generator, in report order. The
+ * document link is not one of them: it compares in-process, below.
+ */
+const GENERATORS = [
+  { script: "scripts/build-tokens.ts", label: "source → stylesheet" },
+  { script: "scripts/build-fixture.ts", label: "source → fixture" },
+  { script: "scripts/build-design-preview.ts", label: "source → preview" },
+] as const;
 
 type Layer = Readonly<Record<string, string>>;
 export type Fixture = Readonly<Record<ThemeName, Readonly<Record<string, Layer>>>>;
@@ -261,9 +274,8 @@ function readFrontmatter(): Record<string, unknown> {
 if (import.meta.main) {
   const brokenLinks: string[] = [];
 
-  for (const script of GENERATORS) {
+  for (const { script, label } of GENERATORS) {
     const run = Bun.spawnSync(["bun", script, "--check"], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
-    const label = script === "scripts/build-tokens.ts" ? "source → stylesheet" : "source → fixture";
     const output = `${run.stdout.toString()}${run.stderr.toString()}`.trim();
     console.log(`${run.exitCode === 0 ? "ok  " : "fail"}  ${label}`);
     for (const line of output.split("\n")) console.log(`        ${line}`);
