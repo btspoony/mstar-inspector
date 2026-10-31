@@ -677,7 +677,7 @@ rule honest:
 `surface-inset` (wells, inputs-in-card, quiet rows) → `surface-overlay`
 (pressed/selected planes, overlays). Dark steps the planes apart with light;
 light steps them with gray. Light `surface-card` is the page white itself —
-cards read by hairline and shadow, not by fill.
+a card reads by its hairline and radius there, not by fill or elevation.
 
 `surface-scrim` is not a plane but the veil under an overlay: the page plane at
 80% in dark, and the ink base at the same 80% in light. It is one of the few
@@ -785,7 +785,8 @@ that differ by more than value:
 - **`tone-warn-solid` takes `amber-600`** and light `tone-danger-solid`
   carries the literal `#dc2626` (no `red-600` step exists; D14 names
   `amber-600` only).
-- **`surface-card` is the page white**: cards read by hairline and shadow.
+- **`surface-card` is the page white**: with no surface step to separate it,
+  a card in light is drawn by its hairline alone.
 - **Charts**: only `chart-1` follows the theme; every other fill is the same
   literal in both themes (see the collision note above).
 
@@ -851,13 +852,14 @@ above, and the source declares them as `breakpoint-*` primitives.
 
 Tonal surfaces first, shadows second. Dark definition comes from surface
 steps + hairlines; shadows are quiet cool-slate tints, never pure black.
-Light shadows tint with the `#101928` base. The values below are the r3
-baseline's (the v0.3 pair in this document was superseded by the fixture in
-v0.5).
+Light shadows tint with the `#101928` base. Elevation marks an overlay, not a
+container: content on a page is defined by its surface step and hairline.
+The values below are the r3 baseline's (the v0.3 pair in this document was
+superseded by the fixture in v0.5).
 
 | Token | Dark | Light | Use |
 |-------|------|-------|-----|
-| `shadow-card` | `0 1px 2px #02061766, 0 2px 8px #02061733` | `0 1px 2px #10192814, 0 2px 8px #1019280f` | resting cards, Tier-1 primary surfaces |
+| `shadow-card` | `0 1px 2px #02061766, 0 2px 8px #02061733` | `0 1px 2px #10192814, 0 2px 8px #1019280f` | hand-drawn SSR boxes only; the component card carries none |
 | `shadow-pop` | `0 8px 24px #02061799, 0 2px 6px #02061766` | `0 8px 24px #1019281f, 0 2px 6px #10192814` | popovers, dropdowns, dialogs, toasts |
 
 Pair each elevation with the container radius tier. Never stack `shadow-pop`
@@ -935,9 +937,12 @@ message below; disabled takes the inset face.
 ### Card
 
 `surface-card` fill, `border-default` hairline, container radius, `spacing-6`
-(24px) padding, `shadow-card` elevation. Tier wrappers (`SectionCard`) may
-lift Tier-1 surfaces within the `shadow-pop` scale boundaries but never
-invent a third radius.
+(24px) padding, and **no elevation**: a hairline plus the surface step carries
+the definition, so a card sitting on a page never lifts off it. The border
+colour is always named — preflight leaves `border-color` at `currentColor`, so
+a width-only border would paint the hairline in the text colour. Tier wrappers
+(`SectionCard`) vary the hairline strength (emphasis vs standard) rather than
+the elevation, and never invent a third radius.
 
 ### Composition primitives
 

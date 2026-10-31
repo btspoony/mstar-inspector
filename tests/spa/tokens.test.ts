@@ -53,6 +53,32 @@ const PALETTE_STEP = /^(?:background-\d00|gray-\d{3,4}|gray-alpha-\d{3,4}|brand-
 /** The frontmatter reference grammar (design-md-spec §6): `{group.key}`, no component-to-component or spacing refs. */
 const REF = /^\{([a-z]+)\.([^}]+)\}$/;
 
+/** sRGB channels of a `#rrggbb` literal, 0–1. */
+const srgb = (value: string): [number, number, number] => {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16) / 255) as [number, number, number];
+  return [r, g, b];
+};
+const luminance = (hex: string): number => {
+  const [r, g, b] = srgb(hex).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)) as [
+    number,
+    number,
+    number,
+  ];
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrast = (a: string, b: string): number => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+};
+/** Resolve `var(--x)` chains against one theme's declarations. */
+const resolve = (vars: Record<string, string>, name: string): string => {
+  let value = vars[name]!;
+  for (let hop = 0; hop < 8 && value.startsWith("var("); hop += 1) {
+    value = vars[/^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1] as string]!;
+  }
+  return value;
+};
+
 type DesignFrontmatter = {
   /** YAML keeps `0.5` a number and `0.5.0` a string. */
   version: string | number;
@@ -544,30 +570,6 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(bridgeVars["destructive"]).toBe("var(--tone-danger-solid)");
     expect(bridgeVars["destructive-hover"]).toBe("var(--tone-danger-solid)");
 
-    const srgb = (value: string): [number, number, number] => {
-      const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16) / 255) as [number, number, number];
-      return [r, g, b];
-    };
-    const luminance = (hex: string): number => {
-      const [r, g, b] = srgb(hex).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)) as [
-        number,
-        number,
-        number,
-      ];
-      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    };
-    const contrast = (a: string, b: string): number => {
-      const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
-      return (hi + 0.05) / (lo + 0.05);
-    };
-    /** Resolve `var(--x)` chains against one theme's declarations. */
-    const resolve = (vars: Record<string, string>, name: string): string => {
-      let value = vars[name]!;
-      for (let hop = 0; hop < 8 && value.startsWith("var("); hop += 1) {
-        value = vars[/^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1] as string]!;
-      }
-      return value;
-    };
     /** The mix the browser performs at paint time, computed. */
     const blend = (solid: string, label: string, weight: number): string => {
       const [s, t] = [srgb(solid), srgb(label)];
@@ -589,6 +591,31 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       expect(hover, "hover must differ from the resting fill").not.toBe(solid);
       expect(contrast(label, solid), `${labelClass} on the resting ${fillClass} face`).toBeGreaterThanOrEqual(4.5);
       expect(contrast(label, hover), `${labelClass} on the hover face ${hover}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  test("the link variant keeps its label readable on the page plane", async () => {
+    // The link face paints no fill, so its contrast duty is the page plane.
+    // The label is read from the face's own class list and resolved to the hex
+    // the browser paints: pinning the class would prove the spelling, not the
+    // ratio the link duty exists for.
+    const variant = /link:\s*"([^"]+)"/.exec(await Bun.file(join(PRIMITIVES_DIR, "button.tsx")).text())?.[1];
+    if (variant === undefined) throw new Error("button.tsx declares no link variant");
+    const labelClass =
+      /(?:^|\s)text-\((--[a-z0-9-]+)\)/.exec(variant)?.[1] ??
+      /(?:^|\s)text-([a-z][a-z0-9-]*)(?=\s|$)/.exec(variant)?.[1];
+    expect(labelClass, "the link face must paint a token label").toBeDefined();
+
+    const bridgeVars = cssCustomProperties(extractBlock(await Bun.file(BRIDGE).text(), ":root {"));
+    const tokens = await Bun.file(TOKENS_CSS).text();
+    const dark = { ...cssCustomProperties(extractBlock(tokens, ":root {")), ...bridgeVars };
+    const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
+    for (const vars of [dark, light]) {
+      const name = labelClass!.startsWith("--") ? labelClass!.slice(2) : labelClass!;
+      const label = resolve(vars, name);
+      expect(label, `${labelClass} must resolve to a colour`).toMatch(/^#[0-9a-f]{3,8}$/i);
+      const plane = resolve(vars, "surface-page");
+      expect(contrast(label, plane), `${labelClass} on surface-page`).toBeGreaterThanOrEqual(4.5);
     }
   });
 
@@ -629,9 +656,15 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
 
     const input = await Bun.file(join(PRIMITIVES_DIR, "input.tsx")).text();
     expect(input).toContain("rounded-sm");
-    // DESIGN.md "Input — States: hover holds the edge": the field must not
-    // recolour its edge on hover, whichever token it would have named.
-    expect(input).not.toMatch(/hover:border-/);
+    // DESIGN.md "Input — States: hover holds the edge" governs every field
+    // face, and the select trigger is a field (`border-input`, control
+    // height, control radius), not an action: it holds its edge through
+    // hover. Asserted as the absence of a hover edge on both, whichever
+    // token they would have named.
+    for (const name of ["input", "select"]) {
+      const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
+      expect(source, name).not.toMatch(/hover:border-/);
+    }
 
     // QC round 1 F-004: raw `transition-opacity` faces ride the duration +
     // easing tokens so the prefers-reduced-motion fold reaches them too.

@@ -23,6 +23,11 @@ function SelectValue({
   return <SelectPrimitive.Value data-slot="select-value" {...props} />
 }
 
+/**
+ * The trigger is a field, not an action: DESIGN.md "Input — States: hover
+ * holds the edge" keeps the rest edge through hover (only the pressed/action
+ * faces step their border), so this face declares no hover edge.
+ */
 function SelectTrigger({
   className,
   size = "default",
