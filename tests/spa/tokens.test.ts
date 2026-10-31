@@ -7,9 +7,9 @@
  *   set-equality over each theme's colour map. The old hand-lists of light
  *   hexes (KEPT_LIGHT/V03_LIGHT) and L2 accent steps died with the palette
  *   they pinned; the fixture is the vocabulary now.
- * - The palette the document carries is exactly the D14 survivor set plus
- *   the D14a transitional live list, read from the token source — not a
- *   second hand-maintained list.
+ * - The palette the document carries is exactly the D14 survivor set, read
+ *   from the token source — not a second hand-maintained list. (The D14a
+ *   transitional live list closed with plan 204; it is empty.)
  * - `src/spa/styles/tokens.css` and the document agree because both equal
  *   the fixture; light applies only via `:root[data-theme="light"]` (the
  *   stored choice; the OS-light fallback branch is deleted).
@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
-import { survivorSteps, transitionalSteps } from "../../src/design-system/tokens";
+import { survivorSteps } from "../../src/design-system/tokens";
 import { documentSync, parseFixture } from "../../scripts/design-system-check";
 
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
@@ -186,9 +186,9 @@ describe("source → fixture → DESIGN.md chain", () => {
     expect(fm.colors).toEqual(fm.themes.dark.colors);
   });
 
-  test("the palette the document carries is the D14 survivors plus the D14a live list", async () => {
+  test("the palette the document carries is the 26 D14 survivors", async () => {
     const fm = await loadFrontmatter();
-    const expected = [...survivorSteps, ...transitionalSteps.map((step) => step.name)].sort();
+    const expected = [...survivorSteps].sort();
     const declared = Object.keys(fm.themes.dark.colors).filter((name) => PALETTE_STEP.test(name)).sort();
     expect(declared).toEqual(expected);
   });
@@ -338,19 +338,6 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     }
     for (const name of Object.keys(lightPrimitive).filter((n) => PALETTE_STEP.test(n))) {
       expect(lightVars[name], `--${name}`).toBe(lightPrimitive[name]);
-    }
-  });
-
-  test("transitional steps are declared with the plan that closes them", async () => {
-    const css = await Bun.file(TOKENS_CSS).text();
-    const dark = extractBlock(css, ":root {");
-    for (const step of transitionalSteps) {
-      // The declaration is what later plans compile against; the owner
-      // comment is the deadline, and it travels with the value.
-      expect(dark, `--${step.name} must stay declared`).toContain(`  --${step.name}: #`);
-      expect(dark, `--${step.name} needs its owner comment`).toMatch(
-        new RegExp(`closed by plan [^\\n]+[\\s\\S]{0,200}?\\n\\s*--${step.name}: `),
-      );
     }
   });
 

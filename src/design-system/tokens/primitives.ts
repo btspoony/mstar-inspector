@@ -2,17 +2,18 @@
  * Primitive layer — raw values only. Nothing here carries meaning; the
  * semantic layer names the jobs.
  *
- * The colour palette is compass D14/D14a: the 96 steps `tokens.css` declared
- * are reduced to the 26 the semantic bands consume, plus the **transitional**
- * steps that still have live consumers owned by later plans (a live list, not
- * a fixed number — it shrinks in the commit that migrates each last
- * consumer). Bands, not a
- * hand-picked list, decide the survivors — surfaces from the neutral solids
- * ladder, text from `gray-600/700/900/1000`, hairlines from
- * `gray-alpha-400/500`, tone-backgrounds from each family's 100 step,
- * tone-borders from the 300-400 band, tone-foregrounds from family 700 (800
- * where 700 fails 4.5:1 against the tone background, `green-800`), tone-solids
- * from family 700 (light may take 600), chart marks from family 700.
+ * The colour palette is compass D14: the 96 steps `tokens.css` declared are
+ * reduced to the 26 the semantic bands consume. Bands, not a hand-picked list,
+ * decide them — surfaces from the neutral solids ladder, text from
+ * `gray-600/700/900/1000`, hairlines from `gray-alpha-400/500`,
+ * tone-backgrounds from each family's 100 step, tone-borders from the 300-400
+ * band, tone-foregrounds from family 700 (800 where 700 fails 4.5:1 against
+ * the tone background, `green-800`), tone-solids from family 700 (light may
+ * take 600), chart marks from family 700.
+ *
+ * The D14a transitional set is empty as of plan 204; `transitionalValues`
+ * below carries no members and its mechanism still governs how a step may be
+ * kept alive.
  *
  * `tests/design-system/tokens.test.ts` pins both sets.
  */
@@ -102,47 +103,29 @@ const survivorLight: SurvivorColors = {
 };
 
 /**
- * D14a transitional steps: dropped by the band rule, kept only because a plan
- * that has not run yet still consumes them. `owner` names the plan that closes
- * the step — task 3's generator emits each declaration with this comment, so
- * the deadline travels with the value instead of living in a second list.
+ * D14a transitional steps: a step dropped by the band rule is kept only while
+ * a consumer outside `src/design-system/` still reads it, and it leaves in the
+ * commit that migrates that last consumer. An entry's `owner` names that plan
+ * and the generator prints it above the declaration, so the deadline travels
+ * with the value instead of living in a second list.
  *
- * This is a **live list, not a fixed number**: a step belongs here only while a
- * consumer outside `src/design-system/` still reads it, and it leaves in the
- * commit that migrates that last consumer. `brand-800`, `red-800` and
- * `green-900` left that way in task 3 — the bridge's hover faces and the
- * component-block notice foregrounds were their last readers — `teal-700`,
- * `pink-700` and `gray-alpha-300` left with plan 202 task 4, where the charts
- * moved onto the six closed slots and ListRow onto `border-subtle`;
- * `gray-500` left with plan 202 task 7, which replaced the last test class that
- * named it with a behaviour assertion; and `gray-100`, `gray-400`, `amber-800`,
- * `amber-900` and `red-900` left with plan 203 task 7, where the SSR face's
- * stylesheet moved onto the semantic layer and stopped reading raw steps.
+ * The set is **empty**: plan 204 migrated `gray-800` and `gray-alpha-200` when
+ * `src/spa/admin.html` stopped reading raw steps, which was their last
+ * consumer. The zero-reference searches that closed them are recorded in
+ * DESIGN.md § The D14a transitional live list.
  */
-const transitionalValues = {
-  // admin.html's inline styles; plan 204 re-tokens that console.
-  "gray-800": { dark: "#ccd5e1", light: "#3a4350", owner: "204 (admin.html)" },
-  "gray-alpha-200": { dark: "#ffffff17", light: "#10192814", owner: "204 (admin.html)" },
-} as const;
-
-export type TransitionalStep = keyof typeof transitionalValues;
+export type TransitionalStep = never;
 export type TransitionalSteps = readonly {
   readonly name: TransitionalStep;
   readonly owner: string;
 }[];
 
-/**
- * The transitional set as data. Task 3 emits these declarations (and their
- * owner comments) from here; nothing may keep a parallel hand-maintained copy.
- */
-export const transitionalSteps: TransitionalSteps = (
-  Object.keys(transitionalValues) as TransitionalStep[]
-).map((name) => ({ name, owner: transitionalValues[name].owner }));
+/** The transitional set as data — empty, so the generator emits none. */
+export const transitionalSteps: TransitionalSteps = [];
 
 /**
- * The survivor set as data, for the same reason: task 3 emits survivors plus
- * the transitional set, so both halves come from the source rather than from a
- * list the generator maintains.
+ * The survivor set as data, for the same reason: the generator emits the
+ * palette from here rather than from a list it maintains.
  */
 export const survivorSteps: readonly SurvivorStep[] = Object.keys(survivorDark) as SurvivorStep[];
 
@@ -156,20 +139,12 @@ const invariant = {
   "breakpoint-xl": "1280px",
 } as const;
 
-/** Every palette step the source declares: survivors plus the transitional set. */
+/** Every palette step the source declares: the survivors, plus any transitional step. */
 export type PrimitiveColorStep = SurvivorStep | TransitionalStep;
 export type PrimitiveName = PrimitiveColorStep | keyof typeof invariant;
 export type PrimitiveTokens = Readonly<Record<PrimitiveName, string>>;
 
-const transitionalFor = (theme: ThemeName): Readonly<Record<TransitionalStep, string>> =>
-  Object.fromEntries(
-    (Object.keys(transitionalValues) as TransitionalStep[]).map((name) => [
-      name,
-      transitionalValues[name][theme],
-    ]),
-  ) as Readonly<Record<TransitionalStep, string>>;
-
 export const primitives: Readonly<Record<ThemeName, PrimitiveTokens>> = {
-  dark: { ...invariant, ...survivorDark, ...transitionalFor("dark") },
-  light: { ...invariant, ...survivorLight, ...transitionalFor("light") },
+  dark: { ...invariant, ...survivorDark },
+  light: { ...invariant, ...survivorLight },
 };

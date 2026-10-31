@@ -612,6 +612,12 @@ describe("Users screen", () => {
     expect(rowContaining(surface, "octocat")?.textContent).toContain("2026-08-26");
     expect(rowContaining(surface, "ops")?.textContent).toContain("Support (2)");
     expect(rowContaining(surface, "yuki")?.textContent).toContain("User");
+    // Plain variant: the console asks for no accent tone at all — the operator
+    // pill is neutral like the rest, and its label carries the meaning.
+    expect(surface.container.querySelectorAll('[data-tone="accent"]')).toHaveLength(0);
+    expect(
+      rowContaining(surface, "octocat")?.querySelector('[data-slot="status-badge"]')?.getAttribute("data-tone"),
+    ).toBe("neutral");
     await surface.close();
   });
 
