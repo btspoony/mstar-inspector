@@ -24,7 +24,8 @@ import path from "node:path";
 
 import { THEMES, resolveTheme } from "../src/design-system/tokens";
 
-const OUT_PATH = path.resolve("src/design-system/fixture.json");
+const ROOT = path.resolve(import.meta.dir, "..");
+const OUT_PATH = path.join(ROOT, "src/design-system/fixture.json");
 
 function build(): string {
   const themes = Object.fromEntries(THEMES.map((theme) => [theme, resolveTheme(theme)]));
@@ -40,7 +41,7 @@ function build(): string {
 }
 
 const generated = build();
-const outLabel = path.relative(process.cwd(), OUT_PATH);
+const outLabel = path.relative(ROOT, OUT_PATH);
 
 if (process.argv.includes("--check")) {
   const current = existsSync(OUT_PATH) ? readFileSync(OUT_PATH, "utf8") : null;

@@ -1,7 +1,7 @@
 ---
 version: "0.5"
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. v0.5 rebuilds the document onto the generated fixture: the D14 band-rule palette (26 survivors plus the D14a transitional live list), a 126-token semantic layer that component code consumes exclusively, and a component layer composed from it. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted); light is a first-class face, not a parity checkbox. Supersedes the earlier theme lock (2026-09-04, user instruction). Upstream direction: baseline reference → token source → generated stylesheet and fixture → this document; the document is raised onto the fixture, never the reverse."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. v0.5 rebuilds the document onto the generated fixture: the D14 band-rule palette (26 survivors plus the D14a transitional live list), a 126-token semantic layer that component and page code are migrating onto exclusively (plans 202–204; today the SSR face and a few SPA files still read primitive steps), and a component layer composed from it. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted); light is a first-class face, not a parity checkbox. Supersedes the earlier theme lock (2026-09-04, user instruction). Upstream direction: baseline reference → token source → generated stylesheet and fixture → this document; the document is raised onto the fixture, never the reverse."
 
 # Runtime default = dark. Top-level colors: mirrors themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -576,16 +576,26 @@ one file under `themes:`.
 
 | Layer | Count | Contains | May reference |
 |-------|-------|----------|---------------|
-| primitive | 46 | 37 palette steps (26 survivors + 11 transitional), 2 font stacks, 4 breakpoints | nothing — raw values only |
+| primitive | 43 | 37 palette steps (26 survivors + 11 transitional), 2 font stacks, 4 breakpoints | nothing — raw values only |
 | semantic | 126 | 47 themed colours, 5 control/row heights, 3 radii, 9 spacing steps, 55 typography properties, 5 motion values, 2 shadows | the primitive layer |
-| component | 33 | button variants and sizes, the text field, the card | **the semantic layer only** |
+| component | 33 | button variants and sizes, the text field, the card | **the semantic layer only**, with two recorded carve-outs: `button-primary-hover-bg` names the primitive `brand-600` (the approved r3 hover — the accent fg equals the accent solid, so hovering through it would be invisible), and the padding values (`button-padding-xs/sm/md`, `field-padding`) are literals, not tokens |
 
-The boundary rule is the point of the architecture: component and page code
-consume the **semantic** layer exclusively (`var(--surface-card)`, never
-`var(--background-200)`). The palette is thereby droppable — the D14 reduction
-deleted 59 of the 96 steps the old stylesheet declared without touching a
-component face. `tests/design-system/boundary.test.ts` enforces the module
-boundary; the generated stylesheet carries the whole contract.
+The boundary rule is the architecture's **target**, and plans 202–204 are what
+lands it: component and page code consume the **semantic** layer only
+(`var(--surface-card)`, never `var(--background-200)`). It is not a fact of the
+tree today — `src/spa/Layout.tsx`, `src/spa/pages.module.css`,
+`src/dashboard/views.ts` (the SSR face) and `src/spa/admin.html` still read
+primitive steps, each is a task in those plans, and the guard for token usage
+arrives in the commit that migrates the last primitive reader.
+
+What `tests/design-system/boundary.test.ts` enforces today is narrower than the
+rule: the **module import specifier** for TypeScript files under `src/` outside
+`src/design-system/` (`@design-system` only). It reads import statements, not
+CSS declarations or inline `style` attributes, so it cannot see a primitive
+variable in a stylesheet or an HTML file. The palette is nevertheless
+droppable — the D14 reduction deleted 59 of the 96 steps the old stylesheet
+declared without touching a component face. The generated stylesheet carries
+the whole contract.
 
 ## Colors — palette by band rule (D14)
 
@@ -606,8 +616,10 @@ survivors; survivors decide the palette:
 **Survivors (26):** `background-100/200/300`; `gray-200/600/700/900/1000`;
 `gray-alpha-400/500`; `brand-600/700`; `blue-700`; `red-100/400/700`;
 `amber-100/400/600/700`; `green-100/300/400/700/800`; `purple-700`. The teal
-and pink families are removed entirely — their only consumer, `charts.css`,
-migrates onto the six closed chart slots.
+and pink families are removed **except `teal-700` and `pink-700`**: those two
+steps are on the transitional list below because `src/spa/components/charts/charts.css`
+still fills from them, and they leave with plan 203, which migrates that file
+onto the six closed chart slots.
 
 Every removed step recorded the D14 zero-reference search before it left
 (`grep -rnF "(--<step>)" src tests scripts` and the declaration-site search
@@ -1073,6 +1085,25 @@ on. Pairs below their bar are **listed with their disposition, not buried**.
 | Pair | Dark | Light | Disposition |
 |------|------|-------|-------------|
 | `on-brand` on `tone-accent-solid` | 9.15 | 5.36 | passes both themes |
+
+### destructive (the label the filled danger button paints)
+
+The `destructive` Button variant paints `--destructive-foreground` on
+`--destructive`; the bridge resolves that pair to `on-brand` on
+`tone-danger-solid`, and the hover face is the derived 12% mix. Measured on
+those rendered faces, not on a neighbouring token:
+
+| Pair | Dark | Light | Disposition |
+|------|------|-------|-------------|
+| `destructive-foreground` on `tone-danger-solid` | 5.98 | 4.83 | passes both themes |
+| `destructive-foreground` on the derived hover face | 6.58 | 5.86 | passes both themes |
+
+The variant previously painted `text-white` (2.77:1 on dark's `#f87171`) and
+carried a `dark:` fill split: Tailwind v4 resolves `dark:` from
+`prefers-color-scheme`, which this document's theme contract never consults, so
+the split could only fire on an OS-dark machine running the light face.
+`tests/spa/tokens.test.ts` reads the label class out of the component and
+measures that class, so a raw colour fails the test instead of passing it.
 
 ### Tone fg pairs (the soft strength — the reading face)
 

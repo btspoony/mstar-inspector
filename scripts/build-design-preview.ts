@@ -38,7 +38,8 @@ import {
   type ThemeName,
 } from "../src/design-system/tokens";
 
-const OUT_PATH = path.resolve("dist/design-preview.html");
+const ROOT = path.resolve(import.meta.dir, "..");
+const OUT_PATH = path.join(ROOT, "dist/design-preview.html");
 
 const LAYERS = ["primitive", "semantic", "component"] as const;
 type Layer = (typeof LAYERS)[number];
@@ -672,7 +673,7 @@ export function previewCoverage(html: string): PreviewCoverage {
 if (import.meta.main) {
   const html = buildPreview();
   const coverage = previewCoverage(html);
-  const label = path.relative(process.cwd(), OUT_PATH);
+  const label = path.relative(ROOT, OUT_PATH);
 
   if (!coverage.ok) {
     for (const entry of coverage.missing) console.error(`  missing  ${entry}`);

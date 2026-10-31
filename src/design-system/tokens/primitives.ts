@@ -3,7 +3,7 @@
  * semantic layer names the jobs.
  *
  * The colour palette is compass D14/D14a: the 96 steps `tokens.css` declared
- * are reduced to the 26 the semantic bands consume, plus 14 **transitional**
+ * are reduced to the 26 the semantic bands consume, plus 11 **transitional**
  * steps that still have live consumers owned by later plans. Bands, not a
  * hand-picked list, decide the survivors — surfaces from the neutral solids
  * ladder, text from `gray-600/700/900/1000`, hairlines from

@@ -18,6 +18,12 @@
  * the token SSOT, and a prose mention that happens to carry a stale value is a
  * second copy, never the authority.
  *
+ * Both directions are total. Forward: every fixture token is compared at the
+ * slot its layer and name route to. Reverse: every frontmatter leaf under a
+ * group the forward pass writes (`themes.<theme>.colors`, `typography`,
+ * `spacing`, `rounded`, `motion`, `elevation`) must be backed by a fixture
+ * token, apart from the two spec-required keys in `DOCUMENT_ONLY`.
+ *
  * Three token classes have no frontmatter slot at all, and the report prints
  * them with their reason rather than dropping them quietly:
  *
@@ -71,8 +77,6 @@ const RADIUS_KEY: Readonly<Record<string, string>> = {
   pill: "full",
 };
 
-const COLOR = /^(?:#[0-9a-f]{3,8}|oklch\()/i;
-
 type Slot = { readonly path: string } | { readonly reason: string };
 
 const NO_SLOT_COMPONENT = "component layer — frontmatter `components:` is variant-shaped, not token-shaped";
@@ -80,11 +84,27 @@ const NO_SLOT_INVARIANT = "font family / breakpoint — carried per typography r
 const NO_SLOT_GEOMETRY = "control / row height — the spec has no size group";
 
 /**
+ * Frontmatter leaves the design-md spec requires that no fixture token backs.
+ * They are named so the reverse sweep can stay total: any other declared leaf
+ * under these groups is a name the source dropped. Printed, never silent.
+ */
+const DOCUMENT_ONLY: Readonly<Record<string, string>> = {
+  "spacing.base": "design-md-spec §Spacing requires the base unit in frontmatter",
+  "motion.reduced-motion": "the reduced-motion fold is a media-query rule, not a duration token",
+};
+
+/**
  * Where one fixture token belongs in the frontmatter, for one theme. A `reason`
  * means the document cannot express the token at all; it is reported, never
  * skipped.
+ *
+ * Routing is by layer and name, not by value shape: a colour whose resolved
+ * value happened to be `rgb()`/`color-mix()` would fall out of a value test and
+ * never be compared. Anything left in the primitive or semantic layer is a
+ * colour, so an unrecognised name lands on the colour slot and is reported
+ * absent — loud, not invisible.
  */
-export function documentSlot(layer: string, name: string, value: string, theme: ThemeName): Slot {
+export function documentSlot(layer: string, name: string, theme: ThemeName): Slot {
   if (layer === "component") return { reason: NO_SLOT_COMPONENT };
 
   const typo = /^typo-(.+)-(family|size|weight|line|tracking)$/.exec(name);
@@ -99,10 +119,11 @@ export function documentSlot(layer: string, name: string, value: string, theme: 
 
   if (name.startsWith("shadow-")) return { path: `elevation.${name}.${theme}` };
 
-  if (COLOR.test(value)) return { path: `themes.${theme}.colors.${name}` };
-
   if (/^(?:control|row)-h-/.test(name)) return { reason: NO_SLOT_GEOMETRY };
-  return { reason: NO_SLOT_INVARIANT };
+
+  if (layer === "primitive" && /^(?:font|breakpoint)-/.test(name)) return { reason: NO_SLOT_INVARIANT };
+
+  return { path: `themes.${theme}.colors.${name}` };
 }
 
 export interface Divergence {
@@ -125,10 +146,25 @@ export interface SyncReport {
   /** Token/path pairs compared — one count per theme for a themed value. */
   readonly compared: number;
   readonly divergences: readonly Divergence[];
-  /** Document-only names under `themes.<theme>.colors`: the reverse direction. */
+  /** Document-only names under a group the forward pass writes: the reverse direction. */
   readonly stale: readonly StaleName[];
+  /**
+   * Two fixture tokens claiming one frontmatter path with different values:
+   * either the two themes disagree on a theme-independent slot, or two names
+   * route to the same slot. Neither can be represented by one document value.
+   */
+  readonly collisions: readonly Collision[];
   /** Names the frontmatter cannot hold, by reason. */
   readonly unexpressed: Readonly<Record<string, number>>;
+}
+
+export interface Collision {
+  /** Frontmatter path both claims landed on. */
+  readonly at: string;
+  readonly first: string;
+  readonly firstValue: string;
+  readonly second: string;
+  readonly secondValue: string;
 }
 
 /** One hop; absent or non-object nodes read as `undefined`, never throw. */
@@ -142,63 +178,101 @@ function at(frontmatter: Record<string, unknown>, dotted: string): unknown {
   return dotted.split(".").reduce<unknown>(hop, frontmatter);
 }
 
+/** Every leaf path under `node`, prefixed: `typography.heading-32.fontSize`. */
+function leaves(node: unknown, prefix: string): string[] {
+  if (typeof node !== "object" || node === null || Array.isArray(node)) return [prefix];
+  return Object.entries(node).flatMap(([key, child]) => leaves(child, `${prefix}.${key}`));
+}
+
 /**
  * Compares every fixture token against the frontmatter. Values compare as text:
  * YAML keeps `1.6` and `600` numbers while the fixture holds the CSS strings the
  * source declares, and `1.6` and `"1.6"` are the same token value.
  *
  * A theme-independent token (`spacing-4`, `duration-fast`) reaches the same
- * path from both themes, so the comparison is keyed by path and runs once.
+ * path from both themes. The second claim is **compared**, not skipped: equal
+ * values are one comparison, different values are a collision the document
+ * cannot satisfy.
  *
- * The colour groups are compared both ways. One way catches a value the
- * document has not caught up with; the other catches a palette step the source
- * dropped and the document still declares — which is exactly what the palette
- * reduction leaves behind, and what a rewrite from the fixture must remove.
- * Only `themes.<theme>.colors` is read: the top-level `colors:` map mirrors the
- * dark group, so counting it would report every name twice.
+ * Both directions are total. Forward catches a value the document has not
+ * caught up with; reverse catches a name the source dropped that the document
+ * still declares — over every group the forward pass writes, not colours only,
+ * which is where the palette reduction leaves its debris.
+ * Only `themes.<theme>.colors` is read for colours: the top-level `colors:` map
+ * mirrors the dark group, so counting it would report every name twice.
  */
 export function documentSync(fixture: Fixture, frontmatter: Record<string, unknown>): SyncReport {
   const divergences: Divergence[] = [];
   const stale: StaleName[] = [];
+  const collisions: Collision[] = [];
   const unexpressed: Record<string, number> = {};
-  const expected = new Map<string, Divergence>();
+  const emitted = new Map<string, { token: string; value: string }>();
+  const liveColors = new Map<ThemeName, Set<string>>();
 
   for (const theme of THEMES) {
     const layers = fixture[theme];
     if (layers === undefined) throw new Error(`fixture is missing theme "${theme}"`);
+    const colors = new Set<string>();
+    liveColors.set(theme, colors);
 
-    const liveColors = new Set<string>();
     for (const [layer, tokens] of Object.entries(layers)) {
       for (const [name, value] of Object.entries(tokens)) {
-        const slot = documentSlot(layer, name, value, theme);
+        const token = `${layer}/${name} [${theme}]`;
+        const slot = documentSlot(layer, name, theme);
         if ("reason" in slot) {
           unexpressed[slot.reason] = (unexpressed[slot.reason] ?? 0) + 1;
           continue;
         }
-        if (COLOR.test(value)) liveColors.add(name);
-        if (expected.has(slot.path)) continue;
+        if (slot.path.startsWith("themes.")) colors.add(name);
+
+        const prior = emitted.get(slot.path);
+        if (prior !== undefined) {
+          if (prior.value !== value) {
+            collisions.push({ at: slot.path, first: prior.token, firstValue: prior.value, second: token, secondValue: value });
+          }
+          continue;
+        }
+        emitted.set(slot.path, { token, value });
         const held = at(frontmatter, slot.path);
-        expected.set(slot.path, {
-          token: `${layer}/${name} [${theme}]`,
+        const candidate: Divergence = {
+          token,
           at: slot.path,
           document: held === undefined ? undefined : String(held),
           fixture: value,
-        });
+        };
+        if (candidate.document !== candidate.fixture) divergences.push(candidate);
       }
     }
+  }
 
+  // Reverse sweep: colours per theme, then every group the forward pass writes.
+  for (const theme of THEMES) {
     const declared = at(frontmatter, `themes.${theme}.colors`);
     if (typeof declared !== "object" || declared === null) continue;
+    const live = liveColors.get(theme)!;
     for (const [name, value] of Object.entries(declared)) {
-      if (!liveColors.has(name)) stale.push({ at: `themes.${theme}.colors.${name}`, document: String(value) });
+      if (!live.has(name)) stale.push({ at: `themes.${theme}.colors.${name}`, document: String(value) });
+    }
+  }
+  for (const group of ["typography", "spacing", "rounded", "motion", "elevation"] as const) {
+    // An absent group is the forward pass's to report: every token it would
+    // hold reads as absent. Only a declared group can carry stale leaves.
+    const declared = at(frontmatter, group);
+    if (typeof declared !== "object" || declared === null) continue;
+    for (const path of leaves(declared, group)) {
+      if (emitted.has(path) || Object.hasOwn(DOCUMENT_ONLY, path)) continue;
+      stale.push({ at: path, document: String(at(frontmatter, path)) });
     }
   }
 
-  for (const candidate of expected.values()) {
-    if (candidate.document !== candidate.fixture) divergences.push(candidate);
-  }
-
-  return { ok: divergences.length === 0 && stale.length === 0, compared: expected.size, divergences, stale, unexpressed };
+  return {
+    ok: divergences.length === 0 && stale.length === 0 && collisions.length === 0,
+    compared: emitted.size,
+    divergences,
+    stale,
+    collisions,
+    unexpressed,
+  };
 }
 
 /**
@@ -210,11 +284,22 @@ export function documentSync(fixture: Fixture, frontmatter: Record<string, unkno
 function report(report: SyncReport): void {
   const absent = report.divergences.filter((d) => d.document === undefined);
   const disagreeing = report.divergences.filter((d) => d.document !== undefined);
+  const problems = report.divergences.length + report.stale.length + report.collisions.length;
 
   console.log(
-    `fixture → DESIGN.md frontmatter: ${
-      report.ok ? "in sync" : `${report.divergences.length + report.stale.length} divergence(s)`
-    } (${report.compared} compared: ${disagreeing.length} disagreeing, ${absent.length} absent, ${report.stale.length} stale)`,
+    `fixture → DESIGN.md frontmatter: ${report.ok ? "in sync" : `${problems} divergence(s)`} (${
+      report.compared
+    } compared: ${disagreeing.length} disagreeing, ${absent.length} absent, ${report.stale.length} stale, ${
+      report.collisions.length
+    } colliding)`,
+  );
+  // Coverage is part of the verdict: "in sync" is only as strong as the sweep
+  // that produced it, so the sweep says what it read in both directions.
+  const documentOnly = Object.keys(DOCUMENT_ONLY).join(", ");
+  console.log(
+    `  both ways over: themes.<theme>.colors, typography, spacing, rounded, motion, elevation` +
+      (documentOnly === "" ? "" : ` — document-only by spec: ${documentOnly}`) +
+      "; the component layer and the invariant/geometry classes above have no slot.",
   );
   if (!report.ok) {
     console.log("  DESIGN.md is the last link (source → fixture → DESIGN.md): it is raised onto the");
@@ -242,6 +327,15 @@ function report(report: SyncReport): void {
   if (report.stale.length > 0) {
     console.log(`  declared by DESIGN.md, no longer in the source (${report.stale.length}):`);
     for (const s of report.stale) console.log(`    ${s.at}  ${JSON.stringify(s.document)}`);
+  }
+
+  if (report.collisions.length > 0) {
+    console.log(`  two source tokens claim one frontmatter path (${report.collisions.length}):`);
+    for (const c of report.collisions) {
+      console.log(`    ${c.at}`);
+      console.log(`      ${c.first}  ${JSON.stringify(c.firstValue)}`);
+      console.log(`      ${c.second}  ${JSON.stringify(c.secondValue)}`);
+    }
   }
 
   for (const [reason, count] of Object.entries(report.unexpressed)) {

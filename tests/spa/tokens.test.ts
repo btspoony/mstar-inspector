@@ -512,13 +512,23 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("the destructive hover is a distinct face in both themes, and keeps its label readable", async () => {
     // The derivation is a colour relationship, so assert the relationship:
     // mixing toward the label face must move the fill away from the resting
-    // colour and keep --on-brand above 4.5:1 on it, in both themes.
-    // The declaration lives in the bridge; the colours it mixes live in the
-    // generated stylesheet, so resolve each from its own authority.
+    // colour and keep the label above 4.5:1 on it, in both themes.
+    // The label is read from the component's own class list, not assumed: the
+    // chip the test measured used to be `on-brand` while the DOM painted
+    // `text-white` (M1/W-103), so the face under test is the face that renders.
     const bridgeVars = cssCustomProperties(extractBlock(await Bun.file(BRIDGE).text(), ":root {"));
     const tokens = await Bun.file(TOKENS_CSS).text();
     const dark = cssCustomProperties(extractBlock(tokens, ":root {"));
     const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
+    const destructiveVariant = /destructive:\s*\n?\s*"([^"]+)"/.exec(await Bun.file(join(UI_DIR, "button.tsx")).text())?.[1];
+    if (destructiveVariant === undefined) throw new Error("button.tsx declares no destructive variant");
+    // `bg-destructive` / `text-destructive-foreground` in the class list are the
+    // rendered faces; a raw colour (`text-white`) has no bridge key and fails here.
+    const fillClass = /(?:^|\s)bg-([a-z][a-z0-9-]*)(?=\s|$)/.exec(destructiveVariant)?.[1];
+    const labelClass = /(?:^|\s)text-([a-z][a-z0-9-]*)(?=\s|$)/.exec(destructiveVariant)?.[1];
+    expect(fillClass, "destructive variant must paint a token fill").toBeDefined();
+    expect(labelClass, "destructive variant must paint a token label").toBeDefined();
+    expect(destructiveVariant, "no `dark:` split — Tailwind's dark: is prefers-color-scheme, this app's theme is data-theme").not.toContain("dark:");
 
     // The derived face lives in the @supports block; the plain solid in `:root`
     // is its fallback.
@@ -567,11 +577,18 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     };
 
     for (const vars of [dark, light]) {
-      const solid = resolve(vars, "tone-danger-solid");
-      const label = resolve(vars, "on-brand");
+      // One map per theme: a bridge key points at a token, a token points at a
+      // primitive, and the chain ends in the hex the browser paints.
+      const chain = { ...vars, ...bridgeVars };
+      expect(chain[fillClass!], `bg-${fillClass} must name a bridge key`).toBeDefined();
+      expect(chain[labelClass!], `text-${labelClass} must name a bridge key`).toBeDefined();
+      const solid = resolve(chain, fillClass!);
+      const label = resolve(chain, labelClass!);
+      expect(label, `${labelClass} must resolve to a colour`).toMatch(/^#[0-9a-f]{3,8}$/i);
       const hover = blend(solid, resolve(vars, "text-primary"), Number(weightPercent) / 100);
       expect(hover, "hover must differ from the resting fill").not.toBe(solid);
-      expect(contrast(label, hover), `label on the hover face ${hover}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(label, solid), `${labelClass} on the resting ${fillClass} face`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(label, hover), `${labelClass} on the hover face ${hover}`).toBeGreaterThanOrEqual(4.5);
     }
   });
 

@@ -143,6 +143,72 @@ describe("document-sync check", () => {
     expect(report.stale).toHaveLength(1);
   });
 
+  test("the reverse sweep covers every group, not colours only", () => {
+    // A retired spacing step, typography role or motion value leaves the same
+    // debris a retired colour does; a colours-only sweep passes it.
+    const doctored = designFrontmatter();
+    (doctored.spacing as Record<string, string>)["13"] = "52px";
+    (doctored.typography as Record<string, Record<string, string>>)["copy-20"] = {
+      fontFamily: '"Geist Sans", sans-serif',
+      fontSize: "20px",
+      fontWeight: "400",
+      lineHeight: "1.5",
+      letterSpacing: "0",
+    };
+    (doctored.motion as Record<string, string>)["duration-slower"] = "400ms";
+
+    const report = documentSync(FIXTURE, doctored);
+    expect(report.ok).toBe(false);
+    expect(report.stale.map((s) => s.at).sort()).toEqual([
+      "motion.duration-slower",
+      "spacing.13",
+      "typography.copy-20.fontFamily",
+      "typography.copy-20.fontSize",
+      "typography.copy-20.fontWeight",
+      "typography.copy-20.letterSpacing",
+      "typography.copy-20.lineHeight",
+    ]);
+  });
+
+  test("the two themes must agree on a theme-independent slot", () => {
+    // `spacing-4` reaches `spacing.4` from both themes; the second theme's
+    // value used to be dropped by the dedup, so a light-only edit passed.
+    const doctored = structuredClone(FIXTURE) as Record<string, Record<string, Record<string, string>>>;
+    doctored.light!.semantic!["spacing-4"] = "20px";
+
+    const report = documentSync(doctored as unknown as typeof FIXTURE, designFrontmatter());
+    expect(report.ok).toBe(false);
+    expect(report.collisions).toHaveLength(1);
+    expect(report.collisions[0]).toMatchObject({
+      at: "spacing.4",
+      first: "semantic/spacing-4 [dark]",
+      firstValue: "16px",
+      second: "semantic/spacing-4 [light]",
+      secondValue: "20px",
+    });
+  });
+
+  test("two tokens claiming one frontmatter path collide instead of skipping the second", () => {
+    // The comparator's own failure mode: a path collision used to `continue`,
+    // so the second claimant was never read. A primitive and a semantic that
+    // route to one slot cannot both be represented by one document value.
+    const doctored = structuredClone(FIXTURE) as Record<string, Record<string, Record<string, string>>>;
+    doctored.dark!.primitive!["spacing-4"] = "18px";
+
+    const report = documentSync(doctored as unknown as typeof FIXTURE, designFrontmatter());
+    expect(report.ok).toBe(false);
+    // The primitive claim lands first and then contests the semantic token in
+    // both themes — three claims, one document slot.
+    expect(report.collisions.map((c) => [c.at, c.first, c.firstValue])).toEqual([
+      ["spacing.4", "primitive/spacing-4 [dark]", "18px"],
+      ["spacing.4", "primitive/spacing-4 [dark]", "18px"],
+    ]);
+    expect(report.collisions.map((c) => c.second)).toEqual([
+      "semantic/spacing-4 [dark]",
+      "semantic/spacing-4 [light]",
+    ]);
+  });
+
   test("a doctored elevation entry reports exactly that divergence, and restoring it clears it", () => {
     // Proves the comparison is a real read of the document rather than a
     // constant: doctoring one shadow value adds exactly one divergence, and

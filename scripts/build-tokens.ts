@@ -32,7 +32,8 @@ import {
   type ThemeName,
 } from "../src/design-system/tokens";
 
-const OUT_PATH = path.resolve("src/spa/styles/tokens.css");
+const ROOT = path.resolve(import.meta.dir, "..");
+const OUT_PATH = path.join(ROOT, "src/spa/styles/tokens.css");
 
 /** `:root` is the deterministic dark default; light is the stored choice only. */
 const ROOT_THEME: ThemeName = "dark";
@@ -149,7 +150,7 @@ function build(): string {
 }
 
 const generated = build();
-const outLabel = path.relative(process.cwd(), OUT_PATH);
+const outLabel = path.relative(ROOT, OUT_PATH);
 
 if (process.argv.includes("--check")) {
   const current = existsSync(OUT_PATH) ? readFileSync(OUT_PATH, "utf8") : null;

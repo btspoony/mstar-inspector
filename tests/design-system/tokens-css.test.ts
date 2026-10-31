@@ -8,10 +8,10 @@
  *    and comparing against the committed file catches a hand edit the same way
  *    `--check` does, and it runs under `bun test` as well as in CI.
  * 2. **The transitional set is declared, with its owner.** Plans 202/203
- *    compile against those 14 steps until they migrate the last consumer;
+ *    compile against those 11 steps until they migrate the last consumer;
  *    emitting survivors alone would break the build with no failing assertion
  *    until those plans run.
- * 3. **Nothing removed comes back.** The 56 steps D14 dropped must not appear
+ * 3. **Nothing removed comes back.** The 59 steps D14 dropped must not appear
  *    as declarations, and no layer may reference a transitional step.
  * 4. **The theme contract survives**: `:root` dark, `[data-theme="light"]`
  *    stored-light only, the ops variant, and the reduced-motion fold.
@@ -82,6 +82,21 @@ describe("generated tokens.css", () => {
       [...survivorSteps, ...transitionalSteps.map((s) => s.name)].sort(),
     );
     expect(unique).toHaveLength(37);
+  });
+
+  test("every dark semantic and component declaration reaches :root at its source value", () => {
+    // The generator's own `--check` compares the file to its last output, so a
+    // filter inside `build()` would stay green after a regeneration. Compare
+    // the source to the file instead: a dropped declaration has nowhere to hide.
+    const dark = tokenLayers("dark");
+    for (const [layer, tokens] of [
+      ["semantic", dark.semantic],
+      ["component", dark.component],
+    ] as const) {
+      for (const [name, value] of Object.entries(tokens)) {
+        expect(ROOT[name], `--${name} (${layer})`).toBe(value);
+      }
+    }
   });
 
   test("every transitional declaration carries the plan that closes it", () => {
