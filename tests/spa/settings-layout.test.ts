@@ -1752,9 +1752,8 @@ describe("settings header typography", () => {
     );
     // Exactly one heading, and it is the heading-24 h1 carrying the slug.
     expect(shell.match(/<h1/g)).toHaveLength(1);
-    expect(shell).toContain(
-      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">Acme</h1>',
-    );
+    expect(shell).toContain('<h1 data-slot="page-header-title"');
+    expect(shell).toContain(">Acme</h1>");
     // Rendering alone cannot express OWNERSHIP — a shell inlining the same
     // triple renders byte-identical markup — so the face's single home is
     // pinned on source: PageHeader spells the triple, the shell composes

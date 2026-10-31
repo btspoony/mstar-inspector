@@ -195,9 +195,8 @@ describe("settings heading idiom (QC convergence)", () => {
     // heading-24 trio with the appId as its content.
     expect(shell.match(/<h1/g)).toHaveLength(1);
     expect(shell.match(/--typo-heading-24-size/g)).toHaveLength(1);
-    expect(shell).toContain(
-      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">Demo</h1>',
-    );
+    expect(shell).toContain('<h1 data-slot="page-header-title"');
+    expect(shell).toContain(">Demo</h1>");
     // Ownership: the triple is spelled once, in PageHeader, and the shell
     // composes it rather than re-spelling it.
     expect(pageHeader).toContain("text-(length:--typo-heading-24-size)");

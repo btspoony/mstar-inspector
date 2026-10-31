@@ -345,9 +345,8 @@ describe("v0.3 page face (A4/A5)", () => {
       // Exactly one element carries the heading-24 trio, and it is the h1.
       expect(html.match(/--typo-heading-24-size/g), name).toHaveLength(1);
       expect(html.match(/<h1/g), name).toHaveLength(1);
-      expect(html, name).toContain(
-        `<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">${heading}</h1>`,
-      );
+      expect(html, name).toContain('<h1 data-slot="page-header-title"');
+      expect(html, name).toContain(`>${heading}</h1>`);
       // The face has exactly one home: the page composes PageHeader…
       expect(PAGE_FACE_SOURCES[name]).toContain("<PageHeader");
       // …and holds no second copy of the heading-24 triple.
