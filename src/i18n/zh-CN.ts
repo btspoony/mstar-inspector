@@ -301,11 +301,6 @@ export const zhCN: Dictionary = {
     noGrant: "当前没有生效的支持访问。",
   },
   settings: {
-    /** (AD-591) 分组 eyebrow 标签——应用信息/状态区与配置区（双语原子）。 */
-    group: {
-      appInfo: "应用信息",
-      configuration: "配置",
-    },
     changesSaved: "更改已保存。",
     removeNoChange: "未做任何更改 — 没有可移除的内容。",
     addKey: "添加密钥",
@@ -333,9 +328,13 @@ export const zhCN: Dictionary = {
     resumeReviews: "恢复审查",
     disconnected: "此 App 已断开连接 — 启用后即可审查。",
     lastWebhook: "最近 webhook：{time}",
+    installations: "安装",
+    installationsCount: "{count} 个安装",
+    installationsCountOne: "{count} 个安装",
+    installationsAccount: "账号",
+    installationsId: "安装",
+    installationsLastSync: "最近同步",
     noInstallations: "还没有安装。",
-    installation: "安装 {id}",
-    lastSeen: "最近可见 {time}",
     recentDeliveries: "最近投递",
     recentDeliveriesCopy: "此 App 最近 5 次 webhook 投递 — 最新的在前。",
     noDeliveries: "还没有投递。",

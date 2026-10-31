@@ -1,18 +1,9 @@
 import { useState } from "react";
 import { Plus } from "lucide-react";
 import { t } from "../../i18n";
-import {
-  Button,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  StatusBadge,
-  type StatusTone,
-} from "@design-system";
+import { Button, FlowSection, StatusBadge, type StatusTone } from "@design-system";
 import { GroupCard, GroupCardBody, GroupCardHeader } from "../components/GroupCard";
 import { ListRow, ListRowGroup } from "../components/ListRow";
-import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import type { CatalogProvider, SettingsManagePayload } from "./data";
@@ -54,7 +45,7 @@ const TIER_FACE = {
  * Opening any of them inserts nothing into this list (AC-4) and changes no
  * route (AC-5); the per-row removes keep their confirmation dialog.
  */
-export function ProvidersCard({
+export function ProvidersSection({
   locale,
   payload,
   onVerify,
@@ -99,13 +90,15 @@ export function ProvidersCard({
       : removeOutcome.notice;
 
   return (
-    <SectionCard tier="secondary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.providers.title")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.providersCopy")}</CardDescription>
-        <CardAction>
-          {/* A dialog trigger, not a disclosure: aria-haspopup names the
-              overlay, and no region of this card is expanded by it. */}
+    <FlowSection
+      title={t(locale, "settings.providers.title")}
+      subtitle={t(locale, "settings.providersCopy")}
+    >
+      <div className="flex flex-col gap-3">
+        {/* A dialog trigger, not a disclosure: aria-haspopup names the
+            overlay, and no region of this section is expanded by it. The
+            flow section owns no action slot, so the trigger heads the body. */}
+        <div className="flex flex-wrap items-center justify-end">
           <Button
             type="button"
             variant="outline"
@@ -116,15 +109,14 @@ export function ProvidersCard({
             <Plus aria-hidden="true" />
             {t(locale, "settings.addProvider")}
           </Button>
-        </CardAction>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        {/* The card's region sits under the header: a completed flow's outcome
-            survives the dialog's success-close (dialog-local state does not).
-            A failed submit stays inside the dialog that produced it. */}
+        </div>
+        {/* The section's region sits under the title: a completed flow's
+            outcome survives the dialog's success-close (dialog-local state
+            does not). A failed submit stays inside the dialog that produced
+            it. */}
         <NoticeRegion notice={notice} />
         {/* A removal whose group is gone has no row to sit beside; the notice
-            stays in the card so the outcome is never dropped. */}
+            stays in the section so the outcome is never dropped. */}
         <NoticeRegion notice={orphanRemoveNotice} />
         {groups.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
@@ -145,7 +137,7 @@ export function ProvidersCard({
             />
           ))
         )}
-      </CardContent>
+      </div>
       <AddProviderDialog
         locale={locale}
         open={addOpen}
@@ -167,7 +159,7 @@ export function ProvidersCard({
         onVerify={onVerify}
         onOutcome={onOutcome}
       />
-    </SectionCard>
+    </FlowSection>
   );
 }
 

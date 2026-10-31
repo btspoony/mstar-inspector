@@ -19,12 +19,14 @@
  * distinction depend on a value this file does not state.
  *
  * `SectionCardTitle` upgrades the card title face to the heading-16 token
- * step (DESIGN.md: heading-16 = section/card titles). `SectionGroup` carries
- * the group rhythm: an eyebrow label above a card stack — spacing-6 inside a
- * group, groups separated by spacing-8 (DESIGN.md Spacing & Layout).
- * All three are purely presentational: pages resolve `t()` themselves.
+ * step (DESIGN.md: heading-16 = section/card titles).
+ * Both are purely presentational: pages resolve `t()` themselves.
+ *
+ * A page's own body — a settings tab, a detail page — is a section flow
+ * (`FlowSection`), not a stack of these cards: a card frames an object that
+ * has to be framed (a table, a form cluster, the operator console's panels).
  */
-import type { ComponentProps, ReactNode } from "react";
+import type { ComponentProps } from "react";
 import { Card, CardTitle, cn } from "@design-system";
 
 type SectionTier = "primary" | "secondary";
@@ -54,29 +56,5 @@ export function SectionCardTitle({ className, ...props }: ComponentProps<typeof 
       )}
       {...props}
     />
-  );
-}
-
-export function SectionGroup({
-  label,
-  className,
-  children,
-}: {
-  label: ReactNode;
-  className?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div data-slot="section-group" className={cn("flex flex-col gap-6", className)}>
-      {/* Rhythm label, not a heading: the zone's own title (e.g. the App
-          slug row) stays the heading tree's owner — no level interleave. */}
-      <p
-        data-slot="section-group-eyebrow"
-        className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-muted-foreground"
-      >
-        {label}
-      </p>
-      {children}
-    </div>
   );
 }

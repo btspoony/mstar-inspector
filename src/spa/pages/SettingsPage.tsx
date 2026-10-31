@@ -14,6 +14,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  FlowSection,
   Input,
   Select,
   SelectContent,
@@ -30,7 +31,8 @@ import {
   ToggleGroupItem,
 } from "@design-system";
 import { AppAvatar } from "../components/AppAvatar";
-import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
+import { DataTable, type DataTableColumn } from "../components/DataTable";
+import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { workspaceRefOf } from "../routes";
@@ -60,7 +62,7 @@ import {
   type SettingsPayload,
 } from "./data";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
-import { ProvidersCard } from "./settings-providers";
+import { ProvidersSection } from "./settings-providers";
 
 export type PendingAction =
   | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
@@ -287,7 +289,7 @@ export function SettingsView({
     if (!pending || busy) return;
     const action = pending;
     // The remove actions originate solely from the manage face's
-    // ProvidersCard; the read-only face can never reach a confirm, so the
+    // ProvidersSection; the read-only face can never reach a confirm, so the
     // empty fallback here is unreachable in practice.
     const configured = payload.can_manage ? payload.configured_providers : [];
     setBusy(true);
@@ -350,20 +352,22 @@ export function SettingsView({
   );
 
   // Identity-only non-manager face: the payload carries the D4 identity
-  // set ONLY (no ops stores), so the tab renders the GitHub
-  // identity card and nothing else — no slug row (the AppDetailPage shell
-  // owns the identity header), no ops/health/configuration surfaces.
+  // set ONLY (no ops stores, no `installations[]`), so the tab renders the
+  // GitHub identity section and nothing else — no slug row (the AppDetailPage
+  // shell owns the identity header), no ops/health/configuration surfaces.
+  // The installations count stays out for the same reason: `installations`
+  // is the manager face's array, and nowhere else may a count appear.
   if (!payload.can_manage) {
     return (
       <div className="flex flex-col gap-6">
-        <SectionGroup label={t(locale, "settings.group.appInfo")}>
-          <AppInfoCard
+        <div className="flex flex-col">
+          <AppInfoSection
             locale={locale}
             app={payload.app}
             workspaceId={payload.workspace_id}
             canManage={false}
           />
-        </SectionGroup>
+        </div>
         {versionFooter}
       </div>
     );
@@ -371,56 +375,55 @@ export function SettingsView({
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-(--spacing-8)">
-        {/* AD-591 section rhythm: two tier groups — the app-info/status zone
-            (Tier 1 primary surfaces) and the configuration zone (Tier 2
-            secondary surfaces), each headed by a group eyebrow. Block order
-            and data flow are unchanged (Non-Goal); the identity-card position
-            contract (identity card inside the app-info group, before the
-            manage conditional) holds. The slug row is the shell's identity
-            header (AppDetailPage h1 + status), not a per-tab face. */}
-        <SectionGroup label={t(locale, "settings.group.appInfo")}>
-          {/* The GitHub identity card sits before the manage conditional in
-              the group (AC3); the viewer's authorization switches the name
-              link's destination (AD-623). */}
-          <AppInfoCard
-            locale={locale}
-            app={app}
-            workspaceId={payload.workspace_id}
-            canManage={payload.can_manage}
-            onReload={() => onReload({ background: true })}
-          />
+      {/* Detail-page section flow (r3 baseline § 5): one content plane divided
+          by hairlines instead of one framed card per section. Sections are
+          direct siblings so FlowSection's first/last edge trimming applies.
+          Order and membership are the plan's: identity, installations,
+          runtime & harness, configuration (providers, chains), seats, and the
+          destructive ops zone. Every field, action and data flow is unchanged. */}
+      <div className="flex flex-col">
+        <AppInfoSection
+          locale={locale}
+          app={app}
+          workspaceId={payload.workspace_id}
+          canManage={payload.can_manage}
+          onReload={() => onReload({ background: true })}
+        />
 
-          <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} onTriggerMode={runTriggerMode} />
-        </SectionGroup>
+        <InstallationsSection locale={locale} payload={payload} />
 
-        {payload.can_manage ? (
-          <SectionGroup label={t(locale, "settings.group.configuration")}>
-            <RuntimeHarnessCard locale={locale} payload={payload} onSettings={submitSettings} />
+        <RuntimeHarnessSection
+          locale={locale}
+          payload={payload}
+          onSettings={submitSettings}
+          onTriggerMode={runTriggerMode}
+        />
 
-            <ProvidersCard
-              locale={locale}
-              payload={payload}
-              onVerify={submitVerify}
-              onSettings={submitSettings}
-              onPending={setPending}
-              notice={providersNotice}
-              removeOutcome={providersRemoveOutcome}
-              onOutcome={setProvidersNotice}
-            />
-            <ChainsCard
-              locale={locale}
-              payload={payload}
-              groups={groups}
-              onSettings={submitSettings}
-              onCreateDraft={createDraftChain}
-              onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
-              notice={chainsNotice}
-              onOutcome={setChainsNotice}
-            />
-            <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
-          </SectionGroup>
-        ) : null}
+        <ProvidersSection
+          locale={locale}
+          payload={payload}
+          onVerify={submitVerify}
+          onSettings={submitSettings}
+          onPending={setPending}
+          notice={providersNotice}
+          removeOutcome={providersRemoveOutcome}
+          onOutcome={setProvidersNotice}
+        />
+
+        <ChainsSection
+          locale={locale}
+          payload={payload}
+          groups={groups}
+          onSettings={submitSettings}
+          onCreateDraft={createDraftChain}
+          onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
+          notice={chainsNotice}
+          onOutcome={setChainsNotice}
+        />
+
+        <SeatsSection locale={locale} payload={payload} onSettings={submitSettings} />
+
+        <OpsSection locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
       </div>
 
       <Dialog
@@ -569,7 +572,7 @@ export function githubAppSettingsUrl(githubHtmlUrl: string): string | null {
  * its local App id with no link, no error state, no layout collapse
  * (the fail-open UI face of the AD-531 read path).
  */
-export function AppInfoCard({
+export function AppInfoSection({
   locale,
   app,
   workspaceId,
@@ -633,114 +636,140 @@ export function AppInfoCard({
   const settingsHref =
     canManage && app.github_html_url ? githubAppSettingsUrl(app.github_html_url) : null;
   return (
-    <SectionCard tier="primary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.appInfo")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.appInfoCopy")}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-start gap-4">
-          <AppAvatar
-            src={app.github_avatar_url}
-            appId={app.github_app_id}
-            className="h-12 w-12 shrink-0 rounded-full border object-cover"
-          />
-          <div className="flex min-w-0 flex-col gap-1">
-            {app.github_name ? (
-              app.github_html_url ? (
-                <a
-                  href={settingsHref ?? app.github_html_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 font-semibold text-primary hover:underline"
-                  aria-label={t(
-                    locale,
-                    settingsHref ? "settings.appInfoManageOnGithub" : "settings.appInfoViewOnGithub",
-                    { name: app.github_name },
-                  )}
-                >
-                  {app.github_name}
-                  <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                </a>
-              ) : (
-                <span className="font-semibold">{app.github_name}</span>
-              )
-            ) : null}
-            {app.github_description ? <p className="text-sm">{app.github_description}</p> : null}
-            <p className="text-sm text-muted-foreground">
-              {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
+    <FlowSection title={t(locale, "settings.appInfo")} subtitle={t(locale, "settings.appInfoCopy")}>
+      <div className="flex items-start gap-4">
+        <AppAvatar
+          src={app.github_avatar_url}
+          appId={app.github_app_id}
+          className="h-12 w-12 shrink-0 rounded-full border object-cover"
+        />
+        <div className="flex min-w-0 flex-col gap-1">
+          {app.github_name ? (
+            app.github_html_url ? (
+              <a
+                href={settingsHref ?? app.github_html_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 font-semibold text-primary hover:underline"
+                aria-label={t(
+                  locale,
+                  settingsHref ? "settings.appInfoManageOnGithub" : "settings.appInfoViewOnGithub",
+                  { name: app.github_name },
+                )}
+              >
+                {app.github_name}
+                <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              </a>
+            ) : (
+              <span className="font-semibold">{app.github_name}</span>
+            )
+          ) : null}
+          {app.github_description ? <p className="text-sm">{app.github_description}</p> : null}
+          <p className="text-sm text-muted-foreground">
+            {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            {t(locale, "settings.appInfoLocalId", { id: app.id })}
+          </p>
+          {/* The delivery URL a webhook repoint needs (deploy doc § 3 sends
+              the operator here): manager-only, because the webhook URL is
+              the App's delivery route and a member has no repoint duty.
+              Both segments are internal ids, so the section shows them above.
+              Selected as one text node so click-drag copies it whole. */}
+          {canManage ? (
+            <p className="text-xs text-muted-foreground">
+              {t(locale, "settings.appInfoDeliveryUrl")}{" "}
+              <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">
+                {`${currentOrigin()}/webhook/${workspaceId}/${app.id}`}
+              </code>
             </p>
-            <p className="text-sm text-muted-foreground">
-              {t(locale, "settings.appInfoLocalId", { id: app.id })}
+          ) : null}
+          {app.github_metadata_synced_at ? (
+            <p className="text-xs text-muted-foreground">
+              {t(locale, "settings.appInfoSynced", {
+                time: formatRelativeTime(app.github_metadata_synced_at, locale),
+              })}
             </p>
-            {/* The delivery URL a webhook repoint needs (deploy doc § 3 sends
-                the operator here): manager-only, because the webhook URL is
-                the App's delivery route and a member has no repoint duty.
-                Both segments are internal ids, so the card shows them above.
-                Selected as one text node so click-drag copies it whole. */}
-            {canManage ? (
-              <p className="text-xs text-muted-foreground">
-                {t(locale, "settings.appInfoDeliveryUrl")}{" "}
-                <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">
-                  {`${currentOrigin()}/webhook/${workspaceId}/${app.id}`}
-                </code>
-              </p>
-            ) : null}
-            {app.github_metadata_synced_at ? (
-              <p className="text-xs text-muted-foreground">
-                {t(locale, "settings.appInfoSynced", {
-                  time: formatRelativeTime(app.github_metadata_synced_at, locale),
-                })}
-              </p>
-            ) : null}
-          </div>
+          ) : null}
         </div>
-        {canManage && onReload ? (
-          <div className="mt-4 flex flex-col gap-2">
+      </div>
+      {canManage && onReload ? (
+        <div className="flex flex-col gap-2">
+          <div>
             <Button type="button" variant="secondary" disabled={refreshing} onClick={() => void refreshMetadata()}>
               {t(locale, "settings.appInfoRefresh")}
             </Button>
-            <NoticeRegion notice={notice} />
           </div>
-        ) : null}
-      </CardContent>
-    </SectionCard>
+          <NoticeRegion notice={notice} />
+        </div>
+      ) : null}
+    </FlowSection>
   );
 }
 
-function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: SettingsManagePayload }) {
-  const { app } = payload;
+/**
+ * Installations — the App's `installations[]` rows (manager settings payload
+ * only) as a table, plus the delivery health they explain: the last webhook
+ * and the recent deliveries. One row is one installation, and its facts are
+ * exactly `account_login`, `installation_id` and `seen_at` — the payload
+ * carries no per-installation repository count, so no repository column
+ * exists (plan 203 task 2; compass D13).
+ */
+export function InstallationsSection({
+  locale,
+  payload,
+}: {
+  locale: SpaBoot["locale"];
+  payload: SettingsManagePayload;
+}) {
+  const { app, installations } = payload;
+  const columns: DataTableColumn<SettingsManagePayload["installations"][number]>[] = [
+    {
+      header: t(locale, "settings.installationsAccount"),
+      cell: (inst) => inst.account_login ?? t(locale, "common.time.unknown"),
+    },
+    {
+      header: t(locale, "settings.installationsId"),
+      cell: (inst) => <span className="font-mono tabular-nums">{inst.installation_id}</span>,
+    },
+    {
+      header: t(locale, "settings.installationsLastSync"),
+      cell: (inst) => (
+        <span className="text-muted-foreground tabular-nums">
+          {formatRelativeTime(inst.seen_at, locale)}
+        </span>
+      ),
+    },
+  ];
+
   return (
-    <div className="flex flex-col gap-4">
+    <FlowSection
+      title={t(locale, "settings.installations")}
+      subtitle={t(
+        locale,
+        installations.length === 1 ? "settings.installationsCountOne" : "settings.installationsCount",
+        { count: installations.length },
+      )}
+    >
       <p className="text-sm text-muted-foreground">
         {t(locale, "settings.lastWebhook", { time: formatRelativeTime(app.last_webhook_at, locale) })}
         {payload.delivery_summary && payload.delivery_summary.rejected24h > 0
           ? ` · ${t(locale, "apps.health.rejected24h", { count: payload.delivery_summary.rejected24h })}`
           : ""}
       </p>
-      {payload.installations.length === 0 ? (
-        <p className="text-sm text-muted-foreground">{t(locale, "settings.noInstallations")}</p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {payload.installations.map((inst) => (
-            <li key={inst.installation_id} className="text-sm">
-              <span className="font-medium">{inst.account_login ?? t(locale, "common.time.unknown")}</span>
-              <span className="text-muted-foreground">
-                {" "}
-                · {t(locale, "settings.installation", { id: inst.installation_id })} ·{" "}
-                {t(locale, "settings.lastSeen", { time: formatRelativeTime(inst.seen_at, locale) })}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div>
+      <DataTable
+        columns={columns}
+        rows={installations}
+        rowKey={(inst) => String(inst.installation_id)}
+        empty={<p className="text-sm text-muted-foreground">{t(locale, "settings.noInstallations")}</p>}
+      />
+      <div className="flex flex-col gap-1">
         <h3 className="text-sm font-medium">{t(locale, "settings.recentDeliveries")}</h3>
         <p className="text-sm text-muted-foreground">{t(locale, "settings.recentDeliveriesCopy")}</p>
         {payload.deliveries.length === 0 ? (
-          <p className="mt-2 text-sm text-muted-foreground">{t(locale, "settings.noDeliveries")}</p>
+          <p className="text-sm text-muted-foreground">{t(locale, "settings.noDeliveries")}</p>
         ) : (
-          <ul className="mt-2 flex flex-col gap-2">
+          <ul className="flex flex-col gap-2">
             {payload.deliveries.map((delivery, index) => (
               <li key={`${delivery.created_at}-${index}`} className="text-sm">
                 <span className="font-medium">{delivery.event_name ?? t(locale, "settings.unknownEvent")}</span>
@@ -757,44 +786,52 @@ function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
           </ul>
         )}
       </div>
-    </div>
+    </FlowSection>
   );
 }
 
 /**
- * Runtime harness: the App's runtime-harness selection (the harness mounted
- * into the sandbox image — manage face only; the identity-only non-manager
- * payload carries no sandbox_image_id).
- * Managers get the shadcn selector over the enabled registry entries (one
- * `omp` option for now) and save through op=save-sandbox-image.
+ * Runtime & harness: how this App's reviews run — the review trigger cadence
+ * (spec review-trigger-policy §2/§3, with the exact mention string) and the
+ * runtime-harness selection (the harness mounted into the sandbox image).
+ * Manage face only: the identity-only non-manager payload carries neither a
+ * `sandbox_image_id` nor a save path, so it renders the read-only line.
  * The payload carries registry ids only — never image-local configuration
  * or secrets.
  */
-export function RuntimeHarnessCard({
+export function RuntimeHarnessSection({
   locale,
   payload,
   onSettings,
+  onTriggerMode,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
+  /** The review-trigger-mode save (the mode control's POST, resolved back to its own region). */
+  onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
 }) {
   return (
-    <SectionCard tier="secondary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.runtimeHarness")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.runtimeHarnessCopy", { id: payload.app.sandbox_image_id })}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {payload.can_manage ? (
+    <FlowSection
+      title={t(locale, "settings.runtimeHarness")}
+      subtitle={t(locale, "settings.runtimeHarnessCopy", { id: payload.app.sandbox_image_id })}
+    >
+      {payload.can_manage ? (
+        <>
+          <ReviewTriggerControl
+            locale={locale}
+            slug={payload.app.github_slug}
+            mode={payload.app.review_trigger_mode}
+            onTriggerMode={onTriggerMode}
+          />
           <RuntimeHarnessEditor locale={locale} payload={payload} onSettings={onSettings} />
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            {t(locale, "settings.runtimeHarnessValue", { id: payload.app.sandbox_image_id })}
-          </p>
-        )}
-      </CardContent>
-    </SectionCard>
+        </>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          {t(locale, "settings.runtimeHarnessValue", { id: payload.app.sandbox_image_id })}
+        </p>
+      )}
+    </FlowSection>
   );
 }
 
@@ -855,69 +892,59 @@ function RuntimeHarnessEditor({
   );
 }
 
-function OpsCard({
+/**
+ * The destructive ops zone (the plan's "danger zone"): pause/resume,
+ * disable/enable and the soft delete — each one confirm-gated through the
+ * page's dialog, each one keeping its existing POST target and semantics.
+ * The confirmed outcome renders in this section's own region.
+ */
+function OpsSection({
   locale,
   payload,
   onPending,
   notice,
-  onTriggerMode,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
   onPending: (action: PendingAction) => void;
   /** The confirmed ops outcome (pause/resume/disable/enable/delete — delete carries its own copy). */
   notice: OpNotice | null;
-  /** The review-trigger-mode save (the mode control's POST, resolved back to its own region). */
-  onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
 }) {
   const { app } = payload;
   const paused = isPaused(app);
   return (
-    <SectionCard tier="primary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.ops")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.opsCopy")}</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        <ReviewTriggerControl
-          locale={locale}
-          slug={app.github_slug}
-          mode={app.review_trigger_mode}
-          onTriggerMode={onTriggerMode}
-        />
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap gap-2">
-            {app.status === "active" ? (
-              paused ? (
-                <Button type="button" onClick={() => onPending({ kind: "resume" })}>
-                  {t(locale, "settings.resumeReviews")}
-                </Button>
-              ) : (
-                <Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>
-                  {t(locale, "settings.pauseReviews")}
-                </Button>
-              )
-            ) : (
-              <p className="text-sm text-muted-foreground">{t(locale, "settings.disconnected")}</p>
-            )}
-            {app.status === "active" ? (
-              <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
-                {t(locale, "apps.actions.disable")}
+    <FlowSection title={t(locale, "settings.ops")} subtitle={t(locale, "settings.opsCopy")}>
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap gap-2">
+          {app.status === "active" ? (
+            paused ? (
+              <Button type="button" onClick={() => onPending({ kind: "resume" })}>
+                {t(locale, "settings.resumeReviews")}
               </Button>
             ) : (
-              <Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>
-                {t(locale, "apps.actions.enable")}
+              <Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>
+                {t(locale, "settings.pauseReviews")}
               </Button>
-            )}
-            <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
-              {t(locale, "apps.actions.delete")}
+            )
+          ) : (
+            <p className="text-sm text-muted-foreground">{t(locale, "settings.disconnected")}</p>
+          )}
+          {app.status === "active" ? (
+            <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
+              {t(locale, "apps.actions.disable")}
             </Button>
-          </div>
-          <NoticeRegion notice={notice} />
+          ) : (
+            <Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>
+              {t(locale, "apps.actions.enable")}
+            </Button>
+          )}
+          <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
+            {t(locale, "apps.actions.delete")}
+          </Button>
         </div>
-        <HealthBody locale={locale} payload={payload} />
-      </CardContent>
-    </SectionCard>
+        <NoticeRegion notice={notice} />
+      </div>
+    </FlowSection>
   );
 }
 
@@ -1210,7 +1237,7 @@ export function draftChainTabLabel(draftName: string, locale: SpaBoot["locale"])
   return draftName.trim() ? draftName : t(locale, "settings.draftChain");
 }
 
-function ChainsCard({
+function ChainsSection({
   locale,
   payload,
   groups,
@@ -1266,12 +1293,11 @@ function ChainsCard({
   }
 
   return (
-    <SectionCard tier="secondary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.modelChains")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.modelChainsCopy")}</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-6">
+    <FlowSection
+      title={t(locale, "settings.modelChains")}
+      subtitle={t(locale, "settings.modelChainsCopy")}
+    >
+      <div className="flex flex-col gap-6">
         <Tabs value={activeChainTabId(tabs, selectedTab)} onValueChange={setSelectedTab}>
           {/* The add-chain entry keeps its strip placement: a TabsList
               SIBLING (never inside the role=tablist) — outline control, plus
@@ -1357,12 +1383,12 @@ function ChainsCard({
             </TabsContent>
           ) : null}
         </Tabs>
-        {/* The card's region: the dialog-confirmed remove and the
+        {/* The section's region: the dialog-confirmed remove and the
             draft's forwarded save success render here, below every tabpanel —
             the editors themselves render their save outcomes in-panel. */}
         <NoticeRegion notice={notice} />
-      </CardContent>
-    </SectionCard>
+      </div>
+    </FlowSection>
   );
 }
 
@@ -1375,7 +1401,7 @@ function ChainsCard({
  * The save stays the route's full-map contract: one role_<role> field per
  * audit seat, always all seats.
  */
-function SeatsCard({
+function SeatsSection({
   locale,
   payload,
   onSettings,
@@ -1422,45 +1448,41 @@ function SeatsCard({
   }
 
   return (
-    <SectionCard tier="secondary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.seats")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.seatsCopy")}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form
-          className="flex flex-col gap-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void submit();
-          }}
-        >
-          {payload.model_role_ids.map((role) => (
-            <label key={role} className="flex flex-col gap-1.5 text-sm font-medium">
-              {role} — {roleHint(role)}
-              <Select
-                value={seatSelectValue(tabs, seats[role])}
-                onValueChange={(value) => setSeats((current) => ({ ...current, [role]: value }))}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={DEFAULT_CHAIN_NAME}>{t(locale, "settings.useDefaultChain")}</SelectItem>
-                  {namedTabs.map((tab) => (
-                    <SelectItem key={tab.id} value={tab.id}>
-                      {tab.id}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </label>
-          ))}
+    <FlowSection title={t(locale, "settings.seats")} subtitle={t(locale, "settings.seatsCopy")}>
+      <form
+        className="flex flex-col gap-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+      >
+        {payload.model_role_ids.map((role) => (
+          <label key={role} className="flex flex-col gap-1.5 text-sm font-medium">
+            {role} — {roleHint(role)}
+            <Select
+              value={seatSelectValue(tabs, seats[role])}
+              onValueChange={(value) => setSeats((current) => ({ ...current, [role]: value }))}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={DEFAULT_CHAIN_NAME}>{t(locale, "settings.useDefaultChain")}</SelectItem>
+                {namedTabs.map((tab) => (
+                  <SelectItem key={tab.id} value={tab.id}>
+                    {tab.id}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+        ))}
+        <div>
           <Button type="submit" disabled={busy}>{t(locale, "settings.saveRoleModels")}</Button>
-          <NoticeRegion notice={notice} />
-        </form>
-      </CardContent>
-    </SectionCard>
+        </div>
+        <NoticeRegion notice={notice} />
+      </form>
+    </FlowSection>
   );
 }
 
@@ -1479,7 +1501,7 @@ function SeatsCard({
  * selection coerces through activeChainTabId once the draft tab is gone. The
  * busy gate covers both triggers while the create POST is in flight, so a
  * discard can never race a resolving save into selecting the created tab.
- * (AD-551): the draft name is controlled — owned by ChainsCard so
+ * (AD-551): the draft name is controlled — owned by ChainsSection so
  * the tab trigger can mirror it live; this panel only renders and edits it
  * through the name/onNameChange props. The input's maxLength=64 mirrors the
  * server's MODEL_CHAIN_NAME_PATTERN cap (stored ids ≤ 64 chars), so the
@@ -1497,7 +1519,7 @@ export function DraftChainPanel({
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
-  /** (AD-551): the controlled draft name, owned by ChainsCard. */
+  /** (AD-551): the controlled draft name, owned by ChainsSection. */
   name: string;
   onNameChange: (name: string) => void;
   /** The draft create (op=add-chain); resolves an error when the awaited reload fails so the draft stays open. */

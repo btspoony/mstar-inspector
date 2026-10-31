@@ -351,14 +351,6 @@ export const en = {
     noGrant: "No support access is active.",
   },
   settings: {
-    /**
-     * (AD-591): section-group eyebrow labels for the two tier
-     * zones — app info/status (Tier 1) and configuration (Tier 2).
-     */
-    group: {
-      appInfo: "App info",
-      configuration: "Configuration",
-    },
     changesSaved: "Changes saved.",
     removeNoChange: "Nothing changed — there was nothing to remove.",
     addKey: "Add key",
@@ -386,9 +378,20 @@ export const en = {
     resumeReviews: "Resume reviews",
     disconnected: "This App is disconnected — enable it to review.",
     lastWebhook: "Last webhook: {time}",
+    /**
+     * The installations section of the settings flow: heading, count subtitle
+     * and the table's three columns. `installations.length` is the only
+     * installation figure the product carries (compass D13); the settings
+     * payload has no per-installation repository count, so there is no
+     * repository column.
+     */
+    installations: "Installations",
+    installationsCount: "{count} installations",
+    installationsCountOne: "{count} installation",
+    installationsAccount: "Account",
+    installationsId: "Installation",
+    installationsLastSync: "Last sync",
     noInstallations: "No installations yet.",
-    installation: "installation {id}",
-    lastSeen: "last seen {time}",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy: "The last 5 webhook deliveries for this App — newest first.",
     noDeliveries: "No deliveries yet.",
