@@ -1,10 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { t, type DictionaryKey } from "../../i18n";
-import { Button } from "@/components/ui/button";
+import { Button, CardContent, CardDescription, CardHeader, Input } from "@design-system";
 import { PageHeader } from "@/components/PageHeader";
 import { SectionCard, SectionCardTitle } from "@/components/SectionCard";
-import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";

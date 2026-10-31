@@ -6,7 +6,7 @@
  * standalone use. Both are props-only: pages pass resolved strings.
  */
 import type { ReactNode } from "react";
-import { cn } from "@/lib/utils";
+import { cn } from "@design-system";
 
 /**
  * The fill width is a static class ladder because Tailwind only compiles
@@ -57,10 +57,10 @@ export function StatCard({
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={step * 10}
-          className="mt-1 h-1 overflow-hidden rounded-(--rounded-full) bg-(--background-300)"
+          className="mt-1 h-1 overflow-hidden rounded-(--radius-pill) bg-(--surface-overlay)"
         >
           <div
-            className={cn("h-full rounded-(--rounded-full) bg-(--primary)", FILL_WIDTHS[step])}
+            className={cn("h-full rounded-(--radius-pill) bg-(--primary)", FILL_WIDTHS[step])}
           />
         </div>
       )}

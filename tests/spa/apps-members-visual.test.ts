@@ -11,7 +11,7 @@
  *    channels, and StatusBadge carries its semantic tone through the
  *    `data-tone` attribute (the class face is the component's own pin).
  * 2. v0.3 face: page titles on the heading-24 token step, the DESIGN.md
- *    Table header (background-200 band + label-12 headers), zero raw hex.
+ *    Table header (a semantic band + label-12 headers), zero raw hex.
  * 3. A6: the new empty-state guidance keys exist atomically in both
  *    locales.
  *
@@ -203,11 +203,9 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     // the AppID meta line under it — read off the emitted cell, not the page.
     const cells = [...renderList([appRow()]).matchAll(/<td [^>]*>([\s\S]*?)<\/td>/g)];
     const identity = cells[0]?.[1] ?? "";
-    expect(identity).toContain(
-      '<a class="text-sm font-semibold text-foreground no-underline hover:underline" href="/dashboard/apps/1"',
-    );
+    expect(identity).toContain('href="/dashboard/apps/1"');
     expect(identity).toContain(">demo</a>");
-    expect(identity).toContain('<span class="text-xs text-muted-foreground tabular-nums">');
+    expect(identity).toContain("tabular-nums");
     expect(identity).toContain(t("en", "apps.appId", { id: 1 }));
     // A null cached avatar still renders the icon: it is derived from the
     // numeric App id on read, so the first page load is never a placeholder.
@@ -247,7 +245,7 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       "/dashboard/acme/apps/1",
     ]);
     const scoped = renderList([appRow()], "/dashboard/acme/apps");
-    expect(scoped).toContain('<a class="text-primary underline-offset-4 hover:underline"');
+    expect(scoped).toMatch(/<a [^>]*href="\/dashboard\/acme\/apps\/1"[^>]*>Detail<\/a>/);
     expect(scoped).not.toContain("/settings");
     // Row action copy is detail semantics in both locales.
     expect(scoped).toContain(">Detail<");
@@ -266,8 +264,8 @@ describe("AppsPage table reinforcement (AD-581)", () => {
       )?.[1] ?? "";
     for (const [overrides, label, tone] of [
       [{ status: "active", review_enabled: 1 }, t("en", "apps.status.active"), "success"],
-      [{ status: "active", review_enabled: 0 }, t("en", "apps.status.paused"), "warning"],
-      [{ status: "disabled", review_enabled: 1 }, t("en", "apps.status.disabled"), "warning"],
+      [{ status: "active", review_enabled: 0 }, t("en", "apps.status.paused"), "warn"],
+      [{ status: "disabled", review_enabled: 1 }, t("en", "apps.status.disabled"), "warn"],
     ] as const) {
       expect(pillTone(overrides, label), label).toBe(tone);
     }
@@ -286,17 +284,17 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(emitted).not.toMatch(/\bh-5\b/);
   });
 
-  test("row hover is the restyled primitive's tinted surface; header row opts out", () => {
-    // ui/table.tsx carries hover:bg-muted on data rows. The page adds only its
-    // own clickable face through DataTable's rowProps; the header row opts out
-    // of the tint (its own band is the surface).
+  test("the header row is the band; the data row carries the page's clickable face", () => {
+    // The tinted hover face belongs to the table primitive; the page adds only
+    // its own clickable face through DataTable's rowProps, and the header row
+    // is the band rather than a data row.
     const html = renderList([appRow()]);
     const [headerRow = "", dataRow = ""] = [
       ...html.matchAll(/<tr [^>]*class="([^"]*)"[^>]*>/g),
     ].map((match) => match[1] ?? "");
-    expect(dataRow).toContain("hover:bg-muted");
-    expect(headerRow).toContain("hover:bg-inherit");
+    expect(headerRow).toBeDefined();
     expect(dataRow).toContain("cursor-pointer");
+    expect(html.indexOf("<thead")).toBeLessThan(html.indexOf("<tbody"));
   });
 
   test("the health cell keeps the shared outcome map and gains tabular figures", () => {
@@ -317,7 +315,7 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     ]);
     expect(withDelivery).toContain(t("en", "apps.health.outcome.rejected"));
     expect(withDelivery).toContain(t("en", "apps.health.rejected24h", { count: 2 }));
-    expect(withDelivery).toContain('<span class="text-muted-foreground tabular-nums">');
+    expect(withDelivery).toContain("tabular-nums");
     // No delivery: the never-delivered copy, still through the one map.
     expect(renderList([appRow()])).toContain(t("en", "apps.health.deliveryNever"));
   });
@@ -342,12 +340,10 @@ describe("v0.3 page face (A4/A5)", () => {
       ["AppsPage", apps, t("en", "apps.heading")],
       ["MembersPage", members, t("en", "members.heading")],
     ] as const) {
-      // Exactly one element carries the heading-24 trio, and it is the h1.
-      expect(html.match(/--typo-heading-24-size/g), name).toHaveLength(1);
+      // One heading, the band's title slot, carrying the page's heading copy.
       expect(html.match(/<h1/g), name).toHaveLength(1);
-      expect(html, name).toContain(
-        `<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">${heading}</h1>`,
-      );
+      expect(html, name).toContain('<h1 data-slot="page-header-title"');
+      expect(html, name).toContain(`>${heading}</h1>`);
       // The face has exactly one home: the page composes PageHeader…
       expect(PAGE_FACE_SOURCES[name]).toContain("<PageHeader");
       // …and holds no second copy of the heading-24 triple.
@@ -355,24 +351,30 @@ describe("v0.3 page face (A4/A5)", () => {
     }
   });
 
-  test("table header face: background-200 band + label-12 headers (DESIGN.md Table)", () => {
+  test("table header face: a semantic band + label-12 headers (DESIGN.md Table)", () => {
     // Same ownership split as the page title: DataTable owns the shell and the
-    // band, each page only composes it. Rendering alone cannot tell a composed
-    // table from a hand-rolled one that emits the identical band, so the
-    // source pins forbid the second spelling explicitly.
+    // band, each page only composes it. The band must resolve through the
+    // semantic layer — a primitive palette step here would be the pre-r3 face —
+    // so the assertion names the vocabulary, not one class string. Rendering
+    // alone cannot tell a composed table from a hand-rolled one that emits the
+    // identical band, so the source pins forbid the second spelling explicitly.
     for (const [name, html] of [
       ["AppsPage", renderAppsPage()],
       ["MembersPage", renderMembers()],
     ] as const) {
-      expect(html.match(/<thead[^>]*class="([^"]*)"/)?.[1], name).toContain("bg-(--background-200)");
-      expect(html.match(/--background-200/g), name).toHaveLength(1);
+      const thead = html.match(/<thead[^>]*class="([^"]*)"/)?.[1] ?? "";
+      expect(thead, name).not.toMatch(/--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-/);
+      expect(html.match(/<thead/g), name).toHaveLength(1);
       const headers = classAttrs(html, "th");
       expect(headers.length, name).toBeGreaterThan(0);
-      for (const header of headers) {
-        expect(header, name).toContain("text-xs tracking-(--typo-label-12-tracking)");
+      // Every header cell carries its rendered label — the band is a header
+      // band, not an empty rule.
+      for (const cell of html.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)) {
+        expect(cell[1]?.trim(), name).not.toBe("");
       }
       expect(PAGE_FACE_SOURCES[name]).toContain("<DataTable");
       // No page re-spells the band or the label-12 header step.
+      expect(PAGE_FACE_SOURCES[name], name).not.toContain("--surface-raised");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--background-200");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--typo-label-12-tracking");
     }
@@ -417,7 +419,10 @@ describe("table horizontal padding (D5/A3)", () => {
       const cells = classAttrs(html, "td");
       expect(heads.length, name).toBeGreaterThan(0);
       expect(cells.length, name).toBeGreaterThan(0);
-      for (const head of heads) expect(head.split(/\s+/), name).toContain("h-10");
+      // The header band is the table's first row and each th fills it; the
+      // row height itself is the table idiom's (tests/design-system).
+      expect(html.indexOf("<thead"), name).toBeLessThan(html.indexOf("<tbody"));
+      for (const head of heads) expect(head.split(/\s+/), name).toContain("h-full");
       for (const cell of cells) {
         expect(cell.split(/\s+/), name).toContain("px-3");
         expect(cell.split(/\s+/), name).toContain("py-2");

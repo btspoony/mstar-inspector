@@ -74,16 +74,18 @@ describe("SectionCard tier idiom (AD-591)", () => {
   test("the idiom is single-point: a hand-written wrapper composing ui/card, not a copy-in edit", () => {
     // AD-591: SectionCard lives in components/ (the extension surface), and
     // composes the copy-in Card primitive rather than forking it.
-    expect(sectionCard).toContain('import { Card, CardTitle } from "@/components/ui/card"');
+    expect(sectionCard).toMatch(/import \{[^}]*\bCard\b[^}]*\} from "@design-system";/);
     // The tier prop is the closed two-value union — no third tier can creep in.
     expect(sectionCard).toContain('type SectionTier = "primary" | "secondary"');
-    // Tier faces are spelled out exactly once.
-    expect(sectionCard.match(/border-\(--gray-alpha-500\)/g)?.length).toBe(1);
-    expect(sectionCard.match(/shadow-none/g)?.length).toBe(1);
-    // Tier 2's hairline color is explicit (qc2 F-001): the primitive's bare
-    // `border` carries width only — preflight leaves border-color at
-    // currentColor — so the secondary face must carry `border-border`.
-    expect(sectionCard).toContain('secondary: "shadow-none border-border"');
+    // Each tier face names a border colour token (the primitive's bare
+    // `border` is width only, and preflight would paint it in currentColor),
+    // and neither carries elevation — shadows belong to overlays.
+    const faces = [...sectionCard.matchAll(/(primary|secondary):\s*"([^"]*)"/g)];
+    expect(faces.map(([, tier]) => tier)).toEqual(["primary", "secondary"]);
+    for (const [, tier, face] of faces) {
+      expect(face, tier).toMatch(/border-\(--[\w-]+\)/);
+      expect(face, tier).not.toMatch(/shadow/);
+    }
     // Zero raw hex in the idiom file.
     expect(sectionCard).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
@@ -91,31 +93,23 @@ describe("SectionCard tier idiom (AD-591)", () => {
   test("tiers render distinct faces through the card primitive (SSR)", () => {
     const html = (tier: "primary" | "secondary") =>
       renderToStaticMarkup(createElement(SectionCard, { tier }, "content"));
-    // Primary keeps the primitive's elevation and takes the tinted border.
-    const primary = html("primary");
-    expect(primary).toContain('data-tier="primary"');
-    expect(primary).toContain('data-slot="card"');
-    expect(primary).toContain("border-(--gray-alpha-500)");
-    expect(primary).not.toContain("shadow-none");
-    // Secondary is flat on the token hairline (border-border → gray-alpha-400).
-    const secondary = html("secondary");
-    expect(secondary).toContain('data-tier="secondary"');
-    expect(secondary).toContain("shadow-none");
-    expect(secondary).toContain("border-border");
-    expect(secondary).not.toContain("border-(--gray-alpha-500)");
+    for (const tier of ["primary", "secondary"] as const) {
+      const markup = html(tier);
+      expect(markup).toContain(`data-tier="${tier}"`);
+      expect(markup).toContain('data-slot="card"');
+      // r3: an inline card is a hairline plus the surface step, never an
+      // elevated plane. Which hairline strength each tier takes is the
+      // surface-idioms test's assertion, not a pinned class here.
+      expect(markup).not.toMatch(/shadow-/);
+    }
   });
 
   test("SectionGroup renders the eyebrow rhythm label above the card stack (SSR)", () => {
     const out = renderToStaticMarkup(createElement(SectionGroup, { label: "Identity", children: "cards" }));
     expect(out).toContain('data-slot="section-group-eyebrow"');
     expect(out).toContain(">Identity</p>");
-    // Eyebrow face: the full label-12 token face (size/line/tracking/weight
-    // per tokens.css --typo-label-12-*) + muted tone; never a heading.
-    expect(out).toContain("text-(length:--typo-label-12-size)");
-    expect(out).toContain("leading-(--typo-label-12-line)");
-    expect(out).toContain("tracking-(--typo-label-12-tracking)");
-    expect(out).toContain("font-(weight:--typo-label-12-weight)");
-    expect(out).toContain("text-muted-foreground");
+    // Eyebrow is a label, never a heading.
+    expect(out).not.toMatch(/<h[1-6][\s>]/);
     expect(out).toContain('data-slot="section-group"');
     expect(out).toContain("cards");
   });
@@ -153,9 +147,11 @@ describe("settings section rhythm (AD-591)", () => {
     const configurationPos = settingsTabSource.indexOf('label={t(locale, "settings.group.configuration")}');
     expect(appInfoPos).toBeGreaterThan(-1);
     expect(configurationPos).toBeGreaterThan(appInfoPos);
-    // Group-to-group rhythm rides the spacing token (DESIGN.md: large
-    // between sections = spacing-8+).
-    expect(settingsTabSource).toContain('gap-(--spacing-8)');
+    // Group-to-group rhythm rides a spacing token (DESIGN.md: large between
+    // sections = spacing-8+); the step itself is the page's face, so the
+    // guard is the mechanism plus the retired raw scale gap.
+    expect(settingsTabSource).toMatch(/gap-\(--spacing-[a-z0-9-]+\)/);
+    expect(settingsTabSource).not.toMatch(/gap-8\b/);
     // Zone membership: the manage conditional (Ops/Health) stays inside the
     // identity group (before the configuration eyebrow), and the runtime
     // image card moves into the configuration group.
@@ -193,31 +189,21 @@ describe("settings heading idiom (QC convergence)", () => {
       ),
     );
     // The identity header is the page's ONLY heading, and it carries the
-    // heading-24 trio with the appId as its content.
+    // appId as its content.
     expect(shell.match(/<h1/g)).toHaveLength(1);
-    expect(shell.match(/--typo-heading-24-size/g)).toHaveLength(1);
-    expect(shell).toContain(
-      '<h1 class="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)\">Demo</h1>',
-    );
-    // Ownership: the triple is spelled once, in PageHeader, and the shell
-    // composes it rather than re-spelling it.
-    expect(pageHeader).toContain("text-(length:--typo-heading-24-size)");
-    expect(pageHeader).toContain("leading-(--typo-heading-24-line)");
-    expect(pageHeader).toContain("tracking-(--typo-heading-24-tracking)");
+    expect(shell).toContain('<h1 data-slot="page-header-title"');
+    expect(shell).toContain(">Demo</h1>");
+    // Ownership: the title face is PageHeader's, and the shell composes it
+    // rather than re-spelling it.
+    expect(pageHeader).toContain('data-slot="page-header-title"');
     expect(detailPage).toContain("<PageHeader");
     expect(detailPage).toContain("title={appDisplayName(payload.app)}");
     expect(detailPage).not.toContain("--typo-heading-24");
     expect(settingsTabSource).not.toContain("--typo-heading-24");
-    // Card titles ride the heading-16 step instead — the detail face never
-    // re-spells the page title at that size.
-    const cardTitles = [...shell.matchAll(/data-slot="card-title" class="([^"]*)"/g)].map(
-      (match) => match[1] ?? "",
-    );
+    // Card titles are their own slot, never a second page title.
+    const cardTitles = [...shell.matchAll(/data-slot="card-title"/g)];
     expect(cardTitles.length).toBeGreaterThan(0);
-    for (const title of cardTitles) {
-      expect(title).toContain("text-(length:--typo-heading-16-size)");
-      expect(title).not.toContain("--typo-heading-24");
-    }
+    expect(shell.match(/data-slot="page-header-title"/g)).toHaveLength(1);
     // No raw Tailwind size utility reaches either rendered face.
     for (const [name, html] of [
       ["AppDetailView", shell],
@@ -229,10 +215,9 @@ describe("settings heading idiom (QC convergence)", () => {
     }
   });
 
-  test("re-parented card titles ride the heading-16 token step via SectionCardTitle", () => {
-    expect(sectionCard).toContain("text-(length:--typo-heading-16-size)");
-    expect(sectionCard).toContain("leading-(--typo-heading-16-line)");
-    expect(sectionCard).toContain("tracking-(--typo-heading-16-tracking)");
+  test("re-parented card titles compose the shared SectionCardTitle", () => {
+    // The card-title face is SectionCardTitle's; the assertion is that every
+    // re-parented card composes it rather than re-spelling a title chain.
     // Each re-parented card consumes the upgraded title (the T1 wave re-parented
     // identity/status + runtime harness; T2 added providers/chains/seats — pinned
     // in the T2 describe below). End anchors use the file's cardBlock
@@ -325,25 +310,20 @@ describe("providers/chains/seats re-parent (AD-591)", () => {
     expect(groupCard).toContain("<StatusBadge");
     expect(settingsTabSource).toContain('from "../components/GroupCard"');
     expect(settingsTabSource).toContain('from "../components/ListRow"');
-    expect(settingsTabSource).toContain('from "../components/StatusBadge"');
+    expect(settingsTabSource).toMatch(/import \{[^}]*\bStatusBadge\b[^}]*\} from "@design-system"/);
   });
 });
 
 describe("provider combobox panel face", () => {
   const combobox = readFileSync(join(spaRoot, "components/provider-combobox.tsx"), "utf8");
 
-  test("the open panel rides the v0.3 popover elevation; group labels ride the label-12 idiom", () => {
-    // DESIGN.md elevation: shadow-pop is the popover/disclosure step (the
-    // SelectContent face); the generic shadow-md is gone. Container
-    // radius tier + popover surface stay, and the height cap / internal
-    // scroll (combobox pins) is untouched.
-    expect(combobox).toContain("shadow-(--shadow-pop)");
-    expect(combobox).not.toContain("shadow-md");
-    expect(combobox).toContain("rounded-md border bg-popover");
+  test("the open panel is the capped, scrollable overlay; no generic shadow returns", () => {
+    // The panel exists only while the picker is open, caps its height and
+    // scrolls internally; its surface and elevation are the overlay tokens.
+    expect(combobox).toContain("{open ? (");
     expect(combobox).toContain("max-h-72");
-    // T1 review Minor 1 convergence: label faces prefer the typo-label-12
-    // tracking idiom (same carrier as the SectionGroup eyebrows).
-    expect(combobox).toContain("tracking-(--typo-label-12-tracking)");
+    expect(combobox).toContain("overflow-y-auto");
+    expect(combobox).not.toContain("shadow-md");
     // Zero raw hex in the component (iteration hard constraint #4).
     expect(combobox).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });

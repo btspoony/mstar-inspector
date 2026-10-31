@@ -11,6 +11,12 @@
  * ride the charts.css class rules — never presentation-attribute var(),
  * knowledge ui-bugs/svg-var-presentation-attributes.md).
  *
+ * D14 two faces: a series names a slot (1-6), never a colour. The bar paints
+ * `--chart-{n}`; the legend swatch paints `--chart-{n}-mark`. The pins below
+ * resolve an element's emitted class list through charts.css and assert the
+ * declared property, so a renamed class cannot pass while a swatch that
+ * resolved to the fill (the defect this split exists to prevent) fails.
+ *
  * (B4): the aggregate BarChart and its describe block retired
  * with the component (the insights severity/category cards consume
  * StackedBarChart now).
@@ -23,8 +29,8 @@
  * severity/category page faces ride the InsightsPage pins in
  * insights-page.test.ts.
  * QC fix-1: the pins dropped with the BarChart retirement
- * restate on the stacked face — the charts.css token-binding pin (every
- * live fill class / swatch twin has its token rule; the axis text faces),
+ * restate on the stacked face — the charts.css token-binding pin (every slot's
+ * two faces carry their token rule; the axis text faces),
  * the hostile-label SSR escape pin (legend + tooltip name + tick faces),
  * plus the tooltip token-styling pin (contentStyle/labelStyle SSR face,
  * itemStyle source-pinned) and the >8-bucket thinning twin of the
@@ -46,6 +52,34 @@ import {
   type DistributionBucket,
   type StackedSeries,
 } from "../../src/spa/components/charts/StackedBarChart";
+import { CHART_SLOTS, chartClasses, type ChartSlot } from "../../src/spa/components/charts/chartSlots";
+
+const CHARTS_CSS = readFileSync(
+  join(import.meta.dir, "../../src/spa/components/charts/charts.css"),
+  "utf8",
+);
+
+/**
+ * The value `prop` resolves to for one element's emitted class list, read from
+ * the charts.css rules — the property, not the class name. `undefined` when no
+ * class in the list declares it (a fill with no rule paints recharts' default).
+ */
+function resolveDeclared(classList: string, prop: string): string | undefined {
+  for (const cls of classList.split(/\s+/).filter(Boolean)) {
+    const rule = new RegExp(`\\.${cls}\\s*\\{([^}]*)\\}`).exec(CHARTS_CSS)?.[1];
+    const value = rule === undefined ? null : new RegExp(`(?:^|;)\\s*${prop}:\\s*([^;]+)`).exec(rule)?.[1];
+    if (value !== null && value !== undefined) return value.trim();
+  }
+  return undefined;
+}
+
+/** Every legend swatch's class list, in legend order. */
+const swatchClasses = (html: string): string[] =>
+  [...html.matchAll(/<span class="(chart-legend-swatch[^"]*)"/g)].map((m) => m[1]!);
+
+/** Every series path's class list (the recharts-rectangle face). */
+const seriesClasses = (html: string): string[] =>
+  [...html.matchAll(/<path [^>]*class="([^"]*)"/g)].map((m) => m[1]!);
 
 const trendChart = (
   points: TrendPoint[],
@@ -65,28 +99,37 @@ describe("TrendChart SSR (recharts face)", () => {
     { week: "2026-08-24", reviews: 3, findings: 4 },
   ];
 
-  test("renders an svg role=img with the aria-label, the dual-series legend, and both fill classes", () => {
+  test("renders an svg role=img with the aria-label, the dual-series legend, and both faces of each slot", () => {
     const html = trendChart(weeks);
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Weekly trend"');
     // Same svg <title> mirror pin as the BarChart face (recharts Surface
     // forwards `title` → `<title>`): dropping the prop fails here too.
     expect(html).toContain("<title>Weekly trend</title>");
-    // Legend order pins the series→color pairing: the blue swatch precedes
-    // the Reviews label, the amber swatch the Findings label (HTML legend
-    // row above the chart).
-    const blue = html.indexOf("chart-swatch-blue-700");
+    // Legend order pins the series→slot pairing: the reviews swatch precedes
+    // its label, then the findings swatch and its label.
     const reviews = html.indexOf(">Reviews</span>");
-    const amber = html.indexOf("chart-swatch-amber-700");
     const findings = html.indexOf(">Findings</span>");
-    expect(blue).toBeGreaterThanOrEqual(0);
-    expect(blue).toBeLessThan(reviews);
-    expect(reviews).toBeLessThan(amber);
-    expect(amber).toBeLessThan(findings);
-    // The bars carry the same preserved AD-601 pair (reviews=blue-700,
-    // findings=amber-700) via the shared fill classes.
-    expect(html).toContain('class="recharts-rectangle chart-fill-blue-700"');
-    expect(html).toContain('class="recharts-rectangle chart-fill-amber-700"');
+    const swatches = swatchClasses(html);
+    expect(swatches).toHaveLength(2);
+    const firstSwatch = html.indexOf(swatches[0]!);
+    const secondSwatch = html.indexOf(swatches[1]!);
+    expect(firstSwatch).toBeGreaterThanOrEqual(0);
+    expect(firstSwatch).toBeLessThan(reviews);
+    expect(reviews).toBeLessThan(secondSwatch);
+    expect(secondSwatch).toBeLessThan(findings);
+    // Two faces: the swatches resolve to the slots' mark token, the bars to
+    // the quiet fill token — a swatch that resolved to the fill is the defect
+    // this split exists to prevent.
+    expect(resolveDeclared(swatches[0]!, "background-color")).toBe("var(--chart-5-mark)");
+    expect(resolveDeclared(swatches[1]!, "background-color")).toBe("var(--chart-3-mark)");
+    const fills = new Set(seriesClasses(html).map((classes) => resolveDeclared(classes, "fill")));
+    expect(fills).toEqual(new Set(["var(--chart-5)", "var(--chart-3)"]));
+    for (const [swatch, slot] of [[swatches[0]!, 5], [swatches[1]!, 3]] as const) {
+      expect(resolveDeclared(swatch, "background-color")).not.toBe(
+        resolveDeclared(chartClasses(slot).fill, "fill"),
+      );
+    }
   });
 
   test("each week carries the two grouped series bars (2 weeks × 2 series)", () => {
@@ -98,7 +141,9 @@ describe("TrendChart SSR (recharts face)", () => {
     // max 4 → recharts domain [0..4]; plot height = 166 - 4 - 20 = 142 →
     // the findings-4 rect spans the full plot height — a collapsed height
     // can never satisfy this.
-    expect(trendChart(weeks)).toMatch(/<path [^>]*height="142"[^>]*class="recharts-rectangle chart-fill-amber-700"/);
+    expect(trendChart(weeks)).toMatch(
+      new RegExp(`<path [^>]*height="142"[^>]*class="recharts-rectangle ${chartClasses(3).fill}"`),
+    );
   });
 
   test("date labels are the pinned M/D format in every locale (2026-09-16 user-feedback pin)", () => {
@@ -152,9 +197,9 @@ describe("StackedBarChart SSR (stacked face)", () => {
     },
   ];
   const severitySeries: StackedSeries[] = [
-    { key: "must-fix", label: "must-fix", fillClass: "chart-fill-red-700" },
-    { key: "should-fix", label: "should-fix", fillClass: "chart-fill-amber-700" },
-    { key: "nit", label: "nit", fillClass: "chart-fill-gray-700" },
+    { key: "must-fix", label: "must-fix", slot: 4 },
+    { key: "should-fix", label: "should-fix", slot: 3 },
+    { key: "nit", label: "nit", slot: 5 },
   ];
 
   const stackedChart = (
@@ -170,12 +215,13 @@ describe("StackedBarChart SSR (stacked face)", () => {
       }),
     );
 
-  /** The y/height of one stacked segment path (recharts-rectangle face). */
-  const segment = (html: string, fillClass: string): { y: number; height: number } => {
-    const tag = new RegExp(`<path [^>]*class="recharts-rectangle ${fillClass}"[^>]*>`).exec(html)?.[0];
+  /** The y/height of one slot's stacked segment path (recharts-rectangle face). */
+  const segment = (html: string, slot: ChartSlot): { y: number; height: number } => {
+    const fill = chartClasses(slot).fill;
+    const tag = new RegExp(`<path [^>]*class="recharts-rectangle ${fill}"[^>]*>`).exec(html)?.[0];
     const y = tag ? /\by="([0-9.]+)"/.exec(tag) : null;
     const height = tag ? /\bheight="([0-9.]+)"/.exec(tag) : null;
-    if (!tag || !y || !height) throw new Error(`stacked segment not found: ${fillClass}`);
+    if (!tag || !y || !height) throw new Error(`stacked segment not found: slot ${slot}`);
     return { y: Number(y[1]), height: Number(height[1]) };
   };
 
@@ -186,31 +232,33 @@ describe("StackedBarChart SSR (stacked face)", () => {
     // Same svg <title> mirror pin as the TrendChart face (recharts Surface
     // forwards `title` → `<title>`): dropping the prop fails here too.
     expect(html).toContain("<title>Findings by severity</title>");
-    // Legend order = stack order: the red swatch precedes the must-fix
-    // label, amber precedes should-fix, gray precedes nit (the HTML legend
-    // row above the chart — the TrendChart face).
-    const red = html.indexOf("chart-swatch-red-700");
-    const mustFix = html.indexOf(">must-fix</span>");
-    const amber = html.indexOf("chart-swatch-amber-700");
-    const shouldFix = html.indexOf(">should-fix</span>");
-    const gray = html.indexOf("chart-swatch-gray-700");
-    const nit = html.indexOf(">nit</span>");
-    expect(red).toBeGreaterThanOrEqual(0);
-    expect(red).toBeLessThan(mustFix);
-    expect(mustFix).toBeLessThan(amber);
-    expect(amber).toBeLessThan(shouldFix);
-    expect(shouldFix).toBeLessThan(gray);
-    expect(gray).toBeLessThan(nit);
+    // Legend order = stack order: each swatch precedes its own label (the
+    // HTML legend row above the chart — the TrendChart face), and each swatch
+    // resolves to its slot's mark token.
+    const swatches = swatchClasses(html);
+    const labels = ["must-fix", "should-fix", "nit"];
+    expect(swatches).toHaveLength(labels.length);
+    let cursor = -1;
+    for (const [index, label] of labels.entries()) {
+      const swatchAt = html.indexOf(swatches[index]!, cursor + 1);
+      const labelAt = html.indexOf(`>${label}</span>`, cursor + 1);
+      expect(swatchAt, label).toBeGreaterThan(cursor);
+      expect(swatchAt, label).toBeLessThan(labelAt);
+      cursor = labelAt;
+      expect(resolveDeclared(swatches[index]!, "background-color"), label).toBe(
+        `var(--chart-${severitySeries[index]!.slot}-mark)`,
+      );
+    }
   });
 
-  test("stacked segments carry the series fill classes and the tooltip series names", () => {
+  test("stacked segments carry the series fill faces and the tooltip series names", () => {
     const html = stackedChart(severityBuckets, severitySeries);
     // Colors ride the charts.css class rules only — never presentation
     // attributes, never raw hex (the no-raw-hex source scan below covers
-    // the module; these pins lock the rendered class face).
-    expect(html).toContain('class="recharts-rectangle chart-fill-red-700"');
-    expect(html).toContain('class="recharts-rectangle chart-fill-amber-700"');
-    expect(html).toContain('class="recharts-rectangle chart-fill-gray-700"');
+    // the module). Each segment's emitted class list resolves to its slot's
+    // quiet fill token; a deleted rule leaves `fill` unresolved.
+    const resolved = new Set(seriesClasses(html).map((classes) => resolveDeclared(classes, "fill")));
+    expect(resolved).toEqual(new Set(severitySeries.map((series) => `var(--chart-${series.slot})`)));
     // Exact counts ride the tooltip — every segment path carries its series
     // name so the hover face can name the number it holds.
     expect(html).toContain('name="must-fix"');
@@ -220,9 +268,9 @@ describe("StackedBarChart SSR (stacked face)", () => {
 
   test("stackId stacking face: segments pile bottom-up in series order, heights track the values", () => {
     const html = stackedChart(severityBuckets, severitySeries);
-    const must = segment(html, "chart-fill-red-700");
-    const should = segment(html, "chart-fill-amber-700");
-    const nit = segment(html, "chart-fill-gray-700");
+    const must = segment(html, 4);
+    const should = segment(html, 3);
+    const nit = segment(html, 5);
     // The first series sits on the axis (plot bottom = 166 - 20 axis) and
     // every next series starts exactly where the previous one ends.
     expect(must.y + must.height).toBeCloseTo(146);
@@ -309,8 +357,8 @@ describe("StackedBarChart SSR (stacked face)", () => {
     // React text/attribute path: hostile markup surfaces escaped, never a
     // raw <img>/<script> element in the chart output.
     const hostileSeries: StackedSeries[] = [
-      { key: "<img src=x>", label: "<img src=x>", fillClass: "chart-fill-blue-700" },
-      { key: "<script>alert(1)</script>", label: "<script>alert(1)</script>", fillClass: "chart-fill-teal-700" },
+      { key: "<img src=x>", label: "<img src=x>", slot: 5 },
+      { key: "<script>alert(1)</script>", label: "<script>alert(1)</script>", slot: 1 },
     ];
     const hostileBuckets: DistributionBucket[] = [
       {
@@ -366,9 +414,11 @@ describe("StackedBarChart SSR (stacked face)", () => {
     expect(tooltip).toContain("background-color:var(--card)");
     expect(tooltip).toContain("border:1px solid var(--border)");
     expect(tooltip).toContain("border-radius:6px");
-    expect(tooltip).toContain('class="recharts-tooltip-label" style="margin:0;color:var(--gray-1000);font-weight:500"');
+    expect(tooltip).toContain(
+      'class="recharts-tooltip-label" style="margin:0;color:var(--text-primary);font-weight:500"',
+    );
     const source = readFileSync(join(import.meta.dir, "../../src/spa/components/charts/StackedBarChart.tsx"), "utf8");
-    expect(source).toContain('itemStyle={{ color: "var(--gray-900)" }}');
+    expect(source).toContain('itemStyle={{ color: "var(--text-secondary)" }}');
   });
 
   test("empty buckets or empty series render null — the page owns the readable empty state", () => {
@@ -386,25 +436,48 @@ describe("chart sources keep the no-raw-hex token discipline (global constraint)
   });
 });
 
-describe("token fills and text faces live as class rules in charts.css (class-rule pin, restated)", () => {
-  test("every live fill class and swatch twin binds to a token rule in charts.css; the axis faces exist", () => {
-    // Source-binding pin (restates the BarChart-era pin the
-    // stacked migration retired with its describe block): the SSR pins
-    // above lock the rendered class ATTRIBUTES, which still pass if a fill
-    // RULE is deleted from charts.css — segments would silently fall to
-    // recharts' default black while the legend swatch twin keeps its
-    // token color. The closed fill vocabulary (charts.css: the page maps
-    // into this set only) is asserted rule-by-rule.
-    const css = readFileSync(join(import.meta.dir, "../../src/spa/components/charts/charts.css"), "utf8");
-    for (const family of ["red", "amber", "gray", "blue", "teal", "purple", "pink"]) {
-      expect(css, `chart-fill-${family}-700`).toContain(`.chart-fill-${family}-700 { fill: var(--${family}-700); }`);
-      expect(css, `chart-swatch-${family}-700`).toContain(
-        `.chart-swatch-${family}-700 { background-color: var(--${family}-700); }`,
-      );
+describe("the closed chart vocabulary has two faces per slot (D14)", () => {
+  test("every slot's fill reads --chart-{n} and its swatch reads --chart-{n}-mark", () => {
+    // Property pin, not a class pin: the emitted class list is resolved
+    // through charts.css and the DECLARED VALUE is asserted. A swatch that
+    // resolved to the slot's fill would paint the loud bar face at 10px —
+    // the exact defect the large-fill-quieter-than-small-marks split exists
+    // to prevent — and fails here.
+    for (const slot of CHART_SLOTS) {
+      const { fill, swatch } = chartClasses(slot);
+      expect(resolveDeclared(fill, "fill"), fill).toBe(`var(--chart-${slot})`);
+      expect(resolveDeclared(swatch, "background-color"), swatch).toBe(`var(--chart-${slot}-mark)`);
+      expect(resolveDeclared(swatch, "background-color")).not.toBe(resolveDeclared(fill, "fill"));
     }
     // The v0.3 chrome faces: tick text renders tabular figures (DESIGN.md
     // numerals rule) and the legend label carries the label-face weight.
-    expect(css).toContain("font-variant-numeric: tabular-nums");
-    expect(css).toContain("font-weight: 500");
+    expect(CHARTS_CSS).toContain("font-variant-numeric: tabular-nums");
+    expect(CHARTS_CSS).toContain("font-weight: 500");
+  });
+
+  test("the stylesheet answers exactly the six slots — no seventh family", () => {
+    // A retired family (teal/pink's `-700` pairs) must not leave a rule
+    // behind, and a slot without a rule cannot be reached from the type.
+    const declared = [...CHARTS_CSS.matchAll(/\.chart-(?:fill|swatch)-[a-z0-9-]+/g)].map((m) => m[0]);
+    const expected = CHART_SLOTS.flatMap((slot) => {
+      const { fill, swatch } = chartClasses(slot);
+      return [`.${fill}`, `.${swatch}`];
+    });
+    expect(declared.sort()).toEqual(expected.sort());
+  });
+
+  test("a series value outside the six slots does not typecheck", () => {
+    const inRange: StackedSeries = { key: "k", label: "k", slot: 6 };
+    // @ts-expect-error — 7 is outside chart-1..6: a chart cannot name a face
+    // the stylesheet does not answer.
+    const outOfRange: StackedSeries = { key: "k", label: "k", slot: 7 };
+    // @ts-expect-error — the slot union has no zero.
+    const zero: ChartSlot = 0;
+    // The teeth are the two `@ts-expect-error` lines above (a value outside
+    // the union is a compile error); the runtime asserts the same facts as
+    // numbers, so a widened slot type shows up here too.
+    expect(inRange.slot).toBe(6);
+    expect([outOfRange.slot as number, zero as number]).toEqual([7, 0]);
+    expect(CHART_SLOTS).toEqual([1, 2, 3, 4, 5, 6]);
   });
 });

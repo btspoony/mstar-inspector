@@ -144,6 +144,15 @@ const darkSemantics = {
   "surface-inset": v("gray-200"),
   "surface-overlay": v("background-300"),
 
+  // The modal veil — the page plane at 80%. A scrim is one of the few tokens
+  // that does not invert with the theme: its job is to recede what sits
+  // behind it, and on light's white plane a white veil would erase the
+  // hairline-drawn cards and leave the (equally white) card above it without
+  // separation. So both themes keep the same 80% dim and only the pole
+  // flips — dark dims to its page plane, light to the ink base its hairline
+  // ladder is already drawn from (`#101928`).
+  "surface-scrim": "#0a0c10cc",
+
   // The hairline under the palette's own alpha ladder.
   "border-subtle": "#ffffff1a",
   "border-default": v("gray-alpha-400"),
@@ -213,6 +222,8 @@ const lightSemantics: Readonly<Record<SemanticColorName, string>> = {
   "surface-card": v("background-100"),
   "surface-inset": v("background-200"),
   "surface-overlay": v("background-300"),
+  // Same 80% dim, flipped pole — see the note on the dark value.
+  "surface-scrim": "#101928cc",
 
   "border-subtle": "#1019280f",
   "border-default": v("gray-alpha-400"),

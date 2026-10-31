@@ -2,10 +2,9 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
-import { StatusBadge } from "@/components/StatusBadge";
 import { SettingsView } from "./SettingsPage";
 import { AppInsightsTab } from "./AppInsightsTab";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";

@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { t } from "../../i18n";
-import { Button } from "@/components/ui/button";
+import { Button, CardContent, CardDescription, CardHeader } from "@design-system";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { PageHeader } from "@/components/PageHeader";
 import { SectionCard, SectionCardTitle } from "@/components/SectionCard";
-import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { ErrorState } from "../components/state/ErrorState";

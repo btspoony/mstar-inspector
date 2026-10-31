@@ -1,16 +1,21 @@
 /**
- * ListRow — DESIGN.md v0.4 `list-row`: isomorphic rows in a gray-alpha-400
- * inset container on `rounded-sm`, rows on gray-200, one 1px gray-alpha-300
- * hairline between them, slots fixed as identity → status → meta → actions.
+ * ListRow — DESIGN.md `list-row`: isomorphic rows in an in-card inset with a
+ * fixed slot order (identity → status → meta → actions), an omitted optional
+ * slot rendering nothing.
  *
  * Static render: every slot is a prop, so the emitted markup is asserted for
- * the group container, the slot order and the Task 1 token classes.
+ * the slot order, the rendered text and the trailing-action placement — never
+ * a design-token class. The inset, hairline and row-height vocabulary lives in
+ * `tests/design-system/surface-idioms.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ListRow, ListRowGroup } from "../../../src/spa/components/ListRow";
-import { StatusBadge } from "../../../src/spa/components/StatusBadge";
+import { StatusBadge } from "../../../src/design-system";
+
+/** A primitive palette step: `--gray-700`, `--background-200`, `--blue-700`. */
+const PRIMITIVE_STEP = /--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-[0-9a-z]+/;
 
 const html = renderToStaticMarkup(
   createElement(
@@ -37,15 +42,16 @@ const between = (from: string, to: string) => {
 };
 
 describe("ListRowGroup", () => {
-  test("container is the in-card inset on the gray-alpha-400 hairline", () => {
+  test("container is the in-card inset group", () => {
     expect(html).toContain('data-slot="list-row-group"');
-    expect(html).toContain("border-(--gray-alpha-400)");
-    expect(html).toContain("rounded-(--rounded-sm)");
+    expect(html).toContain("overflow-hidden");
+    expect(html).not.toMatch(PRIMITIVE_STEP);
   });
 
-  test("rows are separated by the 1px gray-alpha-300 hairline", () => {
-    expect(html).toContain("divide-y");
-    expect(html).toContain("divide-(--gray-alpha-300)");
+  test("rows are the group's children, divided from each other", () => {
+    const group = between('data-slot="list-row-group"', "");
+    expect(group).toContain("divide-y");
+    expect(group.match(/data-slot="list-row"/g)).toHaveLength(2);
   });
 });
 
@@ -61,25 +67,23 @@ describe("ListRow", () => {
     expect(meta).toBeLessThan(actions);
   });
 
-  test("identity rides label-14 in font-mono over a 76px minimum column", () => {
+  test("identity renders the caller's id on the mono stack", () => {
     const identity = between('data-slot="list-row-identity"', 'data-slot="list-row-status"');
+    expect(identity).toContain("sk-proj-…4f2a");
     expect(identity).toContain("font-mono");
     expect(identity).toContain("min-w-[76px]");
-    expect(identity).toContain("text-(length:--typo-label-14-size)");
   });
 
-  test("meta rides label-12 in gray-700", () => {
+  test("meta renders the caller's line in its own slot", () => {
     const meta = between('data-slot="list-row-meta"', 'data-slot="list-row-actions"');
-    expect(meta).toContain("text-(length:--typo-label-12-size)");
-    expect(meta).toContain("text-(--gray-700)");
     expect(meta).toContain("Used 3 days ago");
   });
 
-  test("row fill, padding, column gap and trailing action placement", () => {
+  test("row padding, column gap and trailing action placement", () => {
     const row = between('data-slot="list-row"', 'data-slot="list-row-identity"');
-    expect(row).toContain("bg-(--gray-200)");
+    // A hand-derived vertical padding must never replace the row face.
+    expect(row).not.toContain("py-[9px]");
     expect(row).toContain("px-3");
-    expect(row).toContain("py-[9px]");
     expect(row).toContain("gap-3");
     const actions = between('data-slot="list-row-actions"', "</div>");
     expect(actions).toContain("ml-auto");

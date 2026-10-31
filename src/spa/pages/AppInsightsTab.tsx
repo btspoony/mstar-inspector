@@ -1,8 +1,17 @@
 import { useEffect, useState } from "react";
 import { t } from "../../i18n";
-import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  CardContent,
+  CardDescription,
+  CardHeader,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
@@ -24,6 +33,7 @@ import {
   type InsightsSummary,
 } from "./data";
 import { StackedBarChart, type StackedSeries } from "@/components/charts/StackedBarChart";
+import type { ChartSlot } from "@/components/charts/chartSlots";
 import { TrendChart } from "@/components/charts/TrendChart";
 
 /**
@@ -181,55 +191,54 @@ export function AppInsightsTab({
 }
 
 /**
- * AD-561/AD-601: severity → DESIGN.md token series fills as
- * charts.css fill classes consumed by StackedBarChart — the AD-601-frozen
- * semantic family (must-fix=red-700 / should-fix=amber-700 / nit=gray-700);
- * colors ride class rules into the token layer (never presentation
- * attributes, never raw hex). The API zero-fills exactly these three
- * merge-class keys per bucket, so unknown severity keys never enter the
- * series. Labels stay the raw engine slugs — the aggregate card's visible
- * face carried them unlocalized already (same product ruling as the
- * category slugs below).
+ * AD-561: severity → the D14 closed chart vocabulary, as slots — the page owns
+ * the semantics, the chart owns the faces. Red/amber keep their hue families
+ * (must-fix=4, should-fix=3); nit takes the blue family (5), the neutral
+ * data-series tone the old gray-700 filled (gray is not in the palette). The
+ * API zero-fills exactly these three merge-class keys per bucket, so unknown
+ * severity keys never enter the series. Labels stay the raw engine slugs — the
+ * aggregate card's visible face carried them unlocalized already (same product
+ * ruling as the category slugs below).
  */
-export const SEVERITY_BAR_COLORS: Record<string, string> = {
-  "must-fix": "chart-fill-red-700",
-  "should-fix": "chart-fill-amber-700",
-  nit: "chart-fill-gray-700",
+export const SEVERITY_SLOTS: Record<string, ChartSlot> = {
+  "must-fix": 4,
+  "should-fix": 3,
+  nit: 5,
 };
 
 /** The fixed severity stack, bottom → top: must-fix, should-fix, nit. */
-const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_BAR_COLORS).map(([key, fillClass]) => ({
+const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_SLOTS).map(([key, slot]) => ({
   key,
   label: key,
-  fillClass,
+  slot,
 }));
 
 /**
- * AD-653 category palette: the known engine slugs take Δhue-distinct
- * families from the 700-step {teal, purple, pink} candidates (red/amber
- * stay severity-owned; blue-700 keeps its neutral data-series duty and is
- * deliberately NOT assigned to a single known category). Slugs outside this
- * map (long-tail vocabulary) ride the neutral blue-700 tone; the
- * "uncategorized" fallback (NULL/unknown) is the gray-700 series, stacked
- * last.
+ * AD-653 category palette on the same six slots: the known engine slugs keep a
+ * Δhue-distinct family each (DEBT=1 cyan, the teal successor; DOCS=6 purple;
+ * SEC=4 red, the pink successor). Slugs outside this map (long-tail
+ * vocabulary) ride the neutral blue slot (5) — deliberately NOT assigned to a
+ * single known category — and the "uncategorized" fallback (NULL/unknown)
+ * takes the remaining amber slot (3), stacked last. No two categories in one
+ * chart share a slot.
  */
-export const CATEGORY_FILL_CLASSES: Record<string, string> = {
-  DEBT: "chart-fill-teal-700",
-  DOCS: "chart-fill-purple-700",
-  SEC: "chart-fill-pink-700",
+export const CATEGORY_SLOTS: Record<string, ChartSlot> = {
+  DEBT: 1,
+  DOCS: 6,
+  SEC: 4,
 };
 /** Neutral data-series default (the retired BarChart's fallback tone). */
-const CATEGORY_TAIL_FILL_CLASS = "chart-fill-blue-700";
+const CATEGORY_TAIL_SLOT: ChartSlot = 5;
 /** Store-merged fallback key for NULL/unknown categories. */
 export const UNCATEGORIZED_KEY = "uncategorized";
-const UNCATEGORIZED_FILL_CLASS = "chart-fill-gray-700";
+const UNCATEGORIZED_SLOT: ChartSlot = 3;
 
 /**
  * Category series from the window-level union key set of the
  * `findings_distribution` grids — the legend lists exactly the categories
  * present somewhere in the window, in stack order: known slugs (palette
- * order), remaining slugs (payload ASC order) on the neutral tone, the
- * gray fallback last (topmost segment). Key presence is the derivation
+ * order), remaining slugs (payload ASC order) on the neutral slot, the
+ * fallback last (topmost segment). Key presence is the derivation
  * face; seriesWithFindings applies the zero-count legend filter on top.
  */
 function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: SpaBoot["locale"]): StackedSeries[] {
@@ -238,20 +247,20 @@ function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: 
     for (const key of Object.keys(bucket.by_category)) observed.add(key);
   }
   const series: StackedSeries[] = [];
-  for (const [key, fillClass] of Object.entries(CATEGORY_FILL_CLASSES)) {
-    if (observed.has(key)) series.push({ key, label: key, fillClass });
+  for (const [key, slot] of Object.entries(CATEGORY_SLOTS)) {
+    if (observed.has(key)) series.push({ key, label: key, slot });
   }
   for (const key of observed) {
     // "" never labels a series (schema-permitted, QC F-004) — it
     // merges into the fallback key below.
-    if (key === "" || key === UNCATEGORIZED_KEY || key in CATEGORY_FILL_CLASSES) continue;
-    series.push({ key, label: key, fillClass: CATEGORY_TAIL_FILL_CLASS });
+    if (key === "" || key === UNCATEGORIZED_KEY || key in CATEGORY_SLOTS) continue;
+    series.push({ key, label: key, slot: CATEGORY_TAIL_SLOT });
   }
   if (observed.has(UNCATEGORIZED_KEY) || observed.has("")) {
     series.push({
       key: UNCATEGORIZED_KEY,
       label: t(locale, "insights.uncategorized"),
-      fillClass: UNCATEGORIZED_FILL_CLASS,
+      slot: UNCATEGORIZED_SLOT,
     });
   }
   return series;

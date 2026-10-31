@@ -9,7 +9,7 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-} from "@/components/ui/sidebar";
+} from "@design-system";
 import type { SidebarModel } from "../shell";
 import { spaClick } from "../spa-click";
 

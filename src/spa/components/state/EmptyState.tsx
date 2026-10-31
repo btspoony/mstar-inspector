@@ -7,7 +7,7 @@
  * Page-level only — op-outcome notices stay on `PageNotice`.
  */
 import type { ReactNode } from "react";
-import { Card } from "@/components/ui/card";
+import { Card } from "@design-system";
 
 export function EmptyState({
   icon,

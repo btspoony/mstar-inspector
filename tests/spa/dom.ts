@@ -99,7 +99,7 @@ export async function warmDom(): Promise<void> {
     // exists to prevent. `@radix-ui/primitive` is the answer every Radix
     // package reads, so one dialog import loads it.
     await import("react-dom/client");
-    await import("../../src/spa/components/ui/dialog");
+    await import("@design-system");
   } finally {
     cleanup();
   }

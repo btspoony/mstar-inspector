@@ -21,7 +21,6 @@ const RADIUS = "202-203 (views.ts, pages.module.css, admin.html)";
 const CONTROL = "203 (SSR views.ts)";
 const NOTICES = "203 (pages.module.css, SSR views.ts)";
 const SIDEBAR = "203 (SSR views.ts)";
-const BADGE = "202 (StatusBadge)";
 
 export interface LegacyToken {
   readonly name: string;
@@ -37,20 +36,6 @@ export const legacyTokens: readonly LegacyToken[] = [
   // compares the two faces.
   { name: "rounded-sm", value: v("radius-control"), owner: RADIUS },
   { name: "rounded-md", value: v("radius-container"), owner: RADIUS },
-  { name: "rounded-full", value: v("radius-pill"), owner: BADGE },
-
-  // The status pill (`StatusBadge.tsx` consumes these through Tailwind's
-  // `(--x)` shorthand; plan 202 replaces the pill with tone × strength).
-  { name: "badge-bg", value: v("surface-inset"), owner: BADGE },
-  { name: "badge-fg", value: v("text-secondary"), owner: BADGE },
-  { name: "badge-radius", value: v("radius-pill"), owner: BADGE },
-  { name: "badge-height", value: "20px", owner: BADGE },
-  { name: "badge-success-bg", value: v("tone-success-bg"), owner: BADGE },
-  { name: "badge-success-fg", value: v("tone-success-fg"), owner: BADGE },
-  { name: "badge-warn-bg", value: v("tone-warn-bg"), owner: BADGE },
-  { name: "badge-warn-fg", value: v("tone-warn-fg"), owner: BADGE },
-  { name: "badge-error-bg", value: v("tone-danger-bg"), owner: BADGE },
-  { name: "badge-error-fg", value: v("tone-danger-fg"), owner: BADGE },
 
   // Control sizing on the SSR face, until plan 203 composes the component layer.
   { name: "button-primary-height", value: v("control-h-md"), owner: CONTROL },

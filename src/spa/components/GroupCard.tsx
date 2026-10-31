@@ -1,13 +1,12 @@
 /**
  * Group card (DESIGN.md ### group-card): a set of children under one parent
- * object. The surface and container radius are ui/card's `Card` — nothing is
- * restated there; only Card's symmetric 24px padding is split into the header
- * band (`14px 16px`) and the body (`0 16px 14px`). The hairline colour is NOT
- * inherited: Card's bare `border` carries width only and preflight leaves
- * `border-color` at currentColor, so the root supplies the token hairline. No
- * divider sits under the header: the separation is carried by the caller's
+ * object. The surface, hairline colour and container radius are ui/card's
+ * `Card` — nothing is restated there; only Card's symmetric 24px padding is
+ * split into the header band (at least one `row-h-comfort`, growing to
+ * `14px 16px` when a summary line is present) and the body (`0 16px 14px`).
+ * No divider sits under the header: the separation is carried by the caller's
  * list-row container. Purely presentational — the caller passes the
- * StatusBadge, the action buttons, the list rows and the empty-state copy.
+ * localized strings/nodes in.
  */
 import type { ComponentProps, ReactNode } from "react";
 import {
@@ -17,14 +16,14 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card";
-import { cn } from "@/lib/utils";
+  cn,
+} from "@design-system";
 
 export function GroupCard({ className, ...props }: ComponentProps<typeof Card>) {
   return (
     <Card
       data-slot="group-card"
-      className={cn("gap-0 border-(--gray-alpha-400) p-0", className)}
+      className={cn("gap-0 p-0", className)}
       {...props}
     />
   );
@@ -43,13 +42,15 @@ export function GroupCardHeader({
   actions?: ReactNode;
 }) {
   return (
-    <CardHeader className="px-4 py-3.5">
+    // The band is at least one comfort row; the vertical padding is the
+    // fallback that lets a header with a summary line grow past it.
+    <CardHeader className="min-h-(--row-h-comfort) items-center px-4 py-2">
       <CardTitle className="flex items-center gap-2 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">
         {title}
         {badge}
       </CardTitle>
       {summary ? (
-        <CardDescription className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) text-(--gray-700)">
+        <CardDescription className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) text-(--text-muted)">
           {summary}
         </CardDescription>
       ) : null}

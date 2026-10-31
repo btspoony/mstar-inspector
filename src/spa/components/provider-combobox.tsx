@@ -8,8 +8,8 @@
  * AD-547 red line).
  *
  * Deliberately hand-written at the components/ top level (the hand-written
- * layer — AppSidebar.tsx precedent), NOT in vendored components/ui/ (shadcn
- * copy-in only): Radix Select cannot host a free-typed query and cmdk is out
+ * layer — AppSidebar.tsx precedent), NOT one of the design system's primitives:
+ * Radix Select cannot host a free-typed query and cmdk is out
  * of scope (zero new dependencies, AD-542 lock). Accessibility follows the
  * ARIA combobox pattern at the QA minimum bar: a typeable input
  * (role=combobox with aria-expanded/aria-controls/aria-autocomplete), a
@@ -28,8 +28,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon } from "lucide-react";
 import { t, type Locale } from "../../i18n";
 import type { CatalogProvider } from "../pages/data";
-import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
+import { Input, cn } from "@design-system";
 
 /**
  * The pure filter (AD-542): case-insensitive substring match over the
@@ -137,6 +136,7 @@ export function ProviderComboboxPanel({
                   id={rowId}
                   role="option"
                   aria-selected={provider.id === value}
+                  data-active={activeId === rowId ? "true" : undefined}
                   className={cn(
                     "flex w-full cursor-pointer items-center gap-2 rounded-sm py-1.5 pr-2 pl-2 text-sm select-none hover:bg-accent",
                     activeId === rowId && "bg-accent",

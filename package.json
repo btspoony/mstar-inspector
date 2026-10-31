@@ -7,7 +7,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit && tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/runner/tsconfig.json --noEmit && tsc --noEmit -p tsconfig.spa.json",
-    "build:design-preview": "bun scripts/build-design-preview.ts",
+    "build:design-preview": "bun scripts/build-design-preview.tsx",
     "build:spa": "bun run build:design-preview && vite build",
     "review": "bun run packages/runner/src/runner.ts",
     "release:prepare": "bun run scripts/prepare-release.ts",

@@ -4,7 +4,7 @@
  * and the filtering — this renders the controls only. No URL state, no
  * request: the filter runs over the already-loaded rows.
  */
-import { Input } from "@/components/ui/input";
+import { Input } from "@design-system";
 import { t, type DictionaryKey } from "../../i18n";
 import type { Locale } from "../../i18n";
 

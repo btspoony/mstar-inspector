@@ -43,11 +43,12 @@ describe("login SPA face (A3)", () => {
     expect(loginPage).toContain("max-w-sm");
   });
 
-  test("card title rides the DESIGN.md heading-32 token step (login wordmark-scale titles)", () => {
-    expect(loginPage).toContain("text-(length:--typo-heading-32-size)");
-    expect(loginPage).toContain("leading-(--typo-heading-32-line)");
-    expect(loginPage).toContain("tracking-(--typo-heading-32-tracking)");
-    // The old off-shelf scale utility is retired from the title.
+  test("the card title is the page's one hero heading, off the off-shelf scale", () => {
+    // The title face is the DESIGN.md hero step, carried by the card's one
+    // title slot (the token itself is the component's face, not a test
+    // oracle); the retired off-shelf utility must not come back.
+    expect(loginPage.match(/<CardTitle/g)).toHaveLength(1);
+    expect(loginPage).toContain('{t(locale, "login.heading")}');
     expect(loginPage).not.toContain("text-xl");
   });
 

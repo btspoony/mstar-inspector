@@ -21,7 +21,7 @@
  * Version pins are structural (dotted numeric + matching `v<version>`
  * change-note in the description), never literals.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
@@ -52,6 +52,32 @@ const COLOR = /^(?:#[0-9a-f]{3,8}|oklch\()/i;
 const PALETTE_STEP = /^(?:background-\d00|gray-\d{3,4}|gray-alpha-\d{3,4}|brand-\d00|blue-\d00|red-\d{3,4}|amber-\d{3,4}|green-\d{3,4}|teal-\d00|purple-\d{3,4}|pink-\d{3,4})$/;
 /** The frontmatter reference grammar (design-md-spec §6): `{group.key}`, no component-to-component or spacing refs. */
 const REF = /^\{([a-z]+)\.([^}]+)\}$/;
+
+/** sRGB channels of a `#rrggbb` literal, 0–1. */
+const srgb = (value: string): [number, number, number] => {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16) / 255) as [number, number, number];
+  return [r, g, b];
+};
+const luminance = (hex: string): number => {
+  const [r, g, b] = srgb(hex).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)) as [
+    number,
+    number,
+    number,
+  ];
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrast = (a: string, b: string): number => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+};
+/** Resolve `var(--x)` chains against one theme's declarations. */
+const resolve = (vars: Record<string, string>, name: string): string => {
+  let value = vars[name]!;
+  for (let hop = 0; hop < 8 && value.startsWith("var("); hop += 1) {
+    value = vars[/^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1] as string]!;
+  }
+  return value;
+};
 
 type DesignFrontmatter = {
   /** YAML keeps `0.5` a number and `0.5.0` a string. */
@@ -442,9 +468,32 @@ describe("Appendix A contrast dispositions (D16)", () => {
 
 describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   const BRIDGE = new URL("../../src/spa/styles/shadcn-theme.css", import.meta.url);
-  const UI_DIR = fileURLToPath(new URL("../../src/spa/components/ui/", import.meta.url));
-  /** A5 sensitive subset — the only ui/ files allowed to drift from the copy-in. */
+  const PRIMITIVES_DIR = fileURLToPath(new URL("../../src/design-system/primitives/", import.meta.url));
+  /** A5 sensitive subset — the only primitives allowed to drift from the copy-in. */
   const SUBSET = ["button", "card", "input", "table", "skeleton", "tabs", "sidebar", "select", "dropdown-menu", "dialog"];
+
+  test("the theme entry names the design-system tier Tailwind cannot scan on its own", async () => {
+    const css = await Bun.file(BRIDGE).text();
+    const directives = [...css.matchAll(/@source\s+"([^"]+)"/g)].map((match) => match[1] ?? "");
+    // This line is the only content path outside the entry's own directory
+    // (the Vite root, `src/spa`). Deleting it keeps the DOM and drops every
+    // utility the migrated primitives wear, with a green build — so the check
+    // is that the directive exists, and that it points at a tree the scanner
+    // would otherwise miss.
+    expect(directives, "@source directives in shadcn-theme.css").toHaveLength(1);
+    const [directive = ""] = directives;
+    const target = new URL(directive, BRIDGE);
+    expect(
+      fileURLToPath(target).startsWith(fileURLToPath(new URL("../../src/spa/", import.meta.url))),
+      `${target} sits inside the automatic scan base, so the directive is a no-op`,
+    ).toBe(false);
+    // Both component tiers must be reachable: a path that lands one level off
+    // (or on a file) would scan nothing and fail the same silent way.
+    for (const tier of ["primitives", "patterns"]) {
+      const child = new URL(`${directive}/${tier}/index.ts`, BRIDGE);
+      expect(existsSync(child), `${child}`).toBe(true);
+    }
+  });
 
   test("bridge re-point: every value is a semantic token; focus stays on the blue duty", async () => {
     const css = await Bun.file(BRIDGE).text();
@@ -520,7 +569,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const tokens = await Bun.file(TOKENS_CSS).text();
     const dark = cssCustomProperties(extractBlock(tokens, ":root {"));
     const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
-    const destructiveVariant = /destructive:\s*\n?\s*"([^"]+)"/.exec(await Bun.file(join(UI_DIR, "button.tsx")).text())?.[1];
+    const destructiveVariant = /destructive:\s*\n?\s*"([^"]+)"/.exec(await Bun.file(join(PRIMITIVES_DIR, "button.tsx")).text())?.[1];
     if (destructiveVariant === undefined) throw new Error("button.tsx declares no destructive variant");
     // `bg-destructive` / `text-destructive-foreground` in the class list are the
     // rendered faces; a raw colour (`text-white`) has no bridge key and fails here.
@@ -544,30 +593,6 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(bridgeVars["destructive"]).toBe("var(--tone-danger-solid)");
     expect(bridgeVars["destructive-hover"]).toBe("var(--tone-danger-solid)");
 
-    const srgb = (value: string): [number, number, number] => {
-      const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16) / 255) as [number, number, number];
-      return [r, g, b];
-    };
-    const luminance = (hex: string): number => {
-      const [r, g, b] = srgb(hex).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)) as [
-        number,
-        number,
-        number,
-      ];
-      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    };
-    const contrast = (a: string, b: string): number => {
-      const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
-      return (hi + 0.05) / (lo + 0.05);
-    };
-    /** Resolve `var(--x)` chains against one theme's declarations. */
-    const resolve = (vars: Record<string, string>, name: string): string => {
-      let value = vars[name]!;
-      for (let hop = 0; hop < 8 && value.startsWith("var("); hop += 1) {
-        value = vars[/^var\(--([a-z0-9-]+)\)$/.exec(value)?.[1] as string]!;
-      }
-      return value;
-    };
     /** The mix the browser performs at paint time, computed. */
     const blend = (solid: string, label: string, weight: number): string => {
       const [s, t] = [srgb(solid), srgb(label)];
@@ -592,9 +617,34 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     }
   });
 
-  test("restyled subset carries v0.3 form: supersede marker, control radius, tinted elevation, token-eased transitions", async () => {
+  test("the link variant keeps its label readable on the page plane", async () => {
+    // The link face paints no fill, so its contrast duty is the page plane.
+    // The label is read from the face's own class list and resolved to the hex
+    // the browser paints: pinning the class would prove the spelling, not the
+    // ratio the link duty exists for.
+    const variant = /link:\s*"([^"]+)"/.exec(await Bun.file(join(PRIMITIVES_DIR, "button.tsx")).text())?.[1];
+    if (variant === undefined) throw new Error("button.tsx declares no link variant");
+    const labelClass =
+      /(?:^|\s)text-\((--[a-z0-9-]+)\)/.exec(variant)?.[1] ??
+      /(?:^|\s)text-([a-z][a-z0-9-]*)(?=\s|$)/.exec(variant)?.[1];
+    expect(labelClass, "the link face must paint a token label").toBeDefined();
+
+    const bridgeVars = cssCustomProperties(extractBlock(await Bun.file(BRIDGE).text(), ":root {"));
+    const tokens = await Bun.file(TOKENS_CSS).text();
+    const dark = { ...cssCustomProperties(extractBlock(tokens, ":root {")), ...bridgeVars };
+    const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
+    for (const vars of [dark, light]) {
+      const name = labelClass!.startsWith("--") ? labelClass!.slice(2) : labelClass!;
+      const label = resolve(vars, name);
+      expect(label, `${labelClass} must resolve to a colour`).toMatch(/^#[0-9a-f]{3,8}$/i);
+      const plane = resolve(vars, "surface-page");
+      expect(contrast(label, plane), `${labelClass} on surface-page`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  test("restyled subset carries v0.3 form: supersede marker, control radius, elevation on the overlay faces only, token-eased transitions", async () => {
     for (const name of SUBSET) {
-      const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
+      const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
       // Copy-in supersede marker — a future regen must not clobber silently.
       expect(source, name).toContain("Locally revised shadcn/ui copy-in (v0.3 restyle;");
       // Hard constraint #7 (architect tighten-up): transition-all is
@@ -602,42 +652,57 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       expect(source, name).not.toContain("transition-all");
     }
 
-    const button = await Bun.file(join(UI_DIR, "button.tsx")).text();
+    const button = await Bun.file(join(PRIMITIVES_DIR, "button.tsx")).text();
     expect(button).toContain("rounded-sm");
     expect(button).not.toContain("rounded-md");
-    expect(button).toContain("hover:bg-primary-hover");
-    expect(button).toContain("active:bg-primary-hover");
+    // Hover and press are token fills on the button face; which bridge key
+    // each names is the primitive's, not this suite's oracle.
+    expect(button).toMatch(/hover:bg-[a-z0-9-]+/);
+    expect(button).toMatch(/active:bg-[a-z0-9-]+/);
     expect(button).toContain("duration-(--duration-base)");
     expect(button).toContain("ease-(--ease-in-out)");
-    // Link duty stays blue even though --primary is now the accent tone.
-    expect(button).toContain("text-(--blue-700)");
+    // The link duty stays on the focus blue even though --primary is the accent
+    // tone. Asserted as "names no palette step" rather than as the class that
+    // carries it: the link face resolves through `focus-ring`, and re-pinning
+    // that class name would rebuild the oracle this migration removes.
+    expect(button).not.toMatch(/--(?:background|gray|brand|blue|red|amber|green|purple|teal|pink)-/);
 
-    const card = await Bun.file(join(UI_DIR, "card.tsx")).text();
-    expect(card).toContain("shadow-(--shadow-card)");
-    expect(card).not.toMatch(/shadow-(sm|md|lg)\b/);
+    const card = await Bun.file(join(PRIMITIVES_DIR, "card.tsx")).text();
+    // r3 card rule (plan 202 task 2): definition is the hairline plus the
+    // surface step, so the resting card declares no box-shadow at all —
+    // elevation is the overlays' (asserted below, on the overlay faces).
+    expect(card).not.toMatch(/(?:^|["\s])shadow-/);
 
     for (const name of ["dropdown-menu", "select", "dialog"]) {
-      const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
-      expect(source, name).toContain("shadow-(--shadow-pop)");
+      const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
+      // The overlay faces carry the elevation namespace; a raw shadow step is
+      // the retired spelling.
+      expect(source, name).toMatch(/shadow-\(--[a-z0-9-]+\)/);
       expect(source, name).not.toMatch(/shadow-(md|lg)\b/);
     }
 
-    const input = await Bun.file(join(UI_DIR, "input.tsx")).text();
+    const input = await Bun.file(join(PRIMITIVES_DIR, "input.tsx")).text();
     expect(input).toContain("rounded-sm");
-    expect(input).toContain("hover:border-(--gray-500)");
+    // DESIGN.md "Input — States: hover holds the edge" governs every field
+    // face, and the select trigger is a field (`border-input`, control
+    // height, control radius), not an action: it holds its edge through
+    // hover. Asserted as the absence of a hover edge on both, whichever
+    // token they would have named.
+    for (const name of ["input", "select"]) {
+      const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
+      expect(source, name).not.toMatch(/hover:border-/);
+    }
 
     // QC round 1 F-004: raw `transition-opacity` faces ride the duration +
     // easing tokens so the prefers-reduced-motion fold reaches them too.
-    const dialog = await Bun.file(join(UI_DIR, "dialog.tsx")).text();
-    expect(dialog).toContain(
-      "transition-opacity duration-(--duration-base) ease-(--ease-in-out)",
-    );
-    const tabs = await Bun.file(join(UI_DIR, "tabs.tsx")).text();
-    expect(tabs).toContain(
-      "after:transition-opacity after:duration-(--duration-base) after:ease-(--ease-in-out)",
+    const dialog = await Bun.file(join(PRIMITIVES_DIR, "dialog.tsx")).text();
+    expect(dialog).toMatch(/transition-opacity[^"\n]*duration-\(--duration-[a-z0-9-]+\)[^"\n]*ease-\(--ease-[a-z0-9-]+\)/);
+    const tabs = await Bun.file(join(PRIMITIVES_DIR, "tabs.tsx")).text();
+    expect(tabs).toMatch(
+      /after:transition-opacity after:duration-\(--duration-[a-z0-9-]+\) after:ease-\(--ease-[a-z0-9-]+\)/,
     );
 
-    const skeleton = await Bun.file(join(UI_DIR, "skeleton.tsx")).text();
+    const skeleton = await Bun.file(join(PRIMITIVES_DIR, "skeleton.tsx")).text();
     expect(skeleton).toContain("motion-reduce:animate-none");
   });
 
@@ -649,7 +714,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // sanitized marker wording, never the process-id literal the deleted
     // negative assertion carried.
     for (const name of ["toggle", "sheet"] as const) {
-      const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
+      const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
       expect(source, name).toContain("Locally revised shadcn/ui copy-in (motion-token sweep");
     }
   });

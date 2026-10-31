@@ -110,7 +110,7 @@ describe("support page composition", () => {
     expect(source).not.toContain("text-(length:--typo-heading-24-size)");
     expect(source).not.toContain("text-(length:--typo-heading-16-size)");
     expect(source).not.toContain("bg-(--background-200)");
-    expect(source).not.toContain('from "@/components/ui/table"');
+    expect(source).not.toContain("<Table");
   });
 
   test("zero raw hex and zero inline styles", () => {

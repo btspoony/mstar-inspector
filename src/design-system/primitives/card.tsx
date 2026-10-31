@@ -1,17 +1,20 @@
 // Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
 import * as React from "react"
 
-import { cn } from "@/lib/utils"
+import { cn } from "../cn"
 
 function Card({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card"
       // rounded-xl resolves to the container tier via the bridge remap
-      // (--radius-lg/xl onto var(--radius-container)); elevation is the tinted
-      // --shadow-card token.
+      // (--radius-lg/xl onto var(--radius-container)). Definition is the
+      // hairline plus the surface step: the card names its border colour
+      // token because preflight leaves `border-color` at currentColor, and it
+      // carries no elevation — shadow belongs to overlays, not to content
+      // sitting on the page.
       className={cn(
-        "flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-(--shadow-card)",
+        "flex flex-col gap-6 rounded-xl border border-(--card-border) bg-card py-6 text-card-foreground",
         className
       )}
       {...props}

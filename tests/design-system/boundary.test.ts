@@ -129,7 +129,7 @@ describe("design-system module boundary", () => {
     // must NOT match: a same-named sibling directory of the importer
     expect(matched(`import x from "./design-system";`)).toEqual([]);
     // must NOT match: unrelated specifiers the repo actually uses
-    expect(matched(`import { Card } from "@/components/ui/card";\nimport React from "react";`)).toEqual([]);
+    expect(matched(`import { AppAvatar } from "@/components/AppAvatar";\nimport React from "react";`)).toEqual([]);
     expect(matched(`export * from "./tokens";`, "src/contracts/index.ts")).toEqual([]);
 
     // must NOT match: a sibling module whose name merely starts the same way —
