@@ -95,7 +95,10 @@ const COLOUR_AXIS = `(?:border-[trblsexy]|divide-[xy])`;
  */
 export const PALETTE_UTILITY_SOURCE =
   `(?<![\\w-])(?:${COLOUR_UTILITIES.join("|")})-(?:${FAMILIES.join("|")})-\\d{2,3}(?![\\w-])` +
-  // The side/span spelling, and its bare black/white form: `border-t-black`.
+  // The side/span spelling the families take too: `border-t-red-500`.
   `|(?<![\\w-])${COLOUR_AXIS}-(?:${FAMILIES.join("|")})-\\d{2,3}(?![\\w-])` +
-  `|(?<![\\w-])border-[trblsexy]-(?:black|white)(?![\\w-])` +
-  `|(?<![\\w-])(?:bg|text|border|ring|fill|stroke|from|via|to)-(?:black|white)(?![\\w-])`;
+  // `black`/`white` are colours in the same series, so every prefix above takes
+  // them — `shadow-black`, `caret-white`, `scrollbar-thumb-black` included, not
+  // the nine-prefix subset this clause used to carry. `border-{side}` joins the
+  // same clause: `border-t-black`.
+  `|(?<![\\w-])(?:${COLOUR_UTILITIES.join("|")}|border-[trblsexy])-(?:black|white)(?![\\w-])`;
