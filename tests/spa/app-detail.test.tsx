@@ -28,6 +28,8 @@ import {
   appStatusPill,
   parseAppDetailSearch,
   type InsightsSummary,
+  type SettingsManagePayload,
+  type SettingsPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
 import { apiBase } from "../../src/spa/workspace-base";
@@ -86,7 +88,7 @@ const search = { tab: "settings" as const, window: "30" as const, repo: "" };
 const noReload = async () => true;
 const noSearch = () => {};
 
-function renderDetail(payload: typeof identityPayload | typeof managePayload, canManage: boolean) {
+function renderDetail(payload: SettingsPayload, canManage: boolean) {
   return renderToStaticMarkup(
     createElement(AppDetailView, {
       locale: "en",
@@ -535,5 +537,52 @@ describe("workspace switch on the App detail page (SF-1)", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+});
+
+describe("header metric band on the manage face (static SSR)", () => {
+  const keyRow = { provider: "openai", keyId: "0123456789abcdef", last4: "1234", updatedAt: null, verifiedAt: null, verifiedStatus: "ok" as const };
+  const chain = { name: "default", chain: "m", is_default: true, created_at: "2026-01-01 00:00:00", updated_at: "2026-01-01 00:00:00" };
+  const installation = { installation_id: 1, account_login: "acme", seen_at: "2026-01-01 00:00:00" };
+  const summary = (rejected24h: number) => ({
+    latest: { event_name: "push", outcome: "ok", status_code: 200, created_at: "2026-01-01 00:00:00" },
+    rejected24h,
+  });
+
+  // Key/value pairs in band order, with the value cell's resolved class —
+  // the danger tone is the only tone channel the band has.
+  const band = (payload: SettingsManagePayload) =>
+    [...renderDetail(payload, true).matchAll(/data-slot="metric-key"[^>]*>([^<]+)<\/span><span data-slot="metric-value"[^>]*class="([^"]*)"[^>]*>(\d+)<\/span>/g)]
+      .map((m) => ({ key: m[1]!, value: m[3]!, danger: m[2]!.includes("tone-danger") }));
+
+  const payloadWith = (counts: { keys: number; chains: number; installations: number; rejected: number | null }): SettingsManagePayload => ({
+    ...managePayload,
+    keys: Array.from({ length: counts.keys }, () => keyRow),
+    model_chains: Array.from({ length: counts.chains }, () => chain),
+    installations: Array.from({ length: counts.installations }, () => installation),
+    delivery_summary: counts.rejected === null ? undefined : summary(counts.rejected),
+  });
+
+  test("the four figures render in band order, each wired to its own source count", () => {
+    // Distinct counts: a swap of two array lengths is type-compatible and
+    // must move a number off its label.
+    const pairs = band(payloadWith({ installations: 2, keys: 3, chains: 5, rejected: 7 }));
+    expect(pairs.map(({ key, value }) => [key, value])).toEqual([
+      ["Installations", "2"],
+      ["Keys", "3"],
+      ["Model chains", "5"],
+      ["24h rejected", "7"],
+    ]);
+  });
+
+  test("a zero rejected count renders without the danger tone; non-zero wears it", () => {
+    const zero = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: 0 }));
+    expect(zero[3]!).toEqual({ key: "24h rejected", value: "0", danger: false });
+    // The `?? 0` fallback: a missing delivery summary must still render the
+    // fourth figure as 0, silently absent summary ≠ missing metric.
+    const absent = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: null }));
+    expect(absent[3]!).toEqual({ key: "24h rejected", value: "0", danger: false });
+    const refused = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: 4 }));
+    expect(refused[3]!).toEqual({ key: "24h rejected", value: "4", danger: true });
   });
 });
