@@ -40,7 +40,7 @@ export function MetricBand({ metrics }: { metrics: readonly Metric[] }) {
             ) : null}
             <div
               data-slot="metric"
-              className="flex min-w-0 flex-1 flex-col items-center gap-1 px-(--spacing-6) py-(--spacing-3) text-center"
+              className="flex min-w-0 flex-1 flex-col items-center gap-1 px-(--spacing-2) py-(--spacing-3) text-center md:px-(--spacing-6)"
             >
               <span
                 data-slot="metric-key"
