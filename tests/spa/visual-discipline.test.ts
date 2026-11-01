@@ -106,7 +106,8 @@ const TARGETS = [...SPA_TARGETS, ...PRIMITIVE_TARGETS];
 const ARBITRARY_COLOUR = /\[(#[0-9a-fA-F]{3,8})/g;
 const ARBITRARY_GEOMETRY = /\[(\d+px|calc\(|color-mix\()/g;
 /** The two DESIGN.md Spacing & Layout page measures — the one documented
- * arbitrary pair; the page layer declares them once in Layout.tsx. */
+ * arbitrary pair. `scanContent` strips them from every page target, so the
+ * count pin below holds them to their single `Layout.tsx` site. */
 const DOCUMENTED_MEASURE = /max-w-\[(?:960|1200)px\]/g;
 /** Bare hex, excluding hex used inside rgba(/hsl( function arguments. */
 const HEX_OUTSIDE_FN = /#[0-9a-fA-F]{3,8}\b/g;
@@ -138,7 +139,8 @@ const COLOUR_RULES: GuardRule[] = [
 ];
 
 /** The page layer owns no geometry of its own either — see ARBITRARY_GEOMETRY.
- * Exception: the two DOCUMENTED_MEASURE page widths DESIGN.md declares. */
+ * Exception: the two DOCUMENTED_MEASURE page widths, which the pin below holds
+ * to their one `Layout.tsx` site. */
 const PAGE_RULES: GuardRule[] = [
   { label: "arbitrary-value", re: ARBITRARY_GEOMETRY, strip: DOCUMENTED_MEASURE },
   ...COLOUR_RULES,
@@ -419,6 +421,17 @@ describe("visual discipline guard", () => {
     // not the header's.
     expect(TARGETS).toContain(join(PRIMITIVES_DIR, "dialog.tsx"));
     expect(TARGETS).toContain(join(PRIMITIVES_DIR, "sheet.tsx"));
+  });
+
+  test("the documented measure exemption reaches one Layout.tsx site: the pair occurs there and nowhere else", () => {
+    // The geometry rule strips DOCUMENTED_MEASURE from every page target, so
+    // without this pin a page could hand-roll `max-w-[960px]` and stay green.
+    const hits = SPA_TARGETS.flatMap((file) =>
+      Array.from(readFileSync(file, "utf8").matchAll(new RegExp(DOCUMENTED_MEASURE)), (match) =>
+        `${relative(SPA_DIR, file)}:${match[0]}`,
+      ),
+    );
+    expect(hits).toEqual(["Layout.tsx:max-w-[1200px]", "Layout.tsx:max-w-[960px]"]);
   });
 
   test("the scanned source has no bare colour literals, bracket arbitrary values, palette utilities, or colourless border widths", () => {

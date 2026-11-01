@@ -898,10 +898,10 @@ on stacked pages; full-bleed shell + inner max-width on the SPA layout.
 
 The SPA measures the inner content column in two tiers, centred with
 `mx-auto w-full` (below the tier width the column fills the available
-width): list/table surfaces — the `apps` and `members` tables, five and
-six columns — take max-width 1200px; form/detail surfaces (`settings`,
-`app-detail`, workspace setup, support) and the default face take
-max-width 960px.
+width). `Layout.tsx` keys the tier on the route face: the `apps` and
+`members` list faces take max-width 1200px; form/detail surfaces
+(`settings`, `app-detail`, workspace setup, support) and the default face
+take max-width 960px.
 
 ## Breakpoints
 
