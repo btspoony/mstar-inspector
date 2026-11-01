@@ -2377,8 +2377,9 @@ function appDisplayName(
 
 /**
  * The Apps list with the health column data (AL-20-2): every row
- * carries its deliverySummary (the App's LATEST webhook_deliveries row +
- * the 24h rejected count). The health column reads webhook_deliveries —
+ * carries its health summary (the App's newest review-verdict
+ * webhook_deliveries row — outcome tier, see the store's deliverySummaries —
+ * plus the 24h rejected count). The health column reads webhook_deliveries —
  * NOT the github_apps.last_webhook_at column, which stays the L5 "last
  * verified delivery" stamp (display-only, no computed health).
  *

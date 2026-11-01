@@ -84,7 +84,7 @@
  *     recent list through the same store (AL-20-1: the legacy face records
  *     nothing).
  *   - deliverySummaries (QC wave 1, W-1) is the BATCHED health
- *     read face for the Apps list: latest row + 24h rejected count for
+ *     read face for the Apps list: newest verdict row + 24h rejected count for
  *     every requested app in exactly TWO statements regardless of N;
  *     deliverySummary(appId) stays the single-settings-page face.
  *   - event_name is bounded to EVENT_NAME_MAX_LENGTH (64) chars at
@@ -321,7 +321,8 @@ export type WebhookDeliveryRow = {
 
 /**
  * The dashboard health read face: the App's
- * LATEST delivery row + the count of `rejected` rows inside the trailing
+ * newest review-verdict delivery row (outcome tier — see deliverySummaries)
+ * + the count of `rejected` rows inside the trailing
  * 24h window (`created_at > datetime('now', '-24 hours')` — the sweep
  * window convention). ignored/paused/ok are healthy states and are
  * deliberately NOT counted (AL-20-2).
@@ -385,14 +386,27 @@ export function createAppsStore(db: AppsStoreD1) {
    * BATCHED health-read face (QC wave 1, W-1): the Apps list
    * renders every row's health on each POST re-render, so the per-App
    * deliverySummary fan-out (2N statements) is replaced by exactly TWO
-   * statements for any N: (a) the latest row per app — the same
-   * created_at DESC, rowid DESC tiebreak as deliverySummary, via a
-   * ROW_NUMBER() window (SQLite 3.25+, D1-supported) — and (b) the
-   * 24h `rejected` count grouped by app (same window + healthy-outcome
-   * exclusion as deliverySummary; AL-20-2). Apps with no rows → latest
-   * null, rejected24h 0; unknown ids are absent from the result unless
-   * the caller asked for them (each requested id gets an entry).
-   * deliverySummary(appId) delegates here.
+   * statements for any N: (a) the newest row per app — ranked by an outcome
+   * tier, newest first inside each tier — via a ROW_NUMBER() window (SQLite
+   * 3.25+, D1-supported), and (b) the 24h `rejected` count grouped by app
+   * (same window + healthy-outcome exclusion as deliverySummary; AL-20-2).
+   *
+   * The tier exists because the event name does not predict the outcome:
+   * bypass traffic (check_run, ping) massively outnumbers review traffic,
+   * and whitelisted events routinely land in `ignored` too — a
+   * non-whitelisted pull_request action, an issue comment without the App
+   * mention or from a bot author, a comment outside a PR thread. `ignored`
+   * is therefore the one outcome that says nothing about whether review is
+   * running; ranking by it keeps the health column on noise. Tier 0 is
+   * every outcome that carries a real verdict — `ok` (review enqueued),
+   * `paused` (the App's switch is off, a state worth surfacing) and
+   * `rejected` (the classifier refused the delivery, the failure signal);
+   * tier 1 is `ignored`. So an App with any verdict reports the newest of
+   * those, an App that has only ever produced noise still falls back to its
+   * newest row, and an App with no rows → latest null, rejected24h 0;
+   * unknown ids are absent from the result unless the caller asked for them
+   * (each requested id gets an entry). deliverySummary(appId) delegates
+   * here.
    */
   async function deliverySummaries(appIds: string[]): Promise<Record<string, DeliverySummary>> {
     if (appIds.length === 0) return {};
@@ -401,7 +415,9 @@ export function createAppsStore(db: AppsStoreD1) {
       db
         .prepare(
           `SELECT app_id, id, event_name, outcome, status_code, created_at FROM (
-             SELECT *, ROW_NUMBER() OVER (PARTITION BY app_id ORDER BY created_at DESC, rowid DESC) AS rn
+             SELECT *, ROW_NUMBER() OVER (PARTITION BY app_id
+               ORDER BY CASE WHEN outcome IN ('ok', 'paused', 'rejected') THEN 0 ELSE 1 END,
+                        created_at DESC, rowid DESC) AS rn
              FROM webhook_deliveries WHERE app_id IN (${placeholders})
            ) WHERE rn = 1`,
         )
@@ -778,7 +794,8 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Health read face: the App's LATEST delivery row +
+     * Health read face: the App's newest review-verdict delivery row
+     * (outcome tier — see deliverySummaries) +
      * the count of `rejected` rows inside the trailing 24h window
      * (`created_at > datetime('now', '-24 hours')` — the sweep
      * window convention). ignored/paused/ok are healthy states and are
