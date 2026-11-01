@@ -12,8 +12,9 @@ import { join } from "node:path";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+import { type Element as DomElement } from "happy-dom";
 import { appAvatarUrl } from "../../src/contracts/app-avatar";
-import { t } from "../../src/i18n";
+import { t, type DictionaryKey } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { APP_VERSION } from "../../src/version";
 import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
@@ -1209,23 +1210,45 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
     );
 
   test("one control row carries the picker, add, save and the caller's actions", () => {
-    const html = panelHtml();
-    // A single control row. Before this, the save button was a bare child of
-    // the editor's stack (align-items: stretch made it full-bleed) while the
-    // draft panel's discard opened a second row — the same primitive giving
-    // two answers. The row marker is the structural half of "one row"; the
-    // order below is what a reader actually sees.
-    expect(html.split('class="flex flex-wrap items-center gap-2"').length - 1).toBe(1);
-    const positions: Array<[string, number]> = [
-      ["picker", html.indexOf('data-slot="select-trigger"')],
-      ["add", html.indexOf(`>${t("en", "settings.addToChain")}<`)],
-      ["save", html.indexOf(`>${t("en", "settings.saveChain")}<`)],
-      ["discard", html.indexOf(`>${t("en", "settings.discardChain")}<`)],
-    ];
-    positions.forEach(([name, at], index) => {
-      const previous = index === 0 ? -1 : positions[index - 1]![1];
-      expect(at, name).toBeGreaterThan(previous);
-    });
+    // Before this, the save button was a bare child of the editor's stack
+    // (align-items: stretch made it full-bleed) while the draft panel's
+    // discard opened a second row — the same primitive giving two answers.
+    // "One row" is read off the rendered DOM the browser gets: the four
+    // controls share one container that sits inside the editor without being
+    // it, and they appear in reading order inside that container.
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1/settings");
+    try {
+      win.document.body.innerHTML = panelHtml();
+      const doc = win.document;
+      const button = (key: DictionaryKey): DomElement | null =>
+        [...doc.querySelectorAll("button")].find((node) => node.textContent === t("en", key)) ?? null;
+      const picker = doc.querySelector('[role="combobox"]');
+      const add = button("settings.addToChain");
+      const save = button("settings.saveChain");
+      const discard = button("settings.discardChain");
+      // The picker's accessible name is the field label a reader is told to use.
+      expect(picker?.getAttribute("aria-label")).toBe(t("en", "settings.modelChainField"));
+      expect(add).not.toBeNull();
+      expect(save).not.toBeNull();
+      expect(discard).not.toBeNull();
+
+      const editor = doc.body.firstElementChild!;
+      const row = add!.parentElement!;
+      // One container for all four, and it is the control row rather than the
+      // editor's stack (a second row would move the common parent up to the
+      // stack, which also holds the name field).
+      expect(row).not.toBe(editor);
+      expect(editor.contains(row)).toBe(true);
+      for (const control of [picker!, save!, discard!]) expect(row.contains(control)).toBe(true);
+
+      // Reading order inside that row: picker, add, save, caller's actions.
+      const inOrder = [...row.querySelectorAll("*")];
+      const positions = [picker!, add!, save!, discard!].map((control) => inOrder.indexOf(control));
+      expect(positions).toEqual([...positions].sort((a, b) => a - b));
+      expect(new Set(positions).size).toBe(4);
+    } finally {
+      cleanup();
+    }
   });
 
   test("the discard is visibly styled without hover and carries no confirmation", () => {

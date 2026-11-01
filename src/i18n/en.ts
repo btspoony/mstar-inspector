@@ -505,7 +505,8 @@ export const en = {
     opsReviewsCopy:
       "While paused, every delivery is answered 2xx and ignored — nothing is reviewed. Resuming puts this App back to reviewing.",
     opsDeliveryTitle: "Delivery responses",
-    opsDeliveryCopy: "A disabled App answers 404 to every delivery, so nothing is reviewed.",
+    opsDeliveryCopy:
+      "A disabled App answers 404 to every delivery, so nothing is reviewed. Enabling it puts this App back to answering deliveries.",
     opsDeleteTitle: "Delete this App",
     opsDeleteCopy: "A soft delete — the App leaves this list and every installation is closed.",
     // Review trigger mode (spec review-trigger-policy §2/§3): segment
