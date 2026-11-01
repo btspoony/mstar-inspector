@@ -1,25 +1,50 @@
 /**
- * Visual discipline guard for the SPA source (2026-10).
+ * Visual discipline guard for hand-written source (2026-10).
  *
- * Every hand-written file under `src/spa/` that can carry a class string or a
- * colour must not carry raw colour literals, bracket-syntax arbitrary values,
- * default-palette Tailwind utilities, or a border width with no colour in the
- * same class string; all colour/sizing comes from DESIGN.md tokens.
+ * The scanned files must not carry raw colour literals, bracket-syntax
+ * arbitrary values, default-palette Tailwind utilities, or a border width with
+ * no colour in the same class string; all colour/sizing comes from DESIGN.md
+ * tokens.
  *
- * The target list is DERIVED from the tree, not listed. It used to name
- * `pages/**`, `Layout.tsx`, `admin/**` and the shells, so `components/**` and
- * `styles/fonts.css` — where `I-000235`'s remaining sites live — were scanned
- * only if some rendered surface happened to paint them. The one exclusion is
- * the generated stylesheet, which the gate's link 1 already proves equals the
- * token source. `src/design-system/**` stays outside: it has its own guards
- * (the boundary test walks it for `dark:`; the both-theme pass renders it).
+ * The target list is DERIVED from two roots, both walked by `colourSources`,
+ * never listed:
+ *
+ * - `src/spa/**` — every hand-written file there that can carry a class string
+ *   or a colour, minus the generated stylesheet, which the gate's link 1
+ *   already proves equals the token source. It used to name `pages/**`,
+ *   `Layout.tsx`, `admin/**` and the shells, so `components/**` and
+ *   `styles/fonts.css` — where `I-000235`'s remaining sites lived — were
+ *   scanned only if some rendered surface happened to paint them.
+ * - `src/design-system/primitives/**` — a primitive hands the consumer the
+ *   class string it renders, so its own hairline has to be coloured on its own
+ *   element. The colourless border sites `I-000260` recorded lived here, and
+ *   this guard never walked the directory that held them. Primitives answer the
+ *   colour vocabulary and the hairline rule; the geometry half of the
+ *   arbitrary-value rule is a page-layer rule (see `ARBITRARY_GEOMETRY`).
+ *
+ * The rest of `src/design-system/**` stays OUT, each part for its own reason —
+ * not "it is guarded elsewhere", which is what this guard used to claim:
+ *
+ * - `patterns/**` composes its face from `cva` variant maps, where the colour
+ *   lives in a DIFFERENT class string applied to the same element
+ *   (`StatusBadge`'s base `border` plus the tone variant's border token). The
+ *   border rule's unit is one class string, so it cannot see across that
+ *   composition and would report a defect that is not one.
+ * - `tokens/**` DECLARES the literals: it is the value authority these rules
+ *   compare against, so scanning it would flag the source of truth.
+ * - `baseline/**` is the design specimen the port was measured from — raw
+ *   values are its content, and DESIGN.md is its summary.
+ * - the generated fixture (`fixture.json`) is not a colour source; it is
+ *   derived from `tokens/**` and checked by the design-system gate.
  *
  * Matcher contract:
  * - Arbitrary values match by BRACKET SYNTAX ONLY:
  *     /\[(#[0-9a-fA-F]{3,8}|\d+px|calc\(|color-mix\(/
  *   so ordinary scale utilities (p-4, gap-2, grid-cols-3, -translate-y-1)
  *   can never match; `bottom-[-2px]` does not match either (`[` is followed
- *   by `-`, not a digit).
+ *   by `-`, not a digit). The rule has two spellings with two owners: a
+ *   bracket COLOUR is a violation in every scanned file, a bracket GEOMETRY
+ *   value only on the page layer.
  * - Colour literals: /#[0-9a-fA-F]{3,8}\b/ outside rgba(/hsl( context.
  * - Palette utilities: a Tailwind colour utility whose suffix is a default
  *   palette name plus a numeric shade (`text-red-500`, `border-t-red-500`).
@@ -43,23 +68,43 @@ import { PALETTE_UTILITY_SOURCE } from "../helpers/tailwind-palette";
 const REPO = new URL("../../", import.meta.url).pathname;
 
 const SPA_DIR = join(REPO, "src/spa");
+/**
+ * The design-system primitives — the one directory whose class strings a page
+ * does not restyle. Its own root, so a site there is reachable (I-000260).
+ */
+const PRIMITIVES_DIR = join(REPO, "src/design-system/primitives");
 /** The one stylesheet the token source derives — the gate's link 1 owns it. */
 const GENERATED_STYLESHEET = "styles/tokens.css";
 /** A file that can carry a class string or a colour. */
 const COLOUR_SOURCE = /\.(?:tsx?|css|html)$/;
 
-/** Every hand-written colour-carrying file under `spaRoot`, derived not listed. */
-function colourSources(spaRoot: string = SPA_DIR): string[] {
-  return listFiles(spaRoot)
+/** Every hand-written colour-carrying file under `root`, derived not listed. */
+function colourSources(root: string = SPA_DIR): string[] {
+  return listFiles(root)
     .filter((file) => COLOUR_SOURCE.test(file))
-    .filter((file) => relative(spaRoot, file) !== GENERATED_STYLESHEET)
+    .filter((file) => relative(root, file) !== GENERATED_STYLESHEET)
     .sort();
 }
 
-const TARGETS = colourSources();
+const SPA_TARGETS = colourSources(SPA_DIR);
+const PRIMITIVE_TARGETS = colourSources(PRIMITIVES_DIR);
+const TARGETS = [...SPA_TARGETS, ...PRIMITIVE_TARGETS];
 
-/** Bracket-syntax arbitrary value: `[#hex]`, `[Npx]`, `[calc(`, `[color-mix(`. */
-const ARBITRARY = /\[(#[0-9a-fA-F]{3,8}|\d+px|calc\(|color-mix\()/g;
+/**
+ * Bracket-syntax arbitrary values, in two spellings with different owners.
+ *
+ * - COLOUR (`bg-[#1a2b3c]`) is a violation in every scanned file: a colour
+ *   comes from the token layer, never from a hand-written literal.
+ * - GEOMETRY (`[17px]`, `[calc(…)`, `[color-mix(…)`) is a PAGE-layer rule: a
+ *   page must not hand-roll a value the token layer or the scale should own,
+ *   while a primitive legitimately owns its own shape (`max-w-[calc(100%-2rem)]`
+ *   and `h-[calc(100%-1px)]` on an overlay, `ring-[3px]` on a focus halo, the
+ *   rail's width arithmetic). The design system carries no token for those, so
+ *   applying this half to the primitives root would demand a token for geometry
+ *   that intentionally has none.
+ */
+const ARBITRARY_COLOUR = /\[(#[0-9a-fA-F]{3,8})/g;
+const ARBITRARY_GEOMETRY = /\[(\d+px|calc\(|color-mix\()/g;
 /** Bare hex, excluding hex used inside rgba(/hsl( function arguments. */
 const HEX_OUTSIDE_FN = /#[0-9a-fA-F]{3,8}\b/g;
 /** rgba(/hsl( argument spans stripped before the hex rule runs. */
@@ -80,11 +125,20 @@ const PALETTE_UTILITY = new RegExp(PALETTE_UTILITY_SOURCE, "g");
 /** Allow-list: starts empty. A hit here must be a proven false positive. */
 const ALLOW: string[] = [];
 
-const RULES: { label: string; re: RegExp; strip?: RegExp }[] = [
-  { label: "arbitrary-value", re: ARBITRARY },
+type GuardRule = { label: string; re: RegExp; strip?: RegExp };
+
+/** The colour vocabulary — every scanned file answers to these. */
+const COLOUR_RULES: GuardRule[] = [
+  { label: "arbitrary-value", re: ARBITRARY_COLOUR },
   { label: "colour-literal", re: HEX_OUTSIDE_FN, strip: FN_SPAN },
   { label: "palette-utility", re: PALETTE_UTILITY },
 ];
+
+/** The page layer owns no geometry of its own either — see ARBITRARY_GEOMETRY. */
+const PAGE_RULES: GuardRule[] = [{ label: "arbitrary-value", re: ARBITRARY_GEOMETRY }, ...COLOUR_RULES];
+
+/** A primitive answers the colour vocabulary (its geometry is its own job). */
+const PRIMITIVES_RULES = COLOUR_RULES;
 
 /**
  * A quoted class string: `className="…"`, `cn("…")`, `class="…"`. The quote
@@ -157,9 +211,9 @@ function listFiles(dir: string): string[] {
 
 type Violation = { file: string; line: number; rule: string; text: string };
 
-function scanContent(content: string, file: string): Violation[] {
+function scanContent(content: string, file: string, rules: GuardRule[] = PAGE_RULES): Violation[] {
   const violations: Violation[] = [];
-  for (const { label, re, strip } of RULES) {
+  for (const { label, re, strip } of rules) {
     const source = strip === undefined ? content : content.replace(strip, "");
     re.lastIndex = 0;
     for (let m = re.exec(source); m !== null; m = re.exec(source)) {
@@ -333,10 +387,37 @@ describe("visual discipline guard", () => {
     expect(TARGETS).not.toContain(join(SPA_DIR, GENERATED_STYLESHEET));
   });
 
-  test("the SPA source has no bare colour literals, bracket arbitrary values, palette utilities, or colourless border widths", () => {
-    const violations = TARGETS.flatMap((file) =>
-      scanContent(readFileSync(file, "utf8"), relative(REPO, file)),
-    );
+  test("the primitives root is walked, and a bare border seeded there is caught", () => {
+    // The guard used to describe `src/spa` as its whole surface, so the nine
+    // colourless border sites I-000260 recorded under the primitives were
+    // unreachable: the header claimed a rule the walk never applied there.
+    const root = mkdtempSync(join(tmpdir(), "colour-primitives-"));
+    try {
+      mkdirSync(join(root, "primitives"), { recursive: true });
+      writeFileSync(join(root, "primitives/Seeded.tsx"), `<div className="rounded-md border bg-popover" />`);
+      const targets = colourSources(root);
+      expect(targets).toContain(join(root, "primitives/Seeded.tsx"));
+      const found = targets.flatMap((file) => scanContent(readFileSync(file, "utf8"), relative(root, file)));
+      expect(found.map((v) => [v.rule, v.text])).toEqual([
+        ["border-width-without-colour", "rounded-md border bg-popover"],
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+
+    // …and the shipped tree really is on that walk: the coverage is the tree's,
+    // not the header's.
+    expect(TARGETS).toContain(join(PRIMITIVES_DIR, "dialog.tsx"));
+    expect(TARGETS).toContain(join(PRIMITIVES_DIR, "sheet.tsx"));
+  });
+
+  test("the scanned source has no bare colour literals, bracket arbitrary values, palette utilities, or colourless border widths", () => {
+    const violations = [
+      ...SPA_TARGETS.flatMap((file) => scanContent(readFileSync(file, "utf8"), relative(REPO, file))),
+      ...PRIMITIVE_TARGETS.flatMap((file) =>
+        scanContent(readFileSync(file, "utf8"), relative(REPO, file), PRIMITIVES_RULES),
+      ),
+    ];
     const message = violations.map((v) => `${v.file}:${v.line}: [${v.rule}] ${v.text}`).join("\n");
     expect(violations, `visual discipline violations:\n${message}`).toEqual([]);
   });
