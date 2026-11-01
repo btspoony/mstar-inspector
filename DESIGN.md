@@ -527,8 +527,7 @@ Six structural places where the product does not mirror it are **intent, not
 accident** — recorded here with what ships and why, so the next change reads
 them as decisions instead of re-deriving them. A divergence not listed below
 has no decision behind it: that is a defect, reported rather than absorbed.
-All six were verified against the shipped code on 2026-11-01 for the v1.6
-cleanup (compass D6; the sidebar is D5).
+All six were verified against the shipped code on 2026-11-01.
 
 - **Apps list columns** — five, not the baseline's four: identity (avatar,
   name link, App id), status pill, health, creator, detail link. The health
