@@ -26,10 +26,12 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { isDictionaryKey, t } from "../../src/i18n";
+import { MetricBand } from "../../src/spa/components/MetricBand";
 import { AppsList, AppsPage, AppsView } from "../../src/spa/pages/AppsPage";
 import { MembersPage } from "../../src/spa/pages/MembersPage";
 import { reviewEnabled, type AppsPayload } from "../../src/spa/pages/data";
 import { matchSpaRoute } from "../../src/spa/routes";
+import { DANGER_FG, alertSegments, slotTags, textColourOf } from "../helpers/token-colour";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
 
@@ -790,5 +792,54 @@ describe("Apps list metric band (payload-proved facts only)", () => {
       t("en", "apps.tableCreator"),
       t("en", "apps.detail"),
     ]);
+  });
+
+  test("a non-zero refusal sum is the only figure on the band that wears the alert face", () => {
+    // Refused webhooks are the page's one monitoring signal (I-000251). The
+    // figure is identified by the colour it resolves to, so a restyled class
+    // name cannot pass this and a lost token cannot fail it for the wrong
+    // reason.
+    const faces = slotTags(renderFace(APPS), "metric-value");
+    expect(faces).toHaveLength(4);
+    expect(textColourOf(faces[3] ?? "")).toBe(DANGER_FG);
+    // Review-off is a deliberate pause and the enable count is not a verdict:
+    // neither inherits the alert.
+    for (const neutral of faces.slice(0, 3)) expect(textColourOf(neutral)).toBeNull();
+  });
+
+  test("a zero refusal sum renders the neutral band cell-for-cell identical to the tone-free face", () => {
+    // "Zero stays neutral" proven exactly, not by spot check: the same figures
+    // through the page equal the same figures through the primitive with no
+    // tone anywhere. The danger channel is additive — it cannot re-skin a
+    // healthy page.
+    const quiet = APPS.map((app) => ({ ...app, health: { ...app.health, rejected24h: 0 } }));
+    const control = decoded(
+      renderToStaticMarkup(
+        createElement(MetricBand, {
+          metrics: [
+            { key: t("en", "apps.metricApps"), value: quiet.length },
+            {
+              key: t("en", "apps.metricEnabled"),
+              value: quiet.filter((app) => app.status !== "disabled").length,
+            },
+            { key: t("en", "apps.metricReviewOff"), value: quiet.filter((app) => !reviewEnabled(app)).length },
+            { key: t("en", "apps.metricRejected24h"), value: 0 },
+          ],
+        }),
+      ),
+    );
+    expect(slotTags(renderFace(quiet), "metric-value")).toEqual(slotTags(control, "metric-value"));
+    expect(slotTags(renderFace(quiet), "metric-key")).toEqual(slotTags(control, "metric-key"));
+  });
+
+  test("the list health cell colours its refusal count, and only when it is non-zero", () => {
+    // The same count already prints as muted prose in the row; the count
+    // segment — not the delivery prose beside it — carries the alert colour.
+    const refused = renderList([appRow({ health: { latest: null, rejected24h: 2 } })]);
+    const [segment = ""] = alertSegments(refused);
+    expect(segment).toContain(t("en", "apps.health.rejected24h", { count: 2 }));
+    expect(refused).toContain(t("en", "apps.health.deliveryNever"));
+    // Nothing refused → nothing coloured, and the cell is today's muted line.
+    expect(alertSegments(renderList([appRow()]))).toEqual([]);
   });
 });

@@ -6,8 +6,10 @@
  * rendered separators, so the count is a markup fact (four metrics, four
  * rules: the header rule plus the three between them), never a trailing edge.
  *
- * No tone prop: a figure that needs an alert face takes it from the copy the
- * page passes in, not from a second status vocabulary beside `StatusBadge`.
+ * Tone is the caller's call, never the band's: an entry carries `tone` only
+ * when the page knows the figure means something bad (a refused webhook is a
+ * failure; zero of them is not). The band never infers it from the value, so
+ * a large healthy count cannot turn red on its own.
  */
 import { Fragment, type ReactNode } from "react";
 import { Separator } from "@design-system";
@@ -17,6 +19,8 @@ export type Metric = {
   key: ReactNode;
   /** The figure — tabular, so columns of numbers scan. */
   value: ReactNode;
+  /** Alert face for the value, on the baseline's `metric bad` rule. */
+  tone?: "danger";
 };
 
 export function MetricBand({ metrics }: { metrics: readonly Metric[] }) {
@@ -48,7 +52,9 @@ export function MetricBand({ metrics }: { metrics: readonly Metric[] }) {
               </span>
               <span
                 data-slot="metric-value"
-                className="text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking) font-semibold tabular-nums"
+                className={`text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking) font-semibold tabular-nums${
+                  metric.tone === "danger" ? " text-(--tone-danger-fg)" : ""
+                }`}
               >
                 {metric.value}
               </span>
