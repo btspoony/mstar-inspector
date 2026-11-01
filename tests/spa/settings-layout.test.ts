@@ -1494,7 +1494,6 @@ describe("ops danger zone: one row per action", () => {
             `${locale} ${row.control} count`,
           ).toBe(1);
           const control = button(row.control);
-          expect(control, `${locale} ${row.control}`).not.toBeNull();
           const rowEl = control!.parentElement!;
           expect(rowEl.textContent, `${locale} ${row.title}`).toContain(t(locale, row.title));
           expect(rowEl.textContent, `${locale} ${row.copy}`).toContain(t(locale, row.copy));
