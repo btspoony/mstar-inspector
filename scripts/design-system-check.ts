@@ -107,8 +107,12 @@ export function stylesheetConsumers(dir: string = SPA_ROOT): string[] {
  * hides a retired token behind a literal.
  */
 const REFERENCE = /var\(--([a-z0-9-]+)[\s,)]/g;
-/** A custom property the stylesheet declares itself — the bridge's own keys. */
-const DECLARATION = /(?:^|[;{\s])(--[a-z0-9-]+)\s*:/g;
+/**
+ * A custom property the stylesheet declares itself — the bridge's own keys.
+ * The declared value is captured with the name: a declaration that references
+ * its own name excuses nothing (see `danglingReferences`).
+ */
+const DECLARATION = /(?:^|[;{\s}])(--[a-z0-9-]+)\s*:\s*([^;{}]*)/g;
 /** A block comment declares nothing: a commented-out `--legacy-x:` is not a declaration. */
 const COMMENT = /\/\*[\s\S]*?\*\//g;
 
@@ -124,12 +128,22 @@ export interface DanglingReference {
  * one theme declares and the other does not is dangling in the other one, and
  * the union would hide exactly that.
  *
+ * A declaration excuses references to its name only when it is not itself the
+ * cycle: `--x: var(--x)` (the fallback form included) is guaranteed-invalid in
+ * CSS — the paint breaks while the gate stayed green (`I-000248`). Only that
+ * spelling loses its vote; a name declared genuinely elsewhere in the file
+ * still excuses its references.
+ *
  * Comments are stripped before either match, so a retired name quoted in prose
  * neither becomes a reference nor a self-declaration that suppresses the check.
  */
 export function danglingReferences(file: string, css: string): DanglingReference[] {
   const live = css.replace(COMMENT, "");
-  const local = new Set([...live.matchAll(DECLARATION)].map((match) => (match[1] as string).slice(2)));
+  const local = new Set(
+    [...live.matchAll(DECLARATION)]
+      .filter((match) => !new RegExp(`var\\(${match[1]}(?=[\\s,)])`).test(match[2] as string))
+      .map((match) => (match[1] as string).slice(2)),
+  );
   const names = [...new Set([...live.matchAll(REFERENCE)].map((match) => match[1] as string))].sort();
   return THEMES.flatMap((theme) => {
     const layers = resolveTheme(theme);

@@ -568,6 +568,20 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     ]);
   });
 
+  test("a declaration no longer excuses its own dangling reference (I-000248)", () => {
+    const names = (css: string) =>
+      danglingReferences("probe.css", css).map(({ theme, name }) => `${theme}:${name}`);
+    // Before this rule the declaration set excused every name it declared, so
+    // a guaranteed-invalid cycle passed the gate green: `--x: var(--x)` paints
+    // nothing while the reference reads as locally satisfied.
+    expect(names(":root { --x: var(--x); }")).toEqual(["dark:x", "light:x"]);
+    expect(names(":root { --x: var(--x, #fff); }")).toEqual(["dark:x", "light:x"]);
+    // A genuine intra-file reference still passes, and a name that also has a
+    // genuine declaration in the file still excuses its references.
+    expect(names(":root { --genuine: #fff; } .a { color: var(--genuine); }")).toEqual([]);
+    expect(names(":root { --x: var(--x); --x: #fff; } .a { color: var(--x); }")).toEqual([]);
+  });
+
   test("the primary bridge resolves to the accent pair off the ops surface", async () => {
     // The extra component hop exists for the D15 variant. Off that surface it
     // must be invisible, and that is a value claim: resolve both themes through
