@@ -17,7 +17,7 @@ import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { APP_VERSION } from "../../src/version";
 import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
-import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta } from "../../src/spa/pages/data";
+import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta, type SettingsManagePayload } from "../../src/spa/pages/data";
 import {
   ProviderCombobox,
   ProviderComboboxPanel,
@@ -55,7 +55,7 @@ const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
 const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat", role: "admin" as const };
 
 /** A manage-face settings payload — the full settings tab body renders. */
-const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
+const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
   workspace_id: "ws_0123456789abcdefghijkl",
   app: {
@@ -1404,6 +1404,73 @@ describe("operational action hierarchy", () => {
     expect(t("zh_CN", "settings.confirmDeleteBody")).toContain("软删除");
     expect(t("en", "settings.confirmDeleteButton")).toBe("Delete App");
     expect(t("zh_CN", "settings.confirmDeleteButton")).toBe("删除应用");
+  });
+});
+
+describe("ops danger zone: one row per action", () => {
+  /**
+   * The operations section is a danger zone: each row states what its control
+   * does to deliveries and carries that one control. The confirm dialog keeps
+   * the proceed-or-not body; the row owns the effect.
+   */
+  const opsSectionHtml = (locale: SpaBoot["locale"], app: Partial<SettingsAppMeta> = {}): string => {
+    const payload = detailPayload();
+    const html = withLocation("/dashboard/apps/1", () =>
+      renderToStaticMarkup(
+        createElement(AppDetailView, {
+          locale,
+          appId: "1",
+          payload: { ...payload, app: { ...payload.app, ...app } },
+          groups: [],
+          notice: null,
+          search: { tab: "settings", window: "30", repo: "" },
+          onReload: async () => true,
+          onSearch: () => {},
+        }),
+      ),
+    );
+    const start = html.indexOf(`>${t(locale, "settings.ops")}<`);
+    return html.slice(html.lastIndexOf("<section", start), html.indexOf("</section>", start));
+  };
+
+  test("each row states its effect and carries its own control, in both locales", () => {
+    const rows = [
+      { title: "settings.opsReviewsTitle", copy: "settings.opsReviewsCopy", control: "settings.pauseReviews" },
+      { title: "settings.opsDeliveryTitle", copy: "settings.opsDeliveryCopy", control: "apps.actions.disable" },
+      { title: "settings.opsDeleteTitle", copy: "settings.opsDeleteCopy", control: "apps.actions.delete" },
+    ] as const;
+    for (const locale of ["en", "zh_CN"] as const) {
+      const html = opsSectionHtml(locale);
+      let cursor = -1;
+      for (const row of rows) {
+        const title = html.indexOf(t(locale, row.title));
+        const copy = html.indexOf(t(locale, row.copy));
+        const control = html.indexOf(`>${t(locale, row.control)}</button>`);
+        expect(title, `${locale} ${row.title}`).toBeGreaterThan(cursor);
+        expect(copy, `${locale} ${row.copy}`).toBeGreaterThan(title);
+        expect(control, `${locale} ${row.control}`).toBeGreaterThan(copy);
+        cursor = control;
+      }
+    }
+    // The section summary stopped restating one behaviour per action.
+    expect(t("en", "settings.opsCopy")).not.toContain("404");
+    expect(t("zh_CN", "settings.opsCopy")).not.toContain("404");
+  });
+
+  test("a disconnected App drops the review row and states its state in the summary", () => {
+    const html = opsSectionHtml("en", { status: "disabled" });
+    expect(html).toContain(t("en", "settings.disconnected"));
+    expect(html).not.toContain(t("en", "settings.opsReviewsTitle"));
+    expect(html).toContain(t("en", "apps.actions.enable"));
+    expect(html).not.toContain(t("en", "apps.actions.disable"));
+    expect(html).toContain(t("en", "settings.opsDeleteTitle"));
+  });
+
+  test("a paused App offers resume in the same row", () => {
+    const html = opsSectionHtml("en", { review_enabled: false });
+    expect(html).toContain(t("en", "settings.opsReviewsCopy"));
+    expect(html).toContain(t("en", "settings.resumeReviews"));
+    expect(html).not.toContain(t("en", "settings.pauseReviews"));
   });
 });
 
