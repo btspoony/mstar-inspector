@@ -46,9 +46,16 @@ describe("dark: variant binding", () => {
       '.dark\\:bg-red-500:where(:root:not([data-theme="light"]), :root:not([data-theme="light"]) *)',
     );
     expect(compiled).toMatch(/\.dark\\:bg-red-500[^{]*\{\s*background-color:/);
-    // The compiled root condition, evaluated: absence of the attribute is dark
-    // (the deterministic default), an explicit dark matches, light never does.
-    const rootGuard = ':root:not([data-theme="light"])';
+    // The guards the compiled rule actually carries: the root itself, and any
+    // descendant of such a root.
+    const variant = /\.dark\\:bg-red-500(:where\([^{]*\))/.exec(compiled)?.[1];
+    if (variant === undefined) throw new Error("the compiled dark: rule carries no :where(...) guard");
+    const guards = variant.slice(":where(".length, -1).split(", ");
+    expect(guards).toEqual([':root:not([data-theme="light"])', ':root:not([data-theme="light"]) *']);
+
+    // Evaluated per root: absence of the attribute is dark (the deterministic
+    // default), an explicit dark matches, light never does — root and
+    // descendant alike.
     for (const [theme, expected] of [
       [undefined, true],
       ["dark", true],
@@ -56,7 +63,11 @@ describe("dark: variant binding", () => {
     ] as const) {
       const window = new Window();
       if (theme !== undefined) window.document.documentElement.setAttribute("data-theme", theme);
-      expect(window.document.documentElement.matches(rootGuard), theme ?? "attribute unset").toBe(expected);
+      const descendant = window.document.createElement("div");
+      window.document.body.append(descendant);
+      const label = theme ?? "attribute unset";
+      expect(window.document.documentElement.matches(guards[0] as string), `${label} root`).toBe(expected);
+      expect(descendant.matches(guards[1] as string), `${label} descendant`).toBe(expected);
     }
   });
 });
