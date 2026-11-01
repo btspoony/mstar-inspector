@@ -97,8 +97,13 @@ const BARE_BORDER = /^border(?:-[trblsexy])?$/;
 const BORDER_SIDE = /^[trblsexy]$/;
 const BORDER_WIDTH_VALUE = /^(?:\d+|px|thin|medium|thick|\[[^\]]*\])$/;
 const BORDER_STYLE = /^(?:solid|dashed|dotted|double|none|hidden|collapse|separate)$/;
-/** Comment bodies, blanked in place so a reported line still matches the file. */
-const COMMENT = /\/\*[\s\S]*?\*\/|(^|[^:])\/\/[^\n]*/g;
+/**
+ * Comment bodies, blanked in place so a reported line still matches the file.
+ * The line comment starts at its own delimiter: consuming the character before
+ * `//` blanked a closing quote in `cn("border")//note`, which broke the class
+ * string and let the violation escape. `(?<!:)` keeps `https://` intact.
+ */
+const COMMENT = /\/\*[\s\S]*?\*\/|(?<!:)\/\/[^\n]*/g;
 
 /** Variant prefixes: `hover:`, `after:`, `md:`, `data-[x]:`, `[&:not(:last-child)]:`. */
 function stripVariants(token: string): string {
@@ -239,6 +244,33 @@ describe("visual discipline guard", () => {
     expect(matched(`<div className="border-t-(--border-subtle) divide-x-(--border-subtle)" />`)).toEqual([]);
   });
 
+  test("bare black/white across the whole colour series: shadow-black and caret-black passed the nine-prefix clause; every series prefix is rejected now", () => {
+    // The previous black/white clause listed nine prefixes, so the rest of the
+    // series — the very prefixes the family clause carries — passed every
+    // guard while painting a palette step.
+    const matched = (line: string) => scanContent(line, "fixture.tsx").map((v) => v.text);
+    expect(matched(`<div className="shadow-black" />`)).toEqual(["shadow-black"]);
+    expect(matched(`<div className="caret-black" />`)).toEqual(["caret-black"]);
+    expect(matched(`<div className="accent-white" />`)).toEqual(["accent-white"]);
+    expect(matched(`<div className="inset-shadow-black" />`)).toEqual(["inset-shadow-black"]);
+    expect(matched(`<div className="text-shadow-white" />`)).toEqual(["text-shadow-white"]);
+    expect(matched(`<div className="drop-shadow-black" />`)).toEqual(["drop-shadow-black"]);
+    expect(matched(`<div className="scrollbar-thumb-black" />`)).toEqual(["scrollbar-thumb-black"]);
+    expect(matched(`<div className="scrollbar-track-white" />`)).toEqual(["scrollbar-track-white"]);
+    expect(matched(`<div className="ring-offset-white" />`)).toEqual(["ring-offset-white"]);
+    // The nine the clause already carried stay caught; size and shadow-scale
+    // utilities do not become false positives.
+    expect(matched(`<div className="bg-black text-white border-black" />`)).toEqual([
+      "bg-black",
+      "text-white",
+      "border-black",
+    ]);
+    expect(matched(`<div className="shadow-sm inset-shadow-xs ring-offset-2" />`)).toEqual([]);
+    // StatusBadge compiles the same source without flags.
+    expect(new RegExp(PALETTE_UTILITY_SOURCE).test("shadow-black")).toBe(true);
+    expect(new RegExp(PALETTE_UTILITY_SOURCE).test("caret-white")).toBe(true);
+  });
+
   test("border width without a colour: bare `border`/`border-b` slipped the page-layer net; the class-string rule now rejects them", () => {
     const rejected = (line: string) =>
       scanContent(line, "fixture.tsx")
@@ -262,6 +294,11 @@ describe("visual discipline guard", () => {
     expect(rejected(`<div className="border-2" />`)).toEqual([]);
     // Prose quoting the word is not a class string: comments are blanked first.
     expect(rejected(`// a bare \`border\` carries width only`)).toEqual([]);
+    // A no-space trailing comment must not eat the closing quote: the previous
+    // stripper blanked the character before `//`, so this violation escaped.
+    expect(rejected(`const cls = "border"//no colour named`)).toEqual(["border"]);
+    // The `//` of a URL is not a comment opener, so its line stays intact.
+    expect(rejected(`const url = "https://example.test"; cn("border")`)).toEqual(["border"]);
   });
 
   test("the target walk covers components/** and styles/: a seeded component and fonts.css were invisible to the hand list and are caught now", () => {
