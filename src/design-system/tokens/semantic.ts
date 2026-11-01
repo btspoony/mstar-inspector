@@ -191,11 +191,15 @@ const darkSemantics = {
   // `amber-600` is a surviving step with the same value in both themes, but the
   // fill keeps its literal so it cannot follow that step later. Only chart-1
   // follows the theme, through brand-600.
+  // `chart-5` is the second theme-split fill: dark is lifted from the shared
+  // `#2563a8` (2.900:1 on `surface-card`, 2.696:1 on `surface-inset`) to
+  // `#2d6bb0` so it clears 3:1 on all three dark surfaces while keeping the
+  // blue hue (I-000232); light keeps `#2563a8` (6.125:1 on its page white).
   "chart-1": v("brand-600"),
   "chart-2": "#16a34a",
   "chart-3": "#d97706",
   "chart-4": "#dc2626",
-  "chart-5": "#2563a8",
+  "chart-5": "#2d6bb0",
   "chart-6": "#9333ea",
   "chart-1-mark": v("brand-700"),
   "chart-2-mark": v("green-700"),

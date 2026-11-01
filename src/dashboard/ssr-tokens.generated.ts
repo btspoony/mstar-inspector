@@ -140,7 +140,7 @@ export const ssrTokenValues: Readonly<Record<SsrTheme, Readonly<Record<string, s
     "chart-2": "#16a34a",
     "chart-3": "#d97706",
     "chart-4": "#dc2626",
-    "chart-5": "#2563a8",
+    "chart-5": "#2d6bb0",
     "chart-6": "#9333ea",
     "chart-1-mark": "#22d3ee",
     "chart-2-mark": "#4ade80",

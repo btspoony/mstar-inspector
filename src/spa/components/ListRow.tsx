@@ -46,7 +46,7 @@ export function ListRow({
     >
       <span
         data-slot="list-row-identity"
-        className="min-w-[76px] font-mono text-(length:--typo-label-14-size) leading-(--typo-label-14-line) tracking-(--typo-label-14-tracking) font-(weight:--typo-label-14-weight)"
+        className="min-w-19 font-mono text-(length:--typo-label-14-size) leading-(--typo-label-14-line) tracking-(--typo-label-14-tracking) font-(weight:--typo-label-14-weight)"
       >
         {identity}
       </span>

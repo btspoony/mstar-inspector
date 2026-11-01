@@ -105,12 +105,14 @@ const tokenValue = (theme: ThemeName, name: string): string | undefined => {
  * D14 carve-out: the quiet 600-step chart fills are one approved literal for
  * both themes on purpose (semantic.ts carries the reasoning). A chart is not a
  * surface, so it is the single exemption from "a colour must invert".
+ * `chart-5` left this set when dark was lifted to clear the 3:1 non-text bar
+ * on the dark raised planes (`I-000232`): it is now the one fill that does
+ * invert, deliberately.
  */
 const THEME_FIXED: Readonly<Record<string, true>> = {
   "chart-2": true,
   "chart-3": true,
   "chart-4": true,
-  "chart-5": true,
   "chart-6": true,
 };
 

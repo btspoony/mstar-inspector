@@ -171,7 +171,7 @@
   --chart-2: #16a34a;
   --chart-3: #d97706;
   --chart-4: #dc2626;
-  --chart-5: #2563a8;
+  --chart-5: #2d6bb0;
   --chart-6: #9333ea;
   --chart-1-mark: var(--brand-700);
   --chart-2-mark: var(--green-700);
@@ -275,6 +275,7 @@
   --tone-warn-solid: var(--amber-600);
   --tone-danger-border: #fecaca;
   --tone-danger-solid: #dc2626;
+  --chart-5: #2563a8;
   --on-brand: #ffffff;
   --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
   --shadow-pop: 0 8px 24px #1019281f, 0 2px 6px #10192814;
