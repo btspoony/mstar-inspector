@@ -520,6 +520,49 @@ back up:
 that every `{path}` component reference resolves. A green validate on its own
 is not acceptance — the chain check must also be green.
 
+## Recorded divergences from the baseline
+
+The baseline is the r3 prototype surface; the shipped console is the product.
+Six structural places where the product does not mirror it are **intent, not
+accident** — recorded here with what ships and why, so the next change reads
+them as decisions instead of re-deriving them. A divergence not listed below
+has no decision behind it: that is a defect, reported rather than absorbed.
+All six were verified against the shipped code on 2026-11-01 for the v1.6
+cleanup (compass D6; the sidebar is D5).
+
+- **Apps list columns** — five, not the baseline's four: identity (avatar,
+  name link, App id), status pill, health, creator, detail link. The health
+  cell carries the latest delivery and its outcome, with the 24h rejection
+  count folded into it and painted in the danger token only when it is
+  non-zero. Creator is **who, not when**: an admin scans ownership without
+  opening each App. The detail link is an explicit destination, the same href
+  as the name. The dedicated 24h column stays folded because a non-zero count
+  carries danger, not because five columns beat four.
+- **Seats** — the settings flow carries a role-to-chain mapping the baseline
+  omits: one select per audit seat, each resolving to Default or a named
+  chain. Seats follow the chains they bind, so the section sits after them.
+- **GitHub link placement** — the App's GitHub name in the identity section is
+  the anchor: a manager lands on the GitHub App settings URL, a member on the
+  public page. The detail header's action slot carries the status badge and no
+  GitHub button — a header button duplicated the anchor and could not carry
+  the manager/member split.
+- **App detail section order** — identity, installations, runtime & harness,
+  providers, chains, seats, destructive ops. Providers before chains, seats
+  after chains, destructive ops last. The baseline specimen is shorter and
+  omits providers and seats.
+- **Sidebar** — three flat items (Apps, Members, Settings) in one group, no
+  group headings, and the shell model carries no group field. The baseline §7
+  sidebar is a pattern specimen, not the nav contract: its items (model
+  providers, workspace settings, help and tickets) are not this product's
+  destinations, and headings over three items would invent a support
+  destination and a Settings group whose only child is Settings. The operator
+  console entry sits in the footer, outside the item list.
+- **Empty face** — the Apps empty state owns the one create action, and the
+  header yields its action slot while the list is empty, so the page never
+  renders two submits. The action is present where the guidance is; a second
+  header button would either duplicate the form or pull the action out of the
+  guidance card.
+
 ## Theme contract
 
 Dark is the default console theme — deterministic in every browser. The
@@ -985,10 +1028,17 @@ tone's bg/fg pair, `brand` = `tone-accent-solid` with the `on-brand` label.
 Shape is the pill radius at 20px. The caller passes the label and owns what
 a status means; `brand` is an accent surface, never an alert.
 
-**Documented gaps.** No primitive yet owns an outside-card section heading
-(`WorkspaceSetupPage` and `MembersPage` spell the `heading-16` chain by
-hand), and `LoginPage` keeps its centred `heading-32` hero — the rare hero
-step, not a page title.
+**Documented gaps.** Two remain, and this iteration closed neither: the
+outside-card section heading was closed before it, by the r3 shell pass.
+`FlowSection` owns that heading — it renders the `heading-16` chain — and
+`WorkspaceSetupPage` composes it, spelling no heading typography of its own
+(`tests/spa/workspace-setup-page.test.ts` pins it), so the entry claiming the
+page spells the chain by hand is gone. `MembersPage` still spells its own two
+section headings by hand, but not on the `heading-16` chain: `font-medium
+text-base` is the same 16px size at weight 500 and Tailwind's 1.5 line
+height, where the chain is 600 at 1.4. `LoginPage` keeps its centred
+`heading-32` hero, hand-spelled on `CardTitle`: the rare hero step, not a page
+title, and no primitive owns it.
 
 ### Pattern faces
 
