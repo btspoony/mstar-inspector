@@ -319,11 +319,9 @@ function ProviderGroupCard({
           </div>
         ) : null}
         {meta && modelsOpen ? (
-          // Light: `--surface-page` and the card's `--surface-card` resolve to the
-          // same value, so this fill is dead there and the border carries the
-          // well — see
-          // .mstar/knowledge/best-practices/surface-tokens-can-collapse-across-themes.md
-          // for the arithmetic.
+          // Light: `--surface-page` resolves to the same value as the card's own
+          // surface, so this fill is dead there and the border carries the well.
+          // The knowledge base records the token arithmetic.
           <ul
             id={modelsId}
             className="mt-2 flex flex-wrap gap-x-3 gap-y-1 rounded-(--radius-control) border border-(--border-default) bg-(--surface-page) px-3 py-2 font-mono text-xs text-muted-foreground"
