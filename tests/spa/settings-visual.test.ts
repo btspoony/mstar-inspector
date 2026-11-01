@@ -490,12 +490,12 @@ describe("installations last-webhook line (I-000251)", () => {
     // alert token the metric band uses, and the last-webhook text beside it
     // stays muted. Identified by the colour it resolves to, never by a class
     // spelling.
-    const [segment = ""] = alertSegments(render(3));
+    const [segment = ""] = alertSegments(render(3), "light");
     expect(segment).toContain(t("en", "apps.health.rejected24h", { count: 3 }));
     const lastWebhook = t("en", "settings.lastWebhook", { time: t("en", "common.time.never") });
     expect(render(3)).toContain(lastWebhook);
     // Zero refusals is a healthy line: today's muted text, no count rendered.
-    expect(alertSegments(render(0))).toEqual([]);
+    expect(alertSegments(render(0), "light")).toEqual([]);
     expect(render(0)).toContain(lastWebhook);
   });
 });

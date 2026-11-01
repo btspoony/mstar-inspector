@@ -580,6 +580,16 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // genuine declaration in the file still excuses its references.
     expect(names(":root { --genuine: #fff; } .a { color: var(--genuine); }")).toEqual([]);
     expect(names(":root { --x: var(--x); --x: #fff; } .a { color: var(--x); }")).toEqual([]);
+    // Whitespace inside the call is the same cycle and the same reference: the
+    // canonical `var(` spelling missed both, so the spaced cycle kept its vote
+    // and a spaced retired name was never seen at all.
+    expect(names(":root { --x: var( --x ); }")).toEqual(["dark:x", "light:x"]);
+    expect(names(":root { --x: var( --x , #fff ); }")).toEqual(["dark:x", "light:x"]);
+    expect(names(":root { --fallback: var( --retired-900 , #fff ); }")).toEqual([
+      "dark:retired-900",
+      "light:retired-900",
+    ]);
+    expect(names(":root { --genuine: #fff; } .a { color: var( --genuine ); }")).toEqual([]);
   });
 
   test("the primary bridge resolves to the accent pair off the ops surface", async () => {

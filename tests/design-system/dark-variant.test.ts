@@ -42,12 +42,11 @@ describe("dark: variant binding", () => {
   });
 
   test("a dark: utility fires under the attribute-unset root and data-theme=dark, never under light", () => {
-    expect(compiled).toContain(
-      '.dark\\:bg-red-500:where(:root:not([data-theme="light"]), :root:not([data-theme="light"]) *)',
-    );
     expect(compiled).toMatch(/\.dark\\:bg-red-500[^{]*\{\s*background-color:/);
     // The guards the compiled rule actually carries: the root itself, and any
-    // descendant of such a root.
+    // descendant of such a root. Extracted, never pinned as one string — a
+    // Tailwind reformat of `:where` must not fail this without a behaviour
+    // change.
     const variant = /\.dark\\:bg-red-500(:where\([^{]*\))/.exec(compiled)?.[1];
     if (variant === undefined) throw new Error("the compiled dark: rule carries no :where(...) guard");
     const guards = variant.slice(":where(".length, -1).split(", ");
