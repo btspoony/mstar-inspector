@@ -26,12 +26,48 @@ const tagOf = (html: string, slot: string, element: "div" | "main" = "div"): str
   return match![0];
 };
 
+const tierAt = (pathname: string, bootOverrides: Partial<SpaBoot> = {}): string => {
+  const markup = renderToStaticMarkup(
+    createElement(Layout, {
+      boot: { ...boot, ...bootOverrides },
+      pathname,
+      flash: null,
+      children: createElement("p", null, "Page"),
+    }),
+  );
+  // The tier IS the measure: the content wrapper resolves to exactly one
+  // max-w-[…] value, and that value is the observable.
+  const match = markup.match(/max-w-\[(1200|960)px\]/);
+  expect(match, `the content wrapper resolves to a measure tier at ${pathname}`).not.toBeNull();
+  return match![0];
+};
+
 const html = renderToStaticMarkup(
   createElement(
     Layout,
     { boot, pathname: "/dashboard", flash: null, children: createElement("p", null, "Page") },
   ),
 );
+
+describe("content measure tier (SSR)", () => {
+  test("list/table faces take the wide tier at their real pathnames", () => {
+    expect(tierAt("/dashboard/apps")).toBe("max-w-[1200px]");
+    expect(tierAt("/dashboard/acme/members")).toBe("max-w-[1200px]");
+  });
+
+  test("prose faces take the narrow tier", () => {
+    expect(tierAt("/dashboard/acme/settings")).toBe("max-w-[960px]");
+    expect(tierAt("/dashboard/apps/1")).toBe("max-w-[960px]");
+  });
+
+  test("a workspace-less boot sees the prose tier even at a list pathname", () => {
+    expect(tierAt("/dashboard/apps", { needsWorkspace: true })).toBe("max-w-[960px]");
+  });
+
+  test("a support-only boot sees the prose tier even at a list pathname", () => {
+    expect(tierAt("/dashboard/apps", { supportOnly: true })).toBe("max-w-[960px]");
+  });
+});
 
 describe("dashboard shell scroll contract (SSR)", () => {
   test("provider and inset wrappers pin the viewport with hidden overflow", () => {
