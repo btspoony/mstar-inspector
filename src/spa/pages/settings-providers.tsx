@@ -321,7 +321,7 @@ function ProviderGroupCard({
         {meta && modelsOpen ? (
           <ul
             id={modelsId}
-            className="mt-2 flex flex-wrap gap-x-3 gap-y-1 rounded-(--radius-control) border border-(--border-subtle) bg-(--surface-page) px-3 py-2 font-mono text-xs text-muted-foreground"
+            className="mt-2 flex flex-wrap gap-x-3 gap-y-1 rounded-(--radius-control) border border-(--border-default) bg-(--surface-page) px-3 py-2 font-mono text-xs text-muted-foreground"
           >
             {meta.modelIds.map((modelId) => (
               <li key={modelId}>{modelId}</li>
