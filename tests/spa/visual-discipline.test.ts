@@ -25,6 +25,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { describe, expect, test } from "bun:test";
 
+import { PALETTE_UTILITY_SOURCE } from "../helpers/tailwind-palette";
+
 const REPO = new URL("../../", import.meta.url).pathname;
 
 const PAGES_DIR = join(REPO, "src/spa/pages");
@@ -46,19 +48,16 @@ const HEX_OUTSIDE_FN = /#[0-9a-fA-F]{3,8}\b/g;
 const FN_SPAN = /\b(?:rgba|hsl)a?\([^)]*\)/g;
 /**
  * Default-palette Tailwind colour utility: `text-red-500`, `bg-zinc-100`,
- * `border-slate-700`, `shadow-red-500`, `ring-offset-red-500`. The utility
- * prefix is part of the pattern, so a token that merely carries a palette
- * name (`bg-(--gray-200)`) cannot match.
+ * `border-slate-700`, `border-t-red-500`. The utility prefix is part of the
+ * pattern, so a token that merely carries a palette name
+ * (`bg-(--gray-200)`) cannot match.
  *
- * Every prefix here is a v4 utility that takes a colour (verified against
- * tailwindcss 4.3.3: each emits `--tw-*-color` / a colour declaration).
- * `ring-offset`, `inset-ring`, `inset-shadow`, `text-shadow`,
- * `drop-shadow`, `scrollbar-thumb` and `scrollbar-track` are their own
- * colour families — a bare `ring`/`shadow` prefix cannot match them because
- * the lookbehind rejects the `-` before.
+ * The list lives in `tests/helpers/tailwind-palette.ts`: this guard kept a
+ * private copy whose prefixes drifted from the shared one (I-000255/247), so
+ * a utility one consumer caught the others never saw. Compiled here with `/g`
+ * because the scan walks a whole file; StatusBadge compiles it without.
  */
-const PALETTE_UTILITY =
-  /(?<![\w-])(?:bg|text|border|ring|ring-offset|inset-ring|divide|fill|stroke|outline|decoration|caret|accent|placeholder|shadow|inset-shadow|text-shadow|drop-shadow|scrollbar-thumb|scrollbar-track|from|via|to)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b/g;
+const PALETTE_UTILITY = new RegExp(PALETTE_UTILITY_SOURCE, "g");
 
 /** Allow-list: starts empty. A hit here must be a proven false positive. */
 const ALLOW: string[] = [];
@@ -144,6 +143,27 @@ describe("visual discipline guard", () => {
     // must NOT match; the rgba(/hsl( stripper is load-bearing here — #223 is a valid 3-digit hex
     expect(matched(`style={{ color: "rgba(255,255,255,0.5)", borderColor: "hsl(#223 3% 4%)" }}`)).toEqual([]);
     expect(matched(`// #abcdef in a comment is still a violation`)).toEqual(["#abcdef"]); // guard: comments are not exempt
+  });
+
+  test("border-axis palette forms: border-t-red-500 and divide-x-red-500 matched neither matcher before I-000255; the shared source now rejects every spelling", () => {
+    // The pre-302 source required the family immediately after a bare prefix,
+    // so the side/span spellings below passed the source scan, the
+    // rendered-attribute scan and the component class list alike.
+    const matched = (line: string) => scanContent(line, "fixture.tsx").map((v) => v.text);
+    expect(matched(`<div className="border-t-red-500" />`)).toEqual(["border-t-red-500"]);
+    expect(matched(`<div className="border-x-slate-700" />`)).toEqual(["border-x-slate-700"]);
+    expect(matched(`<div className="border-e-gray-100" />`)).toEqual(["border-e-gray-100"]);
+    expect(matched(`<div className="divide-x-red-500" />`)).toEqual(["divide-x-red-500"]);
+    // The bare black/white spelling takes the axis too.
+    expect(matched(`<div className="border-t-black" />`)).toEqual(["border-t-black"]);
+    // StatusBadge compiles the same source without flags — the axis forms are
+    // caught there too, not only in this guard.
+    const noFlags = new RegExp(PALETTE_UTILITY_SOURCE);
+    expect(noFlags.test("border-t-red-500")).toBe(true);
+    expect(noFlags.test("divide-x-red-500")).toBe(true);
+    // Previously-catchable forms stay caught, and token forms stay clean.
+    expect(matched(`<div className="border-slate-700" />`)).toEqual(["border-slate-700"]);
+    expect(matched(`<div className="border-t-(--border-subtle) divide-x-(--border-subtle)" />`)).toEqual([]);
   });
 
   test("page layer has no bare colour literals, bracket arbitrary values, or palette utilities", () => {
