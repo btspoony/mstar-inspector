@@ -1,13 +1,26 @@
 ---
 module: dashboard / visual foundation (shadcn + Tailwind v4 on Worker-served Vite SPA)
 date: 2026-09-04
-last_updated: 2026-10-31
+last_updated: 2026-11-01
 problem_type: best_practice
 category: best-practices
 severity: medium
 topic: design system app shell
-tags: [shadcn, tailwind-v4, vite, react19, design-tokens, dark-theme, css-modules, worker]
-related_components: [src/spa/styles/shadcn-theme.css, src/spa/styles/tokens.css, DESIGN.md, src/design-system/primitives/, vite.config.ts]
+tags:
+  - shadcn
+  - tailwind-v4
+  - vite
+  - react19
+  - design-tokens
+  - dark-theme
+  - css-modules
+  - worker
+related_components:
+  - src/spa/styles/shadcn-theme.css
+  - src/spa/styles/tokens.css
+  - DESIGN.md
+  - src/design-system/primitives/
+  - vite.config.ts
 ---
 
 # shadcn/ui + Tailwind v4 foundation on a Worker-served Vite SPA
@@ -18,8 +31,8 @@ The dashboard SPA (React 19 + Vite 8, served by the Worker from `build:spa` outp
 
 ## Guidance
 
-- **Bridge, don't replace**: existing `tokens.css` custom properties stay the source of truth; a `shadcn-theme.css` layer maps shadcn CSS variables (`--background`, `--foreground`, …) onto tokens via `@theme inline`. shadcn components then inherit the project palette. Dark is primary; light applies via manual override — `:root[data-theme="light"]` wins over the `@media (prefers-color-scheme: light)` fallback that guards `:root:not([data-theme="dark"])` (a later pass reversed the original no-toggle lock: a navbar toggle persists `localStorage["mstar.dashboard.theme"]`, applied pre-paint by an inline bootstrap in `src/spa/index.html` before `<!--SPA_BOOT-->`); `DESIGN.md` documents the mapping table (L2 completeness).
-- **SSR faces share the theme mechanism (dashboard UI/UX polish pass)**: the legacy manifest views (`src/dashboard/views.ts`, dark `:root` default) gained the same three-part structure — `:root[data-theme="light"]` branch with the recorded light hexes (byte-identical to the media query; no token migration), the `:root:not([data-theme="dark"])` guard on the OS-light media query (stored dark must beat OS light — both directions), and the pre-paint bootstrap snippet inside the `page()` wrapper so ONE insertion covers all SSR faces (zero client runtime beyond the snippet). Forward-note: there is no CSP in `src/` today; a future restrictive `script-src` would silently disable BOTH inline bootstraps (SPA + SSR) — revisit placement if a CSP lands.
+- **Bridge, don't replace**: existing `tokens.css` custom properties stay the source of truth; a `shadcn-theme.css` layer maps shadcn CSS variables (`--background`, `--foreground`, …) onto tokens via `@theme inline`. shadcn components then inherit the project palette. Dark is primary and the OS preference is never consulted: `:root` carries the dark values, `:root[data-theme="light"]` re-declares the light ones, and an unset attribute renders dark in every browser (the earlier `prefers-color-scheme` fallback left with the deterministic-dark default; the `dark:` variant is bound to the same condition — see `tailwind-dark-variant-vs-data-theme`). A navbar toggle persists `localStorage["mstar.dashboard.theme"]`, applied pre-paint by an inline bootstrap in `src/spa/index.html` before `<!--SPA_BOOT-->`; `DESIGN.md` documents the mapping table (L2 completeness).
+- **SSR faces share the theme mechanism (dashboard UI/UX polish pass)**: the legacy manifest views (`src/dashboard/views.ts`, dark `:root` default) gained the same structure as the SPA — `:root` dark defaults, a `:root[data-theme="light"]` branch re-declaring only the names that differ (the recorded light hexes, no token migration), a documented no-op `:root[data-theme="dark"] {}` so every stored choice maps to a branch, and the pre-paint bootstrap snippet inside the `page()` wrapper so ONE insertion covers all SSR faces (zero client runtime beyond the snippet). The OS preference is not consulted on this face either. Forward-note: there is no CSP in `src/` today; a future restrictive `script-src` would silently disable BOTH inline bootstraps (SPA + SSR) — revisit placement if a CSP lands.
 - **Primitives live in the design system, exact-pinned**: the shadcn-derived components live in `src/design-system/primitives/` and read the semantic token layer only; consumers reach them through the single `@design-system` entry, and the copy-in script is retired (their supersede headers stay as provenance). Every new dep (`tailwindcss@4.x`, `@radix-ui/react-*`, `class-variance-authority`, `lucide-react`, …) pinned exact — no `^`/`~`.
 - **Dual-track transition is explicit**: CSS modules and Tailwind coexist during migration; new surfaces are Tailwind-token-only; legacy chrome modules get deleted with test locks (`existsSync === false` assertions) when their surface is reworked.
 - **Path aliases**: `@/` → `src/spa` and `@design-system` → `src/design-system/index.ts` are mapped in `tsconfig.json`, `tsconfig.spa.json` and the vite resolve (and so `bun test`); a deep `@design-system/*` import has no mapping on purpose, so it fails typecheck. Keep the three in sync or imports break only at build. Tailwind needs `@source "../../design-system"` in `shadcn-theme.css`: the module sits outside the Vite root, so automatic content detection never sees its classes.

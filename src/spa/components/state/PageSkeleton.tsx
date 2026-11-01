@@ -52,12 +52,15 @@ export function PageSkeleton({
   );
 }
 
+// Hairline colours are named, never inherited: a bare `border` carries width
+// only and preflight leaves border-color at currentColor. Shell on the default
+// edge, rows on the subtle one — the DataTable face this skeleton mirrors.
 function TableShapes({ count }: { count: number }) {
   return (
-    <div data-slot="skeleton-table" className="rounded-md border">
+    <div data-slot="skeleton-table" className="rounded-md border border-(--border-default)">
       <div
         data-slot="skeleton-table-header"
-        className={cn(TABLE_COLS, "border-b px-4 py-3")}
+        className={cn(TABLE_COLS, "border-b border-(--border-subtle) px-4 py-3")}
       >
         {Array.from({ length: 4 }, (_, cell) => (
           <Skeleton key={cell} className="h-4" />
@@ -67,7 +70,7 @@ function TableShapes({ count }: { count: number }) {
         <div
           key={row}
           data-slot="skeleton-table-row"
-          className={cn(TABLE_COLS, "px-4 py-3 [&:not(:last-child)]:border-b")}
+          className={cn(TABLE_COLS, "border-(--border-subtle) px-4 py-3 [&:not(:last-child)]:border-b")}
         >
           {Array.from({ length: 4 }, (_, cell) => (
             <Skeleton key={cell} className="h-4" />
@@ -85,7 +88,7 @@ function CardShapes({ count }: { count: number }) {
         <div
           key={card}
           data-slot="skeleton-card"
-          className="flex flex-col gap-3 rounded-xl border p-4"
+          className="flex flex-col gap-3 rounded-xl border border-(--border-default) p-4"
         >
           <Skeleton className="h-4 w-1/3" />
           <Skeleton className="h-3 w-full" />

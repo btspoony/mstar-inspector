@@ -242,15 +242,26 @@ describe("token layer boundary", () => {
 });
 
 /**
- * The third guard on the same boundary: Tailwind's `dark:` variant keys off
- * `prefers-color-scheme`, while this app's theme is the `data-theme` attribute
- * the generated stylesheet defines. A `dark:` utility therefore paints the OS
- * preference instead of the stored theme — the defect the 2026-11-01 migration
- * removed from twenty-one utilities at once. The rule lives in
- * `.mstar/knowledge/best-practices/tailwind-dark-variant-vs-data-theme.md`; this
- * is the repo-wide guard it asks for, so a `dark:` cannot re-enter one
- * primitive, pattern or page at a time. The module is walked too: the copy-in
- * primitives are where class strings actually live.
+ * The third guard on the same boundary: no authored `dark:` variant. The ban
+ * is no longer about what the variant resolves to — `@custom-variant dark` in
+ * `shadcn-theme.css` binds it to `:root:not([data-theme="light"])` (dark is
+ * the attribute's absence), so a utility that slipped through would follow the
+ * stored theme, not the OS. The ban is about the mechanism: the token cascade
+ * (`:root` dark + `[data-theme="light"]` re-declare, with `resolveTheme`
+ * throwing on unknown references and cycles) is the single sanctioned way to
+ * paint a theme face. An authored `dark:` split bypasses it and is a second
+ * colour answer for the same face — the 2026-11-01 migration removed
+ * twenty-one utilities that had drifted that way. The rule lives in
+ * `.mstar/knowledge/best-practices/tailwind-dark-variant-vs-data-theme.md`
+ * (it states the post-binding mechanism, the attribute-absence trap, and why
+ * the ban survives); this is the repo-wide guard it asks for, so a `dark:`
+ * cannot re-enter one primitive, pattern or page at a time. The module is
+ * walked too: the copy-in primitives are where class strings actually live.
+ *
+ * The binding is not dead code under this ban: it defends this scan's own
+ * blind spot below — a runtime-composed class name, and a copy-in upstream
+ * component carrying `dark:` utilities, never appear as text here, and now
+ * they follow the app theme instead of the OS preference.
  *
  * The rule is on the source text, comments included: the scan does not strip
  * them. Stripping a `//` tail would also truncate a line before a real utility

@@ -641,7 +641,7 @@ export function AppInfoSection({
         <AppAvatar
           src={app.github_avatar_url}
           appId={app.github_app_id}
-          className="h-12 w-12 shrink-0 rounded-full border object-cover"
+          className="h-12 w-12 shrink-0 rounded-full border border-(--border-default) object-cover"
         />
         <div className="flex min-w-0 flex-col gap-1">
           {app.github_name ? (
@@ -753,9 +753,16 @@ export function InstallationsSection({
     >
       <p className="text-sm text-muted-foreground">
         {t(locale, "settings.lastWebhook", { time: formatRelativeTime(app.last_webhook_at, locale) })}
-        {payload.delivery_summary && payload.delivery_summary.rejected24h > 0
-          ? ` · ${t(locale, "apps.health.rejected24h", { count: payload.delivery_summary.rejected24h })}`
-          : ""}
+        {payload.delivery_summary && payload.delivery_summary.rejected24h > 0 ? (
+          // The refusal count is the failure this line reports, so it wears the
+          // alert token; the last-webhook prose beside it stays muted.
+          <>
+            {" · "}
+            <span className="text-(--tone-danger-fg)">
+              {t(locale, "apps.health.rejected24h", { count: payload.delivery_summary.rejected24h })}
+            </span>
+          </>
+        ) : null}
       </p>
       <DataTable
         columns={columns}

@@ -248,15 +248,19 @@ describe("chart fill/mark split", () => {
     expect([1, 2, 3, 4, 5, 6].map((i) => `chart-${i}`).filter((slot) => dark[slot] === dark[`${slot}-mark`])).toEqual([]);
   });
 
-  test("chart-1 follows the brand, the other fills are theme-fixed literals", () => {
+  test("chart-1 follows the brand, the remaining fills are theme-fixed literals except the lifted chart-5", () => {
     const dark = resolveTheme("dark").semantic;
     const light = resolveTheme("light").semantic;
     expect(dark["chart-1"]?.toLowerCase()).toBe(resolveTheme("dark").primitive["brand-600"]?.toLowerCase());
     expect(light["chart-1"]?.toLowerCase()).toBe(resolveTheme("light").primitive["brand-600"]?.toLowerCase());
-    // Theme-fixed: the same quiet 600-step value in both faces.
-    for (const slot of ["chart-2", "chart-3", "chart-4", "chart-5", "chart-6"] as const) {
+    // Theme-fixed: the same quiet 600-step value in both faces. Dark chart-5
+    // is the exception — lifted so it clears the 3:1 non-text bar on the dark
+    // raised planes (`I-000232`); `tests/design-system/contrast.test.ts` owns
+    // those ratios.
+    for (const slot of ["chart-2", "chart-3", "chart-4", "chart-6"] as const) {
       expect(dark[slot], `${slot} should be theme-fixed`).toBe(light[slot] as string);
     }
+    expect(dark["chart-5"]).not.toBe(light["chart-5"]);
   });
 });
 

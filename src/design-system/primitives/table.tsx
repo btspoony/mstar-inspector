@@ -25,7 +25,7 @@ function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
   return (
     <thead
       data-slot="table-header"
-      className={cn("[&_tr]:border-b", className)}
+      className={cn("[&_tr]:border-b [&_tr]:border-(--border-subtle)", className)}
       {...props}
     />
   )
@@ -46,7 +46,7 @@ function TableFooter({ className, ...props }: React.ComponentProps<"tfoot">) {
     <tfoot
       data-slot="table-footer"
       className={cn(
-        "border-t bg-muted/50 font-medium [&>tr]:last:border-b-0",
+        "border-t border-(--border-subtle) bg-muted/50 font-medium [&>tr]:last:border-b-0",
         className
       )}
       {...props}
@@ -61,7 +61,7 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
       className={cn(
         // Row hover is the full muted token (DESIGN.md Table: row hover
         // gray-100), token-eased per the v0.3 motion discipline.
-        "border-b transition-colors duration-(--duration-base) ease-(--ease-in-out) hover:bg-muted has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
+        "border-b border-(--border-subtle) transition-colors duration-(--duration-base) ease-(--ease-in-out) hover:bg-muted has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
         className
       )}
       {...props}

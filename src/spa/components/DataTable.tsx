@@ -46,10 +46,10 @@ export function DataTable<T>({
   return (
     // The shell hairline is explicit: a bare `border` carries width only and
     // preflight leaves border-color at currentColor, so the face supplies the
-    // `border-default` hairline itself; row hairlines ride `border-subtle`
-    // (DESIGN.md Table). The row heights are the named tokens — the primitive
-    // sets no height of its own.
-    <div className="overflow-hidden rounded-md border border-(--border-default) [&_tr]:border-(--border-subtle)">
+    // `border-default` hairline itself. Row hairlines are the Table primitive's
+    // own (`border-subtle`, DESIGN.md Table) — one owner, not two. The row
+    // heights are the named tokens — the primitive sets no height of its own.
+    <div className="overflow-hidden rounded-md border border-(--border-default)">
       <Table>
         <TableHeader className="bg-(--surface-raised)">
           <TableRow className="h-(--row-h-compact) hover:bg-inherit">

@@ -1,5 +1,5 @@
 /**
- * The design-system gate: one entry point, five links of one chain. CI runs this
+ * The design-system gate: one entry point, six links of one chain. CI runs this
  * and nothing else of the chain.
  *
  *   source → stylesheet   `scripts/build-tokens.ts --check` (also emits the
@@ -10,6 +10,9 @@
  *   consumers → source    `danglingReferences()` below — every `var(--x)` a
  *                         hand-written stylesheet or HTML shell under `src/spa`
  *                         consumes names a token
+ *   fills → surfaces      `chartFillContrast()` below — every chart fill clears
+ *                         WCAG 1.4.11's 3:1 on the surfaces it paints on
+ *                         (`I-000254`)
  *
  * Every link is checked even when an earlier one is broken, so one run reports
  * the whole picture instead of the first failure. Exit 1 when any link is.
@@ -98,14 +101,19 @@ export function stylesheetConsumers(dir: string = SPA_ROOT): string[] {
 }
 
 /**
- * A `var()` reference, whether or not it carries a fallback: `var(--x)`,
- * `var(--x, #fff)` and `var(--x , …)` all name `x`. Requiring the closing paren
- * immediately after the name lost the fallback form, which is the one that
- * hides a retired token behind a literal.
+ * A `var()` reference, whether or not it carries a fallback or spaces inside
+ * the call: `var(--x)`, `var(--x, #fff)`, `var( --x )` and `var( --x , … )`
+ * all name `x`. Requiring the closing paren immediately after the name lost the
+ * fallback form, which is the one that hides a retired token behind a literal;
+ * requiring no space after `(` lost the same reference in its spaced spelling.
  */
-const REFERENCE = /var\(--([a-z0-9-]+)[\s,)]/g;
-/** A custom property the stylesheet declares itself — the bridge's own keys. */
-const DECLARATION = /(?:^|[;{\s])(--[a-z0-9-]+)\s*:/g;
+const REFERENCE = /var\s*\(\s*--([a-z0-9-]+)[\s,)]/g;
+/**
+ * A custom property the stylesheet declares itself — the bridge's own keys.
+ * The declared value is captured with the name: a declaration that references
+ * its own name excuses nothing (see `danglingReferences`).
+ */
+const DECLARATION = /(?:^|[;{\s}])(--[a-z0-9-]+)\s*:\s*([^;{}]*)/g;
 /** A block comment declares nothing: a commented-out `--legacy-x:` is not a declaration. */
 const COMMENT = /\/\*[\s\S]*?\*\//g;
 
@@ -121,12 +129,22 @@ export interface DanglingReference {
  * one theme declares and the other does not is dangling in the other one, and
  * the union would hide exactly that.
  *
+ * A declaration excuses references to its name only when it is not itself the
+ * cycle: `--x: var(--x)` (the fallback and spaced spellings included) is
+ * guaranteed-invalid in CSS — the paint breaks while the gate stayed green
+ * (`I-000248`). Only that spelling loses its vote; a name declared genuinely
+ * elsewhere in the file still excuses its references.
+ *
  * Comments are stripped before either match, so a retired name quoted in prose
  * neither becomes a reference nor a self-declaration that suppresses the check.
  */
 export function danglingReferences(file: string, css: string): DanglingReference[] {
   const live = css.replace(COMMENT, "");
-  const local = new Set([...live.matchAll(DECLARATION)].map((match) => (match[1] as string).slice(2)));
+  const local = new Set(
+    [...live.matchAll(DECLARATION)]
+      .filter((match) => !new RegExp(`var\\s*\\(\\s*${match[1]}(?=[\\s,)])`).test(match[2] as string))
+      .map((match) => (match[1] as string).slice(2)),
+  );
   const names = [...new Set([...live.matchAll(REFERENCE)].map((match) => match[1] as string))].sort();
   return THEMES.flatMap((theme) => {
     const layers = resolveTheme(theme);
@@ -448,6 +466,90 @@ function readFrontmatter(): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+/** WCAG 1.4.11 non-text bar: a chart fill is a large graphic, not body copy. */
+export const CHART_CONTRAST_MIN = 3;
+
+/** One chart fill measured on one backdrop, both named by semantic token. */
+export interface ChartPair {
+  readonly theme: ThemeName;
+  readonly fill: string;
+  readonly backdrop: string;
+}
+
+export interface ContrastMeasurement extends ChartPair {
+  readonly ratio: number;
+}
+
+const CHART_FILLS = ["chart-1", "chart-2", "chart-3", "chart-4", "chart-5", "chart-6"] as const;
+
+/**
+ * Which chart fill sits on which backdrop. The shipped charts paint on the
+ * page canvas: `AppInsightsTab` renders them in bare `FlowSection`s and
+ * `.chart-frame` paints no background of its own
+ * (`src/spa/components/charts/charts.css`). Dark declares its two raised
+ * planes as well — a chart hosted on a card or inset face must clear the same
+ * bar, and dark `chart-5` measured 2.900:1 on `surface-card` and 2.696:1 on
+ * `surface-inset` before it was lifted (I-000232); relying on "charts never
+ * sit on a card" as the only mechanism is exactly what failed there. Light's
+ * `surface-card` is the page white, so the page pairing covers both faces.
+ * Light `surface-inset` (`#f3f5f8`) is not a chart backdrop today: light
+ * `chart-3` measures 2.917:1 on it, and no fill is hosted there.
+ */
+export const CHART_PAIRS: readonly ChartPair[] = [
+  ...THEMES.flatMap((theme) => CHART_FILLS.map((fill) => ({ theme, fill, backdrop: "surface-page" }))),
+  ...CHART_FILLS.flatMap((fill) => [
+    { theme: "dark" as const, fill, backdrop: "surface-card" },
+    { theme: "dark" as const, fill, backdrop: "surface-inset" },
+  ]),
+];
+
+/** WCAG 2.x relative luminance of an opaque `#rrggbb` literal, or a refusal. */
+function luminance(hex: string): number {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (match === null) {
+    throw new Error(`${hex} is not an opaque #rrggbb colour; the contrast link measures resolved literals only`);
+  }
+  const digits = match[1] as string;
+  const [r, g, b] = [0, 2, 4].map((offset) => {
+    const channel = parseInt(digits.slice(offset, offset + 2), 16) / 255;
+    return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  }) as [number, number, number];
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** The WCAG contrast ratio of two opaque colours. */
+export function contrastRatio(a: string, b: string): number {
+  const [lighter, darker] = [luminance(a), luminance(b)].sort((left, right) => right - left) as [number, number];
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/**
+ * Every declared chart pairing, measured on the resolved semantic values —
+ * `resolveTheme`, never a copied table or a re-parse of the generated
+ * stylesheet. A missing token throws: a pairing that measures nothing must
+ * not read as a pass.
+ */
+export function chartFillContrast(
+  layers: (theme: ThemeName) => Readonly<Record<string, string>>,
+  pairs: readonly ChartPair[] = CHART_PAIRS,
+): ContrastMeasurement[] {
+  return pairs.map(({ theme, fill, backdrop }) => {
+    const tokens = layers(theme);
+    const fillValue = tokens[fill];
+    const backdropValue = tokens[backdrop];
+    if (fillValue === undefined) throw new Error(`${fill} is not a ${theme} semantic token`);
+    if (backdropValue === undefined) throw new Error(`${backdrop} is not a ${theme} semantic token`);
+    return { theme, fill, backdrop, ratio: contrastRatio(fillValue, backdropValue) };
+  });
+}
+
+/** The measurements below the bar — the gate fails on a non-empty list. */
+export function chartContrastFailures(
+  measurements: readonly ContrastMeasurement[],
+): ContrastMeasurement[] {
+  return measurements.filter(({ ratio }) => ratio < CHART_CONTRAST_MIN);
+}
+
 if (import.meta.main) {
   const brokenLinks: string[] = [];
 
@@ -493,6 +595,18 @@ if (import.meta.main) {
     console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
   }
   if (consumers.length === 0 || dangling.length > 0) brokenLinks.push("consumers → source");
+
+  // A chart fill is a large graphic face: WCAG 1.4.11's 3:1, not 4.5:1. Every
+  // pair prints its measured ratio, so a token change that erodes a margin is
+  // a visible diff rather than a silent pass.
+  const contrast = chartFillContrast((theme) => resolveTheme(theme).semantic);
+  const below = chartContrastFailures(contrast);
+  console.log(`${below.length === 0 ? "ok  " : "fail"}  chart fill contrast`);
+  for (const { theme, fill, backdrop, ratio } of contrast) {
+    const mark = ratio < CHART_CONTRAST_MIN ? `  BELOW ${CHART_CONTRAST_MIN}:1` : "";
+    console.log(`        ${theme} ${fill} on ${backdrop}: ${ratio.toFixed(3)}:1${mark}`);
+  }
+  if (below.length > 0) brokenLinks.push("chart fill contrast");
 
   if (brokenLinks.length > 0) {
     console.error(`\ndesign-system-check: ${brokenLinks.length} broken link(s): ${brokenLinks.join(", ")}`);

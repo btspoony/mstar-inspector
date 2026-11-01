@@ -15,6 +15,17 @@
  */
 @import "tailwindcss";
 
+/* `dark:` binds this app's theme, not the OS. Dark is the *absence* of
+   `data-theme`: the pre-paint bootstrap writes the attribute only when a
+   stored choice exists, so a never-toggled visitor renders dark with it
+   unset — shadcn's `[data-theme="dark"]` recipe would silently miss exactly
+   those visitors, the same defect one level down. This mirrors the token
+   cascade's own root condition. The authored-source ban stands (the cascade
+   is the one sanctioned mechanism); the binding only makes the spellings a
+   text scan cannot see — runtime-composed class names and copy-in upstream
+   components — follow the app theme instead of the OS preference. */
+@custom-variant dark (&:where(:root:not([data-theme="light"]), :root:not([data-theme="light"]) *));
+
 /* The primitives live outside the Vite root (`src/spa`), which is where
    Tailwind v4's automatic content detection starts, so their class list is
    invisible to the scanner until it is named here. Without this the migrated

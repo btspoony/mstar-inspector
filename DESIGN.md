@@ -76,7 +76,7 @@ colors:
   chart-2: "#16a34a"
   chart-3: "#d97706"
   chart-4: "#dc2626"
-  chart-5: "#2563a8"
+  chart-5: "#2d6bb0"
   chart-6: "#9333ea"
   chart-1-mark: "#22d3ee"
   chart-2-mark: "#4ade80"
@@ -162,7 +162,7 @@ themes:
       chart-2: "#16a34a"
       chart-3: "#d97706"
       chart-4: "#dc2626"
-      chart-5: "#2563a8"
+      chart-5: "#2d6bb0"
       chart-6: "#9333ea"
       chart-1-mark: "#22d3ee"
       chart-2-mark: "#4ade80"
@@ -520,6 +520,54 @@ back up:
 that every `{path}` component reference resolves. A green validate on its own
 is not acceptance — the chain check must also be green.
 
+## Recorded divergences from the baseline
+
+The baseline is the r3 prototype surface; the shipped console is the product.
+Six structural places where the product does not mirror it are **intent, not
+accident** — recorded here with what ships and why, so the next change reads
+them as decisions instead of re-deriving them. A divergence not listed below
+has no decision behind it: that is a defect, reported rather than absorbed.
+All six were verified against the shipped code on 2026-11-01 for the v1.6
+cleanup (compass D6; the sidebar is D5).
+
+- **Apps list columns** — five, not the baseline's four: identity (avatar,
+  name link, App id), status pill, health, creator, detail link. The health
+  cell carries the latest delivery and its outcome, with the 24h rejection
+  count folded into it and painted in the danger token only when it is
+  non-zero. Creator is **who, not when**: an admin scans ownership without
+  opening each App. The detail link is an explicit destination, the same href
+  as the name. The dedicated 24h column stays folded because a non-zero count
+  carries danger, not because five columns beat four.
+- **Seats** — the settings flow carries a role-to-chain mapping the baseline
+  omits: one select per audit seat, each resolving to Default or a named
+  chain. Seats follow the chains they bind, so the section sits after them.
+- **GitHub link placement** — the App's GitHub name in the identity section is
+  the anchor: a manager lands on the GitHub App settings URL, a member on the
+  public page. The detail header's action slot carries the status badge and no
+  GitHub button — a header button duplicated the anchor and could not carry
+  the manager/member split.
+- **App detail section order** — identity, installations, runtime & harness,
+  providers, chains, seats, destructive ops. Providers before chains, seats
+  after chains, destructive ops last. The baseline specimen is shorter and
+  omits providers and seats.
+- **Sidebar** — three flat items (Apps, Members, Settings) in one group, no
+  group headings, and the shell model carries no group field. The baseline §7
+  sidebar is a pattern specimen with five links under three headings: 工作区
+  (应用, 成员), 设置 (模型提供方, 工作区设置), 支持 (帮助与工单). Three of
+  them are destinations here — 应用 and 成员 are the first two items, and
+  工作区设置 is the third, reached as Settings. The other two are not nav
+  destinations: model providers are a section inside an App's settings tab,
+  and help & tickets has no face at all (the only "support" surface is the
+  platform operator's read-only grant view). Headings over the three shipped
+  items would leave Settings alone under 设置 and give 支持 no child, so the
+  list stays flat. The operator console entry sits in the footer, outside the
+  item list.
+- **Empty face** — the Apps empty state owns the one create action, and the
+  header yields its action slot while the list is empty, so the page never
+  renders two submits. The action is present where the guidance is; a second
+  header button would either duplicate the form or pull the action out of the
+  guidance card.
+
 ## Theme contract
 
 Dark is the default console theme — deterministic in every browser. The
@@ -529,6 +577,14 @@ preference. A manual **navbar theme toggle** stores `light` | `dark` in
 `localStorage["mstar.dashboard.theme"]` and applies
 `documentElement.dataset.theme` before first paint; the stored choice wins.
 Supersedes the earlier theme lock (2026-09-04, user instruction).
+
+Tailwind's `dark:` variant is bound to that same condition: `@custom-variant
+dark` in `src/spa/styles/shadcn-theme.css` keys on
+`:root:not([data-theme="light"])` — dark is the attribute's *absence*, so the
+never-toggled visitor is covered. The authored-source ban stands (the cascade
+is the one theme mechanism); the binding only makes the spellings a text scan
+cannot see — a runtime-composed class name, a copy-in upstream component —
+follow the stored theme instead of the OS.
 
 Dual-theme values live in this file under `themes.dark` / `themes.light`
 (same token **names**, different values). Top-level `colors:` equals
@@ -568,10 +624,15 @@ import specifier** for TypeScript files under `src/` outside `src/design-system/
 (`@design-system` only); the **token layer** — no consumer file (`.ts`, `.tsx`,
 `.css`, `.html`) may name a palette step, with the generated stylesheet as the
 single declaration site; and the **theme mechanism** — no file under `src/`,
-the module included, may write a `dark:` variant, because the theme is the
-`data-theme` attribute and Tailwind's `dark:` follows the OS preference
-instead. The first two read source text, so a stylesheet, an HTML shell and an
-inline `style` attribute are all in scope. The palette is
+the module included, may author a `dark:` utility, because the token cascade is
+the single sanctioned way to paint a theme face and an authored split bypasses
+it (twenty-one utilities had drifted that way by 2026-11-01). Tailwind's
+`dark:` is bound with `@custom-variant` to the cascade's own root condition —
+`:root:not([data-theme="light"])`, since dark is the attribute's *absence* — so
+a `dark:` the text scan cannot see (a runtime-composed class name, a copy-in
+upstream component) follows the stored theme rather than the OS. The first two
+read source text, so a stylesheet, an HTML shell and an inline `style`
+attribute are all in scope. The palette is
 therefore droppable: the D14 reduction deleted 62 of the 96 steps the old
 stylesheet declared without touching a component face.
 
@@ -589,7 +650,7 @@ survivors; survivors decide the palette:
 | Tone border | the family 300–400 band |
 | Tone foreground | family 700 in dark; 700–800 in light where 700 fails 4.5:1 on the tone background — `green-800` is the one survivor kept for exactly this pair |
 | Tone solid | family 700; light may take the 600 step (`amber-600`) |
-| Chart slot | a closed pair: fill = the approved quiet 600-step value (theme-fixed literal; only `chart-1` follows the theme through `brand-600`), mark = the family 700 step |
+| Chart slot | a closed pair: fill = the approved quiet 600-step value (theme-fixed literal; `chart-1` follows the theme through `brand-600`, and dark `chart-5` is lifted to clear the 3:1 non-text bar on the dark raised planes), mark = the family 700 step |
 
 **Survivors (26):** `background-100/200/300`; `gray-200/600/700/900/1000`;
 `gray-alpha-400/500`; `brand-600/700`; `blue-700`; `red-100/400/700`;
@@ -724,6 +785,16 @@ The fills are literals by the composition rule — a later change to those
 steps must not move a chart slot, and a chart retune must not re-point the
 palette.
 
+The second theme split is a contrast fix, not a design retune: dark `chart-5`
+is `#2d6bb0`, not the shared `#2563a8`, because the shared value measured
+2.900:1 on `surface-card` and 2.696:1 on `surface-inset` — below the 3:1
+non-text bar on two of the three dark surfaces while clearing it on the page
+canvas (3.196:1). The lift keeps the blue hue and measures 3.580:1 on page,
+3.249:1 on card and 3.020:1 on inset; light keeps `#2563a8` (6.125:1 on its
+page white). The gate's `fills → surfaces` link measures every fill on the
+page canvas and every dark fill on the raised planes, so a retune that erodes
+a margin fails the gate instead of passing silently.
+
 ## The ops surface variant (D15)
 
 "Plainer" for the operator console is one re-map, not a second system:
@@ -777,8 +848,9 @@ that differ by more than value:
   `amber-600` only).
 - **`surface-card` is the page white**: with no surface step to separate it,
   a card in light is drawn by its hairline alone.
-- **Charts**: only `chart-1` follows the theme; every other fill is the same
-  literal in both themes (see the collision note above).
+- **Charts**: `chart-1` follows the theme through `brand-600`, and dark
+  `chart-5` is lifted to clear the non-text bar on the raised planes; every
+  other fill is the same literal in both themes (see the chart split above).
 
 ## Typography
 
@@ -961,10 +1033,17 @@ tone's bg/fg pair, `brand` = `tone-accent-solid` with the `on-brand` label.
 Shape is the pill radius at 20px. The caller passes the label and owns what
 a status means; `brand` is an accent surface, never an alert.
 
-**Documented gaps.** No primitive yet owns an outside-card section heading
-(`WorkspaceSetupPage` and `MembersPage` spell the `heading-16` chain by
-hand), and `LoginPage` keeps its centred `heading-32` hero — the rare hero
-step, not a page title.
+**Documented gaps.** Two remain, and this iteration closed neither: the
+outside-card section heading was closed before it, by the r3 shell pass.
+`FlowSection` owns that heading — it renders the `heading-16` chain — and
+`WorkspaceSetupPage` composes it, spelling no heading typography of its own
+(`tests/spa/workspace-setup-page.test.ts` pins it), so the entry claiming the
+page spells the chain by hand is gone. `MembersPage` still spells its own two
+section headings by hand, but not on the `heading-16` chain: `font-medium
+text-base` is the same 16px size at weight 500 and Tailwind's 1.5 line
+height, where the chain is 600 at 1.4. `LoginPage` keeps its centred
+`heading-32` hero, hand-spelled on `CardTitle`: the rare hero step, not a page
+title, and no primitive owns it.
 
 ### Pattern faces
 
@@ -1124,11 +1203,15 @@ those rendered faces, not on a neighbouring token:
 | `destructive-foreground` on the derived hover face | 6.58 | 5.86 | passes both themes |
 
 The variant previously painted `text-white` (2.77:1 on dark's `#f87171`) and
-carried a `dark:` fill split: Tailwind v4 resolves `dark:` from
-`prefers-color-scheme`, which this document's theme contract never consults, so
-the split could only fire on an OS-dark machine running the light face.
-`tests/spa/tokens.test.ts` reads the label class out of the component and
-measures that class, so a raw colour fails the test instead of passing it.
+carried a `dark:` fill split, which at the time resolved from
+`prefers-color-scheme` — a mechanism this document's theme contract never
+consults, so the split could only fire on an OS-dark machine running the light
+face. The split stays removed even though `dark:` is now bound to
+`:root:not([data-theme="light"])`: the token cascade is still the one
+sanctioned theme mechanism, and a split would be a second colour answer for
+the same face. `tests/spa/tokens.test.ts` reads the label class out of the
+component and measures that class, so a raw colour fails the test instead of
+passing it.
 
 ### Tone fg pairs (the soft strength — the reading face)
 
