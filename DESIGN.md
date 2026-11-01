@@ -896,6 +896,13 @@ Card padding: `spacing-6` (24px) default; `spacing-4` (16px) compact;
 `spacing-8` (32px) hero. Page gutter: `spacing-6`. Content max-width 960px
 on stacked pages; full-bleed shell + inner max-width on the SPA layout.
 
+The SPA measures the inner content column in two tiers, centred with
+`mx-auto w-full` (below the tier width the column fills the available
+width). `Layout.tsx` keys the tier on the route face: the `apps` and
+`members` list faces take max-width 1200px; form/detail surfaces
+(`settings`, `app-detail`, workspace setup, support) and the default face
+take max-width 960px.
+
 ## Breakpoints
 
 | Token | Min width | Layout |

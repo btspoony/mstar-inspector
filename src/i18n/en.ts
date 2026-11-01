@@ -397,6 +397,8 @@ export const en = {
     installationsAccount: "Account",
     installationsId: "Installation ID",
     installationsLastSync: "Last sync",
+    /** Metric-band label for the provider-key count on the App detail face. */
+    metricKeys: "Keys",
     noInstallations: "No installations yet.",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy: "The last 5 webhook deliveries for this App — newest first.",
@@ -498,7 +500,17 @@ export const en = {
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
     },
     ops: "Operations",
-    opsCopy: "Pause ignores deliveries with 2xx; disable answers 404; delete is a soft-delete — all fail closed.",
+    opsCopy: "These actions change how this App answers incoming deliveries.",
+    // The danger zone's per-action rows: the row says what its control does to
+    // deliveries; the confirm dialogs keep their own proceed-or-not bodies.
+    opsReviewsTitle: "Review deliveries",
+    opsReviewsCopy:
+      "While paused, every delivery is answered 2xx and ignored — nothing is reviewed. Resuming puts this App back to reviewing.",
+    opsDeliveryTitle: "Delivery responses",
+    opsDeliveryCopy:
+      "A disabled App answers 404 to every delivery, so nothing is reviewed. Enabling it puts this App back to reviewing.",
+    opsDeleteTitle: "Delete this App",
+    opsDeleteCopy: "A soft delete — the App leaves this list and every installation is closed.",
     // Review trigger mode (spec review-trigger-policy §2/§3): segment
     // labels localize; the wire values (open / every_push / manual) and the
     // mention string stay verbatim.

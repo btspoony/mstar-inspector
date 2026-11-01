@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
 import { PageHeader } from "@/components/PageHeader";
-import { MetricBand } from "@/components/MetricBand";
+import { MetricBand, type Metric } from "@/components/MetricBand";
 import { SettingsView } from "./SettingsPage";
 import { AppInsightsTab } from "./AppInsightsTab";
 import { StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
@@ -324,13 +324,23 @@ export function AppDetailView({
     onSearch({ ...search, tab: next });
   }
 
-  // Header band metrics — only what the landed payload proves. An
-  // installation is an `app_installations` row, so the count is
-  // `installations.length` on the manager settings face and nowhere else:
-  // the identity-only payload carries no array, and this page derives no
-  // number it cannot read (compass D13).
-  const metrics = payload.can_manage
-    ? [{ key: t(locale, "settings.installations"), value: payload.installations.length }]
+  // Header band metrics — only what the landed payload proves (compass
+  // D13): the four figures `SettingsManagePayload` carries — installations,
+  // provider keys, model chains, and refused webhooks in the last 24h. The
+  // refusal count is the one figure here that reports a failure, so it — and
+  // only it — wears the alert face, and only when non-zero, exactly as the
+  // Apps list face (`AppsPage`) already rules it.
+  const metrics: Metric[] = payload.can_manage
+    ? [
+        { key: t(locale, "settings.installations"), value: payload.installations.length },
+        { key: t(locale, "settings.metricKeys"), value: payload.keys.length },
+        { key: t(locale, "settings.modelChains"), value: payload.model_chains.length },
+        {
+          key: t(locale, "apps.metricRejected24h"),
+          value: payload.delivery_summary?.rejected24h ?? 0,
+          tone: (payload.delivery_summary?.rejected24h ?? 0) > 0 ? "danger" : undefined,
+        },
+      ]
     : [];
 
   return (
@@ -338,8 +348,8 @@ export function AppDetailView({
       {/* Identity header — serves both tabs. The heading names the App by its
           GitHub display name (D6 fallback chain); the route `appId` stays the
           address, never the visible identity. The subtitle carries the
-          creator, the action slot the status, and the metric band the one
-          installation figure the settings payload actually carries. */}
+          creator, the action slot the status, and the metric band the four
+          figures the manager settings payload actually carries. */}
       <PageHeader
         title={appDisplayName(payload.app)}
         description={t(locale, "apps.by", { login: payload.app.created_by })}

@@ -63,6 +63,13 @@ function LoginChrome({ children }: { children: ReactNode }) {
 
 function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
   const sidebar = buildSidebarModel(boot, pathname);
+  // Content measure tier (DESIGN.md Spacing & Layout): the shell stays
+  // full-bleed; list/table surfaces take the wide column, the rest prose.
+  // Mirror DashboardPage's early returns (pages.tsx): a workspace-less
+  // sign-in sees WorkspaceSetupPage and a support-grant operator sees
+  // SupportPage whatever the URL names, so both take the prose tier.
+  const page = matchSpaRoute(pathname)?.page ?? null;
+  const proseFace = boot.needsWorkspace === true || boot.supportOnly === true;
   // The shell reads the shared membership list, not a second boot copy.
   const memberships = useLiveMemberships(boot);
   const switcher = buildWorkspaceSwitcherModel({ ...boot, memberships }, pathname);
@@ -119,13 +126,15 @@ function DashboardChrome({ boot, pathname, flash, children }: LayoutProps) {
           {/* The undismissable support notice sits above every workspace page:
               the tenant must see an active operator grant on any screen, and it
               carries no control (AC4). */}
-          <SupportNotice boot={boot} pathname={pathname} />
-          {/* One-shot outcome from the page just left (the delete flow): the
-              boot read and cleared its key, so this load shows it once. */}
-          {flashNotice ? (
-            <PageNotice kind={flashNotice.kind} message={t(boot.locale, flashNotice.key)} />
-          ) : null}
-          {children}
+          <div className={`mx-auto w-full ${!proseFace && (page === "apps" || page === "members") ? "max-w-[1200px]" : "max-w-[960px]"}`}>
+            <SupportNotice boot={boot} pathname={pathname} />
+            {/* One-shot outcome from the page just left (the delete flow): the
+                boot read and cleared its key, so this load shows it once. */}
+            {flashNotice ? (
+              <PageNotice kind={flashNotice.kind} message={t(boot.locale, flashNotice.key)} />
+            ) : null}
+            {children}
+          </div>
         </div>
       </SidebarInset>
     </SidebarProvider>

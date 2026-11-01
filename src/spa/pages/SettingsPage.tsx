@@ -900,6 +900,23 @@ function RuntimeHarnessEditor({
 }
 
 /**
+ * One danger-zone row: the control's title and what it does to deliveries on
+ * the left, the control itself on the right. The row explains the action; the
+ * confirm dialog (owned by the page) explains what happens if you proceed.
+ */
+function OpsRow({ title, copy, children }: { title: string; copy: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-3 pb-3 first:pt-0 last:pb-0">
+      <div className="flex flex-col gap-0.5">
+        <span className="text-sm font-medium">{title}</span>
+        <span className="text-sm text-muted-foreground">{copy}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
  * The destructive ops zone (the plan's "danger zone"): pause/resume,
  * disable/enable and the soft delete — each one confirm-gated through the
  * page's dialog, each one keeping its existing POST target and semantics.
@@ -919,35 +936,44 @@ function OpsSection({
 }) {
   const { app } = payload;
   const paused = isPaused(app);
+  // A disconnected App has no review state to pause: the section summary
+  // carries that state, and the first row drops out.
   return (
-    <FlowSection title={t(locale, "settings.ops")} subtitle={t(locale, "settings.opsCopy")}>
+    <FlowSection
+      title={t(locale, "settings.ops")}
+      subtitle={t(locale, app.status === "active" ? "settings.opsCopy" : "settings.disconnected")}
+    >
       <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-col divide-y divide-(--border-subtle)">
           {app.status === "active" ? (
-            paused ? (
-              <Button type="button" onClick={() => onPending({ kind: "resume" })}>
-                {t(locale, "settings.resumeReviews")}
+            <OpsRow title={t(locale, "settings.opsReviewsTitle")} copy={t(locale, "settings.opsReviewsCopy")}>
+              {paused ? (
+                <Button type="button" onClick={() => onPending({ kind: "resume" })}>
+                  {t(locale, "settings.resumeReviews")}
+                </Button>
+              ) : (
+                <Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>
+                  {t(locale, "settings.pauseReviews")}
+                </Button>
+              )}
+            </OpsRow>
+          ) : null}
+          <OpsRow title={t(locale, "settings.opsDeliveryTitle")} copy={t(locale, "settings.opsDeliveryCopy")}>
+            {app.status === "active" ? (
+              <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
+                {t(locale, "apps.actions.disable")}
               </Button>
             ) : (
-              <Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>
-                {t(locale, "settings.pauseReviews")}
+              <Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>
+                {t(locale, "apps.actions.enable")}
               </Button>
-            )
-          ) : (
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.disconnected")}</p>
-          )}
-          {app.status === "active" ? (
-            <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
-              {t(locale, "apps.actions.disable")}
+            )}
+          </OpsRow>
+          <OpsRow title={t(locale, "settings.opsDeleteTitle")} copy={t(locale, "settings.opsDeleteCopy")}>
+            <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
+              {t(locale, "apps.actions.delete")}
             </Button>
-          ) : (
-            <Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>
-              {t(locale, "apps.actions.enable")}
-            </Button>
-          )}
-          <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
-            {t(locale, "apps.actions.delete")}
-          </Button>
+          </OpsRow>
         </div>
         <NoticeRegion notice={notice} />
       </div>
@@ -1459,7 +1485,7 @@ function SeatsSection({
         }}
       >
         {payload.model_role_ids.map((role) => (
-          <label key={role} className="flex flex-col gap-1.5 text-sm font-medium">
+          <label key={role} className="flex w-fit flex-col gap-1.5 text-sm font-medium">
             {role} — {roleHint(role)}
             <Select
               value={seatSelectValue(tabs, seats[role])}
@@ -1610,10 +1636,10 @@ function ChainEditor({
   onSave: (chain: string) => Promise<OpNotice>;
   saveLabel?: string;
   /**
-   * (AD-552): caller actions rendered in the save row, right of the
+   * (AD-552): caller actions rendered in the control row, right of the
    * save button (pure render insertion — save semantics, the busy gate and
-   * the outcome region are untouched). Absent, the save button renders bare:
-   * byte-equivalent to the pre-actions tree (Default / named-chain editors).
+   * the outcome region are untouched). Absent, the row carries the picker,
+   * the add button and the save button only (Default / named-chain editors).
    */
   actions?: ReactNode;
 }) {
@@ -1680,9 +1706,13 @@ function ChainEditor({
           ))}
         </ul>
       )}
-      <div className="flex flex-wrap items-end gap-2">
-        <div className="flex min-w-64 flex-1 flex-col gap-1.5">
-          <span className="text-sm font-medium">{t(locale, "settings.modelChainField")}</span>
+      {/* One control row (the RuntimeHarnessEditor shape): the picker keeps
+          its content-adaptive shell — no reserved slot — and the add, save and
+          caller actions sit beside it at their intrinsic widths, wrapping
+          below cleanly on narrow screens. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">{t(locale, "settings.modelChainField")}</span>
+        <div className="w-fit max-w-xs">
           <Select value={pick} onValueChange={setPick}>
             <SelectTrigger aria-label={t(locale, "settings.modelChainField")}>
               <SelectValue placeholder={t(locale, "settings.pickModel")} />
@@ -1714,15 +1744,9 @@ function ChainEditor({
         >
           {t(locale, "settings.addToChain")}
         </Button>
+        {saveButton}
+        {actions}
       </div>
-      {actions ? (
-        <div className="flex items-center gap-2">
-          {saveButton}
-          {actions}
-        </div>
-      ) : (
-        saveButton
-      )}
       <NoticeRegion notice={notice} />
     </div>
   );
