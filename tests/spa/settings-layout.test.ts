@@ -17,7 +17,7 @@ import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { APP_VERSION } from "../../src/version";
 import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
-import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta } from "../../src/spa/pages/data";
+import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta, type SettingsManagePayload } from "../../src/spa/pages/data";
 import {
   ProviderCombobox,
   ProviderComboboxPanel,
@@ -55,7 +55,7 @@ const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
 const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat", role: "admin" as const };
 
 /** A manage-face settings payload — the full settings tab body renders. */
-const detailPayload = (): Parameters<typeof AppDetailView>[0]["payload"] => ({
+const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
   workspace_id: "ws_0123456789abcdefghijkl",
   app: {
@@ -1186,12 +1186,12 @@ describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
 describe("discard inline with the save row (A4/A5 / AD-552)", () => {
   /**
    * The discard is a pure render insertion through ChainEditor's optional
-   * actions prop: the save-row wrapper exists only when actions are passed
-   * (absent = byte-equivalent tree for the Default / named-chain editors,
-   * whose pins elsewhere stay untouched), and the injected button keeps its
-   * disabled={busy} bound to DraftChainPanel's own busy closure. Structure
-   * is pinned over the source; the visible styling over SSR of the exported
-   * DraftChainPanel. createElement keeps this .ts file JSX-free.
+   * actions prop: every panel renders ONE control row (picker, add, save,
+   * then the caller's actions), so the save keeps its intrinsic width instead
+   * of stretching to the stack's full width, and the draft panel stops being
+   * the odd one out. The injected button keeps its disabled={busy} bound to
+   * DraftChainPanel's own busy closure. Pinned over SSR of the exported
+   * DraftChainPanel — createElement keeps this .ts file JSX-free.
    */
   const noop = () => {};
   const panelHtml = (): string =>
@@ -1208,55 +1208,55 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
       }),
     );
 
-  test("the save row renders save primary with actions right of it, only when actions exist", () => {
-    const source = readSettingsSource();
-    const editorBody = source.slice(source.indexOf("function ChainEditor"));
-    // Conditional wrapper: with no actions the save button renders bare —
-    // the AD-552 byte-equivalence guard for every other caller.
-    expect(editorBody).toContain("{actions ? (");
-    // Inside the row: save first (primary/leftmost), the actions node right
-    // after it.
-    const rowPos = editorBody.indexOf('<div className="flex items-center gap-2">');
-    const savePos = editorBody.indexOf("{saveButton}");
-    const actionsPos = editorBody.indexOf("{actions}");
-    expect(rowPos).toBeGreaterThan(-1);
-    expect(savePos).toBeGreaterThan(rowPos);
-    expect(actionsPos).toBeGreaterThan(savePos);
-    // DraftChainPanel is the injecting caller; the Default editor's call
-    // stays bare (named-tab editors pass no actions either — the conditional
-    // above already renders them byte-equivalent).
-    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
-    const firstEditorPos = chainsBody.indexOf("<ChainEditor");
-    const defaultCall = chainsBody.slice(firstEditorPos, chainsBody.indexOf("/>", firstEditorPos));
-    expect(defaultCall).not.toContain("actions={");
-    const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
-    expect(panelBody).toContain("actions={");
-    // Scoped count (qc F1): `actions={` occurs exactly once in the draft
-    // panel — its discard injection. The Default AND named-chain ChainEditor
-    // callers both stay bare (the conditional above renders them
-    // byte-equivalent); a second actions-passing ChainEditor caller fails this
-    // count. (The providers group card's own `actions` slots belong to other
-    // components and are outside this slice.)
-    expect(panelBody.match(/actions=\{/g)?.length).toBe(1);
+  test("one control row carries the picker, add, save and the caller's actions", () => {
+    const html = panelHtml();
+    // A single control row. Before this, the save button was a bare child of
+    // the editor's stack (align-items: stretch made it full-bleed) while the
+    // draft panel's discard opened a second row — the same primitive giving
+    // two answers. The row marker is the structural half of "one row"; the
+    // order below is what a reader actually sees.
+    expect(html.split('class="flex flex-wrap items-center gap-2"').length - 1).toBe(1);
+    const positions: Array<[string, number]> = [
+      ["picker", html.indexOf('data-slot="select-trigger"')],
+      ["add", html.indexOf(`>${t("en", "settings.addToChain")}<`)],
+      ["save", html.indexOf(`>${t("en", "settings.saveChain")}<`)],
+      ["discard", html.indexOf(`>${t("en", "settings.discardChain")}<`)],
+    ];
+    positions.forEach(([name, at], index) => {
+      const previous = index === 0 ? -1 : positions[index - 1]![1];
+      expect(at, name).toBeGreaterThan(previous);
+    });
   });
 
-  test("the discard is visibly styled without hover and sits in the save row (SSR)", () => {
+  test("the discard is visibly styled without hover and carries no confirmation", () => {
     const html = panelHtml();
     // Outline + sm + the fixed width land on the real button; the label is
     // the untouched discardChain key. No confirmation dialog anywhere.
     expect(html).toContain('data-variant="outline"');
     expect(html).toContain('data-size="sm"');
     expect(html).toContain("w-20");
-    expect(html).toContain(">Discard</button>");
     expect(html).not.toContain("dialog");
-    // Same row: the flex container wraps both buttons — the save (primary,
-    // default variant) opens the row, the outline discard follows it.
-    const rowPos = html.indexOf("flex items-center gap-2");
-    const savePos = html.indexOf('data-variant="default"');
-    const discardPos = html.indexOf('data-variant="outline"');
-    expect(rowPos).toBeGreaterThan(-1);
-    expect(savePos).toBeGreaterThan(rowPos);
-    expect(discardPos).toBeGreaterThan(savePos);
+  });
+
+  test("only the draft panel injects a discard; the stored-chain editors carry none", () => {
+    // The Default tab's editor renders on the manage face; the draft panel
+    // renders only after 新建链 opens it, so its discard is absent until then.
+    const manage = withLocation("/dashboard/apps/1", () =>
+      renderToStaticMarkup(
+        createElement(AppDetailView, {
+          locale: "en",
+          appId: "1",
+          payload: detailPayload(),
+          groups: [],
+          notice: null,
+          search: { tab: "settings", window: "30", repo: "" },
+          onReload: async () => true,
+          onSearch: () => {},
+        }),
+      ),
+    );
+    expect(manage).toContain(t("en", "settings.saveChain"));
+    expect(manage).not.toContain(t("en", "settings.discardChain"));
   });
 });
 
@@ -1404,6 +1404,73 @@ describe("operational action hierarchy", () => {
     expect(t("zh_CN", "settings.confirmDeleteBody")).toContain("软删除");
     expect(t("en", "settings.confirmDeleteButton")).toBe("Delete App");
     expect(t("zh_CN", "settings.confirmDeleteButton")).toBe("删除应用");
+  });
+});
+
+describe("ops danger zone: one row per action", () => {
+  /**
+   * The operations section is a danger zone: each row states what its control
+   * does to deliveries and carries that one control. The confirm dialog keeps
+   * the proceed-or-not body; the row owns the effect.
+   */
+  const opsSectionHtml = (locale: SpaBoot["locale"], app: Partial<SettingsAppMeta> = {}): string => {
+    const payload = detailPayload();
+    const html = withLocation("/dashboard/apps/1", () =>
+      renderToStaticMarkup(
+        createElement(AppDetailView, {
+          locale,
+          appId: "1",
+          payload: { ...payload, app: { ...payload.app, ...app } },
+          groups: [],
+          notice: null,
+          search: { tab: "settings", window: "30", repo: "" },
+          onReload: async () => true,
+          onSearch: () => {},
+        }),
+      ),
+    );
+    const start = html.indexOf(`>${t(locale, "settings.ops")}<`);
+    return html.slice(html.lastIndexOf("<section", start), html.indexOf("</section>", start));
+  };
+
+  test("each row states its effect and carries its own control, in both locales", () => {
+    const rows = [
+      { title: "settings.opsReviewsTitle", copy: "settings.opsReviewsCopy", control: "settings.pauseReviews" },
+      { title: "settings.opsDeliveryTitle", copy: "settings.opsDeliveryCopy", control: "apps.actions.disable" },
+      { title: "settings.opsDeleteTitle", copy: "settings.opsDeleteCopy", control: "apps.actions.delete" },
+    ] as const;
+    for (const locale of ["en", "zh_CN"] as const) {
+      const html = opsSectionHtml(locale);
+      let cursor = -1;
+      for (const row of rows) {
+        const title = html.indexOf(t(locale, row.title));
+        const copy = html.indexOf(t(locale, row.copy));
+        const control = html.indexOf(`>${t(locale, row.control)}</button>`);
+        expect(title, `${locale} ${row.title}`).toBeGreaterThan(cursor);
+        expect(copy, `${locale} ${row.copy}`).toBeGreaterThan(title);
+        expect(control, `${locale} ${row.control}`).toBeGreaterThan(copy);
+        cursor = control;
+      }
+    }
+    // The section summary stopped restating one behaviour per action.
+    expect(t("en", "settings.opsCopy")).not.toContain("404");
+    expect(t("zh_CN", "settings.opsCopy")).not.toContain("404");
+  });
+
+  test("a disconnected App drops the review row and states its state in the summary", () => {
+    const html = opsSectionHtml("en", { status: "disabled" });
+    expect(html).toContain(t("en", "settings.disconnected"));
+    expect(html).not.toContain(t("en", "settings.opsReviewsTitle"));
+    expect(html).toContain(t("en", "apps.actions.enable"));
+    expect(html).not.toContain(t("en", "apps.actions.disable"));
+    expect(html).toContain(t("en", "settings.opsDeleteTitle"));
+  });
+
+  test("a paused App offers resume in the same row", () => {
+    const html = opsSectionHtml("en", { review_enabled: false });
+    expect(html).toContain(t("en", "settings.opsReviewsCopy"));
+    expect(html).toContain(t("en", "settings.resumeReviews"));
+    expect(html).not.toContain(t("en", "settings.pauseReviews"));
   });
 });
 
