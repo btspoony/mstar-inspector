@@ -431,7 +431,11 @@ describe("visual discipline guard", () => {
         `${relative(SPA_DIR, file)}:${match[0]}`,
       ),
     );
-    expect(hits).toEqual(["Layout.tsx:max-w-[1200px]", "Layout.tsx:max-w-[960px]"]);
+    // The pin is the SET of hits: one site, both measures, no other file. The
+    // order the two literals appear in inside that one expression is not the
+    // contract, so a swap there must stay green.
+    const expected = ["Layout.tsx:max-w-[1200px]", "Layout.tsx:max-w-[960px]"];
+    expect([...hits].sort()).toEqual(expected.sort());
   });
 
   test("the scanned source has no bare colour literals, bracket arbitrary values, palette utilities, or colourless border widths", () => {

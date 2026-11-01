@@ -1473,16 +1473,32 @@ describe("ops danger zone: one row per action", () => {
       { title: "settings.opsDeleteTitle", copy: "settings.opsDeleteCopy", control: "apps.actions.delete" },
     ] as const;
     for (const locale of ["en", "zh_CN"] as const) {
-      const html = opsSectionHtml(locale);
-      let cursor = -1;
-      for (const row of rows) {
-        const title = html.indexOf(t(locale, row.title));
-        const copy = html.indexOf(t(locale, row.copy));
-        const control = html.indexOf(`>${t(locale, row.control)}</button>`);
-        expect(title, `${locale} ${row.title}`).toBeGreaterThan(cursor);
-        expect(copy, `${locale} ${row.copy}`).toBeGreaterThan(title);
-        expect(control, `${locale} ${row.control}`).toBeGreaterThan(copy);
-        cursor = control;
+      const { win, cleanup } = installDom("http://localhost/dashboard/apps/1/settings");
+      try {
+        win.document.body.innerHTML = opsSectionHtml(locale);
+        const doc = win.document;
+        const button = (key: DictionaryKey): DomElement | null =>
+          [...doc.querySelectorAll("button")].find((node) => node.textContent === t(locale, key)) ?? null;
+        // Row association, not global text order: a two-column danger zone
+        // (titles in one column, controls in another) keeps every string in
+        // the same reading order and still breaks the layout. It fails here,
+        // because the control's parent must be the element that states this
+        // row's own effect — the same shape the chain row above is read with.
+        for (const row of rows) {
+          const control = button(row.control);
+          expect(control, `${locale} ${row.control}`).not.toBeNull();
+          const rowEl = control!.parentElement!;
+          expect(rowEl.textContent, `${locale} ${row.title}`).toContain(t(locale, row.title));
+          expect(rowEl.textContent, `${locale} ${row.copy}`).toContain(t(locale, row.copy));
+          for (const other of rows) {
+            if (other === row) continue;
+            expect(rowEl.textContent, `${locale} ${row.control} row holds ${other.title}`).not.toContain(
+              t(locale, other.title),
+            );
+          }
+        }
+      } finally {
+        cleanup();
       }
     }
     // The section summary stopped restating one behaviour per action.
