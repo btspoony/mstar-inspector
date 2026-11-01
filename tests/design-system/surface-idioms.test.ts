@@ -21,10 +21,17 @@
  * this file: the named row heights. A row face names exactly one height, it is
  * a declared `--row-h-*` step, and that step resolves to a length — a literal
  * or an undeclared token fails here instead of only in a comment.
+ *
+ * The fifth is the same hairline rule applied where the card layer does not
+ * reach (I-000235): the loading skeleton, the provider picker's popover edge
+ * and the two App avatars. Seven class sites across four files that named a
+ * width and left the colour to preflight — each is read off its rendered face
+ * and resolved through the same oracle, so "it looked fine" cannot pass.
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { FlowSection } from "../../src/design-system/patterns/flow-section";
@@ -34,6 +41,12 @@ import { GroupCard, GroupCardHeader } from "../../src/spa/components/GroupCard";
 import { ListRow } from "../../src/spa/components/ListRow";
 import { SectionCard } from "../../src/spa/components/SectionCard";
 import { EmptyState } from "../../src/spa/components/state/EmptyState";
+import { PageSkeleton } from "../../src/spa/components/state/PageSkeleton";
+import { ProviderCombobox } from "../../src/spa/components/provider-combobox";
+import { AppsList } from "../../src/spa/pages/AppsPage";
+import { AppInfoSection } from "../../src/spa/pages/SettingsPage";
+import { withLocation } from "../spa/browser-stub";
+import { installDom } from "../spa/dom";
 
 /** The generated stylesheet is the declared-token oracle: every `--name` a
  *  component may reference has to appear here, in both themes. */
@@ -75,10 +88,12 @@ function borderColours(classes: string[]): string[] {
   return classes.filter((name) => name.startsWith("border-") && !NOT_A_COLOUR.test(name));
 }
 
-/** The card's hairline: one colour-bearing border utility, backed by a token. */
-function expectTokenHairline(markup: string): void {
+/** The card's hairline: one colour-bearing border utility, backed by a token.
+ *  `width: false` for a face whose width utility is spelled `border-b` (or
+ *  under an arbitrary variant) rather than the bare `border`. */
+function expectTokenHairline(markup: string, options: { width?: boolean } = {}): void {
   const classes = classesOf(markup);
-  expect(classes).toContain("border");
+  if (options.width !== false) expect(classes).toContain("border");
   const colours = borderColours(classes);
   expect(colours, `a card names ${colours.length || "no"} border colour: ${colours.join(" ")}`)
     .toHaveLength(1);
@@ -240,5 +255,140 @@ describe("flow-section idiom", () => {
   test("renders the subtitle and the section body", () => {
     expect(markup).toContain("GitHub identity cache");
     expect(markup).toContain("4482910");
+  });
+});
+
+/**
+ * The provider picker opened on a live DOM: the popover edge only exists while
+ * the list is open, and focus is what opens it.
+ */
+async function openPickerPopover(): Promise<string> {
+  const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps/1/settings");
+  const container = win.document.createElement("div");
+  win.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  try {
+    await act(async () => {
+      root.render(
+        createElement(ProviderCombobox, {
+          locale: "en",
+          labelledby: "provider-label",
+          providers: [
+            {
+              id: "openai",
+              label: "OpenAI",
+              tier: "builtin",
+              base_url: null,
+              api: null,
+              models: [],
+              verifiable: true,
+              eligibility: "builtin",
+              display_group: "common",
+            },
+          ],
+          value: undefined,
+          onValueChange: () => {},
+          imageId: "omp",
+        }),
+      );
+    });
+    const input = container.querySelector('input[role="combobox"]');
+    await act(async () => {
+      input?.dispatchEvent(new win.FocusEvent("focusin", { bubbles: true }));
+    });
+    // The listbox's own parent is the popover surface the edge belongs to.
+    const popover = container.querySelector('[role="listbox"]')?.parentElement ?? null;
+    expect(popover, "the picker did not open — nothing to read").not.toBeNull();
+    return popover?.outerHTML ?? "";
+  } finally {
+    await act(async () => root.unmount());
+    cleanup();
+  }
+}
+
+/** The two dashboard faces that carry an App avatar (both inline, not in AppAvatar). */
+const APPS_LIST = withLocation("/dashboard/acme/apps", () =>
+  renderToStaticMarkup(
+    createElement(AppsList, {
+      locale: "en",
+      payload: {
+        viewer: { login: "mallory", role: "admin" },
+        apps: [
+          {
+            github_slug: "demo",
+            github_name: "Demo",
+            github_avatar_url: "https://avatars.example/demo.png",
+            github_app_id: 1,
+            status: "active",
+            review_enabled: 1,
+            created_by: "mallory",
+            health: { latest: null, rejected24h: 0 },
+          },
+        ],
+      },
+    }),
+  ),
+);
+
+const APP_INFO = withLocation("/dashboard/acme/apps/1/settings", () =>
+  renderToStaticMarkup(
+    createElement(AppInfoSection, {
+      locale: "en",
+      workspaceId: "ws_0123456789abcdefghijkl",
+      canManage: false,
+      app: {
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        created_at: "2026-01-01T00:00:00Z",
+        id: "app-demo",
+        github_name: "Demo",
+        github_slug: "demo",
+        github_description: null,
+        github_html_url: null,
+        github_avatar_url: "https://avatars.example/demo.png",
+        github_metadata_synced_at: null,
+      },
+    }),
+  ),
+);
+
+describe("hairline sites outside the card layer (I-000235)", () => {
+  test("the loading skeleton: table shell, header band, every row and every card", () => {
+    const table = renderToStaticMarkup(createElement(PageSkeleton, { locale: "en", kind: "table" }));
+    for (const slot of ["skeleton-table", "skeleton-table-header"]) {
+      const [tag = ""] = tagsOfSlot(table, slot);
+      expect(tag, slot).not.toBe("");
+      expectTokenHairline(tag, { width: false });
+    }
+    // Every row, not the first: the row face carries its colour under an
+    // arbitrary variant, which is the spelling a spot check would miss.
+    const rows = tagsOfSlot(table, "skeleton-table-row");
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of rows) expectTokenHairline(row, { width: false });
+
+    const cards = tagsOfSlot(
+      renderToStaticMarkup(createElement(PageSkeleton, { locale: "en", kind: "cards" })),
+      "skeleton-card",
+    );
+    expect(cards.length).toBeGreaterThan(0);
+    for (const card of cards) expectTokenHairline(card);
+  });
+
+  test("the provider picker's open list edge names its colour", async () => {
+    expectTokenHairline(await openPickerPopover());
+  });
+
+  test("both App avatars name their ring colour", () => {
+    const avatarsOf = (markup: string): string[] =>
+      [...markup.matchAll(/<img\b[^>]*>/g)]
+        .map((match) => match[0])
+        .filter((tag) => classesOf(tag).includes("rounded-full"));
+    const avatars = [...avatarsOf(APPS_LIST), ...avatarsOf(APP_INFO)];
+    // One per face: the assertion is about the faces that ship them, not a
+    // count in the abstract.
+    expect(avatars).toHaveLength(2);
+    for (const avatar of avatars) expectTokenHairline(avatar);
   });
 });

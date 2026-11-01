@@ -26,14 +26,6 @@ import {
 } from "./data";
 
 /**
- * The page-level line-tab trigger face (DESIGN.md ### Tabs) — every trigger on
- * the shell bar spells it once. It stays at this consumption site by contract:
- * `SectionCardTitle` is a card-title element, not a tab trigger.
- */
-const PAGE_TAB_TRIGGER_CLASS =
-  "flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking) group-data-[orientation=horizontal]/tabs:after:bottom-[-2px]";
-
-/**
  * Page wayfinding link back to the Apps list. The href is the page's own API
  * base, derived here so the rendered link is the real target on both the
  * legacy and the workspace-scoped path.
@@ -359,28 +351,20 @@ export function AppDetailView({
         {/* Page-level tab face (DESIGN.md ### Tabs, line-tab idiom): the
             shell's bar is full-width over a bottom hairline (border-border
             → gray-alpha-400) with left-aligned, sized-up triggers — 16px
-            heading-16 token step on a 40px bar. The component defaults stay
-            generic: the chains-panel segmented pill keeps variant="default";
-            the face lives at this consumption site only. */}
+            heading-16 token step on a 40px bar. The trigger face is the
+            primitive's line variant, so a change to that variant reaches this
+            page like every other; only the bar itself — full width, hairline,
+            40px — is the page's choice. The chains-panel segmented pill keeps
+            variant="default". */}
         <TabsList
           variant="line"
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
-          <TabsTrigger
-            value="settings"
-            className={PAGE_TAB_TRIGGER_CLASS}
-          >
-            {t(locale, "appDetail.tabSettings")}
-          </TabsTrigger>
+          <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
           {/* The 洞察 tab exists ONLY on the manage face — absence is the
               non-manager contract, pinned by test. */}
           {canManage ? (
-            <TabsTrigger
-              value="insights"
-              className={PAGE_TAB_TRIGGER_CLASS}
-            >
-              {t(locale, "appDetail.tabInsights")}
-            </TabsTrigger>
+            <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger>
           ) : null}
         </TabsList>
         {/* forceMount on BOTH panels (mount-once tab switching): the

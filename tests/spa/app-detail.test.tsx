@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { Tabs, TabsList, TabsTrigger } from "@design-system";
 import { t } from "../../src/i18n";
 import {
   appDetailSearchQuery,
@@ -210,13 +211,60 @@ describe("tab shell source contracts", () => {
     // Tailwind v4 cascade and would ship a 36px bar.
     expect(bar).toContain("group-data-[orientation=horizontal]/tabs:h-10");
     expect(bar).not.toMatch(/(^|\s)h-10(\s|$)/);
-    // The line face is opted into once; its hairline colour and the trigger's
-    // type step are the variant's face, asserted where the token vocabulary
-    // lives rather than as class strings here.
     // The line variant is set exactly once — this shell bar; no other face
     // in the page opts in (the chains panel keeps the component default).
     expect(detailPage.match(/variant="line"/g)?.length).toBe(1);
     expect(tabsWrapper).toMatch(/defaultVariants:\s*\{\s*variant:\s*"default"/);
+  });
+
+  test("the trigger face is the primitive's line variant, not a page-local chain", () => {
+    // The page renders the shared trigger untouched, so a change to the line
+    // variant reaches this page like every other consumer (DESIGN.md: a page
+    // re-spelling a primitive's chain is the duplication the layer exists to
+    // remove). Proven by equality of the two rendered faces, not by a class
+    // string that would pass even if the page appended its own.
+    /** The triggers inside the tab list of one variant — the settings body
+     *  has its own segmented pill, which is a different face. */
+    const triggerFaces = (markup: string, variant: string): string[] => {
+      const lists = [...markup.matchAll(/<div\b[^>]*data-slot="tabs-list"[^>]*>/g)];
+      const at = lists.findIndex((match) => match[0].includes(`data-variant="${variant}"`));
+      if (at < 0) return [];
+      const from = lists[at]?.index ?? 0;
+      const to = lists[at + 1]?.index ?? markup.length;
+      return [...markup.slice(from, to).matchAll(/<button\b[^>]*role="tab"[^>]*>/g)].map(
+        (match) => /class="([^"]*)"/.exec(match[0])?.[1] ?? "",
+      );
+    };
+    const page = triggerFaces(renderDetail(managePayload, true), "line");
+    const primitive = triggerFaces(
+      renderToStaticMarkup(
+        createElement(
+          Tabs,
+          { value: "a" },
+          createElement(
+            TabsList,
+            { variant: "line" },
+            createElement(TabsTrigger, { value: "a" }, "Settings"),
+          ),
+        ),
+      ),
+      "line",
+    );
+    expect(page).toHaveLength(2);
+    expect(primitive).toHaveLength(1);
+    for (const face of page) expect(face).toBe(primitive[0] ?? "");
+    // …and that shared face is the documented line tab: the heading-16 type
+    // step, named as the token it resolves (DESIGN.md ### Tabs).
+    expect(primitive[0] ?? "").toContain("length:--typo-heading-16-size");
+  });
+
+  test("AppDetailPage carries no page-local tab trigger chain", () => {
+    // The finding this replaces (I-000259): a `PAGE_TAB_TRIGGER_CLASS`
+    // constant re-spelt the trigger at the page, so a change to the shared
+    // Tabs stopped at this page.
+    expect(detailPage).not.toContain("PAGE_TAB_TRIGGER_CLASS");
+    const bar = detailPage.slice(detailPage.indexOf("<TabsList"), detailPage.indexOf("</TabsList>"));
+    expect(bar.match(/<TabsTrigger[^>]*className=/g) ?? []).toEqual([]);
   });
 
   test("forceMount knowledge: the ui wrapper hides inactive panels via data-[state=inactive]:hidden", () => {

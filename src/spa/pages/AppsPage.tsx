@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { t } from "../../i18n";
 import { Button, StatusBadge } from "@design-system";
 import { DataTable, type DataTableColumn } from "@/components/DataTable";
-import { MetricBand } from "@/components/MetricBand";
+import { MetricBand, type Metric } from "@/components/MetricBand";
 import { PageHeader } from "@/components/PageHeader";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
@@ -124,7 +124,16 @@ export function AppsView({
   // reviewing, so the pause axis gets its own count instead of joining it.
   // Both axes read the payload through `data.ts`'s normalization, never a
   // second copy of the wire rule.
-  const metrics =
+  //
+  // Refusals are the one figure here that reports a failure: `rejected24h`
+  // counts refused webhooks (bad signature, invalid body, missing fields), not
+  // review volume, so it — and only it — wears the alert face, and only when
+  // the sum is non-zero. Review-off is a deliberate pause and stays neutral.
+  const rejected24h =
+    state === "ok" && payload
+      ? payload.apps.reduce((total, app) => total + app.health.rejected24h, 0)
+      : 0;
+  const metrics: Metric[] =
     state === "ok" && payload
       ? [
           { key: t(locale, "apps.metricApps"), value: payload.apps.length },
@@ -138,7 +147,8 @@ export function AppsView({
           },
           {
             key: t(locale, "apps.metricRejected24h"),
-            value: payload.apps.reduce((total, app) => total + app.health.rejected24h, 0),
+            value: rejected24h,
+            tone: rejected24h > 0 ? "danger" : undefined,
           },
         ]
       : [];
@@ -219,7 +229,7 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
           <AppAvatar
             src={app.github_avatar_url}
             appId={app.github_app_id}
-            className="h-9 w-9 shrink-0 rounded-full border object-cover"
+            className="h-9 w-9 shrink-0 rounded-full border border-(--border-default) object-cover"
           />
           <div className="flex flex-col gap-0.5">
             <a
@@ -254,9 +264,16 @@ export function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; paylo
               ? t(locale, "apps.health.delivery", { time: formatRelativeTime(latest.created_at, locale) })
               : t(locale, "apps.health.deliveryNever")}
             {latest ? ` · ${deliveryOutcomeLabel(latest.outcome, locale)}` : ""}
-            {app.health.rejected24h > 0
-              ? ` · ${t(locale, "apps.health.rejected24h", { count: app.health.rejected24h })}`
-              : ""}
+            {app.health.rejected24h > 0 ? (
+              // The count segment is the failure, so it wears the same alert
+              // token the band uses; the delivery prose beside it stays muted.
+              <>
+                {" · "}
+                <span className="text-(--tone-danger-fg)">
+                  {t(locale, "apps.health.rejected24h", { count: app.health.rejected24h })}
+                </span>
+              </>
+            ) : null}
           </span>
         );
       },

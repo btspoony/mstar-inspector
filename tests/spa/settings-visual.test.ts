@@ -23,7 +23,9 @@ import { SectionCard } from "../../src/spa/components/SectionCard";
 import { PageNotice, type OpNotice } from "../../src/spa/pages/PageNotice";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import type { SettingsManagePayload } from "../../src/spa/pages/data";
+import { InstallationsSection } from "../../src/spa/pages/SettingsPage";
 import { ProvidersSection } from "../../src/spa/pages/settings-providers";
+import { alertSegments } from "../helpers/token-colour";
 import { withLocation } from "./browser-stub";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
@@ -471,5 +473,29 @@ describe("section description wording (A8)", () => {
     expect(t("en", "settings.modelChainsCopy")).toContain("can't be removed");
     expect(t("zh_CN", "settings.modelChainsCopy")).toContain("标签页");
     expect(t("zh_CN", "settings.modelChainsCopy")).toContain("无法移除");
+  });
+});
+
+describe("installations last-webhook line (I-000251)", () => {
+  const render = (rejected24h: number): string =>
+    renderToStaticMarkup(
+      createElement(InstallationsSection, {
+        locale: "en",
+        payload: { ...detailPayload(), delivery_summary: { latest: null, rejected24h } },
+      }),
+    );
+
+  test("the refusal count wears the alert colour, and only when it is non-zero", () => {
+    // The line is prose, not a band entry: the count segment carries the same
+    // alert token the metric band uses, and the last-webhook text beside it
+    // stays muted. Identified by the colour it resolves to, never by a class
+    // spelling.
+    const [segment = ""] = alertSegments(render(3));
+    expect(segment).toContain(t("en", "apps.health.rejected24h", { count: 3 }));
+    const lastWebhook = t("en", "settings.lastWebhook", { time: t("en", "common.time.never") });
+    expect(render(3)).toContain(lastWebhook);
+    // Zero refusals is a healthy line: today's muted text, no count rendered.
+    expect(alertSegments(render(0))).toEqual([]);
+    expect(render(0)).toContain(lastWebhook);
   });
 });
