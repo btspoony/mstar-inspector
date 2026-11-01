@@ -836,6 +836,71 @@ describe("apps-store delivery read faces (consumption)", () => {
     );
     expect(Object.keys(await s.deliverySummaries([]))).toEqual([]);
   });
+
+  test("deliverySummaries ranks by outcome tier: a newer ignored bypass row never outranks an older ok", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null });
+    // The check_run row is genuinely newer, so an unconditionally-newest pick returns it.
+    db.raw
+      .prepare(
+        `UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour')
+         WHERE event_name = 'pull_request'`,
+      )
+      .run();
+
+    const summaries = await s.deliverySummaries([app.id]);
+
+    expect(summaries[app.id]!.latest).toMatchObject({ event_name: "pull_request", outcome: "ok" });
+  });
+
+  test("deliverySummaries prefers an older ok over a newer ignored row from a WHITELISTED event", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    // issue_comment is whitelisted and still ignored: no App mention, a bot
+    // author, or a comment outside a PR thread all land in `ignored`.
+    await s.recordDelivery({ appId: app.id, eventName: "issue_comment", outcome: "ignored", statusCode: null });
+    db.raw
+      .prepare(
+        `UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour')
+         WHERE event_name = 'pull_request'`,
+      )
+      .run();
+
+    const summaries = await s.deliverySummaries([app.id]);
+
+    expect(summaries[app.id]!.latest).toMatchObject({ event_name: "pull_request", outcome: "ok" });
+  });
+
+  test("deliverySummaries keeps a newer paused row over an older ok (switch-off is a state, not noise)", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "paused", statusCode: null });
+    db.raw
+      .prepare(`UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour') WHERE outcome = 'ok'`)
+      .run();
+
+    const summaries = await s.deliverySummaries([app.id]);
+
+    expect(summaries[app.id]!.latest).toMatchObject({ event_name: "pull_request", outcome: "paused" });
+  });
+
+  test("deliverySummaries falls back to the newest row when an app has only ever produced ignored traffic", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.recordDelivery({ appId: app.id, eventName: "ping", outcome: "ignored", statusCode: null });
+
+    const summaries = await s.deliverySummaries([app.id]);
+
+    expect(summaries[app.id]).toMatchObject({ latest: { event_name: "ping", outcome: "ignored" }, rejected24h: 0 });
+  });
 });
 
 describe("saveGithubMetadata (migrations 0019/0036)", () => {
