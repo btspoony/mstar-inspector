@@ -105,6 +105,9 @@ const TARGETS = [...SPA_TARGETS, ...PRIMITIVE_TARGETS];
  */
 const ARBITRARY_COLOUR = /\[(#[0-9a-fA-F]{3,8})/g;
 const ARBITRARY_GEOMETRY = /\[(\d+px|calc\(|color-mix\()/g;
+/** The two DESIGN.md Spacing & Layout page measures — the one documented
+ * arbitrary pair; the page layer declares them once in Layout.tsx. */
+const DOCUMENTED_MEASURE = /max-w-\[(?:960|1200)px\]/g;
 /** Bare hex, excluding hex used inside rgba(/hsl( function arguments. */
 const HEX_OUTSIDE_FN = /#[0-9a-fA-F]{3,8}\b/g;
 /** rgba(/hsl( argument spans stripped before the hex rule runs. */
@@ -134,8 +137,12 @@ const COLOUR_RULES: GuardRule[] = [
   { label: "palette-utility", re: PALETTE_UTILITY },
 ];
 
-/** The page layer owns no geometry of its own either — see ARBITRARY_GEOMETRY. */
-const PAGE_RULES: GuardRule[] = [{ label: "arbitrary-value", re: ARBITRARY_GEOMETRY }, ...COLOUR_RULES];
+/** The page layer owns no geometry of its own either — see ARBITRARY_GEOMETRY.
+ * Exception: the two DOCUMENTED_MEASURE page widths DESIGN.md declares. */
+const PAGE_RULES: GuardRule[] = [
+  { label: "arbitrary-value", re: ARBITRARY_GEOMETRY, strip: DOCUMENTED_MEASURE },
+  ...COLOUR_RULES,
+];
 
 /** A primitive answers the colour vocabulary (its geometry is its own job). */
 const PRIMITIVES_RULES = COLOUR_RULES;
@@ -271,6 +278,9 @@ describe("visual discipline guard", () => {
     expect(
       matched(`<div className="bg-(--gray-200) text-(--gray-700) border-(--gray-400)" />`),
     ).toEqual([]);
+    // must NOT match; the two DESIGN.md Spacing & Layout page measures are the
+    // documented arbitrary pair (Layout.tsx content column), not hand-rolled geometry
+    expect(matched(`<div className={\`mx-auto w-full \${wide ? "max-w-[1200px]" : "max-w-[960px]"}\`} />`)).toEqual([]);
     expect(matched(`<div className="text-(--brand-700) brand-700" />`)).toEqual([]); // brand is not a default palette name
     // must NOT match; the rgba(/hsl( stripper is load-bearing here — #223 is a valid 3-digit hex
     expect(matched(`style={{ color: "rgba(255,255,255,0.5)", borderColor: "hsl(#223 3% 4%)" }}`)).toEqual([]);
