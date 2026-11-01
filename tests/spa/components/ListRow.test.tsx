@@ -71,7 +71,10 @@ describe("ListRow", () => {
     const identity = between('data-slot="list-row-identity"', 'data-slot="list-row-status"');
     expect(identity).toContain("sk-proj-…4f2a");
     expect(identity).toContain("font-mono");
-    expect(identity).toContain("min-w-[76px]");
+    // The identity column keeps its 76px floor on the legal scale spelling:
+    // `min-w-[76px]` is a bracket arbitrary value the extended guard rejects,
+    // and 19 × the 0.25rem spacing step is the same 76px.
+    expect(identity).toContain("min-w-19");
   });
 
   test("meta renders the caller's line in its own slot", () => {
