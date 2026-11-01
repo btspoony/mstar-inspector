@@ -202,13 +202,14 @@ describe("AppsPage table reinforcement (AD-581)", () => {
   });
 
   test("identity cell avatar: github_avatar_url renders a rounded img; the name falls back github_name → slug → App id", () => {
-    // The synced face: the App's own logo (bot avatar), decorative alt.
+    // The synced face: the App's own logo (bot avatar), decorative alt, in the
+    // row's avatar box. The ring COLOUR is the hairline rule's business
+    // (tests/design-system/surface-idioms.test.ts), so this pins the geometry.
     const withAvatar = renderList([
       appRow({ github_avatar_url: appAvatarUrl(1234), github_name: "Demo" }),
     ]);
-    expect(withAvatar).toContain(
-      `<img src="${appAvatarUrl(1234)}" alt="" class="h-9 w-9 shrink-0 rounded-full border object-cover"`,
-    );
+    expect(withAvatar).toContain(`<img src="${appAvatarUrl(1234)}" alt=""`);
+    expect(withAvatar).toMatch(/<img [^>]*class="[^"]*h-9 w-9[^"]*rounded-full[^"]*object-cover[^"]*"/);
     expect(withAvatar).toContain(">Demo</a>");
     expect(withAvatar).toContain('aria-label="Open Demo detail"');
     // Fallback chain: no name → the slug; neither → the numeric App id.
@@ -269,7 +270,7 @@ describe("AppsPage table reinforcement (AD-581)", () => {
     expect(emitted).not.toContain("rounded-full");
     const withAvatar = renderList([appRow({ github_avatar_url: "https://x.test/a.png" })]);
     expect(withAvatar.replace(/<img[^>]*>/g, "")).not.toContain("rounded-full");
-    expect(withAvatar).toContain("rounded-full border object-cover");
+    expect(withAvatar).toMatch(/<img [^>]*class="[^"]*rounded-full[^"]*object-cover[^"]*"/);
     expect(emitted).not.toMatch(/\bh-5\b/);
   });
 

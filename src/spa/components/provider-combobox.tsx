@@ -303,7 +303,7 @@ export function ProviderCombobox({
         // Height cap mirrors the old SelectContent max-h-72:
         // an internal scroll keeps the 214-entry breadth usable.
         <div className="relative">
-          <div className="absolute z-50 mt-1 max-h-72 w-full overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-(--shadow-pop)">
+          <div className="absolute z-50 mt-1 max-h-72 w-full overflow-y-auto rounded-md border border-(--border-default) bg-popover p-1 text-popover-foreground shadow-(--shadow-pop)">
             <ProviderComboboxPanel
               locale={locale}
               providers={providers}

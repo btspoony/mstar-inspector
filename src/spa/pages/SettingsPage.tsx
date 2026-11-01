@@ -641,7 +641,7 @@ export function AppInfoSection({
         <AppAvatar
           src={app.github_avatar_url}
           appId={app.github_app_id}
-          className="h-12 w-12 shrink-0 rounded-full border object-cover"
+          className="h-12 w-12 shrink-0 rounded-full border border-(--border-default) object-cover"
         />
         <div className="flex min-w-0 flex-col gap-1">
           {app.github_name ? (
