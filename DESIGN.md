@@ -76,7 +76,7 @@ colors:
   chart-2: "#16a34a"
   chart-3: "#d97706"
   chart-4: "#dc2626"
-  chart-5: "#2563a8"
+  chart-5: "#2d6bb0"
   chart-6: "#9333ea"
   chart-1-mark: "#22d3ee"
   chart-2-mark: "#4ade80"
@@ -162,7 +162,7 @@ themes:
       chart-2: "#16a34a"
       chart-3: "#d97706"
       chart-4: "#dc2626"
-      chart-5: "#2563a8"
+      chart-5: "#2d6bb0"
       chart-6: "#9333ea"
       chart-1-mark: "#22d3ee"
       chart-2-mark: "#4ade80"
@@ -589,7 +589,7 @@ survivors; survivors decide the palette:
 | Tone border | the family 300–400 band |
 | Tone foreground | family 700 in dark; 700–800 in light where 700 fails 4.5:1 on the tone background — `green-800` is the one survivor kept for exactly this pair |
 | Tone solid | family 700; light may take the 600 step (`amber-600`) |
-| Chart slot | a closed pair: fill = the approved quiet 600-step value (theme-fixed literal; only `chart-1` follows the theme through `brand-600`), mark = the family 700 step |
+| Chart slot | a closed pair: fill = the approved quiet 600-step value (theme-fixed literal; `chart-1` follows the theme through `brand-600`, and dark `chart-5` is lifted to clear the 3:1 non-text bar on the dark raised planes), mark = the family 700 step |
 
 **Survivors (26):** `background-100/200/300`; `gray-200/600/700/900/1000`;
 `gray-alpha-400/500`; `brand-600/700`; `blue-700`; `red-100/400/700`;
@@ -724,6 +724,16 @@ The fills are literals by the composition rule — a later change to those
 steps must not move a chart slot, and a chart retune must not re-point the
 palette.
 
+The second theme split is a contrast fix, not a design retune: dark `chart-5`
+is `#2d6bb0`, not the shared `#2563a8`, because the shared value measured
+2.900:1 on `surface-card` and 2.696:1 on `surface-inset` — below the 3:1
+non-text bar on two of the three dark surfaces while clearing it on the page
+canvas (3.196:1). The lift keeps the blue hue and measures 3.580:1 on page,
+3.249:1 on card and 3.020:1 on inset; light keeps `#2563a8` (6.125:1 on its
+page white). The gate's `fills → surfaces` link measures every fill on the
+page canvas and every dark fill on the raised planes, so a retune that erodes
+a margin fails the gate instead of passing silently.
+
 ## The ops surface variant (D15)
 
 "Plainer" for the operator console is one re-map, not a second system:
@@ -777,8 +787,9 @@ that differ by more than value:
   `amber-600` only).
 - **`surface-card` is the page white**: with no surface step to separate it,
   a card in light is drawn by its hairline alone.
-- **Charts**: only `chart-1` follows the theme; every other fill is the same
-  literal in both themes (see the collision note above).
+- **Charts**: `chart-1` follows the theme through `brand-600`, and dark
+  `chart-5` is lifted to clear the non-text bar on the raised planes; every
+  other fill is the same literal in both themes (see the chart split above).
 
 ## Typography
 
