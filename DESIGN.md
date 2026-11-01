@@ -552,11 +552,16 @@ cleanup (compass D6; the sidebar is D5).
   omits providers and seats.
 - **Sidebar** — three flat items (Apps, Members, Settings) in one group, no
   group headings, and the shell model carries no group field. The baseline §7
-  sidebar is a pattern specimen, not the nav contract: its items (model
-  providers, workspace settings, help and tickets) are not this product's
-  destinations, and headings over three items would invent a support
-  destination and a Settings group whose only child is Settings. The operator
-  console entry sits in the footer, outside the item list.
+  sidebar is a pattern specimen with five links under three headings: 工作区
+  (应用, 成员), 设置 (模型提供方, 工作区设置), 支持 (帮助与工单). Three of
+  them are destinations here — 应用 and 成员 are the first two items, and
+  工作区设置 is the third, reached as Settings. The other two are not nav
+  destinations: model providers are a section inside an App's settings tab,
+  and help & tickets has no face at all (the only "support" surface is the
+  platform operator's read-only grant view). Headings over the three shipped
+  items would leave Settings alone under 设置 and give 支持 no child, so the
+  list stays flat. The operator console entry sits in the footer, outside the
+  item list.
 - **Empty face** — the Apps empty state owns the one create action, and the
   header yields its action slot while the list is empty, so the page never
   renders two submits. The action is present where the guidance is; a second
