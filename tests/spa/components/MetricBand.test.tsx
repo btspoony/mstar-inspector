@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MetricBand, type Metric } from "../../../src/spa/components/MetricBand";
-import { DANGER_FG, slotTags, textColourOf } from "../../helpers/token-colour";
+import { dangerFg, slotTags, textColourOf } from "../../helpers/token-colour";
 
 const render = (metrics: readonly Metric[]) =>
   renderToStaticMarkup(createElement(MetricBand, { metrics }));
@@ -62,11 +62,11 @@ describe("MetricBand tone channel (compass D4)", () => {
   test("a caller-supplied danger tone paints the value face in the alert colour", () => {
     const html = render([{ key: "24h rejected", value: 2, tone: "danger" }]);
     const [value = ""] = slotTags(html, "metric-value");
-    expect(textColourOf(value)).toBe(DANGER_FG);
+    expect(textColourOf(value, "light")).toBe(dangerFg("light"));
     // The key stays the quiet label (`text-faint`); the alert belongs to the
     // figure alone.
     const [key = ""] = slotTags(html, "metric-key");
-    expect(textColourOf(key)).not.toBe(DANGER_FG);
+    expect(textColourOf(key, "light")).not.toBe(dangerFg("light"));
   });
 
   test("a neutral entry renders the markup it always did — the field is additive", () => {
@@ -85,7 +85,7 @@ describe("MetricBand tone channel (compass D4)", () => {
     ];
     expect(render(viaChannel)).toBe(render(toneFree));
     for (const face of slotTags(render(viaChannel), "metric-value")) {
-      expect(textColourOf(face)).toBeNull();
+      expect(textColourOf(face, "light")).toBeNull();
     }
   });
 
@@ -93,7 +93,7 @@ describe("MetricBand tone channel (compass D4)", () => {
     // Danger is the caller's statement about what a number MEANS. The band
     // cannot know that a big figure is a bad one, so it never guesses.
     for (const face of slotTags(render([{ key: "24h rejected", value: 4321 }]), "metric-value")) {
-      expect(textColourOf(face)).toBeNull();
+      expect(textColourOf(face, "light")).toBeNull();
     }
   });
 });

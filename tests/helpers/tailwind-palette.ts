@@ -99,6 +99,6 @@ export const PALETTE_UTILITY_SOURCE =
   `|(?<![\\w-])${COLOUR_AXIS}-(?:${FAMILIES.join("|")})-\\d{2,3}(?![\\w-])` +
   // `black`/`white` are colours in the same series, so every prefix above takes
   // them — `shadow-black`, `caret-white`, `scrollbar-thumb-black` included, not
-  // the nine-prefix subset this clause used to carry. `border-{side}` joins the
-  // same clause: `border-t-black`.
-  `|(?<![\\w-])(?:${COLOUR_UTILITIES.join("|")}|border-[trblsexy])-(?:black|white)(?![\\w-])`;
+  // the nine-prefix subset this clause used to carry. The side/span axis joins
+  // the same clause through `COLOUR_AXIS`: `border-t-black`, `divide-x-black`.
+  `|(?<![\\w-])(?:${COLOUR_UTILITIES.join("|")}|${COLOUR_AXIS})-(?:black|white)(?![\\w-])`;

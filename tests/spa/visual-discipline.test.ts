@@ -258,6 +258,10 @@ describe("visual discipline guard", () => {
     expect(matched(`<div className="scrollbar-thumb-black" />`)).toEqual(["scrollbar-thumb-black"]);
     expect(matched(`<div className="scrollbar-track-white" />`)).toEqual(["scrollbar-track-white"]);
     expect(matched(`<div className="ring-offset-white" />`)).toEqual(["ring-offset-white"]);
+    // The side/span axis applies to black/white too: `divide-x-black` and
+    // `divide-y-white` matched neither clause while painting a palette step.
+    expect(matched(`<div className="divide-x-black" />`)).toEqual(["divide-x-black"]);
+    expect(matched(`<div className="divide-y-white" />`)).toEqual(["divide-y-white"]);
     // The nine the clause already carried stay caught; size and shadow-scale
     // utilities do not become false positives.
     expect(matched(`<div className="bg-black text-white border-black" />`)).toEqual([

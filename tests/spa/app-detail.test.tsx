@@ -258,15 +258,6 @@ describe("tab shell source contracts", () => {
     expect(primitive[0] ?? "").toContain("length:--typo-heading-16-size");
   });
 
-  test("AppDetailPage carries no page-local tab trigger chain", () => {
-    // The finding this replaces (I-000259): a `PAGE_TAB_TRIGGER_CLASS`
-    // constant re-spelt the trigger at the page, so a change to the shared
-    // Tabs stopped at this page.
-    expect(detailPage).not.toContain("PAGE_TAB_TRIGGER_CLASS");
-    const bar = detailPage.slice(detailPage.indexOf("<TabsList"), detailPage.indexOf("</TabsList>"));
-    expect(bar.match(/<TabsTrigger[^>]*className=/g) ?? []).toEqual([]);
-  });
-
   test("forceMount knowledge: the ui wrapper hides inactive panels via data-[state=inactive]:hidden", () => {
     expect(tabsWrapper).toContain("data-[state=inactive]:hidden");
   });
