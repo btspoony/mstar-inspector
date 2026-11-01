@@ -253,10 +253,10 @@ describe("token layer boundary", () => {
  * colour answer for the same face — the 2026-11-01 migration removed
  * twenty-one utilities that had drifted that way. The rule lives in
  * `.mstar/knowledge/best-practices/tailwind-dark-variant-vs-data-theme.md`
- * (its `dark:` mechanism note predates the binding and is stale); this is the
- * repo-wide guard it asks for, so a `dark:` cannot re-enter one primitive,
- * pattern or page at a time. The module is walked too: the copy-in primitives
- * are where class strings actually live.
+ * (it states the post-binding mechanism, the attribute-absence trap, and why
+ * the ban survives); this is the repo-wide guard it asks for, so a `dark:`
+ * cannot re-enter one primitive, pattern or page at a time. The module is
+ * walked too: the copy-in primitives are where class strings actually live.
  *
  * The binding is not dead code under this ban: it defends this scan's own
  * blind spot below — a runtime-composed class name, and a copy-in upstream
