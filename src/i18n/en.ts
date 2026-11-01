@@ -397,6 +397,8 @@ export const en = {
     installationsAccount: "Account",
     installationsId: "Installation ID",
     installationsLastSync: "Last sync",
+    /** Metric-band label for the provider-key count on the App detail face. */
+    metricKeys: "Keys",
     noInstallations: "No installations yet.",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy: "The last 5 webhook deliveries for this App — newest first.",

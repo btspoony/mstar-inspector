@@ -338,6 +338,8 @@ export const zhCN: Dictionary = {
     installationsAccount: "账号",
     installationsId: "安装 ID",
     installationsLastSync: "最近同步",
+    /** App 详情页指标带中 provider 密钥数的标签。 */
+    metricKeys: "密钥",
     noInstallations: "还没有安装。",
     recentDeliveries: "最近投递",
     recentDeliveriesCopy: "此 App 最近 5 次 webhook 投递 — 最新的在前。",
