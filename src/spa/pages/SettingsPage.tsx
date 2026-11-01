@@ -1459,7 +1459,7 @@ function SeatsSection({
         }}
       >
         {payload.model_role_ids.map((role) => (
-          <label key={role} className="flex flex-col gap-1.5 text-sm font-medium">
+          <label key={role} className="flex w-fit flex-col gap-1.5 text-sm font-medium">
             {role} — {roleHint(role)}
             <Select
               value={seatSelectValue(tabs, seats[role])}
@@ -1610,10 +1610,10 @@ function ChainEditor({
   onSave: (chain: string) => Promise<OpNotice>;
   saveLabel?: string;
   /**
-   * (AD-552): caller actions rendered in the save row, right of the
+   * (AD-552): caller actions rendered in the control row, right of the
    * save button (pure render insertion — save semantics, the busy gate and
-   * the outcome region are untouched). Absent, the save button renders bare:
-   * byte-equivalent to the pre-actions tree (Default / named-chain editors).
+   * the outcome region are untouched). Absent, the row carries the picker,
+   * the add button and the save button only (Default / named-chain editors).
    */
   actions?: ReactNode;
 }) {
@@ -1680,9 +1680,13 @@ function ChainEditor({
           ))}
         </ul>
       )}
-      <div className="flex flex-wrap items-end gap-2">
-        <div className="flex min-w-64 flex-1 flex-col gap-1.5">
-          <span className="text-sm font-medium">{t(locale, "settings.modelChainField")}</span>
+      {/* One control row (the RuntimeHarnessEditor shape): the picker keeps
+          its content-adaptive shell — no reserved slot — and the add, save and
+          caller actions sit beside it at their intrinsic widths, wrapping
+          below cleanly on narrow screens. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">{t(locale, "settings.modelChainField")}</span>
+        <div className="w-fit max-w-xs">
           <Select value={pick} onValueChange={setPick}>
             <SelectTrigger aria-label={t(locale, "settings.modelChainField")}>
               <SelectValue placeholder={t(locale, "settings.pickModel")} />
@@ -1714,15 +1718,9 @@ function ChainEditor({
         >
           {t(locale, "settings.addToChain")}
         </Button>
+        {saveButton}
+        {actions}
       </div>
-      {actions ? (
-        <div className="flex items-center gap-2">
-          {saveButton}
-          {actions}
-        </div>
-      ) : (
-        saveButton
-      )}
       <NoticeRegion notice={notice} />
     </div>
   );

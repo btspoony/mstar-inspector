@@ -1186,12 +1186,12 @@ describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
 describe("discard inline with the save row (A4/A5 / AD-552)", () => {
   /**
    * The discard is a pure render insertion through ChainEditor's optional
-   * actions prop: the save-row wrapper exists only when actions are passed
-   * (absent = byte-equivalent tree for the Default / named-chain editors,
-   * whose pins elsewhere stay untouched), and the injected button keeps its
-   * disabled={busy} bound to DraftChainPanel's own busy closure. Structure
-   * is pinned over the source; the visible styling over SSR of the exported
-   * DraftChainPanel. createElement keeps this .ts file JSX-free.
+   * actions prop: every panel renders ONE control row (picker, add, save,
+   * then the caller's actions), so the save keeps its intrinsic width instead
+   * of stretching to the stack's full width, and the draft panel stops being
+   * the odd one out. The injected button keeps its disabled={busy} bound to
+   * DraftChainPanel's own busy closure. Pinned over SSR of the exported
+   * DraftChainPanel — createElement keeps this .ts file JSX-free.
    */
   const noop = () => {};
   const panelHtml = (): string =>
@@ -1208,55 +1208,55 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
       }),
     );
 
-  test("the save row renders save primary with actions right of it, only when actions exist", () => {
-    const source = readSettingsSource();
-    const editorBody = source.slice(source.indexOf("function ChainEditor"));
-    // Conditional wrapper: with no actions the save button renders bare —
-    // the AD-552 byte-equivalence guard for every other caller.
-    expect(editorBody).toContain("{actions ? (");
-    // Inside the row: save first (primary/leftmost), the actions node right
-    // after it.
-    const rowPos = editorBody.indexOf('<div className="flex items-center gap-2">');
-    const savePos = editorBody.indexOf("{saveButton}");
-    const actionsPos = editorBody.indexOf("{actions}");
-    expect(rowPos).toBeGreaterThan(-1);
-    expect(savePos).toBeGreaterThan(rowPos);
-    expect(actionsPos).toBeGreaterThan(savePos);
-    // DraftChainPanel is the injecting caller; the Default editor's call
-    // stays bare (named-tab editors pass no actions either — the conditional
-    // above already renders them byte-equivalent).
-    const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
-    const firstEditorPos = chainsBody.indexOf("<ChainEditor");
-    const defaultCall = chainsBody.slice(firstEditorPos, chainsBody.indexOf("/>", firstEditorPos));
-    expect(defaultCall).not.toContain("actions={");
-    const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
-    expect(panelBody).toContain("actions={");
-    // Scoped count (qc F1): `actions={` occurs exactly once in the draft
-    // panel — its discard injection. The Default AND named-chain ChainEditor
-    // callers both stay bare (the conditional above renders them
-    // byte-equivalent); a second actions-passing ChainEditor caller fails this
-    // count. (The providers group card's own `actions` slots belong to other
-    // components and are outside this slice.)
-    expect(panelBody.match(/actions=\{/g)?.length).toBe(1);
+  test("one control row carries the picker, add, save and the caller's actions", () => {
+    const html = panelHtml();
+    // A single control row. Before this, the save button was a bare child of
+    // the editor's stack (align-items: stretch made it full-bleed) while the
+    // draft panel's discard opened a second row — the same primitive giving
+    // two answers. The row marker is the structural half of "one row"; the
+    // order below is what a reader actually sees.
+    expect(html.split('class="flex flex-wrap items-center gap-2"').length - 1).toBe(1);
+    const positions: Array<[string, number]> = [
+      ["picker", html.indexOf('data-slot="select-trigger"')],
+      ["add", html.indexOf(`>${t("en", "settings.addToChain")}<`)],
+      ["save", html.indexOf(`>${t("en", "settings.saveChain")}<`)],
+      ["discard", html.indexOf(`>${t("en", "settings.discardChain")}<`)],
+    ];
+    positions.forEach(([name, at], index) => {
+      const previous = index === 0 ? -1 : positions[index - 1]![1];
+      expect(at, name).toBeGreaterThan(previous);
+    });
   });
 
-  test("the discard is visibly styled without hover and sits in the save row (SSR)", () => {
+  test("the discard is visibly styled without hover and carries no confirmation", () => {
     const html = panelHtml();
     // Outline + sm + the fixed width land on the real button; the label is
     // the untouched discardChain key. No confirmation dialog anywhere.
     expect(html).toContain('data-variant="outline"');
     expect(html).toContain('data-size="sm"');
     expect(html).toContain("w-20");
-    expect(html).toContain(">Discard</button>");
     expect(html).not.toContain("dialog");
-    // Same row: the flex container wraps both buttons — the save (primary,
-    // default variant) opens the row, the outline discard follows it.
-    const rowPos = html.indexOf("flex items-center gap-2");
-    const savePos = html.indexOf('data-variant="default"');
-    const discardPos = html.indexOf('data-variant="outline"');
-    expect(rowPos).toBeGreaterThan(-1);
-    expect(savePos).toBeGreaterThan(rowPos);
-    expect(discardPos).toBeGreaterThan(savePos);
+  });
+
+  test("only the draft panel injects a discard; the stored-chain editors carry none", () => {
+    // The Default tab's editor renders on the manage face; the draft panel
+    // renders only after 新建链 opens it, so its discard is absent until then.
+    const manage = withLocation("/dashboard/apps/1", () =>
+      renderToStaticMarkup(
+        createElement(AppDetailView, {
+          locale: "en",
+          appId: "1",
+          payload: detailPayload(),
+          groups: [],
+          notice: null,
+          search: { tab: "settings", window: "30", repo: "" },
+          onReload: async () => true,
+          onSearch: () => {},
+        }),
+      ),
+    );
+    expect(manage).toContain(t("en", "settings.saveChain"));
+    expect(manage).not.toContain(t("en", "settings.discardChain"));
   });
 });
 
