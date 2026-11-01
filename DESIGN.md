@@ -530,6 +530,14 @@ preference. A manual **navbar theme toggle** stores `light` | `dark` in
 `documentElement.dataset.theme` before first paint; the stored choice wins.
 Supersedes the earlier theme lock (2026-09-04, user instruction).
 
+Tailwind's `dark:` variant is bound to that same condition: `@custom-variant
+dark` in `src/spa/styles/shadcn-theme.css` keys on
+`:root:not([data-theme="light"])` — dark is the attribute's *absence*, so the
+never-toggled visitor is covered. The authored-source ban stands (the cascade
+is the one theme mechanism); the binding only makes the spellings a text scan
+cannot see — a runtime-composed class name, a copy-in upstream component —
+follow the stored theme instead of the OS.
+
 Dual-theme values live in this file under `themes.dark` / `themes.light`
 (same token **names**, different values). Top-level `colors:` equals
 `themes.dark.colors` so `{colors.X}` component refs resolve to the runtime
@@ -568,10 +576,15 @@ import specifier** for TypeScript files under `src/` outside `src/design-system/
 (`@design-system` only); the **token layer** — no consumer file (`.ts`, `.tsx`,
 `.css`, `.html`) may name a palette step, with the generated stylesheet as the
 single declaration site; and the **theme mechanism** — no file under `src/`,
-the module included, may write a `dark:` variant, because the theme is the
-`data-theme` attribute and Tailwind's `dark:` follows the OS preference
-instead. The first two read source text, so a stylesheet, an HTML shell and an
-inline `style` attribute are all in scope. The palette is
+the module included, may author a `dark:` utility, because the token cascade is
+the single sanctioned way to paint a theme face and an authored split bypasses
+it (twenty-one utilities had drifted that way by 2026-11-01). Tailwind's
+`dark:` is bound with `@custom-variant` to the cascade's own root condition —
+`:root:not([data-theme="light"])`, since dark is the attribute's *absence* — so
+a `dark:` the text scan cannot see (a runtime-composed class name, a copy-in
+upstream component) follows the stored theme rather than the OS. The first two
+read source text, so a stylesheet, an HTML shell and an inline `style`
+attribute are all in scope. The palette is
 therefore droppable: the D14 reduction deleted 62 of the 96 steps the old
 stylesheet declared without touching a component face.
 
@@ -1135,11 +1148,15 @@ those rendered faces, not on a neighbouring token:
 | `destructive-foreground` on the derived hover face | 6.58 | 5.86 | passes both themes |
 
 The variant previously painted `text-white` (2.77:1 on dark's `#f87171`) and
-carried a `dark:` fill split: Tailwind v4 resolves `dark:` from
-`prefers-color-scheme`, which this document's theme contract never consults, so
-the split could only fire on an OS-dark machine running the light face.
-`tests/spa/tokens.test.ts` reads the label class out of the component and
-measures that class, so a raw colour fails the test instead of passing it.
+carried a `dark:` fill split, which at the time resolved from
+`prefers-color-scheme` — a mechanism this document's theme contract never
+consults, so the split could only fire on an OS-dark machine running the light
+face. The split stays removed even though `dark:` is now bound to
+`:root:not([data-theme="light"])`: the token cascade is still the one
+sanctioned theme mechanism, and a split would be a second colour answer for
+the same face. `tests/spa/tokens.test.ts` reads the label class out of the
+component and measures that class, so a raw colour fails the test instead of
+passing it.
 
 ### Tone fg pairs (the soft strength — the reading face)
 

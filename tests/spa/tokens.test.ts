@@ -619,7 +619,10 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const labelClass = /(?:^|\s)text-([a-z][a-z0-9-]*)(?=\s|$)/.exec(destructiveVariant)?.[1];
     expect(fillClass, "destructive variant must paint a token fill").toBeDefined();
     expect(labelClass, "destructive variant must paint a token label").toBeDefined();
-    expect(destructiveVariant, "no `dark:` split — Tailwind's dark: is prefers-color-scheme, this app's theme is data-theme").not.toContain("dark:");
+    expect(
+      destructiveVariant,
+      "no authored `dark:` split — the token cascade is the one theme mechanism; the variant would follow data-theme but still bypass the tokens",
+    ).not.toContain("dark:");
 
     // The derived face lives in the @supports block; the plain solid in `:root`
     // is its fallback.

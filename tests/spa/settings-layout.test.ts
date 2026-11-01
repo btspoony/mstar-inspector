@@ -1380,8 +1380,9 @@ describe("operational action hierarchy", () => {
     // The variant's border, label and hover tint resolve through the
     // destructive token family; `tests/design-system/tokens.test.ts` owns that
     // bridge contract and fails a raw colour that has no bridge key. Here the
-    // branch rules are pinned: no `dark:` split (it would fire on the OS
-    // preference, not the app's data-theme) and no literal colour.
+    // branch rules are pinned: no authored `dark:` split (the cascade is the
+    // one theme mechanism — a split would bypass the tokens) and no literal
+    // colour.
     const variantBlock = source.slice(source.indexOf('"destructive-outline":'), source.indexOf("secondary:"));
     expect(variantBlock).not.toContain("dark:");
     expect(variantBlock).not.toContain("#");
