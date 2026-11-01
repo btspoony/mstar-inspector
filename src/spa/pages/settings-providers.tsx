@@ -293,7 +293,7 @@ function ProviderGroupCard({
           </ListRowGroup>
         )}
         {meta ? (
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+          <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-(--border-subtle) pt-3 text-xs text-muted-foreground">
             <span className="font-mono">{meta.api}</span>
             <span aria-hidden="true">·</span>
             <span className="font-mono">{meta.baseUrl}</span>
@@ -321,7 +321,7 @@ function ProviderGroupCard({
         {meta && modelsOpen ? (
           <ul
             id={modelsId}
-            className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 font-mono text-xs text-muted-foreground"
+            className="mt-2 flex flex-wrap gap-x-3 gap-y-1 rounded-(--radius-control) border border-(--border-subtle) bg-(--surface-page) px-3 py-2 font-mono text-xs text-muted-foreground"
           >
             {meta.modelIds.map((modelId) => (
               <li key={modelId}>{modelId}</li>
