@@ -1485,6 +1485,14 @@ describe("ops danger zone: one row per action", () => {
         // because the control's parent must be the element that states this
         // row's own effect — the same shape the chain row above is read with.
         for (const row of rows) {
+          const label = t(locale, row.control);
+          // Every action label appears exactly once: a duplicated control —
+          // even one rendered after its row, or inside it — fails the contract
+          // "each row carries its own control".
+          expect(
+            [...doc.querySelectorAll("button")].filter((node) => node.textContent === label).length,
+            `${locale} ${row.control} count`,
+          ).toBe(1);
           const control = button(row.control);
           expect(control, `${locale} ${row.control}`).not.toBeNull();
           const rowEl = control!.parentElement!;
