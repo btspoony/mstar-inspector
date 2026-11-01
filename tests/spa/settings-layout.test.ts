@@ -1233,13 +1233,23 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
       expect(discard).not.toBeNull();
 
       const editor = doc.body.firstElementChild!;
+      const pickerSlot = picker!.parentElement!;
       const row = add!.parentElement!;
-      // One container for all four, and it is the control row rather than the
-      // editor's stack (a second row would move the common parent up to the
-      // stack, which also holds the name field).
+      const controls: DomElement[] = [pickerSlot, add!, save!, discard!];
+      // The row is the container that holds the four controls DIRECTLY and
+      // nothing else but their field label — the button primitive renders the
+      // native button, so a control's parentElement is the flex row itself.
+      // The editor's stack holds the model list, the empty-chain text and the
+      // outcome region as well, so a save left bare in that stack (the
+      // full-bleed defect) fails the parent and the leftover checks below.
       expect(row).not.toBe(editor);
       expect(editor.contains(row)).toBe(true);
-      for (const control of [picker!, save!, discard!]) expect(row.contains(control)).toBe(true);
+      for (const control of controls) expect(control.parentElement).toBe(row);
+      expect(
+        [...row.children]
+          .filter((child) => !controls.includes(child as DomElement))
+          .map((child) => child.textContent),
+      ).toEqual([t("en", "settings.modelChainField")]);
 
       // Reading order inside that row: picker, add, save, caller's actions.
       const inOrder = [...row.querySelectorAll("*")];

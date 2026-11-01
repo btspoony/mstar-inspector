@@ -421,7 +421,7 @@ export const zhCN: Dictionary = {
     opsReviewsTitle: "审查投递",
     opsReviewsCopy: "暂停期间，每次投递都以 2xx 应答并被忽略 — 不会进行任何审查；恢复后此 App 重新开始审查。",
     opsDeliveryTitle: "投递应答",
-    opsDeliveryCopy: "停用后，每次投递都以 404 应答，因此不会进行任何审查；重新启用后此 App 恢复正常的投递应答。",
+    opsDeliveryCopy: "停用后，每次投递都以 404 应答，因此不会进行任何审查；重新启用后此 App 重新开始审查。",
     opsDeleteTitle: "删除此 App",
     opsDeleteCopy: "软删除 — App 从此列表移除，其所有安装都会被关闭。",
     // 评审触发模式（spec review-trigger-policy §2/§3）：分段标签本地化；
