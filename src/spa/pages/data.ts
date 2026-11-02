@@ -709,45 +709,235 @@ export function appInsightsSummaryUrl(
   return `${base}/api/apps/${encodeURIComponent(appId)}/insights/summary?${params.toString()}`;
 }
 
-/** The App detail page's two tabs (应用设置 / 洞察). Insights is manager-only. */
-export type AppDetailTab = "settings" | "insights";
+/**
+ * The per-App pull-request ledger (the Pull requests tab). One row per PR
+ * the App received — the list face and the detail's `pull_request` share
+ * this exact shape.
+ */
+export type PullRequestState = "open" | "closed" | "merged";
 
-/** URL-derived detail state: the active tab plus the insights filters. */
-export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string };
+export type PullRequestRow = {
+  number: number;
+  owner: string;
+  repo: string;
+  title: string;
+  state: PullRequestState;
+  head_sha: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  latest_review: { verdict: string; reviewed_at: string } | null;
+  failure_count: number;
+};
+
+export type PullRequestReview = {
+  verdict: string;
+  summary_md: string;
+  model: string;
+  provider: string;
+  reviewed_at: string;
+  head_sha: string;
+};
+
+/** One review-failure log row — the diagnostic payload this tab exists for. */
+export type PullRequestFailure = { stage: string; error: string; created_at: string };
+
+export type PullRequestFinding = {
+  finding_id: string;
+  severity: string;
+  title: string;
+  file_path: string;
+  /** `null` on file-level findings with no line anchor. */
+  line: number | null;
+  body: string;
+};
+
+/** The PR detail payload (`GET …/pull-requests/:owner/:repo/:number`). */
+export type PullRequestDetail = {
+  pull_request: PullRequestRow;
+  reviews: PullRequestReview[];
+  failures: PullRequestFailure[];
+  findings: PullRequestFinding[];
+};
+
+/**
+ * The detail address: one App can be installed on several repos, so the
+ * same number exists in more than one and owner/repo ride with it (the
+ * number-only path was retired for exactly that ambiguity).
+ */
+export type PullRequestRef = { owner: string; repo: string; number: number };
+
+function isPullRequestRow(value: unknown): value is PullRequestRow {
+  if (!isRecord(value)) return false;
+  if (typeof value.number !== "number" || typeof value.failure_count !== "number") return false;
+  if (
+    typeof value.owner !== "string" ||
+    typeof value.repo !== "string" ||
+    typeof value.title !== "string" ||
+    typeof value.head_sha !== "string" ||
+    typeof value.first_seen_at !== "string" ||
+    typeof value.last_seen_at !== "string"
+  ) {
+    return false;
+  }
+  if (value.state !== "open" && value.state !== "closed" && value.state !== "merged") return false;
+  if (value.latest_review !== null) {
+    if (!isRecord(value.latest_review)) return false;
+    if (
+      typeof value.latest_review.verdict !== "string" ||
+      typeof value.latest_review.reviewed_at !== "string"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isPullRequestReview(value: unknown): value is PullRequestReview {
+  return (
+    isRecord(value) &&
+    typeof value.verdict === "string" &&
+    typeof value.summary_md === "string" &&
+    typeof value.model === "string" &&
+    typeof value.provider === "string" &&
+    typeof value.reviewed_at === "string" &&
+    typeof value.head_sha === "string"
+  );
+}
+
+function isPullRequestFailure(value: unknown): value is PullRequestFailure {
+  return (
+    isRecord(value) &&
+    typeof value.stage === "string" &&
+    typeof value.error === "string" &&
+    typeof value.created_at === "string"
+  );
+}
+
+function isPullRequestFinding(value: unknown): value is PullRequestFinding {
+  return (
+    isRecord(value) &&
+    typeof value.finding_id === "string" &&
+    typeof value.severity === "string" &&
+    typeof value.title === "string" &&
+    typeof value.file_path === "string" &&
+    (typeof value.line === "number" || value.line === null) &&
+    typeof value.body === "string"
+  );
+}
+
+/** The list payload: `{ pull_requests: [...] }`, every row validated. */
+export function parsePullRequestList(data: unknown): PullRequestRow[] | null {
+  if (!isRecord(data) || !Array.isArray(data.pull_requests)) return null;
+  if (!data.pull_requests.every(isPullRequestRow)) return null;
+  return data.pull_requests;
+}
+
+/** The detail payload: row + reviews + failures + findings, each validated. */
+export function parsePullRequestDetail(data: unknown): PullRequestDetail | null {
+  if (!isRecord(data)) return null;
+  if (!isPullRequestRow(data.pull_request)) return null;
+  if (!Array.isArray(data.reviews) || !data.reviews.every(isPullRequestReview)) return null;
+  if (!Array.isArray(data.failures) || !data.failures.every(isPullRequestFailure)) return null;
+  if (!Array.isArray(data.findings) || !data.findings.every(isPullRequestFinding)) return null;
+  return {
+    pull_request: data.pull_request,
+    reviews: data.reviews,
+    failures: data.failures,
+    findings: data.findings,
+  };
+}
+
+export function appPullRequestsUrl(base: string, appId: string): string {
+  return `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests`;
+}
+
+/**
+ * The detail read URL, built from the ROW's owner/repo/number — never the
+ * number alone. The segments are GitHub-name-bounded (`owner/repo` match
+ * `[A-Za-z0-9_.-]` and `number` is validated decimal digits at the parse
+ * site), so they ride raw into the path; only appId gets the idiom's
+ * `encodeURIComponent`.
+ */
+export function appPullRequestDetailUrl(base: string, appId: string, ref: PullRequestRef): string {
+  return `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests/${ref.owner}/${ref.repo}/${ref.number}`;
+}
+
+/**
+ * The PR state pill's copy + tone, derived once for the list and the
+ * detail face. The state vocabulary is the API contract's closed set; the
+ * face itself belongs to `StatusBadge` in `@design-system`.
+ */
+export function pullRequestStatePill(
+  locale: Locale,
+  state: PullRequestState,
+): { label: string; tone: "accent" | "success" | "neutral" } {
+  if (state === "merged") return { label: t(locale, "pullRequests.state.merged"), tone: "success" };
+  if (state === "closed") return { label: t(locale, "pullRequests.state.closed"), tone: "neutral" };
+  return { label: t(locale, "pullRequests.state.open"), tone: "accent" };
+}
+
+/** The App detail page's tabs (应用设置 / 洞察 / Pull requests). The last two are manager-only. */
+export type AppDetailTab = "settings" | "insights" | "pull-requests";
+
+/**
+ * URL-derived detail state: the active tab, the insights filters, and the
+ * open PR detail (`pr` = `owner/repo/number`).
+ */
+export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string; pr: string };
+
+/** The `pr` search param shape: `owner/repo/number`, number = decimal digits. */
+const PR_PARAM_PATTERN = /^[^/]+\/[^/]+\/\d+$/;
+
+/**
+ * The `pr` param string → a detail address, or null when the param is
+ * absent or malformed (the tab then renders the list).
+ */
+export function pullRequestRefOf(pr: string): PullRequestRef | null {
+  const [owner, repo, number] = pr.split("/");
+  if (owner === undefined || repo === undefined || number === undefined) return null;
+  if (!/^\d+$/.test(number) || owner === "" || repo === "") return null;
+  return { owner, repo, number: Number(number) };
+}
 
 /**
  * The search string as the detail page states it — the ONE derivation
  * shared by the mount initializer and the popstate re-sync (the
  * spa-url-state-resync contract), built on the pinned insights helpers
- * (off-set windows resolve to the default segment). A `?tab=insights` value
- * is only honored for managers; a non-manager always resolves to the
- * settings tab.
+ * (off-set windows resolve to the default segment). The manager-gated tab
+ * values (`insights`, `pull-requests`) are honored only for managers; a
+ * non-manager — or any other tab value — always resolves to the settings
+ * tab. `pr` rides verbatim when it matches the `owner/repo/number` shape.
  */
 export function parseAppDetailSearch(search: string, canManage: boolean): AppDetailSearch {
   const insights = parseInsightsSearch(search);
-  const rawTab = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search).get("tab");
-  // Any tab value that is not exactly "insights" (or a non-manager) is the
-  // settings tab — the bare path IS settings, so no vocabulary whitelist is
-  // needed beyond the one legal insights value.
-  const tab: AppDetailTab = canManage && rawTab === "insights" ? "insights" : "settings";
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const rawTab = params.get("tab");
+  // The bare path IS settings — the only legal non-settings values are the
+  // two manager tabs, gated by the payload's can_manage.
+  const tab: AppDetailTab =
+    canManage && (rawTab === "insights" || rawTab === "pull-requests") ? rawTab : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
-  return { tab, window, repo: insights.repo };
+  const rawPr = params.get("pr");
+  const pr = rawPr !== null && PR_PARAM_PATTERN.test(rawPr) ? rawPr : "";
+  return { tab, window, repo: insights.repo, pr };
 }
 
 /**
  * The query string for a detail state — the inverse of
- * {@link parseAppDetailSearch}: the tab param only when insights (the bare
- * path IS the settings tab), the window param only off the 30 default, the
- * repo param only when set. Loop-free by construction: consumers write it
- * with replaceState only.
+ * {@link parseAppDetailSearch}: the tab param on every non-settings tab
+ * (the bare path IS the settings tab), the window param only off the 30
+ * default, the repo param only when set, the pr param only when a detail
+ * is open. Loop-free by construction: consumers write it with replaceState
+ * only.
  */
 export function appDetailSearchQuery(search: AppDetailSearch): string {
   const params = new URLSearchParams();
-  if (search.tab === "insights") params.set("tab", "insights");
+  if (search.tab !== "settings") params.set("tab", search.tab);
   if (search.window !== "30") params.set("window", search.window);
   if (search.repo !== "") params.set("repo", search.repo);
+  if (search.pr !== "") params.set("pr", search.pr);
   const query = params.toString();
   return query === "" ? "" : `?${query}`;
 }

@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { MetricBand, type Metric } from "@/components/MetricBand";
 import { SettingsView } from "./SettingsPage";
 import { AppInsightsTab } from "./AppInsightsTab";
+import { AppPullRequestsTab } from "./AppPullRequestsTab";
 import { StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
@@ -212,15 +213,16 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   useEffect(() => {
     canManageRef.current = payload?.can_manage ?? false;
     if (payload) {
-      // Mid-session demotion: a URL still carrying ?tab=insights while the
-      // landed payload says non-manager is rewritten to the bare path
-      // (replaceState — loop-free), so the stale param cannot silently
-      // auto-reactivate the insights face on a later re-promotion.
+      // Mid-session demotion: a URL still carrying a manager tab
+      // (?tab=insights / ?tab=pull-requests) while the landed payload says
+      // non-manager is rewritten to the bare path (replaceState —
+      // loop-free), so the stale param cannot silently auto-reactivate a
+      // manager face on a later re-promotion.
       if (
         !canManageRef.current &&
-        parseAppDetailSearch(window.location.search, true).tab === "insights"
+        parseAppDetailSearch(window.location.search, true).tab !== "settings"
       ) {
-        commitSearch({ tab: "settings", window: "30", repo: "" });
+        commitSearch({ tab: "settings", window: "30", repo: "", pr: "" });
         setSearchReady(true);
         return;
       }
@@ -320,7 +322,7 @@ export function AppDetailView({
   const pill = appStatusPill(locale, payload.app);
 
   function onTabChange(next: string): void {
-    if (next !== "settings" && next !== "insights") return;
+    if (next !== "settings" && next !== "insights" && next !== "pull-requests") return;
     onSearch({ ...search, tab: next });
   }
 
@@ -371,10 +373,13 @@ export function AppDetailView({
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
           <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
-          {/* The 洞察 tab exists ONLY on the manage face — absence is the
-              non-manager contract, pinned by test. */}
+          {/* The 洞察 / Pull requests tabs exist ONLY on the manage face —
+              absence is the non-manager contract, pinned by test. */}
           {canManage ? (
             <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger>
+          ) : null}
+          {canManage ? (
+            <TabsTrigger value="pull-requests">{t(locale, "appDetail.tabPullRequests")}</TabsTrigger>
           ) : null}
         </TabsList>
         {/* forceMount on BOTH panels (mount-once tab switching): the
@@ -395,6 +400,11 @@ export function AppDetailView({
         {canManage ? (
           <TabsContent value="insights" forceMount>
             <AppInsightsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />
+          </TabsContent>
+        ) : null}
+        {canManage ? (
+          <TabsContent value="pull-requests" forceMount>
+            <AppPullRequestsTab locale={locale} appId={appId} search={search} onSearch={onSearch} />
           </TabsContent>
         ) : null}
       </Tabs>

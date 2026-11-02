@@ -101,11 +101,44 @@ export const zhCN: Dictionary = {
       revokeFailed: "无法撤销给 {login} 的邀请 — 请重试。",
     },
   },
-  /** App 详情页（App detail IA）：双标签页外壳。 */
+  /** App 详情页（App detail IA）：标签页外壳。 */
   appDetail: {
     backToApps: "返回应用",
     tabSettings: "应用设置",
     tabInsights: "洞察",
+    tabPullRequests: "拉取请求",
+  },
+  /** Per-App 拉取请求标签页：App 收到的所有 PR 台账。详情以 owner/repo/number 寻址（同一 App 可能在多个仓库见到同一个编号），并以 `pr=owner/repo/number` 挂在 URL 上。 */
+  pullRequests: {
+    backToList: "返回列表",
+    /** 列表表格列——只含行自身的事实。 */
+    columnPr: "拉取请求",
+    columnState: "状态",
+    columnVerdict: "最新结论",
+    columnLastSeen: "最近出现",
+    columnFailures: "失败",
+    /** 组合式空态——无动作变体（PR 由 webhook 产生）。 */
+    emptyTitle: "还没有拉取请求",
+    emptyDescription: "你的 GitHub App 收到的每个拉取请求都会显示在这里。",
+    state: {
+      open: "打开",
+      closed: "已关闭",
+      merged: "已合并",
+    },
+    /** 详情头部行：`{owner}/{repo} #{number}`。 */
+    prNumber: "{owner}/{repo} #{number}",
+    /** 短 SHA 徽标的悬浮提示。 */
+    headSha: "头部 SHA",
+    reviews: "审查",
+    reviewsCount: "审查数：{count}",
+    noReviews: "此拉取请求还没有审查。",
+    reviewMeta: "{model} · {provider}",
+    failures: "失败",
+    failuresCount: "失败数：{count}",
+    noFailures: "此拉取请求没有失败记录。",
+    findings: "发现",
+    findingsCount: "发现数：{count}",
+    noFindings: "此拉取请求没有发现问题。",
   },
   /** Per-App 洞察标签页。7/30/90 窗口分段与仓库筛选语义保持不变。 */
   insights: {
