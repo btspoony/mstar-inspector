@@ -4,7 +4,7 @@
  * used for the @cloudflare/sandbox SDK dist) so they stay deterministic.
  * Contract under test (plan interface section):
  *   - the in-repo `SandboxV1` Durable Object starts its own container (image
- *     from `container.images.sandbox`, lite instance, internet on), (re)sets
+ *     from `container.images.sandbox`, basic instance, internet on), (re)sets
  *     the inactivity timeout on every guard, and never restarts a running
  *     container;
  *   - runCommand wraps the branded command ONCE: GNU `timeout` bound +
@@ -234,7 +234,7 @@ function reset() {
 }
 
 describe("SandboxV1 Durable Object", () => {
-  test("runCommand starts the container once, keeps the lite instance, internet on, and bounds the idle lifetime", async () => {
+  test("runCommand starts the container once, keeps the basic instance, internet on, and bounds the idle lifetime", async () => {
     reset();
     const { sandbox, container } = makeDo();
 
@@ -244,7 +244,7 @@ describe("SandboxV1 Durable Object", () => {
     expect(startCalls).toEqual([
       {
         image: "registry.example/review-sandbox@sha256:abc",
-        instance: "lite",
+        instance: "basic",
         enableInternet: true,
       },
     ]);
