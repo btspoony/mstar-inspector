@@ -277,6 +277,16 @@ function asToolSession(session: AgentSession, cwd: string): ToolSession {
       if (prop === "hasUI") return false;
       if (prop === "getSessionFile") return () => null;
       if (prop === "getSessionSpawns") return () => null;
+      // The pinned SDK declares `effectiveExtensionRoots` as a getter on the
+      // session, then calls it as a method from its own task module
+      // (`request.session.effectiveExtensionRoots?.()`), so it reads an object
+      // and the call throws — every seat dies there, before any model turn.
+      // Hand that caller a function; the SDK needs ONE shape, which is its fix
+      // to make, and this shim goes with it.
+      if (prop === "effectiveExtensionRoots") {
+        const roots: unknown = Reflect.get(target, prop, target);
+        return typeof roots === "function" ? (roots as () => unknown).bind(target) : () => roots;
+      }
       const value: unknown = Reflect.get(target, prop, target);
       return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
