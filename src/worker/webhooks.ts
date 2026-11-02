@@ -276,6 +276,8 @@ const pullRequestSchema = z.object({
       title: z.string().nullable().optional(),
       state: z.string().nullable().optional(),
       merged: z.boolean().nullable().optional(),
+      // GitHub's own clock for the PR row — the ledger's ordering key.
+      updated_at: z.string().nullable().optional(),
       head: z.object({ sha: z.string().nullable().optional() }).optional(),
     })
     .nullable()
@@ -523,6 +525,7 @@ export function pullRequestRecord(rawBody: string): {
   title: string | null;
   state: string;
   headSha: string | null;
+  updatedAt: string | null;
 } | null {
   const parsed = parseBody(rawBody);
   if (parsed === null) return null;
@@ -542,6 +545,7 @@ export function pullRequestRecord(rawBody: string): {
     title: pull_request?.title ?? null,
     state,
     headSha: pull_request?.head?.sha ?? null,
+    updatedAt: pull_request?.updated_at ?? null,
   };
 }
 

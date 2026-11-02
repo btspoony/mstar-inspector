@@ -147,6 +147,38 @@ describe("pull_request delivery → PR ledger", () => {
     expect(ledger(db, appId)[0]!.state).toBe("merged");
   });
 
+  test("a later `opened` delivery leaves a merged PR merged", async () => {
+    const db = createMigratedD1();
+    const appId = await seedApp(db, "every_push");
+    await deliver(
+      appId,
+      {
+        ...PR_PAYLOAD,
+        action: "closed",
+        pull_request: { ...PR_PAYLOAD.pull_request, state: "closed", merged: true, updated_at: "2026-03-01T00:00:00Z" },
+      },
+      makeEnv(db),
+    );
+    // A replayed / out-of-order `opened` for the same PR.
+    await deliver(
+      appId,
+      { ...PR_PAYLOAD, action: "opened", pull_request: { ...PR_PAYLOAD.pull_request, updated_at: "2026-02-01T00:00:00Z" } },
+      makeEnv(db),
+    );
+    expect(ledger(db, appId)[0]!.state).toBe("merged");
+  });
+
+  test("last_seen_at comes from the payload's updated_at", async () => {
+    const db = createMigratedD1();
+    const appId = await seedApp(db, "every_push");
+    await deliver(
+      appId,
+      { ...PR_PAYLOAD, pull_request: { ...PR_PAYLOAD.pull_request, updated_at: "2026-03-04T05:06:07Z" } },
+      makeEnv(db),
+    );
+    expect(ledger(db, appId)[0]!.last_seen_at).toBe("2026-03-04 05:06:07");
+  });
+
   test("a pull_request-shaped ignore records nothing on a non-pull_request event", async () => {
     const db = createMigratedD1();
     const appId = await seedApp(db, "every_push");

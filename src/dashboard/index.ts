@@ -4221,7 +4221,18 @@ const appPullRequestsRoute = async (c: DashboardContext) => {
   const gate = await requireAppJsonRead(c);
   if (!gate.ok) return gate.response;
   c.header("Cache-Control", "private, no-store");
-  return c.json({ pull_requests: await createAppsStore(gate.db).listPullRequests(gate.app.id) });
+  // The wire shape is total: every field the client reads is a string, so one
+  // nullable ledger column can never blank the whole list. `title` / `head_sha`
+  // are genuinely optional in the payload, and `state` is GitHub's own domain —
+  // an unexpected value reads as the only state a client knows how to render.
+  const rows = (await createAppsStore(gate.db).listPullRequests(gate.app.id)).map((row) => ({
+    ...row,
+    title: row.title ?? "",
+    head_sha: row.head_sha ?? "",
+    // The three states a client renders; anything else reads as 'open'.
+    state: row.state === "merged" || row.state === "closed" ? row.state : "open",
+  }));
+  return c.json({ pull_requests: rows });
 };
 
 const appPullRequestRoute = async (c: DashboardContext) => {
@@ -4242,7 +4253,40 @@ const appPullRequestRoute = async (c: DashboardContext) => {
   const detail = await createAppsStore(gate.db).getPullRequest(gate.app.id, owner, repo, number);
   if (detail === null) return c.json({ error: "unknown pull request" }, 404);
   c.header("Cache-Control", "private, no-store");
-  return c.json(detail);
+  // Same total-shape rule as the list: the store reports the tables' actual
+  // columns, and this boundary is where a nullable column becomes "". The
+  // v1 pipeline NEVER records a `provider` (the artifact store persists NULL
+  // and the consumer passes `null`), and a finding may be repo-wide
+  // (`file_path` null), so a client parser must not be the thing that decides
+  // whether a real review renders.
+  return c.json({
+    pull_request: {
+      ...detail.pull_request,
+      title: detail.pull_request.title ?? "",
+      head_sha: detail.pull_request.head_sha ?? "",
+      state:
+        detail.pull_request.state === "merged" || detail.pull_request.state === "closed"
+          ? detail.pull_request.state
+          : "open",
+    },
+    reviews: detail.reviews.map((review) => ({
+      verdict: review.verdict ?? "",
+      summary_md: review.summary_md ?? "",
+      model: review.model ?? "",
+      provider: review.provider ?? "",
+      reviewed_at: review.reviewed_at,
+      head_sha: review.head_sha ?? "",
+    })),
+    failures: detail.failures,
+    findings: detail.findings.map((finding) => ({
+      finding_id: finding.finding_id,
+      severity: finding.severity ?? "",
+      title: finding.title ?? "",
+      file_path: finding.file_path ?? "",
+      line: finding.line,
+      body: finding.body ?? "",
+    })),
+  });
 };
 
 // --- App + member route table ----------------------------------------------
