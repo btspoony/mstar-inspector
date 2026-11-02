@@ -97,8 +97,9 @@ const CONTAINER_IMAGE_KEY = "sandbox";
  *
  * Established: no review has completed since 2026-08-30. Every run observed
  * since records either the bound firing with both streams empty or
- * `Network connection lost`. The runner's own first statement never appears on
- * stderr, so the process is not reaching its own code.
+ * `Network connection lost`. The first `review_stage` line never appears on
+ * stderr, so the stall precedes the first setup stage: bootstrap, module init,
+ * or the credential stdin read.
  *
  * NOT established: which change started it. An earlier move of this pin to
  * `basic` was written, but that deploy FAILED, so the change never reached the
