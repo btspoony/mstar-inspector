@@ -337,6 +337,12 @@ describe("operator with a valid grant", () => {
       );
       expect(res.status, item.path).toBe(403);
       expect(((await res.json()) as { error: string }).error).toBe("forbidden");
+      // The ceiling's 403 comes from the scope middleware, before any handler —
+      // the /api/* prefix sets this ahead of it, so the deny is not cacheable
+      // either (the ledger pair above rides the same assertion).
+      if (item.path.includes("/api/")) {
+        expect(res.headers.get("Cache-Control"), item.path).toBe("private, no-store");
+      }
     }
     const rows = auditRows(db);
     expect(rows).toHaveLength(cases.length);

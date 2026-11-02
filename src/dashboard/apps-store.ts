@@ -115,7 +115,7 @@ export type GithubAppRow = {
   private_key_enc: string;
   /** secretbox envelope of the App webhook secret — opaque, never decrypted here. */
   webhook_secret_enc: string;
-  /** GitHub login of the creating member (creator-or-admin manage rule). */
+  /** GitHub login of the creating member (the manage rule is the workspace role). */
   created_by: string;
   status: GithubAppStatus;
   /** NULL = live row; a timestamp = soft-deleted (the only removal path). */
@@ -327,6 +327,21 @@ export const PULL_REQUEST_RETENTION_DAYS = 90;
 /** Retention row cap per run — bounded work per 15-min sweep (the 0035 rule). */
 export const PULL_REQUEST_RETENTION_CAP = 500;
 
+/**
+ * The ledger list's ONE ordering (newest activity, number as the total-order
+ * tiebreak). Shared by the row statement and the aggregate window so the two
+ * cannot drift apart.
+ */
+const PULL_REQUEST_LEDGER_ORDER = "last_seen_at DESC, pr_number DESC";
+
+/**
+ * The list's ONE bounded window. Used as the row statement's own predicate and
+ * as the scope of both aggregate statements, so the payload is not merely
+ * capped: the work is.
+ */
+const PULL_REQUEST_WINDOW_SQL = `SELECT owner, repo, pr_number FROM pull_requests
+  WHERE app_id = ? ORDER BY ${PULL_REQUEST_LEDGER_ORDER} LIMIT ?`;
+
 /** Input for recordDelivery — one VERIFIED per-App webhook delivery. */
 export type RecordDeliveryInput = {
   appId: string;
@@ -451,6 +466,11 @@ export function createAppsStore(db: AppsStoreD1) {
    * is still a review target however stale its clock, so `state` gates the
    * predicate and age only orders what it already excluded. Capped per run so
    * a large backlog drains over successive sweeps instead of stalling one.
+   *
+   * This predicate and `upsertPullRequest`'s write predicate MUST agree — see
+   * the invariant documented there. Anything swept here was written by a
+   * delivery at least as new as the stored `last_seen_at`, so a swept `closed`
+   * row is genuinely closed at its newest known state.
    */
   async function sweepTerminalPullRequests(): Promise<number> {
     const res = await db
@@ -934,15 +954,18 @@ export function createAppsStore(db: AppsStoreD1) {
      * rather than blanking it). `first_seen_at` is written once, by the
      * INSERT.
      *
-     * Two protections against a late, stale delivery:
-     *   - `merged` is TERMINAL. GitHub sends `merged: true` once, on the
-     *     `closed` delivery; an `opened`/`synchronize` that arrives afterwards
-     *     (out-of-order or replayed) must not rewrite the PR back to `open`.
+     * The timestamp is the single arbiter for BOTH columns, so the write and
+     * the retention predicate can never disagree:
      *   - `last_seen_at` takes the payload's `updated_at` (GitHub's clock)
      *     through `datetime()`, which also normalises ISO 8601 into the
-     *     `YYYY-MM-DD HH:MM:SS` form the column's readers compare against,
-     *     and it only ever advances (MAX), so a stale delivery cannot sort the
-     *     row to the top either.
+     *     `YYYY-MM-DD HH:MM:SS` form the column's readers compare against, and
+     *     it only ever advances (MAX).
+     *   - `state` is accepted ONLY when the delivery is at least as new as the
+     *     stored stamp. A replayed/out-of-order `closed` cannot overwrite a
+     *     newer `open`, so the row cannot claim `closed` while carrying a
+     *     timestamp a later `open` wrote — which is exactly the shape that let
+     *     retention delete a PR that had reopened. `merged` stays terminal
+     *     regardless (GitHub sends it once, on the merge).
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
       // The caller validates the timestamp (`pullRequestRecord` only passes an
@@ -958,7 +981,11 @@ export function createAppsStore(db: AppsStoreD1) {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
            ON CONFLICT (app_id, owner, repo, pr_number) DO UPDATE SET
              title = COALESCE(excluded.title, title),
-             state = CASE WHEN pull_requests.state = 'merged' THEN 'merged' ELSE excluded.state END,
+             state = CASE
+               WHEN pull_requests.state = 'merged' THEN 'merged'
+               WHEN excluded.last_seen_at >= pull_requests.last_seen_at THEN excluded.state
+               ELSE pull_requests.state
+             END,
              head_sha = COALESCE(excluded.head_sha, head_sha),
              last_seen_at = MAX(last_seen_at, excluded.last_seen_at)`,
         )
@@ -990,6 +1017,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * the newest window an operator can act on, and the sweep bounds what
      * stays behind it.
      *
+     * The cap bounds the WORK, not just the payload: both aggregate statements
+     * are scoped to the same `(owner, repo, pr_number)` window (the identical
+     * ORDER BY + LIMIT), so a large review/failure history behind the window is
+     * never scanned or thrown away.
+     *
      * Failure attribution assumes ONE installation per App. `app_installations`
      * permits the same installation id under two App rows, and in that case a
      * failure row would count toward both — accepted, because the alternative
@@ -1003,7 +1035,7 @@ export function createAppsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
              FROM pull_requests WHERE app_id = ?
-             ORDER BY last_seen_at DESC, pr_number DESC
+             ORDER BY ${PULL_REQUEST_LEDGER_ORDER}
              LIMIT ?`,
           )
           .bind(appId, PULL_REQUEST_LIST_LIMIT),
@@ -1013,18 +1045,21 @@ export function createAppsStore(db: AppsStoreD1) {
                SELECT owner, repo, pr_number, verdict, reviewed_at,
                       ROW_NUMBER() OVER (PARTITION BY owner, repo, pr_number
                         ORDER BY reviewed_at DESC, rowid DESC) AS rn
-               FROM reviews WHERE app_id = ?
+               FROM reviews
+               WHERE app_id = ?
+                 AND (owner, repo, pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
              ) WHERE rn = 1`,
           )
-          .bind(appId),
+          .bind(appId, appId, PULL_REQUEST_LIST_LIMIT),
         db
           .prepare(
             `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             WHERE (f.owner, f.repo, f.pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
              GROUP BY f.owner, f.repo, f.pr_number`,
           )
-          .bind(appId),
+          .bind(appId, appId, PULL_REQUEST_LIST_LIMIT),
       ]);
       return assemblePullRequests(
         results[0]!.results as PullRequestBaseRow[],
