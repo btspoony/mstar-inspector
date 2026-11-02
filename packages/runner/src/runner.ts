@@ -432,9 +432,34 @@ async function loadCredentialPool(json: RunnerInputJson, payload: string): Promi
  * keyless run shape. With no pipe (an interactive TTY) there is no EOF to
  * wait for, so the read is skipped and the run is keyless — the interactive
  * case never blocks.
+ *
+ * The wait is BOUNDED. When the consumer sets `stdin: "pipe"` it has already
+ * committed to delivering a payload, so a pipe that never reports EOF is a
+ * broken transport, not a keyless run — and an unbounded read there stalls
+ * silently until the outer exec timeout kills the process with zero output on
+ * either stream, which is exactly what staging showed. Past the bound the read
+ * rejects so the failure names the transport instead of hiding behind a
+ * timeout.
  */
-const readCredentialStdin = (): Promise<string> =>
-  process.stdin.isTTY ? Promise.resolve("") : Bun.stdin.text();
+export const CREDENTIAL_STDIN_TIMEOUT_MS = 30_000;
+
+export async function readCredentialStdin(
+  read: () => Promise<string> = () => Bun.stdin.text(),
+  timeoutMs: number = CREDENTIAL_STDIN_TIMEOUT_MS,
+): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  const { promise: bound, reject } = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () =>
+      reject(new Error(`credential stdin did not reach EOF within ${timeoutMs}ms — the exec pipe was never closed`)),
+    timeoutMs,
+  );
+  try {
+    return await Promise.race([read(), bound]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1

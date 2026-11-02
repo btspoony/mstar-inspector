@@ -59,7 +59,7 @@ import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, Rev
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { capabilityHostsYaml } from "../../packages/runner/src/models-synthesis";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
-import { createInMemoryAuthStorage, main } from "../../packages/runner/src/runner";
+import { createInMemoryAuthStorage, main, readCredentialStdin } from "../../packages/runner/src/runner";
 import { sk } from "../helpers/fake-secrets";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
@@ -769,6 +769,45 @@ describe("runner entry — transported credential pool", () => {
       { type: "api_key", key: sk("custom-one"), source: "login" },
       { type: "api_key", key: sk("custom-two"), source: "login" },
     ]);
+  });
+
+  test("readCredentialStdin bounds a pipe that never reports EOF", async () => {
+    // The container exec pipe is closed by the consumer; one that never
+    // reports EOF stalls the run on its first I/O with zero output on either
+    // stream, which is indistinguishable from a hung model call.
+    await expect(readCredentialStdin(() => new Promise<string>(() => {}), 20)).rejects.toThrow(
+      /did not reach EOF within 20ms/,
+    );
+  });
+
+  test("readCredentialStdin returns the payload when the pipe does close", async () => {
+    await expect(readCredentialStdin(async () => "payload", 20)).resolves.toBe("payload");
+  });
+
+  test("a stdin reader that never settles → the bound names the transport instead of stalling", async () => {
+    // The container exec pipe is closed by the consumer; a pipe that never
+    // reports EOF stalls the run on its first I/O with zero output on either
+    // stream, which is indistinguishable from a hung model call.
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const originalLog = console.log;
+    const originalError = console.error;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      const code = await main(
+        ["--level", "quick", "--input", inputPath],
+        fakeRuntime,
+        () => Promise.reject(new Error("credential stdin did not reach EOF within 30000ms")),
+      );
+      expect(code).toBe(1);
+      expect(logs.join("")).toBe(""); // no envelope
+      expect(errors.join("")).toContain("credential stdin did not reach EOF");
+    } finally {
+      console.log = originalLog;
+      console.error = originalError;
+    }
   });
 
   test("an unparseable payload → fail closed (exit 1, no run, nothing written)", async () => {
