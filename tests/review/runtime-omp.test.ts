@@ -1050,7 +1050,11 @@ describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete enve
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.findings).toEqual([]);
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.incomplete?.reason).toBe("no dispatched seat produced a usable payload");
+    // A rejection carries the only diagnosis a seat that never settled has, so
+    // the declared reason names it rather than restating the symptom.
+    expect(envelope.incomplete?.reason).toMatch(
+      /^no dispatched seat produced a usable payload: provider boom$/,
+    );
     expect(envelope.incomplete?.unscanned).toEqual([
       expect.stringContaining("changeset-1-src"),
       expect.stringContaining("changeset-2-lib"),
