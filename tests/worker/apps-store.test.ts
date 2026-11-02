@@ -790,6 +790,46 @@ describe("apps-store delivery read faces (consumption)", () => {
     expect(recent[0]!.created_at >= recent[1]!.created_at).toBe(true);
   });
 
+  test("listRecentDeliveries surfaces a review verdict ahead of newer bypass noise", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    // The staging shape: one real review verdict buried under a torrent of
+    // check_run rows that all land in `ignored`.
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    for (let i = 0; i < 6; i++) {
+      await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null });
+    }
+    // The verdict is the OLDEST row, so plain newest-first would never show it.
+    db.raw
+      .prepare("UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour') WHERE outcome = 'ok'")
+      .run();
+
+    const recent = await s.listRecentDeliveries(app.id, 5);
+
+    expect(recent).toHaveLength(5);
+    expect(recent[0]).toMatchObject({ event_name: "pull_request", outcome: "ok" });
+    // The remaining four are bypass rows — the panel is never five identical
+    // ignored lines while a verdict exists anywhere in the App's history.
+    expect(recent.slice(1).every((r) => r.event_name === "check_run" && r.outcome === "ignored")).toBe(true);
+  });
+
+  test("listRecentDeliveries still shows rows for an App whose ONLY traffic is bypass noise", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    for (let i = 0; i < 6; i++) {
+      await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null });
+    }
+
+    const recent = await s.listRecentDeliveries(app.id, 5);
+
+    // No verdict exists, so the ranking has nothing to hoist: the newest rows
+    // still render (never an empty panel just because the traffic is noise).
+    expect(recent).toHaveLength(5);
+    expect(recent.every((r) => r.event_name === "check_run" && r.outcome === "ignored")).toBe(true);
+  });
+
   test("deliverySummaries batches latest row + 24h rejected count per app in ONE call (QC W-1), incl. zero-delivery apps", async () => {
     const db = createMigratedD1();
     const appA = await seedApp(db);

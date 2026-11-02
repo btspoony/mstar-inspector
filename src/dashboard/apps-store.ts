@@ -287,6 +287,17 @@ export const DELIVERY_OUTCOMES: readonly string[] = Object.freeze([
 export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected";
 
 /**
+ * Outcome tier rank shared by BOTH delivery health faces: 0 = the row carries
+ * a review verdict (`ok`, `paused`, `rejected`), 1 = `ignored`, which says
+ * nothing about whether review is running (bypass events such as check_run,
+ * and whitelisted events the classifier dropped). The event name cannot stand
+ * in for this: `check_run` alone can outnumber review traffic by orders of
+ * magnitude, and a `pull_request` can legitimately land in `ignored` too. Both
+ * faces rank by exactly this expression so they can never disagree.
+ */
+const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'rejected') THEN 0 ELSE 1 END`;
+
+/**
  * Persist bound for the x-github-event header (QC wave 1, seat2
  * hygiene pin): the header is attacker-influenced on the unauthenticated
  * reject path, and the DDL has no length constraint — store the bounded
@@ -416,7 +427,7 @@ export function createAppsStore(db: AppsStoreD1) {
         .prepare(
           `SELECT app_id, id, event_name, outcome, status_code, created_at FROM (
              SELECT *, ROW_NUMBER() OVER (PARTITION BY app_id
-               ORDER BY CASE WHEN outcome IN ('ok', 'paused', 'rejected') THEN 0 ELSE 1 END,
+               ORDER BY ${DELIVERY_VERDICT_TIER_SQL},
                         created_at DESC, rowid DESC) AS rn
              FROM webhook_deliveries WHERE app_id IN (${placeholders})
            ) WHERE rn = 1`,
@@ -811,16 +822,27 @@ export function createAppsStore(db: AppsStoreD1) {
     deliverySummaries,
 
     /**
-     * Recent-deliveries read face (settings panel): THIS
-     * App's rows, newest first (created_at has second precision, so rowid
-     * breaks ties inside one second — the order is total and
-     * deterministic), bounded by the caller's N (default 5).
+     * Recent-deliveries read face (settings panel): THIS App's rows, verdict
+     * tier first, newest first inside each tier (created_at has second
+     * precision, so rowid breaks ties inside one second — the order is total
+     * and deterministic), bounded by the caller's N (default 5).
+     *
+     * The panel exists for one question — is review flowing? — and bypass
+     * traffic (`check_run`, `ping`, …) dwarfs review traffic while landing in
+     * `ignored`, so a raw newest-first list renders five identical
+     * `check_run · ignored` lines even while reviews run fine. Ranking by the
+     * same verdict tier the Apps list health column uses (see
+     * DELIVERY_VERDICT_TIER_SQL) keeps the verdict in view. Stored rows are
+     * untouched, and an App whose ONLY traffic is bypass rows still returns
+     * those rows — the list never goes empty because of the ranking.
      */
     async listRecentDeliveries(appId: string, limit = 5): Promise<WebhookDeliveryRow[]> {
       const res = await db
         .prepare(
           `SELECT * FROM webhook_deliveries
-           WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+           WHERE app_id = ?
+           ORDER BY ${DELIVERY_VERDICT_TIER_SQL}, created_at DESC, rowid DESC
+           LIMIT ?`,
         )
         .bind(appId, limit)
         .all<WebhookDeliveryRow>();
