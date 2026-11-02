@@ -277,6 +277,16 @@ function asToolSession(session: AgentSession, cwd: string): ToolSession {
       if (prop === "hasUI") return false;
       if (prop === "getSessionFile") return () => null;
       if (prop === "getSessionSpawns") return () => null;
+      // The pinned SDK declares `effectiveExtensionRoots` as a getter on the
+      // session, then calls it as a method from its own task module
+      // (`request.session.effectiveExtensionRoots?.()`), so it reads an object
+      // and the call throws — every seat dies there, before any model turn.
+      // Hand that caller a function; the SDK needs ONE shape, which is its fix
+      // to make, and this shim goes with it.
+      if (prop === "effectiveExtensionRoots") {
+        const roots: unknown = Reflect.get(target, prop, target);
+        return typeof roots === "function" ? (roots as () => unknown).bind(target) : () => roots;
+      }
       const value: unknown = Reflect.get(target, prop, target);
       return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
@@ -1691,6 +1701,16 @@ export const ompAgentRuntime: AgentRuntime = {
       // rides the declared reason so the durable review row and the published
       // body name the cause instead of restating the symptom; bounded like the
       // scope entries beside it.
+      //
+      // ENGINE-OWNED, STAGED HERE: composing an `incomplete` fact from seat
+      // results is the engine's job, not a consumer's. Every consumer that
+      // synthesizes a review will otherwise rediscover which failure shapes
+      // exist — and miss one, exactly as this code missed the rejected-promise
+      // shape until a real run showed it. `@mstar-harness/engine` should accept
+      // the seat outcomes and derive verdict + reason + unscanned itself;
+      // when it does, delete this block and pass nothing. Filed upstream with
+      // the shape the engine needs. Keep this marker until that lands so the
+      // staging is visible rather than looking like a settled design.
       const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
       const rawLostSeat =
         lostSeatDetail !== null

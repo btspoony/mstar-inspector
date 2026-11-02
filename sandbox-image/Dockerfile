@@ -7,6 +7,12 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the runner hands the SDK a callable extension-roots accessor — the
+# pinned SDK reads a getter and calls it as a method, which killed every seat
+# before its first model turn.
+# rebuild: the runner marks its `incomplete`-cause composition as engine-owned
+# staging (the engine should derive the fact from seat results, not accept a
+# consumer's string), so the removal is scheduled rather than discovered.
 # rebuild: a rejected seat promise's own reason now rides the declared
 # `incomplete` cause; without it the only diagnosis of a dead seat is lost with
 # the promise.
