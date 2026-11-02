@@ -1691,6 +1691,16 @@ export const ompAgentRuntime: AgentRuntime = {
       // rides the declared reason so the durable review row and the published
       // body name the cause instead of restating the symptom; bounded like the
       // scope entries beside it.
+      //
+      // ENGINE-OWNED, STAGED HERE: composing an `incomplete` fact from seat
+      // results is the engine's job, not a consumer's. Every consumer that
+      // synthesizes a review will otherwise rediscover which failure shapes
+      // exist — and miss one, exactly as this code missed the rejected-promise
+      // shape until a real run showed it. `@mstar-harness/engine` should accept
+      // the seat outcomes and derive verdict + reason + unscanned itself;
+      // when it does, delete this block and pass nothing. Filed upstream with
+      // the shape the engine needs. Keep this marker until that lands so the
+      // staging is visible rather than looking like a settled design.
       const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
       const rawLostSeat =
         lostSeatDetail !== null
