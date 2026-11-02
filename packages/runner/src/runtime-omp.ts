@@ -1678,6 +1678,24 @@ export const ompAgentRuntime: AgentRuntime = {
       // is exactly then that every dispatched seat was lost).
       const everyStopWasCap = gaps.length === stoppedSeats;
       const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
+      // Why the wave produced nothing. The failure message is the ONLY
+      // diagnosis a lost seat carries (its payload never arrived, so there is
+      // no per-seat document to read), and the unusable-wave branch below is
+      // reached exactly when a seat was lost without a cap explaining it. It
+      // rides the declared reason so the durable review row and the published
+      // body name the cause instead of restating the symptom; bounded like the
+      // scope entries beside it.
+      const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
+      const lostSeatText =
+        lostSeatDetail === null ? "" : lostSeatDetail.message.replace(/\s+/g, " ").trim();
+      const lostSeatCause =
+        lostSeatText === ""
+          ? ""
+          : `: ${
+              lostSeatText.length <= SEAT_GAP_MAX_CHARS
+                ? lostSeatText
+                : `${lostSeatText.slice(0, SEAT_GAP_MAX_CHARS - 1)}…`
+            }`;
       // The stopped seats are declared as the engine's `incomplete` fact,
       // synthesized — never post-edited onto the envelope. A wave that stopped
       // everywhere still synthesizes with `findings: []`: throwing would lose
@@ -1694,7 +1712,7 @@ export const ompAgentRuntime: AgentRuntime = {
                 reason: everyStopWasCap
                   ? `wall-clock cap stopped ${stoppedSeats} of ${seats.length} dispatched seats` +
                     ` before their assigned scope was covered`
-                  : `no dispatched seat produced a usable payload`,
+                  : `no dispatched seat produced a usable payload${lostSeatCause}`,
                 // Every dispatched seat is lost in the unusable-wave branch, so
                 // the dispatch list IS the unscanned set there — rejected seats
                 // included, and no seat silently dropped from the disclosure.

@@ -796,7 +796,10 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     // as settled: the reader gets the uncovered scope, not a clean grade.
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.findings).toEqual([]);
-    expect(envelope.incomplete?.reason).toBe("no dispatched seat produced a usable payload");
+    // The lost seat's own message rides the declared reason.
+    expect(envelope.incomplete?.reason).toMatch(
+      /^no dispatched seat produced a usable payload: .+/,
+    );
     expect(envelope.incomplete?.unscanned).toEqual([expect.stringContaining("full-diff-combined")]);
   });
 
@@ -1010,7 +1013,10 @@ describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete enve
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.findings).toEqual([]);
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.incomplete?.reason).toBe("no dispatched seat produced a usable payload");
+    // The lost seat's own message rides the declared reason.
+    expect(envelope.incomplete?.reason).toMatch(
+      /^no dispatched seat produced a usable payload: .+/,
+    );
     expect(envelope.incomplete?.unscanned).toEqual([
       expect.stringContaining("changeset-1-src"),
       expect.stringContaining("changeset-2-lib"),
@@ -1026,7 +1032,10 @@ describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete enve
 
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.findings).toEqual([]);
-    expect(envelope.incomplete?.reason).toBe("no dispatched seat produced a usable payload");
+    // The lost seat's own message rides the declared reason.
+    expect(envelope.incomplete?.reason).toMatch(
+      /^no dispatched seat produced a usable payload: .+/,
+    );
     expect(envelope.incomplete?.unscanned).toEqual([expect.stringContaining("full-diff-combined")]);
   });
 

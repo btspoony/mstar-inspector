@@ -7,6 +7,9 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the declared `incomplete` reason now carries the lost seat's own
+# failure message, so a wave that produced nothing names its cause in the
+# durable review row instead of restating the symptom.
 # rebuild: runner stdin bound + sandbox instance probe
 # rebuild: credential stdin ends at a complete payload rather than at EOF, and
 # the review setup stages trace themselves. Both are runner-source changes that
