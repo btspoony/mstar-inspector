@@ -766,84 +766,121 @@ export type PullRequestDetail = {
  */
 export type PullRequestRef = { owner: string; repo: string; number: number };
 
-function isPullRequestRow(value: unknown): value is PullRequestRow {
-  if (!isRecord(value)) return false;
-  if (typeof value.number !== "number" || typeof value.failure_count !== "number") return false;
+/**
+ * Per-row list parse (QC: one nullable row must not blank the list). The
+ * nullable DISPLAY fields coerce to "" and an unknown state clamps to
+ * "open"; only the address and timestamp fields stay required — a row
+ * without them cannot be listed or fetched, so it is dropped individually
+ * and the rest of the list still renders. The returned row always carries
+ * non-null strings (the type is not weakened).
+ */
+function parsePullRequestRow(value: unknown): PullRequestRow | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.number !== "number" || !Number.isFinite(value.number)) return null;
+  if (typeof value.owner !== "string" || typeof value.repo !== "string") return null;
+  if (typeof value.first_seen_at !== "string" || typeof value.last_seen_at !== "string") return null;
+  if (typeof value.failure_count !== "number") return null;
+  return {
+    number: value.number,
+    owner: value.owner,
+    repo: value.repo,
+    title: typeof value.title === "string" ? value.title : "",
+    state: value.state === "closed" || value.state === "merged" ? value.state : "open",
+    head_sha: typeof value.head_sha === "string" ? value.head_sha : "",
+    first_seen_at: value.first_seen_at,
+    last_seen_at: value.last_seen_at,
+    latest_review: parseLatestReview(value.latest_review),
+    failure_count: value.failure_count,
+  };
+}
+
+/** The row's latest-review slot: coerced to null unless it is a real review. */
+function parseLatestReview(value: unknown): { verdict: string; reviewed_at: string } | null {
+  if (!isRecord(value) || typeof value.reviewed_at !== "string") return null;
+  return {
+    verdict: typeof value.verdict === "string" ? value.verdict : "",
+    reviewed_at: value.reviewed_at,
+  };
+}
+
+/**
+ * One review entry (QC: the pipeline persists `provider: null`, and
+ * model/summary/verdict can be absent too). The nullable text fields
+ * coerce to "" at this boundary so the view never renders null; the
+ * entry is dropped only when its timestamp/head anchor is missing.
+ */
+function parsePullRequestReview(value: unknown): PullRequestReview | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.reviewed_at !== "string" || typeof value.head_sha !== "string") return null;
+  return {
+    verdict: typeof value.verdict === "string" ? value.verdict : "",
+    summary_md: typeof value.summary_md === "string" ? value.summary_md : "",
+    model: typeof value.model === "string" ? value.model : "",
+    provider: typeof value.provider === "string" ? value.provider : "",
+    reviewed_at: value.reviewed_at,
+    head_sha: value.head_sha,
+  };
+}
+
+function parsePullRequestFailure(value: unknown): PullRequestFailure | null {
+  if (!isRecord(value)) return null;
   if (
-    typeof value.owner !== "string" ||
-    typeof value.repo !== "string" ||
-    typeof value.title !== "string" ||
-    typeof value.head_sha !== "string" ||
-    typeof value.first_seen_at !== "string" ||
-    typeof value.last_seen_at !== "string"
+    typeof value.stage !== "string" ||
+    typeof value.error !== "string" ||
+    typeof value.created_at !== "string"
   ) {
-    return false;
+    return null;
   }
-  if (value.state !== "open" && value.state !== "closed" && value.state !== "merged") return false;
-  if (value.latest_review !== null) {
-    if (!isRecord(value.latest_review)) return false;
-    if (
-      typeof value.latest_review.verdict !== "string" ||
-      typeof value.latest_review.reviewed_at !== "string"
-    ) {
-      return false;
-    }
-  }
-  return true;
+  return { stage: value.stage, error: value.error, created_at: value.created_at };
 }
 
-function isPullRequestReview(value: unknown): value is PullRequestReview {
-  return (
-    isRecord(value) &&
-    typeof value.verdict === "string" &&
-    typeof value.summary_md === "string" &&
-    typeof value.model === "string" &&
-    typeof value.provider === "string" &&
-    typeof value.reviewed_at === "string" &&
-    typeof value.head_sha === "string"
-  );
+/**
+ * One finding entry (QC: repo-wide findings persist `file_path: null`).
+ * title/file_path/body coerce to ""; the entry is dropped without its id
+ * (the detail list keys by finding_id) or a malformed line anchor.
+ */
+function parsePullRequestFinding(value: unknown): PullRequestFinding | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.finding_id !== "string") return null;
+  if (typeof value.line !== "number" && value.line !== null) return null;
+  return {
+    finding_id: value.finding_id,
+    severity: typeof value.severity === "string" ? value.severity : "",
+    title: typeof value.title === "string" ? value.title : "",
+    file_path: typeof value.file_path === "string" ? value.file_path : "",
+    line: value.line,
+    body: typeof value.body === "string" ? value.body : "",
+  };
 }
 
-function isPullRequestFailure(value: unknown): value is PullRequestFailure {
-  return (
-    isRecord(value) &&
-    typeof value.stage === "string" &&
-    typeof value.error === "string" &&
-    typeof value.created_at === "string"
-  );
+function present<T>(value: T | null): value is T {
+  return value !== null;
 }
 
-function isPullRequestFinding(value: unknown): value is PullRequestFinding {
-  return (
-    isRecord(value) &&
-    typeof value.finding_id === "string" &&
-    typeof value.severity === "string" &&
-    typeof value.title === "string" &&
-    typeof value.file_path === "string" &&
-    (typeof value.line === "number" || value.line === null) &&
-    typeof value.body === "string"
-  );
-}
-
-/** The list payload: `{ pull_requests: [...] }`, every row validated. */
+/** The list payload: `{ pull_requests: [...] }` — parsed per row, never all-or-nothing. */
 export function parsePullRequestList(data: unknown): PullRequestRow[] | null {
   if (!isRecord(data) || !Array.isArray(data.pull_requests)) return null;
-  if (!data.pull_requests.every(isPullRequestRow)) return null;
-  return data.pull_requests;
+  return data.pull_requests.map(parsePullRequestRow).filter(present);
 }
 
-/** The detail payload: row + reviews + failures + findings, each validated. */
+/**
+ * The detail payload: row + reviews + failures + findings. The envelope
+ * keeps its shape (a missing/!array face fails the parse), but every
+ * array is parsed per entry — one drifted review/failure/finding is
+ * dropped, not the whole detail.
+ */
 export function parsePullRequestDetail(data: unknown): PullRequestDetail | null {
   if (!isRecord(data)) return null;
-  if (!isPullRequestRow(data.pull_request)) return null;
-  if (!Array.isArray(data.reviews) || !data.reviews.every(isPullRequestReview)) return null;
-  if (!Array.isArray(data.failures) || !data.failures.every(isPullRequestFailure)) return null;
-  if (!Array.isArray(data.findings) || !data.findings.every(isPullRequestFinding)) return null;
+  const pull_request = parsePullRequestRow(data.pull_request);
+  if (pull_request === null) return null;
+  if (!Array.isArray(data.reviews) || !Array.isArray(data.failures) || !Array.isArray(data.findings)) {
+    return null;
+  }
   return {
-    pull_request: data.pull_request,
-    reviews: data.reviews,
-    failures: data.failures,
-    findings: data.findings,
+    pull_request,
+    reviews: data.reviews.map(parsePullRequestReview).filter(present),
+    failures: data.failures.map(parsePullRequestFailure).filter(present),
+    findings: data.findings.map(parsePullRequestFinding).filter(present),
   };
 }
 
@@ -853,13 +890,15 @@ export function appPullRequestsUrl(base: string, appId: string): string {
 
 /**
  * The detail read URL, built from the ROW's owner/repo/number — never the
- * number alone. The segments are GitHub-name-bounded (`owner/repo` match
- * `[A-Za-z0-9_.-]` and `number` is validated decimal digits at the parse
- * site), so they ride raw into the path; only appId gets the idiom's
- * `encodeURIComponent`.
+ * number alone. owner/repo are passed through `encodeURIComponent` so a
+ * value carrying a segment boundary (`/`, `?`, `#`) cannot escape the
+ * pull-requests path family, and {@link pullRequestRefOf} rejects `.`/`..`
+ * segments before this builder runs, so a dot-segment can only reach the
+ * API by normalising into a same-family 404 — never another route. The
+ * `number` segment is validated decimal digits at the parse site.
  */
 export function appPullRequestDetailUrl(base: string, appId: string, ref: PullRequestRef): string {
-  return `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests/${ref.owner}/${ref.repo}/${ref.number}`;
+  return `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`;
 }
 
 /**
@@ -890,12 +929,15 @@ const PR_PARAM_PATTERN = /^[^/]+\/[^/]+\/\d+$/;
 
 /**
  * The `pr` param string → a detail address, or null when the param is
- * absent or malformed (the tab then renders the list).
+ * absent or malformed (the tab then renders the list). `.`/`..` segments
+ * are rejected outright — encoding cannot neutralise a dot-segment
+ * (`encodeURIComponent("..")` is `".."`), so the boundary has to be here.
  */
 export function pullRequestRefOf(pr: string): PullRequestRef | null {
   const [owner, repo, number] = pr.split("/");
   if (owner === undefined || repo === undefined || number === undefined) return null;
   if (!/^\d+$/.test(number) || owner === "" || repo === "") return null;
+  if (owner === "." || owner === ".." || repo === "." || repo === "..") return null;
   return { owner, repo, number: Number(number) };
 }
 
