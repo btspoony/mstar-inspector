@@ -1753,6 +1753,36 @@ and the settings model faces write and read.
    settings page (`/dashboard/apps/<appId>/settings`) is where the model
    chain, per-role overrides, and provider keys are configured.
 
+### 2b. When a permission is missing from an existing App
+
+An installation token is granted as ONE set. If any requested value exceeds what
+the App declares or the installation approved, GitHub refuses the whole mint
+(`create-an-installation-access-token-for-an-app`, 403) and the review never
+starts — no partial grant, no degraded mode. The recorded failures show
+`stage: pipeline` with that message.
+
+Two places must agree, in this order:
+
+1. **App declaration** — `https://github.com/settings/apps/<app-name>/permissions`.
+   The locked set is the table under § GitHub App permissions above. An App made
+   by hand rather than through the manifest flow can differ here; `contents`
+   declared as *read* while `REVIEW_WRITE_PERMISSIONS` asks for *write* is the
+   concrete case that produced the 403 above.
+2. **Installation approval** — after the declaration changes, every installation
+   still has to accept it:
+   `https://github.com/settings/installations/<installation_id>`. The page shows
+   a pending permission review until it does. Until then the mint keeps failing
+   even though the App declaration looks right.
+
+Verify against the live declaration, not the docs:
+
+```bash
+gh api /apps/<app-name> --jq '.permissions'
+```
+
+A mismatch with the § GitHub App permissions table is the cause; a match means
+the install approval in step 2 is still pending.
+
 ### 3. Repoint the webhook + R2 checklist
 
 A freshly manifest-registered App needs no repoint — the flow already set
