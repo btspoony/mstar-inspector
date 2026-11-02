@@ -1147,7 +1147,7 @@ describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete enve
         target: { owner: "acme", repo: "widgets", pr: 7, head_sha: "abc1234567890abcdef1234567890abcdef12" },
         // The runner states coverage; the engine's fallback would restate the
         // verdict header the body already renders.
-        summary_md: "Reviewed 2 seats across the full diff.",
+        summary_md: "No narrative summary: the review seats returned structured findings only.",
       }),
     );
   });
@@ -1661,7 +1661,9 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     // No seat narrative exists on this path, so the summary states coverage
     // instead of restating the verdict header the body already renders.
     expect(envelope.summary_md).not.toContain("## Verdict:");
-    expect(envelope.summary_md).toBe("Reviewed by the deep parent session across the full diff.");
+    expect(envelope.summary_md).toBe(
+      "No narrative summary: the deep parent session ended without one.",
+    );
     // The cause is the declared fact, never a line inside the summary.
     expect(envelope.summary_md).not.toContain("cause:");
   });
@@ -1733,7 +1735,9 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     // No seat narrative exists on this path, so the summary states coverage
     // instead of restating the verdict header the body already renders.
     expect(envelope.summary_md).not.toContain("## Verdict:");
-    expect(envelope.summary_md).toBe("Reviewed by the deep parent session across the full diff.");
+    expect(envelope.summary_md).toBe(
+      "No narrative summary: the deep parent session ended without one.",
+    );
   });
 
   test("a turn that yielded is unchanged by the end event", async () => {
