@@ -507,6 +507,14 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
 }
 
 /**
+ * RFC 3339 (what GitHub stamps) — the ledger's `last_seen_at` input. A value
+ * that fails this is treated as ABSENT by the caller rather than handed to
+ * SQLite's `datetime()`, which silently returns NULL for junk and would let
+ * the store's "no timestamp" fallback masquerade as a real clock.
+ */
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
  * The per-App PR ledger record for one `pull_request` delivery (migration
  * 0039) — the fields the dashboard reads, never a classification. `null` when
  * the payload cannot supply the ledger's identity (owner / repo / number) or
@@ -545,7 +553,9 @@ export function pullRequestRecord(rawBody: string): {
     title: pull_request?.title ?? null,
     state,
     headSha: pull_request?.head?.sha ?? null,
-    updatedAt: pull_request?.updated_at ?? null,
+    // Only a well-formed stamp rides through; junk degrades to "no stamp",
+    // which the store resolves to now EXPLICITLY.
+    updatedAt: RFC3339.test(pull_request?.updated_at ?? "") ? (pull_request?.updated_at ?? null) : null,
   };
 }
 

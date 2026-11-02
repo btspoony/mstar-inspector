@@ -27,6 +27,7 @@ import {
   type SweepInviteLapseFields,
   type SweepLog,
   type SweepRetentionFields,
+  type SweepLedgerRetentionFields,
   type SweepWarnFields,
 } from "../../src/worker/sweep";
 import { createMigratedTestD1 } from "../store/helpers";
@@ -40,7 +41,12 @@ const BASE = {
 };
 
 type WarnCall = {
-  fields: SweepAlertFields | SweepWarnFields | SweepRetentionFields | SweepInviteLapseFields;
+  fields:
+    | SweepAlertFields
+    | SweepWarnFields
+    | SweepRetentionFields
+    | SweepLedgerRetentionFields
+    | SweepInviteLapseFields;
   msg?: string;
 };
 
@@ -107,11 +113,14 @@ describe("runSweep", () => {
   test("counts review_failures with the trailing-24h window SQL", async () => {
     const captured: string[] = [];
     const result = await runSweep(recordingDb(captured));
-    expect(captured).toHaveLength(3);
+    expect(captured).toHaveLength(4);
     expect(captured[0]).toContain("DELETE FROM webhook_deliveries");
-    expect(captured[1]).toContain("UPDATE workspace_invites");
-    expect(captured[2]).toContain("FROM review_failures");
-    expect(captured[2]).toContain("created_at > datetime('now', '-24 hours')");
+    // Migration 0039: the ledger's own bounded retention, terminal rows only.
+    expect(captured[1]).toContain("DELETE FROM pull_requests");
+    expect(captured[1]).toContain("state IN ('closed', 'merged')");
+    expect(captured[2]).toContain("UPDATE workspace_invites");
+    expect(captured[3]).toContain("FROM review_failures");
+    expect(captured[3]).toContain("created_at > datetime('now', '-24 hours')");
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,
@@ -359,8 +368,11 @@ describe("runSweep", () => {
     expect(binds).toHaveLength(1);
     expect(binds[0]).toHaveLength(2);
     expect(binds[0]![1]).toBe(SWEEP_INVITE_LAPSE_CAP);
-    expect(calls).toHaveLength(1);
+    // The fake reports changes: 3 for EVERY statement, so both janitors log;
+    // the delivery sweep's line comes first.
+    expect(calls).toHaveLength(2);
     expect(calls[0]!.fields).toEqual({ event: "retention_swept", deleted: 3 });
+    expect(calls[1]!.fields).toEqual({ event: "pull_request_retention_swept", deleted: 3 });
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,
@@ -400,6 +412,37 @@ describe("runSweep", () => {
       invitesExpired: 0,
       webhook: "not_attempted",
     });
+  });
+
+  test("PR-ledger retention drops only TERMINAL rows older than the window", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .query(
+        `INSERT INTO github_apps (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
+         VALUES ('app-1', 'ledger-app', 9001, 'ledger-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
+      )
+      .run();
+    const insertPr = (id: string, number: number, state: string, ageDays: number): void => {
+      db.raw
+        .query(
+          `INSERT INTO pull_requests (id, app_id, owner, repo, pr_number, state, last_seen_at)
+           VALUES (?, 'app-1', 'acme', 'widgets', ?, ?, datetime('now', ?))`,
+        )
+        .run(id, number, state, `-${ageDays} days`);
+    };
+    insertPr("pr-merged-old", 1, "merged", 120); // swept
+    insertPr("pr-closed-old", 2, "closed", 91); // swept
+    insertPr("pr-open-old", 3, "open", 120); // KEPT — still a live target
+    insertPr("pr-merged-fresh", 4, "merged", 1); // KEPT — inside the window
+
+    const { log, calls } = captureLog();
+    await runSweep(db, { log });
+    const remaining = db.raw
+      .query("SELECT id FROM pull_requests ORDER BY id")
+      .all() as Array<{ id: string }>;
+    expect(remaining.map((row) => row.id)).toEqual(["pr-merged-fresh", "pr-open-old"]);
+    // The delivery sweep deletes nothing here, so the ledger line is first.
+    expect(calls[0]!.fields).toEqual({ event: "pull_request_retention_swept", deleted: 2 });
   });
 
   test("retention failure degrades to a warn and the failure-sweep still runs (breach alert fires)", async () => {

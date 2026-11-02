@@ -306,6 +306,27 @@ const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'reject
  */
 export const EVENT_NAME_MAX_LENGTH = 64;
 
+/**
+ * Bound on `listPullRequests`. Any third party who opens a PR mints a ledger
+ * row and only TERMINAL rows are swept, so the live set grows with every open
+ * PR across every installed repo. 200 is the newest window an operator can
+ * act on (a review queue is read at its head, not its tail) and keeps one tab
+ * open to a bounded payload; a longer history stays queryable through the
+ * ledger itself rather than through this face.
+ */
+export const PULL_REQUEST_LIST_LIMIT = 200;
+
+/**
+ * Retention for the ledger: TERMINAL rows (`closed` / `merged`) whose last
+ * activity is older than this window are swept. Open PRs are never swept —
+ * a PR that is still open is still a live review target, however old — which
+ * is why the predicate keys on `state`, not age alone.
+ */
+export const PULL_REQUEST_RETENTION_DAYS = 90;
+
+/** Retention row cap per run — bounded work per 15-min sweep (the 0035 rule). */
+export const PULL_REQUEST_RETENTION_CAP = 500;
+
 /** Input for recordDelivery — one VERIFIED per-App webhook delivery. */
 export type RecordDeliveryInput = {
   appId: string;
@@ -425,6 +446,26 @@ export const APP_READ_SQL = {
 
 /** Create the github_apps / app_installations store over one D1 handle. */
 export function createAppsStore(db: AppsStoreD1) {
+  /**
+   * Bounded ledger retention (migration 0039). Terminal rows only: an open PR
+   * is still a review target however stale its clock, so `state` gates the
+   * predicate and age only orders what it already excluded. Capped per run so
+   * a large backlog drains over successive sweeps instead of stalling one.
+   */
+  async function sweepTerminalPullRequests(): Promise<number> {
+    const res = await db
+      .prepare(
+        `DELETE FROM pull_requests WHERE id IN (
+           SELECT id FROM pull_requests
+           WHERE state IN ('closed', 'merged')
+             AND last_seen_at < datetime('now', '-${PULL_REQUEST_RETENTION_DAYS} days')
+           LIMIT ${PULL_REQUEST_RETENTION_CAP}
+         )`,
+      )
+      .run();
+    return res.meta.changes;
+  }
+
   /**
    * BATCHED health-read face (QC wave 1, W-1): the Apps list
    * renders every row's health on each POST re-render, so the per-App
@@ -853,6 +894,9 @@ export function createAppsStore(db: AppsStoreD1) {
     /** Batched variant of deliverySummary — see the local implementation above. */
     deliverySummaries,
 
+    /** Bounded ledger retention — see the local implementation above. */
+    sweepTerminalPullRequests,
+
     /**
      * Recent-deliveries read face (settings panel): THIS App's rows, verdict
      * tier first, newest first inside each tier (created_at has second
@@ -901,7 +945,12 @@ export function createAppsStore(db: AppsStoreD1) {
      *     row to the top either.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
-      const seenAt = input.updatedAt ?? null;
+      // The caller validates the timestamp (`pullRequestRecord` only passes an
+      // RFC 3339 stamp), so this branch is the EXPLICIT "no usable stamp"
+      // fallback: arrival time is the only clock left.
+      const seenAt = input.updatedAt === undefined || input.updatedAt === null
+        ? null
+        : input.updatedAt;
       await db
         .prepare(
           `INSERT INTO pull_requests
@@ -928,12 +977,25 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * PR-ledger list face: every pull request this App has received, newest
-     * activity first. THREE statements for any N — the rows, the newest review
-     * per (owner, repo, pr_number) via a ROW_NUMBER() window (the
-     * deliverySummaries shape), and the failure count joined through
-     * `app_installations` (`review_failures` carries no app_id; the
-     * installation is what scopes it to this App) — never one query per row.
+     * PR-ledger list face: the App's most recently active pull requests,
+     * newest first. THREE statements per call regardless of N — the rows, the
+     * newest review per (owner, repo, pr_number) via a ROW_NUMBER() window
+     * (the deliverySummaries shape), and the failure count joined through
+     * `app_installations` — never one query per row.
+     *
+     * Capped at PULL_REQUEST_LIST_LIMIT: any third party who opens a PR mints
+     * a row and the retention sweep only drains TERMINAL rows, so the table's
+     * live set grows with every open PR across every installed repo. An
+     * uncapped list would serialise all of it on every tab open; the cap is
+     * the newest window an operator can act on, and the sweep bounds what
+     * stays behind it.
+     *
+     * Failure attribution assumes ONE installation per App. `app_installations`
+     * permits the same installation id under two App rows, and in that case a
+     * failure row would count toward both — accepted, because the alternative
+     * (a constraint) would refuse a legitimate re-install shape, and a
+     * cross-App duplicate is a config mistake visible in the delivery health
+     * panel, not a silent data problem.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -941,9 +1003,10 @@ export function createAppsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
              FROM pull_requests WHERE app_id = ?
-             ORDER BY last_seen_at DESC, pr_number DESC`,
+             ORDER BY last_seen_at DESC, pr_number DESC
+             LIMIT ?`,
           )
-          .bind(appId),
+          .bind(appId, PULL_REQUEST_LIST_LIMIT),
         db
           .prepare(
             `SELECT owner, repo, pr_number, verdict, reviewed_at FROM (

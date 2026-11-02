@@ -361,7 +361,17 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // structured warn and never changes the response.
   if (eventName === "pull_request") {
     const record = pullRequestRecord(rawBody);
-    if (record !== null) {
+    if (record === null) {
+      // Visible, not silent: this delivery ran (or was ignored) with no ledger
+      // row, so the dashboard's "what did this App receive" answer is
+      // incomplete for it. Same best-effort posture as every sibling path —
+      // log, never change the response.
+      webhookWarn(
+        "pull_request_record_skipped",
+        `${webhookRef} row_id=${row.id}`,
+        "pull_request not recorded — payload carried no owner/repo/number/state",
+      );
+    } else {
       try {
         await appsStore.upsertPullRequest({ appId: row.id, ...record });
       } catch (err) {

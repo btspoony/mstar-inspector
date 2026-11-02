@@ -4149,11 +4149,8 @@ function parseInsightsParams(query: { window?: string; repo?: string; include?: 
 }
 
 const appInsightsRoute = async (c: DashboardContext) => {
-  const gate = await requireAppJsonRead(c);
+  const gate = await requireAppManagerJson(c);
   if (!gate.ok) return gate.response;
-
-  const db = dashboardD1(c.env);
-  if (!db) return c.text("dashboard storage is not configured", 500);
 
   const params = parseInsightsParams({
     window: c.req.query("window"),
@@ -4162,7 +4159,7 @@ const appInsightsRoute = async (c: DashboardContext) => {
   });
   if (!params.ok) return c.json({ error: params.reason }, 400);
 
-  const insights = await createInsightsStore(db, {
+  const insights = await createInsightsStore(gate.db, {
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
@@ -4196,36 +4193,44 @@ const appInsightsRoute = async (c: DashboardContext) => {
 // gone; the global URL answers 404.
 
 /**
- * The per-App pull-request ledger (migration 0039): every PR this App received
- * and what happened to each review run. Same gate ladder as the insights read
- * face — membership, then the App-id resolution (unknown / soft-deleted /
- * cross-workspace all collapse to the one `unknown app` 404, so a sibling
- * workspace's App leaves no existence oracle), then the creator-or-admin rule.
+ * The App-scoped JSON read gate: membership, then the App-id resolution, then
+ * the manage rule. `canManageApp` is the WORKSPACE role (owner/admin) — the
+ * App's creator gets nothing extra, so "creator-or-admin" would be a lie here.
+ *
+ * Cross-workspace invisibility is the resolution's own verdict: unknown,
+ * soft-deleted and foreign Apps all read `null` and share one 404, so a
+ * sibling workspace's App leaves no existence oracle.
+ *
+ * The store is built ONCE and handed back: the ledger faces need exactly this
+ * store, and rebuilding it per handler was a second construction of the same
+ * narrow face.
  */
-async function requireAppJsonRead(
+async function requireAppManagerJson(
   c: DashboardContext,
-): Promise<{ ok: true; app: GithubAppRow; db: DashboardDb } | { ok: false; response: Response }> {
+): Promise<
+  | { ok: true; app: GithubAppRow; db: DashboardDb; store: ReturnType<typeof createAppsStore> }
+  | { ok: false; response: Response }
+> {
   const member = await requireMember(c);
   if (!member.ok) return member;
-  const app = await resolveScopedApp(
-    createAppsStore(member.db),
-    c.req.param("appId") ?? "",
-    member.scope,
-  );
+  const store = createAppsStore(member.db);
+  const app = await resolveScopedApp(store, c.req.param("appId") ?? "", member.scope);
   if (!app) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
   if (!canManageApp(member.scope)) return { ok: false, response: c.json({ error: "forbidden" }, 403) };
-  return { ok: true, app, db: member.db };
+  return { ok: true, app, db: member.db, store };
 }
 
 const appPullRequestsRoute = async (c: DashboardContext) => {
-  const gate = await requireAppJsonRead(c);
-  if (!gate.ok) return gate.response;
+  // Set before the gate: a deny (403) and a 404 are answers about a specific
+  // workspace's data too, so no intermediary may cache them either.
   c.header("Cache-Control", "private, no-store");
+  const gate = await requireAppManagerJson(c);
+  if (!gate.ok) return gate.response;
   // The wire shape is total: every field the client reads is a string, so one
   // nullable ledger column can never blank the whole list. `title` / `head_sha`
   // are genuinely optional in the payload, and `state` is GitHub's own domain —
   // an unexpected value reads as the only state a client knows how to render.
-  const rows = (await createAppsStore(gate.db).listPullRequests(gate.app.id)).map((row) => ({
+  const rows = (await gate.store.listPullRequests(gate.app.id)).map((row) => ({
     ...row,
     title: row.title ?? "",
     head_sha: row.head_sha ?? "",
@@ -4236,23 +4241,27 @@ const appPullRequestsRoute = async (c: DashboardContext) => {
 };
 
 const appPullRequestRoute = async (c: DashboardContext) => {
-  const gate = await requireAppJsonRead(c);
+  c.header("Cache-Control", "private, no-store");
+  const gate = await requireAppManagerJson(c);
   if (!gate.ok) return gate.response;
   const raw = c.req.param("number") ?? "";
   // Decimal digits only (the App-id segment's rule): `0x1f` / `1e3` are number
-  // spellings that `Number()` would alias onto a real PR number.
+  // spellings that `Number()` would alias onto a real PR number. Hono params
+  // are already non-empty, so only the number needs a shape check.
   const number = /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    return c.json({ error: "unknown pull request" }, 404);
+  }
   // The address is the ledger's own key — owner AND repo AND number. One App
   // serves several repos, so a number alone is ambiguous; a miss is a 404,
   // never a same-number row from another repo.
-  const owner = c.req.param("owner") ?? "";
-  const repo = c.req.param("repo") ?? "";
-  if (!Number.isSafeInteger(number) || number <= 0 || owner === "" || repo === "") {
-    return c.json({ error: "unknown pull request" }, 404);
-  }
-  const detail = await createAppsStore(gate.db).getPullRequest(gate.app.id, owner, repo, number);
+  const detail = await gate.store.getPullRequest(
+    gate.app.id,
+    c.req.param("owner") ?? "",
+    c.req.param("repo") ?? "",
+    number,
+  );
   if (detail === null) return c.json({ error: "unknown pull request" }, 404);
-  c.header("Cache-Control", "private, no-store");
   // Same total-shape rule as the list: the store reports the tables' actual
   // columns, and this boundary is where a nullable column becomes "". The
   // v1 pipeline NEVER records a `provider` (the artifact store persists NULL
