@@ -287,13 +287,19 @@ function stripMachineFactLines(md: string, fact: { reason: string; unscanned: re
 
 /**
  * The engine's summary is not always a narrative. `defaultReviewSummary` (the
- * model-less path) emits a `## Verdict:` line, the `must-fix=…` tally and a
- * `- <class>: <title>` list — the same three facts this assembler already
- * renders from the envelope through `**Verdict:**`, `renderTally` and
+ * model-less path) emits a `## Verdict:` line, the `must-fix=…` tally and one
+ * `- <mergeClass>: <title>` bullet per finding — the same facts this assembler
+ * already renders from the envelope through `**Verdict:**`, `renderTally` and
  * `renderFindings`. Published together, every fact appears twice, which is what
  * a real review comment showed: the verdict and tally once from the body and
  * again from the summary, then the finding titles a third time in the findings
  * section.
+ *
+ * Only the three MERGE_CLASSES are stripped. An `unverified` bullet is NOT an
+ * echo: `renderFindings` sections solely over the merge classes, so such a line
+ * would be the only place an unverified item is ever named — stripping it would
+ * leave a count with no titles. `defaultReviewSummary` emits no such bullet
+ * today; the pattern excludes it so a future one survives.
  *
  * A seat's own narrative does not use these shapes (the review skill writes
  * `## ✅ Verdict:` and prose), so a summary that carries content passes through
@@ -312,7 +318,7 @@ function stripEchoedEnvelopeFacts(md: string): string {
       (line) =>
         !line.startsWith("## Verdict: ") &&
         !/^must-fix=\d+ should-fix=\d+ nit=\d+ unverified=\d+$/.test(line) &&
-        !/^- (must-fix|should-fix|nit|unverified): /.test(line),
+        !/^- (must-fix|should-fix|nit): /.test(line),
     )
     .join("\n");
   return kept.replace(/\n{3,}/g, "\n\n").trim();

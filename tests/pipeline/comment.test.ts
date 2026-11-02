@@ -710,6 +710,51 @@ describe("buildReviewBody", () => {
     expect(body).not.toContain("cause:");
     expect(body).not.toContain("unscanned:");
   });
+
+  test("a narrative summary passes through untouched", () => {
+    const narrative =
+      "## What this does\n\nRewrites the doc block so it records only what the deploy history supports.\n\n## Considered\n\n- A path-families route: rejected.";
+    const body = buildReviewBody({ ...output, verdict: "ship it", findings: [], summary_md: narrative });
+    expect(body).toContain(narrative);
+  });
+
+  test("the engine's verdict, tally and per-class bullets are stripped from a settled verdict", () => {
+    // A settled verdict passes its summary through byte-identical EXCEPT for
+    // the echo: the body renders these three facts itself, and a real comment
+    // showed each one twice.
+    const body = buildReviewBody({
+      ...output,
+      verdict: "ship it",
+      findings: [],
+      summary_md: [
+        "## Verdict: ship it · 90% (pass)",
+        "",
+        "must-fix=0 should-fix=0 nit=2 unverified=1",
+        "",
+        "- nit: A duplicate title",
+        "- nit: Another duplicate title",
+        "",
+        "## Prose that must survive",
+      ].join("\n"),
+    });
+    expect(body).not.toContain("## Verdict: ship it · 90%");
+    expect(body).not.toContain("must-fix=0 should-fix=0 nit=2");
+    expect(body).not.toContain("- nit: A duplicate title");
+    expect(body).toContain("## Prose that must survive");
+  });
+
+  test("an unverified bullet survives: it is the only place those items are named", () => {
+    // renderFindings sections over MERGE_CLASSES only, so an unverified bullet
+    // has no duplicate to fall back on.
+    const body = buildReviewBody({
+      ...output,
+      verdict: "ship it",
+      findings: [],
+      summary_md: "- unverified: could not reach the registry\n- nit: duplicate",
+    });
+    expect(body).toContain("- unverified: could not reach the registry");
+    expect(body).not.toContain("- nit: duplicate");
+  });
 });
 
 describe("review comment upsert (T5)", () => {
