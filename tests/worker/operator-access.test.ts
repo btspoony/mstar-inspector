@@ -324,6 +324,10 @@ describe("operator with a valid grant", () => {
       { path: `/dashboard/acme/api/apps/${APP_ID}/settings` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/models` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/insights/summary` },
+      // The PR ledger pair (migration 0039): a support grant never widens to
+      // App data, so both the list and the detail face stay 403.
+      { path: `/dashboard/acme/api/apps/${APP_ID}/pull-requests` },
+      { path: `/dashboard/acme/api/apps/${APP_ID}/pull-requests/acme/widgets/131` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/keys/verify`, method: "POST", body: "provider=openai" },
     ];
     for (const item of cases) {

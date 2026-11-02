@@ -168,6 +168,22 @@ describe("pull_request delivery → PR ledger", () => {
     expect(ledger(db, appId)[0]!.state).toBe("merged");
   });
 
+  test("an unparsable updated_at is dropped by the caller, not swallowed by datetime()", async () => {
+    const db = createMigratedD1();
+    const appId = await seedApp(db, "every_push");
+    // `datetime('not-a-timestamp')` yields NULL, which used to be hidden by a
+    // COALESCE inside the SQL. The caller now filters it, so the store takes
+    // its OWN explicit "no usable stamp" branch and the column is never NULL.
+    await deliver(
+      appId,
+      { ...PR_PAYLOAD, pull_request: { ...PR_PAYLOAD.pull_request, updated_at: "not-a-timestamp" } },
+      makeEnv(db),
+    );
+    const row = ledger(db, appId)[0]!;
+    expect(row.last_seen_at).not.toBeNull();
+    expect(row.last_seen_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
   test("last_seen_at comes from the payload's updated_at", async () => {
     const db = createMigratedD1();
     const appId = await seedApp(db, "every_push");
@@ -202,6 +218,31 @@ describe("pull_request delivery → PR ledger", () => {
     );
     expect(res.status).toBe(401);
     expect(ledger(db, appId).length).toBe(0);
+  });
+
+  test("a payload with no owner/repo/number is skipped VISIBLY, not silently", async () => {
+    const db = createMigratedD1();
+    const appId = await seedApp(db, "every_push");
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (line: unknown) => {
+      warns.push(typeof line === "string" ? line : JSON.stringify(line));
+    };
+    try {
+      // A non-whitelisted action with NO repository: the classifier ignores it
+      // (so the route reaches the ledger branch) while `pullRequestRecord`
+      // cannot form the tuple, which is exactly the skipped case.
+      const res = await deliver(
+        appId,
+        { action: "assigned", installation: { id: 123 }, pull_request: { number: 131, state: "open" } },
+        makeEnv(db),
+      );
+      expect(res.status).toBe(200);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(ledger(db, appId).length).toBe(0);
+    expect(warns.some((line) => line.includes("pull_request_record_skipped"))).toBe(true);
   });
 
   test("a store failure logs a warn and leaves the HTTP status untouched", async () => {

@@ -74,6 +74,17 @@ async function seededWorld(): Promise<TestD1> {
     createdBy: "mallory",
     workspaceId: "default",
   });
+  // One ledger row: the detail face's 200 side needs a real tuple, and every
+  // deny path must still answer before the lookup.
+  await createAppsStore(db).upsertPullRequest({
+    appId: id,
+    owner: "acme",
+    repo: "widgets",
+    prNumber: 131,
+    title: "Add a thing",
+    state: "open",
+    headSha: "sha-1",
+  });
   return db;
 }
 
@@ -419,6 +430,55 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       expect(res.status).toBe(404);
     });
   }
+});
+
+// --- PR-ledger read faces: the list and one-PR detail (migration 0039) ---
+// Same canManageApp rule as every other App read: the workspace role decides,
+// and App authorship grants nothing. The detail address is the ledger's own
+// key (owner/repo/number).
+describe("App pull-request ledger read-face permission matrix", () => {
+  const LIST = `/dashboard/default/api/apps/${APP_ID}/pull-requests`;
+  const DETAIL = `${LIST}/acme/widgets/131`;
+
+  async function getFace(path: string, login: string, env: Env): Promise<Response> {
+    return worker.fetch(
+      new Request(`https://worker.local${path}`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}` },
+      }),
+      env,
+    );
+  }
+
+  for (const path of [LIST, DETAIL]) {
+    test(`${path}: anonymous → 302 login`, async () => {
+      const res = await worker.fetch(new Request(`https://worker.local${path}`), makeEnv(await seededWorld()));
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe("/dashboard/login");
+    });
+
+    for (const actor of ACTORS) {
+      test(`${path}: ${actor.name} (${actor.login}) → ${actor.expected}`, async () => {
+        const res = await getFace(path, actor.login, makeEnv(await seededWorld()));
+        expect(res.status).toBe(actor.expected);
+        if (actor.expected === 403) {
+          // The manager gate is what answered — not the App resolution.
+          expect(await res.json()).toEqual({ error: "forbidden" });
+        }
+      });
+    }
+
+    test(`${path}: deny answers are not cacheable`, async () => {
+      const res = await getFace(path, "hubot", makeEnv(await seededWorld()));
+      expect(res.status).toBe(403);
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+  }
+
+  test("detail: unknown PR number → 404 for a manager, also not cacheable", async () => {
+    const res = await getFace(`${LIST}/acme/widgets/999`, "octocat", makeEnv(await seededWorld()));
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
 });
 
 // --- Read-face matrix: GET /dashboard/default/api/apps/:appId/insights/summary ---

@@ -10,7 +10,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createAppsStore, PULL_REQUEST_LIST_LIMIT } from "../../src/dashboard/apps-store";
 
 const APP_ID = "app-pr-ledger";
 
@@ -181,6 +181,53 @@ describe("listPullRequests", () => {
     const rows = await createAppsStore(counted as never).listPullRequests(APP_ID);
     expect(rows.length).toBe(3);
     expect(prepares).toBe(3);
+  });
+
+  test("is bounded: never more than PULL_REQUEST_LIST_LIMIT rows, newest first", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    // One past the cap, each stamped a distinct second via the payload clock.
+    const total = PULL_REQUEST_LIST_LIMIT + 1;
+    for (let n = 1; n <= total; n++) {
+      await createAppsStore(db).upsertPullRequest({
+        ...PR,
+        prNumber: n,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString(),
+      });
+    }
+    const rows = await createAppsStore(db).listPullRequests(APP_ID);
+    expect(rows.length).toBe(PULL_REQUEST_LIST_LIMIT);
+    // The oldest (prNumber 1, second 1) is the one dropped.
+    expect(rows[0]!.number).toBe(total);
+    expect(rows.some((row) => row.number === 1)).toBe(false);
+  });
+});
+
+describe("sweepTerminalPullRequests", () => {
+  test("drops terminal rows past the window and keeps open ones however old", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    const old = "2020-01-01T00:00:00Z";
+    await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: 1, state: "merged", updatedAt: old });
+    await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: 2, state: "closed", updatedAt: old });
+    // An OPEN row is a live review target however stale its clock.
+    await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: 3, state: "open", updatedAt: old });
+    // A terminal row INSIDE the window stays.
+    await createAppsStore(db).upsertPullRequest({ ...PR, prNumber: 4, state: "closed" });
+
+    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(2);
+    const remaining = db.raw
+      .prepare("SELECT pr_number FROM pull_requests ORDER BY pr_number")
+      .all() as Array<{ pr_number: number }>;
+    expect(remaining.map((row) => row.pr_number)).toEqual([3, 4]);
+  });
+
+  test("is idempotent — a second run deletes nothing", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest({ ...PR, state: "merged", updatedAt: "2020-01-01T00:00:00Z" });
+    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(1);
+    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(0);
   });
 });
 
