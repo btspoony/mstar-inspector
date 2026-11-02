@@ -733,15 +733,18 @@ describe("buildReviewBody", () => {
         "",
         "must-fix=0 should-fix=0 nit=2 unverified=1",
         "",
-        "- nit: A duplicate title",
-        "- nit: Another duplicate title",
+        "- must-fix: A duplicate title",
+        "- should-fix: Another duplicate title",
+        "- nit: A third duplicate title",
         "",
         "## Prose that must survive",
       ].join("\n"),
     });
     expect(body).not.toContain("## Verdict: ship it · 90%");
     expect(body).not.toContain("must-fix=0 should-fix=0 nit=2");
-    expect(body).not.toContain("- nit: A duplicate title");
+    expect(body).not.toContain("- must-fix: A duplicate title");
+    expect(body).not.toContain("- should-fix: Another duplicate title");
+    expect(body).not.toContain("- nit: A third duplicate title");
     expect(body).toContain("## Prose that must survive");
   });
 
