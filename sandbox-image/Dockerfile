@@ -1,5 +1,14 @@
 # mstar-inspector review sandbox image (review-runner containerization).
 #
+# REBUILD TRIGGER (read before editing packages/runner): this Dockerfile
+# COPYs packages/{runner,shared}/src, but the image hash wrangler compares on
+# `wrangler deploy` covers THIS file, not the copied sources. A runner change
+# that is not accompanied by a Dockerfile touch therefore deploys the Worker
+# without rebuilding the image, and the container keeps running stale code.
+# Touch this comment whenever the copied runner sources change.
+#
+# rebuild: runner stdin bound + sandbox instance probe
+#
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and
 # its committed bun.lock) are all pinned to exact versions.
