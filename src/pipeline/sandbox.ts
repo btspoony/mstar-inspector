@@ -89,18 +89,23 @@ export type ReviewSandbox = {
 const CONTAINER_IMAGE_KEY = "sandbox";
 /**
  * Instance size. `lite` (256 MiB, 1/16 vCPU) carried the pin over from the
- * 0.12 `instance_type` value, and the note above says the all-silent stall
- * "was not resource exhaustion — a memory-starved process would not emit
- * nothing on either stream". That reasoning was wrong: an OOM-killed process
- * emits exactly nothing, and the container's own death reaches `exec` as
- * `Network connection lost`.
+ * 0.12 `instance_type` value. The note it replaced claimed the all-silent
+ * stall "was not resource exhaustion — a memory-starved process would not
+ * emit nothing on either stream". That reasoning is wrong on its own terms:
+ * an OOM-killed process emits exactly nothing, and a container dying reaches
+ * `exec` as `Network connection lost`.
  *
- * The pin stopped fitting when the omp SDK bump to 18.13.3 first reached an
- * image build. From that deploy on, every review died at the bound with both
- * streams empty, and a later run reported `Network connection lost` after
- * four minutes. `basic` (1 GiB, 1/4 vCPU) is the smallest step that gives the
- * runner room for its own runtime plus one agent session; raise it only with
- * evidence, the way this step was taken.
+ * Established: no review has completed since 2026-08-30. Every run observed
+ * since records either the bound firing with both streams empty or
+ * `Network connection lost`. The runner's own first statement never appears on
+ * stderr, so the process is not reaching its own code.
+ *
+ * NOT established: which change started it. An earlier move of this pin to
+ * `basic` was written, but that deploy FAILED, so the change never reached the
+ * container and the hypothesis has never actually been exercised. Do not treat
+ * that earlier attempt as a negative result.
+ *
+ * `basic` (1 GiB, 1/4 vCPU) is that exercise, not a proven fix.
  */
 const CONTAINER_INSTANCE = "basic" as const;
 /**
