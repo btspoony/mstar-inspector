@@ -745,6 +745,30 @@ describe("buildReviewBody", () => {
     expect(body).toContain("## Prose that must survive");
   });
 
+  test("the echo gate does not fire on a narrative that merely looks like bullets", () => {
+    // Negative branch: without the gate, `- nit:` lines inside ordinary prose
+    // would be deleted from a body that never carried an engine echo.
+    const narrative = "## Review\n\n- nit: consider renaming this.\n- should-fix: split the parser.";
+    const body = buildReviewBody({ ...output, verdict: "ship it", findings: [], summary_md: narrative });
+    expect(body).toContain("- nit: consider renaming this.");
+    expect(body).toContain("- should-fix: split the parser.");
+  });
+
+  test("the header carries the score, and the band when the chat header names one", () => {
+    const body = buildReviewBody({
+      ...output,
+      verdict: "ship it",
+      findings: [],
+      tally: {
+        verdict: "ship it",
+        scorePct: 79,
+        tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 0 },
+        chatHeader: "ship it · 79% (pass)",
+      },
+    });
+    expect(body.startsWith("**Verdict: ship it** · 79% (pass)")).toBe(true);
+  });
+
   test("an unverified bullet survives: it is the only place those items are named", () => {
     // renderFindings sections over MERGE_CLASSES only, so an unverified bullet
     // has no duplicate to fall back on.

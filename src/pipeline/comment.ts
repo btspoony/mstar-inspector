@@ -356,17 +356,20 @@ export function buildReviewBody(
   previousFingerprints?: ReadonlySet<string>,
   closure?: string,
 ): string {
-  // The grade rides the header: the engine's summary carries `scorePct` and the
-  // band, and once its echoed `## Verdict:` line is stripped nothing else in the
-  // body names them. Absent tally (a degraded publication) keeps the bare verb.
-  // `band` is optional on the envelope tally (legacy-valid without it), so the
-  // grade degrades to the bare percentage rather than printing `undefined`.
+  // The grade rides the header: once the summary's echoed `## Verdict:` line is
+  // stripped, nothing else in the body names the score. Absent tally (a degraded
+  // publication) keeps the bare verb. The tally carries `scorePct` but NOT the band — the band lives only
+  // inside `chatHeader` ("ship it · 79% (pass)"), the same string the engine's
+  // own summary line is built from. Read it there; a header that does not match
+  // degrades to the bare percentage rather than printing `undefined`.
+  const bandMatch =
+    output.tally === undefined
+      ? null
+      : /·\s*\d+%\s*\(([a-z][a-z ,-]*)\)/i.exec(output.tally.chatHeader);
   const grade =
     output.tally === undefined
       ? ""
-      : output.tally.band === undefined
-        ? ` · ${output.tally.scorePct}%`
-        : ` · ${output.tally.scorePct}% (${output.tally.band})`;
+      : ` · ${output.tally.scorePct}%${bandMatch === null ? "" : ` (${bandMatch[1]})`}`;
   const verdict = `**Verdict: ${output.verdict}**${grade}`;
   const tally = renderTally(output.tally, output.findings, previousFingerprints);
   // Incomplete verdicts state the declared cause + unscanned scope as part of
