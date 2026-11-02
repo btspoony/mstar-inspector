@@ -1417,7 +1417,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             // the fact itself) so a summary-only consumer still learns why. This
             // path declares the diff unscanned, so it never claims coverage.
             summary_md:
-              gathered.summary ?? `cause: ${cause}\n\nNo narrative summary was produced by the deep parent session.`,
+              gathered.summary ?? "No narrative summary was produced by the deep parent session.",
           });
           // The engine vocabulary is the SSOT for the synthesized envelope
           // too: an `agent_end` transcript is no more trusted than a yielded
@@ -1759,13 +1759,14 @@ export const ompAgentRuntime: AgentRuntime = {
         // fact the fallback does not carry: there was no narrative. The sentence
         // assumes nothing about the seats (a lost wave returned nothing), and it
         // never claims coverage — a stopped wave declares its scope unscanned in
-        // the same envelope. The cause rides a `cause:` line, the exact prefix
-        // the publishing body strips because it renders that fact itself, so a
-        // consumer reading only summary_md still learns why.
-        summary_md:
-          stoppedReason === undefined
-            ? "No narrative summary was produced by the review seats."
-            : `cause: ${stoppedReason}\n\nNo narrative summary was produced by the review seats.`,
+        // the same envelope.
+        //
+        // The cause does NOT ride here. This string is rendered verbatim by a
+        // surface that never reads `incomplete` (the dashboard's summary block),
+        // so a `cause:` line would surface as machine text in the UI. Why a wave
+        // stopped is the envelope's `incomplete` fact; a surface that wants it
+        // reads that field.
+        summary_md: "No narrative summary was produced by the review seats.",
         ...(stoppedSeats === 0
           ? {}
           : {
