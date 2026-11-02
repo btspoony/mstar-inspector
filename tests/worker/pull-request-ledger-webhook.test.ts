@@ -249,10 +249,26 @@ describe("pull_request delivery → PR ledger", () => {
     const db = createMigratedD1();
     const appId = await seedApp(db, "every_push");
     // Drop the ledger table under the route: the upsert throws, the response
-    // must not change.
+    // must not change — and the failure must still be visible in the log,
+    // because "the ledger recorded nothing" and "the ledger could not record"
+    // are different diagnoses and the caller only sees the response.
     db.raw.exec("DROP TABLE pull_requests");
-    const res = await deliver(appId, PR_PAYLOAD, makeEnv(db));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("accepted");
+    const warns: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (line: unknown) => {
+      warns.push(typeof line === "string" ? line : JSON.stringify(line));
+    };
+    let body: string;
+    let status: number;
+    try {
+      const res = await deliver(appId, PR_PAYLOAD, makeEnv(db));
+      status = res.status;
+      body = await res.text();
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(status).toBe(200);
+    expect(body).toBe("accepted");
+    expect(warns.some((line) => line.includes("pull_request_record_failed"))).toBe(true);
   });
 });
