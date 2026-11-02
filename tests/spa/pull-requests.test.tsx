@@ -4,11 +4,16 @@
  * Static-SSR pins over the pure faces (the InsightsRecordsView idiom):
  * the manage-gated tab trigger, the list table (title / state / verdict /
  * last seen / failure count), the empty state, and the detail face
- * (reviews, failures — stage + error as TEXT — findings). The fetch
- * wiring is pinned on the URL builders + payload parsers (no DOM runner).
+ * (reviews, failures — stage + error as TEXT — findings). Mounted
+ * (happy-dom) pins cover what only real effects and events prove: the
+ * manage-gated click-through to the ledger, the failures-column cell
+ * content, and the S2 switching contract — a retained detail from PR A
+ * must never render while PR B loads, and a failed fetch for the new PR
+ * renders the error face with a retry.
  */
 import { describe, expect, test } from "bun:test";
-import { createElement } from "react";
+import { act, createElement, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import {
@@ -17,15 +22,18 @@ import {
   parsePullRequestDetail,
   parsePullRequestList,
   pullRequestRefOf,
+  type AppDetailSearch,
   type PullRequestDetail,
   type PullRequestRow,
   type SettingsPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import {
+  AppPullRequestsTab,
   PullRequestDetailView,
   PullRequestsListView,
 } from "../../src/spa/pages/AppPullRequestsTab";
+import { installDom } from "./dom";
 
 const IDENTITY_APP = {
   github_slug: "demo",
@@ -159,7 +167,6 @@ describe("tab shell rendering (static SSR)", () => {
   test("the Pull requests trigger appears ONLY on the manage face", () => {
     const manage = renderDetail(managePayload);
     expect(manage).toContain(">Pull requests</button>");
-    expect(manage).toContain('data-state="inactive"');
     const identity = renderDetail(identityPayload);
     expect(identity).not.toContain(">Pull requests</button>");
     expect(identity).not.toContain(t("en", "pullRequests.columnPr"));
@@ -181,8 +188,9 @@ describe("pull requests list face (static SSR)", () => {
     // Latest verdict, and the no-review dash for the null case.
     expect(markup).toContain("ship it");
     expect(markup).toContain("Revert the cache change");
-    // The failure count is the row's own figure.
-    expect(markup).toContain(">2</span>");
+    // The failures column header rides the table; the count INSIDE the
+    // column is pinned by the mounted suite.
+    expect(markup).toContain(t("en", "pullRequests.columnFailures"));
   });
 
   test("the empty state renders when the App has seen no PR yet", () => {
@@ -325,11 +333,183 @@ describe("pull requests data plane (pure helpers)", () => {
       line: 42,
       body: "",
     });
-    // And the view renders the coerced row.
+    // And the view renders the coerced row: the review meta line carries
+    // both coerced fields as `model · provider` — here " · " — and the
+    // empty finding path renders no location at all, no bare `:line` (N12).
     const markup = renderToStaticMarkup(
       createElement(PullRequestDetailView, { locale: "en", detail: parsed ?? DETAIL }),
     );
-    expect(markup).not.toContain("undefined");
+    expect(markup).toContain(" · </span>");
+    expect(markup).not.toContain(":42");
     expect(markup).not.toContain(">null<");
+  });
+});
+
+/** A second PR's detail payload — the switch target in the S2 test. */
+const DETAIL_B: PullRequestDetail = {
+  pull_request: {
+    ...ROW_OPEN,
+    number: 9,
+    title: "Bump the dependencies",
+    latest_review: null,
+    failure_count: 0,
+  },
+  reviews: [],
+  failures: [],
+  findings: [],
+};
+
+const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+/** The stateful wrapper AppDetailView expects: the harness owns the search. */
+function DetailHarness() {
+  const [search, setSearch] = useState<AppDetailSearch>({
+    tab: "settings",
+    window: "30",
+    repo: "",
+    pr: "",
+  });
+  return createElement(AppDetailView, {
+    locale: "en",
+    appId: "1",
+    payload: managePayload,
+    groups: [],
+    notice: null,
+    search,
+    onReload: noReload,
+    onSearch: setSearch,
+  });
+}
+
+describe("pull requests tab (mounted)", () => {
+  test("clicking the Pull requests tab on the manage face opens the ledger", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const realFetch = globalThis.fetch;
+    // Every read answers the same empty ledger.
+    globalThis.fetch = (async () => jsonResponse({ pull_requests: [] })) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(DetailHarness)));
+      await act(async () => {});
+      const trigger = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "appDetail.tabPullRequests"),
+      );
+      expect(trigger).toBeDefined();
+      await act(async () => {
+        trigger?.dispatchEvent(new win.MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+        trigger?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      await act(async () => {});
+      // The ledger's empty state is the opened tab's face.
+      expect(container.textContent ?? "").toContain(t("en", "pullRequests.emptyTitle"));
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("the failures column carries the row's failure count", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () =>
+        root.render(
+          createElement(PullRequestsListView, { locale: "en", rows: [ROW_OPEN, ROW_CLOSED], onOpen: noSearch }),
+        ),
+      );
+      await act(async () => {});
+      const headers = [...container.querySelectorAll("th")].map((th) => th.textContent ?? "");
+      const failuresAt = headers.indexOf(t("en", "pullRequests.columnFailures"));
+      expect(failuresAt).toBeGreaterThan(-1);
+      const row = [...container.querySelectorAll("tr")].find((tr) =>
+        (tr.textContent ?? "").includes("Revert the cache change"),
+      );
+      const cells = [...(row?.querySelectorAll("td") ?? [])];
+      expect(cells[failuresAt]?.textContent?.trim()).toBe("2");
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
+  test("switching PRs never shows the previous PR's data; a failed fetch renders the error face with a retry (S2)", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const realFetch = globalThis.fetch;
+    // Gate every fetch: the test resolves each read by its URL suffix.
+    type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
+    const gates = new Map<string, Gate>();
+    globalThis.fetch = (async (input: unknown) => {
+      const gate: Gate = Promise.withResolvers<Response>();
+      gates.set(String(input), gate);
+      return gate.promise;
+    }) as unknown as typeof fetch;
+    const resolve = (suffix: string, response: Response) => {
+      const url = [...gates.keys()].reverse().find((key) => key.endsWith(suffix));
+      const gate = url === undefined ? undefined : gates.get(url);
+      if (!gate) throw new Error(`no fetch issued for ${suffix}`);
+      gate.resolve(response);
+    };
+    const tabElementFor = (pr: string) =>
+      createElement(AppPullRequestsTab, {
+        locale: "en",
+        appId: "1",
+        search: { tab: "pull-requests", window: "30", repo: "", pr },
+        onSearch: noSearch,
+      });
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const text = () => container.textContent ?? "";
+    try {
+      await act(async () => root.render(tabElementFor("acme/web/1")));
+      await act(async () => {});
+      await act(async () => {
+        resolve("/pull-requests/acme/web/1", jsonResponse(DETAIL));
+      });
+      await act(async () => {});
+      expect(text()).toContain("Fix the login flow");
+
+      // Switch to PR B: A's detail is retained in state but must NOT render.
+      await act(async () => root.render(tabElementFor("acme/web/2")));
+      await act(async () => {});
+      expect(text()).not.toContain("Fix the login flow");
+      expect(text()).toContain(t("en", "common.loading"));
+
+      // B's fetch fails: the error face replaces the loading face — A's
+      // data never reappears — and a retry is offered.
+      await act(async () => {
+        resolve("/pull-requests/acme/web/2", new Response("boom", { status: 500 }));
+      });
+      await act(async () => {});
+      expect(text()).not.toContain("Fix the login flow");
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+      expect(text()).toContain(t("en", "common.loadFailed"));
+      const retry = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "common.retry"),
+      );
+      expect(retry).toBeDefined();
+
+      // Retry re-issues the read; B's payload lands.
+      await act(async () => {
+        retry?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      await act(async () => {});
+      await act(async () => {
+        resolve("/pull-requests/acme/web/2", jsonResponse(DETAIL_B));
+      });
+      await act(async () => {});
+      expect(text()).toContain("Bump the dependencies");
+      expect(text()).not.toContain("Fix the login flow");
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
   });
 });

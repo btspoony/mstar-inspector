@@ -59,9 +59,13 @@ export function AppPullRequestsTab({
   const [reloadNonce, setReloadNonce] = useState(0);
 
   const ref = search.pr === "" ? null : pullRequestRefOf(search.pr);
-  const [detail, setDetail] = useState<PullRequestDetail | null>(null);
+  // Stamped with the pr it belongs to (S2): a retained detail from PR A
+  // must not render while PR B loads, so the rendered face derives from
+  // the stamp matching the ACTIVE pr — a mismatched stamp is stale data.
+  const [detail, setDetail] = useState<{ pr: string; data: PullRequestDetail } | null>(null);
   const [detailState, setDetailState] = useState<"loading" | "ok" | "error">("loading");
   const [detailNonce, setDetailNonce] = useState(0);
+  const currentDetail = detail !== null && detail.pr === search.pr ? detail.data : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -97,7 +101,7 @@ export function AppPullRequestsTab({
           setDetailState("error");
           return;
         }
-        setDetail(parsed);
+        setDetail({ pr: search.pr, data: parsed });
         setDetailState("ok");
       })
       .catch(() => {
@@ -124,15 +128,18 @@ export function AppPullRequestsTab({
           <ArrowLeft aria-hidden="true" />
           {t(locale, "pullRequests.backToList")}
         </Button>
-        {detailState === "loading" && detail === null ? (
+        {detailState === "loading" && currentDetail === null ? (
           <p role="status" className="text-sm text-muted-foreground">
             {t(locale, "common.loading")}
           </p>
         ) : null}
-        {detailState === "error" && detail === null ? (
+        {/* ErrorState is the no-current-data face: a retained detail belongs
+            to a DIFFERENT pr (the stamp mismatches), so a failed fetch for
+            the active pr always lands here — with a retry (S2). */}
+        {detailState === "error" && currentDetail === null ? (
           <ErrorState locale={locale} onRetry={() => setDetailNonce((nonce) => nonce + 1)} />
         ) : null}
-        {detail !== null ? <PullRequestDetailView locale={locale} detail={detail} /> : null}
+        {currentDetail !== null ? <PullRequestDetailView locale={locale} detail={currentDetail} /> : null}
       </div>
     );
   }
@@ -361,8 +368,11 @@ export function PullRequestDetailView({
                   <span className="font-medium">{finding.title}</span>
                   <span className="text-muted-foreground">{finding.severity}</span>
                   <span className="text-muted-foreground">
-                    {finding.file_path}
-                    {finding.line === null ? "" : `:${finding.line}`}
+                    {/* A coerced-empty file_path (repo-wide finding) renders
+                        no location at all — never a bare `:line` (N12). */}
+                    {finding.file_path === ""
+                      ? ""
+                      : `${finding.file_path}${finding.line === null ? "" : `:${finding.line}`}`}
                   </span>
                 </div>
                 <p className="whitespace-pre-wrap text-sm text-muted-foreground">{finding.body}</p>
