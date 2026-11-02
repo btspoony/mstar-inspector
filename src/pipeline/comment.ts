@@ -286,6 +286,39 @@ function stripMachineFactLines(md: string, fact: { reason: string; unscanned: re
 }
 
 /**
+ * The engine's summary is not always a narrative. `defaultReviewSummary` (the
+ * model-less path) emits a `## Verdict:` line, the `must-fix=…` tally and a
+ * `- <class>: <title>` list — the same three facts this assembler already
+ * renders from the envelope through `**Verdict:**`, `renderTally` and
+ * `renderFindings`. Published together, every fact appears twice, which is what
+ * a real review comment showed: the verdict and tally once from the body and
+ * again from the summary, then the finding titles a third time in the findings
+ * section.
+ *
+ * A seat's own narrative does not use these shapes (the review skill writes
+ * `## ✅ Verdict:` and prose), so a summary that carries content passes through
+ * untouched; only an echo is removed.
+ *
+ * UPSTREAM-OWNED, STAGED HERE: whether a summary duplicates the body is a
+ * question about the engine's summary contract, not a rendering preference —
+ * `synthesizeReview` should return a body meant to be published as-is instead of
+ * a header copy a consumer must recognise and strip. Delete this when the
+ * engine renders its own markdown.
+ */
+function stripEchoedEnvelopeFacts(md: string): string {
+  const kept = md
+    .split("\n")
+    .filter(
+      (line) =>
+        !line.startsWith("## Verdict: ") &&
+        !/^must-fix=\d+ should-fix=\d+ nit=\d+ unverified=\d+$/.test(line) &&
+        !/^- (must-fix|should-fix|nit|unverified): /.test(line),
+    )
+    .join("\n");
+  return kept.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
  * Assemble the overall review body: verdict header (verbatim) + tally line
  * (when present) + incomplete fact lines (`cause:` / `unscanned:`,
  * incomplete verdict with a present fact only, each line bounded per
@@ -324,9 +357,10 @@ export function buildReviewBody(
   // reproduces must not consume the budget that keeps the summary's tail.
   const incomplete = output.verdict === "incomplete" ? output.incomplete : undefined;
   const rendersFact = incomplete !== undefined;
-  const summary = rendersFact
-    ? truncateSummary(stripMachineFactLines(output.summary_md, incomplete))
-    : truncateSummary(output.summary_md);
+  const stripped = rendersFact
+    ? stripMachineFactLines(output.summary_md, incomplete)
+    : output.summary_md;
+  const summary = truncateSummary(stripEchoedEnvelopeFacts(stripped));
   const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;
   const fact =
@@ -337,7 +371,10 @@ export function buildReviewBody(
         ].join("\n")
       : "";
   const withFact = fact === "" ? head : `${head}\n\n${fact}`;
-  const body = findings ? `${withFact}\n\n${summary}\n\n${findings}` : `${withFact}\n\n${summary}`;
+  // A summary stripped to nothing (an envelope that echoed only its own header)
+  // must not leave the separators that surrounded it.
+  const withSummary = summary === "" ? withFact : `${withFact}\n\n${summary}`;
+  const body = findings ? `${withSummary}\n\n${findings}` : withSummary;
   const withOmitted = omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
   const withClosure = closure ? `${withOmitted}\n\n${closure}` : withOmitted;
   return withClosure.length <= REVIEW_BODY_LIMIT ? withClosure : `${withClosure.slice(0, REVIEW_BODY_LIMIT - 1)}…`;

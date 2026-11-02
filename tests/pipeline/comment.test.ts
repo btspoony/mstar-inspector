@@ -311,10 +311,9 @@ describe("buildReviewBody", () => {
       incomplete,
     });
     expect(echoed.match(/^unscanned:/gm)?.length).toBe(1);
-    // The blank separator line the stripped pair left behind stays, like every
-    // other summary line.
+    // A summary that is nothing but the echoed pair leaves no separators behind.
     expect(echoed).toBe(
-      "**Verdict: incomplete**\n\ncause: model returned no findings\nunscanned: none\n\n## Partial\n",
+      "**Verdict: incomplete**\n\ncause: model returned no findings\nunscanned: none\n\n## Partial",
     );
   });
 
@@ -486,10 +485,11 @@ describe("buildReviewBody", () => {
     });
     expect(body.match(/^cause:/gm)?.length).toBe(1);
     expect(body.match(/^unscanned:/gm)?.length).toBe(1);
-    // The summary's own pair is stripped; every other summary line is verbatim.
+    // The summary's echoed header and tally are stripped too: the body already
+    // renders both from the envelope, so publishing the summary's copies made
+    // every fact appear twice in a real comment.
     expect(body).toBe(
-      "**Verdict: incomplete**\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts" +
-        "\n\n## Verdict: incomplete · 0% (F, partial)\n\nmust-fix=0 should-fix=0 nit=0 unverified=0",
+      "**Verdict: incomplete**\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts",
     );
   });
 
@@ -522,10 +522,9 @@ describe("buildReviewBody", () => {
     });
     expect(body.match(/^cause:/gm)?.length).toBe(1);
     expect(body.match(/^unscanned:/gm)?.length).toBe(1);
-    // The blank line that separated the stripped line stays (every other
-    // summary line is byte-identical).
+    // The blank run the stripped line left behind collapses to one separator.
     expect(body).toBe(
-      "**Verdict: incomplete**\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts\n\n## Partial report\n\n\nOtherwise complete.",
+      "**Verdict: incomplete**\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts\n\n## Partial report\n\nOtherwise complete.",
     );
   });
 
@@ -554,7 +553,7 @@ describe("buildReviewBody", () => {
     // The raw echoes are gone; every other summary line survives.
     expect(body).not.toContain(reason);
     expect(body).not.toContain(entry);
-    expect(body).toContain("## Verdict: incomplete · 0% (F, partial)");
+    expect(body).not.toContain("## Verdict: incomplete · 0% (F, partial)");
   });
 
   test("a summary echoing the renderer's clamped pair is stripped to that single pair", () => {
