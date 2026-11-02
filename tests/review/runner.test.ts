@@ -771,17 +771,36 @@ describe("runner entry — transported credential pool", () => {
     ]);
   });
 
-  test("readCredentialStdin bounds a pipe that never reports EOF", async () => {
-    // The container exec pipe is closed by the consumer; one that never
-    // reports EOF stalls the run on its first I/O with zero output on either
-    // stream, which is indistinguishable from a hung model call.
-    await expect(readCredentialStdin(() => new Promise<string>(() => {}), 20)).rejects.toThrow(
-      /did not reach EOF within 20ms/,
-    );
+  test("readCredentialStdin stops at a complete payload without waiting for EOF", async () => {
+    // The exec pipe's close is not guaranteed to surface as EOF. The payload is
+    // a whole JSON document, so a read that only ends on EOF would stall a run
+    // that already has everything it needs.
+    async function* neverEnds(): AsyncGenerator<Uint8Array> {
+      yield new TextEncoder().encode('{"version":1,');
+      yield new TextEncoder().encode('"pools":{}}');
+      await new Promise(() => {}); // the stream stays open forever
+    }
+    await expect(readCredentialStdin(neverEnds(), 50)).resolves.toBe('{"version":1,"pools":{}}');
   });
 
-  test("readCredentialStdin returns the payload when the pipe does close", async () => {
-    await expect(readCredentialStdin(async () => "payload", 20)).resolves.toBe("payload");
+  test("readCredentialStdin does not end early on a brace inside a string", async () => {
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      yield new TextEncoder().encode('{"version":1,"pools":{"a":["k}1"]}}');
+    }
+    await expect(readCredentialStdin(chunks(), 50)).resolves.toBe('{"version":1,"pools":{"a":["k}1"]}}');
+  });
+
+  test("readCredentialStdin bounds a pipe that delivers neither a payload nor EOF", async () => {
+    async function* stalls(): AsyncGenerator<Uint8Array> {
+      yield new TextEncoder().encode('{"version":1,"pools":');
+      await new Promise(() => {});
+    }
+    await expect(readCredentialStdin(stalls(), 20)).rejects.toThrow(/neither a complete payload nor EOF within 20ms/);
+  });
+
+  test("readCredentialStdin treats an empty stream as the keyless run shape", async () => {
+    async function* empty(): AsyncGenerator<Uint8Array> {}
+    await expect(readCredentialStdin(empty(), 50)).resolves.toBe("");
   });
 
   test("a stdin reader that never settles → the bound names the transport instead of stalling", async () => {
@@ -799,11 +818,11 @@ describe("runner entry — transported credential pool", () => {
       const code = await main(
         ["--level", "quick", "--input", inputPath],
         fakeRuntime,
-        () => Promise.reject(new Error("credential stdin did not reach EOF within 30000ms")),
+        () => Promise.reject(new Error("credential stdin delivered neither a complete payload nor EOF")),
       );
       expect(code).toBe(1);
       expect(logs.join("")).toBe(""); // no envelope
-      expect(errors.join("")).toContain("credential stdin did not reach EOF");
+      expect(errors.join("")).toContain("credential stdin delivered neither a complete payload nor EOF");
     } finally {
       console.log = originalLog;
       console.error = originalError;

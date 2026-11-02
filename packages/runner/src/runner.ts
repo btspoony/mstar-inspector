@@ -427,35 +427,67 @@ async function loadCredentialPool(json: RunnerInputJson, payload: string): Promi
 
 /**
  * The credential payload source: this process's STDIN — the exec pipe the
- * consumer writes the payload into and then closes (that close is the EOF this
- * read waits for). `Bun.stdin.text()` reads to EOF; an empty result is the
- * keyless run shape. With no pipe (an interactive TTY) there is no EOF to
- * wait for, so the read is skipped and the run is keyless — the interactive
- * case never blocks.
+ * consumer writes the payload into.
  *
- * The wait is BOUNDED. When the consumer sets `stdin: "pipe"` it has already
- * committed to delivering a payload, so a pipe that never reports EOF is a
- * broken transport, not a keyless run — and an unbounded read there stalls
- * silently until the outer exec timeout kills the process with zero output on
- * either stream, which is exactly what staging showed. Past the bound the read
- * rejects so the failure names the transport instead of hiding behind a
- * timeout.
+ * The payload is a self-describing JSON document, so its END IS KNOWABLE
+ * WITHOUT EOF: the read stops as soon as the accumulated text parses. That
+ * matters because relying on EOF makes the run hostage to the pipe close: when
+ * a write-side close does not surface as EOF, the read never returns, the
+ * process emits nothing on either stream, and the only visible symptom is the
+ * outer exec bound killing a silent run.
+ *
+ * EOF remains a legitimate end (an empty stream is the keyless run shape), and
+ * so does a TTY — there is no pipe to read, so the run is keyless. The wait is
+ * additionally BOUNDED: a pipe that delivers neither a complete document nor
+ * EOF is a broken transport, and the rejection names it instead of hiding
+ * behind a timeout.
  */
 export const CREDENTIAL_STDIN_TIMEOUT_MS = 30_000;
 
+/** No pipe (interactive TTY) or nothing to read is the keyless run shape. */
+async function* defaultStdinChunks(): AsyncGenerator<Uint8Array> {
+  if (process.stdin.isTTY) return;
+  for await (const chunk of Bun.stdin.stream()) yield chunk;
+}
+
+/**
+ * True once `text` is a whole JSON document. A trailing `}` gate only avoids
+ * a parse attempt per chunk; `JSON.parse` is the real test, so a `}` inside a
+ * string cannot end the read early.
+ */
+function isCompletePayload(text: string): boolean {
+  if (!text.trimEnd().endsWith("}")) return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function readCredentialStdin(
-  read: () => Promise<string> = () => Bun.stdin.text(),
+  chunks: AsyncIterable<Uint8Array> = defaultStdinChunks(),
   timeoutMs: number = CREDENTIAL_STDIN_TIMEOUT_MS,
 ): Promise<string> {
-  if (process.stdin.isTTY) return "";
+  const collect = (async (): Promise<string> => {
+    const decoder = new TextDecoder();
+    let acc = "";
+    for await (const chunk of chunks) {
+      acc += decoder.decode(chunk, { stream: true });
+      if (isCompletePayload(acc)) return acc;
+    }
+    return acc;
+  })();
   const { promise: bound, reject } = Promise.withResolvers<never>();
   const timer = setTimeout(
     () =>
-      reject(new Error(`credential stdin did not reach EOF within ${timeoutMs}ms — the exec pipe was never closed`)),
+      reject(
+        new Error(`credential stdin delivered neither a complete payload nor EOF within ${timeoutMs}ms`),
+      ),
     timeoutMs,
   );
   try {
-    return await Promise.race([read(), bound]);
+    return await Promise.race([collect, bound]);
   } finally {
     clearTimeout(timer);
   }

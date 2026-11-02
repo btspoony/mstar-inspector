@@ -511,7 +511,7 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
     expect(message).not.toContain("secret-key");
   });
 
-  test("a stdin write failure keeps the child's own non-zero exit code (its stderr is the diagnosis)", async () => {
+  test("a stdin write failure keeps the child's own non-zero exit code AND its own evidence", async () => {
     reset();
     execStdin = "error-on-write";
     execResult = { stdout: new ArrayBuffer(0), stderr: bytes("review: cannot read runner input\n"), exitCode: 1 };
@@ -520,7 +520,13 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
     const result = await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: PAYLOAD });
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toBe("review: cannot read runner input\n");
+    // The child's stderr leads — it is the real diagnosis — and the failed
+    // stdin delivery is appended rather than dropped: "the payload never
+    // arrived" and "it arrived and the run then failed" are different causes,
+    // and the caller only ever sees this string.
+    expect(result.stderr).toBe(
+      "review: cannot read runner input\nexec stdin: exec stdin closed before the payload was delivered",
+    );
   });
 
   test("output collection starts BEFORE the payload write (a child whose full output pipe blocks the stdin write cannot deadlock the run)", async () => {

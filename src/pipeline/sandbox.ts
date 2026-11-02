@@ -240,9 +240,20 @@ export class SandboxV1 extends DurableObject {
     if (stdinFailure !== undefined && output.exitCode === 0) {
       throw stdinFailure;
     }
+    // A non-zero exit keeps the child's own stderr, but a stdin write failure
+    // is still evidence and must not vanish with it: "the payload never landed"
+    // and "the payload landed and the child then failed" are different
+    // diagnoses, and the caller only sees this string.
+    const stderrText = utf8.decode(output.stderr);
+    const stdinNote = stdinFailure === undefined ? "" : `exec stdin: ${stdinFailure.message}`;
     return {
       stdout: utf8.decode(output.stdout),
-      stderr: utf8.decode(output.stderr),
+      stderr:
+        stdinNote === ""
+          ? stderrText
+          : stderrText.trimEnd() === ""
+            ? stdinNote
+            : `${stderrText.trimEnd()}\n${stdinNote}`,
       exitCode: output.exitCode,
     };
   }
