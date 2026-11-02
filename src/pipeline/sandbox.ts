@@ -88,14 +88,15 @@ export type ReviewSandbox = {
 /** Container image key in `wrangler.jsonc` → `containers[].images`. */
 const CONTAINER_IMAGE_KEY = "sandbox";
 /**
- * Instance size. The 0.12-era pin was `lite` (256 MiB), set before the
- * in-image runner existed. Staging review runs now die after a full 600s of
- * silence, then surface a lost exec connection on retry — consistent with the
- * runner exhausting a 256 MiB budget, but NOT yet proven. `basic` (512 MiB) is
- * the smallest step up. Keep it if runs complete; this is a probe, so revert to
- * `lite` if they still fail and the cause lies elsewhere.
+ * Instance size, carried over from the 0.12 `instance_type: "lite"` pin.
+ *
+ * `lite` (256 MiB) was suspected of starving the in-image runner, but the
+ * staging symptom turned out to be a runner blocked on its first I/O, not
+ * resource exhaustion — the run emits nothing on EITHER stream for the whole
+ * bound, which a memory-starved process would not do. Size stays as chosen;
+ * raise it only with evidence that the runner actually needs the headroom.
  */
-const CONTAINER_INSTANCE = "basic" as const;
+const CONTAINER_INSTANCE = "lite" as const;
 /**
  * Container inactivity bound. The DO stays active while a `runCommand` RPC is
  * in flight, so this guards the gaps BETWEEN calls — it must outlive the
