@@ -1412,9 +1412,12 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             // The engine's model-less summary is a COPY of the verdict header
             // and tally, not prose — publishing it beside the body that renders
             // those same facts made every review print each one twice. A real
-            // narrative is published as-is. Without one, say exactly that: this
-            // path declares the diff unscanned, so it must not claim coverage.
-            summary_md: gathered.summary ?? "No narrative summary: the deep parent session ended without one.",
+            // narrative is published as-is. Without one, say that, and carry the
+            // cause on the `cause:` prefix the publishing body strips (it renders
+            // the fact itself) so a summary-only consumer still learns why. This
+            // path declares the diff unscanned, so it never claims coverage.
+            summary_md:
+              gathered.summary ?? `cause: ${cause}\n\nNo narrative summary was produced by the deep parent session.`,
           });
           // The engine vocabulary is the SSOT for the synthesized envelope
           // too: an `agent_end` transcript is no more trusted than a yielded
@@ -1739,25 +1742,35 @@ export const ompAgentRuntime: AgentRuntime = {
       // everywhere still synthesizes with `findings: []`: throwing would lose
       // the review entirely, and a zero-finding envelope reporting a clean
       // verdict over a wave that reviewed nothing is the dishonest outcome.
+      const stoppedReason =
+        stoppedSeats === 0
+          ? undefined
+          : everyStopWasCap
+            ? `wall-clock cap stopped ${stoppedSeats} of ${seats.length} dispatched seats` +
+              ` before their assigned scope was covered`
+            : `no dispatched seat produced a usable payload${lostSeatCause}`;
       const envelope = synthesizeReview({
         findings,
         unverifiedCount,
         target: parseTarget(input.reconFacts),
         // The envelope requires a non-empty summary, and the engine's fallback
         // for one is a COPY of the verdict header and the finding list — which
-        // is what made a published review print every fact twice. Say the one
-        // true thing this layer knows and the fallback does not: there was no
-        // narrative. Never claim coverage: a stopped wave declares its scope
-        // unscanned in the same envelope.
-        summary_md: "No narrative summary: the review seats returned structured findings only.",
+        // is what made a published review print every fact twice. State the one
+        // fact the fallback does not carry: there was no narrative. The sentence
+        // assumes nothing about the seats (a lost wave returned nothing), and it
+        // never claims coverage — a stopped wave declares its scope unscanned in
+        // the same envelope. The cause rides a `cause:` line, the exact prefix
+        // the publishing body strips because it renders that fact itself, so a
+        // consumer reading only summary_md still learns why.
+        summary_md:
+          stoppedReason === undefined
+            ? "No narrative summary was produced by the review seats."
+            : `cause: ${stoppedReason}\n\nNo narrative summary was produced by the review seats.`,
         ...(stoppedSeats === 0
           ? {}
           : {
               incomplete: {
-                reason: everyStopWasCap
-                  ? `wall-clock cap stopped ${stoppedSeats} of ${seats.length} dispatched seats` +
-                    ` before their assigned scope was covered`
-                  : `no dispatched seat produced a usable payload${lostSeatCause}`,
+                reason: stoppedReason!,
                 // Every dispatched seat is lost in the unusable-wave branch, so
                 // the dispatch list IS the unscanned set there — rejected seats
                 // included, and no seat silently dropped from the disclosure.

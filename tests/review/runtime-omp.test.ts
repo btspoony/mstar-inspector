@@ -1147,7 +1147,7 @@ describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete enve
         target: { owner: "acme", repo: "widgets", pr: 7, head_sha: "abc1234567890abcdef1234567890abcdef12" },
         // The runner states coverage; the engine's fallback would restate the
         // verdict header the body already renders.
-        summary_md: "No narrative summary: the review seats returned structured findings only.",
+        summary_md: "No narrative summary was produced by the review seats.",
       }),
     );
   });
@@ -1662,10 +1662,13 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     // instead of restating the verdict header the body already renders.
     expect(envelope.summary_md).not.toContain("## Verdict:");
     expect(envelope.summary_md).toBe(
-      "No narrative summary: the deep parent session ended without one.",
+      "cause: Deadline exceeded while streaming (the tier cap)\n\n" +
+        "No narrative summary was produced by the deep parent session.",
     );
-    // The cause is the declared fact, never a line inside the summary.
-    expect(envelope.summary_md).not.toContain("cause:");
+    // The cause rides the summary too, on the `cause:` prefix the publishing body
+    // strips (it renders the fact itself), so a summary-only consumer still
+    // learns why the wave stopped.
+    expect(envelope.summary_md.startsWith("cause: ")).toBe(true);
   });
 
   test("a reported yield error is the cause of a stopped turn", async () => {
@@ -1732,11 +1735,13 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
     );
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    // No seat narrative exists on this path, so the summary states coverage
-    // instead of restating the verdict header the body already renders.
+    // No seat narrative exists on this path, so the summary says that instead of
+    // restating the verdict header the body already renders, and carries the
+    // cause on the prefix the body strips.
     expect(envelope.summary_md).not.toContain("## Verdict:");
     expect(envelope.summary_md).toBe(
-      "No narrative summary: the deep parent session ended without one.",
+      "cause: deep parent turn produced no structured yield (mstar.review/v1 envelope)\n\n" +
+        "No narrative summary was produced by the deep parent session.",
     );
   });
 
