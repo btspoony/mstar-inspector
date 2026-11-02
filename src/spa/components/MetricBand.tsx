@@ -44,7 +44,7 @@ export function MetricBand({ metrics }: { metrics: readonly Metric[] }) {
             >
               <span
                 data-slot="metric-key"
-                className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)"
+                className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint) [overflow-wrap:anywhere]"
               >
                 {metric.key}
               </span>
