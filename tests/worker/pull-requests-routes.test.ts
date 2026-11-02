@@ -5,7 +5,8 @@
  *
  * Both ride the SAME gate ladder as every other App JSON read: membership →
  * App-id resolution (unknown / soft-deleted / CROSS-WORKSPACE all collapse into
- * the one `unknown app` 404) → creator-or-admin. The detail face answers 404
+ * the one `unknown app` 404) → the workspace owner/admin role. The detail face
+ * answers 404
  * for a tuple this App never received — the address is the ledger's own key, so
  * a same-number PR in another repo is a miss, never a fallback.
  */

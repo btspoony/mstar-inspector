@@ -183,6 +183,48 @@ describe("listPullRequests", () => {
     expect(prepares).toBe(3);
   });
 
+  test("the window bounds the AGGREGATES too: a review outside it is not attached", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    const total = PULL_REQUEST_LIST_LIMIT + 1;
+    for (let n = 1; n <= total; n++) {
+      await createAppsStore(db).upsertPullRequest({
+        ...PR,
+        prNumber: n,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString(),
+      });
+    }
+    db.raw
+      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .run(APP_ID);
+    // A review and a failure on the OLDEST PR (1), which falls outside the
+    // window, and one on the newest.
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id)
+         VALUES ('r-out', 77, 'acme', 'widgets', 1, 'sha-1', 'comment', ?),
+                ('r-in', 77, 'acme', 'widgets', ?, 'sha-1', 'approve', ?)`,
+      )
+      .run(APP_ID, total, APP_ID);
+    for (const [id, number] of [["f-out", 1], ["f-in", total]] as const) {
+      db.raw
+        .prepare(
+          `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+           VALUES (?, 77, 'acme', 'widgets', ?, 'sha-1', 'runner', 'boom')`,
+        )
+        .run(id, number);
+    }
+
+    const rows = await createAppsStore(db).listPullRequests(APP_ID);
+    expect(rows.length).toBe(PULL_REQUEST_LIST_LIMIT);
+    const newest = rows.find((row) => row.number === total);
+    expect(newest!.latest_review).toEqual({ verdict: "approve", reviewed_at: expect.any(String) });
+    expect(newest!.failure_count).toBe(1);
+    // The out-of-window PR is not in the list at all, so its aggregates are
+    // never computed — the same ORDER BY + LIMIT scopes both statements.
+    expect(rows.some((row) => row.number === 1)).toBe(false);
+  });
+
   test("is bounded: never more than PULL_REQUEST_LIST_LIMIT rows, newest first", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
@@ -204,6 +246,43 @@ describe("listPullRequests", () => {
 });
 
 describe("sweepTerminalPullRequests", () => {
+  test("an older `closed` cannot mark a reopened PR, and it survives retention", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    // 1. The PR closes in 2020 → its stamp is 2020.
+    await createAppsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: "2020-01-01T00:00:00Z" });
+    // 2. It reopens in 2026 → newer stamp, state open.
+    await createAppsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2026-01-01T00:00:00Z" });
+    // 3. A replayed/out-of-order OLD `closed` arrives.
+    await createAppsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: "2020-06-01T00:00:00Z" });
+
+    // The stale delivery must not have rewritten the state (the timestamp is
+    // the single arbiter for both columns).
+    const row = db.raw
+      .prepare("SELECT state, last_seen_at FROM pull_requests WHERE app_id = ?")
+      .get(APP_ID) as { state: string; last_seen_at: string };
+    expect(row.state).toBe("open");
+    expect(row.last_seen_at).toBe("2026-01-01 00:00:00");
+
+    // The predicate agrees with the write: an open row is never swept.
+    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(0);
+  });
+
+  test("a newer `closed` after `open` DOES close it (and is not swept inside the window)", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    // Relative to the real clock — a hard-coded date slides out of the 90-day
+    // window and becomes a date bomb.
+    const fresh = new Date(Date.now() - 60_000).toISOString();
+    await createAppsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2020-01-01T00:00:00Z" });
+    await createAppsStore(db).upsertPullRequest({ ...PR, state: "closed", updatedAt: fresh });
+    const row = db.raw.prepare("SELECT state FROM pull_requests WHERE app_id = ?").get(APP_ID) as {
+      state: string;
+    };
+    expect(row.state).toBe("closed");
+    expect(await createAppsStore(db).sweepTerminalPullRequests()).toBe(0);
+  });
+
   test("drops terminal rows past the window and keeps open ones however old", async () => {
     const db = createMigratedTestD1();
     seedApp(db);

@@ -164,10 +164,15 @@ describe("worker entry scheduled wiring", () => {
     } finally {
       defaultSweepLog.warn = originalWarn;
     }
-    expect(warnCalls).toHaveLength(3);
-    expect(warnCalls[0]!.fields.event).toBe("retention_swept_failed");
-    expect(warnCalls[1]!.fields.event).toBe("invite_lapse_swept_failed");
-    expect(warnCalls[2]!.fields.event).toBe("ops_sweep_failed");
-    expect(warnCalls[2]!.fields.detail).toContain("d1 down");
+    // Order-insensitive: the rule is "scheduled never throws and every step
+    // degrades to its OWN warn", not a fixed janitor sequence — pinning
+    // positions made every new best-effort step a test edit.
+    const events = warnCalls.map((call) => call.fields.event);
+    expect(new Set(events)).toEqual(
+      new Set(["retention_swept_failed", "pull_request_retention_swept_failed", "invite_lapse_swept_failed", "ops_sweep_failed"]),
+    );
+    expect(events).toHaveLength(4);
+    const sweepFailure = warnCalls.find((call) => call.fields.event === "ops_sweep_failed");
+    expect(sweepFailure?.fields.detail).toContain("d1 down");
   });
 });

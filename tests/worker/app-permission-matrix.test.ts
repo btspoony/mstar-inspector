@@ -6,7 +6,8 @@
  * add-template-provider / remove-custom-provider / key/delete / keys/verify,
  * plus the chain ops add-chain / remove-chain) and ops
  * (pause / resume / disable / enable / delete) — funnels through the SAME
- * server-side creator-or-admin gate (`canManageApp` in src/dashboard/index.ts,
+ * server-side workspace owner/admin gate (`canManageApp` in
+ * src/dashboard/index.ts,
  * `canManageRole` = workspace owner/admin). This file locks that matrix as
  * ONE systematic sweep: creator / admin / other / other-creator × every
  * write route → 200/403, with zero mutation and zero outbound network on
@@ -482,7 +483,7 @@ describe("App pull-request ledger read-face permission matrix", () => {
 });
 
 // --- Read-face matrix: GET /dashboard/default/api/apps/:appId/insights/summary ---
-// The per-App insights data face rides the SAME creator-or-admin rule
+// The per-App insights data face rides the SAME workspace owner/admin rule
 // (canManageApp) as every write route above, plus the App-id lookup
 // (non-numeric/unknown/soft-deleted → 404). Read-only, so no zero-mutation sweep is
 // needed — the assertions are the status matrix itself.
@@ -527,5 +528,11 @@ describe("App insights read-face permission matrix", () => {
       makeEnv(db),
     );
     expect(res.status).toBe(404);
+  });
+
+  test("read face: deny and 404 answers are not cacheable", async () => {
+    const denied = await getFace("hubot", makeEnv(await seededWorld()));
+    expect(denied.status).toBe(403);
+    expect(denied.headers.get("Cache-Control")).toBe("private, no-store");
   });
 });
