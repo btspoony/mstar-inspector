@@ -528,11 +528,26 @@ describe("App insights read-face permission matrix", () => {
       makeEnv(db),
     );
     expect(res.status).toBe(404);
+    // This route sets no header of its own — the 404 inherits it from the
+    // `/:workspaceRef/api/*` prefix middleware, which is exactly what this
+    // asserts.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
-  test("read face: deny and 404 answers are not cacheable", async () => {
+  test("read face: the manager 403 is not cacheable", async () => {
     const denied = await getFace("hubot", makeEnv(await seededWorld()));
     expect(denied.status).toBe(403);
     expect(denied.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  test("read face: a malformed window 400 is not cacheable", async () => {
+    const res = await worker.fetch(
+      new Request(`https://worker.local${FACE}?window=abc`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}` },
+      }),
+      makeEnv(await seededWorld()),
+    );
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 });

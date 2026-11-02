@@ -183,7 +183,50 @@ describe("listPullRequests", () => {
     expect(prepares).toBe(3);
   });
 
-  test("the window bounds the AGGREGATES too: a review outside it is not attached", async () => {
+  test("the aggregates are scoped to the window (mechanism, not just the payload)", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest(PR);
+
+    // Capture what the store PREPARES and how it binds: an unscoped aggregate
+    // scans every review/failure for the App and binds one parameter (appId);
+    // a scoped one carries the window subquery and binds three (appId, appId,
+    // LIMIT). The payload-shape assertions below hold either way, so this is
+    // the assertion that fails when the scoping is reverted.
+    const statements: Array<{ sql: string; binds: number }> = [];
+    const recording = {
+      prepare(sql: string) {
+        const record = { sql, binds: 0 };
+        statements.push(record);
+        const inner = db.prepare(sql);
+        return {
+          bind(...values: unknown[]) {
+            record.binds = values.length;
+            return inner.bind(...values);
+          },
+          first: inner.first.bind(inner),
+          all: inner.all.bind(inner),
+          run: inner.run.bind(inner),
+        };
+      },
+      batch: db.batch.bind(db),
+    };
+    await createAppsStore(recording as never).listPullRequests(APP_ID);
+
+    expect(statements.length).toBe(3);
+    const aggregates = statements.filter(
+      (stmt) => stmt.sql.includes("FROM reviews") || stmt.sql.includes("FROM review_failures"),
+    );
+    expect(aggregates.length).toBe(2);
+    for (const stmt of aggregates) {
+      expect(stmt.sql).toContain("IN (SELECT owner, repo, pr_number FROM pull_requests");
+      expect(stmt.sql).toContain("LIMIT ?");
+      // appId for the aggregate, appId + LIMIT for the shared window subquery.
+      expect(stmt.binds).toBe(3);
+    }
+  });
+
+  test("the payload lists only the window, newest first", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     const total = PULL_REQUEST_LIST_LIMIT + 1;
@@ -197,31 +240,24 @@ describe("listPullRequests", () => {
     db.raw
       .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
       .run(APP_ID);
-    // A review and a failure on the OLDEST PR (1), which falls outside the
-    // window, and one on the newest.
     db.raw
       .prepare(
         `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, app_id)
-         VALUES ('r-out', 77, 'acme', 'widgets', 1, 'sha-1', 'comment', ?),
-                ('r-in', 77, 'acme', 'widgets', ?, 'sha-1', 'approve', ?)`,
+         VALUES ('r-in', 77, 'acme', 'widgets', ?, 'sha-1', 'approve', ?)`,
       )
-      .run(APP_ID, total, APP_ID);
-    for (const [id, number] of [["f-out", 1], ["f-in", total]] as const) {
-      db.raw
-        .prepare(
-          `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-           VALUES (?, 77, 'acme', 'widgets', ?, 'sha-1', 'runner', 'boom')`,
-        )
-        .run(id, number);
-    }
+      .run(total, APP_ID);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+         VALUES ('f-in', 77, 'acme', 'widgets', ?, 'sha-1', 'runner', 'boom')`,
+      )
+      .run(total);
 
     const rows = await createAppsStore(db).listPullRequests(APP_ID);
     expect(rows.length).toBe(PULL_REQUEST_LIST_LIMIT);
-    const newest = rows.find((row) => row.number === total);
-    expect(newest!.latest_review).toEqual({ verdict: "approve", reviewed_at: expect.any(String) });
-    expect(newest!.failure_count).toBe(1);
-    // The out-of-window PR is not in the list at all, so its aggregates are
-    // never computed — the same ORDER BY + LIMIT scopes both statements.
+    expect(rows[0]!.number).toBe(total);
+    expect(rows[0]!.latest_review).toEqual({ verdict: "approve", reviewed_at: expect.any(String) });
+    expect(rows[0]!.failure_count).toBe(1);
     expect(rows.some((row) => row.number === 1)).toBe(false);
   });
 

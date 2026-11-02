@@ -468,9 +468,14 @@ export function createAppsStore(db: AppsStoreD1) {
    * a large backlog drains over successive sweeps instead of stalling one.
    *
    * This predicate and `upsertPullRequest`'s write predicate MUST agree — see
-   * the invariant documented there. Anything swept here was written by a
-   * delivery at least as new as the stored `last_seen_at`, so a swept `closed`
-   * row is genuinely closed at its newest known state.
+   * the invariant documented there. What that guarantees, and what it does
+   * not: a swept row's state was written by a delivery whose stamp was >= the
+   * stored one, so it is the newest state we could resolve. It is NOT proof
+   * that the PR is still closed — two deliveries that share one `updated_at`
+   * second cannot be ordered from payload data, and a same-second
+   * close→reopen delivered out of order stores `closed` under the reopen's
+   * stamp. Accepted: the row is swept rather than kept forever, and the next
+   * delivery for that PR (any action) rewrites the row with a newer stamp.
    */
   async function sweepTerminalPullRequests(): Promise<number> {
     const res = await db
@@ -954,18 +959,26 @@ export function createAppsStore(db: AppsStoreD1) {
      * rather than blanking it). `first_seen_at` is written once, by the
      * INSERT.
      *
-     * The timestamp is the single arbiter for BOTH columns, so the write and
-     * the retention predicate can never disagree:
+     * The timestamp is the single arbiter for BOTH columns, so the retention
+     * predicate and this write agree on what "current" means:
      *   - `last_seen_at` takes the payload's `updated_at` (GitHub's clock)
      *     through `datetime()`, which also normalises ISO 8601 into the
      *     `YYYY-MM-DD HH:MM:SS` form the column's readers compare against, and
      *     it only ever advances (MAX).
-     *   - `state` is accepted ONLY when the delivery is at least as new as the
+     *   - `state` is accepted when the delivery is AT LEAST as new as the
      *     stored stamp. A replayed/out-of-order `closed` cannot overwrite a
-     *     newer `open`, so the row cannot claim `closed` while carrying a
-     *     timestamp a later `open` wrote — which is exactly the shape that let
-     *     retention delete a PR that had reopened. `merged` stays terminal
-     *     regardless (GitHub sends it once, on the merge).
+     *     newer `open`, which was the shape that let retention delete a PR that
+     *     had reopened. `merged` stays terminal regardless (GitHub sends it
+     *     once, on the merge).
+     *
+     * Residual, not denied: `updated_at` is second-granular and delivery order
+     * is not guaranteed, so a `closed` and the `reopened` that follows within
+     * the SAME second cannot be ordered from payload data. The tie takes the
+     * arriving delivery (`>=`), which means such a pair delivered out of order
+     * can store `closed` under the reopen's stamp — the deletion shape above,
+     * narrowed to same-second ties. `>` would merely invert which arrival wins
+     * and would break a legitimate in-order close→reopen, so this layer accepts
+     * the tie; any later delivery for the PR rewrites the row with a new stamp.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
       // The caller validates the timestamp (`pullRequestRecord` only passes an
