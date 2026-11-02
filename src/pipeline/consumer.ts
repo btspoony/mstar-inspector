@@ -1845,6 +1845,27 @@ function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: reado
   return values;
 }
 
+/** Characters of the runner's stderr tail carried by the failure message. */
+const RUNNER_STDERR_TAIL_MAX = 600;
+
+/**
+ * The runner stage's failure detail. stderr is the ONLY diagnosis a non-zero
+ * exit carries (exit 124 = the exec bound fired, and the run leaves 0B of
+ * stdout), so a redacted tail rides the message that reaches the durable
+ * review_failures row and the log line. Redaction runs BEFORE the tail cut:
+ * a secret sliced in half would survive the exact-value pass.
+ */
+function runnerFailureDetail(
+  run: { stdout: string; stderr: string; exitCode: number },
+  secretValues: readonly string[],
+): string {
+  // review_failures.error is unbounded TEXT (migration 0010), so the bounded
+  // tail below cannot overflow the column.
+  const base = `runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`;
+  const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-RUNNER_STDERR_TAIL_MAX);
+  return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
+}
+
 /**
  * KV done-state read (B3): `done` means a review was already POSTED for this
  * sha (the consumer writes it right after posting, before the D1 insert).
@@ -2538,6 +2559,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // exact-redacted from any model-echoed output below.
     const runnerEnv = buildRunnerEnv(appCfg);
     const credentials = buildRunnerCredentials(appCfg, deps.log, fields, customProviders);
+    // SEC-01 exact-value defense: the session's ACTUAL secret values (the
+    // transported provider keys + the minted installation token) — needed by
+    // the failure message below and shared by the degrade and success paths.
+    secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
     // §7.8: with a recheck input the runner gains `--recheck-out` — the seat
     // writes its validated document to the audited fixed path before the
     // envelope reaches stdout.
@@ -2555,7 +2580,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     });
     const runnerElapsedMs = Date.now() - runnerStartedAt;
     if (run.exitCode !== 0) {
-      throw new Error(`runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`);
+      throw new Error(runnerFailureDetail(run, secretValues));
     }
     // d5-budget AC-S10-logs: one runner attempt → at least one budget line
     // (level + runner_timeout_ms + elapsed_ms + orchestration). elapsed_ms is
@@ -2565,10 +2590,6 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       { ...fields, elapsed_ms: runnerElapsedMs },
       `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeoutMs(level)}ms)`,
     );
-    // SEC-01 exact-value defense: the session's ACTUAL secret values
-    // (the transported provider keys + the minted installation token) —
-    // shared by the degrade path and the success path below.
-    secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
 
     // AL-6 stage window: post-runner steps (parse has its own branch; the
     // post/KV/put orchestration is worker-side) are "pipeline" again.
