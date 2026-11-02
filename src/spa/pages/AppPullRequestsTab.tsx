@@ -128,18 +128,20 @@ export function AppPullRequestsTab({
           <ArrowLeft aria-hidden="true" />
           {t(locale, "pullRequests.backToList")}
         </Button>
-        {detailState === "loading" && currentDetail === null ? (
+        {/* Exactly one face renders: the retained view only when its stamp
+            matches the active pr; an error when the active read failed; and
+            LOADING for everything else — including the A→B transition frame
+            before the passive effect flips the state (N1: a stale "ok" with
+            a mismatched stamp must not render a bare back button). */}
+        {currentDetail !== null ? (
+          <PullRequestDetailView locale={locale} detail={currentDetail} />
+        ) : detailState === "error" ? (
+          <ErrorState locale={locale} onRetry={() => setDetailNonce((nonce) => nonce + 1)} />
+        ) : (
           <p role="status" className="text-sm text-muted-foreground">
             {t(locale, "common.loading")}
           </p>
-        ) : null}
-        {/* ErrorState is the no-current-data face: a retained detail belongs
-            to a DIFFERENT pr (the stamp mismatches), so a failed fetch for
-            the active pr always lands here — with a retry (S2). */}
-        {detailState === "error" && currentDetail === null ? (
-          <ErrorState locale={locale} onRetry={() => setDetailNonce((nonce) => nonce + 1)} />
-        ) : null}
-        {currentDetail !== null ? <PullRequestDetailView locale={locale} detail={currentDetail} /> : null}
+        )}
       </div>
     );
   }

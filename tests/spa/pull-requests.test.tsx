@@ -333,13 +333,13 @@ describe("pull requests data plane (pure helpers)", () => {
       line: 42,
       body: "",
     });
-    // And the view renders the coerced row: the review meta line carries
-    // both coerced fields as `model · provider` — here " · " — and the
-    // empty finding path renders no location at all, no bare `:line` (N12).
+    // And the view renders the coerced row: the review meta line resolves
+    // the model/provider template with both coerced fields, and the empty
+    // finding path renders no location at all, no bare `:line` (N12).
     const markup = renderToStaticMarkup(
       createElement(PullRequestDetailView, { locale: "en", detail: parsed ?? DETAIL }),
     );
-    expect(markup).toContain(" · </span>");
+    expect(markup).toContain(t("en", "pullRequests.reviewMeta", { model: "", provider: "" }));
     expect(markup).not.toContain(":42");
     expect(markup).not.toContain(">null<");
   });
