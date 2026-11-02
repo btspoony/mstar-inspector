@@ -885,17 +885,56 @@ describe("createReviewConsumer", () => {
   test("runner exitCode !== 0 → failure row (stage=runner) + rethrow, destroy, no post/insert (AL-6)", async () => {
     reset();
     runnerExitCode = 1;
-    runnerStderr = "review: session failed: boom";
+    // The seeded App's ark key is "ark-key" — it rides the credential payload
+    // and a prompt-injected seat can echo it onto stderr.
+    runnerStderr = "review: session failed: boom\nprovider echo: ark-key\n";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+    const message = await consumer(makeBatch(makePayload())).then(
+      () => "",
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+    expect(message).toContain("runner failed");
+    // stderr is the only diagnosis a non-zero exit carries (exit 124 → 0B stdout).
+    expect(message).toContain("boom");
+    // SEC-01: a transported provider key echoed onto stderr never reaches the
+    // thrown message (nor the durable row built from it) — only the marker.
+    expect(message).not.toContain("ark-key");
+    expect(message).toContain(REDACTED);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "runner", head_sha: SHA });
     expect(failureRows(db)[0]!.error).toContain("runner failed");
     expect(destroyCalls).toBe(1);
+  });
+
+  test("runner failure with empty stderr says so explicitly", async () => {
+    reset();
+    runnerExitCode = 124; // the exec bound fired — the run leaves nothing on stderr
+    runnerStderr = "";
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /runner failed: exit 124, stdout 0B, stderr empty/,
+    );
+  });
+
+  test("runner failure keeps the stderr TAIL, bounded", async () => {
+    reset();
+    runnerExitCode = 124;
+    runnerStderr = `${"x".repeat(5000)}\nrunner: seat budget exceeded after 600s\n`;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    const message = await consumer(makeBatch(makePayload())).then(
+      () => "",
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
+    expect(message).toContain("runner: seat budget exceeded after 600s");
+    expect(message.length).toBeLessThan(700);
   });
 
   test("infra failure with a failing failure-store → rethrow not masked (AL-6 best-effort)", async () => {
@@ -912,7 +951,7 @@ describe("createReviewConsumer", () => {
       },
     });
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed: exit 1, stdout 0B, stderr empty/);
 
     const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("review_failures insert failed"));
     expect(warn).toBeDefined();
