@@ -1258,7 +1258,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     expect(envelope.incomplete?.unscanned).toEqual(["full-diff-combined: lib/c.ts, src/a.ts, src/b.ts"]);
   });
 
-  test("both capped seats' notes reach the summary, inside the body budget", async () => {
+  test("both capped seats' notes reach the summary and name every stopped seat", async () => {
     // The summary is a fixed sentence now, so nothing competes with the
     // disclosure for the budget: this pins that the notes still fit and still
     // name every stopped seat.
@@ -1280,8 +1280,9 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
       expect(notes[index]).toContain(CAP_REASON);
       expect(notes[index]).toContain("its assigned scope is not fully covered");
     }
-    // And the body the publisher receives stays inside the budget it truncates at.
+    // The disclosure fits the publisher's budget with the fixed sentence beside it.
     expect(envelope.summary_md.length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
+    expect(envelope.summary_md).toContain("No narrative summary was produced by the review seats.");
   });
 });
 

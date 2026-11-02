@@ -1412,10 +1412,10 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             // The engine's model-less summary is a COPY of the verdict header
             // and tally, not prose — publishing it beside the body that renders
             // those same facts made every review print each one twice. A real
-            // narrative is published as-is. Without one, say that, and carry the
-            // cause on the `cause:` prefix the publishing body strips (it renders
-            // the fact itself) so a summary-only consumer still learns why. This
-            // path declares the diff unscanned, so it never claims coverage.
+            // narrative is published as-is; without one, say that. The cause is
+            // the envelope's `incomplete` fact and never a line here: a surface
+            // rendering this string verbatim would show machine text. This path
+            // declares the diff unscanned, so it never claims coverage.
             summary_md:
               gathered.summary ?? "No narrative summary was produced by the deep parent session.",
           });
@@ -1761,11 +1761,9 @@ export const ompAgentRuntime: AgentRuntime = {
         // never claims coverage — a stopped wave declares its scope unscanned in
         // the same envelope.
         //
-        // The cause does NOT ride here. This string is rendered verbatim by a
-        // surface that never reads `incomplete` (the dashboard's summary block),
-        // so a `cause:` line would surface as machine text in the UI. Why a wave
-        // stopped is the envelope's `incomplete` fact; a surface that wants it
-        // reads that field.
+        // The cause does NOT ride here: this string is rendered verbatim (the
+        // dashboard's summary block), so a `cause:` line would surface as machine
+        // text. `incomplete` is the field that carries it.
         summary_md: "No narrative summary was produced by the review seats.",
         ...(stoppedSeats === 0
           ? {}
