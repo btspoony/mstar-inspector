@@ -30,8 +30,10 @@ import {
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import {
   AppPullRequestsTab,
+  currentDetailRead,
   PullRequestDetailView,
   PullRequestsListView,
+  type DetailRead,
 } from "../../src/spa/pages/AppPullRequestsTab";
 import { installDom } from "./dom";
 
@@ -382,6 +384,23 @@ function DetailHarness() {
   });
 }
 
+describe("pull requests detail read derivation (pure)", () => {
+  test("a read stamped for another pr derives to not-yet-loaded, whatever its kind (N1)", () => {
+    const okA: DetailRead = { pr: "acme/web/1", kind: "ok", data: DETAIL };
+    const errorA: DetailRead = { pr: "acme/web/1", kind: "error" };
+    const loadingA: DetailRead = { pr: "acme/web/1", kind: "loading" };
+    // A's view AND A's error must not render for B — the B transition
+    // frame derives to null, which renders the loading face.
+    expect(currentDetailRead(okA, "acme/web/2")).toBeNull();
+    expect(currentDetailRead(errorA, "acme/web/2")).toBeNull();
+    expect(currentDetailRead(loadingA, "acme/web/2")).toBeNull();
+    // The matching stamp passes through — including the error, for retry.
+    expect(currentDetailRead(okA, "acme/web/1")).toEqual(okA);
+    expect(currentDetailRead(errorA, "acme/web/1")).toEqual(errorA);
+    expect(currentDetailRead(null, "acme/web/1")).toBeNull();
+  });
+});
+
 describe("pull requests tab (mounted)", () => {
   test("clicking the Pull requests tab on the manage face opens the ledger", async () => {
     const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
@@ -506,6 +525,67 @@ describe("pull requests tab (mounted)", () => {
       await act(async () => {});
       expect(text()).toContain("Bump the dependencies");
       expect(text()).not.toContain("Fix the login flow");
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("a failed read for A leaves no error on B's transition frame (N1)", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const realFetch = globalThis.fetch;
+    type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
+    const gates = new Map<string, Gate>();
+    globalThis.fetch = (async (input: unknown) => {
+      const gate: Gate = Promise.withResolvers<Response>();
+      gates.set(String(input), gate);
+      return gate.promise;
+    }) as unknown as typeof fetch;
+    const resolve = (suffix: string, response: Response) => {
+      const url = [...gates.keys()].reverse().find((key) => key.endsWith(suffix));
+      const gate = url === undefined ? undefined : gates.get(url);
+      if (!gate) throw new Error(`no fetch issued for ${suffix}`);
+      gate.resolve(response);
+    };
+    const tabElementFor = (pr: string) =>
+      createElement(AppPullRequestsTab, {
+        locale: "en",
+        appId: "1",
+        search: { tab: "pull-requests", window: "30", repo: "", pr },
+        onSearch: noSearch,
+      });
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const text = () => container.textContent ?? "";
+    try {
+      await act(async () => root.render(tabElementFor("acme/web/1")));
+      await act(async () => {});
+      // A's read fails: the error face is correct FOR A.
+      await act(async () => {
+        resolve("/pull-requests/acme/web/1", new Response("boom", { status: 500 }));
+      });
+      await act(async () => {});
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+      expect(text()).toContain(t("en", "common.loadFailed"));
+
+      // Switch to B: the face is the loading face — never A's error, which
+      // would name the wrong PR (and announce assertively) before B's
+      // fetch is even issued.
+      await act(async () => root.render(tabElementFor("acme/web/2")));
+      await act(async () => {});
+      expect(text()).toContain(t("en", "common.loading"));
+      expect(text()).not.toContain(t("en", "common.loadFailed"));
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+
+      // B's read lands; B's face replaces the loading face.
+      await act(async () => {
+        resolve("/pull-requests/acme/web/2", jsonResponse(DETAIL_B));
+      });
+      await act(async () => {});
+      expect(text()).toContain("Bump the dependencies");
+      expect(container.querySelector('[role="alert"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;

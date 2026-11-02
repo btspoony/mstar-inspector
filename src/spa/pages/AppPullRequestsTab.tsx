@@ -22,6 +22,22 @@ import {
 } from "./data";
 
 /**
+ * One detail read, stamped with the pr it belongs to (S2/N1). A read whose
+ * stamp mismatches the ACTIVE pr is a different PR's result — view, error
+ * or loading — and derives to null, so a transition frame renders the
+ * loading face, never the previous PR's data or its error.
+ */
+export type DetailRead =
+  | { pr: string; kind: "ok"; data: PullRequestDetail }
+  | { pr: string; kind: "error" }
+  | { pr: string; kind: "loading" };
+
+/** The read for the active pr — null when the stamp mismatches or nothing was read. */
+export function currentDetailRead(read: DetailRead | null, pr: string): DetailRead | null {
+  return read !== null && read.pr === pr ? read : null;
+}
+
+/**
  * The Pull requests tab of the App detail page — the per-App ledger of
  * every PR the App received. Two faces in one tab: the list (`pr` empty)
  * and the in-place detail (a valid `pr` search param). The detail address
@@ -59,13 +75,9 @@ export function AppPullRequestsTab({
   const [reloadNonce, setReloadNonce] = useState(0);
 
   const ref = search.pr === "" ? null : pullRequestRefOf(search.pr);
-  // Stamped with the pr it belongs to (S2): a retained detail from PR A
-  // must not render while PR B loads, so the rendered face derives from
-  // the stamp matching the ACTIVE pr — a mismatched stamp is stale data.
-  const [detail, setDetail] = useState<{ pr: string; data: PullRequestDetail } | null>(null);
-  const [detailState, setDetailState] = useState<"loading" | "ok" | "error">("loading");
+  const [read, setRead] = useState<DetailRead | null>(null);
   const [detailNonce, setDetailNonce] = useState(0);
-  const currentDetail = detail !== null && detail.pr === search.pr ? detail.data : null;
+  const current = currentDetailRead(read, search.pr);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,20 +104,19 @@ export function AppPullRequestsTab({
   useEffect(() => {
     if (ref === null) return;
     let cancelled = false;
-    setDetailState("loading");
+    setRead({ pr: search.pr, kind: "loading" });
     fetchJson(appPullRequestDetailUrl(apiBase(), appId, ref))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parsePullRequestDetail(raw);
         if (!parsed) {
-          setDetailState("error");
+          setRead({ pr: search.pr, kind: "error" });
           return;
         }
-        setDetail({ pr: search.pr, data: parsed });
-        setDetailState("ok");
+        setRead({ pr: search.pr, kind: "ok", data: parsed });
       })
       .catch(() => {
-        if (!cancelled) setDetailState("error");
+        if (!cancelled) setRead({ pr: search.pr, kind: "error" });
       });
     return () => {
       cancelled = true;
@@ -123,19 +134,19 @@ export function AppPullRequestsTab({
   // A malformed pr param resolves to null: fall back to the list face.
   if (ref !== null) {
     return (
-      <div className="flex flex-col gap-6" aria-busy={detailState === "loading"}>
+      <div className="flex flex-col gap-6" aria-busy={current === null || current.kind === "loading"}>
         <Button type="button" variant="ghost" size="sm" className="self-start" onClick={closePr}>
           <ArrowLeft aria-hidden="true" />
           {t(locale, "pullRequests.backToList")}
         </Button>
-        {/* Exactly one face renders: the retained view only when its stamp
-            matches the active pr; an error when the active read failed; and
-            LOADING for everything else — including the A→B transition frame
-            before the passive effect flips the state (N1: a stale "ok" with
-            a mismatched stamp must not render a bare back button). */}
-        {currentDetail !== null ? (
-          <PullRequestDetailView locale={locale} detail={currentDetail} />
-        ) : detailState === "error" ? (
+        {/* Exactly one face renders, all derived from the ACTIVE pr's read:
+            the view when its stamp matches; the error (with retry) when the
+            active read failed; and LOADING for everything else — including
+            a transition frame whose retained read belongs to a different pr
+            (S2/N1: never the previous PR's data, never its error). */}
+        {current !== null && current.kind === "ok" ? (
+          <PullRequestDetailView locale={locale} detail={current.data} />
+        ) : current !== null && current.kind === "error" ? (
           <ErrorState locale={locale} onRetry={() => setDetailNonce((nonce) => nonce + 1)} />
         ) : (
           <p role="status" className="text-sm text-muted-foreground">
