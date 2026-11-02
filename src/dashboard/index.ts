@@ -4149,19 +4149,8 @@ function parseInsightsParams(query: { window?: string; repo?: string; include?: 
 }
 
 const appInsightsRoute = async (c: DashboardContext) => {
-  const member = await requireMember(c);
-  if (!member.ok) return member.response;
-
-  // Same App-id resolution rule as requireAppVisible: unknown, soft-deleted and
-  // cross-workspace apps are equally invisible → 404. JSON body — this face
-  // never renders HTML (no forbiddenPage on either deny path).
-  const app = await resolveScopedApp(
-    createAppsStore(member.db),
-    c.req.param("appId") ?? "",
-    member.scope,
-  );
-  if (!app) return c.json({ error: "unknown app" }, 404);
-  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  const gate = await requireAppJsonRead(c);
+  if (!gate.ok) return gate.response;
 
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
@@ -4179,7 +4168,7 @@ const appInsightsRoute = async (c: DashboardContext) => {
     includeRepos: params.includeRepos,
     // The App row PK (never empty — the GitHub App id resolved a real row),
     // composed into every aggregation by the store's appId filter.
-    appId: app.id,
+    appId: gate.app.id,
   });
   return c.json({
     window_days: clampWindow(params.windowDays),
@@ -4205,6 +4194,51 @@ const appInsightsRoute = async (c: DashboardContext) => {
 // retired — /dashboard/insights is SPA-owned (spa-dispatch serves the shell;
 // the SPA reads the per-App JSON face above). The legacy GET handlers are
 // gone; the global URL answers 404.
+
+/**
+ * The per-App pull-request ledger (migration 0039): every PR this App received
+ * and what happened to each review run. Same gate ladder as the insights read
+ * face — membership, then the App-id resolution (unknown / soft-deleted /
+ * cross-workspace all collapse to the one `unknown app` 404, so a sibling
+ * workspace's App leaves no existence oracle), then the creator-or-admin rule.
+ */
+async function requireAppJsonRead(
+  c: DashboardContext,
+): Promise<{ ok: true; app: GithubAppRow; db: DashboardDb } | { ok: false; response: Response }> {
+  const member = await requireMember(c);
+  if (!member.ok) return member;
+  const app = await resolveScopedApp(
+    createAppsStore(member.db),
+    c.req.param("appId") ?? "",
+    member.scope,
+  );
+  if (!app) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
+  if (!canManageApp(member.scope)) return { ok: false, response: c.json({ error: "forbidden" }, 403) };
+  return { ok: true, app, db: member.db };
+}
+
+const appPullRequestsRoute = async (c: DashboardContext) => {
+  const gate = await requireAppJsonRead(c);
+  if (!gate.ok) return gate.response;
+  c.header("Cache-Control", "private, no-store");
+  return c.json({ pull_requests: await createAppsStore(gate.db).listPullRequests(gate.app.id) });
+};
+
+const appPullRequestRoute = async (c: DashboardContext) => {
+  const gate = await requireAppJsonRead(c);
+  if (!gate.ok) return gate.response;
+  const raw = c.req.param("number") ?? "";
+  // Decimal digits only (the App-id segment's rule): `0x1f` / `1e3` are number
+  // spellings that `Number()` would alias onto a real PR number.
+  const number = /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    return c.json({ error: "unknown pull request" }, 404);
+  }
+  const detail = await createAppsStore(gate.db).getPullRequest(gate.app.id, number);
+  if (detail === null) return c.json({ error: "unknown pull request" }, 404);
+  c.header("Cache-Control", "private, no-store");
+  return c.json(detail);
+};
 
 // --- App + member route table ----------------------------------------------
 //
@@ -4246,6 +4280,11 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/insights/summary", handler: appInsightsRoute, access: "write" },
+  // Per-App pull-request ledger (migration 0039): the list face and the
+  // one-PR detail face. App-scoped reads are `write` in this table (AC3) —
+  // only the workspace-scoped member list is `read`.
+  { method: "get", path: "/api/apps/:appId/pull-requests", handler: appPullRequestsRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId/pull-requests/:number", handler: appPullRequestRoute, access: "write" },
   // The member list is `read` (every member sees it, and the operator's AC2
   // field set is this same list); every App/settings read and invite face is
   // `write` (AC3).

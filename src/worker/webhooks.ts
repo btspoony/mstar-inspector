@@ -270,6 +270,12 @@ const pullRequestSchema = z.object({
   pull_request: z
     .object({
       number: z.number().optional(),
+      // Display fields for the per-App PR ledger (`pullRequestRecord`). All
+      // optional *and* nullable: a delivery may omit them and every existing
+      // classifier guard stays decided by `number` / `head.sha` alone.
+      title: z.string().nullable().optional(),
+      state: z.string().nullable().optional(),
+      merged: z.boolean().nullable().optional(),
       head: z.object({ sha: z.string().nullable().optional() }).optional(),
     })
     .nullable()
@@ -495,6 +501,47 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
       action: "created",
       triggered_by: "issue_comment",
     },
+  };
+}
+
+/**
+ * The per-App PR ledger record for one `pull_request` delivery (migration
+ * 0039) — the fields the dashboard reads, never a classification. `null` when
+ * the payload cannot supply the ledger's identity (owner / repo / number) or
+ * its state, so an unrecordable delivery records nothing rather than inventing
+ * a value: the ledger's `state` domain is GitHub's own ('open' | 'closed'),
+ * promoted to 'merged' when the payload says so.
+ *
+ * Deliberately a SECOND parse of the same body: `classifyEvent` returns the
+ * identity only on a `job`, and the ledger must also record the `ignore`
+ * outcomes (a non-whitelisted action, a mode that does not auto-trigger).
+ */
+export function pullRequestRecord(rawBody: string): {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  title: string | null;
+  state: string;
+  headSha: string | null;
+} | null {
+  const parsed = parseBody(rawBody);
+  if (parsed === null) return null;
+  const result = pullRequestSchema.safeParse(parsed);
+  if (!result.success) return null;
+  const { pull_request, repository } = result.data;
+  const owner = repository?.owner.login;
+  const repo = repository?.name;
+  const prNumber = pull_request?.number ?? result.data.number;
+  const state = pull_request?.merged === true ? "merged" : pull_request?.state;
+  if (owner === undefined || repo === undefined || prNumber === undefined) return null;
+  if (state === undefined || state === null || state === "") return null;
+  return {
+    owner,
+    repo,
+    prNumber,
+    title: pull_request?.title ?? null,
+    state,
+    headSha: pull_request?.head?.sha ?? null,
   };
 }
 

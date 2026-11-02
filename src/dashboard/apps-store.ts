@@ -343,6 +343,33 @@ export type DeliverySummary = {
   rejected24h: number;
 };
 
+/** Input for upsertPullRequest — one VERIFIED `pull_request` delivery. */
+export type UpsertPullRequestInput = {
+  appId: string;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  /** Omitted/null keeps whatever the row already knows. */
+  title?: string | null;
+  /** The payload's state, already promoted to 'merged' when `merged` was true. */
+  state: string;
+  headSha?: string | null;
+};
+
+/** The PR-ledger read row (`pull_requests` + its newest review, migration 0039). */
+export type PullRequestRow = {
+  number: number;
+  owner: string;
+  repo: string;
+  title: string | null;
+  state: string;
+  head_sha: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  latest_review: { verdict: string; reviewed_at: string } | null;
+  failure_count: number;
+};
+
 /**
  * Narrow D1 face, declared locally so this leaf module imports nothing
  * (prepare/bind/first/all/run plus batch — App creation writes the App row
@@ -848,5 +875,249 @@ export function createAppsStore(db: AppsStoreD1) {
         .all<WebhookDeliveryRow>();
       return res.results;
     },
+
+    /**
+     * Record one VERIFIED `pull_request` delivery (migration 0039) —
+     * idempotent on the UNIQUE (app_id, owner, repo, pr_number) tuple: a PR
+     * that arrives several times (opened, synchronize, closed, …) keeps ONE
+     * row, its `last_seen_at` advances, and `title` / `state` / `head_sha`
+     * refresh only when the caller supplies them (a payload that omits a
+     * field keeps the last known value rather than blanking it). `first_seen_at`
+     * is written once, by the INSERT.
+     */
+    async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
+      await db
+        .prepare(
+          `INSERT INTO pull_requests
+             (id, app_id, owner, repo, pr_number, title, state, head_sha)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (app_id, owner, repo, pr_number) DO UPDATE SET
+             title = COALESCE(excluded.title, title),
+             state = excluded.state,
+             head_sha = COALESCE(excluded.head_sha, head_sha),
+             last_seen_at = datetime('now')`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          input.appId,
+          input.owner,
+          input.repo,
+          input.prNumber,
+          input.title ?? null,
+          input.state,
+          input.headSha ?? null,
+        )
+        .run();
+    },
+
+    /**
+     * PR-ledger list face: every pull request this App has received, newest
+     * activity first. THREE statements for any N — the rows, the newest review
+     * per (owner, repo, pr_number) via a ROW_NUMBER() window (the
+     * deliverySummaries shape), and the failure count joined through
+     * `app_installations` (`review_failures` carries no app_id; the
+     * installation is what scopes it to this App) — never one query per row.
+     */
+    async listPullRequests(appId: string): Promise<PullRequestRow[]> {
+      const results = await db.batch([
+        db
+          .prepare(
+            `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
+             FROM pull_requests WHERE app_id = ?
+             ORDER BY last_seen_at DESC, pr_number DESC`,
+          )
+          .bind(appId),
+        db
+          .prepare(
+            `SELECT owner, repo, pr_number, verdict, reviewed_at FROM (
+               SELECT owner, repo, pr_number, verdict, reviewed_at,
+                      ROW_NUMBER() OVER (PARTITION BY owner, repo, pr_number
+                        ORDER BY reviewed_at DESC, rowid DESC) AS rn
+               FROM reviews WHERE app_id = ?
+             ) WHERE rn = 1`,
+          )
+          .bind(appId),
+        db
+          .prepare(
+            `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
+             FROM review_failures f
+             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             GROUP BY f.owner, f.repo, f.pr_number`,
+          )
+          .bind(appId),
+      ]);
+      return assemblePullRequests(
+        results[0]!.results as PullRequestBaseRow[],
+        results[1]!.results as PullRequestReviewRow[],
+        results[2]!.results as PullRequestFailureCountRow[],
+      );
+    },
+
+    /**
+     * ONE pull request with its review history, failures and findings — the
+     * detail face. Every statement is scoped by `app_id` as well as the
+     * (owner, repo, pr_number) tuple, so a PR number that exists for a sibling
+     * App never leaks in. `null` when this App has not received the PR.
+     *
+     * Findings come from `review_findings` (the lifecycle table): it carries
+     * `finding_id` and the immutable original as JSON, so `severity` is its
+     * `mergeClass` (the vocab-switch mapping `findings.severity` already
+     * uses), and `title` / `file_path` / `line` / `body` are read out of
+     * `original_json`. Newest lifecycle row first.
+     *
+     * shortcut: the address is the PR NUMBER alone, while the ledger's key is
+     * (app_id, owner, repo, pr_number) — one App can serve several repos, so
+     * two repos may both have a #5. The most recently seen match wins; upgrade
+     * to an (owner, repo, number) route if a surface ever needs either.
+     */
+    async getPullRequest(appId: string, prNumber: number): Promise<PullRequestDetail | null> {
+      const row = await db
+        .prepare(
+          `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
+           FROM pull_requests WHERE app_id = ? AND pr_number = ?
+           ORDER BY last_seen_at DESC LIMIT 1`,
+        )
+        .bind(appId, prNumber)
+        .first<PullRequestBaseRow>();
+      if (!row) return null;
+      const results = await db.batch([
+        db
+          .prepare(
+            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha
+             FROM reviews WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+             ORDER BY reviewed_at DESC, rowid DESC`,
+          )
+          .bind(appId, row.owner, row.repo, prNumber),
+        db
+          .prepare(
+            `SELECT f.stage, f.error, f.created_at
+             FROM review_failures f
+             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?
+             ORDER BY f.created_at DESC, f.rowid DESC`,
+          )
+          .bind(appId, row.owner, row.repo, prNumber),
+        db
+          .prepare(
+            `SELECT finding_id,
+                    json_extract(original_json, '$.mergeClass') AS severity,
+                    json_extract(original_json, '$.title') AS title,
+                    json_extract(original_json, '$.filePath') AS file_path,
+                    json_extract(original_json, '$.lineStart') AS line,
+                    json_extract(original_json, '$.body') AS body
+             FROM review_findings
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+             ORDER BY updated_ms DESC, finding_id`,
+          )
+          .bind(appId, row.owner, row.repo, prNumber),
+      ]);
+      // The histories ARE the aggregates: reviews come newest first, so the
+      // first one is the latest verdict, and the failure rows count themselves.
+      const reviews = results[0]!.results as PullRequestReviewDetailRow[];
+      const failures = results[1]!.results as PullRequestFailureDetailRow[];
+      return {
+        pull_request: {
+          number: row.pr_number,
+          owner: row.owner,
+          repo: row.repo,
+          title: row.title,
+          state: row.state,
+          head_sha: row.head_sha,
+          first_seen_at: row.first_seen_at,
+          last_seen_at: row.last_seen_at,
+          latest_review:
+            reviews[0] === undefined ? null : { verdict: reviews[0].verdict, reviewed_at: reviews[0].reviewed_at },
+          failure_count: failures.length,
+        },
+        reviews,
+        failures,
+        findings: (results[2]!.results as PullRequestFindingRow[]).map((finding) => ({
+          finding_id: finding.finding_id,
+          severity: finding.severity ?? "",
+          title: finding.title ?? "",
+          file_path: finding.file_path,
+          line: finding.line,
+          body: finding.body,
+        })),
+      };
+    },
   };
+}
+
+/** The `pull_requests` columns the ledger reads (`number` = `pr_number`). */
+type PullRequestBaseRow = {
+  owner: string;
+  repo: string;
+  pr_number: number;
+  title: string | null;
+  state: string;
+  head_sha: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+type PullRequestReviewRow = { owner: string; repo: string; pr_number: number; verdict: string; reviewed_at: string };
+type PullRequestFailureCountRow = { owner: string; repo: string; pr_number: number; n: number };
+type PullRequestReviewDetailRow = {
+  verdict: string;
+  summary_md: string | null;
+  model: string | null;
+  provider: string | null;
+  reviewed_at: string;
+  head_sha: string;
+};
+type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
+type PullRequestFindingRow = {
+  finding_id: string;
+  severity: string | null;
+  title: string | null;
+  file_path: string | null;
+  line: number | null;
+  body: string | null;
+};
+
+/** Detail read result — the row plus its three histories. */
+export type PullRequestDetail = {
+  pull_request: PullRequestRow;
+  reviews: PullRequestReviewDetailRow[];
+  failures: PullRequestFailureDetailRow[];
+  findings: Array<{
+    finding_id: string;
+    severity: string;
+    title: string;
+    file_path: string | null;
+    line: number | null;
+    body: string | null;
+  }>;
+};
+
+/**
+ * Join the ledger list's three result sets in memory — the tuple
+ * (owner, repo, pr_number) is the key, and a PR with no review / no failure
+ * reads `latest_review: null`, `failure_count: 0`.
+ */
+function assemblePullRequests(
+  rows: PullRequestBaseRow[],
+  reviews: PullRequestReviewRow[],
+  failures: PullRequestFailureCountRow[],
+): PullRequestRow[] {
+  const key = (owner: string, repo: string, pr: number): string => `${owner}\u0000${repo}\u0000${pr}`;
+  const reviewByKey = new Map(reviews.map((row) => [key(row.owner, row.repo, row.pr_number), row]));
+  const failureByKey = new Map(failures.map((row) => [key(row.owner, row.repo, row.pr_number), row.n]));
+  return rows.map((row) => {
+    const k = key(row.owner, row.repo, row.pr_number);
+    const review = reviewByKey.get(k);
+    return {
+      number: row.pr_number,
+      owner: row.owner,
+      repo: row.repo,
+      title: row.title,
+      state: row.state,
+      head_sha: row.head_sha,
+      first_seen_at: row.first_seen_at,
+      last_seen_at: row.last_seen_at,
+      latest_review: review ? { verdict: review.verdict, reviewed_at: review.reviewed_at } : null,
+      failure_count: failureByKey.get(k) ?? 0,
+    };
+  });
 }
