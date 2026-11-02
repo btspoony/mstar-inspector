@@ -401,7 +401,8 @@ export const en = {
     metricKeys: "Keys",
     noInstallations: "No installations yet.",
     recentDeliveries: "Recent deliveries",
-    recentDeliveriesCopy: "The last 5 webhook deliveries for this App — newest first.",
+    recentDeliveriesCopy:
+      "Up to 5 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",
     noDeliveries: "No deliveries yet.",
     unknownEvent: "unknown event",
     status: "status {code}",

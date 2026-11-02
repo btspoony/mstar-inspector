@@ -342,7 +342,7 @@ export const zhCN: Dictionary = {
     metricKeys: "密钥",
     noInstallations: "还没有安装。",
     recentDeliveries: "最近投递",
-    recentDeliveriesCopy: "此 App 最近 5 次 webhook 投递 — 最新的在前。",
+    recentDeliveriesCopy: "最多 5 次 webhook 投递 — 带结论的（正常 / 已暂停 / 已拒绝）排在前，其余按时间从新到旧。",
     noDeliveries: "还没有投递。",
     unknownEvent: "未知事件",
     status: "状态 {code}",
