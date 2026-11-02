@@ -8,6 +8,12 @@
 # Touch this comment whenever the copied runner sources change.
 #
 # rebuild: runner stdin bound + sandbox instance probe
+# rebuild: credential stdin ends at a complete payload rather than at EOF, and
+# the review setup stages trace themselves. Both are runner-source changes that
+# landed without touching this file, so the deployed image kept the unbounded
+# `Bun.stdin.text()` read: the worker sends a complete document and no longer
+# relies on the write side closing, so that read never returned, the run emitted
+# nothing on either stream, and the outer exec bound killed it at exit 124.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

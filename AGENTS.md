@@ -38,6 +38,49 @@ or in commit messages / PR titles / PR bodies:
   are fine; local plan/iteration identifiers are not.
 - Applies to all new work; existing pushed history is never rewritten.
 
+## Sandbox image rebuild
+
+The review container is built from `sandbox-image/Dockerfile`, and `wrangler`
+hashes **that file alone** — not the sources the Dockerfile copies in. A change
+to those sources therefore deploys the Worker without rebuilding the image, and
+the container keeps running the previous build: no error, no warning, no
+failing check.
+
+Touch the `# rebuild:` marker block in `sandbox-image/Dockerfile` in the same
+commit whenever you change any of:
+
+- `packages/runner/src/**`
+- `packages/shared/src/**`
+- `packages/runner/package.json` or `packages/runner/bun.lock` (the image
+  installs from them, so an omp SDK bump is an image change)
+- `sandbox-image/**` — the CLI shims and their lockfiles
+
+Check before merging anything that touches those paths:
+
+```bash
+IMAGE_AT=$(git log -1 --format=%h -- sandbox-image/Dockerfile)
+git log --oneline "$IMAGE_AT"..HEAD -- packages/runner/src packages/shared/src
+```
+
+Non-empty output means the deployment would ship mismatched halves.
+
+### The failure this prevents
+
+Worker and image disagreeing is silent. The observed shape: the Worker sends a
+credential payload and no longer relies on the write side closing the pipe; the
+stale runner still waits for EOF; the read never returns; both streams stay
+empty; the outer exec bound kills the run at its full budget.
+
+```
+runner failed: exit 124, stdout 0B, stderr empty
+```
+
+`exit 124` with both streams empty is not a hung model call — check the image
+age before reading runner logic. This cost two production review cycles in a
+row, the second one 24 minutes after the first was "fixed" by touching this
+same file. The tracing added to the runner (`traceStage`) cannot help while the
+image does not contain it, which is how both runs stayed silent.
+
 ## Post-work cleanup
 
 After a session that spawned **local** wrangler / Cloudflare Sandbox / Docker
