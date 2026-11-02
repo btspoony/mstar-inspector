@@ -228,7 +228,7 @@ describe("settings heading idiom (QC convergence)", () => {
           payload: detailPayload(),
           groups: [],
           notice: null,
-          search: { tab: "settings", window: "30", repo: "" },
+          search: { tab: "settings", window: "30", repo: "", pr: "" },
           onReload: async () => true,
           onSearch: () => {},
         }),
