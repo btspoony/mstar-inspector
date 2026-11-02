@@ -1282,7 +1282,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     }
     // The disclosure fits the publisher's budget with the fixed sentence beside it.
     expect(envelope.summary_md.length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
-    expect(envelope.summary_md).toContain("No narrative summary was produced by the review seats.");
+    expect(envelope.summary_md).toMatch(/^This review is incomplete: /);
   });
 });
 
@@ -1653,10 +1653,11 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     // No seat narrative exists on this path, so the summary states coverage
     // instead of restating the verdict header the body already renders.
     expect(envelope.summary_md).not.toContain("## Verdict:");
-    expect(envelope.summary_md).toBe("No narrative summary was produced by the deep parent session.");
-    // The cause is the envelope's `incomplete` fact, never a line in the prose:
-    // a surface rendering summary_md verbatim would show machine text.
+    expect(envelope.summary_md).toMatch(/^This review is incomplete: /);
+    // The cause is stated in prose, not as a machine line: the dashboard renders
+    // this string verbatim and reads no `incomplete` field.
     expect(envelope.summary_md).not.toContain("cause:");
+    expect(envelope.summary_md).toContain(envelope.incomplete!.reason);
   });
 
   test("a reported yield error is the cause of a stopped turn", async () => {
@@ -1727,7 +1728,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     // restating the verdict header the body already renders, and carries the
     // cause on the prefix the body strips.
     expect(envelope.summary_md).not.toContain("## Verdict:");
-    expect(envelope.summary_md).toBe("No narrative summary was produced by the deep parent session.");
+    expect(envelope.summary_md).toMatch(/^This review is incomplete: /);
   });
 
   test("a turn that yielded is unchanged by the end event", async () => {

@@ -1412,12 +1412,11 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             // The engine's model-less summary is a COPY of the verdict header
             // and tally, not prose — publishing it beside the body that renders
             // those same facts made every review print each one twice. A real
-            // narrative is published as-is; without one, say that. The cause is
-            // the envelope's `incomplete` fact and never a line here: a surface
-            // rendering this string verbatim would show machine text. This path
-            // declares the diff unscanned, so it never claims coverage.
-            summary_md:
-              gathered.summary ?? "No narrative summary was produced by the deep parent session.",
+            // narrative is published as-is. Without one the cause is stated in
+            // prose, because the dashboard renders this string verbatim and reads
+            // no `incomplete` field; this path declares the diff unscanned, so it
+            // never claims coverage.
+            summary_md: gathered.summary ?? `This review is incomplete: ${cause}.`,
           });
           // The engine vocabulary is the SSOT for the synthesized envelope
           // too: an `agent_end` transcript is no more trusted than a yielded
@@ -1761,10 +1760,14 @@ export const ompAgentRuntime: AgentRuntime = {
         // never claims coverage — a stopped wave declares its scope unscanned in
         // the same envelope.
         //
-        // The cause does NOT ride here: this string is rendered verbatim (the
-        // dashboard's summary block), so a `cause:` line would surface as machine
-        // text. `incomplete` is the field that carries it.
-        summary_md: "No narrative summary was produced by the review seats.",
+        // The dashboard renders this string verbatim and reads no `incomplete`
+        // field (the reviews table has none), so the cause must be legible HERE,
+        // in prose — a `cause:` machine prefix would show as UI text, and a bare
+        // absence sentence would erase the only diagnosis that surface has.
+        summary_md:
+          stoppedReason === undefined
+            ? "No narrative summary was produced by the review seats."
+            : `This review is incomplete: ${stoppedReason}.`,
         ...(stoppedSeats === 0
           ? {}
           : {
