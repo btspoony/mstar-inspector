@@ -164,10 +164,13 @@ describe("worker entry scheduled wiring", () => {
     } finally {
       defaultSweepLog.warn = originalWarn;
     }
-    expect(warnCalls).toHaveLength(3);
+    // Every janitor degrades to its own warn before the failure sweep's D1
+    // error reaches the handler's catch — one entry per best-effort step.
+    expect(warnCalls).toHaveLength(4);
     expect(warnCalls[0]!.fields.event).toBe("retention_swept_failed");
-    expect(warnCalls[1]!.fields.event).toBe("invite_lapse_swept_failed");
-    expect(warnCalls[2]!.fields.event).toBe("ops_sweep_failed");
+    expect(warnCalls[1]!.fields.event).toBe("pull_request_retention_swept_failed");
+    expect(warnCalls[2]!.fields.event).toBe("invite_lapse_swept_failed");
+    expect(warnCalls[3]!.fields.event).toBe("ops_sweep_failed");
     expect(warnCalls[2]!.fields.detail).toContain("d1 down");
   });
 });
