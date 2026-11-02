@@ -354,6 +354,11 @@ export type UpsertPullRequestInput = {
   /** The payload's state, already promoted to 'merged' when `merged` was true. */
   state: string;
   headSha?: string | null;
+  /**
+   * The payload's `pull_request.updated_at` (ISO 8601), so ordering follows
+   * GitHub's clock rather than our arrival clock. Omitted/null → now.
+   */
+  updatedAt?: string | null;
 };
 
 /** The PR-ledger read row (`pull_requests` + its newest review, migration 0039). */
@@ -880,22 +885,33 @@ export function createAppsStore(db: AppsStoreD1) {
      * Record one VERIFIED `pull_request` delivery (migration 0039) —
      * idempotent on the UNIQUE (app_id, owner, repo, pr_number) tuple: a PR
      * that arrives several times (opened, synchronize, closed, …) keeps ONE
-     * row, its `last_seen_at` advances, and `title` / `state` / `head_sha`
-     * refresh only when the caller supplies them (a payload that omits a
-     * field keeps the last known value rather than blanking it). `first_seen_at`
-     * is written once, by the INSERT.
+     * row and `title` / `state` / `head_sha` refresh only when the caller
+     * supplies them (a payload that omits a field keeps the last known value
+     * rather than blanking it). `first_seen_at` is written once, by the
+     * INSERT.
+     *
+     * Two protections against a late, stale delivery:
+     *   - `merged` is TERMINAL. GitHub sends `merged: true` once, on the
+     *     `closed` delivery; an `opened`/`synchronize` that arrives afterwards
+     *     (out-of-order or replayed) must not rewrite the PR back to `open`.
+     *   - `last_seen_at` takes the payload's `updated_at` (GitHub's clock)
+     *     through `datetime()`, which also normalises ISO 8601 into the
+     *     `YYYY-MM-DD HH:MM:SS` form the column's readers compare against,
+     *     and it only ever advances (MAX), so a stale delivery cannot sort the
+     *     row to the top either.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
+      const seenAt = input.updatedAt ?? null;
       await db
         .prepare(
           `INSERT INTO pull_requests
-             (id, app_id, owner, repo, pr_number, title, state, head_sha)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             (id, app_id, owner, repo, pr_number, title, state, head_sha, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
            ON CONFLICT (app_id, owner, repo, pr_number) DO UPDATE SET
              title = COALESCE(excluded.title, title),
-             state = excluded.state,
+             state = CASE WHEN pull_requests.state = 'merged' THEN 'merged' ELSE excluded.state END,
              head_sha = COALESCE(excluded.head_sha, head_sha),
-             last_seen_at = datetime('now')`,
+             last_seen_at = MAX(last_seen_at, excluded.last_seen_at)`,
         )
         .bind(
           crypto.randomUUID(),
@@ -906,6 +922,7 @@ export function createAppsStore(db: AppsStoreD1) {
           input.title ?? null,
           input.state,
           input.headSha ?? null,
+          seenAt,
         )
         .run();
     },
@@ -1032,14 +1049,11 @@ export function createAppsStore(db: AppsStoreD1) {
         },
         reviews,
         failures,
-        findings: (results[2]!.results as PullRequestFindingRow[]).map((finding) => ({
-          finding_id: finding.finding_id,
-          severity: finding.severity ?? "",
-          title: finding.title ?? "",
-          file_path: finding.file_path,
-          line: finding.line,
-          body: finding.body,
-        })),
+        // Nullable columns pass through AS THEY ARE: the store reports what
+        // the tables hold, and the route's wire mapping decides what the
+        // client may receive (a NULL `provider` is a real, common row — the
+        // v1 pipeline never records one).
+        findings: results[2]!.results as PullRequestFindingRow[],
       };
     },
   };
@@ -1059,16 +1073,7 @@ type PullRequestBaseRow = {
 
 type PullRequestReviewRow = { owner: string; repo: string; pr_number: number; verdict: string; reviewed_at: string };
 type PullRequestFailureCountRow = { owner: string; repo: string; pr_number: number; n: number };
-type PullRequestReviewDetailRow = {
-  verdict: string;
-  summary_md: string | null;
-  model: string | null;
-  provider: string | null;
-  reviewed_at: string;
-  head_sha: string;
-};
-type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
-type PullRequestFindingRow = {
+export type PullRequestFindingRow = {
   finding_id: string;
   severity: string | null;
   title: string | null;
@@ -1077,19 +1082,24 @@ type PullRequestFindingRow = {
   body: string | null;
 };
 
+/** One `reviews` row as the detail face reads it — nullable columns honest. */
+export type PullRequestReviewDetailRow = {
+  verdict: string;
+  summary_md: string | null;
+  model: string | null;
+  provider: string | null;
+  reviewed_at: string;
+  head_sha: string;
+};
+
+export type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
+
 /** Detail read result — the row plus its three histories. */
 export type PullRequestDetail = {
   pull_request: PullRequestRow;
   reviews: PullRequestReviewDetailRow[];
   failures: PullRequestFailureDetailRow[];
-  findings: Array<{
-    finding_id: string;
-    severity: string;
-    title: string;
-    file_path: string | null;
-    line: number | null;
-    body: string | null;
-  }>;
+  findings: PullRequestFindingRow[];
 };
 
 /**

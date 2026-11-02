@@ -101,6 +101,34 @@ async function getFace(path: string, db: TestD1, login = "octocat"): Promise<Res
 }
 
 describe("GET /api/apps/:appId/pull-requests", () => {
+  test("a PR with null title / head_sha still appears, with empty strings", async () => {
+    const db = await fixture();
+    // The payload for a sparse delivery omits both (migration 0039 keeps them
+    // nullable). One such row must not blank the whole list.
+    await createAppsStore(db).upsertPullRequest({
+      appId: "app-acme",
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 132,
+      state: "open",
+    });
+    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`, db);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { pull_requests: Array<Record<string, unknown>> };
+    const sparse = body.pull_requests.find((row) => row.number === 132);
+    expect(sparse).toMatchObject({ title: "", head_sha: "" });
+  });
+
+  test("an unknown state is clamped to 'open'", async () => {
+    const db = await fixture();
+    db.raw
+      .prepare("UPDATE pull_requests SET state = 'draft-ish' WHERE app_id = 'app-acme' AND pr_number = 131")
+      .run();
+    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`, db);
+    const body = (await res.json()) as { pull_requests: Array<Record<string, unknown>> };
+    expect(body.pull_requests[0]!.state).toBe("open");
+  });
+
   test("lists this App's PRs with the contract row shape", async () => {
     const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests`, await fixture());
     expect(res.status).toBe(200);
@@ -138,6 +166,62 @@ describe("GET /api/apps/:appId/pull-requests", () => {
 });
 
 describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
+  test("a review with NULL provider / model / summary round-trips as empty strings", async () => {
+    const db = await fixture();
+    // The v1 pipeline always writes reviews.provider NULL (the artifact store
+    // persists the payload's null), and a degraded run may omit model /
+    // summary. The whole detail panel must still parse.
+    db.raw
+      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', 'app-acme', 77, 'acme', datetime('now'))")
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, app_id)
+         VALUES ('r-null', 77, 'acme', 'widgets', 131, 'sha-1', 'comment', NULL, NULL, NULL, 'app-acme')`,
+      )
+      .run();
+
+    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/131`, db);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { reviews: Array<Record<string, unknown>> };
+    expect(body.reviews[0]).toMatchObject({ verdict: "comment", summary_md: "", model: "", provider: "" });
+  });
+
+  test("a repo-wide finding (null file_path) round-trips as ''", async () => {
+    const db = await fixture();
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+         VALUES ('p1', 'app-acme', 77, 'acme', 'widgets', 131, 'sha-1', 'review', 'applied', '{}', 1, 1)`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_findings
+           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+            first_seen_round, last_seen_round, state, created_ms, updated_ms)
+         VALUES ('row-1', 'app-acme', 77, 'acme', 'widgets', 131, 'F-1', ?, 'p1', 'p1', 'sha-1', 'sha-1', 1, 1, 'open', 1, 1)`,
+      )
+      .run(
+        JSON.stringify({
+          title: "Repo-wide thing",
+          body: "",
+          filePath: null,
+          lineStart: null,
+          lineEnd: null,
+          mergeClass: "nit",
+          category: null,
+          fingerprintHint: null,
+        }),
+      );
+
+    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/131`, db);
+    const body = (await res.json()) as { findings: Array<Record<string, unknown>> };
+    expect(body.findings[0]).toMatchObject({ finding_id: "F-1", file_path: "", line: null });
+  });
+
   test("returns the row with its reviews, failures and findings", async () => {
     const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/131`, await fixture());
     expect(res.status).toBe(200);

@@ -60,7 +60,7 @@ describe("upsertPullRequest", () => {
     expect(row.last_seen_at).not.toBe("2020-01-01 00:00:00");
   });
 
-  test("an omitted title / head_sha keeps the stored value; state always overwrites", async () => {
+  test("an omitted title / head_sha keeps the stored value; state overwrites while non-terminal", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createAppsStore(db).upsertPullRequest(PR);
@@ -71,6 +71,36 @@ describe("upsertPullRequest", () => {
     expect(row.title).toBe("Add a thing");
     expect(row.head_sha).toBe("sha-1");
     expect(row.state).toBe("merged");
+  });
+
+  test("a merged PR stays merged: a late `opened` delivery cannot reopen it", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest({ ...PR, state: "merged" });
+    // Out-of-order / replayed `opened` for the same tuple, stamped OLDER than
+    // the merge by GitHub's own clock.
+    await createAppsStore(db).upsertPullRequest({ ...PR, state: "open", updatedAt: "2020-01-01T00:00:00Z" });
+    const row = db.raw
+      .prepare("SELECT state FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?")
+      .get(APP_ID, "acme", "widgets", 131) as { state: string };
+    expect(row.state).toBe("merged");
+  });
+
+  test("last_seen_at follows the payload's updated_at and never moves backwards", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-03-04T05:06:07Z" });
+    const first = db.raw
+      .prepare("SELECT last_seen_at FROM pull_requests WHERE app_id = ?")
+      .get(APP_ID) as { last_seen_at: string };
+    // ISO 8601 is normalised into the column's own datetime form.
+    expect(first.last_seen_at).toBe("2026-03-04 05:06:07");
+
+    await createAppsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-01-01T00:00:00Z" });
+    const after = db.raw
+      .prepare("SELECT last_seen_at FROM pull_requests WHERE app_id = ?")
+      .get(APP_ID) as { last_seen_at: string };
+    expect(after.last_seen_at).toBe("2026-03-04 05:06:07");
   });
 });
 

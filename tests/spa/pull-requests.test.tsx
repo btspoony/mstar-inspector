@@ -231,34 +231,105 @@ describe("pull request detail face (static SSR)", () => {
 });
 
 describe("pull requests data plane (pure helpers)", () => {
-  test("the list/detail URLs are base-prefixed; the detail address is the row's owner/repo/number", () => {
+  test("the list URL is base-prefixed and encodes the appId", () => {
     expect(appPullRequestsUrl("/dashboard", "1")).toBe("/dashboard/api/apps/1/pull-requests");
     expect(appPullRequestsUrl("/dashboard/acme", "12345")).toBe(
       "/dashboard/acme/api/apps/12345/pull-requests",
     );
+  });
+
+  test("the detail URL builder encodes owner/repo so a value cannot break out of the path family", () => {
     expect(appPullRequestDetailUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 })).toBe(
       "/dashboard/api/apps/1/pull-requests/acme/web/42",
     );
+    // Segment-boundary characters are encoded, not trusted raw.
+    expect(
+      appPullRequestDetailUrl("/dashboard", "1", { owner: "a/b", repo: "settings?x", number: 42 }),
+    ).toBe("/dashboard/api/apps/1/pull-requests/a%2Fb/settings%3Fx/42");
   });
 
-  test("pullRequestRefOf validates the pr param shape", () => {
+  test("pullRequestRefOf validates the pr param shape and rejects dot segments", () => {
     expect(pullRequestRefOf("acme/web/42")).toEqual({ owner: "acme", repo: "web", number: 42 });
     expect(pullRequestRefOf("42")).toBeNull();
     expect(pullRequestRefOf("acme/web/abc")).toBeNull();
     expect(pullRequestRefOf("/web/42")).toBeNull();
+    // Path traversal: encodeURIComponent cannot neutralise a dot-segment
+    // (".." encodes to ".."), so the parse boundary rejects it outright.
+    expect(pullRequestRefOf("../settings/1")).toBeNull();
+    expect(pullRequestRefOf("acme/../1")).toBeNull();
   });
 
-  test("the list parser rejects a drifted row instead of rendering it", () => {
+  test("the list parser coerces a drifted row instead of blanking the list (QC)", () => {
     expect(parsePullRequestList({ pull_requests: [ROW_OPEN] })).toEqual([ROW_OPEN]);
-    expect(parsePullRequestList({ pull_requests: [{ ...ROW_OPEN, state: "draft" }] })).toBeNull();
-    expect(parsePullRequestList({ pull_requests: [{ ...ROW_OPEN, latest_review: "ship it" }] })).toBeNull();
+    // Nullable display fields coerce to ""; an unknown state clamps to open.
+    const drifted = { ...ROW_OPEN, title: null, head_sha: undefined, state: "draft" };
+    expect(parsePullRequestList({ pull_requests: [drifted] })).toEqual([
+      { ...ROW_OPEN, title: "", head_sha: "", state: "open" },
+    ]);
+    // A row without its address is dropped individually — the rest stay.
+    const noAddress = { ...ROW_OPEN, owner: null };
+    expect(parsePullRequestList({ pull_requests: [noAddress, ROW_CLOSED] })).toEqual([ROW_CLOSED]);
+    // A malformed latest_review coerces to null, not a failed row.
+    expect(parsePullRequestList({ pull_requests: [{ ...ROW_OPEN, latest_review: "ship it" }] })).toEqual([
+      { ...ROW_OPEN, latest_review: null },
+    ]);
+    // The envelope keeps its shape.
     expect(parsePullRequestList({})).toBeNull();
   });
 
-  test("the detail parser validates all four faces", () => {
+  test("a null title on one row still returns the other rows", () => {
+    const parsed = parsePullRequestList({ pull_requests: [{ ...ROW_OPEN, title: null }, ROW_CLOSED] });
+    expect(parsed).toHaveLength(2);
+    expect(parsed?.[0]?.title).toBe("");
+    expect(parsed?.[1]).toEqual(ROW_CLOSED);
+  });
+
+  test("the detail parser keeps the envelope strict but drops drifted entries (QC)", () => {
     expect(parsePullRequestDetail(DETAIL)).toEqual(DETAIL);
-    expect(parsePullRequestDetail({ ...DETAIL, failures: [{ stage: 1 }] })).toBeNull();
-    expect(parsePullRequestDetail({ ...DETAIL, findings: [{ ...DETAIL.findings[0], line: "42" }] })).toBeNull();
+    // One drifted failure / finding drops that entry, not the whole detail.
+    expect(parsePullRequestDetail({ ...DETAIL, failures: [{ stage: 1 }] })?.failures).toEqual([]);
+    expect(
+      parsePullRequestDetail({ ...DETAIL, findings: [{ ...DETAIL.findings[0], line: "42" }] })?.findings,
+    ).toEqual([]);
+    // A pull_request without its address still fails the envelope.
+    expect(
+      parsePullRequestDetail({ ...DETAIL, pull_request: { ...DETAIL.pull_request, owner: null } }),
+    ).toBeNull();
     expect(parsePullRequestDetail(null)).toBeNull();
+  });
+
+  test("a review with provider null parses and renders without a null leak (QC)", () => {
+    const withNulls = {
+      ...DETAIL,
+      reviews: [
+        { ...DETAIL.reviews[0], verdict: null, summary_md: null, model: null, provider: null },
+      ],
+      findings: [{ ...DETAIL.findings[0], title: null, file_path: null, body: null }],
+    };
+    const parsed = parsePullRequestDetail(withNulls);
+    // The nullable text fields coerce to "" at the parse boundary; the
+    // address fields pass through untouched.
+    expect(parsed?.reviews[0]).toEqual({
+      verdict: "",
+      summary_md: "",
+      model: "",
+      provider: "",
+      reviewed_at: "2026-11-01 08:00:00",
+      head_sha: "aaa111bbb222",
+    });
+    expect(parsed?.findings[0]).toEqual({
+      finding_id: "f-1",
+      severity: "must-fix",
+      title: "",
+      file_path: "",
+      line: 42,
+      body: "",
+    });
+    // And the view renders the coerced row.
+    const markup = renderToStaticMarkup(
+      createElement(PullRequestDetailView, { locale: "en", detail: parsed ?? DETAIL }),
+    );
+    expect(markup).not.toContain("undefined");
+    expect(markup).not.toContain(">null<");
   });
 });
