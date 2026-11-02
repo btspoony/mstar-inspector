@@ -1,11 +1,13 @@
 /**
- * GET /api/apps/:appId/pull-requests[/:number] — the App-scoped PR ledger
- * faces (migration 0039).
+ * GET /api/apps/:appId/pull-requests and
+ * GET /api/apps/:appId/pull-requests/:owner/:repo/:number — the App-scoped PR
+ * ledger faces (migration 0039).
  *
  * Both ride the SAME gate ladder as every other App JSON read: membership →
  * App-id resolution (unknown / soft-deleted / CROSS-WORKSPACE all collapse into
- * the one `unknown app` 404) → creator-or-admin. The detail face additionally
- * answers 404 for a PR number this App never received.
+ * the one `unknown app` 404) → creator-or-admin. The detail face answers 404
+ * for a tuple this App never received — the address is the ledger's own key, so
+ * a same-number PR in another repo is a miss, never a fallback.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -135,9 +137,9 @@ describe("GET /api/apps/:appId/pull-requests", () => {
   });
 });
 
-describe("GET /api/apps/:appId/pull-requests/:number", () => {
+describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
   test("returns the row with its reviews, failures and findings", async () => {
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/131`, await fixture());
+    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/131`, await fixture());
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       pull_request: Record<string, unknown>;
@@ -152,20 +154,32 @@ describe("GET /api/apps/:appId/pull-requests/:number", () => {
   });
 
   test("an unknown PR number → 404", async () => {
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/999`, await fixture());
+    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999`, await fixture());
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "unknown pull request" });
+  });
+
+  test("the number in a repo this App never received → 404, no same-number fallback", async () => {
+    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/gadgets/131`, await fixture());
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "unknown pull request" });
   });
 
   test("a non-numeric number is the same 404 (no number-spelling alias)", async () => {
     for (const number of ["0x1f", "1e3", "1.5"]) {
-      const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/${number}`, await fixture());
+      const res = await getFace(
+        `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/${number}`,
+        await fixture(),
+      );
       expect(res.status, number).toBe(404);
     }
   });
 
   test("a cross-workspace App → 404 before the PR lookup", async () => {
-    const res = await getFace(`/dashboard/acme/api/apps/${OTHER_APP_ID}/pull-requests/131`, await fixture());
+    const res = await getFace(
+      `/dashboard/acme/api/apps/${OTHER_APP_ID}/pull-requests/acme/widgets/131`,
+      await fixture(),
+    );
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "unknown app" });
   });

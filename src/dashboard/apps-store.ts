@@ -955,29 +955,30 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * ONE pull request with its review history, failures and findings — the
-     * detail face. Every statement is scoped by `app_id` as well as the
-     * (owner, repo, pr_number) tuple, so a PR number that exists for a sibling
-     * App never leaks in. `null` when this App has not received the PR.
+     * detail face. The address is the ledger's OWN key
+     * (app_id, owner, repo, pr_number): one App can be installed on several
+     * repos, and a number is only unique WITHIN a repo, so a number-only
+     * lookup would answer with a different repo's PR. A miss is `null` — never
+     * a same-number row from another repo.
      *
      * Findings come from `review_findings` (the lifecycle table): it carries
      * `finding_id` and the immutable original as JSON, so `severity` is its
      * `mergeClass` (the vocab-switch mapping `findings.severity` already
      * uses), and `title` / `file_path` / `line` / `body` are read out of
      * `original_json`. Newest lifecycle row first.
-     *
-     * shortcut: the address is the PR NUMBER alone, while the ledger's key is
-     * (app_id, owner, repo, pr_number) — one App can serve several repos, so
-     * two repos may both have a #5. The most recently seen match wins; upgrade
-     * to an (owner, repo, number) route if a surface ever needs either.
      */
-    async getPullRequest(appId: string, prNumber: number): Promise<PullRequestDetail | null> {
+    async getPullRequest(
+      appId: string,
+      owner: string,
+      repo: string,
+      prNumber: number,
+    ): Promise<PullRequestDetail | null> {
       const row = await db
         .prepare(
           `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-           FROM pull_requests WHERE app_id = ? AND pr_number = ?
-           ORDER BY last_seen_at DESC LIMIT 1`,
+           FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
         )
-        .bind(appId, prNumber)
+        .bind(appId, owner, repo, prNumber)
         .first<PullRequestBaseRow>();
       if (!row) return null;
       const results = await db.batch([

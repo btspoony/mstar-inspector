@@ -4231,10 +4231,15 @@ const appPullRequestRoute = async (c: DashboardContext) => {
   // Decimal digits only (the App-id segment's rule): `0x1f` / `1e3` are number
   // spellings that `Number()` would alias onto a real PR number.
   const number = /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN;
-  if (!Number.isSafeInteger(number) || number <= 0) {
+  // The address is the ledger's own key — owner AND repo AND number. One App
+  // serves several repos, so a number alone is ambiguous; a miss is a 404,
+  // never a same-number row from another repo.
+  const owner = c.req.param("owner") ?? "";
+  const repo = c.req.param("repo") ?? "";
+  if (!Number.isSafeInteger(number) || number <= 0 || owner === "" || repo === "") {
     return c.json({ error: "unknown pull request" }, 404);
   }
-  const detail = await createAppsStore(gate.db).getPullRequest(gate.app.id, number);
+  const detail = await createAppsStore(gate.db).getPullRequest(gate.app.id, owner, repo, number);
   if (detail === null) return c.json({ error: "unknown pull request" }, 404);
   c.header("Cache-Control", "private, no-store");
   return c.json(detail);
@@ -4281,10 +4286,12 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/insights/summary", handler: appInsightsRoute, access: "write" },
   // Per-App pull-request ledger (migration 0039): the list face and the
-  // one-PR detail face. App-scoped reads are `write` in this table (AC3) —
-  // only the workspace-scoped member list is `read`.
+  // one-PR detail face. The detail address is the ledger's own key —
+  // owner/repo/number — because one App serves several repos and a number is
+  // only unique within a repo. App-scoped reads are `write` in this table
+  // (AC3) — only the workspace-scoped member list is `read`.
   { method: "get", path: "/api/apps/:appId/pull-requests", handler: appPullRequestsRoute, access: "write" },
-  { method: "get", path: "/api/apps/:appId/pull-requests/:number", handler: appPullRequestRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId/pull-requests/:owner/:repo/:number", handler: appPullRequestRoute, access: "write" },
   // The member list is `read` (every member sees it, and the operator's AC2
   // field set is this same list); every App/settings read and invite face is
   // `write` (AC3).

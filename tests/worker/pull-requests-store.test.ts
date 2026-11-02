@@ -176,7 +176,7 @@ describe("getPullRequest", () => {
       .run();
     seedFinding(db, { findingId: "F-1", mergeClass: "must-fix", title: "Null deref", filePath: "src/a.ts", lineStart: 12, body: "guard it" });
 
-    const detail = await createAppsStore(db).getPullRequest(APP_ID, 131);
+    const detail = await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131);
     expect(detail).not.toBeNull();
     expect(detail!.pull_request.latest_review).toEqual({ verdict: "approve", reviewed_at: expect.any(String) });
     expect(detail!.pull_request.failure_count).toBe(1);
@@ -191,7 +191,20 @@ describe("getPullRequest", () => {
   test("unknown PR number → null (the route's 404)", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    expect(await createAppsStore(db).getPullRequest(APP_ID, 999)).toBeNull();
+    expect(await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 999)).toBeNull();
+  });
+
+  test("the same number in another repo of the SAME App → null, never a fallback", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest(PR);
+    await createAppsStore(db).upsertPullRequest({ ...PR, repo: "gadgets", title: "Other repo's #131" });
+    // Both rows exist under #131; asking for a repo that has none must miss
+    // rather than answer with either of them.
+    expect(await createAppsStore(db).getPullRequest(APP_ID, "acme", "sprockets", 131)).toBeNull();
+    expect((await createAppsStore(db).getPullRequest(APP_ID, "acme", "gadgets", 131))!.pull_request.title).toBe(
+      "Other repo's #131",
+    );
   });
 
   test("a PR number that belongs to a sibling App → null", async () => {
@@ -199,7 +212,7 @@ describe("getPullRequest", () => {
     seedApp(db);
     seedApp(db, "other-app", 2002);
     await createAppsStore(db).upsertPullRequest({ ...PR, appId: "other-app" });
-    expect(await createAppsStore(db).getPullRequest(APP_ID, 131)).toBeNull();
+    expect(await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131)).toBeNull();
   });
 });
 
