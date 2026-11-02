@@ -88,15 +88,21 @@ export type ReviewSandbox = {
 /** Container image key in `wrangler.jsonc` → `containers[].images`. */
 const CONTAINER_IMAGE_KEY = "sandbox";
 /**
- * Instance size, carried over from the 0.12 `instance_type: "lite"` pin.
+ * Instance size. `lite` (256 MiB, 1/16 vCPU) carried the pin over from the
+ * 0.12 `instance_type` value, and the note above says the all-silent stall
+ * "was not resource exhaustion — a memory-starved process would not emit
+ * nothing on either stream". That reasoning was wrong: an OOM-killed process
+ * emits exactly nothing, and the container's own death reaches `exec` as
+ * `Network connection lost`.
  *
- * `lite` (256 MiB) was suspected of starving the in-image runner, but the
- * staging symptom turned out to be a runner blocked on its first I/O, not
- * resource exhaustion — the run emits nothing on EITHER stream for the whole
- * bound, which a memory-starved process would not do. Size stays as chosen;
- * raise it only with evidence that the runner actually needs the headroom.
+ * The pin stopped fitting when the omp SDK bump to 18.13.3 first reached an
+ * image build. From that deploy on, every review died at the bound with both
+ * streams empty, and a later run reported `Network connection lost` after
+ * four minutes. `basic` (1 GiB, 1/4 vCPU) is the smallest step that gives the
+ * runner room for its own runtime plus one agent session; raise it only with
+ * evidence, the way this step was taken.
  */
-const CONTAINER_INSTANCE = "lite" as const;
+const CONTAINER_INSTANCE = "basic" as const;
 /**
  * Container inactivity bound. The DO stays active while a `runCommand` RPC is
  * in flight, so this guards the gaps BETWEEN calls — it must outlive the
