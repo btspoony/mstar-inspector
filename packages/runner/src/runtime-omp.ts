@@ -1409,7 +1409,12 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             unverifiedCount: 0,
             target: parseTarget(input.reconFacts),
             incomplete: { reason: cause, unscanned: [DEEP_STOP_UNSCANNED] },
-            ...(gathered.summary === undefined ? {} : { summary_md: gathered.summary }),
+            // The engine's model-less summary is a COPY of the verdict header
+            // and tally, not prose — publishing it beside the body that renders
+            // those same facts made every review print each one twice. A real
+            // narrative is published as-is; without one, state the coverage this
+            // layer alone knows rather than restating the header.
+            summary_md: gathered.summary ?? "Reviewed by the deep parent session across the full diff.",
           });
           // The engine vocabulary is the SSOT for the synthesized envelope
           // too: an `agent_end` transcript is no more trusted than a yielded
@@ -1738,6 +1743,12 @@ export const ompAgentRuntime: AgentRuntime = {
         findings,
         unverifiedCount,
         target: parseTarget(input.reconFacts),
+        // The envelope requires a non-empty summary, and the engine's fallback
+        // for one is a COPY of the verdict header and the finding list — which
+        // is what made a published review print every fact twice. State what
+        // only this layer knows instead: how much was covered. The facts the
+        // fallback would have restated all reach the body from the envelope.
+        summary_md: `Reviewed ${seats.length} seat${seats.length === 1 ? "" : "s"} across the full diff.`,
         ...(stoppedSeats === 0
           ? {}
           : {

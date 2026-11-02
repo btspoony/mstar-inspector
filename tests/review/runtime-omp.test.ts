@@ -1145,6 +1145,9 @@ describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete enve
         ],
         unverifiedCount: 1,
         target: { owner: "acme", repo: "widgets", pr: 7, head_sha: "abc1234567890abcdef1234567890abcdef12" },
+        // The runner states coverage; the engine's fallback would restate the
+        // verdict header the body already renders.
+        summary_md: "Reviewed 2 seats across the full diff.",
       }),
     );
   });
@@ -1276,8 +1279,9 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     const notesAt = envelope.summary_md.indexOf("\n\n- notes: ");
     const summaryPart = envelope.summary_md.slice(0, notesAt);
     const notes = noteLines(envelope.summary_md);
-    // The engine summary was cut to hold the disclosure, and its cut is marked.
-    expect(summaryPart).toContain("summary truncated");
+    // The summary no longer restates the verdict, so it never rivals the body
+    // budget — the disclosure is what has a claim on it.
+    expect(summaryPart).not.toContain("summary truncated");
     // Both capped seats keep their slug, the cause and the coverage statement.
     expect(notes).toHaveLength(2);
     for (const [index, slug] of ["changeset-1-src", "changeset-2-lib"].entries()) {
@@ -1654,8 +1658,12 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     // No text gathered → the engine's own template, never a blank summary and
     // never a throw over the missing text.
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.summary_md).toContain("## Verdict: incomplete");
-    expect(envelope.summary_md).toContain("cause: Deadline exceeded while streaming (the tier cap)");
+    // No seat narrative exists on this path, so the summary states coverage
+    // instead of restating the verdict header the body already renders.
+    expect(envelope.summary_md).not.toContain("## Verdict:");
+    expect(envelope.summary_md).toBe("Reviewed by the deep parent session across the full diff.");
+    // The cause is the declared fact, never a line inside the summary.
+    expect(envelope.summary_md).not.toContain("cause:");
   });
 
   test("a reported yield error is the cause of a stopped turn", async () => {
@@ -1722,7 +1730,10 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
     );
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.summary_md).toContain("## Verdict: incomplete");
+    // No seat narrative exists on this path, so the summary states coverage
+    // instead of restating the verdict header the body already renders.
+    expect(envelope.summary_md).not.toContain("## Verdict:");
+    expect(envelope.summary_md).toBe("Reviewed by the deep parent session across the full diff.");
   });
 
   test("a turn that yielded is unchanged by the end event", async () => {

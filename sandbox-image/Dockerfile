@@ -7,6 +7,9 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the runner states coverage in `summary_md` instead of accepting the
+# engine's header-copy fallback, so a published review no longer prints its
+# verdict, tally and finding titles twice.
 # rebuild: the runner hands the SDK a callable extension-roots accessor — the
 # pinned SDK reads a getter and calls it as a method, which killed every seat
 # before its first model turn.
