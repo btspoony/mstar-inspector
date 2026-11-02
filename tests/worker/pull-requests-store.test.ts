@@ -193,15 +193,15 @@ describe("listPullRequests", () => {
     // a scoped one carries the window subquery and binds three (appId, appId,
     // LIMIT). The payload-shape assertions below hold either way, so this is
     // the assertion that fails when the scoping is reverted.
-    const statements: Array<{ sql: string; binds: number }> = [];
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
     const recording = {
       prepare(sql: string) {
-        const record = { sql, binds: 0 };
+        const record = { sql, values: [] as unknown[] };
         statements.push(record);
         const inner = db.prepare(sql);
         return {
           bind(...values: unknown[]) {
-            record.binds = values.length;
+            record.values = values;
             return inner.bind(...values);
           },
           first: inner.first.bind(inner),
@@ -219,10 +219,11 @@ describe("listPullRequests", () => {
     );
     expect(aggregates.length).toBe(2);
     for (const stmt of aggregates) {
-      expect(stmt.sql).toContain("IN (SELECT owner, repo, pr_number FROM pull_requests");
-      expect(stmt.sql).toContain("LIMIT ?");
-      // appId for the aggregate, appId + LIMIT for the shared window subquery.
-      expect(stmt.binds).toBe(3);
+      // The bound VALUES, not the statement text: a splice that keeps the SQL
+      // but permutes the slots satisfies any substring or count assertion.
+      // The aggregate's own scope takes appId, then the window subquery takes
+      // (appId, LIMIT) — in that order, which is the order the splice binds.
+      expect(stmt.values).toEqual([APP_ID, APP_ID, PULL_REQUEST_LIST_LIMIT]);
     }
   });
 
