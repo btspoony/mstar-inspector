@@ -151,6 +151,19 @@ export function parseModelSelectors(raw: string | undefined): string[] {
  * Seats receive these as session skills; their prompts point at the plugin
  * root's pr-review reference by absolute path (engine prReviewSeatPrompt).
  */
+/**
+ * Structured progress on stderr, one line per setup stage.
+ *
+ * The run's failure mode so far has been total silence: a stall inside setup
+ * reaches the caller as "exit 124, stdout 0B" with nothing to say which stage
+ * never returned. These lines make that answerable without a debugger inside a
+ * container that is destroyed when the run ends. Stage names only — no model,
+ * path or credential detail.
+ */
+function traceStage(stage: string): void {
+  console.error(JSON.stringify({ event: "review_stage", stage }));
+}
+
 export async function loadHarnessSkills(pluginRoot: string): Promise<Skill[]> {
   const { skills, warnings } = await loadSkillsFromDir({
     dir: join(pluginRoot, "skills"),
@@ -1514,10 +1527,13 @@ export const ompAgentRuntime: AgentRuntime = {
     const cwd = input.worktreePath;
     let session: AgentSession | undefined;
     try {
+      traceStage("enter_run_review");
       await installSeatAgent(cwd);
+      traceStage("seat_installed");
       // Seat model chain: single SSOT derivation shared with the recheck
       // seat — see seatModelChain (the L2 rationale lives there).
       const seatModels = seatModelChain(input);
+      traceStage("models_resolved");
       const created = await createAgentSession(
         buildSessionOptions({
           cwd,
@@ -1532,6 +1548,7 @@ export const ompAgentRuntime: AgentRuntime = {
         }),
       );
       session = created.session;
+      traceStage("session_ready");
 
       const plans = partitionSeats(input.reconFacts, input.level);
       if (plans.length !== REVIEW_SEATS[input.level]) {
