@@ -1630,10 +1630,16 @@ export const ompAgentRuntime: AgentRuntime = {
       // still a lost seat — the results array is index-aligned with the dispatch
       // list, so every rejection maps back to the seat it was dispatched for.
       let rejectedSeats = 0;
+      // A rejected seat promise carries its cause in the rejection itself —
+      // there is no outcome object to read it from, so capture it here or the
+      // only diagnosis of a dead seat is lost with the promise.
+      let rejectedReason: unknown = undefined;
       try {
         const results = await group; // never rejects: the barrier absorbs every seat
         outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
-        rejectedSeats = results.filter((result) => result.status === "rejected").length;
+        const rejections = results.filter((result) => result.status === "rejected");
+        rejectedSeats = rejections.length;
+        rejectedReason = rejections[0]?.reason;
         // The wave's verdict on a lost seat. A settled seat that failed without
         // a cap carries its own error; a seat promise that rejected outright
         // produced no outcome at all (the SDK threw, or a bug of ours). Both are
@@ -1686,8 +1692,15 @@ export const ompAgentRuntime: AgentRuntime = {
       // body name the cause instead of restating the symptom; bounded like the
       // scope entries beside it.
       const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-      const lostSeatText =
-        lostSeatDetail === null ? "" : lostSeatDetail.message.replace(/\s+/g, " ").trim();
+      const rawLostSeat =
+        lostSeatDetail !== null
+          ? lostSeatDetail.message
+          : rejectedReason === undefined
+            ? ""
+            : rejectedReason instanceof Error
+              ? rejectedReason.message
+              : String(rejectedReason);
+      const lostSeatText = rawLostSeat.replace(/\s+/g, " ").trim();
       const lostSeatCause =
         lostSeatText === ""
           ? ""

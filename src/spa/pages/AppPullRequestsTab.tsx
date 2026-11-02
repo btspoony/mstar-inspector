@@ -18,6 +18,7 @@ import {
   pullRequestStatePill,
   type AppDetailSearch,
   type PullRequestDetail,
+  type PullRequestRef,
   type PullRequestRow,
 } from "./data";
 
@@ -75,9 +76,6 @@ export function AppPullRequestsTab({
   const [reloadNonce, setReloadNonce] = useState(0);
 
   const ref = search.pr === "" ? null : pullRequestRefOf(search.pr);
-  const [read, setRead] = useState<DetailRead | null>(null);
-  const [detailNonce, setDetailNonce] = useState(0);
-  const current = currentDetailRead(read, search.pr);
 
   useEffect(() => {
     let cancelled = false;
@@ -101,28 +99,6 @@ export function AppPullRequestsTab({
     };
   }, [appId, reloadNonce]);
 
-  useEffect(() => {
-    if (ref === null) return;
-    let cancelled = false;
-    setRead({ pr: search.pr, kind: "loading" });
-    fetchJson(appPullRequestDetailUrl(apiBase(), appId, ref))
-      .then((raw) => {
-        if (cancelled) return;
-        const parsed = parsePullRequestDetail(raw);
-        if (!parsed) {
-          setRead({ pr: search.pr, kind: "error" });
-          return;
-        }
-        setRead({ pr: search.pr, kind: "ok", data: parsed });
-      })
-      .catch(() => {
-        if (!cancelled) setRead({ pr: search.pr, kind: "error" });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [appId, search.pr, detailNonce]);
-
   function openPr(row: PullRequestRow): void {
     onSearch({ ...search, pr: `${row.owner}/${row.repo}/${row.number}` });
   }
@@ -133,27 +109,17 @@ export function AppPullRequestsTab({
 
   // A malformed pr param resolves to null: fall back to the list face.
   if (ref !== null) {
+    // The key is the pr address: switching PRs remounts instead of reusing a
+    // retained read, and closing the PR unmounts so reopening starts clean.
     return (
-      <div className="flex flex-col gap-6" aria-busy={current === null || current.kind === "loading"}>
-        <Button type="button" variant="ghost" size="sm" className="self-start" onClick={closePr}>
-          <ArrowLeft aria-hidden="true" />
-          {t(locale, "pullRequests.backToList")}
-        </Button>
-        {/* Exactly one face renders, all derived from the ACTIVE pr's read:
-            the view when its stamp matches; the error (with retry) when the
-            active read failed; and LOADING for everything else — including
-            a transition frame whose retained read belongs to a different pr
-            (S2/N1: never the previous PR's data, never its error). */}
-        {current !== null && current.kind === "ok" ? (
-          <PullRequestDetailView locale={locale} detail={current.data} />
-        ) : current !== null && current.kind === "error" ? (
-          <ErrorState locale={locale} onRetry={() => setDetailNonce((nonce) => nonce + 1)} />
-        ) : (
-          <p role="status" className="text-sm text-muted-foreground">
-            {t(locale, "common.loading")}
-          </p>
-        )}
-      </div>
+      <PullRequestDetail
+        key={search.pr}
+        locale={locale}
+        appId={appId}
+        prKey={search.pr}
+        prRef={ref}
+        onBack={closePr}
+      />
     );
   }
 
@@ -170,6 +136,79 @@ export function AppPullRequestsTab({
       {rows !== null ? (
         <PullRequestsListView locale={locale} rows={rows} onOpen={openPr} />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * The in-place detail face. Its read state lives HERE rather than in the tab,
+ * so unmounting discards it: the tab renders this node only while a pr is
+ * open, which makes reopening a PR a remount with a clean read instead of a
+ * repaint of the previous visit's error. An effect cannot do that job — it
+ * runs after paint, and the retained frame IS the frame the operator sees.
+ *
+ * The tab also keys this node on the pr address, so switching PRs is a
+ * remount rather than a stamp comparison and no retained face survives a
+ * transition at all.
+ */
+function PullRequestDetail({
+  locale,
+  appId,
+  prKey,
+  prRef,
+  onBack,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  /** The `pr` search value this node belongs to — its own read stamp. */
+  prKey: string;
+  prRef: PullRequestRef;
+  onBack: () => void;
+}) {
+  const [read, setRead] = useState<DetailRead | null>(null);
+  const [nonce, setNonce] = useState(0);
+  const current = currentDetailRead(read, prKey);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRead({ pr: prKey, kind: "loading" });
+    fetchJson(appPullRequestDetailUrl(apiBase(), appId, prRef))
+      .then((raw) => {
+        if (cancelled) return;
+        const parsed = parsePullRequestDetail(raw);
+        setRead(parsed ? { pr: prKey, kind: "ok", data: parsed } : { pr: prKey, kind: "error" });
+      })
+      .catch(() => {
+        if (!cancelled) setRead({ pr: prKey, kind: "error" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appId, prKey, prRef, nonce]);
+
+  // Retry resets the read in the click itself, so the loading face paints
+  // first; bumping the nonce alone would leave the failed face up until the
+  // effect ran.
+  const retry = (): void => {
+    setRead({ pr: prKey, kind: "loading" });
+    setNonce((value) => value + 1);
+  };
+
+  return (
+    <div className="flex flex-col gap-6" aria-busy={current === null || current.kind === "loading"}>
+      <Button type="button" variant="ghost" size="sm" className="self-start" onClick={onBack}>
+        <ArrowLeft aria-hidden="true" />
+        {t(locale, "pullRequests.backToList")}
+      </Button>
+      {current !== null && current.kind === "ok" ? (
+        <PullRequestDetailView locale={locale} detail={current.data} />
+      ) : current !== null && current.kind === "error" ? (
+        <ErrorState locale={locale} onRetry={retry} />
+      ) : (
+        <p role="status" className="text-sm text-muted-foreground">
+          {t(locale, "common.loading")}
+        </p>
+      )}
     </div>
   );
 }

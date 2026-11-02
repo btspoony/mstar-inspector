@@ -7,6 +7,9 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: a rejected seat promise's own reason now rides the declared
+# `incomplete` cause; without it the only diagnosis of a dead seat is lost with
+# the promise.
 # rebuild: the declared `incomplete` reason now carries the lost seat's own
 # failure message, so a wave that produced nothing names its cause in the
 # durable review row instead of restating the symptom.
