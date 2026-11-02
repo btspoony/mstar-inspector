@@ -4,7 +4,7 @@
  * navigation GET nor any other GET reaches the SPA boot document on this
  * path). The data contract lives on the per-App JSON face
  * (GET /dashboard/api/apps/:appId/insights/summary); this file also pins
- * that face: membership + creator-or-admin gate with app-scoped data, and
+ * that face: membership + the workspace owner/admin gate with app-scoped data, and
  * the cross-App global endpoint removed with no compat shim.
  */
 import { describe, expect, test } from "bun:test";
@@ -78,7 +78,7 @@ describe("GET /dashboard/insights (retired)", () => {
 // GET /dashboard/api/apps/:appId/insights/summary — the JSON read face for
 // the insights aggregation, scoped to one App via the store's `appId`
 // filter. Gate: mount-level membership → App-id lookup (unknown and
-// soft-deleted are equally invisible, 404) → creator-or-admin (403). All
+// soft-deleted are equally invisible, 404) → workspace owner/admin (403). All
 // deny bodies are `{ error }` JSON. The former cross-App global endpoint
 // (GET /dashboard/api/insights/summary) is removed — no compat shim.
 const SESSION_SECRET_API = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");

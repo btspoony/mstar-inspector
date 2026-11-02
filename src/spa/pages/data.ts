@@ -709,45 +709,277 @@ export function appInsightsSummaryUrl(
   return `${base}/api/apps/${encodeURIComponent(appId)}/insights/summary?${params.toString()}`;
 }
 
-/** The App detail page's two tabs (应用设置 / 洞察). Insights is manager-only. */
-export type AppDetailTab = "settings" | "insights";
+/**
+ * The per-App pull-request ledger (the Pull requests tab). One row per PR
+ * the App received — the list face and the detail's `pull_request` share
+ * this exact shape.
+ */
+export type PullRequestState = "open" | "closed" | "merged";
 
-/** URL-derived detail state: the active tab plus the insights filters. */
-export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string };
+export type PullRequestRow = {
+  number: number;
+  owner: string;
+  repo: string;
+  title: string;
+  state: PullRequestState;
+  head_sha: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  latest_review: { verdict: string; reviewed_at: string } | null;
+  failure_count: number;
+};
+
+export type PullRequestReview = {
+  verdict: string;
+  summary_md: string;
+  model: string;
+  provider: string;
+  reviewed_at: string;
+  head_sha: string;
+};
+
+/** One review-failure log row — the diagnostic payload this tab exists for. */
+export type PullRequestFailure = { stage: string; error: string; created_at: string };
+
+export type PullRequestFinding = {
+  finding_id: string;
+  severity: string;
+  title: string;
+  file_path: string;
+  /** `null` on file-level findings with no line anchor. */
+  line: number | null;
+  body: string;
+};
+
+/** The PR detail payload (`GET …/pull-requests/:owner/:repo/:number`). */
+export type PullRequestDetail = {
+  pull_request: PullRequestRow;
+  reviews: PullRequestReview[];
+  failures: PullRequestFailure[];
+  findings: PullRequestFinding[];
+};
+
+/**
+ * The detail address: one App can be installed on several repos, so the
+ * same number exists in more than one and owner/repo ride with it (the
+ * number-only path was retired for exactly that ambiguity).
+ */
+export type PullRequestRef = { owner: string; repo: string; number: number };
+
+/**
+ * Per-row list parse (QC: one nullable row must not blank the list). The
+ * nullable DISPLAY fields coerce to "" and an unknown state clamps to
+ * "open"; only the address and timestamp fields stay required — a row
+ * without them cannot be listed or fetched, so it is dropped individually
+ * and the rest of the list still renders. The returned row always carries
+ * non-null strings (the type is not weakened).
+ */
+function parsePullRequestRow(value: unknown): PullRequestRow | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.number !== "number" || !Number.isFinite(value.number)) return null;
+  if (typeof value.owner !== "string" || typeof value.repo !== "string") return null;
+  if (typeof value.first_seen_at !== "string" || typeof value.last_seen_at !== "string") return null;
+  if (typeof value.failure_count !== "number") return null;
+  return {
+    number: value.number,
+    owner: value.owner,
+    repo: value.repo,
+    title: typeof value.title === "string" ? value.title : "",
+    state: value.state === "closed" || value.state === "merged" ? value.state : "open",
+    head_sha: typeof value.head_sha === "string" ? value.head_sha : "",
+    first_seen_at: value.first_seen_at,
+    last_seen_at: value.last_seen_at,
+    latest_review: parseLatestReview(value.latest_review),
+    failure_count: value.failure_count,
+  };
+}
+
+/** The row's latest-review slot: coerced to null unless it is a real review. */
+function parseLatestReview(value: unknown): { verdict: string; reviewed_at: string } | null {
+  if (!isRecord(value) || typeof value.reviewed_at !== "string") return null;
+  return {
+    verdict: typeof value.verdict === "string" ? value.verdict : "",
+    reviewed_at: value.reviewed_at,
+  };
+}
+
+/**
+ * One review entry (QC: the pipeline persists `provider: null`, and
+ * model/summary/verdict can be absent too). The nullable text fields
+ * coerce to "" at this boundary so the view never renders null; the
+ * entry is dropped only when its timestamp/head anchor is missing.
+ */
+function parsePullRequestReview(value: unknown): PullRequestReview | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.reviewed_at !== "string" || typeof value.head_sha !== "string") return null;
+  return {
+    verdict: typeof value.verdict === "string" ? value.verdict : "",
+    summary_md: typeof value.summary_md === "string" ? value.summary_md : "",
+    model: typeof value.model === "string" ? value.model : "",
+    provider: typeof value.provider === "string" ? value.provider : "",
+    reviewed_at: value.reviewed_at,
+    head_sha: value.head_sha,
+  };
+}
+
+function parsePullRequestFailure(value: unknown): PullRequestFailure | null {
+  if (!isRecord(value)) return null;
+  if (
+    typeof value.stage !== "string" ||
+    typeof value.error !== "string" ||
+    typeof value.created_at !== "string"
+  ) {
+    return null;
+  }
+  return { stage: value.stage, error: value.error, created_at: value.created_at };
+}
+
+/**
+ * One finding entry (QC: repo-wide findings persist `file_path: null`).
+ * title/file_path/body coerce to ""; the entry is dropped without its id
+ * (the detail list keys by finding_id) or a malformed line anchor.
+ */
+function parsePullRequestFinding(value: unknown): PullRequestFinding | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.finding_id !== "string") return null;
+  if (typeof value.line !== "number" && value.line !== null) return null;
+  return {
+    finding_id: value.finding_id,
+    severity: typeof value.severity === "string" ? value.severity : "",
+    title: typeof value.title === "string" ? value.title : "",
+    file_path: typeof value.file_path === "string" ? value.file_path : "",
+    line: value.line,
+    body: typeof value.body === "string" ? value.body : "",
+  };
+}
+
+function present<T>(value: T | null): value is T {
+  return value !== null;
+}
+
+/** The list payload: `{ pull_requests: [...] }` — parsed per row, never all-or-nothing. */
+export function parsePullRequestList(data: unknown): PullRequestRow[] | null {
+  if (!isRecord(data) || !Array.isArray(data.pull_requests)) return null;
+  return data.pull_requests.map(parsePullRequestRow).filter(present);
+}
+
+/**
+ * The detail payload: row + reviews + failures + findings. The envelope
+ * keeps its shape (a missing/!array face fails the parse), but every
+ * array is parsed per entry — one drifted review/failure/finding is
+ * dropped, not the whole detail.
+ */
+export function parsePullRequestDetail(data: unknown): PullRequestDetail | null {
+  if (!isRecord(data)) return null;
+  const pull_request = parsePullRequestRow(data.pull_request);
+  if (pull_request === null) return null;
+  if (!Array.isArray(data.reviews) || !Array.isArray(data.failures) || !Array.isArray(data.findings)) {
+    return null;
+  }
+  return {
+    pull_request,
+    reviews: data.reviews.map(parsePullRequestReview).filter(present),
+    failures: data.failures.map(parsePullRequestFailure).filter(present),
+    findings: data.findings.map(parsePullRequestFinding).filter(present),
+  };
+}
+
+export function appPullRequestsUrl(base: string, appId: string): string {
+  return `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests`;
+}
+
+/**
+ * The detail read URL, built from the ROW's owner/repo/number — never the
+ * number alone. owner/repo are passed through `encodeURIComponent` so a
+ * value carrying a segment boundary (`/`, `?`, `#`) cannot escape the
+ * pull-requests path family, and {@link pullRequestRefOf} rejects `.`/`..`
+ * segments before this builder runs, so a dot-segment can only reach the
+ * API by normalising into a same-family 404 — never another route. The
+ * `number` segment is validated decimal digits at the parse site.
+ */
+export function appPullRequestDetailUrl(base: string, appId: string, ref: PullRequestRef): string {
+  return `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`;
+}
+
+/**
+ * The PR state pill's copy + tone, derived once for the list and the
+ * detail face. The state vocabulary is the API contract's closed set; the
+ * face itself belongs to `StatusBadge` in `@design-system`.
+ */
+export function pullRequestStatePill(
+  locale: Locale,
+  state: PullRequestState,
+): { label: string; tone: "accent" | "success" | "neutral" } {
+  if (state === "merged") return { label: t(locale, "pullRequests.state.merged"), tone: "success" };
+  if (state === "closed") return { label: t(locale, "pullRequests.state.closed"), tone: "neutral" };
+  return { label: t(locale, "pullRequests.state.open"), tone: "accent" };
+}
+
+/** The App detail page's tabs (应用设置 / 洞察 / Pull requests). The last two are manager-only. */
+export type AppDetailTab = "settings" | "insights" | "pull-requests";
+
+/**
+ * URL-derived detail state: the active tab, the insights filters, and the
+ * open PR detail (`pr` = `owner/repo/number`).
+ */
+export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string; pr: string };
+
+/** The `pr` search param shape: `owner/repo/number`, number = decimal digits. */
+const PR_PARAM_PATTERN = /^[^/]+\/[^/]+\/\d+$/;
+
+/**
+ * The `pr` param string → a detail address, or null when the param is
+ * absent or malformed (the tab then renders the list). `.`/`..` segments
+ * are rejected outright — encoding cannot neutralise a dot-segment
+ * (`encodeURIComponent("..")` is `".."`), so the boundary has to be here.
+ */
+export function pullRequestRefOf(pr: string): PullRequestRef | null {
+  const [owner, repo, number] = pr.split("/");
+  if (owner === undefined || repo === undefined || number === undefined) return null;
+  if (!/^\d+$/.test(number) || owner === "" || repo === "") return null;
+  if (owner === "." || owner === ".." || repo === "." || repo === "..") return null;
+  return { owner, repo, number: Number(number) };
+}
 
 /**
  * The search string as the detail page states it — the ONE derivation
  * shared by the mount initializer and the popstate re-sync (the
  * spa-url-state-resync contract), built on the pinned insights helpers
- * (off-set windows resolve to the default segment). A `?tab=insights` value
- * is only honored for managers; a non-manager always resolves to the
- * settings tab.
+ * (off-set windows resolve to the default segment). The manager-gated tab
+ * values (`insights`, `pull-requests`) are honored only for managers; a
+ * non-manager — or any other tab value — always resolves to the settings
+ * tab. `pr` rides verbatim when it matches the `owner/repo/number` shape.
  */
 export function parseAppDetailSearch(search: string, canManage: boolean): AppDetailSearch {
   const insights = parseInsightsSearch(search);
-  const rawTab = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search).get("tab");
-  // Any tab value that is not exactly "insights" (or a non-manager) is the
-  // settings tab — the bare path IS settings, so no vocabulary whitelist is
-  // needed beyond the one legal insights value.
-  const tab: AppDetailTab = canManage && rawTab === "insights" ? "insights" : "settings";
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const rawTab = params.get("tab");
+  // The bare path IS settings — the only legal non-settings values are the
+  // two manager tabs, gated by the payload's can_manage.
+  const tab: AppDetailTab =
+    canManage && (rawTab === "insights" || rawTab === "pull-requests") ? rawTab : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
-  return { tab, window, repo: insights.repo };
+  const rawPr = params.get("pr");
+  const pr = rawPr !== null && PR_PARAM_PATTERN.test(rawPr) ? rawPr : "";
+  return { tab, window, repo: insights.repo, pr };
 }
 
 /**
  * The query string for a detail state — the inverse of
- * {@link parseAppDetailSearch}: the tab param only when insights (the bare
- * path IS the settings tab), the window param only off the 30 default, the
- * repo param only when set. Loop-free by construction: consumers write it
- * with replaceState only.
+ * {@link parseAppDetailSearch}: the tab param on every non-settings tab
+ * (the bare path IS the settings tab), the window param only off the 30
+ * default, the repo param only when set, the pr param only when a detail
+ * is open. Loop-free by construction: consumers write it with replaceState
+ * only.
  */
 export function appDetailSearchQuery(search: AppDetailSearch): string {
   const params = new URLSearchParams();
-  if (search.tab === "insights") params.set("tab", "insights");
+  if (search.tab !== "settings") params.set("tab", search.tab);
   if (search.window !== "30") params.set("window", search.window);
   if (search.repo !== "") params.set("repo", search.repo);
+  if (search.pr !== "") params.set("pr", search.pr);
   const query = params.toString();
   return query === "" ? "" : `?${query}`;
 }

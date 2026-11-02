@@ -25,6 +25,7 @@
 
 import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
+import { createAppsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
@@ -96,6 +97,16 @@ export type SweepRetentionFields =
   | { event: "retention_swept_failed"; detail: string };
 
 /**
+ * PR-ledger retention log fields (migration 0039): the second best-effort
+ * janitor in the sweep. Only a run that actually deleted rows logs — a quiet
+ * sweep says nothing, and the count is what tells an operator the ledger is
+ * draining.
+ */
+export type SweepLedgerRetentionFields =
+  | { event: "pull_request_retention_swept"; deleted: number }
+  | { event: "pull_request_retention_swept_failed"; detail: string };
+
+/**
  * Invite-lapse log fields (I-000096): the bulk flip that moved off the
  * members-page read. Only the failure is logged — a quiet sweep says nothing.
  */
@@ -110,7 +121,12 @@ export type SweepInviteLapseFields = { event: "invite_lapse_swept_failed"; detai
  */
 export type SweepLog = {
   warn: (
-    fields: SweepAlertFields | SweepWarnFields | SweepRetentionFields | SweepInviteLapseFields,
+    fields:
+      | SweepAlertFields
+      | SweepWarnFields
+      | SweepRetentionFields
+      | SweepLedgerRetentionFields
+      | SweepInviteLapseFields,
     msg?: Parameters<ConsumerLog["warn"]>[1],
   ) => void;
 };
@@ -185,6 +201,30 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
             : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
       },
       "webhook_deliveries retention sweep failed — continuing",
+    );
+  }
+  // PR-ledger retention (migration 0039): terminal PR rows only — an OPEN PR
+  // stays a live review target however stale. Bounded per run like the
+  // delivery sweep above, and best-effort in the same way: a failure warns and
+  // never breaks the failure-sweep path, so a missing ledger table (an older
+  // DB mid-deploy) is not an ops alarm.
+  try {
+    const deleted = await createAppsStore(db).sweepTerminalPullRequests();
+    if (deleted > 0) {
+      log.warn({ event: "pull_request_retention_swept", deleted }, "pull_requests retention sweep");
+    }
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
+    log.warn(
+      {
+        event: "pull_request_retention_swept_failed",
+        detail:
+          detail.length <= SWEEP_LOG_DETAIL_MAX
+            ? detail
+            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
+      },
+      "pull_requests retention sweep failed — continuing",
     );
   }
   // Invite lapse (I-000096) moved here from the members-page read: a lapsed

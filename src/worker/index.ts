@@ -32,6 +32,7 @@ import {
   classifyWebhook,
   MENTION_MISS_REASON,
   payloadMentionsALogin,
+  pullRequestRecord,
   WEBHOOK_BODY_LIMIT,
   type WebhookOutcome,
 } from "./webhooks";
@@ -349,6 +350,35 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
 
   if (outcome.kind === "reject") {
     return c.text(outcome.reason, outcome.status);
+  }
+
+  // PR ledger (migration 0039): every VERIFIED, non-reject `pull_request`
+  // delivery lands in `pull_requests` — including an `ignore` (a
+  // non-whitelisted action, a mode that does not auto-trigger, a paused App),
+  // which is exactly the "the App received this PR but nothing ran" case the
+  // dashboard must show. A reject records nothing (the payload did not
+  // validate). Best-effort like recordDelivery above: a store failure logs a
+  // structured warn and never changes the response.
+  if (eventName === "pull_request") {
+    const record = pullRequestRecord(rawBody);
+    if (record === null) {
+      // Visible, not silent: this delivery ran (or was ignored) with no ledger
+      // row, so the dashboard's "what did this App receive" answer is
+      // incomplete for it. Same best-effort posture as every sibling path —
+      // log, never change the response.
+      webhookWarn(
+        "pull_request_record_skipped",
+        `${webhookRef} row_id=${row.id}`,
+        "pull_request not recorded — payload carried no owner/repo/number/state",
+      );
+    } else {
+      try {
+        await appsStore.upsertPullRequest({ appId: row.id, ...record });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        webhookWarn("pull_request_record_failed", detail, "pull_request record failed — webhook response unaffected");
+      }
+    }
   }
 
   // Lock L5: the signature VERIFIED (classifyWebhook returned a

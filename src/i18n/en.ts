@@ -121,11 +121,48 @@ export const en = {
       revokeFailed: "Could not revoke {login}'s invitation — try again.",
     },
   },
-  /** App detail page (App detail IA): the two-tab shell. */
+  /** App detail page (App detail IA): the tabbed shell. */
   appDetail: {
     backToApps: "Back to Apps",
     tabSettings: "Settings",
     tabInsights: "Insights",
+    tabPullRequests: "Pull requests",
+  },
+  /**
+   * Per-App Pull requests tab: the ledger of every PR the App received.
+   * The detail face is addressed by owner/repo/number (one App can see the
+   * same number on several repos) and rides the URL as `pr=owner/repo/number`.
+   */
+  pullRequests: {
+    backToList: "Back to list",
+    /** The list table's columns — the row's own facts only. */
+    columnPr: "Pull request",
+    columnState: "State",
+    columnVerdict: "Latest verdict",
+    columnLastSeen: "Last seen",
+    columnFailures: "Failures",
+    /** Composed empty state — no-action variant (PRs arrive via webhooks). */
+    emptyTitle: "No pull requests yet",
+    emptyDescription: "Every pull request your GitHub App receives shows up here.",
+    state: {
+      open: "open",
+      closed: "closed",
+      merged: "merged",
+    },
+    /** The detail header line: `{owner}/{repo} #{number}`. */
+    prNumber: "{owner}/{repo} #{number}",
+    /** The short-sha chip's tooltip. */
+    headSha: "Head SHA",
+    reviews: "Reviews",
+    reviewsCount: "Reviews: {count}",
+    noReviews: "No reviews for this pull request.",
+    reviewMeta: "{model} · {provider}",
+    failures: "Failures",
+    failuresCount: "Failures: {count}",
+    noFailures: "No failures for this pull request.",
+    findings: "Findings",
+    findingsCount: "Findings: {count}",
+    noFindings: "No findings for this pull request.",
   },
   /**
    * Per-App insights tab (the 洞察 face). The records copy returns with

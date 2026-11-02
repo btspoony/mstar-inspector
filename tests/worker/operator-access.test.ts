@@ -324,6 +324,10 @@ describe("operator with a valid grant", () => {
       { path: `/dashboard/acme/api/apps/${APP_ID}/settings` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/models` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/insights/summary` },
+      // The PR ledger pair (migration 0039): a support grant never widens to
+      // App data, so both the list and the detail face stay 403.
+      { path: `/dashboard/acme/api/apps/${APP_ID}/pull-requests` },
+      { path: `/dashboard/acme/api/apps/${APP_ID}/pull-requests/acme/widgets/131` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/keys/verify`, method: "POST", body: "provider=openai" },
     ];
     for (const item of cases) {
@@ -333,6 +337,12 @@ describe("operator with a valid grant", () => {
       );
       expect(res.status, item.path).toBe(403);
       expect(((await res.json()) as { error: string }).error).toBe("forbidden");
+      // The ceiling's 403 comes from the scope middleware, before any handler —
+      // the /api/* prefix sets this ahead of it, so the deny is not cacheable
+      // either (the ledger pair above rides the same assertion).
+      if (item.path.includes("/api/")) {
+        expect(res.headers.get("Cache-Control"), item.path).toBe("private, no-store");
+      }
     }
     const rows = auditRows(db);
     expect(rows).toHaveLength(cases.length);

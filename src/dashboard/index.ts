@@ -3,11 +3,11 @@
  * + GitHub App Manifest start/callback/commit (the
  * commit writes the encrypted github_apps D1 row, the Cloudflare secrets-bulk
  * path is retired) + per-App management UI (/dashboard/apps list,
- * POST …/disable|enable|delete — creator-or-admin) + per-App review
+ * POST …/disable|enable|delete — workspace owner/admin) + per-App review
  * pause/resume (POST …/pause|/resume — the same action
  * pattern) + per-App AI config settings (GET/POST
  * /dashboard/apps/:appId/settings — BYOK provider keys, masked, + model chain
- * — and POST …/settings/key/delete, creator-or-admin; plus the
+ * — and POST …/settings/key/delete, workspace owner/admin; plus the
  * settings Review switch and the read-only install-health panel, and
  * the Role models editor on the same op-discriminated POST) behind a
  * per-request membership guard + admin-only members management.
@@ -882,6 +882,15 @@ async function classifyWorkspacePrincipal(
  * its access. HTML shell loads are dispatch, not workspace routes: they are
  * classified by the same function but write no row (see `docs/deploy.md`).
  */
+// Every App-scoped JSON answer — the 200 payload, the 403 the ceiling below
+// returns, and the 404 the route handlers return — is per-workspace data and
+// must not be cached. Set once on the prefix, ahead of the scope middleware, so
+// no later return path (including the middleware's own 404/403) can miss it.
+dashboardApp.use("/:workspaceRef/api/*", async (c, next) => {
+  c.header("Cache-Control", "private, no-store");
+  return next();
+});
+
 dashboardApp.use("*", async (c, next) => {
   if (c.get("workspaceScope") !== undefined) return next();
   const tenant = c.get("tenant");
@@ -2467,7 +2476,8 @@ async function appStatusAction(
 // Apps-list actions POST here (spec § IA). Gate/order mirror appStatusAction
 // exactly: the per-request guard has verified membership, then unknown and
 // soft-deleted apps are equally invisible (→ 404, zero writes), then
-// creator-or-admin (→ 403 forbiddenPage, zero writes). Confirm-free and
+// the workspace owner/admin role (→ 403 forbiddenPage, zero writes).
+// Confirm-free and
 // reversible (pause ≠ disable — the webhook face stays healthy while
 // paused). The response is plain 200 "ok"; the SPA refetches
 // the JSON face rather than re-rendering HTML.
@@ -2527,7 +2537,8 @@ async function appReviewAction(
 // is orthogonal and works in every mode (spec §3). Gate/order mirror
 // appReviewAction exactly: the per-request guard has verified membership,
 // then unknown and soft-deleted apps are equally invisible (→ 404, zero
-// writes), then creator-or-admin (→ 403 forbiddenPage, zero writes). The
+// writes), then the workspace owner/admin role (→ 403 forbiddenPage, zero
+// writes). The
 // mode is validated BEFORE any write — an unknown/invalid value fails
 // closed with the keyed settings 400 and the stored row is left unchanged
 // (no silent coercion to the default, spec §2); the store setter throws as
@@ -4004,7 +4015,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     // against the same registry as the backstop (setSandboxImage), refuses
     // soft-deleted rows, and stamps updated_at (operator mutation). This
     // whole POST family already runs behind requireAppSettings — the
-    // canManageApp (creator-or-admin) gate.
+    // canManageApp (workspace owner/admin) gate.
     const imageId = typeof form.sandbox_image_id === "string" ? form.sandbox_image_id.trim() : "";
     const image = getSandboxImage(imageId);
     if (!image || !image.enabled) {
@@ -4080,7 +4091,8 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
 //   - membership: requireMember (session + live member row);
 //   - app lookup by GitHub App id, same rule as requireAppVisible: unknown and
 //     soft-deleted apps are equally invisible → 404;
-//   - creator-or-admin via canManageApp → 403.
+//   - the workspace owner/admin role via canManageApp → 403 (App authorship
+//     grants nothing; the manage rule is the workspace role).
 //   All deny bodies are `{ error }` JSON.
 // Params (same parse + 400 semantics the global face had):
 //   - window: pure integer days, default 30. Non-integer (incl. negative and
@@ -4149,22 +4161,8 @@ function parseInsightsParams(query: { window?: string; repo?: string; include?: 
 }
 
 const appInsightsRoute = async (c: DashboardContext) => {
-  const member = await requireMember(c);
-  if (!member.ok) return member.response;
-
-  // Same App-id resolution rule as requireAppVisible: unknown, soft-deleted and
-  // cross-workspace apps are equally invisible → 404. JSON body — this face
-  // never renders HTML (no forbiddenPage on either deny path).
-  const app = await resolveScopedApp(
-    createAppsStore(member.db),
-    c.req.param("appId") ?? "",
-    member.scope,
-  );
-  if (!app) return c.json({ error: "unknown app" }, 404);
-  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
-
-  const db = dashboardD1(c.env);
-  if (!db) return c.text("dashboard storage is not configured", 500);
+  const gate = await requireAppManagerJson(c);
+  if (!gate.ok) return gate.response;
 
   const params = parseInsightsParams({
     window: c.req.query("window"),
@@ -4173,13 +4171,13 @@ const appInsightsRoute = async (c: DashboardContext) => {
   });
   if (!params.ok) return c.json({ error: params.reason }, 400);
 
-  const insights = await createInsightsStore(db, {
+  const insights = await createInsightsStore(gate.db, {
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
     // The App row PK (never empty — the GitHub App id resolved a real row),
     // composed into every aggregation by the store's appId filter.
-    appId: app.id,
+    appId: gate.app.id,
   });
   return c.json({
     window_days: clampWindow(params.windowDays),
@@ -4205,6 +4203,112 @@ const appInsightsRoute = async (c: DashboardContext) => {
 // retired — /dashboard/insights is SPA-owned (spa-dispatch serves the shell;
 // the SPA reads the per-App JSON face above). The legacy GET handlers are
 // gone; the global URL answers 404.
+
+/**
+ * The App-scoped JSON read gate: membership, then the App-id resolution, then
+ * the manage rule. `canManageApp` is the WORKSPACE role (owner/admin) — the
+ * App's creator gets nothing extra, so "creator-or-admin" would be a lie here.
+ *
+ * Cross-workspace invisibility is the resolution's own verdict: unknown,
+ * soft-deleted and foreign Apps all read `null` and share one 404, so a
+ * sibling workspace's App leaves no existence oracle.
+ *
+ * The store is built ONCE and handed back: the ledger faces need exactly this
+ * store, and rebuilding it per handler was a second construction of the same
+ * narrow face.
+ */
+async function requireAppManagerJson(
+  c: DashboardContext,
+): Promise<
+  | { ok: true; app: GithubAppRow; db: DashboardDb; store: ReturnType<typeof createAppsStore> }
+  | { ok: false; response: Response }
+> {
+  const member = await requireMember(c);
+  if (!member.ok) return member;
+  const store = createAppsStore(member.db);
+  const app = await resolveScopedApp(store, c.req.param("appId") ?? "", member.scope);
+  if (!app) return { ok: false, response: c.json({ error: "unknown app" }, 404) };
+  if (!canManageApp(member.scope)) return { ok: false, response: c.json({ error: "forbidden" }, 403) };
+  return { ok: true, app, db: member.db, store };
+}
+
+const appPullRequestsRoute = async (c: DashboardContext) => {
+  // Set before the gate: a deny (403) and a 404 are answers about a specific
+  // workspace's data too, so no intermediary may cache them either.
+  c.header("Cache-Control", "private, no-store");
+  const gate = await requireAppManagerJson(c);
+  if (!gate.ok) return gate.response;
+  // The wire shape is total: every field the client reads is a string, so one
+  // nullable ledger column can never blank the whole list. `title` / `head_sha`
+  // are genuinely optional in the payload, and `state` is GitHub's own domain —
+  // an unexpected value reads as the only state a client knows how to render.
+  const rows = (await gate.store.listPullRequests(gate.app.id)).map((row) => ({
+    ...row,
+    title: row.title ?? "",
+    head_sha: row.head_sha ?? "",
+    // The three states a client renders; anything else reads as 'open'.
+    state: row.state === "merged" || row.state === "closed" ? row.state : "open",
+  }));
+  return c.json({ pull_requests: rows });
+};
+
+const appPullRequestRoute = async (c: DashboardContext) => {
+  c.header("Cache-Control", "private, no-store");
+  const gate = await requireAppManagerJson(c);
+  if (!gate.ok) return gate.response;
+  const raw = c.req.param("number") ?? "";
+  // Decimal digits only (the App-id segment's rule): `0x1f` / `1e3` are number
+  // spellings that `Number()` would alias onto a real PR number.
+  const number = /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    return c.json({ error: "unknown pull request" }, 404);
+  }
+  // The address is the ledger's own key — owner AND repo AND number. One App
+  // serves several repos, so a number alone is ambiguous; a miss is a 404,
+  // never a same-number row from another repo. (`?? ""` only satisfies the
+  // generic handler's `string | undefined` param type.)
+  const detail = await gate.store.getPullRequest(
+    gate.app.id,
+    c.req.param("owner") ?? "",
+    c.req.param("repo") ?? "",
+    number,
+  );
+  if (detail === null) return c.json({ error: "unknown pull request" }, 404);
+  // Same total-shape rule as the list: the store reports the tables' actual
+  // columns, and this boundary is where a nullable column becomes "". The
+  // v1 pipeline NEVER records a `provider` (the artifact store persists NULL
+  // and the consumer passes `null`), and a finding may be repo-wide
+  // (`file_path` null), so a client parser must not be the thing that decides
+  // whether a real review renders.
+  return c.json({
+    pull_request: {
+      ...detail.pull_request,
+      title: detail.pull_request.title ?? "",
+      head_sha: detail.pull_request.head_sha ?? "",
+      state:
+        detail.pull_request.state === "merged" || detail.pull_request.state === "closed"
+          ? detail.pull_request.state
+          : "open",
+    },
+    reviews: detail.reviews.map((review) => ({
+      verdict: review.verdict ?? "",
+      summary_md: review.summary_md ?? "",
+      model: review.model ?? "",
+      provider: review.provider ?? "",
+      reviewed_at: review.reviewed_at,
+      head_sha: review.head_sha ?? "",
+    })),
+    failures: detail.failures,
+    findings: detail.findings.map((finding) => ({
+      finding_id: finding.finding_id,
+      severity: finding.severity ?? "",
+      title: finding.title ?? "",
+      file_path: finding.file_path ?? "",
+      line: finding.line,
+      body: finding.body ?? "",
+    })),
+  });
+};
 
 // --- App + member route table ----------------------------------------------
 //
@@ -4246,6 +4350,13 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/insights/summary", handler: appInsightsRoute, access: "write" },
+  // Per-App pull-request ledger (migration 0039): the list face and the
+  // one-PR detail face. The detail address is the ledger's own key —
+  // owner/repo/number — because one App serves several repos and a number is
+  // only unique within a repo. App-scoped reads are `write` in this table
+  // (AC3) — only the workspace-scoped member list is `read`.
+  { method: "get", path: "/api/apps/:appId/pull-requests", handler: appPullRequestsRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId/pull-requests/:owner/:repo/:number", handler: appPullRequestRoute, access: "write" },
   // The member list is `read` (every member sees it, and the operator's AC2
   // field set is this same list); every App/settings read and invite face is
   // `write` (AC3).

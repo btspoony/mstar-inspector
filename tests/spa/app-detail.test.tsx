@@ -18,7 +18,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { createElement } from "react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Tabs, TabsList, TabsTrigger } from "@design-system";
 import { t } from "../../src/i18n";
@@ -31,9 +32,10 @@ import {
   type SettingsManagePayload,
   type SettingsPayload,
 } from "../../src/spa/pages/data";
-import { AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
+import { AppDetailPage, AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
 import { apiBase } from "../../src/spa/workspace-base";
 import { AppInsightsTab, CATEGORY_SLOTS, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/spa/pages/AppInsightsTab";
+import { installDom } from "./dom";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
@@ -61,6 +63,9 @@ const identityPayload = {
   app: IDENTITY_APP,
 };
 
+/** Minimal boot for mounting the stateful shell (the DOM demotion test). */
+const BOOT = { locale: "en" as const, login: "mallory", name: null };
+
 const managePayload = {
   can_manage: true as const,
   workspace_id: "ws_0123456789abcdefghijkl",
@@ -84,7 +89,7 @@ const managePayload = {
   deliveries: [],
 };
 
-const search = { tab: "settings" as const, window: "30" as const, repo: "" };
+const search = { tab: "settings" as const, window: "30" as const, repo: "", pr: "" };
 const noReload = async () => true;
 const noSearch = () => {};
 
@@ -105,11 +110,28 @@ function renderDetail(payload: SettingsPayload, canManage: boolean) {
 
 describe("app detail URL state (shared pure helpers)", () => {
   test("default tab is settings on the bare path; ?tab=insights only for a manager", () => {
-    expect(parseAppDetailSearch("", true)).toEqual({ tab: "settings", window: "30", repo: "" });
+    expect(parseAppDetailSearch("", true)).toEqual({ tab: "settings", window: "30", repo: "", pr: "" });
     expect(parseAppDetailSearch("?tab=insights", true).tab).toBe("insights");
-    // A non-manager never resolves to the insights tab — the URL cannot
+    expect(parseAppDetailSearch("?tab=pull-requests", true).tab).toBe("pull-requests");
+    // A non-manager never resolves to a manager tab — the URL cannot
     // grant the tab the payload denies.
     expect(parseAppDetailSearch("?tab=insights", false).tab).toBe("settings");
+    expect(parseAppDetailSearch("?tab=pull-requests", false).tab).toBe("settings");
+    // Unknown tab values fall back to settings.
+    expect(parseAppDetailSearch("?tab=bogus", true).tab).toBe("settings");
+  });
+
+  test("the open PR detail rides the pr param (owner/repo/number), malformed values fall back to the list", () => {
+    expect(parseAppDetailSearch("?tab=pull-requests&pr=acme%2Fweb%2F42", true)).toEqual({
+      tab: "pull-requests",
+      window: "30",
+      repo: "",
+      pr: "acme/web/42",
+    });
+    expect(parseAppDetailSearch("?pr=acme/web/42", true).pr).toBe("acme/web/42");
+    expect(parseAppDetailSearch("?pr=42", true).pr).toBe("");
+    expect(parseAppDetailSearch("?pr=acme/web/abc", true).pr).toBe("");
+    expect(parseAppDetailSearch("?pr=a/b/1/2", true).pr).toBe("");
   });
 
   test("insights filter params ride the same query (window segments + repo)", () => {
@@ -117,17 +139,21 @@ describe("app detail URL state (shared pure helpers)", () => {
       tab: "insights",
       window: "7",
       repo: "acme/web",
+      pr: "",
     });
     // Off-set windows resolve to the default segment (pinned helper).
     expect(parseAppDetailSearch("?window=60", true).window).toBe("30");
   });
 
   test("appDetailSearchQuery is the inverse — defaults omitted (loop-free replaceState writes)", () => {
-    expect(appDetailSearchQuery({ tab: "settings", window: "30", repo: "" })).toBe("");
-    expect(appDetailSearchQuery({ tab: "insights", window: "30", repo: "" })).toBe("?tab=insights");
-    expect(appDetailSearchQuery({ tab: "insights", window: "7", repo: "acme/web" })).toBe(
+    expect(appDetailSearchQuery({ tab: "settings", window: "30", repo: "", pr: "" })).toBe("");
+    expect(appDetailSearchQuery({ tab: "insights", window: "30", repo: "", pr: "" })).toBe("?tab=insights");
+    expect(appDetailSearchQuery({ tab: "insights", window: "7", repo: "acme/web", pr: "" })).toBe(
       "?tab=insights&window=7&repo=acme%2Fweb",
     );
+    expect(
+      appDetailSearchQuery({ tab: "pull-requests", window: "30", repo: "", pr: "acme/web/42" }),
+    ).toBe("?tab=pull-requests&pr=acme%2Fweb%2F42");
   });
 
   test("the per-App summary URL is base-prefixed and encodes appId + filters; include=repos always rides", () => {
@@ -252,7 +278,7 @@ describe("tab shell source contracts", () => {
       ),
       "line",
     );
-    expect(page).toHaveLength(2);
+    expect(page).toHaveLength(3);
     expect(primitive).toHaveLength(1);
     for (const face of page) expect(face).toBe(primitive[0] ?? "");
     // …and that shared face is the documented line tab: the heading-16 type
@@ -264,28 +290,49 @@ describe("tab shell source contracts", () => {
     expect(tabsWrapper).toContain("data-[state=inactive]:hidden");
   });
 
-  test("mount-once tab switching: BOTH panels forceMount — switching tabs preserves settings form state (qc1)", () => {
+  test("mount-once tab switching: ALL panels forceMount — switching tabs preserves settings form state (qc1)", () => {
     // Radix unmounts inactive panels by default, which would destroy the
     // settings forms (typed inputs, Add Provider panel, op notices) and
-    // refetch insights from scratch on every 应用设置 ↔ 洞察 switch. Both
-    // panels forceMount; the wrapper's data-[state=inactive]:hidden keeps
-    // the one-visible-panel invariant (pin above).
+    // refetch the manager tabs from scratch on every switch. All panels
+    // forceMount; the wrapper's data-[state=inactive]:hidden keeps the
+    // one-visible-panel invariant (pin above).
     expect(detailPage.match(/<TabsContent value="settings" forceMount>/g)?.length).toBe(1);
     expect(detailPage.match(/<TabsContent value="insights" forceMount>/g)?.length).toBe(1);
+    expect(detailPage.match(/<TabsContent value="pull-requests" forceMount>/g)?.length).toBe(1);
     // No unmount-by-default panel remains on the shell.
     expect(detailPage).not.toMatch(/<TabsContent value="[^"]+">\s*\n/);
   });
 
-  test("mid-session demotion rewrite: a stale ?tab=insights is replaced when the payload says non-manager (qc2)", () => {
-    // The payload-landing effect rewrites the URL (replaceState via
-    // commitSearch — loop-free) to the settings tab, so the stale param
-    // cannot auto-reactivate the insights face on a later re-promotion.
-    const landing = detailPage.slice(
-      detailPage.indexOf("// When the payload lands"),
-      detailPage.indexOf("const onPop"),
-    );
-    expect(landing).toContain('parseAppDetailSearch(window.location.search, true).tab === "insights"');
-    expect(landing).toContain('commitSearch({ tab: "settings", window: "30", repo: "" });');
+  test("mid-session demotion rewrite: a stale manager-tab URL is rewritten once the non-manager payload lands (qc2)", async () => {
+    // Product behaviour: ?tab=pull-requests in the address bar + a payload
+    // that says non-manager → the landing effect rewrites the URL to the
+    // bare path (replaceState), so the stale param cannot sit in the
+    // address bar and no manager face renders. A rename of the page's
+    // internals must not false-fail this — it drives the real page.
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1?tab=pull-requests");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(identityPayload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () =>
+        root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })),
+      );
+      await act(async () => {});
+      expect(win.location.search).not.toContain("tab=pull-requests");
+      const text = container.textContent ?? "";
+      expect(text).not.toContain(t("en", "appDetail.tabPullRequests"));
+      expect(text).toContain(t("en", "appDetail.tabSettings"));
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
   });
 
   test("insights refetch retains data: content renders on data !== null; ErrorState is initial-load-only (qc3)", () => {
@@ -473,7 +520,7 @@ describe("insights tab face (static SSR over the kept charts)", () => {
       createElement(AppInsightsTab, {
         locale: "en",
         appId: "1",
-        search: { tab: "insights", window: "30", repo: "" },
+        search: { tab: "insights", window: "30", repo: "", pr: "" },
         onSearch: () => {},
       }),
     );
