@@ -282,7 +282,9 @@ function stripMachineFactLines(md: string, fact: { reason: string; unscanned: re
   return md
     .split("\n")
     .filter((line) => !machineLines.includes(line))
-    .join("\n");
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /**
@@ -312,6 +314,10 @@ function stripMachineFactLines(md: string, fact: { reason: string; unscanned: re
  * engine renders its own markdown.
  */
 function stripEchoedEnvelopeFacts(md: string): string {
+  // The gate is the summary's FIRST line carrying the engine's own shape —
+  // `## Verdict: <verdict> · <n>% (<band>. A narrative that merely contains a
+  // `- nit:` bullet is content and passes through whole.
+  if (!/^## Verdict: .+ · \d+% \(/.test(md)) return md;
   const kept = md
     .split("\n")
     .filter(
@@ -350,7 +356,18 @@ export function buildReviewBody(
   previousFingerprints?: ReadonlySet<string>,
   closure?: string,
 ): string {
-  const verdict = `**Verdict: ${output.verdict}**`;
+  // The grade rides the header: the engine's summary carries `scorePct` and the
+  // band, and once its echoed `## Verdict:` line is stripped nothing else in the
+  // body names them. Absent tally (a degraded publication) keeps the bare verb.
+  // `band` is optional on the envelope tally (legacy-valid without it), so the
+  // grade degrades to the bare percentage rather than printing `undefined`.
+  const grade =
+    output.tally === undefined
+      ? ""
+      : output.tally.band === undefined
+        ? ` · ${output.tally.scorePct}%`
+        : ` · ${output.tally.scorePct}% (${output.tally.band})`;
+  const verdict = `**Verdict: ${output.verdict}**${grade}`;
   const tally = renderTally(output.tally, output.findings, previousFingerprints);
   // Incomplete verdicts state the declared cause + unscanned scope as part of
   // the verdict block. The renderer owns the pair: on the same condition that

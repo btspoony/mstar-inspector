@@ -332,8 +332,10 @@ describe("buildReviewBody", () => {
         incomplete,
       },
     });
+    // The header carries the grade: once the summary's echoed `## Verdict:` line
+    // is stripped, nothing else in the body names the score.
     expect(body).toContain(
-      "**Verdict: incomplete**\n\n**Tally:** 🔴 must-fix 0 · 🟠 should-fix 0 · 🔵 nit 0 · ❓ unverified 0\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts\n\nTwo issues found in the diff.",
+      "**Verdict: incomplete** · 0%\n\n**Tally:** 🔴 must-fix 0 · 🟠 should-fix 0 · 🔵 nit 0 · ❓ unverified 0\n\ncause: runner timed out\nunscanned: src/pipeline/comment.ts\n\nTwo issues found in the diff.",
     );
   });
 
@@ -750,7 +752,8 @@ describe("buildReviewBody", () => {
       ...output,
       verdict: "ship it",
       findings: [],
-      summary_md: "- unverified: could not reach the registry\n- nit: duplicate",
+      // The gate is the engine's own shape; a bare bullet list is not an echo.
+      summary_md: "## Verdict: ship it · 90% (pass)\n\n- unverified: could not reach the registry\n- nit: duplicate",
     });
     expect(body).toContain("- unverified: could not reach the registry");
     expect(body).not.toContain("- nit: duplicate");
