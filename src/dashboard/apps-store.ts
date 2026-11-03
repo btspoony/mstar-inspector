@@ -974,8 +974,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * webhook face wraps this in try/catch itself — an insert failure must
      * never change the webhook response (best-effort旁路). The event_name
      * header and the repository_full_name body field are capped at their
-     * MAX_LENGTH constants at persist (seat2 hygiene pin) — both are
-     * attacker-influenced on the unauthenticated reject path.
+     * MAX_LENGTH constants at persist (seat2 hygiene pin) — but only
+     * `event_name` is attacker-influenced: it is the x-github-event HEADER,
+     * which the unauthenticated reject path does reach. `repository_full_name`
+     * comes from the already-parsed, HMAC-verified body, so its bound is
+     * defence-in-depth against GitHub's name ceilings, not a payload bound.
      */
     async recordDelivery(input: RecordDeliveryInput): Promise<void> {
       if (!DELIVERY_OUTCOMES.includes(input.outcome)) {

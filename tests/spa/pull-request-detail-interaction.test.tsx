@@ -451,6 +451,25 @@ describe("pull request detail (mounted)", () => {
       expect(last).toContain("severity=must-fix");
       expect(container.textContent ?? "").not.toContain("Nit 1");
       expect(container.textContent ?? "").toContain("Must 0");
+
+      // Reset to All: the sentinel maps back to NO `severity` param (the route
+      // 400s any spelling outside its vocabulary, `all` included), and the
+      // filter's reset must restore the unfiltered page from its first row.
+      await press(win, container.querySelector('[role="combobox"]'));
+      const allOption = [...win.document.querySelectorAll('[role="option"]')].find(
+        (row) => row.textContent === t("en", "pullRequests.filterAll"),
+      );
+      expect(allOption).toBeDefined();
+      await press(win, allOption as unknown as Element);
+      const reset = fetches.at(-1) ?? "";
+      expect(reset).toContain("offset=0");
+      expect(reset).not.toContain("severity=");
+      expect(container.textContent ?? "").toContain("Must 0");
+      // The pager counts the UNFILTERED total again (13 rows, not the 12 the
+      // must-fix bucket reported), so the filter really left the read.
+      expect(container.textContent ?? "").toContain(
+        t("en", "pullRequests.pageRange", { from: 1, to: 10, total: 13 }),
+      );
     } finally {
       await unmount();
     }

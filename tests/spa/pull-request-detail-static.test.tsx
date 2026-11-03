@@ -157,9 +157,13 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(parseRecordPage("reviews", null)).toBeNull();
   });
 
-  test("the envelope's must_fix tally is required, and the opening family is records-first", () => {
-    // Counts are all-or-nothing: a drifted tally fails the envelope like any
-    // other count (the dot would otherwise read a silent zero).
+  test("an absent must_fix tally degrades to zero; a malformed one fails; the opening family is records-first", () => {
+    // The tally is a head fact newer than the envelope: a payload that predates
+    // it keeps rendering, with no danger dot — the same skew tolerance the
+    // sibling `RecordPage.limit` gets.
+    const { must_fix: _omitted, ...withoutTally } = DETAIL.counts;
+    expect(parsePullRequestDetail({ ...DETAIL, counts: withoutTally })?.counts.must_fix).toBe(0);
+    // Present-but-malformed still fails the envelope like any other count.
     expect(parsePullRequestDetail({ ...DETAIL, counts: { ...DETAIL.counts, must_fix: null } })).toBeNull();
     expect(parsePullRequestDetail({ ...DETAIL, counts: { ...DETAIL.counts, must_fix: Number.NaN } })).toBeNull();
     // Records first, history last: findings, else failures, else reviews — an

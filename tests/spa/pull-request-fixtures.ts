@@ -27,6 +27,7 @@ import type {
   RecordPageItems,
   RecordSection,
 } from "../../src/spa/pages/data";
+import { isFindingSeverity } from "../../src/contracts/finding-severity";
 import { installDom } from "./dom";
 
 /** The head row both faces carry: the list adds its aggregates, the detail its totals. */
@@ -271,9 +272,6 @@ export async function mountView(
   };
 }
 
-/** The route's `severity` vocabulary (`FINDING_SEVERITIES`); anything else is a 400. */
-const FINDING_SEVERITIES = ["must-fix", "should-fix", "nit"] as const;
-
 /**
  * A fetch stub for the detail host: the head read answers that App's `detail`,
  * and each record read pages that App's family — `offset`/`limit` slice its
@@ -282,11 +280,13 @@ const FINDING_SEVERITIES = ["must-fix", "should-fix", "nit"] as const;
  * different Apps. Every request is recorded for the "one read per switch"
  * assertions.
  *
- * The `severity` semantics are the route's own (`FINDING_SEVERITIES` in
- * `src/dashboard/index.ts`): empty or absent is no filter, a spelling outside
- * the merge-class vocabulary is the documented 400 — a stub that answered an
- * unknown spelling with an empty 200 would let a mounted test believe in a
- * contract the API does not have.
+ * The `severity` semantics are the route's own (`isFindingSeverity` in
+ * `src/contracts/finding-severity.ts`, which `src/dashboard/index.ts` guards
+ * with): empty or absent is no filter, a spelling outside the merge-class
+ * vocabulary is the documented 400 — a stub that answered an unknown spelling
+ * with an empty 200 would let a mounted test believe in a contract the API does
+ * not have, and a hand copy of the vocabulary would answer a set the route no
+ * longer enforces.
  */
 export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
   const fetches: string[] = [];
@@ -298,7 +298,7 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
     const severity = url.searchParams.get("severity") ?? "";
     for (const section of ["findings", "reviews", "failures"] as const) {
       if (!url.pathname.endsWith(`/${section}`)) continue;
-      if (section === "findings" && severity !== "" && !(FINDING_SEVERITIES as readonly string[]).includes(severity)) {
+      if (section === "findings" && severity !== "" && !isFindingSeverity(severity)) {
         return jsonResponse({ error: "invalid severity" }, 400);
       }
       const rows =

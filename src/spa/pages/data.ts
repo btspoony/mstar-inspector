@@ -913,8 +913,11 @@ export function parsePullRequestList(data: unknown): PullRequestRow[] | null {
 
 /**
  * The detail payload: the head row plus its record totals. The envelope is
- * strict — a missing row or a missing/non-finite count fails the whole parse,
- * because a silent zero would disable a tab's count.
+ * strict — a missing row or a missing/non-finite tab count fails the whole
+ * parse, because a silent zero would disable a tab's count. `must_fix` is the
+ * exception: it is a head fact newer than the envelope, so a payload that
+ * predates it is tolerated at zero (no danger dot) rather than turning the
+ * whole face into an error, exactly as an absent `RecordPage.limit` is.
  */
 export function parsePullRequestDetail(data: unknown): PullRequestDetail | null {
   if (!isRecord(data)) return null;
@@ -926,7 +929,10 @@ export function parsePullRequestDetail(data: unknown): PullRequestDetail | null 
   return { pull_request, counts, latest_review: parsePullRequestReview(data.latest_review) };
 }
 
-/** A count is required and finite; anything else fails the payload. */
+/**
+ * A tab count is required and finite; anything else fails the payload —
+ * a silent zero there would disable a tab that has rows.
+ */
 function finiteCount(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -936,8 +942,11 @@ function parsePullRequestCounts(value: unknown): PullRequestCounts | null {
   const findings = finiteCount(value.findings);
   const reviews = finiteCount(value.reviews);
   const failures = finiteCount(value.failures);
-  const must_fix = finiteCount(value.must_fix);
-  if (findings === null || reviews === null || failures === null || must_fix === null) return null;
+  if (findings === null || reviews === null || failures === null) return null;
+  // Absent → 0 (a pre-`must_fix` payload: no dot, no note); present-but-malformed
+  // → fail, like every other count.
+  const must_fix = value.must_fix === undefined ? 0 : finiteCount(value.must_fix);
+  if (must_fix === null) return null;
   return { findings, reviews, failures, must_fix };
 }
 
