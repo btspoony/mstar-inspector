@@ -1514,14 +1514,16 @@ async function readRecheckDoc(
     boundedRead(sandbox, readRecheckStatusCommand()),
   ]);
   let doc: RecheckDoc | null = null;
-  // An empty payload is the seat writing nothing: absent, not malformed.
+  // A zero-byte payload is the seat writing nothing: absent, not malformed.
+  // Parsing it would throw and report the round as a JSON fault instead.
+  const docText = docRead.text !== null && docRead.text.trim() !== "" ? docRead.text : null;
   let docFailure: string | null =
-    docRead.failure ?? (docRead.text !== null && docRead.text.trim() === "" ? "absent" : null);
+    docRead.failure ?? (docRead.text !== null && docText === null ? "absent" : null);
   const droppedRowIds = new Set<string>();
   let anonymousRejectedRows = 0;
-  if (docRead.text !== null) {
+  if (docText !== null) {
     try {
-      const gate = validateRecheckDoc(JSON.parse(docRead.text), recheckInput);
+      const gate = validateRecheckDoc(JSON.parse(docText), recheckInput);
       if (gate.ok) {
         doc = gate.doc;
         docFailure = null;
@@ -2990,27 +2992,34 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       const candidates = targets.filter(
         (target) => !catalogExcluded.has(target.rowId) && !catalogBudgetExcluded.has(target.rowId),
       );
-      // Each row is measured against the budget left by the evidence it
-      // references: dropping a row shrinks that evidence, so re-measure until
-      // the sent set is stable. The set only ever shrinks, so this terminates.
-      let included = candidates;
+      // Each row is measured against the evidence of the rows ALREADY
+      // accepted, never against slices a pending row might still bring: a row
+      // that does not fit is dropped and contributes nothing, so a later row
+      // is measured against the set that will really ride — it cannot lose its
+      // place to a row that was itself excluded, and byte accounting is
+      // monotone (adding a row only grows the serialized input), so a row
+      // dropped here cannot fit the final input either.
+      const included: RecheckTarget[] = [];
+      const referenced = new Set<string>();
       let evidence: EvidenceSlice[] = [];
-      for (;;) {
-        const referenced = new Set(
-          included.flatMap((target) => catalog.sliceIdsByRowId.get(target.rowId) ?? []),
-        );
-        evidence = catalog.slices.filter((slice) => referenced.has(slice.id));
+      for (const target of candidates) {
+        const withRow = new Set([...referenced, ...(catalog.sliceIdsByRowId.get(target.rowId) ?? [])]);
+        const nextEvidence = catalog.slices.filter((slice) => withRow.has(slice.id));
         // §7.3 cap measured on the SERIALIZED input — schema, headSha,
         // evidence, discussion, array brackets and separators included — so
         // the accepted document is exactly what the cap counts.
-        const next: RecheckTarget[] = [];
-        for (const target of included) {
-          const candidate = { schema: RECHECK_INPUT_SCHEMA, headSha, targets: [...next, target], evidence, discussion };
-          // §7.3: an oversized whole target is accounted, never truncated.
-          if (jsonByteLength(candidate) <= RECHECK_INPUT_MAX_BYTES) next.push(target);
-        }
-        if (next.length === included.length) break;
-        included = next;
+        const candidate = {
+          schema: RECHECK_INPUT_SCHEMA,
+          headSha,
+          targets: [...included, target],
+          evidence: nextEvidence,
+          discussion,
+        };
+        // §7.3: an oversized whole target is accounted, never truncated.
+        if (jsonByteLength(candidate) > RECHECK_INPUT_MAX_BYTES) continue;
+        included.push(target);
+        evidence = nextEvidence;
+        for (const id of withRow) referenced.add(id);
       }
       const sentIds = new Set(included.map((target) => target.rowId));
       for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);

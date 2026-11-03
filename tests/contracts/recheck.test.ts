@@ -15,8 +15,8 @@
  *     after `normalizeQuoteText` 1–4096 chars, nonblank explanation ≤1200
  *   - removed/replaced proof must intersect the original concern's old
  *     range and demonstrate the structural change (deleted-file absence,
- *     or old lines no longer on the hunk's new side; a current hunk must
- *     exist for replaced-code)
+ *     or old lines no longer standing in the cited range's own new-side
+ *     counterpart; a current hunk must exist for replaced-code)
  *   - dismissed requires non-fix-dismissal and never resolves; unverifiable
  *     may have no evidence
  *   - strict shapes (exact key sets — no remote IDs in output), closed
@@ -610,6 +610,29 @@ describe("validateRecheckDoc — addressed eligibility", () => {
         evidence: evidence({ kind: "replaced-code", sliceId: "slice-rep-context", startLine: 5, endLine: 6, quote: "count = a + b;\nrender();" }),
       })] },
       input({ evidence: [replaced], targets: [{ ...TARGET, original: OLD_CONCERN_IN_OLD_TS }] }),
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.rejected).toEqual([]);
+  });
+
+  test("a replaced range whose cited text recurs elsewhere in the hunk still proves the replacement", () => {
+    // The cited line was replaced in place and the same text is added again at
+    // the end of the hunk. Reading the WHOLE new side finds that recurrence and
+    // false-rejects a genuine replacement; only the cited range's own
+    // counterpart (new lines 5-6) says anything about this range.
+    const recurring = {
+      ...REPLACED_HUNK,
+      id: "slice-rep-recur",
+      oldLines: ["count = a + b;", "render();"],
+      newLines: ["total = a + b;", "render();", "count = a + b;"],
+      addedNewLines: [5, 7],
+    };
+    const outcome = validateRecheckDoc(
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({
+        evidence: evidence({ kind: "replaced-code", sliceId: "slice-rep-recur", startLine: 5, endLine: 6, quote: "count = a + b;\nrender();" }),
+      })] },
+      input({ evidence: [recurring], targets: [{ ...TARGET, original: OLD_CONCERN_IN_OLD_TS }] }),
     );
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;

@@ -90,9 +90,17 @@ category: Fixed
   `replaced-code` "old lines are gone" guard no longer searches the joined
   new-side block for the joined quote: an insertion inside the cited block
   split it and forged a removal. Every non-blank normalized cited line must now
-  be absent from the new-side line set, so the insertion proves nothing — while
-  a genuine replacement that keeps an identical context line still passes,
-  because only the lines the change actually removed are gone.
+  be absent from the cited range's OWN new-side counterpart — the lines that
+  stand where the cited old lines stood, insertions inside the block included —
+  so the insertion still proves nothing, while a genuine replacement passes:
+  a surviving identical context line inside the range, and identical text that
+  only recurs elsewhere in the hunk, no longer make it look present.
+- **A size-budget row is judged against the input that is actually sent.** The
+  §7.3 byte budget measured each row against the evidence of every candidate,
+  including rows that pass was about to drop, so a row excluded early could
+  never return even after the evidence set shrank. Rows are now measured
+  against the rows already accepted: a dropped neighbour contributes no slices,
+  and a row that cannot fit the final input is the only one excluded.
 - **The status `reason` is a closed vocabulary.** `budget`, `aborted`,
   `all-rows-rejected`, `empty-result`, `seat-failed` and `invalid-document` are
   the only accepted values (one shared constant both halves use). The worker's
@@ -100,7 +108,9 @@ category: Fixed
   string is dropped on read instead of silently picking a branch.
 - **A lost recheck document names its real cause.** A round whose seat reported
   `ok` but whose document failed the read (absent, overflow, validation) used to
-  persist `error: "ok: null: null"`. The read cause now leads that text.
+  persist `error: "ok: null: null"`. The read cause now leads that text, and a
+  zero-byte document reads `absent`: the seat wrote nothing, so the round is
+  not blamed for a malformed payload it never produced.
 - **A stale drop note no longer erases a real answer.** When the seat's status
   names a row the surviving document also answered, the answer wins instead of
   being overwritten with `unverifiable/invalid-output`.
@@ -195,14 +205,21 @@ category: Fixed
   轮转时钟。现在只有真正上过线的行才是 `invalid-output` 并计入已尝试；目录排除的行
   保持 `no-evidence`，目录预算排除的行保持 `budget`，两者的时钟都不动。
 - **「旧行已消失」按行判定。** `removed-code` / `replaced-code` 的守卫不再在拼接后的新侧
-  块里搜索拼接后的引用：在被引用块中间插入一行会打断整块，从而伪造出一次删除。现在要求
-  每一条非空白的规范化被引用行都不出现在新侧行集合中，插入因此不再能证明任何删除；而
-  真实替换中仍保留的相同上下文行不会让该行失败，因为只有真正被删掉的行才会消失。
+  块里搜索拼接后的引用：在被引用块中间插入一行会打断整块，从而伪造出一次删除。现在只按
+  被引用范围**自己**在新侧对应的那段行判定（包含块内插入的行），要求每一条非空白的
+  规范化被引用行都不在其中：插入因此仍然不能证明任何删除，而真实替换可以通过——范围内
+  残留的相同上下文行、以及仅仅在 hunk 别处重复出现的同一段文字，都不会再让它看起来
+  「还在」。
+- **尺寸预算按真正上线的输入判定。** §7.3 字节预算此前用所有候选行的证据来衡量每一行，
+  其中包含本轮即将被丢掉的行，因此早先被排除的行即使证据集随后缩小也再也回不来。现在
+  每一行只用已接受的行所带的证据来衡量：被丢弃的邻居不贡献切片，唯一被排除的是确实放不进
+  最终输入的行。
 - **状态 `reason` 是封闭词表。** 只接受 `budget`、`aborted`、`all-rows-rejected`、
   `empty-result`、`seat-failed`、`invalid-document`（两侧共用一个常量）。worker 的逐行
   账目正是按这些字面值分支，因此词表外的值在读取时被丢弃，而不是静默走进某个分支。
 - **丢失的重审文档会说出真实原因。** 席位报告 `ok`、但文档在读取侧失败（缺失 / 超出上限 /
-  校验失败）时，此前会写入 `error: "ok: null: null"`；现在读取原因排在最前。
+  校验失败）时，此前会写入 `error: "ok: null: null"`；现在读取原因排在最前，且零字节的
+  文档读作 `absent`：席位什么都没写，因此不会把它从未产出的负载格式错误算到该轮头上。
 - **过期的丢弃记录不再抹掉真实答案。** 当状态点名了某行、而存活的文档也给出了该行的答案时，
   以答案为准，而不是覆盖成 `unverifiable/invalid-output`。
 - **发布覆盖行只统计席位真正给出的回答。** 被校验丢弃的行是「已尝试」的，轮转时钟

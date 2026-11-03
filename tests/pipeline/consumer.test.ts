@@ -48,14 +48,11 @@ import { createArtifactStore } from "../../src/store/artifact-store";
 import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
-import { createMigratedTestD1, createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
+import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
+import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
-import {
-  createFakeCommenter,
-  initialFakeCommenterState,
-  type CommenterCall,
-} from "../helpers/review-commenter";
+import type { CommenterCall } from "../helpers/review-commenter";
 // the Check lifecycle is driven through PRODUCTION code — the real
 // registry double plus a scripted GitHub Checks surface (no live request).
 import { PreparedSendRejected } from "../../src/pipeline/comment";
@@ -103,10 +100,6 @@ import {
   seedAssociation,
   ADDRESSED_QUOTE,
   recheckDocWith,
-  createFakeSandbox,
-  createTestLog,
-  registerGitOpsCommands,
-  resetFakeSandboxState,
 } from "../helpers/consumer-fixtures";
 
 /**
@@ -118,35 +111,38 @@ import {
  */
 const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 
-// --- sandbox fake (injected via createReviewConsumer overrides) -------------
-// The double and its per-test knobs live in tests/helpers/consumer-fixtures:
-// it answers ONLY the commands consumer.ts issues (the diff stdout IS the
-// worker-captured §7.3 trusted evidence; the recheck read mirrors the REAL
-// `<content>\n<wc -c flag>\n` bytes) and throws on anything else.
-const fakeSandbox = createFakeSandbox();
-const sandbox = fakeSandbox.state;
-
-// Load-shim only: consumer.ts statically imports ./sandbox → the workerd
-// builtin `cloudflare:workers` (unresolvable in Bun's test runner). The
-// consumer never calls the sandbox — every test injects the fake via
-// createReviewConsumer overrides.
-import "../helpers/cloudflare-workers-mock";
-
-// --- commenter fake (injected via createReviewConsumer overrides) -----------
-// the shared double (tests/helpers/review-commenter.ts) records
-// every op into commenterCalls and reads behavior from the mutable
-// commenterState (tests mutate it per case, like the `let` vars they
-// replace).
-const commenterCalls: CommenterCall[] = [];
-const commenterState = initialFakeCommenterState();
-
-const fakeCommenter: ReviewCommenter = createFakeCommenter(commenterState, commenterCalls);
-
-// Injected into every consumer under test (DI replaces the old mock.module).
-const testOverrides = {
-  createAppCommenter: () => fakeCommenter,
-  getSandbox: async () => fakeSandbox,
-};
+// --- shared runtime doubles -------------------------------------------------
+// The sandbox/commenter/KV doubles, the payload + batch builders and `reset`
+// live in ONE place (tests/helpers/consumer-harness) — the same module the
+// recheck suites import — so a fixture change cannot leave this suite on stale
+// defaults. Only the Check-lifecycle surface below is local to this file.
+import {
+  CHECK_HOOK_TIMEOUT_MS,
+  DIFF_PREFETCH_MAX_BYTES,
+  INLINE_RESOLVE_MAX_ENTRIES,
+  commenterCalls,
+  commenterState,
+  createReviewConsumer,
+  failureRows,
+  fakeCommenter,
+  fakeSandbox,
+  guardRetryDelaysSeconds,
+  kvPuts,
+  kvState,
+  logLines,
+  makeBatch,
+  makeEnv,
+  makePayload,
+  messageAckCalls,
+  messageRetryCalls,
+  queueState,
+  reset as resetHarness,
+  reviewGuardTtlSeconds,
+  runnerTimeoutMs,
+  sandbox,
+  testLog,
+  testOverrides,
+} from "../helpers/consumer-harness";
 
 /** Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
@@ -173,99 +169,19 @@ function holdFirstRunner(): { reached: Promise<void>; release: () => void } {
   return { reached: reached.promise, release: released.resolve };
 }
 
-// --- consumer under test (dynamic import: mocks must be registered first) ---
-const {
-  createReviewConsumer,
-  runnerTimeoutMs,
-  reviewGuardTtlSeconds,
-  guardRetryDelaysSeconds,
-  DIFF_PREFETCH_MAX_BYTES,
-  INLINE_RESOLVE_MAX_ENTRIES,
-  CHECK_HOOK_TIMEOUT_MS,
-} = await import("../../src/pipeline/consumer");
-import type { PipelineEnv } from "../../src/pipeline/consumer";
-
-// --- test log sink (injected via the consumer's optional log param) --------
-const { lines: logLines, log: testLog } = createTestLog();
-// --- helpers ----------------------------------------------------------------
-const kvPuts: Array<{ key: string; value: string; options?: unknown }> = [];
-const messageRetryCalls: Array<{ attempts: number; delaySeconds?: number }> = [];
-const messageAckCalls: Array<{ attempts: number }> = [];
-let messageAttempts = 1;
-let kvPutError: Error | undefined;
-let kvGetValue: string | null = null;
-const kv = {
-  get: mock(async (_key: string) => kvGetValue),
-  put: mock(async (key: string, value: string, options?: unknown) => {
-    kvPuts.push({ key, value, options });
-    if (kvPutError) throw kvPutError;
-  }),
-  delete: mock(async (_key: string) => {}),
-};
-
-async function makeEnv(overrides: Partial<PipelineEnv> = {}): Promise<PipelineEnv> {
-  return {
-    DB: await createSeededTestD1() as never,
-    IDEMPOTENCY_KV: kv as never,
-    SANDBOX: {} as never,
-    DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
-    ...overrides,
-  };
+/** Count review rows in the real D1 double. */
+function reviewCount(db: TestD1): number {
+  const row = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+  return row.n;
 }
 
-function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
-  return {
-    installation_id: 123,
-    owner: "acme",
-    repo: "widgets",
-    pr_number: 42,
-    head_sha: SHA,
-    action: "opened",
-    triggered_by: "pull_request",
-    // Guard note (Step 4): a payload WITHOUT appRef is
-    // impossible at the type level (required field). At runtime the
-    // classifier never attaches App identity — the per-App route is the
-    // only producer that adds appRef, so every enqueued job carries it.
-    // No runtime guard is added (AL-24-4: no defensive checks).
-    appRef: { appId: TEST_APP_ID },
-    ...overrides,
-  };
-}
-
-function makeBatch(payload: ReviewJobPayload): MessageBatch<ReviewJobPayload> {
-  // Declare the payload's own commands before the consumer can exec them.
-  registerGitOpsCommands(sandbox, payload);
-  return {
-    queue: "review-queue",
-    messages: [
-      {
-        id: "m1",
-        timestamp: new Date(),
-        attempts: messageAttempts,
-        body: payload,
-        retry: (options?: { delaySeconds?: number }) => {
-          messageRetryCalls.push({ attempts: messageAttempts, delaySeconds: options?.delaySeconds });
-        },
-        ack: () => {
-          messageAckCalls.push({ attempts: messageAttempts });
-        },
-      },
-    ],
-  } as unknown as MessageBatch<ReviewJobPayload>;
-}
-
+/**
+ * The shared reset, plus this file's own scripted Checks surface (declared
+ * further down): harness state and Check state are cleared by one call, so no
+ * case can inherit a half-configured double.
+ */
 function reset(): void {
-  resetFakeSandboxState(sandbox);
-  commenterCalls.length = 0;
-  Object.assign(commenterState, initialFakeCommenterState());
-  kvPuts.length = 0;
-  messageRetryCalls.length = 0;
-  messageAckCalls.length = 0;
-  messageAttempts = 1;
-  logLines.length = 0;
-
-  kvPutError = undefined;
-  kvGetValue = null;
+  resetHarness();
   checkRequests.length = 0;
   checkRuns.clear();
   checkRequestOverrides = {};
@@ -273,26 +189,15 @@ function reset(): void {
   checkState.clockMs = 1_700_000_000_000;
 }
 
-/** Count review rows in the real D1 double. */
-function reviewCount(db: ReturnType<typeof createMigratedTestD1>): number {
-  const row = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
-  return row.n;
-}
-
-/** All rows of the review_failures table in the real D1 double. */
-function failureRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
-  return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
-}
-
 /** All rows of the usage_events ledger in the real D1 double. */
-function usageRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
+function usageRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM usage_events ORDER BY review_id, seq").all() as Array<
     Record<string, unknown>
   >;
 }
 
 /** Live admission rows — the per-PR lock plus the capacity reservation. */
-function inflightRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
+function inflightRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_inflight ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
@@ -1167,7 +1072,7 @@ describe("createReviewConsumer", () => {
   test("KV completion write failure → warn, still ack (D1 row is durable)", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    kvPutError = new Error("kv down");
+    kvState.putError = new Error("kv down");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1335,7 +1240,7 @@ describe("createReviewConsumer", () => {
 
   test("KV done-state hit → ack without post/insert (B3)", async () => {
     reset();
-    kvGetValue = "done";
+    kvState.getValue = "done";
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -1854,7 +1759,7 @@ describe("createReviewConsumer", () => {
       [2, 120],
       [3, 240],
     ] as const) {
-      messageAttempts = attempts;
+      queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
     }
     expect(messageRetryCalls).toEqual([
@@ -1879,7 +1784,7 @@ describe("createReviewConsumer", () => {
       [2, 360],
       [3, 720],
     ] as const) {
-      messageAttempts = attempts;
+      queueState.attempts = attempts;
       await consumer(makeBatch(makePayload()));
     }
     expect(messageRetryCalls).toEqual([
@@ -1893,7 +1798,7 @@ describe("createReviewConsumer", () => {
 
   test("guard still held after the 3 delayed retries → ack with a warning, no DLQ (BB-3)", async () => {
     reset();
-    messageAttempts = 4; // final delivery before the queue would DLQ
+    queueState.attempts = 4; // final delivery before the queue would DLQ
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -1919,7 +1824,7 @@ describe("createReviewConsumer", () => {
     // by it, so the drop must reach the failure sweep — a warn line alone
     // leaves the commit with no trace at all.
     reset();
-    messageAttempts = 4;
+    queueState.attempts = 4;
     const db = await createSeededTestD1();
     await seedInflight(db); // holds SHA
     const newer = "1111111111111111111111111111111111111111";
@@ -1951,7 +1856,7 @@ describe("createReviewConsumer", () => {
       { held: SHA, payload: null, rows: 0 },
     ] as const) {
       reset();
-      messageAttempts = 4; // final delivery: the job is dropped here
+      queueState.attempts = 4; // final delivery: the job is dropped here
       const db = await createSeededTestD1();
       await seedInflight(db, { headSha: held });
       const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -1966,7 +1871,7 @@ describe("createReviewConsumer", () => {
 
   test("a comment-triggered delivery held by a live review stays silent (no sha to compare)", async () => {
     reset();
-    messageAttempts = 4;
+    queueState.attempts = 4;
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -1981,7 +1886,7 @@ describe("createReviewConsumer", () => {
 
   test("a cap refusal that survives the whole backoff records ONE failure row (W-1)", async () => {
     reset();
-    messageAttempts = 4; // final delivery: the job is dropped here
+    queueState.attempts = 4; // final delivery: the job is dropped here
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw
@@ -2011,7 +1916,7 @@ describe("createReviewConsumer", () => {
 
   test("a storage error refusal that survives the whole backoff records one failure row (W-1)", async () => {
     reset();
-    messageAttempts = 4;
+    queueState.attempts = 4;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(
       await makeEnv({ DB: dbFailingOn(db, "review_inflight") as never }),
@@ -2036,7 +1941,7 @@ describe("createReviewConsumer", () => {
     // still be readable from the row, or the drop cannot be joined back to a
     // PR at all.
     reset();
-    messageAttempts = 4;
+    queueState.attempts = 4;
     const db = await createSeededTestD1();
     db.raw
       .prepare(

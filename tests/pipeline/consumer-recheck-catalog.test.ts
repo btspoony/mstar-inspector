@@ -211,6 +211,71 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     expect(prepared.body).not.toContain("unverifiable (no-evidence)");
   });
 
+  test("a size-budget row is judged against the final input, not against a dropped neighbour's slices", async () => {
+    reset();
+    // Two provable rows. Row A is over the §7.3 cap on its own (a ~520 KiB
+    // body) and brings four slices; row B fits only once A is gone, because A's
+    // slices push B's input over the cap. Measuring B against the WHOLE
+    // candidate set — as the old fixpoint did — excluded it for evidence it
+    // never rode with, and it never came back.
+    sandbox.diffStdout = [
+      catalogBudgetDiff(1),
+      "diff --git a/src/other.ts b/src/other.ts",
+      "index 3333333..4444444 100644",
+      "--- a/src/other.ts",
+      "+++ b/src/other.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const a = 1;",
+      "+export const b = 2;",
+      " export const c = 3;",
+      "",
+    ].join("\n");
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = ""; // no document: each row is accounted by its own cause
+    const oversizedRowId = "eeeeeeee-0000-4000-8000-00000000000a";
+    const affordableRowId = "eeeeeeee-0000-4000-8000-00000000000b";
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db, {
+      rowId: oversizedRowId,
+      findingId: "finding-oversized-neighbour",
+      original: {
+        title: "Oversized neighbour",
+        filePath: "src/b01.ts",
+        lineStart: 1,
+        lineEnd: 1,
+        body: "a".repeat(520 * 1024),
+      },
+      nowMs: 2_000,
+    });
+    await seedOpenTarget(db, {
+      rowId: affordableRowId,
+      findingId: "finding-affordable",
+      original: {
+        title: "Affordable row",
+        filePath: "src/other.ts",
+        lineStart: 1,
+        lineEnd: 1,
+        body: "b".repeat(515_000),
+      },
+      nowMs: 2_100,
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
+      recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ path: string }> };
+    };
+    // B rides alone: A cannot fit any input, so it contributes no evidence.
+    expect(runnerInput.recheck.targets.map((target) => target.rowId)).toEqual([affordableRowId]);
+    expect(runnerInput.recheck.evidence.map((slice) => slice.path)).toEqual(["src/other.ts"]);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    // The never-sent row keeps the budget reason; the sent row was answered.
+    expect(prepared.body).toContain("| Oversized neighbour | unverifiable (budget) ");
+    expect(prepared.body).toContain("| Affordable row | unverifiable (invalid-output) ");
+  });
+
   test("an oversized hunk is sliced into windows that still contain the target line", async () => {
     reset();
     sandbox.diffStdout = oversizedAuthDiff(200);

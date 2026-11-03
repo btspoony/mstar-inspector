@@ -39,8 +39,9 @@
 # rebuild: the recheck seat now writes a status document beside its findings
 # document, and a single failed row is dropped in place instead of failing the
 # whole round. A stale runner writes no status at all, so the worker reads
-# `absent` and every recheck round lands in `review_failures` as a degraded
-# attribution row it did not have to write.
+# `absent` and the round loses its seat-supplied reason — it lands in
+# `review_failures` only when its document is also missing or invalid (or the
+# seat reported `failed`), never merely because the status is absent.
 # rebuild: the runner's status redaction now uses the shared credential-pattern
 # list (`packages/shared/src/secret-shapes.ts`) instead of a narrow local
 # subset, and a recheck document-write failure now exits 1 with no stdout (the

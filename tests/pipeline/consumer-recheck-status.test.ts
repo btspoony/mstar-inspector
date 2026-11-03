@@ -990,4 +990,36 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (invalid-output)");
   });
+
+  test("a zero-byte document is absent, not a malformed-JSON fault", async () => {
+    // The seat opened the file and wrote nothing — an empty file, not a
+    // malformed payload. Parsing it would throw and report a JSON fault the
+    // seat never committed.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "ok",
+      reason: null,
+      rejected: 0,
+      rejected_row_ids: [],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(String(rows[0]!.error)).toBe("document absent: ok: null: null");
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+  });
 });

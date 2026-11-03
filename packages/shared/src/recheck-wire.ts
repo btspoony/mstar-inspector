@@ -254,12 +254,13 @@ function segmentQuote(lines: string[], startLine: number, start: number, endLine
 }
 
 /**
- * Whether the cited old lines still survive on the hunk's new side, tested
+ * Whether the cited old lines still survive where they stood, tested
  * PER LINE rather than as a joined block. A block test lets an inserted line
  * inside the cited range forge a removal: the whole block then no longer
  * appears contiguously, so the removal reads as proven. Every non-blank
- * normalized quote line must be accounted for by an occurrence on the new side
- * for the block to count as still present. Two deliberate scoping choices:
+ * normalized quote line must be accounted for by an occurrence in the CITED
+ * RANGE's own new-side counterpart (`counterpartNewLines`) for the block to
+ * count as still present. Two deliberate scoping choices:
  *   - blank lines are skipped — a blank matches any blank, so it proves
  *     nothing either way and would fail every quote that spans an empty line;
  *   - the block counts as still present only when EVERY line matches, so a
@@ -283,6 +284,39 @@ function oldLinesStillPresent(quote: string, newLines: readonly string[]): boole
   }
   // `quote` is never blank (visibleQuote), so at least one line was tested.
   return true;
+}
+
+/**
+ * The new-side lines standing where the cited OLD range stood. A slice carries
+ * no per-line diff flags, so the mapping walks the new side and pairs every
+ * NON-added line with the next old line that carries the same text (a `+` line
+ * has no old counterpart, and a `-` line has no new-side line, so the pointer
+ * skips it); the window then runs from the first cited line's position to the
+ * last one's, so lines the change inserted INSIDE the block stay inside it
+ * while identical text that merely recurs elsewhere in the hunk is not read as
+ * a survivor of this range. Null when none of the cited old lines survives as
+ * an unchanged line.
+ */
+function counterpartNewLines(slice: EvidenceSlice, startLine: number, endLine: number): string[] | null {
+  const added = new Set(slice.addedNewLines);
+  const first = startLine - slice.oldStart;
+  const last = endLine - slice.oldStart;
+  const oldLines = slice.oldLines.map((line) => normalizeQuoteText(line));
+  let oldIndex = 0;
+  let from = -1;
+  let to = -1;
+  for (let index = 0; index < slice.newLines.length; index += 1) {
+    if (added.has(slice.newStart + index)) continue; // an insertion is not an old line
+    const text = normalizeQuoteText(slice.newLines[index]!);
+    while (oldIndex < oldLines.length && oldLines[oldIndex] !== text) oldIndex += 1;
+    if (oldIndex >= oldLines.length) break;
+    if (oldIndex >= first && oldIndex <= last) {
+      if (from < 0) from = index;
+      to = index;
+    }
+    oldIndex += 1;
+  }
+  return from < 0 ? null : slice.newLines.slice(from, to + 1);
 }
 
 /**
@@ -372,10 +406,12 @@ function addressedProofError(
       if (!slice.absentAtHead) return 'removed-code deleted-file slice must prove absence at HEAD';
       return null;
     }
-    // Hunk slice: the cited old lines must no longer exist on the new side —
-    // otherwise the code was not removed by this change. Tested per line, so
-    // an insertion inside the cited block cannot forge the removal.
-    if (oldLinesStillPresent(quote, slice.newLines)) {
+    // Hunk slice: the cited old lines must no longer exist where they stood —
+    // otherwise the code was not removed by this change. Tested per line over
+    // the cited range's own new-side counterpart, so an insertion inside the
+    // cited block cannot forge the removal either.
+    const cited = counterpartNewLines(slice, evidence.startLine, evidence.endLine);
+    if (cited !== null && oldLinesStillPresent(quote, cited)) {
       return 'removed-code cites old lines still present on the hunk new side';
     }
     return null;
@@ -383,14 +419,16 @@ function addressedProofError(
 
   // replaced-code: the old range plus its current hunk — a current side
   // must exist, otherwise the change is a removal, not a replacement. And, as
-  // with removed-code, the cited old lines must no longer survive on the new
-  // side: only when EVERY cited line is still there does the hunk prove
-  // nothing was replaced. A surviving identical context line elsewhere in the
-  // hunk does not fail a genuine replacement, because a line the change really
-  // removed is then missing from the new side.
+  // with removed-code, the cited old lines must no longer stand in their own
+  // new-side counterpart: only when EVERY cited line survives there does the
+  // hunk prove nothing was replaced. Text that merely recurs elsewhere in the
+  // hunk (a duplicated line the change left alone) does not fail a genuine
+  // replacement, and a line the change really removed is missing from the
+  // counterpart window.
   if (slice.kind !== 'hunk') return 'replaced-code must cite a hunk slice';
   if (slice.newLines.length === 0) return 'replaced-code slice has no current hunk (use removed-code)';
-  if (oldLinesStillPresent(quote, slice.newLines)) {
+  const cited = counterpartNewLines(slice, evidence.startLine, evidence.endLine);
+  if (cited !== null && oldLinesStillPresent(quote, cited)) {
     return 'replaced-code cites old lines still present on the hunk new side';
   }
   return null;
