@@ -1571,6 +1571,12 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
       .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
+    // The PR ledger is written before the ignore return: a bot-authored PR
+    // must still reach it, or the per-App PR surface goes blind for them.
+    const ledger = db.raw
+      .query("SELECT pr_number, state FROM pull_requests WHERE app_id = ?")
+      .all(appRow.id) as Array<{ pr_number: number; state: string }>;
+    expect(ledger).toEqual([{ pr_number: 42, state: "open" }]);
   });
 
   test("flag read failure on a `job` delivery → 2xx ignored, ZERO enqueue, `paused`, all diagnostics kept", async () => {

@@ -200,7 +200,7 @@ const BOT_LOGIN = /\[bot\]$/i;
 
 export const BOT_PR_REASON = "PR authored by a bot account";
 
-export const MISSING_AUTHOR_REASON = "pull request payload carried no author login";
+export const MISSING_AUTHOR_REASON = "payload carried no PR author login";
 
 /**
  * Both trigger faces share one author rule: a PR whose author is unknown is
@@ -423,8 +423,10 @@ const issueCommentSchema = z.object({
   issue: z
     .object({
       number: z.number(),
-      // PR author (issue.user.login) — the actor allowlist (B5).
-      user: z.object({ login: z.string() }).nullable().optional(),
+      // PR author (issue.user.login) — the actor allowlist (B5) and the
+      // bot/missing-author guard. `login` is optional so a truncated payload
+      // fails closed on the guard instead of rejecting 400.
+      user: z.object({ login: z.string().optional() }).nullable().optional(),
       pull_request: z.unknown().optional(),
     })
     .nullable()
@@ -635,6 +637,15 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   if (action !== "created") {
     return { kind: "ignore", reason: `issue_comment action ${action} is not whitelisted` };
   }
+  // Malformed payloads reject before any policy gate, exactly as on the
+  // pull_request face: 400 stays reserved for what a retry cannot repair.
+  const installationId = installation?.id;
+  const owner = repository?.owner.login;
+  const repo = repository?.name;
+  const prNumber = issue?.number;
+  if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
+    return { kind: "reject", status: 400, reason: "issue_comment payload missing required fields" };
+  }
   // Bot authorship outranks the mention grammar: a PR opened by a bot is
   // ignored whatever the comment says, and reaching the mention check first
   // would report MENTION_MISS_REASON on an unsynced App — a false
@@ -675,13 +686,6 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
       "bot mention ignored — commenter is not the PR author or repo owner",
     );
     return { kind: "ignore", reason: "comment actor is not the PR author or repo owner" };
-  }
-  const installationId = installation?.id;
-  const owner = repository?.owner.login;
-  const repo = repository?.name;
-  const prNumber = issue?.number;
-  if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
-    return { kind: "reject", status: 400, reason: "issue_comment payload missing required fields" };
   }
   // Same authority as the pull_request face: the payload's own
   // `installation.account.login`, with the repository owner as the fallback —

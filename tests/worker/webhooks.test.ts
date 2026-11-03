@@ -268,16 +268,14 @@ describe("classifyEvent — pull_request whitelist", () => {
     expect(outcome.kind).toBe("job");
   });
 
-  test("pull_request authored by a [bot] account is ignored, case-insensitively", () => {
-    for (const login of ["dependabot[bot]", "GitHub-Actions[BOT]", "test-app[bot]"]) {
-      const outcome = classifyEvent(
-        "pull_request",
-        pullRequestBody("synchronize", {
-          pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login } },
-        }),
-      );
-      expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
-    }
+  test("bot login suffix matching is case-insensitive", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("synchronize", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "GitHub-Actions[BOT]" } },
+      }),
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
   });
 
   test("pull_request without an author login is ignored rather than reviewed", () => {
@@ -522,6 +520,8 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     for (const issue of [
       { number: 42, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
       { number: 42, user: null, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
+      { number: 42, user: {}, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
+      { number: 42, user: { login: "" }, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
     ]) {
       const outcome = classifyEvent(
         "issue_comment",
@@ -547,7 +547,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     });
   });
 
-  test("bot-authored PR outranks the missing-required-fields reject on the comment face", () => {
+  test("malformed bot-authored comment still rejects 400 (reject outranks the author guard)", () => {
     const outcome = classifyEvent(
       "issue_comment",
       issueCommentBody({
@@ -562,7 +562,11 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       undefined,
       EVERY_PUSH,
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
+    expect(outcome).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "issue_comment payload missing required fields",
+    });
   });
 
   test("bot-authored PR outranks the actor allowlist, so no actor_not_allowed warn fires", () => {
