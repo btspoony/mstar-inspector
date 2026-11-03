@@ -167,6 +167,35 @@ describe("runtime-config-store", () => {
     });
   });
 
+  test("a present row with a missing field degrades instead of defaulting", async () => {
+    // A row that exists but does not carry the selected column: absent is
+    // `first() === null`, so a missing field must be untrusted, not a default.
+    const dbWithRow = (row: Record<string, unknown>): DashboardD1 => ({
+      prepare() {
+        const statement: DashboardD1Statement = {
+          bind: () => statement,
+          first: async () => row as never,
+          all: async () => ({ results: [] }),
+          run: async () => ({ results: [], meta: { changes: 0, last_row_id: 0 } }),
+        };
+        return statement;
+      },
+      batch: async () => [],
+    });
+    const degraded = {
+      system: CONCURRENCY_MIN,
+      workspace: CONCURRENCY_MIN,
+      effective: CONCURRENCY_MIN,
+      degraded: true,
+    };
+    for (const row of [{}, { workspace_value: 16 }, { system_value: "8" }]) {
+      const db = dbWithRow(row);
+      expect(await getSystemConcurrency(db)).toBe(CONCURRENCY_MIN);
+      expect(await getWorkspaceConcurrency(db, WS)).toBe(CONCURRENCY_MIN);
+      expect(await getEffectiveConcurrency(db, WS)).toEqual(degraded);
+    }
+  });
+
   test("a D1 read failure returns the conservative cap and degraded:true", async () =>
     expect(await getEffectiveConcurrency(failingDb, WS)).toEqual({
       system: CONCURRENCY_MIN,

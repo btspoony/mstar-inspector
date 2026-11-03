@@ -74,6 +74,17 @@ function resolveStored(value: string | number | null | undefined, fallback: numb
   return Number.isNaN(parsed) ? CONCURRENCY_MIN : parsed;
 }
 
+/**
+ * One cap from one result row. Only `row === null` is an absent setting, so the
+ * caller's default applies; a present row whose selected field is missing is a
+ * malformed result — untrusted, never absent.
+ */
+function resolveRow(row: { value?: string | number | null } | null, fallback: number): number {
+  if (row === null) return fallback;
+  if (row.value === undefined) return CONCURRENCY_MIN;
+  return resolveStored(row.value, fallback);
+}
+
 /** Why a write was refused. `invalid_value` is the 1..250 range; `above_system`
  * is a workspace value over the system cap, refused so the route can answer a
  * keyed 400 instead of storing a number that would never apply;
@@ -103,16 +114,16 @@ export type EffectiveConcurrency = {
 /** One `review_runtime_settings` row. */
 type RuntimeSettingRow = { value: string };
 
-/** The system cap; an absent row reads as the default, garbage as 1. */
+/** The system cap; an absent row reads as the default, anything untrusted as 1. */
 export async function getSystemConcurrency(db: DashboardD1): Promise<number> {
   const row = await db
     .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
     .bind(SYSTEM_CONCURRENCY_KEY)
     .first<RuntimeSettingRow>();
-  return resolveStored(row?.value, SYSTEM_CONCURRENCY_DEFAULT);
+  return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT);
 }
 
-/** The workspace cap; an absent row/NULL column reads as the default, garbage as 1. */
+/** The workspace cap; an absent row/NULL column reads as the default, anything untrusted as 1. */
 export async function getWorkspaceConcurrency(
   db: DashboardD1,
   workspaceId: string,
@@ -121,7 +132,7 @@ export async function getWorkspaceConcurrency(
     .prepare("SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = ?")
     .bind(workspaceId)
     .first<{ value: number | null }>();
-  return resolveStored(row?.value, WORKSPACE_CONCURRENCY_DEFAULT);
+  return resolveRow(row, WORKSPACE_CONCURRENCY_DEFAULT);
 }
 
 /** The untrusted-read answer: serial, flagged. */
@@ -153,8 +164,13 @@ export async function getEffectiveConcurrency(
       .bind(SYSTEM_CONCURRENCY_KEY, workspaceId)
       .first<{ system_value: string | null; workspace_value: number | null }>();
     // This query always yields exactly one row; no row means the answer itself
-    // is untrustworthy, not that both settings are absent.
+    // is untrustworthy, not that both settings are absent. A present row whose
+    // selected fields are missing is untrusted for the same reason — only a NULL
+    // column means the setting is absent.
     if (row === null) return degradedConcurrency();
+    if (row.system_value === undefined || row.workspace_value === undefined) {
+      return degradedConcurrency();
+    }
     const storedSystem = parseStored(row.system_value);
     const storedWorkspace = parseStored(row.workspace_value);
     if (Number.isNaN(storedSystem) || Number.isNaN(storedWorkspace)) {
