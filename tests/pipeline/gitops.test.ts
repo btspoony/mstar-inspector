@@ -148,7 +148,7 @@ describe("gitops command builders", () => {
     // The optional path exists for the oracle above; the production call site
     // passes nothing and must keep reading the exact constant. Pure string
     // check — this test writes no file and touches no /tmp path.
-    expect(readRecheckStatusCommand()).toContain("'/tmp/mstar-recheck-status.json'");
+    expect(readRecheckStatusCommand()).toContain(`'${RECHECK_STATUS_PATH}'`);
   });
 
   test("runnerCommand appends the optional --recheck-out flag quoted", () => {

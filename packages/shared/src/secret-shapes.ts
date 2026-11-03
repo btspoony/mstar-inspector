@@ -47,8 +47,14 @@ export const SECRET_PATTERNS: readonly RegExp[] = [
   /\b[0-9a-fA-F]{40,}\b/g,
 ];
 
-/** Replace every secret-shaped span in `text` with `[REDACTED]`. */
+/**
+ * Replace every secret-shaped span in `text` with `[REDACTED]`.
+ *
+ * A non-string (a caller that coerced wrong) cannot be proven secret-free, so
+ * it becomes the marker itself rather than riding through unredacted.
+ */
 export function redactSecretShapes(text: string): string {
+  if (typeof text !== 'string') return REDACTED;
   let out = text;
   for (const pattern of SECRET_PATTERNS) out = out.replace(pattern, REDACTED);
   return out;

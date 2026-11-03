@@ -864,18 +864,21 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
  * the AUTHORITATIVE checkout SHA the diff was captured for (the worker runs
  * one diff per pinned checkout — the per-file old/new blob oids on each
  * slice carry the finer-grained pins). Returns the slices plus the
- * per-target excluded flags (honest coverage).
+ * per-target excluded flags (honest coverage) and, for every provable target,
+ * the slice ids it references — the input builder keeps only those slices, so
+ * a row that never rides the wire leaves no orphan evidence behind.
  */
 function buildEvidenceCatalog(
   diffText: string,
   targets: RecheckTarget[],
   captureSha: string,
-): { slices: EvidenceSlice[]; excludedTargets: Set<string> } {
+): { slices: EvidenceSlice[]; excludedTargets: Set<string>; sliceIdsByRowId: Map<string, string[]> } {
   const slices: EvidenceSlice[] = [];
   const excludedTargets = new Set<string>();
+  const sliceIdsByRowId = new Map<string, string[]>();
   if (diffText === "") {
     for (const target of targets) excludedTargets.add(target.rowId);
-    return { slices, excludedTargets };
+    return { slices, excludedTargets, sliceIdsByRowId };
   }
   const files = parseUnifiedDiffFiles(diffText);
   let budget = RECHECK_CATALOG_MAX_BYTES;
@@ -926,10 +929,13 @@ function buildEvidenceCatalog(
         a.hunk.oldStart - b.hunk.oldStart,
     );
     let included = 0;
+    const referenced: string[] = [];
     for (const { file, hunk } of candidates) {
       if (included >= RECHECK_SLICES_PER_TARGET) break;
       const key = `${file.path}\u0000${hunk.oldStart}:${hunk.oldLines.length}+${hunk.newStart}:${hunk.newLines.length}`;
-      if (sliceIdByKey.has(key)) {
+      const shared = sliceIdByKey.get(key);
+      if (shared !== undefined) {
+        referenced.push(shared);
         included += 1; // the hunk is already in the catalog — targets share slices
         continue;
       }
@@ -940,11 +946,13 @@ function buildEvidenceCatalog(
       slices.push(built);
       budget -= sizeOf(built);
       sliceIdByKey.set(key, built.id);
+      referenced.push(built.id);
       included += 1;
     }
     if (included === 0) excludedTargets.add(target.rowId);
+    else sliceIdsByRowId.set(target.rowId, referenced);
   }
-  return { slices, excludedTargets };
+  return { slices, excludedTargets, sliceIdsByRowId };
 }
 
 /**
@@ -980,12 +988,18 @@ type OriginalFindingProjection = RecheckTarget["original"];
  *     forces unverifiable;
  *   - an unavailable prior-journal apply means stale lifecycle state — no
  *     closure is trusted (context-incomplete).
- * Rows the document omitted are accounted as `unverifiable/omitted` for the
- * closure and coverage but are NOT truly assessed — they never enter
- * `lifecycle.assessments`, so `last_assessed_ms` advances only for real
- * assessments (fair-rotation §7.2). The seat's own status decides WHY a row
- * has no document row: a budget-skipped round (`outcome: "skipped"`) never
- * sent it (`budget`), while a failed/absent round is invalid output.
+ * Per-row reason precedence (first match wins): stale context, then catalog
+ * exclusion (`no-evidence` — the row could not be proven from the captured
+ * diff, so it was never sent), then gate rejection (`invalid-output` — it WAS
+ * sent and answered badly), then the size budget / seat skip (`budget`), then
+ * `invalid-output` for an absent document, then `omitted`.
+ *
+ * ATTEMPTED vs never-sent is the accounting split (§7.2 fair rotation): a row
+ * the seat was given — whether the gate kept its answer or dropped it — is
+ * assessed and enters `lifecycle.assessments`, so `last_assessed_ms` advances
+ * and the rotation clock moves. A row that was never sent (size budget,
+ * catalog exclusion, seat skip, no document at all) is NOT assessed: it is
+ * accounted as `omitted` for coverage and leaves `last_assessed_ms` alone.
  */
 function reconcileRecheckRound(input: {
   targets: RecheckTarget[];
@@ -996,6 +1010,8 @@ function reconcileRecheckRound(input: {
   output: ReviewOutput;
   /** Stale lifecycle state (failed pending-journal apply or capture): no closure. */
   staleContext: boolean;
+  /** Selected rows the trusted catalog could not prove: never sent, never assessable. */
+  catalogExcluded: ReadonlySet<string>;
   /** Selected rows excluded from the recheck input by the §7.3 size budget. */
   budgetExcluded: ReadonlySet<string>;
   /** Rows the gate dropped from an otherwise accepted document (row content errors). */
@@ -1007,7 +1023,8 @@ function reconcileRecheckRound(input: {
   assessedCount: number;
   omittedCount: number;
 } {
-  const { targets, doc, status, discussion, output, staleContext, budgetExcluded, rejectedRowIds } = input;
+  const { targets, doc, status, discussion, output, staleContext, catalogExcluded, budgetExcluded, rejectedRowIds } =
+    input;
   const outcomeByRowId = new Map<string, Assessment>();
   const assessments: Assessment[] = [];
   const forceUnverifiable = (rowId: string, reason: Assessment["reason"]): Assessment => ({
@@ -1025,12 +1042,18 @@ function reconcileRecheckRound(input: {
 
   for (const target of targets) {
     const docResult = doc?.results.find((r) => r.rowId === target.rowId) ?? undefined;
+    const rejected = rejectedRowIds.has(target.rowId);
     let assessment: Assessment;
     if (staleContext) {
       // Stale lifecycle state (pending-journal apply or capture failed):
       // nothing may close this round, assessed or not.
       assessment = forceUnverifiable(target.rowId, "context-incomplete");
-    } else if (rejectedRowIds.has(target.rowId)) {
+    } else if (catalogExcluded.has(target.rowId)) {
+      // The trusted catalog could not prove this row from the captured diff,
+      // so it never rode the wire — `no-evidence`, never a blamed seat and
+      // never the size `budget` (the row was unprovable, not oversized).
+      assessment = forceUnverifiable(target.rowId, "no-evidence");
+    } else if (rejected) {
       // The seat answered this row but the gate dropped it (shape / enum /
       // evidence error) — the row WAS attempted, so it is invalid output,
       // never "omitted" (never ran) or "budget" (never sent).
@@ -1085,7 +1108,10 @@ function reconcileRecheckRound(input: {
       }
     }
     outcomeByRowId.set(target.rowId, assessment);
-    if (docResult !== undefined) assessments.push(assessment);
+    // ATTEMPTED rows — answered, or answered and dropped by the gate — are the
+    // ones whose rotation clock moves. A row with no document row was never
+    // accounted by the seat, so it stays un-assessed (§7.2 fair rotation).
+    if (docResult !== undefined || rejected) assessments.push(assessment);
   }
 
   // Resolution eligibility (§7.4/§7.5): addressed verdicts only, with the
@@ -1242,13 +1268,13 @@ async function readRecheckDoc(
     boundedRead(sandbox, readRecheckStatusCommand()),
   ]);
   let doc: RecheckDoc | null = null;
-  const validated = new Set<string>();
+  const droppedRowIds = new Set<string>();
   if (docText !== null) {
     try {
       const gate = validateRecheckDoc(JSON.parse(docText), recheckInput);
       if (gate.ok) {
         doc = gate.doc;
-        for (const row of gate.rejected) if (row.rowId !== null) validated.add(row.rowId);
+        for (const row of gate.rejected) if (row.rowId !== null) droppedRowIds.add(row.rowId);
       }
     } catch {
       doc = null;
@@ -1256,7 +1282,7 @@ async function readRecheckDoc(
   }
   const status = parseRecheckStatus(statusText, recheckInput.headSha);
   const sent = new Set(recheckInput.targets.map((target) => target.rowId));
-  const rejected = new Set(validated);
+  const rejected = new Set(droppedRowIds);
   for (const rowId of status?.rejected_row_ids ?? []) if (sent.has(rowId)) rejected.add(rowId);
   return { doc, rejected, status };
 }
@@ -2632,11 +2658,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const diffText = diff.stdout.length <= DIFF_PREFETCH_MAX_BYTES ? diff.stdout : "";
 
     // Trusted evidence catalog (§7.3) for the selected targets, pinned to
-    // the authoritative checkout SHA.
+    // the authoritative checkout SHA. A target the captured diff cannot prove
+    // is EXCLUDED from the recheck input: without catalog evidence the seat
+    // could only guess, so sending it would invite a misattributed verdict.
     const catalog =
       targets.length > 0
         ? buildEvidenceCatalog(diffText, targets, headSha)
-        : { slices: [] as EvidenceSlice[], excludedTargets: new Set<string>() };
+        : { slices: [] as EvidenceSlice[], excludedTargets: new Set<string>(), sliceIdsByRowId: new Map<string, string[]>() };
+    const catalogExcluded: ReadonlySet<string> = catalog.excludedTargets;
 
     // Bounded discussion capture (§7.8) for the selected targets' known
     // threads. API failure is unavailable — never empty/complete.
@@ -2675,29 +2704,43 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
 
     // The typed recheck input (§7.3): omitted ENTIRELY when no open rows
-    // exist — the runner input stays byte-identical on a first round.
-    // Oversized whole targets are excluded with coverage (never silently
-    // truncated concerns).
+    // exist — the runner input stays byte-identical on a first round. Only
+    // rows the trusted catalog can prove ride the wire, and only the slices
+    // those rows reference: a never-sent row leaves no orphan evidence, and
+    // no slice it owns consumes the byte budget.
     let recheckInput: RecheckInput | undefined;
     const budgetExcluded = new Set<string>();
     if (targets.length > 0 && !captureFailed) {
-      const included: RecheckTarget[] = [];
-      let budget = RECHECK_INPUT_MAX_BYTES - jsonByteLength({ headSha, evidence: catalog.slices, discussion });
-      for (const target of targets) {
-        const cost = jsonByteLength(target);
-        if (cost > budget) {
-          budgetExcluded.add(target.rowId); // §7.3: oversized whole target — accounted, never truncated
-          continue;
+      const candidates = targets.filter((target) => !catalogExcluded.has(target.rowId));
+      // Each row is measured against the budget left by the evidence it
+      // references: dropping a row shrinks that evidence, so re-measure until
+      // the sent set is stable. The set only ever shrinks, so this terminates.
+      let included = candidates;
+      let evidence: EvidenceSlice[] = [];
+      for (;;) {
+        const referenced = new Set(
+          included.flatMap((target) => catalog.sliceIdsByRowId.get(target.rowId) ?? []),
+        );
+        evidence = catalog.slices.filter((slice) => referenced.has(slice.id));
+        let budget = RECHECK_INPUT_MAX_BYTES - jsonByteLength({ headSha, evidence, discussion });
+        const next: RecheckTarget[] = [];
+        for (const target of included) {
+          const cost = jsonByteLength(target);
+          if (cost > budget) continue; // §7.3: oversized whole target — accounted, never truncated
+          budget -= cost;
+          next.push(target);
         }
-        budget -= cost;
-        included.push(target);
+        if (next.length === included.length) break;
+        included = next;
       }
+      const sentIds = new Set(included.map((target) => target.rowId));
+      for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);
       if (included.length > 0) {
         recheckInput = {
           schema: "mstar.recheck-input/v1",
           headSha,
           targets: included,
-          evidence: catalog.slices,
+          evidence,
           discussion,
         };
       }
@@ -2943,7 +2986,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // assembly + final body. The recheck document is reconciled against the
     // SAME round's final capped findings (§7.4 conservative precedence:
     // same-round recurrence and related unresolved concerns force
-    // unverifiable; omitted rows are accounted but never "assessed").
+    // unverifiable; rows the seat was never given are accounted but never
+    // "assessed").
     const staleContext = pendingApplyFailed || captureFailed;
     const reconciled = reconcileRecheckRound({
       targets,
@@ -2952,6 +2996,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       discussion,
       output,
       staleContext,
+      catalogExcluded,
       budgetExcluded,
       rejectedRowIds,
     });
@@ -2986,11 +3031,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           ? recheckDoc === null
             ? "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
             : "recheck round accounted"
-          : "recheck round accounted — no input sent: every selected row exceeded the §7.3 size budget",
+          : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
       );
       // A failure row names a round that RAN and produced nothing usable. A
       // round that sent nothing has no failure to record — its rows are
-      // already accounted as `budget` in the closure section.
+      // already accounted as `budget`/`no-evidence` in the closure section.
       if (recheckInput !== undefined && (recheckDoc === null || recheckOutcome === "failed")) {
         // Best-effort: the insert must never mask the round (AL-6 pattern).
         try {

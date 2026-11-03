@@ -3391,23 +3391,41 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     await consumer(makeBatch(makePayload()));
 
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    // 23 truly assessed; the 2 rejected rows are accounted as not-assessed
-    // (coverage) but their closure reason names the real cause.
-    expect(prepared.body).toContain("Reassessed 23/25 open prior finding(s)");
+    // All 25 rows were ATTEMPTED — 23 answered assessably, 2 answered badly and
+    // gate-dropped — so every one of them is assessed and its rotation clock
+    // advances. Nothing is omitted.
+    expect(prepared.body).toContain("Reassessed 25/25 open prior finding(s)");
+    expect(prepared.body).toContain("0 omitted");
     expect(prepared.body).toContain("unverifiable (invalid-output)");
     expect(prepared.body).not.toContain("unverifiable (omitted)");
-    // The 23 assessable rows really persisted a round row; the rejected two did not.
+    // Every attempted row persisted a round row, gate-dropped ones included.
     const roundRows = db.raw.query("SELECT finding_row_id FROM review_finding_rounds").all() as Array<{
       finding_row_id: string;
     }>;
-    expect(roundRows).toHaveLength(23);
+    expect(roundRows).toHaveLength(25);
     const persisted = new Set(roundRows.map((r) => r.finding_row_id));
     for (const rowId of assessableRowIds) expect(persisted.has(rowId)).toBe(true);
-    for (const rowId of rejectedRowIds) expect(persisted.has(rowId)).toBe(false);
+    for (const rowId of rejectedRowIds) expect(persisted.has(rowId)).toBe(true);
+    // …and the dropped pair carries the real cause, never a fabricated closure,
+    // with its rotation clock advanced (it WAS attempted).
+    const rejectedRounds = db.raw
+      .query(`SELECT assessment_json FROM review_finding_rounds WHERE finding_row_id IN (?, ?)`)
+      .all(rejectedRowIds[0]!, rejectedRowIds[1]!) as Array<{ assessment_json: string }>;
+    expect(rejectedRounds).toHaveLength(2);
+    for (const row of rejectedRounds) {
+      expect(JSON.parse(row.assessment_json)).toMatchObject({
+        disposition: "unverifiable",
+        reason: "invalid-output",
+      });
+    }
+    const clocks = db.raw
+      .query(`SELECT last_assessed_ms FROM review_findings WHERE id IN (?, ?)`)
+      .all(rejectedRowIds[0]!, rejectedRowIds[1]!) as Array<{ last_assessed_ms: number | null }>;
+    expect(clocks.map((row) => row.last_assessed_ms).every((ms) => ms !== null)).toBe(true);
     // A usable document means no failure row.
     expect(failureRows(db)).toHaveLength(0);
     const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
-    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 2, assessed: 23 });
+    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 2, assessed: 25 });
   });
 
   test("a budget-skipped round accounts every row as budget, never invalid-output", async () => {
@@ -3541,6 +3559,164 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(failureRows(db)).toHaveLength(0);
   });
 
+  test("a readable status body with a wrong or absent schema is no attribution: the row stays invalid-output, outcome absent", async () => {
+    // The gate's other halves: the body READ fine and is not a status this
+    // round can attribute. Anything but this round's own
+    // `mstar.recheck-status/v1` is `absent` — never a fabricated outcome.
+    for (const statusBody of [
+      JSON.stringify({ headSha: SHA, outcome: "failed", reason: "seat-failed" }),
+      JSON.stringify({ schema: "mstar.recheck-status/v2", headSha: SHA, outcome: "failed", reason: "seat-failed" }),
+    ]) {
+      reset();
+      diffStdout = VALID_DIFF;
+      runnerStdout = JSON.stringify(VALID_OUTPUT);
+      recheckFileContent = "";
+      recheckStatusContent = statusBody;
+      const db = await createSeededTestD1();
+      await seedPriorPublication(db);
+      await seedOpenTarget(db);
+      await seedAssociation(db, "PRRT_thread1");
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(makePayload()));
+
+      const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+      expect(line.fields).toMatchObject({
+        recheck_outcome: "absent",
+        recheck_reason: null,
+        recheck_error: null,
+      });
+      // No status → the document is the only evidence, and it is absent: the
+      // row is invalid-output and exactly one failure row carries `absent`.
+      const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+      expect(prepared.body).toContain("unverifiable (invalid-output)");
+      const rows = failureRows(db);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.error).toBe("absent: null: null");
+    }
+  });
+
+  test("a readable status body that is not JSON at all is no attribution either", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    recheckFileContent = "";
+    // The transport succeeded and handed back bytes that are not a status.
+    recheckStatusContent = "mstar.recheck-status/v1 { truncated";
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+    expect(failureRows(db)[0]!.error).toBe("absent: null: null");
+  });
+
+  test("a row the trusted catalog cannot prove never rides the wire: no-evidence, never budget, never assessed", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    // The concern's file is absent from the captured diff, so no slice can
+    // prove it and no honest verdict is possible.
+    db.raw.prepare(`UPDATE review_findings SET original_json = ? WHERE id = ?`).run(
+      JSON.stringify({ ...TARGET_ORIGINAL, filePath: "src/elsewhere.ts" }),
+      TARGET_ROW_ID,
+    );
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Not sent: the runner gains no --recheck-out and the input has no recheck.
+    expect(sandboxCalls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
+    expect((JSON.parse(writtenInputJson!) as { recheck?: unknown }).recheck).toBeUndefined();
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    // The reason names the real cause — an unprovable row is not oversized.
+    expect(prepared.body).toContain("unverifiable (no-evidence)");
+    expect(prepared.body).not.toContain("unverifiable (budget)");
+    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
+    // Nothing was attempted, so nothing is assessed and no failure is recorded.
+    const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.last_assessed_ms).toBeNull();
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("slices belonging to a budget-excluded row do not ride the recheck input, and the budget is measured without them", async () => {
+    reset();
+    // Two files in the captured diff, one selected row per file.
+    diffStdout = [
+      VALID_DIFF,
+      "diff --git a/src/other.ts b/src/other.ts",
+      "index 3333333..4444444 100644",
+      "--- a/src/other.ts",
+      "+++ b/src/other.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const a = 1;",
+      "+export const b = 2;",
+      " export const c = 3;",
+      "",
+    ].join("\n");
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    // The second row is oversized, so the §7.3 budget drops it AFTER the
+    // catalog already holds its slice.
+    const oversizedRowId = "eeeeeeee-0000-4000-8000-000000000005";
+    db.raw
+      .prepare(
+        `INSERT INTO review_findings
+           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+            first_seen_round, last_seen_round, state, created_ms, updated_ms)
+         VALUES (?, ?, 123, 'acme', 'widgets', 42, 'finding-oversized', ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
+      )
+      .run(
+        oversizedRowId,
+        TEST_APP_ID,
+        JSON.stringify({
+          ...TARGET_ORIGINAL,
+          title: "Oversized concern",
+          filePath: "src/other.ts",
+          lineStart: 1,
+          body: "y".repeat(600 * 1024),
+        }),
+        PRIOR_PUB_ID,
+        PRIOR_PUB_ID,
+        PRIOR_SHA,
+        PRIOR_SHA,
+        2_100,
+        2_100,
+      );
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(writtenInputJson!) as {
+      recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ id: string; path: string }> };
+    };
+    expect(runnerInput.recheck.targets.map((t) => t.rowId)).toEqual([TARGET_ROW_ID]);
+    // Only the surviving row's slice rides — the dropped row's file is gone.
+    expect(runnerInput.recheck.evidence.length).toBeGreaterThan(0);
+    expect(runnerInput.recheck.evidence.every((slice) => slice.path === "src/auth.ts")).toBe(true);
+    // Slice ids stay stable (the shared catalog numbering, not a rebuilt one).
+    expect(runnerInput.recheck.evidence[0]!.id).toBe("ev-1");
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (budget)");
+  });
+
   test("a status naming a row this round never sent cannot attribute it: that id is ignored", async () => {
     reset();
     diffStdout = VALID_DIFF;
@@ -3568,9 +3744,11 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (invalid-output)");
     expect(prepared.body).not.toContain("unverifiable (omitted)");
-    // The count is the sent-row union: the foreign id never entered it.
+    // The count is the sent-row union: the foreign id never entered it. The
+    // SENT row was attempted (the seat answered and the gate dropped it), so
+    // it is assessed even though the document carries no row for it.
     const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
-    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 1, assessed: 0 });
+    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 1, assessed: 1 });
   });
 
   test("an oversized status error or reason is bounded at parse time, so the log field and the D1 text share one value", async () => {

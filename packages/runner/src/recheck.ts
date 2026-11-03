@@ -351,7 +351,10 @@ export async function runRecheckSeat(input: {
     });
     gate = validateRecheckDoc(recheckStructuredData(result), input.input);
   } catch (error) {
-    const message = redactedStatusError((error as Error).message);
+    // A non-Error rejection (`throw "x"`, a rejected plain value) has no
+    // `.message`; coercing keeps the REAL failure inside the never-throws
+    // contract instead of throwing out of this catch.
+    const message = redactedStatusError(error instanceof Error ? error.message : String(error));
     console.error(JSON.stringify({ event: "recheck_seat_failed", error: message }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, rejected_row_ids: [], error: message } };
   }

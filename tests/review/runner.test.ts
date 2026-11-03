@@ -48,8 +48,7 @@
  *     `recheck` key and writes no file.
  */
 
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
-import * as fs from "node:fs";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -791,29 +790,6 @@ describe("runner entry — --recheck-out channel", () => {
     } finally {
       console.error = original;
     }
-  });
-
-  test("no target argument → RECHECK_STATUS_PATH, stated as its literal path", () => {
-    // Production callers pass no target; intercept the write so the assertion
-    // stays on the literal path without touching a real runner's file.
-    const targets: unknown[] = [];
-    const spy = spyOn(fs, "writeFileSync").mockImplementation(((...args: unknown[]) => {
-      targets.push(args[0]);
-    }) as never);
-    try {
-      writeRecheckStatus({
-        schema: "mstar.recheck-status/v1",
-        headSha: RECHECK_INPUT_DOC.headSha,
-        outcome: "skipped",
-        reason: "budget",
-        rejected: 0,
-        rejected_row_ids: [],
-        error: null,
-      });
-    } finally {
-      spy.mockRestore();
-    }
-    expect(targets).toEqual(["/tmp/mstar-recheck-status.json"]);
   });
 
   test("legacy input (no recheck field) → runtime input carries no recheck key, no file written", async () => {

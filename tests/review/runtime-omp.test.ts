@@ -81,6 +81,8 @@ let seatResults: Array<{
   abortReason?: string;
   /** When set, the seat's PROMISE rejects with this message — no settled result at all. */
   reject?: string;
+  /** When set, the seat rejects with a NON-Error value — the shape that has no `.message`. */
+  rejectWith?: unknown;
 }> = [];
 /** Definition content snapshotted from the PR-clone cwd at session creation. */
 let installedSeatAgent: string | null = null;
@@ -365,6 +367,8 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
     // A seat whose promise REJECTS rather than settles: the SDK threw, or our
     // own code did. It produces no seat outcome at all.
     if (plan.reject !== undefined) throw new Error(plan.reject);
+    // A non-Error rejection: the shape with no `.message` to read.
+    if ("rejectWith" in plan) throw plan.rejectWith;
     const status = plan.status ?? "valid";
     return {
       result: {
@@ -2335,6 +2339,26 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(result.recheckStatus?.outcome).toBe("failed");
     expect(result.recheckStatus?.reason).toBe("seat-failed");
     expect(result.recheckStatus?.error).toBe("provider boom");
+  });
+
+  test("a seat rejecting with a plain string still resolves failed — never throws out of the catch", async () => {
+    // A non-Error rejection has no `.message`; reading it blind would make the
+    // documented never-throws catch throw and lose the real failure.
+    seatResults = [{ rejectWith: "provider boom" }, { data: seatPayload() }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result.recheck).toBeNull();
+    expect(result.recheckStatus).toMatchObject({
+      outcome: "failed",
+      reason: "seat-failed",
+      error: "provider boom",
+    });
   });
 
   test("a long secret-bearing seat error is redacted BEFORE it is truncated", async () => {
