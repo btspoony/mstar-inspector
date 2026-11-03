@@ -198,7 +198,7 @@ function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
  */
 const BOT_LOGIN = /\[bot\]$/i;
 
-const BOT_PR_REASON = "pull request was opened by a bot account";
+const BOT_PR_REASON = "PR authored by a bot account";
 
 /** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
 export const WEBHOOK_BODY_LIMIT = 1_000_000;

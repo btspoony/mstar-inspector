@@ -2201,7 +2201,7 @@ In every mode, a PR comment that @mentions the App's bot — `@<slug>` or
 the canonical `@<slug>[bot]`, matched as a standalone token —
 (re-)starts a review when the commenter is the PR author or the
 repository owner (bot-sender comments are ignored; anyone else gets a
-structured warn). Two review controls gate every trigger path: the per-App
+structured warn). Two operator switches also gate every trigger path: the per-App
 pause (`review_enabled`) gates one App, and the server flag `review_global`
 closes the enqueue face for every App (absent row = enabled). In `saas` the
 console's flags page (`/_internal_admin`) sets `review_global`; `self-hosted`

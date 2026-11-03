@@ -228,6 +228,12 @@ describe("warn event labels (log hygiene 硬化项 3)", () => {
 });
 
 describe("classifyEvent — pull_request whitelist", () => {
+  // Manifest parity: the loops below iterate the production constant, so only
+  // this literal list can catch a member added or dropped from it.
+  test("PULL_REQUEST_ACTIONS is exactly the documented whitelist", () => {
+    expect([...PULL_REQUEST_ACTIONS]).toEqual(["opened", "synchronize", "reopened"]);
+  });
+
   for (const action of PULL_REQUEST_ACTIONS) {
     test(`pull_request.${action} yields a job`, () => {
       const outcome = classifyEvent("pull_request", pullRequestBody(action));
@@ -268,7 +274,7 @@ describe("classifyEvent — pull_request whitelist", () => {
           pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login } },
         }),
       );
-      expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
+      expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
     }
   });
 
@@ -324,7 +330,7 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
           undefined,
           { mode, appSlug: APP_SLUG },
         );
-        expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
+        expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
       });
     }
   }
@@ -465,7 +471,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       undefined,
       EVERY_PUSH,
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
   });
 
   test("bot-authored PR outranks the mention grammar, so an unsynced App gets no mention-miss reason", () => {
@@ -482,7 +488,44 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       undefined,
       { mode: "every_push", appSlug: "" },
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+  });
+
+  test("bot-authored PR outranks the missing-required-fields reject on the comment face", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        installation: null,
+        issue: {
+          number: 42,
+          user: { login: "dependabot[bot]" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+        sender: { type: "User", login: "test-owner" },
+      }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+  });
+
+  test("bot-authored PR outranks the actor allowlist, so no actor_not_allowed warn fires", () => {
+    const log = makeLog();
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        issue: {
+          number: 42,
+          user: { login: "dependabot[bot]" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+        sender: { type: "User", login: "hacker-123" },
+      }),
+      log,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+    expect(log.warn).not.toHaveBeenCalled();
   });
 
   test("human-accounted bot login without the [bot] suffix still triggers on the comment face", () => {
@@ -637,7 +680,10 @@ describe("classifyEvent — bot mention grammar: ASCII-restricted folding (QC F-
   test("a non-ASCII character before `@` is not a login continuation: a literal mention still matches", () => {
     // Boundary characters are read from the ORIGINAL body against the ASCII
     // class — U+0130 is outside [A-Za-z0-9-], so it cannot close the boundary.
-    expect(classifyMention("\u0130 @bot-i please", I_SLUG).kind).toBe("job");
+    expect(classifyMention("\u0130@bot-i please", I_SLUG).kind).toBe("job");
+    // A character that ASCII-folds into a continuation letter when lowercased
+    // (U+212A → k) still must not close the boundary.
+    expect(classifyMention("\u212A@k-app please", K_SLUG).kind).toBe("job");
   });
 });
 
