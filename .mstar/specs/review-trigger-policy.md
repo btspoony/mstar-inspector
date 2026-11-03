@@ -38,7 +38,7 @@ The comment trigger is a **bare mention**: no slash command, no magic wording. `
 | any `pull_request` action whose PR author login ends in `[bot]` (case-insensitive; `dependabot[bot]`, `github-actions[bot]`, another App's `<slug>[bot]`) | ignore | ignore | ignore |
 | any `pull_request` action whose payload carries no author login | ignore | ignore | ignore |
 | `issue_comment.created` (allowed actor, bot mention, on a PR) | enqueue | enqueue | enqueue |
-| `issue_comment.created` (disallowed actor / no mention / not a PR / bot sender / PR opened by a `[bot]` account) | ignore | ignore | ignore |
+| `issue_comment.created` (disallowed actor / no mention / not a PR / bot sender / PR opened by a `[bot]` account / PR author login missing) | ignore | ignore | ignore |
 
 Ignored paths keep today's structured-log discipline; classification never rejects (4xx) an event for policy reasons — reject is reserved for malformed payloads, exactly as today.
 
@@ -72,7 +72,7 @@ Ignored paths keep today's structured-log discipline; classification never rejec
 
 1. Mode matrix (§2.1) is pinned exhaustively by worker classification tests (mode × event × actor).
 2. Mention grammar (§3) is pinned: canonical `[bot]` form, bare-slug form, trailing-boundary rejections (`@{appSlug}-other`, `@{appSlug}bot`), leading-boundary rejection (email-shaped `name@{appSlug}.host`), match at body start/middle/end, multi-App isolation, actor gate, bot-sender guard.
-3. `every_push` default reproduces current behavior byte-for-byte at the classification layer for human-authored PR payloads (diff-to-current pin); the bot-author row is the sole added ignore.
+3. `every_push` default reproduces current behavior byte-for-byte at the classification layer for human-authored PR payloads (diff-to-current pin); the two added `pull_request` ignore rows (bot author, missing author login) and the comment-face bot/missing-author gates are the only divergences.
 4. Body-cap tests cover: truthful header over limit, lying short header with oversized body, headerless chunked oversized body, at-limit body accepted.
 5. Admin-required-input evidence recorded against `docs/deploy.md` § 6 + the deploy workflow's pre-deploy required check and post-deploy assertion.
 6. The `triggered_by` wire union retires `"review_command"`: classification and pipeline tests pin `"issue_comment"` on the mention path and the updated `review_failures` event label.

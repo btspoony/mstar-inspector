@@ -15,6 +15,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
 import {
   BOT_PR_REASON,
+  MISSING_AUTHOR_REASON,
   classifyEvent,
   classifyWebhook,
   payloadMentionsALogin,
@@ -280,16 +281,15 @@ describe("classifyEvent — pull_request whitelist", () => {
   });
 
   test("pull_request without an author login is ignored rather than reviewed", () => {
-    const outcome = classifyEvent(
-      "pull_request",
-      pullRequestBody("opened", {
-        pull_request: { number: 42, head: { sha: HEAD_SHA } },
-      }),
-    );
-    expect(outcome).toEqual({
-      kind: "ignore",
-      reason: "pull request payload carried no author login",
-    });
+    for (const user of [undefined, null, { login: "" }]) {
+      const outcome = classifyEvent(
+        "pull_request",
+        pullRequestBody("opened", {
+          pull_request: user === undefined ? { number: 42, head: { sha: HEAD_SHA } } : { number: 42, head: { sha: HEAD_SHA }, user },
+        }),
+      );
+      expect(outcome).toEqual({ kind: "ignore", reason: MISSING_AUTHOR_REASON });
+    }
   });
 
   test("pull_request with missing required fields is rejected with 400", () => {
@@ -516,6 +516,21 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       { mode: "every_push", appSlug: "" },
     );
     expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
+  });
+
+  test("comment on a PR with no author login is ignored, matching the pull_request face", () => {
+    for (const issue of [
+      { number: 42, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
+      { number: 42, user: null, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
+    ]) {
+      const outcome = classifyEvent(
+        "issue_comment",
+        issueCommentBody({ issue, sender: { type: "User", login: "test-owner" } }),
+        undefined,
+        EVERY_PUSH,
+      );
+      expect(outcome).toEqual({ kind: "ignore", reason: MISSING_AUTHOR_REASON });
+    }
   });
 
   test("human-authored comment with a missing required field still rejects 400", () => {

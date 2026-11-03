@@ -200,9 +200,22 @@ const BOT_LOGIN = /\[bot\]$/i;
 
 export const BOT_PR_REASON = "PR authored by a bot account";
 
-/** GitHub always sends `pull_request.user`; without it we cannot prove the
- * author is human, so the delivery is ignored rather than reviewed. */
-const MISSING_AUTHOR_REASON = "pull request payload carried no author login";
+export const MISSING_AUTHOR_REASON = "pull request payload carried no author login";
+
+/**
+ * Both trigger faces share one author rule: a PR whose author is unknown is
+ * ignored (GitHub always sends the login — a truncated payload cannot prove a
+ * human authored it), and a `[bot]` login is never reviewed.
+ */
+function ignoredForAuthor(login: string | null | undefined): WebhookOutcome | null {
+  if (!login) {
+    return { kind: "ignore", reason: MISSING_AUTHOR_REASON };
+  }
+  if (BOT_LOGIN.test(login)) {
+    return { kind: "ignore", reason: BOT_PR_REASON };
+  }
+  return null;
+}
 
 /** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
 export const WEBHOOK_BODY_LIMIT = 1_000_000;
@@ -580,12 +593,9 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
   }
-  const prAuthor = pull_request?.user?.login;
-  if (!prAuthor) {
-    return { kind: "ignore", reason: MISSING_AUTHOR_REASON };
-  }
-  if (BOT_LOGIN.test(prAuthor)) {
-    return { kind: "ignore", reason: BOT_PR_REASON };
+  const authorIgnore = ignoredForAuthor(pull_request?.user?.login);
+  if (authorIgnore) {
+    return authorIgnore;
   }
   // The install's own account wins: the payload states it, whereas the owner
   // is only the inference a delivery without `installation.account` allows.
@@ -632,8 +642,9 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   if (issue?.pull_request == null) {
     return { kind: "ignore", reason: "comment is not on a pull request thread" };
   }
-  if (BOT_LOGIN.test(issue?.user?.login ?? "")) {
-    return { kind: "ignore", reason: BOT_PR_REASON };
+  const authorIgnore = ignoredForAuthor(issue?.user?.login);
+  if (authorIgnore) {
+    return authorIgnore;
   }
   // Bare mention (spec review-trigger-policy §3): the body must contain the
   // resolved App's `@{appSlug}` as a standalone token — any position, no

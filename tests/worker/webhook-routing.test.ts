@@ -1552,6 +1552,27 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(ledger).toEqual([{ pr_number: 42, state: "open" }]);
   });
 
+  test("bot-authored PR → 2xx ignored, ZERO enqueue, delivery row recorded `ignored`", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      ...PR_PAYLOAD,
+      pull_request: { ...PR_PAYLOAD.pull_request, user: { login: "dependabot[bot]" } },
+    });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0); // the classifier skip reaches the queue
+    const rows = db.raw
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
+    expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
+  });
+
   test("flag read failure on a `job` delivery → 2xx ignored, ZERO enqueue, `paused`, all diagnostics kept", async () => {
     // The read sits before the delivery row, the PR ledger and the
     // last_webhook_at touch, so an unguarded failure would 500 an
