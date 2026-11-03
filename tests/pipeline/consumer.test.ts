@@ -2127,7 +2127,7 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(0);
   });
 
-  // --- supersede skip (migration 0044 / plan 313 AC-1..AC-3, AC-6, AC-7) ----
+  // --- supersede skip (migration 0044; acceptance AC-1..AC-3, AC-6, AC-7) ---
   const OLD_AT = "2026-01-01T00:00:00.000Z";
   const NEW_AT = "2026-01-01T00:05:00.000Z";
   const NEW_SHA = "1111111111111111111111111111111111111111";
@@ -2157,18 +2157,23 @@ describe("createReviewConsumer", () => {
     expect(line!.fields.sandbox_id).toBeUndefined();
   });
 
-  test("the ledger's own sha is never skipped, at an equal or a newer payload stamp (AC-2)", async () => {
-    // Same commit on both sides: this delivery IS the newest one. An equal
-    // stamp (the ledger's own stamp) and a newer payload stamp both stay
-    // reviewable — the skip needs a DIFFERENT sha.
-    for (const payloadHeadAt of [OLD_AT, NEW_AT]) {
+  test("the ledger's own sha is never skipped, whatever the stamps say (AC-2)", async () => {
+    // Same commit on both sides: this delivery IS the newest one, so no stamp
+    // ordering can make it a leftover — only the sha term holds it back. The
+    // third pair (ledger newer) isolates exactly that term: the stamp test
+    // alone would skip it.
+    for (const [ledgerAt, payloadAt] of [
+      [OLD_AT, OLD_AT],
+      [OLD_AT, NEW_AT],
+      [NEW_AT, OLD_AT],
+    ] as const) {
       reset();
       runnerStdout = JSON.stringify(VALID_OUTPUT);
       const db = await createSeededTestD1();
-      await seedPrHead(db, { headSha: SHA, headAt: OLD_AT });
+      await seedPrHead(db, { headSha: SHA, headAt: ledgerAt });
       const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-      await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: payloadHeadAt })));
+      await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: payloadAt })));
 
       expect(sandboxCalls.length).toBeGreaterThan(0);
       expect(reviewCount(db)).toBe(1);
@@ -2176,11 +2181,27 @@ describe("createReviewConsumer", () => {
     }
   });
 
-  test("an out-of-order older delivery is reviewed, never skipped (AC-3)", async () => {
+  test("a different sha at the ledger's own stamp is reviewed, not skipped (AC-3)", async () => {
+    // `>` and not `>=`: a delivery stamped at the same instant as the ledger's
+    // head is not a leftover, so relaxing the comparison would lose it.
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The ledger already advanced BEFORE this older delivery (older stamp).
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: NEW_AT })));
+
+    expect(sandboxCalls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("an older ledger stamp never blocks a newer payload stamp (AC-3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The ledger's head is a different commit stamped BEFORE this delivery.
     await seedPrHead(db, { headSha: NEW_SHA, headAt: OLD_AT });
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 

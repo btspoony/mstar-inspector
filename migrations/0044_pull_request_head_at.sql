@@ -8,9 +8,11 @@
 -- reviews an already-superseded commit or never reviews the newest one.
 --
 -- `head_at` stores the RFC 3339 `pull_request.updated_at` of the delivery that
--- last advanced `head_sha`, in the payload's own spelling (GitHub sends
--- `YYYY-MM-DDTHH:MM:SSZ`, so text order equals time order and the pair is
--- comparable as text). It is written ONLY together with a new `head_sha`, so
+-- last advanced `head_sha`, rewritten to the canonical UTC ISO-8601 spelling
+-- (`new Date(v).toISOString()`) on BOTH the job payload and this ledger — a
+-- numeric-offset stamp does not sort correctly as text against `Z`, so the
+-- one spelling is what makes text order equal time order and the pair
+-- comparable as text. It is written ONLY together with a new `head_sha`, so
 -- the column never names a stamp the stored sha did not arrive with.
 --
 -- NULL = unknown (a row written before this migration, or a delivery that

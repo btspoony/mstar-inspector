@@ -2234,6 +2234,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // assertAppConfigComplete / admission, so a storage fault can only add
     // this one read, never a side effect.
     //
+    // The skip assumes the delivery that advanced the ledger also enqueued
+    // its own job. That holds for the pull_request route, where the same
+    // delivery writes the ledger and the queue message; it does NOT hold when
+    // that job never runs (manual trigger mode, a paused App, a failed
+    // enqueue) — the skipped commit is then reviewed by nobody. The info line
+    // below is the only trace, so the assumption stays observable rather than
+    // silently assumed.
+    //
     // `issue_comment` jobs and pre-migration messages carry no stamp and take
     // today's path untouched — not even this read.
     const payloadHeadSha = payload.head_sha;

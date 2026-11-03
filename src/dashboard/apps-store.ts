@@ -402,6 +402,10 @@ export type UpsertPullRequestInput = {
    * GitHub's clock rather than our arrival clock. Omitted/null → now.
    * It is ALSO the `head_at` watermark: the stamp recorded for `headSha` when
    * this delivery supplies one (migration 0044).
+   *
+   * Callers MUST pass the canonical UTC ISO-8601 spelling
+   * (`new Date(v).toISOString()`): it is bound verbatim and compared as text,
+   * so a numeric-offset spelling would sort wrongly against the stored `Z`.
    */
   updatedAt?: string | null;
 };
