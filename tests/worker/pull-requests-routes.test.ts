@@ -366,20 +366,23 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
   test("an out-of-bounds limit is clamped into [1, 50], not rejected", async () => {
     const db = await fixture();
     seedInstallation(db);
-    seedReviews(db, 12);
+    // More than the maximum page size, so the ceiling is observable: accepting
+    // or ignoring a limit of 51 would answer with 51 rows.
+    seedReviews(db, 51);
     // limit=0 clamps up to 1: a one-row page, not a 400.
     const floorLimit = await getFace(`${sectionPath("reviews")}?limit=0`, db);
     expect(floorLimit.status).toBe(200);
     const floored = (await floorLimit.json()) as { items: unknown[]; total: number };
     expect(floored.items).toHaveLength(1);
-    expect(floored.total).toBe(12);
+    expect(floored.total).toBe(51);
 
-    // limit=51 clamps down to 50: the whole 12-row corpus comes back on one page.
+    // limit=51 clamps down to 50: one full maximum page, and the total stays the
+    // unpaged count of the whole corpus.
     const ceilingLimit = await getFace(`${sectionPath("reviews")}?limit=51`, db);
     expect(ceilingLimit.status).toBe(200);
     const ceilinged = (await ceilingLimit.json()) as { items: unknown[]; total: number };
-    expect(ceilinged.items).toHaveLength(12);
-    expect(ceilinged.total).toBe(12);
+    expect(ceilinged.items).toHaveLength(50);
+    expect(ceilinged.total).toBe(51);
   });
 
   test("an unknown PR number → 404", async () => {
