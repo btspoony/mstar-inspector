@@ -22,7 +22,7 @@ findings 落入 D1 供后续分析。
 - **隔离执行** —— 每次审查运行在一次性 Cloudflare Sandbox 容器中（clone → review → 销毁），镜像内零密钥
 - **结构化结果** —— 审查产出 `mstar.review/v1` envelope（verdict + 分级 findings）持久化到 D1，为后续去重、复现统计和健康分析提供数据层
 - **findings 生命周期跨轮保留** —— 未解决的 findings 跨轮存续：每轮将它们对照当前代码与讨论重新验证，结果呈现在同一条总体评论中，且只自动 resolve 那些 Inspector 能证明属于自己、且被积极修复的 review thread（finding 的 *addressed* 处置从不等同于 *resolved* 的 GitHub thread）
-- **按 App 的触发模式** —— 每个 App 在 settings 页选择审查何时自动启动：`open`（仅首次打开）、`every_push`（默认——打开、push、重新打开）或 `manual`（从不自动审查）；任何模式下，PR 作者或仓库所有者在 PR 评论中 @提及 App 的 bot（`@your-app-slug[bot]`）即可（重新）启动一次审查
+- **按 App 的触发模式** —— 每个 App 在 settings 页选择审查何时自动启动：`open`（仅首次打开）、`every_push`（默认——打开、push、重新打开）或 `manual`（从不自动审查）；任何模式下，PR 作者或仓库所有者在 PR 评论中 @提及 App 的 bot（`@your-app-slug[bot]`）即可（重新）启动一次审查；由 bot 账号（登录名以 `[bot]` 结尾）创建的 PR 两种触发面都不会审查
 - **设计上 fail-closed** —— 暂停的 App 不再启动新的审查（包括其模型运行）、发布与行内评论创建；只有有界的[恢复例外](docs/deploy.md#lifecycle-recovery-7111)可以完成已授权的工作，且仅限仍处于活跃状态的 App。每个 App 必须自带 provider key 与模型链：配置缺失的 App 审查会大声失败，绝不动用别人的凭据
 
 ## 架构

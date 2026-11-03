@@ -1380,9 +1380,9 @@ the review enqueue, not the bookkeeping). The `installation` branch reaches the
 write on every whitelisted install action and returns without enqueuing; a
 `job` delivery reaches it after the `ignore` return, so **ignored deliveries do
 not reach the write** — a non-whitelisted action, a `manual`-mode App's
-`pull_request`, or a comment that mentions no bot never records a login. A row
-accordingly stays `未知` until the first job delivery or install event for that
-App.
+`pull_request`, a delivery for a PR opened by a bot account (either face), or a
+comment that mentions no bot never records a login. A row accordingly stays
+`未知` until the first job delivery or install event for that App.
 
 > **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
 > the recovery lanes are covered by the implementation's scoped behavioral
@@ -1641,7 +1641,8 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    on an installed repo and
    confirm the review comment lands (the App's trigger mode must cover the
    event — the default `every_push` auto-triggers on open/update; from any
-   mode, a PR comment @mentioning the App's bot forces a run —
+   mode, a PR comment @mentioning the App's bot forces a run, unless the PR
+   was opened by a bot account —
    § Review triggers (per App)). To pin per-role overrides end-to-end,
    first configure a seat chain on the dashboard (a named chain in
    `app_model_chains` plus the seat's reference row in
@@ -1889,7 +1890,8 @@ column.
    and the `review_global` flag, § Secrets and vars inventory), open or update
    a PR on an installed
    repo of that App (default `every_push` mode auto-triggers; from any
-   mode, a PR comment @mentioning the App's bot works too —
+   mode, a PR comment @mentioning the App's bot works too — but a bot-authored
+   PR never triggers —
    § Review triggers (per App)).
 3. **Assert the column** — the review lands and the row records the chain
    head:
@@ -2247,16 +2249,28 @@ column (migration `0022`), set on the App's dashboard Settings page
 alongside the pause switch:
 
 - `every_push` (default) — review on `opened`, `synchronize` and
-  `reopened` (the historical behavior, preserved exactly).
+  `reopened` (the historical behavior, preserved exactly for human-authored
+  PRs — a bot-authored PR is skipped, see below).
 - `open` — the PR's first `opened` event only; pushes and reopens never
   auto-trigger.
 - `manual` — never auto-reviews.
+
+A PR opened by a bot account is **never** reviewed, on either face
+(auto trigger and bot mention): the rule is the login suffix, so
+`dependabot[bot]`, `github-actions[bot]` and another App's own
+`<slug>[bot]` all qualify (case-insensitive match). Only that suffix is
+matched — a login without it, whatever the account type, still triggers.
+
+A delivery whose payload carries no PR author login is also skipped (fail
+closed: the author cannot be proven human). Both skips are visible as one
+info-level log line with `reason: bot_author` or `reason: missing_author`;
+grep those labels when a review does not start.
 
 In every mode, a PR comment that @mentions the App's bot — `@<slug>` or
 the canonical `@<slug>[bot]`, matched as a standalone token —
 (re-)starts a review when the commenter is the PR author or the
 repository owner (bot-sender comments are ignored; anyone else gets a
-structured warn). Two review controls gate every trigger path: the per-App
+structured warn). Two operator switches also gate every trigger path: the per-App
 pause (`review_enabled`) gates one App, and the server flag `review_global`
 closes the enqueue face for every App (absent row = enabled). In `saas` the
 console's flags page (`/_internal_admin`) sets `review_global`; `self-hosted`

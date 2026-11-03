@@ -253,7 +253,7 @@ const PR_PAYLOAD = {
   installation: { id: 123 },
   // `state` is what the PR ledger (0039) requires of the payload: a
   // production `pull_request` delivery always carries it.
-  pull_request: { number: 42, state: "open", head: { sha: "abc123" } },
+  pull_request: { number: 42, state: "open", head: { sha: "abc123" }, user: { login: "alice" } },
   repository: { name: "test-repo", owner: { login: "test-owner" } },
 };
 
@@ -859,6 +859,78 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(lines.some((entry) => entry.includes("mention_unresolved"))).toBe(false);
   });
 
+  test("a mention on a [bot]-authored PR on an unsynced App stays silent (no mention_unresolved)", async () => {
+    // The author guard runs before the mention grammar, so the classifier
+    // reports the author reason and the route's warn gate cannot fire.
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 123 },
+      comment: { body: "@app-x please review" },
+      issue: { number: 7, pull_request: {}, user: { login: "dependabot[bot]" } },
+      repository: { name: "test-repo", owner: { login: "alice" } },
+      sender: { type: "User", login: "alice" },
+    });
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
+        env,
+      );
+    } finally {
+      stop();
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((entry) => entry.includes("mention_unresolved"))).toBe(false);
+  });
+
+  test("a mention on a plain issue (no PR thread) stays silent (no mention_unresolved)", async () => {
+    // The not-a-PR gate precedes the mention grammar: an unsynced App's slug
+    // is never consulted, so the warn cannot fire on a non-PR thread.
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 123 },
+      comment: { body: "@app-x please review" },
+      issue: { number: 7, user: { login: "alice" } },
+      repository: { name: "test-repo", owner: { login: "alice" } },
+      sender: { type: "User", login: "alice" },
+    });
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
+        env,
+      );
+    } finally {
+      stop();
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((entry) => entry.includes("mention_unresolved"))).toBe(false);
+  });
+
   test("a sibling App's mention does not trigger this App (GitHub-slug-keyed matching)", async () => {
     // Negative control for the `mention_unresolved` warn: THIS App IS synced, so
     // a mention aimed at `@app-y` is an ordinary ignore — and must stay silent.
@@ -1009,7 +1081,7 @@ describe("installations upsert wiring", () => {
 
     // Different PR/sha → a different idempotency key, so delivery 2 enqueues
     // (and therefore reaches the touch) instead of being KV-skipped.
-    const body2 = JSON.stringify({ ...PR_PAYLOAD, number: 43, pull_request: { number: 43, head: { sha: "def456" } } });
+    const body2 = JSON.stringify({ ...PR_PAYLOAD, number: 43, pull_request: { number: 43, head: { sha: "def456" }, user: { login: "alice" } } });
     const res2 = await postWebhook(
       "/webhook/default/app-x",
       body2,
@@ -1047,7 +1119,7 @@ describe("installations upsert wiring", () => {
     const body = JSON.stringify({
       ...PR_PAYLOAD,
       number: 43,
-      pull_request: { number: 43, state: "open", head: { sha: "def456" } },
+      pull_request: { number: 43, state: "open", head: { sha: "def456" }, user: { login: "alice" } },
       installation: { id: 123, account: { login: "octo-org" } },
     });
     const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
@@ -1550,6 +1622,58 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
       .query("SELECT pr_number, state FROM pull_requests WHERE app_id = ?")
       .all(appRow.id) as Array<{ pr_number: number; state: string }>;
     expect(ledger).toEqual([{ pr_number: 42, state: "open" }]);
+  });
+
+  test("bot-authored PR → 2xx ignored, ZERO enqueue, delivery row recorded `ignored`", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      ...PR_PAYLOAD,
+      pull_request: { ...PR_PAYLOAD.pull_request, user: { login: "dependabot[bot]" } },
+    });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0); // the classifier skip reaches the queue
+    const rows = db.raw
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
+    expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
+    // The PR ledger is written before the ignore return: a bot-authored PR
+    // must still reach it, or the per-App PR surface goes blind for them.
+    const ledger = db.raw
+      .query("SELECT pr_number, state FROM pull_requests WHERE app_id = ?")
+      .all(appRow.id) as Array<{ pr_number: number; state: string }>;
+    expect(ledger).toEqual([{ pr_number: 42, state: "open" }]);
+  });
+
+  test("malformed issue_comment (no installation.id) → 400, delivery row rejected", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      action: "created",
+      installation: null,
+      comment: { body: "@app-x please review" },
+      issue: { number: 7, user: { login: "alice" } },
+      repository: { name: "test-repo", owner: { login: "alice" } },
+      sender: { type: "User", login: "alice" },
+    });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body, "issue_comment"), env);
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe("issue_comment payload missing required fields");
+    expect(sent).toHaveLength(0);
+    const rows = db.raw
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
+    expect(rows).toEqual([{ event_name: "issue_comment", outcome: "rejected", status_code: 400 }]);
   });
 
   test("flag read failure on a `job` delivery → 2xx ignored, ZERO enqueue, `paused`, all diagnostics kept", async () => {

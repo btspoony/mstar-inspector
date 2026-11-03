@@ -248,7 +248,7 @@ const PR_PAYLOAD = {
   action: "opened",
   number: 42,
   installation: { id: 123 },
-  pull_request: { number: 42, head: { sha: "abc123" } },
+  pull_request: { number: 42, head: { sha: "abc123" }, user: { login: "alice" } },
   repository: { name: "test-repo", owner: { login: "test-owner" } },
 };
 
