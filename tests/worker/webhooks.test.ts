@@ -272,6 +272,22 @@ describe("classifyEvent — pull_request whitelist", () => {
     expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
   });
 
+  test("bot-authored PR skip logs an info line naming the reason", () => {
+    const log = makeLog();
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("opened", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+      }),
+      log,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
+    expect(log.info).toHaveBeenCalledWith(
+      { event: "pull_request", reason: BOT_PR_REASON, detail: "author=dependabot[bot]" },
+      "review skipped — PR author is not reviewable",
+    );
+  });
+
   test("pull_request without an author login is ignored rather than reviewed", () => {
     for (const user of [undefined, null, { login: "" }]) {
       const outcome = classifyEvent(
@@ -323,6 +339,29 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
     }
   }
 
+  // Whitelist and reject checks precede the mode gate, so these two cases are
+  // mode-invariant by construction and are pinned once, outside the loop.
+  test("pull_request.closed by a [bot] author → the action reason (whitelist runs first)", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("closed", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+      }),
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "pull_request action closed is not whitelisted" });
+  });
+
+  test("malformed payload by a [bot] author still rejects 400 (reject outranks the bot guard)", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("opened", {
+        installation: null,
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+      }),
+    );
+    expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
+  });
+
   // §2.1 bot-author row: every whitelisted action is ignored in EVERY mode,
   // and the bot guard outranks the mode gate (`open` × `opened` would
   // otherwise enqueue). A non-whitelisted action keeps the action reason
@@ -351,34 +390,11 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
       });
       expect(outcome).toEqual({ kind: "ignore", reason: "pull_request action closed is not whitelisted" });
     });
-    test(`${mode} × pull_request.closed by a [bot] author → the action reason (whitelist runs first)`, () => {
-      const outcome = classifyEvent(
-        "pull_request",
-        pullRequestBody("closed", {
-          pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
-        }),
-        undefined,
-        { mode, appSlug: APP_SLUG },
-      );
-      expect(outcome).toEqual({ kind: "ignore", reason: "pull_request action closed is not whitelisted" });
-    });
     test(`${mode} × malformed payload still rejects 400 (reject set is mode-invariant)`, () => {
       const outcome = classifyEvent("pull_request", pullRequestBody("opened", { installation: null }), undefined, {
         mode,
         appSlug: APP_SLUG,
       });
-      expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
-    });
-    test(`${mode} × malformed payload by a [bot] author still rejects 400 (reject outranks the bot guard)`, () => {
-      const outcome = classifyEvent(
-        "pull_request",
-        pullRequestBody("opened", {
-          installation: null,
-          pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
-        }),
-        undefined,
-        { mode, appSlug: APP_SLUG },
-      );
       expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
     });
   }
@@ -461,7 +477,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     expect(outcome).toEqual({ kind: "ignore", reason: "comment body does not mention the App bot" });
   });
 
-  test("a bare `@` with no slug context (omitted trigger) never matches", () => {
+  test("an omitted trigger context (empty slug) never matches a full mention", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody({ comment: { body: `@${APP_SLUG}` } }));
     expect(outcome).toEqual({ kind: "ignore", reason: "comment body does not mention the App bot" });
   });
@@ -489,23 +505,6 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       }),
       undefined,
       EVERY_PUSH,
-    );
-    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
-  });
-
-  test("bot-authored PR outranks the mention grammar", () => {
-    const outcome = classifyEvent(
-      "issue_comment",
-      issueCommentBody({
-        issue: {
-          number: 42,
-          user: { login: "dependabot[bot]" },
-          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
-        },
-        sender: { type: "User", login: "test-owner" },
-      }),
-      undefined,
-      { mode: "every_push", appSlug: "" },
     );
     expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
   });

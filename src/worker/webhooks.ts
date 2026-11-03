@@ -207,16 +207,20 @@ export const MISSING_AUTHOR_REASON = "payload carried no PR author login";
 /**
  * Both trigger faces share one author rule: a PR whose author is unknown is
  * ignored (GitHub always sends the login — a truncated payload cannot prove a
- * human authored it), and a `[bot]` login is never reviewed.
+ * human authored it), and a `[bot]` login is never reviewed. Info-level, not
+ * warn: a bot PR is a normal skip, and the delivery row still records it.
  */
-function ignoredForAuthor(login: string | null | undefined): WebhookOutcome | null {
-  if (!login) {
-    return { kind: "ignore", reason: MISSING_AUTHOR_REASON };
+function ignoredForAuthor(
+  login: string | null | undefined,
+  event: "pull_request" | "issue_comment",
+  log?: HandlerLog,
+): WebhookOutcome | null {
+  const reason = !login ? MISSING_AUTHOR_REASON : BOT_LOGIN.test(login) ? BOT_PR_REASON : null;
+  if (reason === null) {
+    return null;
   }
-  if (BOT_LOGIN.test(login)) {
-    return { kind: "ignore", reason: BOT_PR_REASON };
-  }
-  return null;
+  log?.info({ event, reason, detail: `author=${login ?? "null"}` }, "review skipped — PR author is not reviewable");
+  return { kind: "ignore", reason };
 }
 
 /** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
@@ -529,7 +533,7 @@ export function classifyEvent(
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }
   if (eventName === "pull_request") {
-    return classifyPullRequest(rawBody, trigger.mode);
+    return classifyPullRequest(rawBody, trigger.mode, log);
   }
   if (eventName === "issue_comment") {
     return classifyIssueComment(rawBody, log, trigger.appSlug);
@@ -574,7 +578,7 @@ function classifyInstallation(rawBody: string): WebhookOutcome {
   };
 }
 
-function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookOutcome {
+function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode, log?: HandlerLog): WebhookOutcome {
   const parsed = parseBody(rawBody);
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
@@ -597,7 +601,7 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
   }
-  const authorIgnore = ignoredForAuthor(pull_request?.user?.login);
+  const authorIgnore = ignoredForAuthor(pull_request?.user?.login, "pull_request", log);
   if (authorIgnore) {
     return authorIgnore;
   }
@@ -655,7 +659,7 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   if (issue?.pull_request == null) {
     return { kind: "ignore", reason: "comment is not on a pull request thread" };
   }
-  const authorIgnore = ignoredForAuthor(issue?.user?.login);
+  const authorIgnore = ignoredForAuthor(issue?.user?.login, "issue_comment", log);
   if (authorIgnore) {
     return authorIgnore;
   }
