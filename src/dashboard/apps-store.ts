@@ -320,7 +320,7 @@ const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'reject
 export const EVENT_NAME_MAX_LENGTH = 64;
 
 /**
- * Persist bound for the source repository name (`owner/name`, migration 0040)
+ * Persist bound for the source repository name (`owner/name`, migration 0043)
  * — same rationale as EVENT_NAME_MAX_LENGTH: `repository.full_name` rides in
  * the body, which is attacker-controlled on the unauthenticated reject path,
  * and the DDL has no length constraint. GitHub's own ceilings (39-char owner +
@@ -378,7 +378,7 @@ export type RecordDeliveryInput = {
   /** The classifier's status for rejected; NULL for every other outcome. */
   statusCode: number | null;
   /**
-   * The delivery's source repository (`owner/name`, migration 0040) — NULL
+   * The delivery's source repository (`owner/name`, migration 0043) — NULL
    * when the payload carried no `repository` (an install / bypass event).
    * Truncated to REPOSITORY_FULL_NAME_MAX_LENGTH (160) chars at persist — the
    * value is attacker-influenced on the unauthenticated reject path.
@@ -393,7 +393,7 @@ export type WebhookDeliveryRow = {
   event_name: string | null;
   outcome: DeliveryOutcome;
   status_code: number | null;
-  /** `owner/name` of the source repo (0040); NULL = unknown source. */
+  /** `owner/name` of the source repo (0043); NULL = unknown source. */
   repository_full_name: string | null;
   created_at: string;
 };

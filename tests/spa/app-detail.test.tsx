@@ -257,7 +257,7 @@ describe("tab shell rendering (static SSR)", () => {
     expect(panelTag).toContain('data-state="active"');
     expect(installed).toContain(t("en", "settings.installationsAccount"));
     expect(installed).toContain("acme");
-    // The delivery line leads with its repo; a pre-0040 row (NULL source)
+    // The delivery line leads with its repo; a pre-0043 row (NULL source)
     // falls back to the unknown-source label rather than a blank line.
     expect(installed).toContain("acme/web");
     expect(installed).toContain(t("en", "settings.unknownSource"));

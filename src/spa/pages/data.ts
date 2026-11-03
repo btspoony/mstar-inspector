@@ -416,7 +416,7 @@ type SettingsHealth = {
     event_name: string | null;
     outcome: string;
     status_code: number | null;
-    /** `owner/name` of the source repo (migration 0040); NULL = unknown source. */
+    /** `owner/name` of the source repo (migration 0043); NULL = unknown source. */
     repository_full_name: string | null;
     created_at: string;
   }>;

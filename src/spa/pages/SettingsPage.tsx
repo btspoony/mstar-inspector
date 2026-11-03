@@ -717,7 +717,7 @@ export function AppInfoSection({
  * `installation_id` and `seen_at` — the payload carries no per-installation
  * repository count, so no repository column exists (dashboard surface pass,
  * 2026-11-01; compass D13). Each delivery line leads with its source
- * repository (migration 0040), or the unknown-source label for rows written
+ * repository (migration 0043), or the unknown-source label for rows written
  * before it.
  */
 export function InstallationsSection({

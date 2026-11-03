@@ -170,7 +170,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
   });
 });
 
-describe("webhookRepositoryFullName (delivery source repo, migration 0040)", () => {
+describe("webhookRepositoryFullName (delivery source repo, migration 0043)", () => {
   test("full_name wins, owner/name is the fallback, and a body with no source is null — never throws", () => {
     expect(
       webhookRepositoryFullName(
@@ -431,7 +431,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       "0038_webhook_path_drop.sql",
     ];
     if (withDeliveries) {
-      names.push("0011_webhook_deliveries.sql", "0040_webhook_delivery_repository.sql");
+      names.push("0011_webhook_deliveries.sql", "0043_webhook_delivery_repository.sql");
     }
     for (const name of names) {
       db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));

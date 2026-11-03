@@ -1,4 +1,4 @@
--- 0040_webhook_delivery_repository.sql — the delivery's source repository.
+-- 0043_webhook_delivery_repository.sql — the delivery's source repository.
 --
 -- The diagnostics face ("which repo did this delivery come from?") could not
 -- be answered from a `webhook_deliveries` row: the payload's `repository` was

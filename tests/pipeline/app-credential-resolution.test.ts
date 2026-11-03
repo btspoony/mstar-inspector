@@ -107,8 +107,11 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0024_provider_multi_key.sql",
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
+    // 0011: the delivery table — 0043 adds a column to it, so the fixture
+    // must carry it before the derived tail runs.
+    "0011_webhook_deliveries.sql",
     "0036_app_identity.sql",
-    // Every later migration, derived from the directory (0040/0041 included):
+    // Every later migration, derived from the directory (0040–0043 included):
     // the consumer's per-message admission reads the runtime caps and writes
     // the `review_inflight` row on EVERY admitted message.
     ...MIGRATIONS_AFTER_0036,

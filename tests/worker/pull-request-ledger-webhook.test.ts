@@ -40,9 +40,9 @@ function createMigratedD1(): TestD1 {
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
     "0039_pull_requests.sql",
-    // 0040: the delivery row's source repository — recordDelivery names the
+    // 0043: the delivery row's source repository — recordDelivery names the
     // column, so a fixture without it drops every delivery row.
-    "0040_webhook_delivery_repository.sql",
+    "0043_webhook_delivery_repository.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

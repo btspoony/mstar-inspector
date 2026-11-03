@@ -273,7 +273,7 @@ describe("members/apps/settings parsers", () => {
       model_chains: [],
       custom_providers: [],
       installations: [],
-      // The delivery rows carry the source repository (migration 0040); the
+      // The delivery rows carry the source repository (migration 0043); the
       // parse stays array-level and keeps the rows verbatim.
       deliveries: [delivery],
       configured_providers: [],

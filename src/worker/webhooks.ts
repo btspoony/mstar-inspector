@@ -787,7 +787,7 @@ export function pullRequestRecord(rawBody: string): {
 /**
  * The delivery's SOURCE repository (`owner/name`) — the diagnostics face's
  * "which repo did this delivery come from?" answer, which the delivery row
- * could not give before migration 0040. `repository.full_name` wins when
+ * could not give before migration 0043. `repository.full_name` wins when
  * GitHub states it; the same block's `owner.login` + `name` pair is the
  * fallback. `null` when the body is not JSON, carries no `repository`, or
  * states neither form.
