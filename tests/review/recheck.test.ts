@@ -204,7 +204,8 @@ describe("recheckAssignment", () => {
     expect(assignment).toContain("verified-fix");
     expect(assignment).toContain("non-fix-dismissal");
     expect(assignment).toContain("unverifiable");
-    expect(assignment).toContain("byte-equal");
+    // The seat must copy the cited catalog lines, not retype them.
+    expect(assignment).toContain("Copy `quote` verbatim");
     // The seat never sees the current findings — it must not invent indexes.
     expect(assignment).toContain("emit []");
   });

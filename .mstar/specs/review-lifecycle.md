@@ -238,20 +238,28 @@ export type RecheckInput = {
 };
 export type RecheckDoc = { schema: 'mstar.recheck/v1'; headSha: string; results: Assessment[] };
 export const RECHECK_OUTPUT_PATH = '/tmp/mstar-recheck.json';
+export const RECHECK_STATUS_PATH = '/tmp/mstar-recheck-status.json';
+export type RecheckStatus = {
+  schema: 'mstar.recheck-status/v1'; headSha: string;
+  outcome: 'ok' | 'skipped' | 'failed';
+  rejected: number; reason: string | null; error: string | null;
+};
 export const RECHECK_MAX_TARGETS = 25;
 export const ASSESSMENT_TARGET_CAP = 25;
 export const RECHECK_MAX_RUNTIME_MS = 180_000;
 export const RECHECK_MIN_REMAINING_MS = 30_000;
 export const RECHECK_FILE_MAX_BYTES = 262_144;
+export type RecheckRowRejection = { rowId: string | null; index: number; error: string };
 export function validateRecheckDoc(value: unknown, input: RecheckInput):
-  { ok: true; doc: RecheckDoc } | { ok: false; error: string };
+  | { ok: true; doc: RecheckDoc; rejected: RecheckRowRejection[] }
+  | { ok: false; error: string };
 ```
 
 **Trusted evidence catalog:** Worker-controlled capture, never model output, assigns slice IDs to the actual unified diff and immutable blobs for the reviewed head/base. Verify fetched PR head before/after diff capture equals checkout SHA; reject changed snapshots. `current-code` cites exact contiguous new-side lines within a real hunk and byte-equal content at that SHA. `removed-code` cites exact old-side lines intersecting the original finding range, with authenticated complete tree/blob evidence that the file or relevant code was removed; `replaced-code` cites the replaced old range plus its current hunk. Deleted-file evidence uses the old path/range and a complete head tree proving absence, not changedPaths membership or an ambiguous HTTP 404. An absent file needs no fabricated positive current line. Missing blobs, truncated patches/tree, binary files, unmatched original range or unsupported structural proof produce no eligible slice. The read-only model supplies the semantic explanation tying the change to the original bug; the validator proves location/content, not mathematical correctness of that explanation.
 
 The catalog is built with trusted git/object reads of pinned SHAs, not arbitrary model shell commands. Diff capture plus catalog is bounded to 256 KiB; at most 4 slices per target, 80 lines/8 KiB per slice. Unsupported/oversized evidence is incomplete, not silently complete. Original finding text is the existing published/clamped content, never reduced to a title; input cap 512 KiB, oversized whole targets excluded with coverage rather than silently truncating their concern. No arbitrary filesystem path interpolation; reuse ShellCommand allowlisting/base64 transport and pin object refs.
 
-**Validation:** exact schema/HEAD, strict object shape and closed enums; at most 25 results; unique row IDs contained in input; no remote IDs in output. Addressed requires `verified-fix`, an eligible complete catalog slice, integer ordered range entirely inside the appropriate old/new hunk, exact quote match (1–4096 chars) and nonblank explanation ≤1200 chars. Removed/replaced proof must intersect the original concern's old range and demonstrate the relevant structural change; renamed code alone is not proof of removal. Dismissed requires non-fix rationale (`explanation` via evidence when available, or the original discussion in input); it never resolves. `relatedCurrentFindingIndexes` are validated against the final current envelope by the consumer, not blindly trusted. Unverifiable may have no evidence. Duplicate/foreign/stale/malformed documents fail closed as a whole; omitted selected rows become unverifiable. Runner and Worker both validate; Worker uses its own retained input/catalog, not a returned model echo. The final engine envelope remains the independent authority.
+**Validation:** two levels. Document-level distrust fails the whole document: exact schema/HEAD, a strict `{schema, headSha, results}` shape, `results` an array of at most 25 entries, no remote IDs in output, every row ID contained in the input targets, and no duplicate row ID. A row-level content fault drops only that row: closed enums, disposition/reason pairing, evidence shape, `relatedCurrentFindingIndexes` and Addressed proof fail the row alone, so the row lands in `rejected` and the consumer surfaces it as `unverifiable/invalid-output` while the surviving rows are accepted. Addressed requires `verified-fix`, an eligible complete catalog slice, integer ordered range entirely inside the appropriate old/new hunk, quote equality after normalized comparison (CRLF/CR→LF, per-line trailing whitespace stripped, one trailing newline dropped; 1–4096 chars) and nonblank explanation ≤1200 chars; every other eligibility rule is unchanged. Removed/replaced proof must intersect the original concern's old range and demonstrate the relevant structural change; renamed code alone is not proof of removal. Dismissed requires non-fix rationale (`explanation` via evidence when available, or the original discussion in input); it never resolves. `relatedCurrentFindingIndexes` are validated against the final current envelope by the consumer, not blindly trusted. Unverifiable may have no evidence. Duplicate/foreign row IDs and stale documents fail closed as a whole; a row dropped on its own content becomes `invalid-output`, and omitted selected rows become unverifiable. Runner and Worker both validate; Worker uses its own retained input/catalog, not a returned model echo. The final engine envelope remains the independent authority.
 
 ### 7.4 Evidence, conflict and coverage decisions
 
@@ -421,6 +429,8 @@ export function recheckBudget(outerDeadlineMs: number, nowMs: number): number; /
 ```
 
 Runner stdout remains envelope JSON only, exit codes unchanged. Optional `--recheck-out` emits the separate validated JSON file; no targets/invalid output emits no file. Worker reads it through an audited fixed-path bounded read (262144 bytes plus overflow detection), not arbitrary model file paths. Existing callers/runtime doubles unwrap `envelope`; no envelope field/category/hint overloading.
+
+**Status document:** the seat writes `mstar.recheck-status/v1` (same 262144-byte bounded read) on every exit path — `ok` with the counted `rejected` rows, `skipped` when the budget left no room to start, or `failed` carrying the bounded `reason`/`error` (500 chars) — so a round that produced no usable document is still attributable in D1 without container stderr. The Worker consumes it next to the document: an absent or foreign-schema/HEAD status attributes nothing, and a missing or failed document records a `review_failures` row with `stage: recheck`.
 
 ### 7.9 App-owned Check attempt fencing and conclusions
 
