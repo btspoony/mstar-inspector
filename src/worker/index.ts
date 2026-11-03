@@ -110,15 +110,21 @@ function webhookInfo(event: string, detail: string, msg: string): void {
  * the (appId, installationId) row's `account_login` / `seen_at`, and on any
  * store failure log the one structured warn and carry on. It never throws —
  * bookkeeping must not change the webhook response or the enqueue.
+ *
+ * `authoritative` says which source the login came from: an install event
+ * states the installation's own account (overwrites any stored login), while
+ * a review delivery only infers it from `repository.owner.login` (fills an
+ * empty column, never replaces a value).
  */
 async function recordInstallation(
   appsStore: ReturnType<typeof createAppsStore>,
   appId: string,
   installationId: number,
   accountLogin: string | null,
+  authoritative: boolean,
 ): Promise<void> {
   try {
-    await appsStore.upsertInstallation({ appId, installationId, accountLogin });
+    await appsStore.upsertInstallation({ appId, installationId, accountLogin, authoritative });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     webhookWarn(
@@ -209,15 +215,20 @@ app.route("/dashboard", dashboardApp);
  *
  * Install bookkeeping: a classified job payload always
  * carries `installation_id`, so the accepted path runs an `app_installations`
- * seen_at upsert (lock L1 store) that also refreshes `account_login` from
+ * seen_at upsert that also records `account_login` from
  * `outcome.installationAccount` — the installing account the delivery states,
- * with `repository.owner.login` only as the payload-missing fallback. That
- * write runs BEFORE the pause gate, the global flag gate and the enqueue,
- * because those three decide only the ENQUEUE face: a paused App or a disabled
- * flag must still learn its installing account. An `installation` delivery
- * (`installation.created` / `new_permissions_accepted`) records the same row
- * before answering `accepted`. Both are best-effort: a failure logs one
- * structured warn and never throws, blocks the enqueue, or fails the webhook.
+ * with `repository.owner.login` only as the payload-missing fallback. A review
+ * delivery's value is INFERRED (`accountAuthoritative: false`), so it only
+ * fills an empty login and never replaces a stored one; an `installation`
+ * delivery (`installation.created` / `new_permissions_accepted`) states the
+ * installation's own account and overwrites (`accountAuthoritative: true`).
+ * The job write runs BEFORE the pause gate, the global flag gate and the
+ * enqueue, because those three decide only the ENQUEUE face: a paused App or a
+ * disabled flag must still learn its installing account. An `installation`
+ * delivery records the same row before answering `accepted` — earlier still,
+ * before both gates (it never enqueues). Both are best-effort: a failure logs
+ * one structured warn and never throws, blocks the enqueue, or fails the
+ * webhook.
  *
  * Delivery recording (AL-20-1): immediately after
  * classification (before the reject return) ONE best-effort row is appended
@@ -228,8 +239,9 @@ app.route("/dashboard", dashboardApp);
  * legacy 不落行 — it was the fallback path with no dashboard consumer).
  *
  * Order of the verified, non-reject path: classify → delivery record → PR
- * ledger (0039) → `last_webhook_at` touch → job-guarded install bookkeeping →
- * `ignore` return → pause gate → global flag gate → enqueue. The reject
+ * ledger (0039) → `last_webhook_at` touch → `ignore` return → install
+ * bookkeeping (the `installation` branch records and returns; the job path
+ * records and proceeds) → pause gate → global flag gate → enqueue. The reject
  * return sits between the delivery record and the PR ledger.
  */
 app.post("/webhook/:workspaceId/:appId", async (c) => {
@@ -442,19 +454,27 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("ignored", 200);
   }
 
-  // Install bookkeeping: every verified review-type delivery refreshes the
-  // row's login from `outcome.installationAccount` — the installing account's
-  // login — so installs that predate this column fill in on their next
-  // delivery instead of waiting for another install event. The login rides
-  // beside `payload`, never inside it: the queue message below stays
-  // account-free. Written BEFORE the pause gate, the global flag gate and the
-  // enqueue, because those three decide only the ENQUEUE face: a paused App or
-  // a disabled flag must still learn its installing account. Best-effort (the
-  // review path never fails on bookkeeping): a failure logs a structured warn
-  // and the webhook still returns 200. The store's COALESCE keeps a stored
-  // login when a touch arrives without one.
+  // Install bookkeeping: every verified review-type delivery offers
+  // `outcome.installationAccount` — the installing account's login, inferred
+  // from the repository owner when the payload omits `installation.account` —
+  // so installs that predate this column fill in on their next delivery instead
+  // of waiting for another install event. The value is INFERRED, so the store
+  // only fills an EMPTY login: an account already recorded (by an install
+  // event, or an earlier delivery) is never overwritten by an inference. The
+  // login rides beside `payload`, never inside it: the queue message below
+  // stays account-free. Written BEFORE the pause gate, the global flag gate and
+  // the enqueue, because those three decide only the ENQUEUE face: a paused App
+  // or a disabled flag must still learn its installing account. Best-effort
+  // (the review path never fails on bookkeeping): a failure logs a structured
+  // warn and the webhook still returns 200.
   if (outcome.kind === "job") {
-    await recordInstallation(appsStore, row.id, outcome.payload.installation_id, outcome.installationAccount);
+    await recordInstallation(
+      appsStore,
+      row.id,
+      outcome.payload.installation_id,
+      outcome.installationAccount,
+      outcome.accountAuthoritative,
+    );
   }
 
   // Install event (installation.created / new_permissions_accepted): the one
@@ -464,7 +484,13 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // enqueues. Best-effort like every sibling bookkeeping write: a store
   // failure logs and the webhook still answers 200.
   if (outcome.kind === "installation") {
-    await recordInstallation(appsStore, row.id, outcome.installationId, outcome.accountLogin);
+    await recordInstallation(
+      appsStore,
+      row.id,
+      outcome.installationId,
+      outcome.accountLogin,
+      outcome.accountAuthoritative,
+    );
     return c.text("accepted", 200);
   }
 

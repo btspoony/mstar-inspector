@@ -1344,17 +1344,28 @@ and `issue_comment`: `installation` is not a subscribable GitHub App event
 (GitHub's "Subscribe to events" list offers only "Installation target"), it is
 delivered to every App automatically. So a new App receives
 `installation.created` without any subscription, and the install-bookkeeping
-path fills the row from `installation.account.login`, falling back to the
-repository owner. That bookkeeping is gate-independent but not unconditional:
-only a delivery the classifier accepts as review work reaches it — a
-whitelisted action the App's trigger mode allows, or a bot-mention comment on a
-PR thread. It runs before the pause and global-flag gates, so it still lands
+path records two kinds of login on `app_installations.account_login`:
+
+- **Authoritative** — `installation.account.login` from an
+  `installation.created` / `new_permissions_accepted` event. This is the
+  installation's own statement of its account, so it overwrites whatever the row
+  holds (a NULL login on such an event still preserves the stored value).
+- **Inferred** — `repository.owner.login` from a review delivery
+  (`pull_request` / `issue_comment`), because GitHub does not put
+  `installation.account` in those payloads. An inference only **fills an empty**
+  login; it never replaces one, so historical NULL rows still fill in from
+  ordinary review traffic without an inference ever overwriting an authoritative
+  value.
+
+Both writes happen before the pause and global-flag gates, so they still land
 while the App is paused or the global review flag is off (those gates close only
-the review enqueue, not the bookkeeping). **Every other verified delivery leaves
-the login untouched** — a non-whitelisted action, a `manual`-mode App's
-`pull_request`, or a comment that mentions no bot is classified `ignored` and
-returns before the bookkeeping write. A row accordingly stays `未知` until the
-first job delivery or install event for that App.
+the review enqueue, not the bookkeeping). The `installation` branch reaches the
+write on every whitelisted install action and returns without enqueuing; a
+`job` delivery reaches it after the `ignore` return, so **ignored deliveries do
+not reach the write** — a non-whitelisted action, a `manual`-mode App's
+`pull_request`, or a comment that mentions no bot never records a login. A row
+accordingly stays `未知` until the first job delivery or install event for that
+App.
 
 > **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
 > the recovery lanes are covered by the implementation's scoped behavioral
