@@ -22,6 +22,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { stripJsonComments } from "../../scripts/check-image-inputs";
+
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const CONFIG_PATH = join(REPO_ROOT, "wrangler.jsonc");
 
@@ -41,46 +43,6 @@ const NOT_RESTATED: Record<string, true> = {
 };
 
 type Json = Record<string, unknown>;
-
-/**
- * Strip JSONC comments before JSON.parse — no dependency. A scanner (not a
- * regex) so a `//` inside a string value is never mistaken for a comment.
- */
-function stripJsonComments(text: string): string {
-  let out = "";
-  let inString = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text.charAt(i);
-    if (inString) {
-      out += ch;
-      if (ch === "\\") {
-        out += text.charAt(i + 1);
-        i++;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-      out += ch;
-      continue;
-    }
-    if (ch === "/" && text.charAt(i + 1) === "/") {
-      while (i < text.length && text.charAt(i) !== "\n") i++;
-      out += "\n";
-      continue;
-    }
-    if (ch === "/" && text.charAt(i + 1) === "*") {
-      i += 2;
-      while (i < text.length && !(text.charAt(i) === "*" && text.charAt(i + 1) === "/")) i++;
-      i++;
-      continue;
-    }
-    out += ch;
-  }
-  return out;
-}
 
 function asObject(value: unknown): Json {
   return typeof value === "object" && value !== null ? (value as Json) : {};

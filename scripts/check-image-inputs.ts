@@ -41,10 +41,19 @@ export const IMAGE_INPUT_FAMILIES: readonly string[] = [
   "wrangler.jsonc",
 ];
 
-/** One family glob as an anchored path regex (`**` = anything below). */
-function familyPattern(glob: string): RegExp {
-  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escaped.replaceAll("**", ".*")}$`);
+/**
+ * One family glob as an anchored path regex. `**` crosses `/` (anything
+ * below), `*` is one path segment, `?` is one character — the glob grammar,
+ * not regex syntax, so an unescaped `?` never becomes an optional group.
+ */
+export function familyPattern(glob: string): RegExp {
+  const GLOBSTAR = "\u0000";
+  const source = glob
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replaceAll("**", GLOBSTAR)
+    .replace(/[*?]/g, (meta) => (meta === "*" ? "[^/]*" : "[^/]"))
+    .replaceAll(GLOBSTAR, ".*");
+  return new RegExp(`^${source}$`);
 }
 
 export const IMAGE_INPUT_PATTERNS: readonly RegExp[] = IMAGE_INPUT_FAMILIES.map(familyPattern);
@@ -99,7 +108,7 @@ export function readDockerfilePath(configText: string): string | undefined {
  * Strip JSONC comments — no dependency. A scanner, not a regex, so a `//`
  * inside a string value is never mistaken for a comment.
  */
-function stripJsonComments(text: string): string {
+export function stripJsonComments(text: string): string {
   let out = "";
   let inString = false;
   for (let i = 0; i < text.length; i++) {

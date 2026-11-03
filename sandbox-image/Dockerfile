@@ -10,6 +10,8 @@
 # rebuild: the runner hands the SDK a callable extension-roots accessor — the
 # pinned SDK reads a getter and calls it as a method, which killed every seat
 # before its first model turn.
+# rebuild: the shim COPY is digest-pinned, so a rebuild no longer depends on what
+# the mutable 1.0.0 tag resolves to at build time.
 # rebuild: the runner marks its `incomplete`-cause composition as engine-owned
 # staging (the engine should derive the fact from seat results, not accept a
 # consumer's string), so the removal is scheduled rather than discovered.
@@ -106,7 +108,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git unzip \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+# The shim is digest-pinned for the same reason as the base: the tag alone is
+# mutable, so a rebuild could silently swap the helper binary inside the review
+# executor. The digest moves ONLY together with the `@cloudflare/sandbox`
+# version (package.json / bun.lock) — a version bump re-resolves both the tag
+# and the digest in one change, never one without the other.
+COPY --from=docker.io/cloudflare/sandbox:1.0.0@sha256:5bc187515bad0d9d486a4f1476f7d8ad39fe97c57965f044e4b0a0dcc93eac06 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 
 # Bun 1.4.0 pinned (base ships no Bun; omp requires >=1.3.14).
 RUN curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip -o /tmp/bun.zip \

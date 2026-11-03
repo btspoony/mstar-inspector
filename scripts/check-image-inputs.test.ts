@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   evaluateImageGate,
+  familyPattern,
   IMAGE_INPUT_FAMILIES,
   IMAGE_INPUT_PATTERNS,
   readDockerfilePath,
@@ -174,6 +175,22 @@ describe("touchesImageInput", () => {
     ]) {
       expect(touchesImageInput([path])).toBe(false);
     }
+  });
+
+  test("a single `*` stays inside one path segment", () => {
+    // `sandbox-image/*.sh` is one level only: the shell helpers the Dockerfile
+    // copies live there, while a nested script (or the repo root) is not a
+    // member of that family.
+    const family = familyPattern("sandbox-image/*.sh");
+    expect(family.test("sandbox-image/entry.sh")).toBe(true);
+    expect(family.test("sandbox-image/verify-cli-lock.sh")).toBe(true);
+    expect(family.test("sandbox-image/nested/entry.sh")).toBe(false);
+    expect(family.test("entry.sh")).toBe(false);
+    // `?` is one character, never the regex optional-quantifier it reads as.
+    const single = familyPattern("sandbox-image/?.sh");
+    expect(single.test("sandbox-image/a.sh")).toBe(true);
+    expect(single.test("sandbox-image/.sh")).toBe(false);
+    expect(single.test("sandbox-image/ab.sh")).toBe(false);
   });
 });
 

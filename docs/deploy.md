@@ -2112,8 +2112,8 @@ bun scripts/check-image-inputs.ts --base origin/main
 
 ## Image pins and digest record
 
-The image's versioned build inputs — base digest, sandbox-shim tag, Bun, gh,
-mstar-harness tag/ref, and the CLI pin — are declared once in
+The image's versioned build inputs — base digest, sandbox-shim tag plus digest,
+Bun, gh, mstar-harness tag/ref, and the CLI pin — are declared once in
 `OMP_SANDBOX_IMAGE_PINS` (`src/contracts/sandbox-images.ts`). That declaration
 is the single live copy; `tests/review/pin.test.ts` locks the Dockerfile's
 unavoidable literals to it (the image builds with no build args and no env, so
@@ -2140,7 +2140,9 @@ review-session model cannot invoke the CLI today — a sanctioned session
 toolcall path is a tracked follow-up, not a shipped mechanism. Bun / gh pins
 carried forward unchanged; the base image moved with the Sandbox SDK 1.0
 migration (the SDK no longer ships a runtime base — controlled Debian base +
-the 1.0.0 `sandbox-shim`).
+the 1.0.0 `sandbox-shim`, digest-pinned to
+`sha256:5bc187…ac06` — the digest moves only together with the
+`@cloudflare/sandbox` version, never on its own).
 
 Finding carry at the 4.0.4 pin (the omp 18.12.3 / harness 4.0.4 cohort
 above): the harness can hold exactly one review artifact unchanged — the

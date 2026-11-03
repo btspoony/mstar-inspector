@@ -325,10 +325,10 @@ export const zhCN: Dictionary = {
     /** {system} = 该工作区不能超过的平台系统上限。 */
     concurrencySystemCap: "系统上限：{system}。",
     concurrencyStoredAboveSystem:
-      "已存储值：{stored} — 高于当前系统上限 {system}，因此在保存更低的值之前按 {system} 生效。",
+      "已存储值：{stored} — 高于当前系统上限 {system}。请输入不大于 {system} 的值后再保存；在此之前按系统上限生效。",
     /** 已存储的并发上限无法读取——显示的数字只是兜底值，不是此工作区的设置。 */
     concurrencyUnreadable:
-      "无法读取已存储的审查并发数，因此审查会逐个运行。设置未被修改——请重新读取。",
+      "无法读取已存储的审查并发数，因此审查会逐个运行。设置未被修改且保存已禁用——请重新读取。",
   },
   /**
    * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
