@@ -310,17 +310,67 @@ describe("pull request detail face (static SSR)", () => {
     expect(markup).not.toContain(":null");
   });
 
+  /**
+   * Fold pairs read off the serialized markup: each control's `aria-expanded`,
+   * the body its `aria-controls` names, and whether that body carries `hidden`.
+   * Bodies stay mounted, so the attribute — not presence — is the fold.
+   */
+  const foldPairs = (markup: string) => {
+    const bodies = new Map(
+      [...markup.matchAll(/<p id="([^"]+)"([^>]*)>/g)].map((match) => [
+        match[1] ?? "",
+        /\bhidden=""/.test(match[2] ?? ""),
+      ]),
+    );
+    return [...markup.matchAll(/<button([^>]*)>/g)].flatMap((match) => {
+      const attrs = match[1] ?? "";
+      const expanded = /aria-expanded="(true|false)"/.exec(attrs);
+      const controls = /aria-controls="([^"]+)"/.exec(attrs);
+      if (expanded === null || controls === null) return [];
+      return [
+        {
+          expanded: expanded[1] === "true",
+          hidden: bodies.get(controls[1] as string),
+        },
+      ];
+    });
+  };
+
   test("only the must-fix body opens; every other group starts folded", () => {
     const markup = render(DETAIL);
+    // Fold order follows the group order: must-fix, should-fix, nit.
+    const pairs = foldPairs(markup);
+    expect(pairs.map((pair) => pair.expanded)).toEqual([true, false, false]);
+    // Every body is resolved by its control, and `hidden` is the fold — the
+    // folded text stays in the DOM rather than dropping out of the markup.
+    expect(pairs.map((pair) => pair.hidden)).toEqual([false, true, true]);
     expect(markup).toContain("String interpolation reaches the SQL engine.");
-    expect(markup).not.toContain("The refresh cookie is set with secure only.");
-    expect(markup).not.toContain("The variable holds the pending redirect target.");
+    expect(markup).toContain("The refresh cookie is set with secure only.");
+    expect(markup).toContain("The variable holds the pending redirect target.");
     // One expanded control (the must-fix finding), two folded ones.
     expect(markup.match(/aria-expanded="true"/g) ?? []).toHaveLength(1);
     expect(markup.match(/aria-expanded="false"/g) ?? []).toHaveLength(2);
   });
 
   test("a clean detail opens on the reviews family with the latest summary readable", () => {
+    const reviews = [
+      {
+        verdict: "ship it",
+        summary_md: "Everything the last round asked for is in.",
+        model: "kimi-for-coding",
+        provider: "openrouter",
+        reviewed_at: "2026-11-01 09:00:00",
+        head_sha: "aaa111b",
+      },
+      {
+        verdict: "ship it",
+        summary_md: "An older round, folded by default.",
+        model: "kimi-for-coding",
+        provider: "",
+        reviewed_at: "2026-10-30 09:00:00",
+        head_sha: "bbb222c",
+      },
+    ];
     const clean: PullRequestDetail = {
       pull_request: {
         ...ROW_OPEN,
@@ -329,23 +379,62 @@ describe("pull request detail face (static SSR)", () => {
         latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
         failure_count: 0,
       },
-      reviews: [
-        {
-          verdict: "ship it",
-          summary_md: "Everything the last round asked for is in.",
-          model: "kimi-for-coding",
-          provider: "openrouter",
-          reviewed_at: "2026-11-01 09:00:00",
-          head_sha: "aaa111b",
-        },
-      ],
+      reviews,
       failures: [],
       findings: [],
     };
     const markup = render(clean);
     expect(familyTabs(markup).map((tab) => tab.selected)).toEqual([false, true, false]);
     expect(markup).toContain("Everything the last round asked for is in.");
+    // The latest summary opens; older history is mounted but folded.
+    expect(foldPairs(markup)).toEqual([
+      { expanded: true, hidden: false },
+      { expanded: false, hidden: true },
+    ]);
+    // No provider means no dangling separator.
+    expect(markup).toContain("kimi-for-coding</span>");
+    expect(markup).not.toContain("kimi-for-coding · </span>");
     expect(markup).not.toContain(t("en", "pullRequests.noReviews"));
+  });
+
+  test("an empty head sha renders neither chip nor aside row", () => {
+    const markup = render({
+      ...DETAIL,
+      pull_request: { ...DETAIL.pull_request, head_sha: "", latest_review: null },
+    });
+    // The review rows still carry their own shas; only the PR-level ones go —
+    // chip, tooltip and the aside's Head row all disappear together.
+    expect(markup.match(/>aaa111b</g) ?? []).toHaveLength(0);
+    expect(markup).not.toContain(t("en", "pullRequests.headSha"));
+    expect(markup).not.toContain(t("en", "pullRequests.factHead"));
+    // The verdict figure is announced rather than left blank.
+    expect(markup).toContain(t("en", "pullRequests.noVerdict"));
+  });
+
+  test("the aside timeline is capped and still ends on the PR's first sighting", () => {
+    const history = Array.from({ length: 12 }, (_, index) => ({
+      verdict: "needs fixes",
+      summary_md: `Round ${index}`,
+      model: "kimi-for-coding",
+      provider: "openrouter",
+      // Newest first, as the store orders them; one hour apart.
+      reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
+      head_sha: `sha${index}`,
+    }));
+    const markup = render({
+      ...DETAIL,
+      pull_request: { ...DETAIL.pull_request, latest_review: { verdict: "needs fixes", reviewed_at: history[0]?.reviewed_at as string } },
+      reviews: history,
+    });
+    // Eight rows: seven newest activity entries, then the anchor.
+    expect(markup.match(/<li class="flex gap-2">/g) ?? []).toHaveLength(8);
+    const order = positions(markup, [
+      t("en", "pullRequests.timelineReview", { verdict: "needs fixes" }),
+      t("en", "pullRequests.timelineFirstSeen"),
+    ]);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // The oldest reviews fall outside the cap.
+    expect(markup).not.toContain("12:00:00");
   });
 
   test("a failure's first line renders as escaped text and its full output stays in details", () => {

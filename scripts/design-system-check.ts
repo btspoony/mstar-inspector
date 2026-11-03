@@ -77,8 +77,14 @@ const GENERATORS = [
   { script: "scripts/build-design-preview.tsx", label: "source → preview" },
 ] as const;
 
-/** The trees whose hand-written CSS/HTML answers to the token source. */
-const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
+/**
+ * The trees whose hand-written CSS/HTML answers to the token source. Exported
+ * with `walkConsumers` so a test can hold each root to having contributed: a
+ * global "some consumer exists" passes while one root silently contributes
+ * nothing (a moved or renamed directory), which is the failure mode this link
+ * exists to catch.
+ */
+export const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
 
 /**
  * Every hand-written stylesheet and HTML shell the token source does not
@@ -96,7 +102,8 @@ export function stylesheetConsumers(dirs: readonly string[] = CONSUMER_ROOTS): s
   return dirs.flatMap((dir) => walkConsumers(dir)).sort();
 }
 
-function walkConsumers(dir: string): string[] {
+/** The consumers under one root, repo-relative. */
+export function walkConsumers(dir: string): string[] {
   if (!existsSync(dir)) return [];
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {

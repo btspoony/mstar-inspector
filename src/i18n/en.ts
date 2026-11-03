@@ -164,6 +164,8 @@ export const en = {
     firstSeen: "First seen",
     lastSeen: "Last seen",
     latestReview: "Latest review",
+    /** The verdict metric's screen-reader text when no review exists yet. */
+    noVerdict: "no verdict yet",
     /** The segmented pill over the three record families. */
     recordsLabel: "Pull request records",
     /** The findings metric's note, rendered beside the count. */

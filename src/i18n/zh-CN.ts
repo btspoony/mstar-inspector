@@ -140,6 +140,8 @@ export const zhCN: Dictionary = {
     firstSeen: "首次出现",
     lastSeen: "最近出现",
     latestReview: "最新审查",
+    /** 尚无审查时，结论指标的读屏文本。 */
+    noVerdict: "暂无结论",
     /** 三个记录类别上的分段胶囊。 */
     recordsLabel: "拉取请求记录",
     /** 发现指标中数量旁的提示。 */

@@ -38,7 +38,7 @@
 
   .pill {
     display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
-    border-radius: 999px; border: 1px solid var(--tone-neutral-border); background: var(--tone-neutral-bg);
+    border-radius: var(--radius-pill); border: 1px solid var(--tone-neutral-border); background: var(--tone-neutral-bg);
     color: var(--tone-neutral-fg); font-size: 12px; font-weight: 500; white-space: nowrap;
   }
   .pill.ok { background: var(--tone-success-bg); border-color: var(--tone-success-border); color: var(--tone-success-fg); }
@@ -67,17 +67,17 @@
   }
   .tab {
     appearance: none; border: 0; background: transparent; color: var(--text-muted);
-    font: inherit; font-size: 14px; padding: 5px 12px; border-radius: 4px; cursor: pointer;
+    font: inherit; font-size: 14px; padding: 5px 12px; border-radius: var(--radius-control); cursor: pointer;
     display: inline-flex; align-items: center; gap: 6px;
   }
   .tab .n { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-faint); }
   .tab[aria-selected="true"] { background: var(--surface-card); color: var(--text-primary); }
   .tab[aria-selected="true"] .n { color: var(--text-muted); }
-  .tab .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--tone-danger-fg); }
+  .tab .dot { width: 6px; height: 6px; border-radius: var(--radius-pill); background: var(--tone-danger-fg); }
 
   /* ---------- layout ---------- */
   .cols { display: grid; grid-template-columns: minmax(0, 1fr) 272px; gap: 32px; margin-top: 20px; align-items: start; }
-  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } .aside { order: -1; } }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
   [role="tabpanel"][hidden] { display: none; }
 
   /* ---------- findings ---------- */
@@ -102,7 +102,7 @@
   .finding .title { font-weight: 500; flex: 1; min-width: 0; }
   .finding .loc {
     font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
-    background: var(--surface-inset); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 6px;
+    background: var(--surface-inset); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 1px 6px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 230px;
   }
   .finding .body { font-size: 14px; color: var(--text-secondary); }
@@ -138,7 +138,7 @@
   }
   .failure + .failure { margin-top: 8px; }
   .failure .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
-  .failure .stage { font-family: var(--font-mono); font-size: 12px; color: var(--tone-danger-fg); border: 1px solid var(--tone-danger-border); border-radius: 4px; padding: 1px 6px; }
+  .failure .stage { font-family: var(--font-mono); font-size: 12px; color: var(--tone-danger-fg); border: 1px solid var(--tone-danger-border); border-radius: var(--radius-control); padding: 1px 6px; }
   .failure .when { color: var(--text-faint); margin-left: auto; }
   .failure .first { font-family: var(--font-mono); font-size: 12px; color: var(--tone-danger-fg); white-space: pre-wrap; word-break: break-word; margin: 0; }
   .failure details { margin: 0; }
@@ -163,7 +163,7 @@
   .timeline li { position: relative; padding: 0 0 14px 18px; font-size: 13px; color: var(--text-secondary); }
   .timeline li:last-child { padding-bottom: 0; }
   .timeline li::before {
-    content: ""; position: absolute; left: 0; top: 6px; width: 7px; height: 7px; border-radius: 999px;
+    content: ""; position: absolute; left: 0; top: 6px; width: 7px; height: 7px; border-radius: var(--radius-pill);
     background: var(--border-subtle); border: 1px solid var(--border-strong);
   }
   .timeline li::after { content: ""; position: absolute; left: 3px; top: 15px; bottom: 0; width: 1px; background: var(--border-subtle); }

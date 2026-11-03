@@ -352,6 +352,9 @@ const TIMELINE_DOT: Record<StatusTone, string> = {
 /** One merged activity row: a review, a failure, or the PR's first sighting. */
 type ActivityEntry = { at: string; key: string; tone: StatusTone; label: string; meta: string };
 
+/** Rows the aside timeline renders, the closing first-sighting entry included. */
+const TIMELINE_LIMIT = 8;
+
 /** The family the face opens on: the actionable record first, history last. */
 function defaultFamily(detail: PullRequestDetail): RecordFamily {
   if (detail.findings.some((finding) => finding.severity === "must-fix")) return "findings";
@@ -416,13 +419,15 @@ export function PullRequestDetailView({
   const [openFindings, setOpenFindings] = useState<Readonly<Record<string, boolean>>>({});
   const [openReviews, setOpenReviews] = useState<Readonly<Record<string, boolean>>>({});
   const baseId = useId();
+  // Element ids are derived from payload keys, so any character an id cannot
+  // carry (the spaces and colons in a review timestamp) is folded to a dash.
+  const bodyId = (key: string): string => `${baseId}-${key.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
 
   const mustFix = detail.findings.filter((finding) => finding.severity === "must-fix").length;
   const groups = severityGroups(locale, detail.findings);
   // Reviews arrive newest first from the store, so the first row is the latest.
   const latestReview = detail.reviews[0] ?? null;
   const copyAvailable = typeof navigator !== "undefined" && "clipboard" in navigator;
-  const bodyId = (key: string): string => `${baseId}-${key}`;
   // Radix hands the trigger's value back as a string; only our three triggers
   // can reach this, but the guard keeps the narrowing honest.
   const selectFamily = (next: string): void => {
@@ -432,7 +437,17 @@ export function PullRequestDetailView({
   const metrics: Metric[] = [
     {
       key: t(locale, "pullRequests.columnVerdict"),
-      value: pr.latest_review === null ? <span aria-hidden="true">—</span> : pr.latest_review.verdict,
+      // A PR with no review yet is not an alarm: the dash is announced, so the
+      // figure never reads as a blank cell.
+      value:
+        pr.latest_review === null ? (
+          <>
+            <span aria-hidden="true">—</span>
+            <span className="sr-only">{t(locale, "pullRequests.noVerdict")}</span>
+          </>
+        ) : (
+          pr.latest_review.verdict
+        ),
       tone: pr.latest_review !== null && pr.latest_review.verdict !== "ship it" ? "danger" : undefined,
     },
     { key: t(locale, "pullRequests.reviews"), value: detail.reviews.length },
@@ -460,7 +475,16 @@ export function PullRequestDetailView({
     { label: t(locale, "pullRequests.factRepo"), value: `${pr.owner}/${pr.repo}` },
     { label: t(locale, "pullRequests.factNumber"), value: `#${pr.number}` },
     { label: t(locale, "pullRequests.factState"), value: pill.label },
-    { label: t(locale, "pullRequests.factHead"), value: <code className="font-mono">{pr.head_sha.slice(0, 7)}</code> },
+    // The payload coerces a nullable head_sha to "": an empty chip would read
+    // as a fact, so the row disappears instead.
+    ...(pr.head_sha === ""
+      ? []
+      : [
+          {
+            label: t(locale, "pullRequests.factHead"),
+            value: <code className="font-mono">{pr.head_sha.slice(0, 7)}</code>,
+          },
+        ]),
     {
       label: t(locale, "pullRequests.firstSeen"),
       value: (
@@ -480,8 +504,9 @@ export function PullRequestDetailView({
   ];
 
   // Both tables stamp `datetime('now')` (UTC), so the raw text orders
-  // chronologically; `first_seen_at` closes the list as the oldest entry.
-  const activity: ActivityEntry[] = [
+  // chronologically. The list is capped: a long history must not fill the
+  // aside, and the PR's own first sighting always closes it.
+  const history = [
     ...detail.reviews.map((review, index) => ({
       at: review.reviewed_at,
       key: `review-${index}`,
@@ -497,13 +522,16 @@ export function PullRequestDetailView({
       meta: formatRelativeTime(failure.created_at, locale),
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
-  activity.push({
-    at: pr.first_seen_at,
-    key: "first-seen",
-    tone: "neutral",
-    label: t(locale, "pullRequests.timelineFirstSeen"),
-    meta: formatRelativeTime(pr.first_seen_at, locale),
-  });
+  const activity: ActivityEntry[] = [
+    ...history.slice(0, TIMELINE_LIMIT - 1),
+    {
+      at: pr.first_seen_at,
+      key: "first-seen",
+      tone: "neutral",
+      label: t(locale, "pullRequests.timelineFirstSeen"),
+      meta: formatRelativeTime(pr.first_seen_at, locale),
+    },
+  ];
 
   return (
     <div className="flex flex-col">
@@ -513,12 +541,14 @@ export function PullRequestDetailView({
             {t(locale, "pullRequests.prNumber", { owner: pr.owner, repo: pr.repo, number: pr.number })}
           </span>
           <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
-          <span
-            className="rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 font-mono text-xs text-(--text-muted)"
-            title={t(locale, "pullRequests.headSha")}
-          >
-            {pr.head_sha.slice(0, 7)}
-          </span>
+          {pr.head_sha === "" ? null : (
+            <span
+              className="rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 font-mono text-xs text-(--text-muted)"
+              title={t(locale, "pullRequests.headSha")}
+            >
+              {pr.head_sha.slice(0, 7)}
+            </span>
+          )}
         </div>
         <h2 className="text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking) font-(weight:--typo-heading-20-weight) text-(--text-primary)">
           {pr.title}
@@ -574,7 +604,7 @@ export function PullRequestDetailView({
           </TabsTrigger>
         </TabsList>
 
-        <div className="mt-(--spacing-5) flex flex-col gap-(--spacing-6) lg:flex-row lg:items-start lg:gap-(--spacing-8)">
+        <div className="mt-(--spacing-5) flex flex-col gap-(--spacing-6) xl:flex-row xl:items-start xl:gap-(--spacing-8)">
           <div className="min-w-0 flex-1">
             <TabsContent value="findings">
               {detail.findings.length === 0 ? (
@@ -617,11 +647,15 @@ export function PullRequestDetailView({
                                   </span>
                                 )}
                               </div>
-                              {open ? (
-                                <p id={id} className="whitespace-pre-wrap break-words text-sm text-(--text-secondary)">
-                                  {finding.body}
-                                </p>
-                              ) : null}
+                              {/* Mounted whether folded or not: the
+                                  toggle's aria-controls must always resolve. */}
+                              <p
+                                id={id}
+                                hidden={!open}
+                                className="whitespace-pre-wrap break-words text-sm text-(--text-secondary)"
+                              >
+                                {finding.body}
+                              </p>
                               <Button
                                 type="button"
                                 variant="ghost"
@@ -655,11 +689,14 @@ export function PullRequestDetailView({
               ) : (
                 <ul className="flex flex-col gap-2">
                   {detail.reviews.map((review, index) => {
-                    const open = openReviews[index] ?? index === 0;
-                    const id = bodyId(`review-${index}`);
+                    // The store's own identity for a review, so a refetched
+                    // list keeps each row's fold state instead of its position.
+                    const reviewKey = `${review.reviewed_at}-${review.head_sha}-${index}`;
+                    const open = openReviews[reviewKey] ?? index === 0;
+                    const id = bodyId(reviewKey);
                     return (
                       <li
-                        key={id}
+                        key={reviewKey}
                         className={cn(
                           "flex flex-col gap-2 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5",
                           index === 0 ? "border-(--border-strong)" : "",
@@ -682,11 +719,13 @@ export function PullRequestDetailView({
                             </span>
                           )}
                         </div>
-                        {open ? (
-                          <p id={id} className="whitespace-pre-wrap break-words text-sm text-(--text-secondary)">
-                            {review.summary_md}
-                          </p>
-                        ) : null}
+                        <p
+                          id={id}
+                          hidden={!open}
+                          className="whitespace-pre-wrap break-words text-sm text-(--text-secondary)"
+                        >
+                          {review.summary_md}
+                        </p>
                         <Button
                           type="button"
                           variant="ghost"
@@ -694,7 +733,7 @@ export function PullRequestDetailView({
                           className="self-start text-(--text-muted)"
                           aria-expanded={open}
                           aria-controls={id}
-                          onClick={() => setOpenReviews((previous) => ({ ...previous, [index]: !open }))}
+                          onClick={() => setOpenReviews((previous) => ({ ...previous, [reviewKey]: !open }))}
                         >
                           <ChevronRight aria-hidden="true" className={cn("transition-transform", open && "rotate-90")} />
                           {t(locale, open ? "pullRequests.collapse" : "pullRequests.expand")}
@@ -713,7 +752,8 @@ export function PullRequestDetailView({
                 <ul className="flex flex-col gap-2">
                   {detail.failures.map((failure, index) => {
                     // The first line is the diagnosis; the rest is evidence.
-                    const lines = failure.error.split("\n");
+                    const lines = failure.error.split(/\r?\n/);
+                    const firstLine = lines[0] ?? "";
                     return (
                       <li
                         key={`${failure.created_at}-${index}`}
@@ -728,9 +768,11 @@ export function PullRequestDetailView({
                           </span>
                         </div>
                         {/* Model/runtime output — rendered as text, never as HTML. */}
-                        <p className="whitespace-pre-wrap break-words font-mono text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--tone-danger-fg)">
-                          {lines[0]}
-                        </p>
+                        {firstLine === "" ? null : (
+                          <p className="whitespace-pre-wrap break-words font-mono text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--tone-danger-fg)">
+                            {firstLine}
+                          </p>
+                        )}
                         {lines.length > 1 ? (
                           <details>
                             <summary className="cursor-pointer text-(length:--typo-label-12-size) text-(--text-secondary)">
@@ -748,7 +790,11 @@ export function PullRequestDetailView({
                             size="xs"
                             className="self-start text-(--text-secondary)"
                             onClick={() => {
-                              void navigator.clipboard.writeText(failure.error);
+                              // A rejected write (permission, insecure
+                              // context) must not surface as an unhandled
+                              // rejection: the button is the only affordance
+                              // and the error text is right above it.
+                              navigator.clipboard.writeText(failure.error).catch(() => {});
                             }}
                           >
                             <Copy aria-hidden="true" />
@@ -765,7 +811,7 @@ export function PullRequestDetailView({
 
           <aside
             aria-label={t(locale, "pullRequests.asideFacts")}
-            className="order-first flex w-full shrink-0 flex-col gap-(--spacing-4) lg:order-none lg:w-64"
+            className="flex w-full shrink-0 flex-col gap-(--spacing-4) xl:w-64"
           >
             <section className="flex flex-col gap-2.5 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5">
               <h2 className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">

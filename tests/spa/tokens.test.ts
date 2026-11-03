@@ -27,7 +27,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
 import { survivorSteps } from "../../src/design-system/tokens";
-import { documentSync, danglingReferences, parseFixture, stylesheetConsumers } from "../../scripts/design-system-check";
+import {
+  CONSUMER_ROOTS,
+  documentSync,
+  danglingReferences,
+  parseFixture,
+  stylesheetConsumers,
+  walkConsumers,
+} from "../../scripts/design-system-check";
 
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
 const TOKENS_CSS = new URL("../../src/spa/styles/tokens.css", import.meta.url);
@@ -542,8 +549,13 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // stylesheet and HTML shell exists — not the two this link first listed.
     const consumers = stylesheetConsumers();
     expect(consumers.length).toBeGreaterThan(0);
-    // The design-system prototypes are on the same walk: a reference page that
-    // reads a retired token fails here like any stylesheet does.
+    // Per root, not just in aggregate: a root that contributes nothing (moved,
+    // renamed, emptied) would pass a global count while checking nothing.
+    for (const root of CONSUMER_ROOTS) {
+      expect(walkConsumers(root).length, root).toBeGreaterThan(0);
+    }
+    // The design-system prototypes are one of those roots, and a reference page
+    // that reads a retired token fails here like any stylesheet does.
     expect(consumers).toContain("src/design-system/prototypes/record-detail.html");
     for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
