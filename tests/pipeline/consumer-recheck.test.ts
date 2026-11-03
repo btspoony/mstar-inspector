@@ -233,9 +233,10 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     // All 25 rows were ATTEMPTED — 23 answered assessably, 2 answered badly and
-    // gate-dropped — so every one of them is assessed and its rotation clock
-    // advances. Nothing is omitted.
-    expect(prepared.body).toContain("Reassessed 25/25 open prior finding(s)");
+    // gate-dropped — so every one advances its rotation clock. The published
+    // coverage counts the REAL seat answers only (23), so a gate-rejected row
+    // never inflates the reassessed tally; nothing was omitted.
+    expect(prepared.body).toContain("Reassessed 23/25 open prior finding(s)");
     expect(prepared.body).toContain("0 omitted");
     expect(prepared.body).toContain("unverifiable (invalid-output)");
     expect(prepared.body).not.toContain("unverifiable (omitted)");
@@ -266,7 +267,9 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     // A usable document means no failure row.
     expect(failureRows(db)).toHaveLength(0);
     const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
-    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 2, assessed: 25 });
+    // `assessed` is the published coverage count (real answers), not the
+    // lifecycle clock — the two gate-dropped rows do not count as reassessed.
+    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 2, assessed: 23 });
   });
 
   test("a budget-skipped round accounts every row as budget, never invalid-output", async () => {
@@ -829,9 +832,64 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).not.toContain("unverifiable (omitted)");
     // The count is the sent-row union: the foreign id never entered it. The
     // SENT row was attempted (the seat answered and the gate dropped it), so
-    // it is assessed even though the document carries no row for it.
+    // it advances its rotation clock — but the document carries no answer for
+    // it, so the published coverage counts nothing.
     const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
-    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 1, assessed: 1 });
+    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 1, assessed: 0 });
+  });
+
+  test("a gate-rejected row with no usable rowId is still attributed: invalid-output, never omitted", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The seat answered, but its row carries an empty rowId, so the gate drops
+    // it without a name. The row is still ATTEMPTED: the reconciliation
+    // attributes the drop by position among the SENT-and-unanswered rows, so it
+    // is never mistaken for a row that never rode the wire.
+    sandbox.recheckFileContent = JSON.stringify({
+      schema: "mstar.recheck/v1",
+      headSha: SHA,
+      results: [
+        {
+          rowId: "",
+          disposition: "unverifiable",
+          reason: "no-evidence",
+          evidence: null,
+          relatedCurrentFindingIndexes: [],
+        },
+      ],
+    });
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "ok",
+      reason: null,
+      rejected: 0,
+      rejected_row_ids: [],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+    expect(prepared.body).not.toContain("unverifiable (omitted)");
+    // No real seat answer survived the gate, so the coverage counts nothing —
+    // while the row's rotation clock advanced (it WAS sent).
+    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.last_assessed_ms).not.toBeNull();
+    const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
+    // `rejected` counts the drop the gate could not name; `assessed` counts
+    // answers that survived it.
+    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 1, assessed: 0 });
   });
 
   test("an oversized status error or reason is bounded at parse time, so the log field and the D1 text share one value", async () => {

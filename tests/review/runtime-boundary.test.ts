@@ -243,6 +243,14 @@ describe("in-image module graph — the image ships packages/runner/src plus the
   const rootSrcCopies = copySources.filter(
     (spec) => spec === "src" || spec.startsWith("src/"),
   );
+  /**
+   * The admission boundary: a module may ship from the runner tree or from a
+   * shared file one of the COPY lines carries. The runner-import scan and the
+   * admission test below evaluate THIS predicate, so a widening shows up in
+   * both directions instead of being restated per test.
+   */
+  const isAdmittedModule = (target: string): boolean =>
+    target.startsWith(`${RUNNER_SRC}/`) || admittedShared.includes(target);
 
   test("the Dockerfile admits exactly the two package source trees", () => {
     // Derived, not restated: the assertion pins the derivation against the
@@ -280,16 +288,27 @@ describe("in-image module graph — the image ships packages/runner/src plus the
     expect(() => dockerfileCopySources("COPY src ./ \\")).toThrow(/unterminated COPY/);
   });
 
-  test("every admitted shared module is a real file in the image build context", () => {
-    // The pin that matters is not WHICH shared modules ship but that each
-    // admitted path is reachable from the build context (a stale COPY source
-    // fails the image build), and that admission stays a closed set: a shared
-    // module the Dockerfile does not list is refused by the same predicate the
-    // runner-import scan above evaluates.
-    expect(admittedShared.length).toBeGreaterThan(0);
-    expect(admittedShared.filter((file) => !existsSync(file))).toEqual([]);
-    expect(admittedShared).toContain(join(SHARED_SRC, "recheck-wire.ts"));
-    expect(admittedShared).not.toContain(join(SHARED_SRC, "not-shipped.ts"));
+  test("every shared module the runner imports is admitted, and the boundary refuses anything else", () => {
+    // Direction 1 — ADMIT: every shared module the runner graph actually
+    // imports resolves to a real file in the build context AND is one the
+    // Dockerfile copies, so the image's module graph is closed by construction
+    // (an import of an uncopied file fails the build, not this test).
+    const importedShared = new Set<string>();
+    for (const file of collectFiles(RUNNER_SRC)) {
+      for (const match of readFileSync(file, "utf8").matchAll(RELATIVE_IMPORT_RE)) {
+        const target = resolveModuleTarget(match[1]!, file);
+        if (!target.startsWith(`${RUNNER_SRC}/`)) importedShared.add(target);
+      }
+    }
+    expect(importedShared.size).toBeGreaterThan(0);
+    for (const target of importedShared) {
+      expect(existsSync(target), `${target} is not in the image build context`).toBe(true);
+      expect(isAdmittedModule(target), `${target} is imported but no COPY line ships it`).toBe(true);
+    }
+    // Direction 2 — REFUSE: the same predicate rejects a module outside both
+    // admitted roots, including a shared-package file no COPY line carries.
+    expect(isAdmittedModule(join(REPO_ROOT, "src", "worker", "index.ts"))).toBe(false);
+    expect(isAdmittedModule(join(SHARED_SRC, "not-shipped.ts"))).toBe(false);
   });
 
   test("no packages/runner/src module imports outside that tree and the admitted files", () => {
@@ -299,8 +318,7 @@ describe("in-image module graph — the image ships packages/runner/src plus the
       for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
         const specifier = match[1]!;
         const target = resolveModuleTarget(specifier, file);
-        const admissible = target.startsWith(`${RUNNER_SRC}/`) || admittedShared.includes(target);
-        if (!admissible) offenders.push(`${file.slice(REPO_ROOT.length + 1)}: ${specifier}`);
+        if (!isAdmittedModule(target)) offenders.push(`${file.slice(REPO_ROOT.length + 1)}: ${specifier}`);
       }
     }
     expect(offenders).toEqual([]);

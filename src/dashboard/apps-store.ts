@@ -102,7 +102,7 @@
  *     (app_id, installation_id) pairs, and unknown app references are
  *     caller-visible errors, never swallowed.
  */
-import { HISTORY_EXCLUDED_STAGES, PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
+import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { getSandboxImage } from "../contracts/sandbox-images";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
@@ -1079,11 +1079,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * both are per-round attribution written for rounds that continued
      * (`recheck` a budget skip / dead seat / invalid document, `usage` a
      * failed `usage_events` insert), so a clean PR would otherwise read a
-     * non-zero failure count. The count excludes both; the sweep excludes the
-     * same two stages from paging. The detail face keeps `usage` rows in its
-     * failure history (a lost metered-usage record needs a surface) while
-     * still excluding `HISTORY_EXCLUDED_STAGES` (`recheck`), whose accounting
-     * already rides the published coverage line.
+     * non-zero failure count. This count excludes both; the sweep excludes the
+     * same two stages from paging. The detail face's failure HISTORY excludes
+     * nothing: `usage` (a lost metered record) and `recheck` (a round that
+     * produced no usable document) each need a surface, and the detail's own
+     * `failure_count` still filters the same two stages out.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -1166,8 +1166,7 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage NOT IN (${sqlStageList(HISTORY_EXCLUDED_STAGES)})
-               AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
+             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC`,
           )
           .bind(appId, row.owner, row.repo, prNumber),
@@ -1188,8 +1187,9 @@ export function createAppsStore(db: AppsStoreD1) {
       // The histories ARE the aggregates: reviews come newest first, so the
       // first one is the latest verdict; the failure COUNT excludes the
       // paging set (`PAGING_EXCLUDED_STAGES` — per-round attribution of a
-      // review that continued), while the history list keeps `usage` so a
-      // lost metered record still has a surface.
+      // review that continued), while the history list itself carries every
+      // stage, so a lost metered record and a degraded recheck round both
+      // keep a surface.
       const reviews = results[0]!.results as PullRequestReviewDetailRow[];
       const failures = results[1]!.results as PullRequestFailureDetailRow[];
       return {

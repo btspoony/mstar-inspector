@@ -43,9 +43,10 @@
 # attribution row it did not have to write.
 # rebuild: the runner's status redaction now uses the shared credential-pattern
 # list (`packages/shared/src/secret-shapes.ts`) instead of a narrow local
-# subset, and a recheck document-write failure is recorded as
-# `failed/write-failed` rather than the seat's optimistic `ok`. A stale image
-# still writes `ok` for a round whose document never landed.
+# subset, and a recheck document-write failure now exits 1 with no stdout (the
+# Worker's runner-failure path) instead of writing any status: the status is
+# written only once the document has landed. A stale image instead reports the
+# seat's optimistic `ok` for a round whose document never reached the Worker.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

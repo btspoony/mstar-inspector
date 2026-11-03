@@ -1,7 +1,7 @@
 /**
  * The `review_failures.stage` ATTRIBUTION partition — single source of truth
  * (compass contracts B). The cron sweep and the dashboard both ask the same
- * question ("is this row a failure of the review?"), so the lists are written
+ * question ("is this row a failure of the review?"), so the list is written
  * once here and interpolated into each query by `sqlStageList`; a hand-written
  * stage literal is what let the count/history asymmetry drift.
  *
@@ -13,17 +13,14 @@
 
 /**
  * Stages whose rows record a review that CONTINUED — per-round attribution,
- * never a failure of the review itself. The paging count (cron sweep) and the
- * dashboard's failure count both exclude this whole set.
+ * never a failure of the review itself. The two COUNT faces exclude this whole
+ * set: the cron sweep's paging count and the dashboard's failure count (list
+ * aggregate and detail `failure_count`). The dashboard's per-PR failure
+ * HISTORY excludes nothing — both stages stay visible there, because each row
+ * is the only surface for something D1 lost (`usage`: a dropped metered
+ * attempt, `recheck`: a round that produced no usable document).
  */
 export const PAGING_EXCLUDED_STAGES = Object.freeze(["recheck", "usage"] as const);
-
-/**
- * The detail-history partition: the attribution set minus `usage`, whose row
- * is a lost metered record that still needs a surface. `recheck` is excluded
- * because its accounting already rides the published coverage line.
- */
-export const HISTORY_EXCLUDED_STAGES = Object.freeze(["recheck"] as const);
 
 /**
  * Render a stage list as a SQL `IN (…)` literal body (each stage

@@ -138,7 +138,7 @@ describe("listPullRequests", () => {
     expect(byNumber.get(132)!.failure_count).toBe(0);
   });
 
-  test("recheck attribution rows are not review failures: count 0 and no history entry", async () => {
+  test("recheck attribution rows are not review failures: count 0, but the detail history keeps the row", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createAppsStore(db).upsertPullRequest(PR);
@@ -153,11 +153,16 @@ describe("listPullRequests", () => {
       .run();
 
     const rows = await createAppsStore(db).listPullRequests(APP_ID);
-    expect(rows[0]!.failure_count).toBe(0);
+    const byNumber = new Map(rows.map((row) => [row.number, row]));
+    expect(byNumber.get(131)!.failure_count).toBe(0);
     const detail = await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131);
+    // Still not a REVIEW failure — but a round that produced no usable
+    // document has a surface in the detail history, and its count stays 0.
     expect(detail!.pull_request.failure_count).toBe(0);
-    expect(detail!.failures).toEqual([]);
-    // Still in D1 as attribution — only the dashboard's failure framing drops it.
+    expect(detail!.failures).toEqual([
+      { stage: "recheck", error: "skipped: budget: null", created_at: expect.any(String) },
+    ]);
+    // Still in D1 as attribution — only the failure count drops it.
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
   });
 
@@ -177,7 +182,8 @@ describe("listPullRequests", () => {
       .run();
 
     const rows = await createAppsStore(db).listPullRequests(APP_ID);
-    expect(rows[0]!.failure_count).toBe(0);
+    const byNumber = new Map(rows.map((row) => [row.number, row]));
+    expect(byNumber.get(131)!.failure_count).toBe(0);
     const detail = await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131);
     // Still not a REVIEW failure — but the dropped metered-usage record has a
     // surface in the detail history, and the detail count stays 0.

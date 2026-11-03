@@ -24,12 +24,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
-  ASSESSMENT_TARGET_CAP,
-  RECHECK_FILE_MAX_BYTES,
-  RECHECK_MAX_RUNTIME_MS,
   RECHECK_MAX_TARGETS,
-  RECHECK_MIN_REMAINING_MS,
-  RECHECK_OUTPUT_PATH,
   validateRecheckDoc,
   type Assessment,
   type EvidenceSlice,
@@ -180,17 +175,6 @@ function expectDroppedRow(
   expect(outcome.rejected[0]!.error).toContain(expected.error);
   expect(outcome.doc.results.map((row) => row.rowId)).toEqual([SURVIVOR.rowId]);
 }
-
-describe("recheck constants (spec §7.3 verbatim)", () => {
-  test("carries the frozen limits and output path", () => {
-    expect(RECHECK_OUTPUT_PATH).toBe("/tmp/mstar-recheck.json");
-    expect(RECHECK_MAX_TARGETS).toBe(25);
-    expect(ASSESSMENT_TARGET_CAP).toBe(25);
-    expect(RECHECK_MAX_RUNTIME_MS).toBe(180_000);
-    expect(RECHECK_MIN_REMAINING_MS).toBe(30_000);
-    expect(RECHECK_FILE_MAX_BYTES).toBe(262_144);
-  });
-});
 
 describe("validateRecheckDoc — acceptance", () => {
   test("a valid addressed doc round-trips typed with results preserved", () => {

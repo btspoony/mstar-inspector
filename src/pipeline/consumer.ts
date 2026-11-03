@@ -1107,10 +1107,17 @@ type OriginalFindingProjection = RecheckTarget["original"];
  *
  * ATTEMPTED vs never-sent is the accounting split (§7.2 fair rotation): a row
  * the seat was given — whether the gate kept its answer or dropped it — is
- * assessed and enters `lifecycle.assessments`, so `last_assessed_ms` advances
+ * attempted and enters `lifecycle.assessments`, so `last_assessed_ms` advances
  * and the rotation clock moves. A row that was never sent (size budget,
- * catalog exclusion, seat skip, no document at all) is NOT assessed: it is
+ * catalog exclusion, seat skip, no document at all) is NOT attempted: it is
  * accounted as `omitted` for coverage and leaves `last_assessed_ms` alone.
+ *
+ * ONE round therefore yields TWO counts, and they are not interchangeable:
+ * `assessedCount` is the rows carrying a real `docResult` — the REAL seat
+ * answers, which is what the published coverage line and the accounting log
+ * field report; `assessments.length` is the lifecycle clock, which also
+ * carries the gate-rejected rows (attempted and answered badly). Reporting the
+ * clock as "assessed" would claim reassessments the seat never delivered.
  */
 function reconcileRecheckRound(input: {
   targets: RecheckTarget[];
@@ -1129,11 +1136,18 @@ function reconcileRecheckRound(input: {
   budgetExcluded: ReadonlySet<string>;
   /** Rows the gate dropped from an otherwise accepted document (row content errors). */
   rejectedRowIds: ReadonlySet<string>;
+  /**
+   * Gate-dropped rows that carried no usable rowId, so they name no target.
+   * They are attributed by position among the SENT-and-unanswered rows.
+   */
+  anonymousRejectedRows: number;
 }): {
   assessments: Assessment[];
   outcomeByRowId: Map<string, Assessment>;
   resolutions: { associationId: string; verified: VerifiedResolution }[];
+  /** Rows carrying a real seat answer — the published coverage/tally count. */
   assessedCount: number;
+  /** Never-sent rows (`assessments.length` is the lifecycle clock instead). */
   omittedCount: number;
 } {
   const {
@@ -1147,6 +1161,7 @@ function reconcileRecheckRound(input: {
     catalogBudgetExcluded,
     budgetExcluded,
     rejectedRowIds,
+    anonymousRejectedRows,
   } = input;
   const outcomeByRowId = new Map<string, Assessment>();
   const assessments: Assessment[] = [];
@@ -1162,10 +1177,33 @@ function reconcileRecheckRound(input: {
   const currentComposites = new Set(
     output.findings.map((f) => computeFindingFingerprint({ ...f, fingerprint_hint: null })),
   );
+  const answeredRowIds = new Set((doc?.results ?? []).map((row) => row.rowId));
+
+  // A gate rejection with no usable rowId names no target, so the only honest
+  // mapping is POSITION among the rows that were sent and left unanswered: the
+  // seat emitted N results we cannot identify, so the first N such rows are
+  // the attempted-and-bad ones. Never-sent rows (catalog exclusion, catalog or
+  // size budget) stay out of the pool — dropping one into `invalid-output`
+  // would blame a row the seat never received.
+  const anonymouslyRejected = new Set<string>();
+  if (anonymousRejectedRows > 0) {
+    for (const target of targets) {
+      if (anonymouslyRejected.size >= anonymousRejectedRows) break;
+      if (answeredRowIds.has(target.rowId) || rejectedRowIds.has(target.rowId)) continue;
+      if (
+        catalogExcluded.has(target.rowId) ||
+        catalogBudgetExcluded.has(target.rowId) ||
+        budgetExcluded.has(target.rowId)
+      ) {
+        continue;
+      }
+      anonymouslyRejected.add(target.rowId);
+    }
+  }
 
   for (const target of targets) {
     const docResult = doc?.results.find((r) => r.rowId === target.rowId) ?? undefined;
-    const rejected = rejectedRowIds.has(target.rowId);
+    const rejected = rejectedRowIds.has(target.rowId) || anonymouslyRejected.has(target.rowId);
     let assessment: Assessment;
     if (staleContext) {
       // Stale lifecycle state (pending-journal apply or capture failed):
@@ -1275,7 +1313,9 @@ function reconcileRecheckRound(input: {
     assessments,
     outcomeByRowId,
     resolutions,
-    assessedCount: assessments.length,
+    // Coverage counts REAL seat answers, not the lifecycle clock: a
+    // gate-rejected row advances `last_assessed_ms` but was never assessed.
+    assessedCount: targets.filter((target) => answeredRowIds.has(target.rowId)).length,
     omittedCount: targets.length - assessments.length,
   };
 }
@@ -1389,24 +1429,35 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
  * written document is ALREADY filtered by the seat, so a second validation
  * pass sees no drops; the status's `rejected_row_ids` is the only surviving
  * record of them and is therefore the primary source. It is trusted only for
- * the row IDs this round actually sent.
+ * the row IDs this round actually sent. A drop that carried no usable rowId
+ * cannot be named, so it is counted and the reconciliation attributes it by
+ * position (see `reconcileRecheckRound`).
  */
 async function readRecheckDoc(
   sandbox: ReviewSandbox,
   recheckInput: RecheckInput,
-): Promise<{ doc: RecheckDoc | null; rejected: ReadonlySet<string>; status: RecheckStatus | null }> {
+): Promise<{
+  doc: RecheckDoc | null;
+  rejected: ReadonlySet<string>;
+  anonymousRejectedRows: number;
+  status: RecheckStatus | null;
+}> {
   const [docText, statusText] = await Promise.all([
     boundedRead(sandbox, readRecheckCommand(RECHECK_OUTPUT_PATH)),
     boundedRead(sandbox, readRecheckStatusCommand()),
   ]);
   let doc: RecheckDoc | null = null;
   const droppedRowIds = new Set<string>();
+  let anonymousRejectedRows = 0;
   if (docText !== null) {
     try {
       const gate = validateRecheckDoc(JSON.parse(docText), recheckInput);
       if (gate.ok) {
         doc = gate.doc;
-        for (const row of gate.rejected) if (row.rowId !== null) droppedRowIds.add(row.rowId);
+        for (const row of gate.rejected) {
+          if (row.rowId === null) anonymousRejectedRows += 1;
+          else droppedRowIds.add(row.rowId);
+        }
       }
     } catch {
       doc = null;
@@ -1416,7 +1467,7 @@ async function readRecheckDoc(
   const sent = new Set(recheckInput.targets.map((target) => target.rowId));
   const rejected = new Set(droppedRowIds);
   for (const rowId of status?.rejected_row_ids ?? []) if (sent.has(rowId)) rejected.add(rowId);
-  return { doc, rejected, status };
+  return { doc, rejected, anonymousRejectedRows, status };
 }
 
 /**
@@ -3042,10 +3093,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // other than a valid document is NO recheck; the round proceeds with every
     // selected row conservatively accounted (§7.4), and the seat's status makes
     // that loss attributable in D1. Rows the gate dropped are carried as
-    // rejected so they are never mistaken for rows the seat never reached.
+    // rejected — by rowId when it had one, by position among the unanswered
+    // sent rows when it did not — so they are never mistaken for rows the seat
+    // never reached.
     const recheck = recheckInput !== undefined ? await readRecheckDoc(sandbox, recheckInput) : null;
     const recheckDoc = recheck?.doc ?? null;
     const rejectedRowIds = recheck?.rejected ?? new Set<string>();
+    const anonymousRejectedRows = recheck?.anonymousRejectedRows ?? 0;
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
@@ -3141,6 +3195,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       catalogBudgetExcluded,
       budgetExcluded,
       rejectedRowIds,
+      anonymousRejectedRows,
     });
     // §7.8 attribution: ONE line per recheck round carrying the seat's own
     // status next to this round's accounting. A lost round therefore leaves a
@@ -3166,7 +3221,12 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           recheck_error: status?.error === null || status?.error === undefined
             ? null
             : redactExactSecrets(redactSecrets(status.error), secretValues),
-          rejected: rejectedRowIds.size,
+          // Named drops + the ones the gate could not name (no usable rowId):
+          // the count reports what happened, not only what could be named.
+          rejected: rejectedRowIds.size + anonymousRejectedRows,
+          // Real seat answers (the published coverage count), never the
+          // lifecycle clock — a gate-rejected row advances `last_assessed_ms`
+          // without ever having been assessed.
           assessed: reconciled.assessedCount,
         },
         recheckInput !== undefined

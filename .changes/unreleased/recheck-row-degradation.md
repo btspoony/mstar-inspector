@@ -49,8 +49,9 @@ category: Fixed
   another HEAD — or one naming a row this round never sent — attributes nothing.
 - **A recheck document-write failure is recorded, not hidden.** The runner
   writes the round status only after the document lands; a failed document
-  write records `failed/write-failed` instead of the seat's `ok`, so D1 can no
-  longer keep a round that published nothing as clean. The status error is
+  write exits 1 with no stdout (the worker's runner-failure path), so no status
+  ever reports an `ok` for a document that never reached the worker, and D1
+  cannot keep a round that published nothing as clean. The status error is
   redacted with the worker's own credential-pattern list
   (`packages/shared/src/secret-shapes.ts` — one canonical list for both halves).
 - **A round that rejected every row reports `failed`, not `ok`.** When the gate
@@ -60,6 +61,14 @@ category: Fixed
   clean. A partial drop still reports `ok` with the rejected IDs. The status's
   `rejected` count is derived from `rejected_row_ids` on read, so the two faces
   of the count cannot disagree.
+- **The published coverage line counts real seat answers.** A row the gate
+  dropped was attempted and still advances its rotation clock
+  (`last_assessed_ms`), but it was never assessed: the coverage line and the
+  round's accounting log field now count only rows that carry a document
+  result, so a round can no longer claim reassessments the seat never
+  delivered. The lifecycle clock keeps the attempted rows, so fair rotation is
+  unchanged. A gate drop that carried no usable row ID is attributed to the
+  sent-but-unanswered row at its position instead of being reported `omitted`.
 - **A finding inside an oversized hunk keeps local evidence.** A hunk larger
   than the 80-line slice bound is no longer excluded whole (which left every
   finding inside it permanently `no-evidence`): it is split into consecutive
@@ -73,11 +82,11 @@ category: Fixed
   produced an invalid document, and a review that continued after its usage
   event failed to record — could page the on-call for reviews that published
   normally. Both stages are now outside the paging signal, and both are out of
-  the per-PR failure count. The per-PR failure history still lists `usage`
-  rows, so a lost metered-usage record keeps a surface; `recheck` rows stay out
-  of it, their accounting already rides the published coverage line. The
-  stage lists live once in `src/contracts/failure-stages.ts` and are
-  interpolated into the sweep and dashboard queries.
+  the per-PR failure count. The per-PR failure history lists BOTH, so a lost
+  metered-usage record and a recheck round that produced no usable document
+  each keep a surface in the App detail page. The stage list is written once in
+  `src/contracts/failure-stages.ts` and interpolated into the sweep and
+  dashboard queries; the history query carries no stage predicate at all.
 
 <!-- CN -->
 - **单行不合格不再丢弃整轮重审。** 重审文档校验现在区分两级不信任。文档级故障
@@ -113,14 +122,20 @@ category: Fixed
   `invalid-output`。别的 HEAD 写下的状态、或点名了本轮从未发送的行的状态，都不产生
   任何归因。
 - **重审文档写失败会被记录，而不是被掩盖。** runner 只有在文档写成功之后才写轮次
-  状态；文档写失败时记录 `failed/write-failed`，而不是席位的 `ok`，因此 D1 不会
-  再把「什么都没发布」的轮次留成干净记录。状态错误的脱敏使用 worker 同一份凭据
-  模式表（`packages/shared/src/secret-shapes.ts`——两侧共用唯一一份列表）。
+  状态；文档写失败时以退出码 1 结束且不输出 stdout（走 worker 的 runner 失败路径），
+  因此不会有任何状态把从未送达 worker 的文档报成 `ok`，D1 也不会再把「什么都没发布」
+  的轮次留成干净记录。状态错误的脱敏使用 worker 同一份凭据模式表
+  （`packages/shared/src/secret-shapes.ts`——两侧共用唯一一份列表）。
 - **整轮全部行被拒时状态报 `failed` 而非 `ok`。** 当校验接受了文档、但没有任何一行
   提交行通过时，状态为 `failed`，reason 为 `all-rows-rejected`，因此 worker 会写入
   自己的 `review_failures` 行，而不会把「什么都没交付」的轮次留成干净记录。部分行
   被拒仍是 `ok` 并携带被拒行 ID。读取时 `rejected` 计数由 `rejected_row_ids` 推导，
   两个计数面不可能互相矛盾。
+- **发布覆盖行只统计席位真正给出的回答。** 被校验丢弃的行是「已尝试」的，轮转时钟
+  （`last_assessed_ms`）照常前进，但它从未被真正评估：覆盖行与该轮的账目日志字段
+  现在只统计携带文档结果的行，一轮再也无法声称席位从未交付的重审数量。生命周期时钟
+  仍然包含已尝试的行，因此公平轮转不变。校验丢弃且没有可用行 ID 的行，按其位置归到
+  已发送但无回答的那一行，而不是报成 `omitted`。
 - **超大 hunk 内的 finding 仍保有局部证据。** 超过 80 行切片上限的 hunk 不再被整体
   排除（那会让它内部的每个 finding 永久成为 `no-evidence`）：它按连续 ≤80 行切成
   多个窗口，离原始关注行最近的优先，每个窗口的起始行号直接来自 hunk 头的行号算术。
@@ -129,7 +144,7 @@ category: Fixed
   `review_failures` 行——查询没有任何 stage 条件，且 `recheck` 当时还不是可选
   stage——因此两类归因行都可能为正常发布的评审唤来 on-call：预算跳过 / 席位失联 /
   文档无效的重审轮，以及用量事件写入失败但评审继续的轮次。现在两个阶段都在告警
-  统计之外，也都不计入单个 PR 的失败数量。单个 PR 的失败历史仍会列出 `usage` 行，
-  让丢失的计量记录有可见面；`recheck` 行仍不进该列表，它的账目已经随发布覆盖行
-  呈现。阶段清单只在 `src/contracts/failure-stages.ts` 写一次，并插值进扫描与
-  仪表盘查询。
+  统计之外，也都不计入单个 PR 的失败数量。单个 PR 的失败历史两者都会列出，让丢失的
+  计量记录和「未产出可用文档」的重审轮在 App 详情页各自保有可见面。阶段清单只在
+  `src/contracts/failure-stages.ts` 写一次，并插值进扫描与仪表盘查询；失败历史
+  查询完全不带 stage 条件。
