@@ -1750,14 +1750,21 @@ export const ompAgentRuntime: AgentRuntime = {
         // body, which is what made a real review print each of them twice. This
         // layer has no narrative to offer, so it says exactly that.
         //
-        // KNOWN GAP, accepted here: a surface that renders this string verbatim
-        // and reads no structured field (the dashboard review row, whose table
-        // stores no scorePct/tally/incomplete) rendered those facts out of the
-        // fallback and now has nothing. Re-adding any of them to prose puts
-        // machine text into a markdown field and re-duplicates the published
-        // body — the two defects this change removes. The fix is structured
-        // columns on the review row plus the engine-side renderer, tracked
-        // upstream; it is not a wording change.
+        // KNOWN GAP, accepted here — scoped precisely. The dashboard review row
+        // still renders `verdict` (its own span) and the findings (their own
+        // section: title, severity, file:line, body). What it loses is the two
+        // facts that only ever lived in the fallback's machine lines: the tally
+        // with its score/band, and — for an `incomplete` review — the cause and
+        // the unscanned scope. Its query selects
+        // `verdict, summary_md, model, provider, reviewed_at, head_sha`.
+        //
+        // Re-adding any of that to prose would put machine text into a markdown
+        // field and re-duplicate the published body, which are the two defects
+        // this change removes. The repair belongs on the read side: the review
+        // row already stores an `envelope` column (`src/store/artifact-store.ts`),
+        // so the dashboard query can read the tally and the `incomplete` fact
+        // from structured data instead of parsing a summary. Tracked upstream
+        // with the renderer work; it is not a wording change.
         summary_md: "No narrative summary was produced by the review seats.",
         ...(stoppedSeats === 0
           ? {}
