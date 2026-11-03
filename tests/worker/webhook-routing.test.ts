@@ -228,6 +228,24 @@ function brokenInstallDb(db: ReturnType<typeof createTestD1>): ReturnType<typeof
   } as unknown as ReturnType<typeof createTestD1>;
 }
 
+/**
+ * D1 double that fails ONLY the `server_flags` read — every other statement
+ * (webhook-path lookup, delivery record, ledger, touch) stays healthy, so a
+ * delivery against it exercises exactly the flag-read failure.
+ */
+function brokenFlagReadDb(db: ReturnType<typeof createTestD1>): ReturnType<typeof createTestD1> {
+  return {
+    raw: db.raw,
+    batch: db.batch.bind(db),
+    prepare(query: string) {
+      if (query.includes("FROM server_flags")) {
+        throw new Error("d1 unavailable (test injection)");
+      }
+      return db.prepare(query);
+    },
+  } as unknown as ReturnType<typeof createTestD1>;
+}
+
 /** Swap `console.warn` for a mock until `stop()` restores it. */
 function captureWarn(): { warn: ReturnType<typeof mock<(msg: unknown) => void>>; stop: () => void } {
   const warn = mock((_msg: unknown) => {});
@@ -1509,6 +1527,28 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
       .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "paused", status_code: null }]);
+  });
+
+  test("flag read failure does not reach an `ignore` delivery → 2xx ignored + delivery row recorded", async () => {
+    // Job-scoped flag read: only a `job` can enqueue, so an `ignore` never
+    // consults `review_global` — a failing read must not turn this 2xx into a
+    // 500 that also drops the delivery row.
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(brokenFlagReadDb(db), { REVIEW_QUEUE: queue as never });
+    // `closed` is not a whitelisted pull_request action → classify → ignore.
+    const body = JSON.stringify({ ...PR_PAYLOAD, action: "closed" });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const rows = db.raw
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
+    expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
   });
 
   test("paused App, non-whitelisted event → 2xx ignored + touched (ignore outcome also counts)", async () => {

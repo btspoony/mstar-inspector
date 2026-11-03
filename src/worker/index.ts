@@ -401,7 +401,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // consumers need it: this record (a globally blocked `job` is `paused`, never
   // `ok`) and the enqueue gate below. One PK point read, per the flag read
   // contract in src/admin/flags.ts; a second read for the gate is forbidden.
-  const reviewGlobal = await isFlagEnabled(db, "review_global");
+  // Job-scoped: only a `job` can enqueue, so reject / ignore / installation
+  // deliveries must not gain a flag dependency (a failed read would turn their
+  // 2xx into a 500 and cost them their delivery row).
+  const reviewGlobal = outcome.kind === "job" ? await isFlagEnabled(db, "review_global") : true;
   try {
     await appsStore.recordDelivery({
       appId: row.id,
