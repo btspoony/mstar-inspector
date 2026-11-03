@@ -271,7 +271,8 @@ export type WebhookOutcome =
    * A review job. `installationAccount` is `installation.account.login`
    * when the payload carries it, falling back to `repository.owner.login` —
    * the installation's own account is authoritative and the repository
-   * owner only covers payloads that omit it. It is carried OUTSIDE
+   * owner covers only payloads that omit it (the review path does NOT always
+   * receive an owner-derived login). It is carried OUTSIDE
    * `payload` so it never enters the queue message (the consumer contract
    * `ReviewJobPayload` must not grow an account field) while the route can
    * still record it on `app_installations`.
@@ -332,11 +333,12 @@ const repositorySchema = z
  * AUTHORITATIVE or INFERRED):
  * - authoritative = `installation.account.login` on an `installation.*` event
  *   (the installation's own statement) — overwrites a stored login;
- * - inferred = `repository.owner.login`, the only thing a review delivery can
- *   supply because GitHub omits `installation.account` from `pull_request` /
- *   `issue_comment` payloads — only fills an EMPTY stored login.
- * They are never interchangeable: the store picks its update expression from
- * `accountAuthoritative`, not from which value looks more specific.
+ * - inferred = the login a review delivery (`pull_request` / `issue_comment`)
+ *   carries, which is `installation.account.login` when the payload has it and
+ *   `repository.owner.login` otherwise — only fills an EMPTY stored login.
+ * The precedence is stated here once. They are never interchangeable: the store
+ * picks its update expression from `accountAuthoritative`, not from which value
+ * looks more specific.
  *
  * An empty-string login is treated as absent, so the owner covers it.
  */

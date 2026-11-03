@@ -1551,6 +1551,42 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
   });
 
+  test("flag read failure on a `job` delivery → 2xx accepted, enqueued, and every diagnostic write still lands", async () => {
+    // The read sits before the delivery row, the PR ledger and the
+    // last_webhook_at touch, so an unguarded failure would 500 an
+    // already-verified job and drop all three. The read is best-effort:
+    // fail-open to "enabled" (the flag's absent-row default), one warn.
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(brokenFlagReadDb(db), { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      stop();
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    // Delivery row: `ok` (the job really enqueued), not `paused`.
+    const deliveries = db.raw
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
+    expect(deliveries).toEqual([{ event_name: "pull_request", outcome: "ok", status_code: null }]);
+    const ledger = db.raw
+      .query("SELECT pr_number, state FROM pull_requests WHERE app_id = ?")
+      .all(appRow.id) as Array<{ pr_number: number; state: string }>;
+    expect(ledger).toEqual([{ pr_number: 42, state: "open" }]);
+    expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
+    const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("review_global_read_failed");
+  });
+
   test("paused App, non-whitelisted event → 2xx ignored + touched (ignore outcome also counts)", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });

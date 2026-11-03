@@ -403,8 +403,24 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // contract in src/admin/flags.ts; a second read for the gate is forbidden.
   // Job-scoped: only a `job` can enqueue, so reject / ignore / installation
   // deliveries must not gain a flag dependency (a failed read would turn their
-  // 2xx into a 500 and cost them their delivery row).
-  const reviewGlobal = outcome.kind === "job" ? await isFlagEnabled(db, "review_global") : true;
+  // 2xx into a 500 and cost them their delivery row). For the SAME reason the
+  // read itself is best-effort: it sits before the delivery row, the PR ledger
+  // and the last_webhook_at touch, so a D1 failure here would drop all three
+  // diagnostics of an already-verified job. It logs one structured warn and
+  // falls back to enabled — the flag's own documented absent-row default.
+  let reviewGlobal = true;
+  if (outcome.kind === "job") {
+    try {
+      reviewGlobal = await isFlagEnabled(db, "review_global");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      webhookWarn(
+        "review_global_read_failed",
+        detail,
+        "review_global flag read failed — assuming enabled (fail-open); webhook response and bookkeeping unaffected",
+      );
+    }
+  }
   try {
     await appsStore.recordDelivery({
       appId: row.id,

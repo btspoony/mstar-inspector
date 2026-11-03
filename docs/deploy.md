@@ -1353,12 +1353,11 @@ path records two kinds of login on `app_installations.account_login`:
   `installation.created` / `new_permissions_accepted` event. This is the
   installation's own statement of its account, so it overwrites whatever the row
   holds (a NULL login on such an event still preserves the stored value).
-- **Inferred** — `repository.owner.login` from a review delivery
-  (`pull_request` / `issue_comment`), because GitHub does not put
-  `installation.account` in those payloads. An inference only **fills an empty**
-  login; it never replaces one, so historical NULL rows still fill in from
-  ordinary review traffic without an inference ever overwriting an authoritative
-  value.
+- **Inferred** — the login a review delivery (`pull_request` / `issue_comment`)
+  carries: `installation.account.login` when the payload has it, else
+  `repository.owner.login`. An inference only **fills an empty** login; it never
+  replaces one, so historical NULL rows still fill in from ordinary review
+  traffic without an inference ever overwriting an authoritative value.
 
 Both writes happen before the pause and global-flag gates, so they still land
 while the App is paused or the global review flag is off (those gates close only
