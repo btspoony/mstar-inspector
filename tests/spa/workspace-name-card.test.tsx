@@ -310,7 +310,7 @@ describe("workspace name card", () => {
 
       await act(async () => {
         win.history.pushState(null, "", "/dashboard/ws_beta/settings");
-        win.dispatchEvent(new win.Event("popstate") as unknown as Event);
+        win.dispatchEvent(new win.Event("popstate"));
       });
 
       // B's read replaced A's: its stored value and ceiling, never A's draft.
