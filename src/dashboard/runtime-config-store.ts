@@ -162,7 +162,7 @@ export async function getEffectiveConcurrency(
                 (SELECT max_concurrent_reviews FROM workspaces WHERE id = ?2) AS workspace_value`,
       )
       .bind(SYSTEM_CONCURRENCY_KEY, workspaceId)
-      .first<{ system_value: string | null; workspace_value: number | null }>();
+      .first<{ system_value?: string | null; workspace_value?: number | null }>();
     // This query always yields exactly one row; no row means the answer itself
     // is untrustworthy, not that both settings are absent. A present row whose
     // selected fields are missing is untrusted for the same reason — only a NULL
