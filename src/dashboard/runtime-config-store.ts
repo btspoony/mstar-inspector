@@ -12,15 +12,20 @@
  *
  * Read discipline: ONE prepared statement per decision point, no KV and no
  * request cache — `getEffectiveConcurrency` reads both levels in a single
- * statement for exactly that reason. A read failure returns the CONSERVATIVE
- * cap (1, i.e. serial) with `degraded: true` and never throws: a settings read
- * that breaks must not admit unlimited concurrent reviews. The structured warn
- * belongs to the consumer that has a logger (the pipeline reader), not here.
+ * statement for exactly that reason. Only an ABSENT row/column is the default:
+ * a PRESENT value the parse cannot trust, or a result that is not a row at
+ * all, answers the CONSERVATIVE cap (1, i.e. serial) with `degraded: true` and
+ * never throws — a settings read that breaks must not admit unlimited
+ * concurrent reviews. The structured warn belongs to the consumer that has a
+ * logger (the pipeline reader), not here.
  *
  * Write discipline: values are integers in 1..250; a workspace value above the
- * CURRENT system value is refused, never clamped. Both writes land with their
- * `platform_audit_events` row in ONE `db.batch`, the `flag.set` pattern in
- * src/admin/index.ts — a failed write appends no audit row.
+ * CURRENT system value is refused, never clamped. The cap is part of the
+ * UPDATE's own predicate, so the refusal is decided by the write against the
+ * cap as it stands at that moment — a concurrent lowering cannot slip between
+ * a check and the write. Both writes land with their `platform_audit_events`
+ * row in ONE `db.batch`, the `flag.set` pattern in src/admin/index.ts — a
+ * failed write appends no audit row.
  *
  * Module boundary: a dashboard leaf whose only import is the `DashboardD1`
  * type from ./users — no store/pipeline/review code, no runtime dependency.
@@ -49,7 +54,27 @@ export function isConcurrencyValue(value: unknown): value is number {
 }
 
 /**
- * Why a write was refused. `invalid_value` is the 1..250 range; `above_system`
+ * Parse one stored value. `undefined` = the row/column is ABSENT, so the
+ * caller's default applies; `NaN` = the value is present but not a trusted
+ * 1..250 integer, which no reader may treat as a default.
+ */
+function parseStored(value: string | number | null | undefined): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return isConcurrencyValue(parsed) ? parsed : Number.NaN;
+}
+
+/**
+ * One cap from its stored value: absent → `fallback`, present-but-untrusted →
+ * the conservative bound. Same answer `getEffectiveConcurrency` degrades to.
+ */
+function resolveStored(value: string | number | null | undefined, fallback: number): number {
+  const parsed = parseStored(value);
+  if (parsed === undefined) return fallback;
+  return Number.isNaN(parsed) ? CONCURRENCY_MIN : parsed;
+}
+
+/** Why a write was refused. `invalid_value` is the 1..250 range; `above_system`
  * is a workspace value over the system cap, refused so the route can answer a
  * keyed 400 instead of storing a number that would never apply;
  * `unknown_workspace` is a target that does not exist, so nothing was written.
@@ -78,17 +103,16 @@ export type EffectiveConcurrency = {
 /** One `review_runtime_settings` row. */
 type RuntimeSettingRow = { value: string };
 
-/** The system cap; an absent row reads as the default. */
+/** The system cap; an absent row reads as the default, garbage as 1. */
 export async function getSystemConcurrency(db: DashboardD1): Promise<number> {
   const row = await db
     .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
     .bind(SYSTEM_CONCURRENCY_KEY)
     .first<RuntimeSettingRow>();
-  const parsed = row === null ? Number.NaN : Number(row.value);
-  return isConcurrencyValue(parsed) ? parsed : SYSTEM_CONCURRENCY_DEFAULT;
+  return resolveStored(row?.value, SYSTEM_CONCURRENCY_DEFAULT);
 }
 
-/** The workspace cap; a NULL row/column reads as the default. */
+/** The workspace cap; an absent row/NULL column reads as the default, garbage as 1. */
 export async function getWorkspaceConcurrency(
   db: DashboardD1,
   workspaceId: string,
@@ -97,15 +121,24 @@ export async function getWorkspaceConcurrency(
     .prepare("SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = ?")
     .bind(workspaceId)
     .first<{ value: number | null }>();
-  const stored = row?.value ?? null;
-  return isConcurrencyValue(stored) ? stored : WORKSPACE_CONCURRENCY_DEFAULT;
+  return resolveStored(row?.value, WORKSPACE_CONCURRENCY_DEFAULT);
+}
+
+/** The untrusted-read answer: serial, flagged. */
+function degradedConcurrency(): EffectiveConcurrency {
+  return {
+    system: CONCURRENCY_MIN,
+    workspace: CONCURRENCY_MIN,
+    effective: CONCURRENCY_MIN,
+    degraded: true,
+  };
 }
 
 /**
  * Both caps in ONE statement (one read per decision point), resolved to the
- * effective value. Any read failure — thrown, or a row shape the parse cannot
- * trust — answers the conservative cap with `degraded: true`; it never throws
- * and never fails open to unlimited.
+ * effective value. Any read failure — thrown, no result row, or a present
+ * value the parse cannot trust — answers the conservative cap with
+ * `degraded: true`; it never throws and never fails open to unlimited.
  */
 export async function getEffectiveConcurrency(
   db: DashboardD1,
@@ -119,22 +152,34 @@ export async function getEffectiveConcurrency(
       )
       .bind(SYSTEM_CONCURRENCY_KEY, workspaceId)
       .first<{ system_value: string | null; workspace_value: number | null }>();
-    const systemValue = Number(row?.system_value ?? Number.NaN);
-    const system = isConcurrencyValue(systemValue) ? systemValue : SYSTEM_CONCURRENCY_DEFAULT;
-    const workspaceStored = row?.workspace_value ?? null;
-    const workspace = isConcurrencyValue(workspaceStored)
-      ? workspaceStored
-      : WORKSPACE_CONCURRENCY_DEFAULT;
+    // This query always yields exactly one row; no row means the answer itself
+    // is untrustworthy, not that both settings are absent.
+    if (row === null) return degradedConcurrency();
+    const storedSystem = parseStored(row.system_value);
+    const storedWorkspace = parseStored(row.workspace_value);
+    if (Number.isNaN(storedSystem) || Number.isNaN(storedWorkspace)) {
+      return degradedConcurrency();
+    }
+    const system = storedSystem ?? SYSTEM_CONCURRENCY_DEFAULT;
+    const workspace = storedWorkspace ?? WORKSPACE_CONCURRENCY_DEFAULT;
     return { system, workspace, effective: Math.min(system, workspace), degraded: false };
   } catch {
-    return {
-      system: CONCURRENCY_MIN,
-      workspace: CONCURRENCY_MIN,
-      effective: CONCURRENCY_MIN,
-      degraded: true,
-    };
+    return degradedConcurrency();
   }
 }
+
+/**
+ * The system cap as SQL, so a write statement can read the cap inside its own
+ * predicate instead of trusting an earlier read. An absent row is the default;
+ * anything not a plain 1..250 integer is the conservative bound, matching what
+ * a degraded read answers. (Stricter than `parseStored` on stray whitespace:
+ * `shortcut: a hand-edited " 8" is read as 8 but refuses writes, upgrade if a
+ * non-canonical writer ever exists`.)
+ */
+const systemCapSql = (keyParam: string) => `COALESCE((SELECT CASE
+      WHEN value NOT GLOB '*[^0-9]*' AND CAST(value AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${CONCURRENCY_MAX}
+      THEN CAST(value AS INTEGER) ELSE ${CONCURRENCY_MIN} END
+    FROM review_runtime_settings WHERE key = ${keyParam}), ${SYSTEM_CONCURRENCY_DEFAULT})`;
 
 /** Audit row + `review_runtime_settings` upsert, in that order, in ONE batch. */
 const SYSTEM_AUDIT_SQL = `
@@ -154,10 +199,10 @@ const SYSTEM_UPSERT_SQL = `
     updated_by = excluded.updated_by`;
 
 /**
- * The ledger row is guarded by the TARGET's existence, so an unknown workspace
- * appends nothing (the `workspace.slug.set` pattern in src/admin/workspaces.ts),
- * and it computes `before` with a subquery against the not-yet-updated row —
- * a bind cannot read the old value after the write.
+ * The ledger row carries the same two guards as the UPDATE below — the target
+ * exists and the value does not exceed the system cap — so a refused write
+ * appends nothing. It computes `before` with a subquery against the
+ * not-yet-updated row: a bind cannot read the old value after the write.
  */
 const WORKSPACE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
@@ -166,17 +211,19 @@ const WORKSPACE_AUDIT_SQL = `
          json_object('before', (SELECT max_concurrent_reviews FROM workspaces WHERE id = ?3),
                      'after', ?4),
          ?5
-   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
+   WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)
+     AND ?4 <= ${systemCapSql("?6")}`;
 
 /**
- * No cap predicate here: the refusal above is a named error the route answers
- * with a keyed 400, which a guarded UPDATE cannot distinguish from an unknown
- * workspace. A system cap lowered in that instant is still honoured by every
- * read — `getEffectiveConcurrency` takes the min — so no message can exceed it.
+ * The cap is part of the predicate: raising the workspace value above the
+ * system cap is refused by this statement itself, against the cap as it stands
+ * now, so no concurrent lowering can be raced by a separate check. Zero rows
+ * changed means either refusal; the caller reads the post-write state to name
+ * which one.
  */
 const WORKSPACE_UPDATE_SQL = `
   UPDATE workspaces SET max_concurrent_reviews = ?2
-   WHERE id = ?1 AND deleted_at IS NULL`;
+   WHERE id = ?1 AND deleted_at IS NULL AND ?2 <= ${systemCapSql("?3")}`;
 
 /** Set the system cap. Audited with the actor; returns the stored value. */
 export async function setSystemConcurrency(
@@ -217,24 +264,32 @@ export async function setWorkspaceConcurrency(
       `concurrency must be an integer in ${CONCURRENCY_MIN}..${CONCURRENCY_MAX}`,
     );
   }
-  const system = await getSystemConcurrency(db);
-  if (value > system) {
-    throw new RuntimeConfigError(
-      "above_system",
-      `workspace concurrency ${value} exceeds the system cap ${system}`,
-    );
-  }
   const now = new Date().toISOString();
   const [, update] = await db.batch([
     db
       .prepare(WORKSPACE_AUDIT_SQL)
-      .bind(crypto.randomUUID(), actor, workspaceId, value, now),
-    db.prepare(WORKSPACE_UPDATE_SQL).bind(workspaceId, value),
+      .bind(crypto.randomUUID(), actor, workspaceId, value, now, SYSTEM_CONCURRENCY_KEY),
+    db
+      .prepare(WORKSPACE_UPDATE_SQL)
+      .bind(workspaceId, value, SYSTEM_CONCURRENCY_KEY),
   ]);
-  if (update?.meta.changes !== 1) {
-    throw new UnknownWorkspaceError(workspaceId);
-  }
-  return value;
+  if (update?.meta.changes === 1) return value;
+
+  // Zero rows: the write was refused, so nothing was written. Which refusal it
+  // was comes from the state after the attempt, never from a check before it.
+  const post = await db
+    .prepare(
+      `SELECT (SELECT 1 FROM workspaces WHERE id = ?1 AND deleted_at IS NULL) AS target,
+              (SELECT value FROM review_runtime_settings WHERE key = ?2) AS system_value`,
+    )
+    .bind(workspaceId, SYSTEM_CONCURRENCY_KEY)
+    .first<{ target: number | null; system_value: string | null }>();
+  if (post === null || post.target === null) throw new UnknownWorkspaceError(workspaceId);
+  const system = resolveStored(post.system_value, SYSTEM_CONCURRENCY_DEFAULT);
+  throw new RuntimeConfigError(
+    "above_system",
+    `workspace concurrency ${value} exceeds the system cap ${system}`,
+  );
 }
 
 /** A refused write against a workspace id that does not exist. */
