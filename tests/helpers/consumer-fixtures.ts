@@ -1,13 +1,17 @@
 /**
  * Fixtures shared by the consumer test files (tests/pipeline/consumer.test.ts
- * and consumer-recheck.test.ts): the App-seeded D1 double, the envelope/diff
- * fixtures and the finding-lifecycle seeds the recheck cases hang off.
+ * and consumer-recheck.test.ts): the App-seeded D1 double, the sandbox exec and
+ * log doubles, the envelope/diff fixtures and the finding-lifecycle seeds the
+ * recheck cases hang off.
  *
- * Every suite keeps its OWN sandbox/commenter/log doubles — those carry
- * per-test mutable state — while everything here is pure data or a function of
- * `db`, so one copy is safe to import from every file.
+ * Each double reads its behavior from a caller-owned mutable STATE object, so
+ * one copy serves both suites and tests still switch it per case.
  */
+import { mock } from "bun:test";
 import type { ReviewOutput } from "../../src/review/schema";
+import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
+import { readRecheckCommand } from "../../src/pipeline/gitops";
+import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -123,6 +127,171 @@ export const VALID_DIFF = [
   " return claims;",
   "",
 ].join("\n");
+
+// ---------------------------------------------------------------------------
+// Sandbox exec double (spec §7.7 steps 1–8). It answers ONLY the commands
+// consumer.ts issues: anything else throws, so a new/renamed product command
+// fails the suite instead of reading as an empty success.
+// ---------------------------------------------------------------------------
+
+/** The in-image paths consumer.ts execs against (its private constants). */
+const CLONE_DIR = "/workspace/repo";
+const DIFF_PATH = "/workspace/pr.diff";
+const RUNNER_INPUT_PATH = "/workspace/review-input.json";
+const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
+/** The audited bounded reads, built by production code from the fixed paths. */
+const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
+const RECHECK_STATUS_READ = readRecheckCommand(RECHECK_STATUS_PATH);
+
+export type FakeSandboxState = {
+  calls: Array<{ cmd: string; opts?: unknown }>;
+  /** Authoritative sha the checkout reports (becomes the round's HEAD). */
+  resolvedSha: string;
+  revParseExitCode: number;
+  cloneExitCode: number;
+  diffStdout: string;
+  diffExitCode: number;
+  numstatStdout: string;
+  numstatExitCode: number;
+  writeInputExitCode: number;
+  /** Decoded runner --input JSON written via the base64 write step. */
+  writtenInputJson: string | undefined;
+  /** The runner's recheck document and the `wc -c` overflow flag of its read. */
+  recheckFileContent: string;
+  recheckFileOverflow: string;
+  /** The seat's status document; `null` = the runner wrote none. */
+  recheckStatusContent: string | null;
+  recheckStatusOverflow: string;
+  recheckStatusExitCode: number;
+  runnerStdout: string;
+  runnerStderr: string;
+  runnerExitCode: number;
+  /** Thrown from every exec instead of answering (sandbox transport failure). */
+  error: Error | undefined;
+  destroyCalls: number;
+  destroyError: Error | undefined;
+  /** Runs at the FIRST sandbox command of a test (ordering probes). */
+  probe: (() => void) | undefined;
+  /** Holds the FIRST runner exec; `reached` resolves once it is parked. */
+  gate: { released: Promise<void>; markReached: () => void } | undefined;
+};
+
+export function initialFakeSandboxState(): FakeSandboxState {
+  return {
+    calls: [],
+    resolvedSha: SHA,
+    revParseExitCode: 0,
+    cloneExitCode: 0,
+    diffStdout: "",
+    diffExitCode: 0,
+    numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
+    numstatExitCode: 0,
+    writeInputExitCode: 0,
+    writtenInputJson: undefined,
+    recheckFileContent: "",
+    recheckFileOverflow: "0",
+    recheckStatusContent: null,
+    recheckStatusOverflow: "0",
+    recheckStatusExitCode: 0,
+    runnerStdout: "",
+    runnerStderr: "",
+    runnerExitCode: 0,
+    error: undefined,
+    destroyCalls: 0,
+    destroyError: undefined,
+    probe: undefined,
+    gate: undefined,
+  };
+}
+
+/** Reset the state IN PLACE, so the double keeps reading the same object. */
+export function resetFakeSandboxState(state: FakeSandboxState): void {
+  Object.assign(state, initialFakeSandboxState());
+}
+
+type ExecResult = { stdout: string; stderr: string; exitCode: number };
+
+/** The declared command set; an unlisted command is a test failure, not a pass. */
+function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
+  if (cmd.startsWith(`rm -rf '${CLONE_DIR}' && git init '${CLONE_DIR}'`)) {
+    return { stdout: "", stderr: "", exitCode: state.cloneExitCode };
+  }
+  if (cmd === `git -C '${CLONE_DIR}' rev-parse HEAD`) {
+    return { stdout: `${state.resolvedSha}\n`, stderr: "", exitCode: state.revParseExitCode };
+  }
+  if (cmd.startsWith("gh pr diff '") && cmd.includes(` > '${DIFF_PATH}'`)) {
+    return { stdout: state.diffStdout, stderr: "", exitCode: state.diffExitCode };
+  }
+  if (cmd === `git apply --numstat '${DIFF_PATH}'`) {
+    return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };
+  }
+  if (cmd.startsWith("printf '%s' '") && cmd.endsWith(`| base64 -d > '${RUNNER_INPUT_PATH}'`)) {
+    const match = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(cmd);
+    state.writtenInputJson = match ? Buffer.from(match[1]!, "base64").toString("utf8") : undefined;
+    return { stdout: "", stderr: "", exitCode: state.writeInputExitCode };
+  }
+  if (cmd === RECHECK_DOC_READ) {
+    return { stdout: `${state.recheckFileContent}\n${state.recheckFileOverflow}\n`, stderr: "", exitCode: 0 };
+  }
+  if (cmd === RECHECK_STATUS_READ) {
+    if (state.recheckStatusExitCode !== 0) {
+      return { stdout: "", stderr: "read failed", exitCode: state.recheckStatusExitCode };
+    }
+    // A missing status file fails the head chain, exactly like the real one.
+    if (state.recheckStatusContent === null) return { stdout: "", stderr: "no such file", exitCode: 1 };
+    return { stdout: `${state.recheckStatusContent}\n${state.recheckStatusOverflow}\n`, stderr: "", exitCode: 0 };
+  }
+  if (cmd.startsWith(`bun run '${RUNNER_PATH}' --level '`) && cmd.includes(`--input '${RUNNER_INPUT_PATH}'`)) {
+    return { stdout: state.runnerStdout, stderr: state.runnerStderr, exitCode: state.runnerExitCode };
+  }
+  throw new Error(`fake sandbox: unrecognized command — declare it in tests/helpers/consumer-fixtures.ts: ${cmd}`);
+}
+
+/** The injected sandbox double: `state` carries every per-test knob. */
+export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxState()) {
+  return {
+    state,
+    runCommand: mock(async (cmd: string, opts?: unknown) => {
+      const first = state.calls.length === 0;
+      state.calls.push({ cmd, opts });
+      if (first && state.probe !== undefined) state.probe();
+      if (state.error !== undefined) throw state.error;
+      if (cmd.includes("--input") && state.gate !== undefined) {
+        const gate = state.gate;
+        state.gate = undefined; // only the first runner exec is held
+        gate.markReached();
+        await gate.released;
+      }
+      return answerCommand(cmd, state);
+    }),
+    destroy: mock(async () => {
+      state.destroyCalls += 1;
+      if (state.destroyError !== undefined) throw state.destroyError;
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Log sink double (injected via the consumer's optional log param).
+// ---------------------------------------------------------------------------
+
+export type TestLogLine = {
+  level: "info" | "warn" | "error";
+  fields: ConsumerLogFields;
+  msg: string;
+};
+
+export function createTestLog(): { lines: TestLogLine[]; log: ConsumerLog } {
+  const lines: TestLogLine[] = [];
+  return {
+    lines,
+    log: {
+      info: (fields, msg) => lines.push({ level: "info", fields, msg: msg ?? "" }),
+      warn: (fields, msg) => lines.push({ level: "warn", fields, msg: msg ?? "" }),
+      error: (fields, msg) => lines.push({ level: "error", fields, msg: msg ?? "" }),
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Finding recheck & closure (spec §7.7 order / §7.4 conservative

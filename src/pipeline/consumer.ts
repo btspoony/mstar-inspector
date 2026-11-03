@@ -662,6 +662,8 @@ const RECHECK_SLICE_MAX_BYTES = 8 * 1024;
 const RECHECK_SLICES_PER_TARGET = 4;
 /** §7.3 input cap: oversized whole targets are excluded with coverage. */
 const RECHECK_INPUT_MAX_BYTES = 512 * 1024;
+/** The wire schema this consumer serializes (measured and written as one). */
+const RECHECK_INPUT_SCHEMA = "mstar.recheck-input/v1";
 
 /**
  * Await a promise with the §7.10 inline-hook budget as a hard consumer-side
@@ -2860,13 +2862,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           included.flatMap((target) => catalog.sliceIdsByRowId.get(target.rowId) ?? []),
         );
         evidence = catalog.slices.filter((slice) => referenced.has(slice.id));
-        let budget = RECHECK_INPUT_MAX_BYTES - jsonByteLength({ headSha, evidence, discussion });
+        // §7.3 cap measured on the SERIALIZED input — schema, headSha,
+        // evidence, discussion, array brackets and separators included — so
+        // the accepted document is exactly what the cap counts.
         const next: RecheckTarget[] = [];
         for (const target of included) {
-          const cost = jsonByteLength(target);
-          if (cost > budget) continue; // §7.3: oversized whole target — accounted, never truncated
-          budget -= cost;
-          next.push(target);
+          const candidate = { schema: RECHECK_INPUT_SCHEMA, headSha, targets: [...next, target], evidence, discussion };
+          // §7.3: an oversized whole target is accounted, never truncated.
+          if (jsonByteLength(candidate) <= RECHECK_INPUT_MAX_BYTES) next.push(target);
         }
         if (next.length === included.length) break;
         included = next;
@@ -2875,7 +2878,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       for (const target of candidates) if (!sentIds.has(target.rowId)) budgetExcluded.add(target.rowId);
       if (included.length > 0) {
         recheckInput = {
-          schema: "mstar.recheck-input/v1",
+          schema: RECHECK_INPUT_SCHEMA,
           headSha,
           targets: included,
           evidence,

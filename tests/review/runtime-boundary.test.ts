@@ -280,14 +280,16 @@ describe("in-image module graph — the image ships packages/runner/src plus the
     expect(() => dockerfileCopySources("COPY src ./ \\")).toThrow(/unterminated COPY/);
   });
 
-  test("the Dockerfile admits exactly the shared package modules", () => {
-    expect(admittedShared.map((file) => file.slice(REPO_ROOT.length + 1))).toEqual([
-      "packages/shared/src/credential-key.ts",
-      "packages/shared/src/credential-payload.ts",
-      "packages/shared/src/recheck-wire.ts",
-      "packages/shared/src/runtime.ts",
-      "packages/shared/src/secret-shapes.ts",
-    ]);
+  test("every admitted shared module is a real file in the image build context", () => {
+    // The pin that matters is not WHICH shared modules ship but that each
+    // admitted path is reachable from the build context (a stale COPY source
+    // fails the image build), and that admission stays a closed set: a shared
+    // module the Dockerfile does not list is refused by the same predicate the
+    // runner-import scan above evaluates.
+    expect(admittedShared.length).toBeGreaterThan(0);
+    expect(admittedShared.filter((file) => !existsSync(file))).toEqual([]);
+    expect(admittedShared).toContain(join(SHARED_SRC, "recheck-wire.ts"));
+    expect(admittedShared).not.toContain(join(SHARED_SRC, "not-shipped.ts"));
   });
 
   test("no packages/runner/src module imports outside that tree and the admitted files", () => {

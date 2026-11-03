@@ -1,9 +1,9 @@
 /**
  * Consumer recheck-round attribution (spec §7.7/§7.4/§7.10) — the status
  * document's parse bounds and the round's accounting in D1 and the published
- * body. Moved out of tests/pipeline/consumer.test.ts with this suite's own
- * sandbox/commenter/log doubles; the App-seeded D1 and the finding-lifecycle
- * seeds come from ../helpers/consumer-fixtures (one copy, both suites).
+ * body. Moved out of tests/pipeline/consumer.test.ts; the sandbox/log doubles,
+ * the App-seeded D1 and the finding-lifecycle seeds all come from
+ * ../helpers/consumer-fixtures (one copy, both suites).
  *
  * Same DI technique as the parent suite: sandbox + commenter injected through
  * createReviewConsumer's overrides (no process-wide mock.module on relative
@@ -12,7 +12,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
+import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { CommenterCall } from "../helpers/review-commenter";
 import type { TestD1 } from "../store/helpers";
 import { createFakeCommenter, initialFakeCommenterState } from "../helpers/review-commenter";
@@ -33,54 +33,16 @@ import {
   seedOpenTarget,
   seedAssociation,
   recheckDocWith,
+  createFakeSandbox,
+  createTestLog,
+  resetFakeSandboxState,
 } from "../helpers/consumer-fixtures";
 
 // --- sandbox fake (injected via createReviewConsumer overrides) -------------
-const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
-let runnerStdout = "";
-let diffStdout = "";
-/**
- * The runner's `--recheck-out` file content and the seat's STATUS document, as
- * the audited bounded reads hand them back. `null` status = the runner never
- * wrote one — the double then fails the `head` chain for that path exactly
- * like a missing file.
- */
-let recheckFileContent = "";
-let recheckStatusContent: string | null = null;
-let recheckStatusOverflow = "0";
-let recheckStatusExitCode = 0;
-/** Decoded runner --input JSON written via the base64 write step. */
-let writtenInputJson: string | undefined;
-
-const fakeSandbox = {
-  runCommand: mock(async (cmd: string, opts?: unknown) => {
-    sandboxCalls.push({ cmd, opts });
-    if (cmd.includes("rev-parse")) return { stdout: `${SHA}\n`, stderr: "", exitCode: 0 };
-    if (cmd.includes("git init")) return { stdout: "", stderr: "", exitCode: 0 };
-    if (cmd.includes("gh pr diff")) return { stdout: diffStdout, stderr: "", exitCode: 0 };
-    if (cmd.includes("git apply --numstat")) {
-      return { stdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n", stderr: "", exitCode: 0 };
-    }
-    if (cmd.includes("base64 -d")) {
-      const match = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(cmd);
-      writtenInputJson = match ? Buffer.from(match[1]!, "base64").toString("utf8") : undefined;
-      return { stdout: "", stderr: "", exitCode: 0 };
-    }
-    if (cmd.includes("head -c") && cmd.includes("/tmp/mstar-recheck-status.json")) {
-      if (recheckStatusExitCode !== 0) return { stdout: "", stderr: "read failed", exitCode: recheckStatusExitCode };
-      // A missing status file fails the head chain, exactly like the real one.
-      if (recheckStatusContent === null) return { stdout: "", stderr: "no such file", exitCode: 1 };
-      return { stdout: `${recheckStatusContent}\n${recheckStatusOverflow}\n`, stderr: "", exitCode: 0 };
-    }
-    if (cmd.includes("head -c") && cmd.includes("/tmp/mstar-recheck.json")) {
-      // Byte-for-byte the audited fixed-path recheck read's stdout.
-      return { stdout: `${recheckFileContent}\n0\n`, stderr: "", exitCode: 0 };
-    }
-    if (cmd.includes("--input")) return { stdout: runnerStdout, stderr: "", exitCode: 0 };
-    return { stdout: "", stderr: "", exitCode: 0 };
-  }),
-  destroy: mock(async () => {}),
-};
+// The double and its per-test knobs live in tests/helpers/consumer-fixtures:
+// it answers ONLY the commands consumer.ts issues and throws on anything else.
+const fakeSandbox = createFakeSandbox();
+const sandbox = fakeSandbox.state;
 
 // Load-shim only: consumer.ts statically imports ./sandbox → the workerd
 // builtin `cloudflare:workers` (unresolvable in Bun's test runner).
@@ -101,16 +63,7 @@ const testOverrides = {
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
 
 // --- test log sink (injected via the consumer's optional log param) --------
-const logLines: Array<{
-  level: "info" | "warn" | "error";
-  fields: ConsumerLogFields;
-  msg: string;
-}> = [];
-const testLog: ConsumerLog = {
-  info: (fields, msg) => logLines.push({ level: "info", fields, msg: msg ?? "" }),
-  warn: (fields, msg) => logLines.push({ level: "warn", fields, msg: msg ?? "" }),
-  error: (fields, msg) => logLines.push({ level: "error", fields, msg: msg ?? "" }),
-};
+const { lines: logLines, log: testLog } = createTestLog();
 
 // --- helpers ----------------------------------------------------------------
 const kv = {
@@ -160,17 +113,10 @@ function makeBatch(payload: ReviewJobPayload): MessageBatch<ReviewJobPayload> {
 }
 
 function reset(): void {
-  sandboxCalls.length = 0;
+  resetFakeSandboxState(sandbox);
   commenterCalls.length = 0;
   Object.assign(commenterState, initialFakeCommenterState());
   logLines.length = 0;
-  runnerStdout = "";
-  diffStdout = "";
-  recheckFileContent = "";
-  recheckStatusContent = null;
-  recheckStatusOverflow = "0";
-  recheckStatusExitCode = 0;
-  writtenInputJson = undefined;
 }
 
 /** All rows of the review_failures table in the real D1 double. */
@@ -181,11 +127,11 @@ function failureRows(db: TestD1): Array<Record<string, unknown>> {
 describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
   test("a failed seat status with no document makes the round attributable: every row invalid-output, one recheck failure row", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // The seat never wrote a document and said why.
-    recheckFileContent = "";
-    recheckStatusContent = JSON.stringify({
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
       schema: "mstar.recheck-status/v1",
       headSha: SHA,
       outcome: "failed",
@@ -223,8 +169,8 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("rejected rows of an accepted document are invalid-output, never omitted; the rest still assess", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     // 25 selected rows: 23 the seat answers assessably, 2 it answers badly.
@@ -259,7 +205,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     // are gone from `results`, so a second validation pass cannot recover them.
     // The status's `rejected_row_ids` is the only record, and the reconciliation
     // must still name them `invalid-output`.
-    recheckFileContent = JSON.stringify({
+    sandbox.recheckFileContent = JSON.stringify({
       schema: "mstar.recheck/v1",
       headSha: SHA,
       results: assessableRowIds.map((rowId) => ({
@@ -270,7 +216,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
         relatedCurrentFindingIndexes: [],
       })),
     });
-    recheckStatusContent = JSON.stringify({
+    sandbox.recheckStatusContent = JSON.stringify({
       schema: "mstar.recheck-status/v1",
       headSha: SHA,
       outcome: "ok",
@@ -325,13 +271,13 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("a budget-skipped round accounts every row as budget, never invalid-output", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // The budget left no room, so the seat never ran: it wrote a status and
     // no document. The row was not answered badly — nobody asked — so the
     // reason is `budget`, not `invalid-output`.
-    recheckFileContent = "";
-    recheckStatusContent = JSON.stringify({
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
       schema: "mstar.recheck-status/v1",
       headSha: SHA,
       outcome: "skipped",
@@ -368,8 +314,8 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("a size-budget-excluded round sends nothing: rows are budget, and the round is still attributed", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // One open row whose own JSON exceeds the whole §7.3 input budget, so the
     // builder excludes every target and no recheck input exists at all. The
     // row was never sent — `invalid-output` would blame a seat that never ran.
@@ -402,7 +348,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     await consumer(makeBatch(makePayload()));
 
     // No seat ran: the runner exec must not carry --recheck-out.
-    expect(sandboxCalls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
+    expect(sandbox.calls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (budget)");
     expect(prepared.body).not.toContain("unverifiable (invalid-output)");
@@ -421,13 +367,13 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("a status from another HEAD attributes nothing: the row stays omitted, never invalid-output", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // A usable document that answers nothing, beside a status that DOES claim
     // the sent row as rejected — but for a different HEAD. Trusting it would
     // name a reason this round never established.
-    recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
-    recheckStatusContent = JSON.stringify({
+    sandbox.recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    sandbox.recheckStatusContent = JSON.stringify({
       schema: "mstar.recheck-status/v1",
       headSha: "f".repeat(40),
       outcome: "ok",
@@ -463,10 +409,10 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       JSON.stringify({ schema: "mstar.recheck-status/v2", headSha: SHA, outcome: "failed", reason: "seat-failed" }),
     ]) {
       reset();
-      diffStdout = VALID_DIFF;
-      runnerStdout = JSON.stringify(VALID_OUTPUT);
-      recheckFileContent = "";
-      recheckStatusContent = statusBody;
+      sandbox.diffStdout = VALID_DIFF;
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      sandbox.recheckFileContent = "";
+      sandbox.recheckStatusContent = statusBody;
       const db = await createSeededTestD1();
       await seedPriorPublication(db);
       await seedOpenTarget(db);
@@ -493,11 +439,11 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("a readable status body that is not JSON at all is no attribution either", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    recheckFileContent = "";
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = "";
     // The transport succeeded and handed back bytes that are not a status.
-    recheckStatusContent = "mstar.recheck-status/v1 { truncated";
+    sandbox.recheckStatusContent = "mstar.recheck-status/v1 { truncated";
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
@@ -515,8 +461,8 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("a row the trusted catalog cannot prove never rides the wire: no-evidence, never budget, never assessed", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
@@ -532,8 +478,8 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     await consumer(makeBatch(makePayload()));
 
     // Not sent: the runner gains no --recheck-out and the input has no recheck.
-    expect(sandboxCalls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
-    expect((JSON.parse(writtenInputJson!) as { recheck?: unknown }).recheck).toBeUndefined();
+    expect(sandbox.calls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
+    expect((JSON.parse(sandbox.writtenInputJson!) as { recheck?: unknown }).recheck).toBeUndefined();
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
     // The reason names the real cause — an unprovable row is not oversized.
@@ -551,7 +497,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
   test("slices belonging to a budget-excluded row do not ride the recheck input, and the budget is measured without them", async () => {
     reset();
     // Two files in the captured diff, one selected row per file.
-    diffStdout = [
+    sandbox.diffStdout = [
       VALID_DIFF,
       "diff --git a/src/other.ts b/src/other.ts",
       "index 3333333..4444444 100644",
@@ -563,7 +509,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       " export const c = 3;",
       "",
     ].join("\n");
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     await seedOpenTarget(db);
@@ -599,7 +545,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const runnerInput = JSON.parse(writtenInputJson!) as {
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
       recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ id: string; path: string }> };
     };
     expect(runnerInput.recheck.targets.map((t) => t.rowId)).toEqual([TARGET_ROW_ID]);
@@ -651,9 +597,9 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     // Twelve provable rows whose slices all fit individually, but not together:
     // the catalog budget stops adding slices partway through the target list.
     const rowCount = 12;
-    diffStdout = catalogBudgetDiff(rowCount);
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    recheckFileContent = ""; // no document: every row is accounted by WHY it has no verdict
+    sandbox.diffStdout = catalogBudgetDiff(rowCount);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = ""; // no document: every row is accounted by WHY it has no verdict
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     for (let i = 0; i < rowCount; i++) {
@@ -688,7 +634,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const runnerInput = JSON.parse(writtenInputJson!) as {
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
       recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ path: string }> };
     };
     // The budget really bit: not every provable row could ride.
@@ -704,11 +650,11 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("an oversized hunk is sliced into windows that still contain the target line", async () => {
     reset();
-    diffStdout = oversizedAuthDiff(200);
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = oversizedAuthDiff(200);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // The concern sits at line 21 — inside the FIRST window, so its local
     // evidence exists even though the whole hunk (200 lines) exceeds the bound.
-    recheckFileContent = JSON.stringify({
+    sandbox.recheckFileContent = JSON.stringify({
       schema: "mstar.recheck/v1",
       headSha: SHA,
       results: [
@@ -736,7 +682,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const runnerInput = JSON.parse(writtenInputJson!) as {
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
       recheck: {
         evidence: Array<{ id: string; oldStart: number; newStart: number; oldLines: string[]; newLines: string[] }>;
       };
@@ -757,8 +703,8 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("windows are ordered nearest the concern first, so the third one is ev-1 with its own starts", async () => {
     reset();
-    diffStdout = oversizedAuthDiff(200);
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = oversizedAuthDiff(200);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // The concern sits at line 180 — window THREE in file order (lines 161-200)
     // and the NEAREST window to the cited line. Nearest-first ordering must put
     // it first and number it ev-1, with the partition's own exact starts.
@@ -769,7 +715,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       JSON.stringify({ ...TARGET_ORIGINAL, lineStart: 180, lineEnd: 180 }),
       TARGET_ROW_ID,
     );
-    recheckFileContent = JSON.stringify({
+    sandbox.recheckFileContent = JSON.stringify({
       schema: "mstar.recheck/v1",
       headSha: SHA,
       results: [
@@ -794,7 +740,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const runnerInput = JSON.parse(writtenInputJson!) as {
+    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
       recheck: {
         evidence: Array<{ id: string; oldStart: number; newStart: number; newLines: string[] }>;
       };
@@ -817,11 +763,11 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("a quote outside the cited window still fails validation", async () => {
     reset();
-    diffStdout = oversizedAuthDiff(200);
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = oversizedAuthDiff(200);
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // Line 190 lives in window THREE (ev-3). Citing ev-1 (lines 1-80) with that
     // quote is out of range, so the row is dropped and cannot close anything.
-    recheckFileContent = JSON.stringify({
+    sandbox.recheckFileContent = JSON.stringify({
       schema: "mstar.recheck/v1",
       headSha: SHA,
       results: [
@@ -856,12 +802,12 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("a status naming a row this round never sent cannot attribute it: that id is ignored", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     // The seat dropped the SENT row from its own document and also named a row
     // from another round. Only the sent-row membership makes a name credible.
-    recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
-    recheckStatusContent = JSON.stringify({
+    sandbox.recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    sandbox.recheckStatusContent = JSON.stringify({
       schema: "mstar.recheck-status/v1",
       headSha: SHA,
       outcome: "ok",
@@ -894,12 +840,12 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const capped = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS);
     for (const field of ["error", "reason"] as const) {
       reset();
-      diffStdout = VALID_DIFF;
-      runnerStdout = JSON.stringify(VALID_OUTPUT);
-      recheckFileContent = "";
+      sandbox.diffStdout = VALID_DIFF;
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      sandbox.recheckFileContent = "";
       const reason = field === "reason" ? oversized : "seat-failed";
       const error = field === "error" ? oversized : null;
-      recheckStatusContent = JSON.stringify({
+      sandbox.recheckStatusContent = JSON.stringify({
         schema: "mstar.recheck-status/v1",
         headSha: SHA,
         outcome: "failed",
@@ -935,10 +881,10 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     // would survive a slice-first parser as a bare, unrecognizable prefix.
     const head = "y".repeat(RECHECK_STATUS_ERROR_MAX_CHARS - 30);
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    recheckFileContent = "";
-    recheckStatusContent = JSON.stringify({
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
       schema: "mstar.recheck-status/v1",
       headSha: SHA,
       outcome: "failed",
@@ -972,10 +918,10 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
 
   test("an ok seat status with a valid document records no failure and keeps the accounting unchanged", async () => {
     reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    recheckFileContent = recheckDocWith({});
-    recheckStatusContent = JSON.stringify({
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
+    sandbox.recheckStatusContent = JSON.stringify({
       schema: "mstar.recheck-status/v1",
       headSha: SHA,
       outcome: "ok",
@@ -1023,15 +969,15 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     // byte bound (flag 1), and a failed shell chain. All are `absent`.
     for (const [why, arm] of [
       ["missing", () => {}],
-      ["overflow", () => { recheckStatusOverflow = "1"; }],
-      ["exit", () => { recheckStatusExitCode = 1; }],
+      ["overflow", () => { sandbox.recheckStatusOverflow = "1"; }],
+      ["exit", () => { sandbox.recheckStatusExitCode = 1; }],
     ] as const) {
       reset();
-      diffStdout = VALID_DIFF;
-      runnerStdout = JSON.stringify(VALID_OUTPUT);
+      sandbox.diffStdout = VALID_DIFF;
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
       // The document is absent in every case; only the status transport varies.
-      recheckFileContent = "";
-      if (why !== "missing") recheckStatusContent = "{}";
+      sandbox.recheckFileContent = "";
+      if (why !== "missing") sandbox.recheckStatusContent = "{}";
       arm();
       const db = await createSeededTestD1();
       await seedPriorPublication(db);

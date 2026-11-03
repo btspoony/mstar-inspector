@@ -248,9 +248,10 @@ function addressedProofError(
     if (normalizeQuoteText(expected) !== quote) {
       return 'current-code quote does not match the cited new-side lines';
     }
-    // Binding to the concern's own file: a fix may move the code within the
-    // file, but a citation from elsewhere proves nothing about THIS concern.
-    if (original.filePath !== null && slice.path !== original.filePath) {
+    // Binding to the concern's own file: a fix may move the code (and the
+    // file itself may be renamed, so either path identifies it), but a
+    // citation from elsewhere proves nothing about THIS concern.
+    if (original.filePath !== null && slice.path !== original.filePath && slice.oldPath !== original.filePath) {
       return `current-code slice path ${JSON.stringify(slice.path)} does not match the original concern file ${JSON.stringify(original.filePath)}`;
     }
     return null;
@@ -292,9 +293,17 @@ function addressedProofError(
   }
 
   // replaced-code: the old range plus its current hunk — a current side
-  // must exist, otherwise the change is a removal, not a replacement.
+  // must exist, otherwise the change is a removal, not a replacement. And, as
+  // with removed-code, the cited old lines must no longer exist verbatim on
+  // the new side: an unchanged context line inside the hunk proves nothing
+  // was replaced. Both sides are normalized, so a trailing blank cannot
+  // disguise present code.
   if (slice.kind !== 'hunk') return 'replaced-code must cite a hunk slice';
   if (slice.newLines.length === 0) return 'replaced-code slice has no current hunk (use removed-code)';
+  const newSide = normalizeQuoteText(slice.newLines.join('\n'));
+  if (newSide.includes(quote)) {
+    return 'replaced-code cites old lines still present on the hunk new side';
+  }
   return null;
 }
 

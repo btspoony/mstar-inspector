@@ -551,6 +551,42 @@ describe("validateRecheckDoc — addressed eligibility", () => {
     expectDroppedRow(result, { index: 0, rowId: "row-1", error: "still present" });
   });
 
+  test("replaced-code citing old lines still present on the hunk new side drops that row", () => {
+    // An unchanged context line inside the hunk proves nothing was replaced:
+    // replaced-code carries the same still-present guard as removed-code, and
+    // it normalizes too, so a trailing blank cannot disguise present code.
+    for (const quote of ["const b = 2;", "const b = 2; "]) {
+      const result = validateRecheckDoc(
+        {
+          schema: "mstar.recheck/v1",
+          headSha: SHA,
+          results: [
+            addressedResult({
+              evidence: evidence({ kind: "replaced-code", sliceId: "slice-still", startLine: 9, endLine: 9, quote }),
+            }),
+            SURVIVOR,
+          ],
+        },
+        pairedInput({ targets: [{ ...TARGET, original: { ...ORIGINAL, lineStart: 9, lineEnd: 9 } }, TARGET_2] }),
+      );
+      expectDroppedRow(result, { index: 0, rowId: "row-1", error: "still present" });
+    }
+  });
+
+  test("current-code on a renamed file is eligible (the concern's old path identifies it)", () => {
+    // removed-code/replaced-code already accept `oldPath`; a rename must not
+    // strand a current-code fix in the file the concern used to live in.
+    const renamed = { ...HUNK, path: "src/b.ts", oldPath: "src/a.ts" };
+    const outcome = validateRecheckDoc(
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult()] },
+      input({ evidence: [renamed] }),
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.rejected).toEqual([]);
+    expect(outcome.doc.results).toHaveLength(1);
+  });
+
   test("removed-code on a path unrelated to the original concern drops that row", () => {
     const result = validateRecheckDoc(
       {
