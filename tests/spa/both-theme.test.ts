@@ -546,7 +546,7 @@ const SURFACES: readonly Surface[] = [
     marker: t("en", "login.signIn"),
     render: () => renderLight(createElement(LoginPage, { boot: { locale: "en", login: null, name: null } })),
   },
-  // The 2026-11-01 census, extended by plan 309's runtime screen: the
+  // The 2026-11-01 census, extended by the runtime-parameters screen: the
   // console's five page family plus the shell they mount in.
   // Each marker is a loaded-face string, so a screen that fell back to its
   // skeleton or error branch cannot pass the marker assertion.

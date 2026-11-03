@@ -259,6 +259,87 @@ describe("workspace name card", () => {
     }
   });
 
+  test("switching the workspace reloads the card, and the save lands on the new workspace's URL", async () => {
+    // The switcher only rewrites the path segment, so the card stays the same
+    // mount: its loaded cap, ceiling and draft must follow the URL instead.
+    const { win, cleanup } = installDom(`http://localhost${PATH}`);
+    const calls: Call[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      const url = String(input);
+      calls.push({ method, url, body: String(init?.body ?? "") });
+      if (method === "PUT") {
+        return new Response(JSON.stringify({ concurrency: 5 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url === "/dashboard/ws_beta/api/settings/concurrency") {
+        return new Response(JSON.stringify({ concurrency: 5, system: 12, min: 1, max: 250 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const twoWorkspaces: SpaBoot = {
+      ...boot,
+      memberships: [
+        ...(boot.memberships ?? []),
+        { id: "ws_beta", slug: "beta", name: "Beta", role: "owner", plan: "Free" },
+      ],
+    };
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot: twoWorkspaces })));
+
+      const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
+      expect(input.value).toBe("8");
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(input, "9");
+        input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      expect(input.value).toBe("9");
+
+      await act(async () => {
+        win.history.pushState(null, "", "/dashboard/ws_beta/settings");
+        win.dispatchEvent(new win.Event("popstate") as unknown as Event);
+      });
+
+      // B's read replaced A's: its stored value and ceiling, never A's draft.
+      const reloaded = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
+      expect(reloaded.value).toBe("5");
+      expect(container.textContent).toContain(t("en", "workspace.concurrencySystemCap", { system: 12 }));
+      expect(container.textContent).not.toContain(t("en", "workspace.concurrencySystemCap", { system: 32 }));
+      expect(calls.map((call) => call.url)).toContain("/dashboard/ws_beta/api/settings/concurrency");
+
+      await act(async () => {
+        reloaded
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      expect(calls.filter((call) => call.method === "PUT")).toEqual([
+        {
+          method: "PUT",
+          url: "/dashboard/ws_beta/api/settings/concurrency",
+          body: JSON.stringify({ concurrency: 5 }),
+        },
+      ]);
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
   test("an admin gets the concurrency card but no name form; a plain member gets the refusal copy", () => {
     // The name is owner-only; the review concurrency is owner-or-admin — the
     // page mirrors the two routes rather than the stricter gate alone.

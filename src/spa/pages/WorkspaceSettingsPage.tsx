@@ -31,7 +31,10 @@ export function WorkspaceSettingsPage({ boot }: { boot: SpaBoot }) {
       {/* A plain member sees a refusal up front instead of forms whose saves
           would fail; each manager sees exactly the cards their role may write. */}
       {canManage ? (
-        <div className="flex flex-col">
+        // Keyed by the workspace: the cards hold that workspace's loaded value
+        // and draft, while their saves resolve the URL. An in-app switch must
+        // remount them, or A's state would be submitted to B.
+        <div key={ref ?? ""} className="flex flex-col">
           {isOwner ? <WorkspaceNameCard locale={boot.locale} storedName={membership.name} /> : null}
           <WorkspaceConcurrencyCard locale={boot.locale} />
         </div>
