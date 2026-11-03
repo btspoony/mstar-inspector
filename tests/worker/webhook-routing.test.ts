@@ -14,7 +14,7 @@
  * fail-closed (lock L1), zero enqueue.
  *
  * The D1 double is the real bun:sqlite helper over migrations 0003/0004/0005
- * (+ 0008/0011/0018/0019/0022/0026/0033/0036/0037/0038 — see
+ * (+ 0008/0011/0018/0019/0022/0026/0033/0036/0037/0038/0039 — see
  * `createMigratedD1` below; production-shaped, the store CRUD itself is pinned
  * by tests/worker/apps-store.test.ts — here the rows are seeded raw with
  * secretbox envelopes so the route exercises the real lookup + decrypt).
@@ -43,6 +43,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // app_installations (and the installation outcome path does too).
   // 0008: the github_apps ops columns (review_enabled /
   // last_webhook_at) the pause gate + touch read and write on every delivery.
+  // 0005: reviews.app_id — applied after the 0004 parent table exists.
   // 0011: webhook_deliveries — the route's post-classify
   // recordDelivery is best-effort in production; with the table present the
   // fixture can pin WHAT it records (an invalid signature lands
@@ -57,6 +58,9 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // `review_global` enqueue gate reads.
   // 0036/0037/0018/0019/0038: the app-identity + ops columns, and the
   // parent-table rebuild that must carry every one of them.
+  // 0039: pull_requests — the route writes one ledger row on EVERY verified,
+  // non-reject `pull_request` delivery, so a fixture without it would send
+  // every PR delivery down the `pull_request_record_failed` warn branch.
   for (const name of [
     "0003_dashboard_users.sql",
     "0004_github_apps.sql",
@@ -75,6 +79,8 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0019_github_apps_metadata.sql",
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
+    // 0039 references github_apps, so it runs after the 0038 rebuild.
+    "0039_pull_requests.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -201,7 +207,9 @@ const PR_PAYLOAD = {
   action: "opened",
   number: 42,
   installation: { id: 123 },
-  pull_request: { number: 42, head: { sha: "abc123" } },
+  // `state` is what the PR ledger (0039) requires of the payload: a
+  // production `pull_request` delivery always carries it.
+  pull_request: { number: 42, state: "open", head: { sha: "abc123" } },
   repository: { name: "test-repo", owner: { login: "test-owner" } },
 };
 
@@ -233,6 +241,15 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       triggered_by: "pull_request",
       appRef: { appId: appRow.id },
     });
+    // The same delivery lands its PR-ledger row (migration 0039): the fixture
+    // carries the table, so a missing/failed write here is a real regression
+    // rather than the "no such table" warn branch this suite used to take.
+    const ledger = db.raw
+      .query("SELECT owner, repo, pr_number, state, head_sha FROM pull_requests WHERE app_id = ?")
+      .all(appRow.id) as Array<{ owner: string; repo: string; pr_number: number; state: string; head_sha: string | null }>;
+    expect(ledger).toEqual([
+      { owner: "test-owner", repo: "test-repo", pr_number: 42, state: "open", head_sha: "abc123" },
+    ]);
   });
 
   test("wrong-App secret signature → 401, zero enqueue (sibling-App isolation, AC-B5-isolation)", async () => {
@@ -800,6 +817,9 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("a sibling App's mention does not trigger this App (GitHub-slug-keyed matching)", async () => {
+    // Negative control for the `mention_unresolved` warn: THIS App IS synced, so
+    // a mention aimed at `@app-y` is an ordinary ignore — and must stay silent.
+    // Fails if the `appSlug === ""` conjunct is dropped from that gate.
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -813,15 +833,26 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       sender: { type: "User", login: "alice" },
     });
 
-    const res = await postWebhook(
-      "/webhook/default/app-x",
-      body,
-      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
-      env,
-    );
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
 
     expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((entry) => entry.includes("mention_unresolved"))).toBe(false);
   });
 
   test("idempotency: a second identical delivery is KV-skipped", async () => {

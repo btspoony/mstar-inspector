@@ -1345,11 +1345,16 @@ and `issue_comment`: `installation` is not a subscribable GitHub App event
 delivered to every App automatically. So a new App receives
 `installation.created` without any subscription, and the install-bookkeeping
 path fills the row from `installation.account.login`, falling back to the
-repository owner. That bookkeeping is gate-independent: **any** verified
-`pull_request` / `issue_comment` delivery refreshes the login too, even while
-the App is paused or the global review flag is off (those gates close only the
-review enqueue, not the bookkeeping). A row accordingly stays `未知` only until
-the App receives its first verified review-type delivery or install event.
+repository owner. That bookkeeping is gate-independent but not unconditional:
+only a delivery the classifier accepts as review work reaches it — a
+whitelisted action the App's trigger mode allows, or a bot-mention comment on a
+PR thread. It runs before the pause and global-flag gates, so it still lands
+while the App is paused or the global review flag is off (those gates close only
+the review enqueue, not the bookkeeping). **Every other verified delivery leaves
+the login untouched** — a non-whitelisted action, a `manual`-mode App's
+`pull_request`, or a comment that mentions no bot is classified `ignored` and
+returns before the bookkeeping write. A row accordingly stays `未知` until the
+first job delivery or install event for that App.
 
 > **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
 > the recovery lanes are covered by the implementation's scoped behavioral

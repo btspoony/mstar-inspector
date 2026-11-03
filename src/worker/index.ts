@@ -14,9 +14,9 @@
  *   entry — the legacy bare `/webhook` face is
  *   retired): our webhook path → github_apps row (active, not deleted) → that App's
  *   decrypted webhook secret verifies the signature → classify → enqueue
- *   with `appRef: { appId }` (spec § Multi-App 契约, locks L3/L4); the
- *   classified payload's installation_id touches `app_installations`
- *   (fire-and-forget relative to the enqueue)
+ *   with `appRef: { appId }` (spec § Multi-App 契约, locks L3/L4); a
+ *   classified review job records its installing account in
+ *   `app_installations` before the pause/flag gates (best-effort)
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
@@ -105,6 +105,31 @@ function webhookInfo(event: string, detail: string, msg: string): void {
 }
 
 /**
+ * Best-effort install bookkeeping shared by the two delivery paths that learn
+ * an installing account (a review `job` and an `installation.*` event): upsert
+ * the (appId, installationId) row's `account_login` / `seen_at`, and on any
+ * store failure log the one structured warn and carry on. It never throws —
+ * bookkeeping must not change the webhook response or the enqueue.
+ */
+async function recordInstallation(
+  appsStore: ReturnType<typeof createAppsStore>,
+  appId: string,
+  installationId: number,
+  accountLogin: string | null,
+): Promise<void> {
+  try {
+    await appsStore.upsertInstallation({ appId, installationId, accountLogin });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    webhookWarn(
+      "installation_upsert_failed",
+      detail,
+      "installation upsert failed — webhook response and enqueue unaffected",
+    );
+  }
+}
+
+/**
  * Byte-authoritative streamed body read for the webhook cap (61-R1): reads
  * the request stream up to `limit` bytes and UTF-8-decodes exactly those
  * bytes — TextDecoder's default (UTF-8, non-fatal) is the same decode
@@ -183,12 +208,16 @@ app.route("/dashboard", dashboardApp);
  * (consumer lock L4).
  *
  * Install bookkeeping: a classified job payload always
- * carries `installation_id`, so the accepted path touches
- * `app_installations` (seen_at upsert, lock L1 store). The touch runs AFTER
- * the enqueue — fire-and-forget relative to it, so the review path never
- * waits on bookkeeping — and a bookkeeping failure only logs a structured
- * warn: it never blocks the enqueue nor fails the webhook (best-effort
- * install health, B3 roadmap).
+ * carries `installation_id`, so the accepted path runs an `app_installations`
+ * seen_at upsert (lock L1 store) that also refreshes `account_login` from
+ * `outcome.installationAccount` — the installing account the delivery states,
+ * with `repository.owner.login` only as the payload-missing fallback. That
+ * write runs BEFORE the pause gate, the global flag gate and the enqueue,
+ * because those three decide only the ENQUEUE face: a paused App or a disabled
+ * flag must still learn its installing account. An `installation` delivery
+ * (`installation.created` / `new_permissions_accepted`) records the same row
+ * before answering `accepted`. Both are best-effort: a failure logs one
+ * structured warn and never throws, blocks the enqueue, or fails the webhook.
  *
  * Delivery recording (AL-20-1): immediately after
  * classification (before the reject return) ONE best-effort row is appended
@@ -197,6 +226,11 @@ app.route("/dashboard", dashboardApp);
  * store failure only logs a structured warn (the response and enqueue are
  * never affected). The retired legacy face recorded nothing (AL-20-1:
  * legacy 不落行 — it was the fallback path with no dashboard consumer).
+ *
+ * Order of the verified, non-reject path: classify → delivery record → PR
+ * ledger (0039) → `last_webhook_at` touch → job-guarded install bookkeeping →
+ * `ignore` return → pause gate → global flag gate → enqueue. The reject
+ * return sits between the delivery record and the PR ledger.
  */
 app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Body-size cap checked BEFORE buffering the body (B6). Two gates: the
@@ -420,16 +454,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // and the webhook still returns 200. The store's COALESCE keeps a stored
   // login when a touch arrives without one.
   if (outcome.kind === "job") {
-    try {
-      await appsStore.upsertInstallation({
-        appId: row.id,
-        installationId: outcome.payload.installation_id,
-        accountLogin: outcome.installationAccount,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      webhookWarn("installation_upsert_failed", detail, "installation upsert failed — enqueue unaffected");
-    }
+    await recordInstallation(appsStore, row.id, outcome.payload.installation_id, outcome.installationAccount);
   }
 
   // Install event (installation.created / new_permissions_accepted): the one
@@ -439,16 +464,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // enqueues. Best-effort like every sibling bookkeeping write: a store
   // failure logs and the webhook still answers 200.
   if (outcome.kind === "installation") {
-    try {
-      await appsStore.upsertInstallation({
-        appId: row.id,
-        installationId: outcome.installationId,
-        accountLogin: outcome.accountLogin,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      webhookWarn("installation_upsert_failed", detail, "installation upsert failed — webhook response unaffected");
-    }
+    await recordInstallation(appsStore, row.id, outcome.installationId, outcome.accountLogin);
     return c.text("accepted", 200);
   }
 
