@@ -437,4 +437,48 @@ describe("pull requests tab (mounted)", () => {
       await unmount();
     }
   });
+
+  test("a list read that fails after closing the detail shows the error face, and retry re-reads", async () => {
+    const { container, fetches, text, win, rerender, resolve, unmount } = await mountTabWithGatedFetch("");
+    const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
+    try {
+      // The ledger loads, so a later failure has stale rows to hide.
+      await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
+      await act(async () => {});
+      expect(text()).toContain("Add the export button");
+
+      // Open a PR, then close it: the close re-reads the list, and that read
+      // fails. The stale row must not stand in for the current ledger.
+      await rerender("acme/web/133");
+      await act(async () => resolve("/pull-requests/acme/web/133", jsonResponse(DETAIL)));
+      await act(async () => {});
+      expect(text()).toContain("Fix the login flow");
+      await press(
+        win,
+        [...container.querySelectorAll("button")].find(
+          (button) => button.textContent === t("en", "pullRequests.backToList"),
+        ),
+      );
+      expect(listReads()).toHaveLength(2);
+      await act(async () => resolve("/pull-requests", new Response("boom", { status: 500 })));
+      await act(async () => {});
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+      expect(text()).toContain(t("en", "common.loadFailed"));
+      expect(text()).not.toContain("Add the export button");
+
+      // Retry re-reads; the ledger it returns replaces the error face.
+      const retry = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "common.retry"),
+      );
+      expect(retry).toBeDefined();
+      await press(win, retry);
+      expect(listReads()).toHaveLength(3);
+      await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_CLOSED] })));
+      await act(async () => {});
+      expect(text()).toContain("Revert the cache change");
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      await unmount();
+    }
+  });
 });

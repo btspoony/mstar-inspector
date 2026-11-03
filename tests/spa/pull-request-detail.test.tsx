@@ -10,7 +10,6 @@
  */
 import { describe, expect, jest, test } from "bun:test";
 import { act, createElement, StrictMode } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import {
@@ -19,8 +18,8 @@ import {
   type PullRequestDetail,
 } from "../../src/spa/pages/data";
 import { currentDetailRead, PullRequestDetailView, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
-import { installDom, withMarkup } from "./dom";
-import { DETAIL, ROW_OPEN, press } from "./pull-request-fixtures";
+import { withMarkup } from "./dom";
+import { DETAIL, ROW_OPEN, mountDetailView, press } from "./pull-request-fixtures";
 
 describe("pull request detail data plane (pure helpers)", () => {
   test("the detail URL builder encodes owner/repo so a value cannot break out of the path family", () => {
@@ -120,6 +119,18 @@ describe("pull request detail face (static SSR)", () => {
       expect(at, needle).toBeGreaterThan(-1);
       return at;
     });
+
+  /**
+   * Which family triggers wear the danger dot, keyed by the trigger's own
+   * label: the dot is a semantic hook, so the claim never reads a class name.
+   */
+  const familyDots = (container: HTMLElement): Record<string, boolean> =>
+    Object.fromEntries(
+      [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) => [
+        (tab.textContent ?? "").replace(/\d+/g, ""),
+        tab.querySelector('[data-slot="family-dot"]') !== null,
+      ]),
+    );
 
   /**
    * The head line (verdict, attribution, when, sha) of the review row that owns
@@ -271,6 +282,31 @@ describe("pull request detail face (static SSR)", () => {
     // A repo-wide finding (empty file_path) renders no location at all.
     expect(markup).toContain("Rename tmp to pending");
     expect(markup).not.toContain(":null");
+  });
+
+  test("the danger dot marks an actionable family and a recorded failure, and nothing else", () => {
+    const dots = (detail: PullRequestDetail) => withMarkup(render(detail), familyDots);
+    const findingsLabel = t("en", "pullRequests.findings");
+    const failuresLabel = t("en", "pullRequests.failures");
+    const reviewsLabel = t("en", "pullRequests.reviews");
+
+    // A must-fix and a should-fix both make the findings family actionable; a
+    // recorded failure is an alarm of its own; history never earns a dot.
+    expect(dots(DETAIL)).toEqual({ [findingsLabel]: true, [reviewsLabel]: false, [failuresLabel]: true });
+    // A should-fix alone is a requested change, not a nit.
+    expect(dots({ ...DETAIL, findings: DETAIL.findings.filter((f) => f.severity === "should-fix") })[findingsLabel]).toBe(true);
+    // Nits only: nothing to act on, so the findings trigger goes quiet.
+    expect(dots({ ...DETAIL, findings: DETAIL.findings.filter((f) => f.severity === "nit") })).toEqual({
+      [findingsLabel]: false,
+      [reviewsLabel]: false,
+      [failuresLabel]: true,
+    });
+    // No failure: the failures trigger loses its dot too.
+    expect(dots({ ...DETAIL, failures: [] })).toEqual({
+      [findingsLabel]: true,
+      [reviewsLabel]: false,
+      [failuresLabel]: false,
+    });
   });
 
   test("an out-of-set severity lands in the `other` bucket, last, with its count", () => {
@@ -434,6 +470,17 @@ describe("pull request detail face (static SSR)", () => {
     };
     expect(withMarkup(render(shouldOnly), familyTabs).map((tab) => tab.selected)).toEqual([true, false, false]);
     expect(render(shouldOnly)).toContain("The refresh cookie is set with secure only.");
+    // The findings figure counts the row but names no must-fix: the note is a
+    // must-fix count, so a should-fix-only detail must not wear it.
+    expect(
+      withMarkup(
+        render(shouldOnly),
+        (container) =>
+          [...container.querySelectorAll('[data-slot="metric"]')].at(-1)?.querySelector(
+            '[data-slot="metric-value"]',
+          )?.textContent ?? "",
+      ),
+    ).toBe("1");
   });
 
   test("an empty verdict reads as no verdict: announced dash, no pill, no dangling separator", () => {
@@ -605,10 +652,14 @@ describe("pull request detail face (static SSR)", () => {
     // `· model-NN` is the timeline's meta separator: the header names the model
     // without it, so the marker identifies exactly the rows that rendered.
     const marker = (index: number) => ` · model-${String(index).padStart(2, "0")}`;
-    // Newest seven (indices 0..6) survive, in newest-first order, and the anchor
-    // closes the list — a cap that kept the OLDEST seven would fail below.
+    // Newest seven (indices 0..6) survive, in newest-first order; the dropped
+    // events are named ABOVE the anchor, because they are newer than the PR's
+    // first sighting and the list reads newest-first. A cap that kept the OLDEST
+    // seven, or a note placed under the anchor, fails below.
+    const truncation = t("en", "pullRequests.timelineHidden", { count: 6 });
     const order = positions(markup, [
       ...[0, 1, 2, 3, 4, 5, 6].map(marker),
+      truncation,
       t("en", "pullRequests.timelineFirstSeen"),
     ]);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
@@ -619,13 +670,19 @@ describe("pull request detail face (static SSR)", () => {
     expect(markup.match(/data-slot="activity-entry"/g) ?? []).toHaveLength(8);
     // The dropped six are named, not silently swallowed: 12 reviews plus the
     // payload's one failure make 13 events, of which the cap shows seven. The
-    // truncation row itself carries the count.
+    // truncation row itself carries the count and closes the shown history.
     expect(
-      withMarkup(
-        render(detail),
-        (container) => container.querySelector('[data-slot="timeline-truncated"]')?.textContent ?? "",
-      ),
-    ).toBe(t("en", "pullRequests.timelineHidden", { count: 6 }));
+      withMarkup(render(detail), (container) => {
+        const rows = [...container.querySelectorAll('[data-slot="activity-entry"], [data-slot="timeline-truncated"]')].map(
+          (row) => row.getAttribute("data-slot"),
+        );
+        return {
+          last: rows.at(-1),
+          beforeAnchor: rows.at(-2),
+          text: container.querySelector('[data-slot="timeline-truncated"]')?.textContent ?? "",
+        };
+      }),
+    ).toEqual({ last: "activity-entry", beforeAnchor: "timeline-truncated", text: truncation });
   });
 
   test("a timeline that fits the cap renders no truncation row", () => {
@@ -662,26 +719,20 @@ describe("pull request detail face (static SSR)", () => {
         return block === null ? null : (block.textContent ?? "");
       }),
     ).toContain("sandbox");
-    // A multi-line error folds its full output behind a native details block.
+    // A multi-line error folds its full output behind a native details block;
+    // its behaviour is pinned in the mounted suite, where the disclosure can
+    // actually be opened.
     const multiline = render({
       ...FAILING,
       failures: [{ stage: "sandbox", error: "first line\nsecond line", created_at: "2026-10-31 23:00:00" }],
     });
-    const fold = withMarkup(multiline, (container) => {
-      const details = container.querySelector<HTMLDetailsElement>('[role="tabpanel"] details');
-      const output = details?.querySelector("pre")?.textContent ?? "";
-      if (details === null) return null;
-      // The fold starts collapsed, so the evidence is behind the summary
-      // until the reader opens it.
-      const collapsed = { open: details.open, output };
-      details.open = true;
-      return { collapsed, opened: details.open, output, summary: details.querySelector("summary")?.textContent ?? "" };
-    });
-    expect(fold).not.toBeNull();
-    expect(fold?.collapsed).toEqual({ open: false, output: "first line\nsecond line" });
-    expect(fold?.opened).toBe(true);
-    expect(fold?.summary).toBe(t("en", "pullRequests.failureFullOutput"));
-    expect(fold?.output).toContain("second line");
+    expect(multiline).toContain(t("en", "pullRequests.failureFullOutput"));
+    expect(multiline).toContain("second line");
+    // A single-line error has nothing to fold.
+    const single = withMarkup(render(FAILING), (container) =>
+      container.querySelector('[role="tabpanel"] details'),
+    );
+    expect(single).toBeNull();
   });
 
   test("a failure with no recorded stage renders neither chip nor a dangling separator", () => {
@@ -746,20 +797,12 @@ describe("pull requests detail read derivation (pure)", () => {
 
 describe("pull request detail (mounted)", () => {
   test("the family switch and a fold toggle act on the live tree", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const host = win.document.createElement("div");
-    win.document.body.appendChild(host);
-    // happy-dom's nodes cross into lib.dom's here: the queries below read the
-    // same roles, attributes and `hidden` the static tests do.
-    const container = host as unknown as HTMLElement;
-    const root = createRoot(host as unknown as Element);
-    const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
-    const panels = () => [...container.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
-    const selected = () => tabs().map((tab) => tab.getAttribute("aria-selected") === "true");
-    const visible = () => panels().map((panel) => panel.hidden === false);
+    const { container, win, unmount } = await mountDetailView(DETAIL);
     try {
-      await act(async () => root.render(createElement(PullRequestDetailView, { locale: "en", detail: DETAIL })));
-      await act(async () => {});
+      const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
+      const panels = () => [...container.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
+      const selected = () => tabs().map((tab) => tab.getAttribute("aria-selected") === "true");
+      const visible = () => panels().map((panel) => panel.hidden === false);
       // DETAIL carries a must-fix finding: findings first, its panel open.
       expect(selected()).toEqual([true, false, false]);
       expect(visible()).toEqual([true, false, false]);
@@ -787,17 +830,11 @@ describe("pull request detail (mounted)", () => {
       expect(controls()[1]?.getAttribute("aria-expanded")).toBe("true");
       expect(bodyOf(controls()[1])?.hidden).toBe(false);
     } finally {
-      await act(async () => root.unmount());
-      cleanup();
+      await unmount();
     }
   });
 
   test("two findings sharing a payload id fold independently", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const host = win.document.createElement("div");
-    win.document.body.appendChild(host);
-    const container = host as unknown as HTMLElement;
-    const root = createRoot(host as unknown as Element);
     // The payload can repeat an id; the rendered rows must not share a fold.
     const duplicated: PullRequestDetail = {
       ...DETAIL,
@@ -820,17 +857,14 @@ describe("pull request detail (mounted)", () => {
         },
       ],
     };
-    const controls = () =>
-      [...container.querySelectorAll<HTMLElement>('[data-slot="finding"] button[aria-controls]')];
-    const bodyOf = (control: HTMLElement | undefined) =>
-      control === undefined
-        ? null
-        : container.querySelector<HTMLElement>(`#${control.getAttribute("aria-controls") ?? ""}`);
+    const { container, win, unmount } = await mountDetailView(duplicated);
     try {
-      await act(async () =>
-        root.render(createElement(PullRequestDetailView, { locale: "en", detail: duplicated })),
-      );
-      await act(async () => {});
+      const controls = () =>
+        [...container.querySelectorAll<HTMLElement>('[data-slot="finding"] button[aria-controls]')];
+      const bodyOf = (control: HTMLElement | undefined) =>
+        control === undefined
+          ? null
+          : container.querySelector<HTMLElement>(`#${control.getAttribute("aria-controls") ?? ""}`);
       // Both must-fix bodies start open, and each control owns a distinct body.
       expect(controls().map((control) => control.getAttribute("aria-expanded"))).toEqual(["true", "true"]);
       expect(new Set(controls().map((control) => control.getAttribute("aria-controls"))).size).toBe(2);
@@ -841,43 +875,33 @@ describe("pull request detail (mounted)", () => {
       expect(bodyOf(controls()[0])?.hidden).toBe(false);
       expect(bodyOf(controls()[1])?.hidden).toBe(true);
     } finally {
-      await act(async () => root.unmount());
-      cleanup();
+      await unmount();
     }
   });
 
   test("the copy action reports its outcome on the button and reverts", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const host = win.document.createElement("div");
-    win.document.body.appendChild(host);
-    // happy-dom's nodes cross into lib.dom's here, as in the suites above.
-    const container = host as unknown as HTMLElement;
-    const root = createRoot(host as unknown as Element);
     // The clipboard is the one surface happy-dom does not script: the first
     // write resolves and the second rejects, so both branches are exercised.
     let writes = 0;
-    Object.defineProperty(win.navigator, "clipboard", {
-      configurable: true,
-      value: {
-        writeText: () => {
-          writes += 1;
-          return writes === 1 ? Promise.resolve() : Promise.reject(new Error("denied"));
-        },
-      },
-    });
+    jest.useFakeTimers();
     // No actionable finding: the face opens on the failures family, whose one
     // control is the copy action.
-    const copyButton = () => container.querySelector<HTMLElement>('[data-slot="copy-error"]');
-    // The button's own label is the outcome's one channel: the name of the
-    // focused control changes, and no live region repeats it.
-    const liveRegions = () => container.querySelectorAll('[role="status"], [aria-live]');
-    const renders = (label: string) => (container.textContent ?? "").split(label).length - 1;
-    jest.useFakeTimers();
+    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
     try {
-      await act(async () =>
-        root.render(createElement(PullRequestDetailView, { locale: "en", detail: { ...DETAIL, findings: [] } })),
-      );
-      await act(async () => {});
+      Object.defineProperty(win.navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: () => {
+            writes += 1;
+            return writes === 1 ? Promise.resolve() : Promise.reject(new Error("denied"));
+          },
+        },
+      });
+      const copyButton = () => container.querySelector<HTMLElement>('[data-slot="copy-error"]');
+      // The button's own label is the outcome's one channel: the name of the
+      // focused control changes, and no live region repeats it.
+      const liveRegions = () => container.querySelectorAll('[role="status"], [aria-live]');
+      const renders = (label: string) => (container.textContent ?? "").split(label).length - 1;
       expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyError"));
 
       // Resolved write: the label reports the outcome, once.
@@ -901,75 +925,106 @@ describe("pull request detail (mounted)", () => {
       expect(liveRegions()).toHaveLength(0);
     } finally {
       jest.useRealTimers();
-      await act(async () => root.unmount());
-      cleanup();
+      await unmount();
+    }
+  });
+
+  test("a clipboard write that throws synchronously reports the failure", async () => {
+    // Some browsers throw from `writeText` rather than returning a rejected
+    // promise. A throw must land on the same outcome, not escape the handler.
+    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
+    Object.defineProperty(win.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: () => {
+          throw new Error("clipboard is blocked");
+        },
+      },
+    });
+    const problems: unknown[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      problems.push(args[0]);
+    };
+    try {
+      const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
+      await press(win, button);
+      // The press reports the failure on the button it kept focus on, and the
+      // throw never reached React as an uncaught handler error.
+      expect(button?.textContent).toBe(t("en", "pullRequests.copyFailed"));
+      expect(problems).toEqual([]);
+    } finally {
+      console.error = realError;
+      await unmount();
+    }
+  });
+
+  test("a failure's full output is folded until the reader opens the disclosure", async () => {
+    // The first line is the diagnosis; the rest is evidence behind a native
+    // disclosure. Read the behaviour off the rendered tree: closed → only the
+    // summary, opened → the full output, both driven by a press on the summary.
+    const { container, win, unmount } = await mountDetailView({
+      ...DETAIL,
+      findings: [],
+      failures: [{ stage: "sandbox", error: "first line\nsecond line", created_at: "2026-10-31 23:00:00" }],
+    });
+    try {
+      const details = () => container.querySelector<HTMLDetailsElement>('[role="tabpanel"] details');
+      const summary = () => details()?.querySelector("summary");
+      const output = () => details()?.querySelector("pre")?.textContent ?? "";
+      const block = () => container.querySelector('[role="tabpanel"] li[data-tone="danger"]');
+      // Closed: the diagnosis stands in the block, the evidence sits behind
+      // the disclosure's own summary.
+      expect(details()?.open).toBe(false);
+      expect(block()?.querySelector("p")?.textContent).toBe("first line");
+      expect(summary()?.textContent).toBe(t("en", "pullRequests.failureFullOutput"));
+
+      await press(win, summary());
+      expect(details()?.open).toBe(true);
+      expect(output()).toBe("first line\nsecond line");
+    } finally {
+      await unmount();
     }
   });
 
   test("under StrictMode's double mount a copy's outcome still renders", async () => {
     // StrictMode runs mount → cleanup → mount; the cleanup-only effect used to
     // leave the mounted flag false, so every outcome was dropped.
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const host = win.document.createElement("div");
-    win.document.body.appendChild(host);
-    const container = host as unknown as HTMLElement;
-    const root = createRoot(host as unknown as Element);
-    Object.defineProperty(win.navigator, "clipboard", {
-      configurable: true,
-      value: { writeText: () => Promise.resolve() },
-    });
     jest.useFakeTimers();
+    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] }, (view) =>
+      createElement(StrictMode, null, view),
+    );
     try {
-      await act(async () =>
-        root.render(
-          createElement(
-            StrictMode,
-            null,
-            createElement(PullRequestDetailView, { locale: "en", detail: { ...DETAIL, findings: [] } }),
-          ),
-        ),
-      );
-      await act(async () => {});
+      Object.defineProperty(win.navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: () => Promise.resolve() },
+      });
       const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
       expect(button?.textContent).toBe(t("en", "pullRequests.copyError"));
       await press(win, button);
       expect(button?.textContent).toBe(t("en", "pullRequests.copyCopied"));
     } finally {
       jest.useRealTimers();
-      await act(async () => root.unmount());
-      cleanup();
+      await unmount();
     }
   });
 
   test("copying a second error block does not cancel the first block's revert", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const host = win.document.createElement("div");
-    win.document.body.appendChild(host);
-    const container = host as unknown as HTMLElement;
-    const root = createRoot(host as unknown as Element);
-    Object.defineProperty(win.navigator, "clipboard", {
-      configurable: true,
-      value: { writeText: () => Promise.resolve() },
-    });
-    const copyButtons = () => [...container.querySelectorAll<HTMLElement>('[data-slot="copy-error"]')];
     jest.useFakeTimers();
+    const { container, win, unmount } = await mountDetailView({
+      ...DETAIL,
+      findings: [],
+      failures: [
+        { stage: "sandbox", error: "first block", created_at: "2026-10-31 23:00:00" },
+        { stage: "review", error: "second block", created_at: "2026-10-30 23:00:00" },
+      ],
+    });
     try {
-      await act(async () =>
-        root.render(
-          createElement(PullRequestDetailView, {
-            locale: "en",
-            detail: {
-              ...DETAIL,
-              findings: [],
-              failures: [
-                { stage: "sandbox", error: "first block", created_at: "2026-10-31 23:00:00" },
-                { stage: "review", error: "second block", created_at: "2026-10-30 23:00:00" },
-              ],
-            },
-          }),
-        ),
-      );
-      await act(async () => {});
+      Object.defineProperty(win.navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: () => Promise.resolve() },
+      });
+      const copyButtons = () => [...container.querySelectorAll<HTMLElement>('[data-slot="copy-error"]')];
       expect(copyButtons()).toHaveLength(2);
 
       // Copy A, then B one second later. B's press must not cancel A's revert.
@@ -994,19 +1049,15 @@ describe("pull request detail (mounted)", () => {
       expect(copyButtons()[1]?.textContent).toBe(t("en", "pullRequests.copyError"));
     } finally {
       jest.useRealTimers();
-      await act(async () => root.unmount());
-      cleanup();
+      await unmount();
     }
   });
 
   test("a clipboard write that settles after unmount updates nothing", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const host = win.document.createElement("div");
-    win.document.body.appendChild(host);
-    const container = host as unknown as HTMLElement;
-    const root = createRoot(host as unknown as Element);
     // A write the test settles by hand, so it can outlive the face.
     const { promise: pendingWrite, resolve: settleWrite } = Promise.withResolvers<void>();
+    jest.useFakeTimers();
+    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
     Object.defineProperty(win.navigator, "clipboard", {
       configurable: true,
       value: { writeText: () => pendingWrite },
@@ -1016,17 +1067,12 @@ describe("pull request detail (mounted)", () => {
     console.error = (...args: unknown[]) => {
       problems.push(String(args[0]));
     };
-    jest.useFakeTimers();
     try {
-      await act(async () =>
-        root.render(createElement(PullRequestDetailView, { locale: "en", detail: { ...DETAIL, findings: [] } })),
-      );
-      await act(async () => {});
       const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
       await press(win, button);
       const labelAtUnmount = button?.textContent;
       // The face goes away while the write is still in flight.
-      await act(async () => root.unmount());
+      await unmount();
       await act(async () => {
         settleWrite();
       });
@@ -1039,27 +1085,17 @@ describe("pull request detail (mounted)", () => {
     } finally {
       jest.useRealTimers();
       console.error = realError;
-      cleanup();
+      await unmount();
     }
   });
 
   test("without a Clipboard API the copy control stays and reports the failure", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const host = win.document.createElement("div");
-    win.document.body.appendChild(host);
-    const container = host as unknown as HTMLElement;
-    const root = createRoot(host as unknown as Element);
     // An insecure context offers no Clipboard API at all: the property reads
     // as absent, not as a rejecting write. happy-dom's own Clipboard lives on
     // the prototype, so the absent state is shadowed on the instance.
+    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
     Object.defineProperty(win.navigator, "clipboard", { configurable: true, value: undefined });
     try {
-      await act(async () =>
-        root.render(
-          createElement(PullRequestDetailView, { locale: "en", detail: { ...DETAIL, findings: [] } }),
-        ),
-      );
-      await act(async () => {});
       const copyButton = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
       // The affordance is not hidden just because the API is missing.
       expect(copyButton).not.toBeNull();
@@ -1067,8 +1103,7 @@ describe("pull request detail (mounted)", () => {
       expect(copyButton?.textContent).toBe(t("en", "pullRequests.copyFailed"));
       expect(container.querySelectorAll('[role="status"], [aria-live]')).toHaveLength(0);
     } finally {
-      await act(async () => root.unmount());
-      cleanup();
+      await unmount();
     }
   });
 });

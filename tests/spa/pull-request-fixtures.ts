@@ -4,10 +4,11 @@
  * The list/detail split imports the same PR payloads; keeping them here means
  * neither file pins its own copy of the data the other one asserts on.
  */
-import { act, createElement, useState } from "react";
+import { act, createElement, useState, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import type { Window } from "happy-dom";
 import { AppPullRequestsTab } from "../../src/spa/pages/AppPullRequestsTab";
+import { PullRequestDetailView } from "../../src/spa/pages/PullRequestDetail";
 import type { AppDetailSearch, PullRequestDetail, PullRequestRow } from "../../src/spa/pages/data";
 import { installDom } from "./dom";
 
@@ -106,6 +107,46 @@ export async function press(win: Window, target: Element | null | undefined): Pr
     target?.dispatchEvent(pointer("click"));
   });
   await act(async () => {});
+}
+
+/**
+ * Mount the detail face on its own window, with one settled render, and hand
+ * back the container plus the window the clipboard stubs hang off. Teardown
+ * unmounts and restores the DOM in one call.
+ */
+export async function mountDetailView(
+  detail: PullRequestDetail,
+  wrap?: (view: ReactElement) => ReactElement,
+) {
+  const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+  const host = win.document.createElement("div");
+  win.document.body.appendChild(host);
+  // happy-dom's nodes cross into lib.dom's here: the queries read the same
+  // roles, attributes and `hidden` the static tests do.
+  const container = host as unknown as HTMLElement;
+  const root = createRoot(container as unknown as Element);
+  let mounted = true;
+  const view = createElement(PullRequestDetailView, { locale: "en", detail });
+  try {
+    await act(async () => root.render(wrap === undefined ? view : wrap(view)));
+    await act(async () => {});
+  } catch (error) {
+    mounted = false;
+    cleanup();
+    throw error;
+  }
+  return {
+    container,
+    win,
+    unmount: async () => {
+      // A test may unmount mid-body (the late-write case) and again on the way
+      // out; the window is restored once.
+      if (!mounted) return;
+      mounted = false;
+      await act(async () => root.unmount());
+      cleanup();
+    },
+  };
 }
 
 /**

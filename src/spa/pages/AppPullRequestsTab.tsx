@@ -117,10 +117,12 @@ export function AppPullRequestsTab({
           {t(locale, "common.loading")}
         </p>
       ) : null}
-      {listState === "error" && rows === null ? (
+      {/* A failed read replaces the ledger rather than sitting above it: rows
+          from an earlier read would read as the current list. Covers the close
+          of a detail, whose list read is this tab's own. */}
+      {listState === "error" ? (
         <ErrorState locale={locale} onRetry={() => setReloadNonce((nonce) => nonce + 1)} />
-      ) : null}
-      {rows !== null ? (
+      ) : rows !== null ? (
         <PullRequestsListView locale={locale} rows={rows} onOpen={openPr} />
       ) : null}
     </div>

@@ -1,16 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, ChevronRight, Copy } from "lucide-react";
 import { t } from "../../i18n";
-import {
-  Button,
-  cn,
-  StatusBadge,
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-  type StatusTone,
-} from "@design-system";
+import { Button, cn, StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
@@ -22,10 +13,22 @@ import {
   parsePullRequestDetail,
   pullRequestStatePill,
   type PullRequestDetail,
-  type PullRequestFinding,
   type PullRequestRef,
-  type PullRequestReview,
 } from "./data";
+import {
+  COPY_OUTCOME_MS,
+  copyOutcomeLabel,
+  defaultFamily,
+  foldLabel,
+  hasActionableFinding,
+  reviewAttribution,
+  severityGroups,
+  timelineRows,
+  verdictTone,
+  type ActivityTone,
+  type RecordFamily,
+  type SeverityTone,
+} from "./pullRequestDetailModel";
 
 /**
  * One detail read, stamped with the pr it belongs to (S2/N1). A read whose
@@ -120,125 +123,20 @@ export function PullRequestDetail({
   );
 }
 
-/** The three record families the detail face switches between. */
-type RecordFamily = "findings" | "reviews" | "failures";
-
-/**
- * Severity buckets in the order an operator asks about them. `severity` is a
- * free string in the payload, so the last bucket catches every spelling these
- * three do not name.
- */
-const SEVERITY_GROUPS = [
-  { severity: "must-fix", labelKey: "pullRequests.severityMustFix", tone: "danger" },
-  { severity: "should-fix", labelKey: "pullRequests.severityShouldFix", tone: "warn" },
-  { severity: "nit", labelKey: "pullRequests.severityNit", tone: "neutral" },
-] as const;
-
-/**
- * The severity left rule per group. Literal class strings: Tailwind scans
- * source text, so a composed `border-l-(--tone-${tone}-fg)` never compiles.
- */
-const SEVERITY_RULE: Record<(typeof SEVERITY_GROUPS)[number]["tone"], string> = {
+/** The severity left rule per group. Literal class strings: Tailwind scans
+ * source text, so a composed `border-l-(--tone-${tone}-fg)` never compiles. */
+const SEVERITY_RULE: Record<SeverityTone, string> = {
   danger: "border-l-(--tone-danger-fg)",
   warn: "border-l-(--tone-warn-fg)",
   neutral: "border-l-(--border-strong)",
 };
 
 /** A timeline dot's fill, same rule: literal strings for the scanner. */
-const TIMELINE_DOT: Record<StatusTone, string> = {
+const TIMELINE_DOT: Record<ActivityTone, string> = {
   danger: "bg-(--tone-danger-fg)",
   success: "bg-(--tone-success-fg)",
-  warn: "bg-(--tone-warn-fg)",
-  accent: "bg-(--tone-accent-fg)",
   neutral: "bg-(--border-strong)",
 };
-
-/** One merged activity row: a review, a failure, or the PR's first sighting. */
-type ActivityEntry = { at: string; key: string; tone: StatusTone; label: string; meta: string };
-
-/**
- * The event-row cap: at most this many merged review/failure rows render, then
- * the PR's first-sighting row. The "earlier events not shown" row is one row
- * more, rendered only when the cap actually dropped an event — so the aside
- * renders `TIMELINE_LIMIT + 1` rows when the history fits the cap and
- * `TIMELINE_LIMIT + 2` at most, which is the DOM the cap tests pin.
- */
-const TIMELINE_LIMIT = 7;
-
-/** How long the copy action's outcome stays on the button before it reverts. */
-const COPY_OUTCOME_MS = 2000;
-
-/** The family the face opens on: the actionable record first, history last. */
-function defaultFamily(detail: PullRequestDetail): RecordFamily {
-  // A should-fix is a requested change, not a nit: it opens the findings too.
-  if (detail.findings.some((finding) => finding.severity === "must-fix" || finding.severity === "should-fix")) {
-    return "findings";
-  }
-  if (detail.failures.length > 0) return "failures";
-  return "reviews";
-}
-
-/** Findings bucketed by severity, empty groups dropped, `other` last. */
-function severityGroups(
-  locale: SpaBoot["locale"],
-  findings: readonly PullRequestFinding[],
-): { key: string; label: string; tone: (typeof SEVERITY_GROUPS)[number]["tone"]; items: { finding: PullRequestFinding; index: number }[] }[] {
-  const indexed = findings.map((finding, index) => ({ finding, index }));
-  const known = new Set(SEVERITY_GROUPS.map((group) => group.severity as string));
-  const groups = SEVERITY_GROUPS.map((group) => ({
-    key: group.severity as string,
-    label: t(locale, group.labelKey),
-    tone: group.tone,
-    items: indexed.filter(({ finding }) => finding.severity === group.severity),
-  }));
-  const other = indexed.filter(({ finding }) => !known.has(finding.severity));
-  if (other.length > 0) {
-    groups.push({
-      key: "other",
-      label: t(locale, "pullRequests.severityOther"),
-      tone: "neutral",
-      items: other,
-    });
-  }
-  return groups.filter((group) => group.items.length > 0);
-}
-
-/**
- * The one verdict-tone rule, for the band, the review row and the timeline
- * alike: `ship it` is success, any other non-empty verdict is danger — a
- * review that asked for changes is an alarm wherever its verdict is painted.
- * No verdict (`""`, the payload's coercion of a missing one) is neutral.
- */
-function verdictTone(verdict: string): StatusTone {
-  if (verdict === "") return "neutral";
-  return verdict === "ship it" ? "success" : "danger";
-}
-
-/** `model · provider`, the separator dropped when the payload records no provider. */
-function reviewAttribution(locale: SpaBoot["locale"], review: PullRequestReview): string {
-  if (review.provider === "") return review.model;
-  if (review.model === "") return review.provider;
-  return t(locale, "pullRequests.reviewMeta", { model: review.model, provider: review.provider });
-}
-
-/**
- * A fold control's accessible name: the action plus the record it folds, so
- * the nine toggles on this face are told apart by what they open rather than
- * by nine identical "Expand"s. A record with no identity text (a coerced-empty
- * title or verdict) falls back to its position, which still keeps the name
- * distinct.
- */
-function foldLabel(locale: SpaBoot["locale"], open: boolean, record: string, position: number): string {
-  const action = t(locale, open ? "pullRequests.collapse" : "pullRequests.expand");
-  return `${action} — ${record === "" ? `#${position}` : record}`;
-}
-
-/** The copy action's label: its action while idle, its transient outcome after a press. */
-function copyOutcomeLabel(locale: SpaBoot["locale"], outcome: "copied" | "failed" | undefined): string {
-  if (outcome === "copied") return t(locale, "pullRequests.copyCopied");
-  if (outcome === "failed") return t(locale, "pullRequests.copyFailed");
-  return t(locale, "pullRequests.copyError");
-}
 
 /**
  * The detail face — pure `t()` + data rendering, no window/router access.
@@ -389,53 +287,10 @@ export function PullRequestDetailView({
     },
   ];
 
-  // Both tables stamp `datetime('now')` (UTC), so the raw text orders
-  // chronologically. The list is capped: a long history must not fill the
-  // aside, and the PR's own first sighting always closes it.
-  const history = [
-    ...detail.reviews.map((review, index) => {
-      // The payload coerces an absent verdict to ""; a label of "Review · "
-      // would paint a separator with nothing after it.
-      const label =
-        review.verdict === ""
-          ? t(locale, "pullRequests.timelineReviewNoVerdict")
-          : t(locale, "pullRequests.timelineReview", { verdict: review.verdict });
-      // The same attribution the review head wears, so a provider-only review
-      // names its provider here instead of an empty model.
-      const attribution = reviewAttribution(locale, review);
-      const when = formatRelativeTime(review.reviewed_at, locale);
-      return {
-        at: review.reviewed_at,
-        key: `review-${index}`,
-        tone: verdictTone(review.verdict),
-        label,
-        meta: attribution === "" ? when : `${when} · ${attribution}`,
-      };
-    }),
-    ...detail.failures.map((failure, index) => ({
-      at: failure.created_at,
-      key: `failure-${index}`,
-      tone: "danger" as StatusTone,
-      label:
-        failure.stage === ""
-          ? t(locale, "pullRequests.timelineFailureNoStage")
-          : t(locale, "pullRequests.timelineFailure", { stage: failure.stage }),
-      meta: formatRelativeTime(failure.created_at, locale),
-    })),
-  ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
-  const shownHistory = history.slice(0, TIMELINE_LIMIT);
-  // The cap is silent unless it says so: the row below names what it dropped.
-  const hiddenHistory = history.length - shownHistory.length;
-  const activity: ActivityEntry[] = [
-    ...shownHistory,
-    {
-      at: pr.first_seen_at,
-      key: "first-seen",
-      tone: "neutral",
-      label: t(locale, "pullRequests.timelineFirstSeen"),
-      meta: formatRelativeTime(pr.first_seen_at, locale),
-    },
-  ];
+  // The aside's one list: capped history, the truncation note (when the cap
+  // dropped anything) directly above the PR's own first sighting, which always
+  // closes it.
+  const timeline = timelineRows(locale, detail);
 
   return (
     <div className="flex flex-col">
@@ -495,8 +350,13 @@ export function PullRequestDetailView({
           <TabsTrigger value="findings">
             {t(locale, "pullRequests.findings")}
             <span className="text-xs tabular-nums text-(--text-faint)">{detail.findings.length}</span>
-            {mustFix > 0 ? (
-              <span aria-hidden="true" className="size-1.5 rounded-full bg-(--tone-danger-fg)" />
+            {hasActionableFinding(detail) ? (
+              <span
+                data-slot="family-dot"
+                data-tone="danger"
+                aria-hidden="true"
+                className="size-1.5 rounded-full bg-(--tone-danger-fg)"
+              />
             ) : null}
           </TabsTrigger>
           <TabsTrigger value="reviews">
@@ -507,7 +367,12 @@ export function PullRequestDetailView({
             {t(locale, "pullRequests.failures")}
             <span className="text-xs tabular-nums text-(--text-faint)">{detail.failures.length}</span>
             {detail.failures.length > 0 ? (
-              <span aria-hidden="true" className="size-1.5 rounded-full bg-(--tone-danger-fg)" />
+              <span
+                data-slot="family-dot"
+                data-tone="danger"
+                aria-hidden="true"
+                className="size-1.5 rounded-full bg-(--tone-danger-fg)"
+              />
             ) : null}
           </TabsTrigger>
         </TabsList>
@@ -757,7 +622,17 @@ export function PullRequestDetailView({
                                 announceCopy(failureKey, "failed");
                                 return;
                               }
-                              clipboard.writeText(failure.error).then(
+                              // A browser may throw from `writeText` instead of
+                              // rejecting: same outcome, so the write is wrapped
+                              // and both settle paths land on the one machine.
+                              let write: Promise<void>;
+                              try {
+                                write = clipboard.writeText(failure.error);
+                              } catch {
+                                announceCopy(failureKey, "failed");
+                                return;
+                              }
+                              write.then(
                                 () => announceCopy(failureKey, "copied"),
                                 () => announceCopy(failureKey, "failed"),
                               );
@@ -798,23 +673,28 @@ export function PullRequestDetailView({
                 {t(locale, "pullRequests.asideActivity")}
               </h2>
               <ol className="flex flex-col gap-(--spacing-3)">
-                {activity.map((entry) => (
-                  <li key={entry.key} data-slot="activity-entry" data-tone={entry.tone} className="flex gap-2">
-                    <span
-                      aria-hidden="true"
-                      className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", TIMELINE_DOT[entry.tone])}
-                    />
-                    <div className="flex min-w-0 flex-col">
-                      <span className="text-(length:--typo-copy-14-size) text-(--text-primary)">{entry.label}</span>
-                      <span className="text-(length:--typo-label-12-size) text-(--text-faint)">{entry.meta}</span>
-                    </div>
-                  </li>
-                ))}
-                {hiddenHistory > 0 ? (
-                  <li data-slot="timeline-truncated" className="pl-3.5 text-(length:--typo-label-12-size) text-(--text-faint)">
-                    {t(locale, "pullRequests.timelineHidden", { count: hiddenHistory })}
-                  </li>
-                ) : null}
+                {timeline.map((row) =>
+                  "hidden" in row ? (
+                    <li
+                      key={row.key}
+                      data-slot="timeline-truncated"
+                      className="pl-3.5 text-(length:--typo-label-12-size) text-(--text-faint)"
+                    >
+                      {t(locale, "pullRequests.timelineHidden", { count: row.hidden })}
+                    </li>
+                  ) : (
+                    <li key={row.key} data-slot="activity-entry" data-tone={row.tone} className="flex gap-2">
+                      <span
+                        aria-hidden="true"
+                        className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", TIMELINE_DOT[row.tone])}
+                      />
+                      <div className="flex min-w-0 flex-col">
+                        <span className="text-(length:--typo-copy-14-size) text-(--text-primary)">{row.label}</span>
+                        <span className="text-(length:--typo-label-12-size) text-(--text-faint)">{row.meta}</span>
+                      </div>
+                    </li>
+                  ),
+                )}
               </ol>
             </section>
           </aside>
