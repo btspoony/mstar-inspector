@@ -40,9 +40,11 @@ into an artifact.
   inputs to a parity test, not independent sources of truth.
 - Derive the build-definition path from `wrangler.jsonc` (`containers[].images.sandbox.dockerfile`)
   instead of hardcoding it; fail closed when the config declares none.
-- Treat the build context as an input: the root `.dockerignore` decides what reaches the image,
-  and a `wrangler.jsonc` change can repoint `build_context` or the Dockerfile. Both belong in
-  the vocabulary.
+- Treat the build context as an input: the root `.dockerignore` decides what reaches the image.
+  For the container config itself, compare the parsed `containers[].images` block (dockerfile,
+  build context, image entries) between base and head rather than treating the whole
+  `wrangler.jsonc` file as an input path, so an unrelated var, cron or queue edit does not force
+  an image rebuild.
 - Prove completeness from the artifact, not from memory: parse every `COPY` source in the
   Dockerfile (skipping `COPY --from=`) and require each to match a family. A new `COPY` line
   must either be covered or fail the test.
