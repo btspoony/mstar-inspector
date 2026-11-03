@@ -44,7 +44,10 @@ import type { D1Like } from "./types";
  * step failed; `pipeline` = worker-side orchestration (level/credential/
  * config resolution, comment post, …); `usage` = the execution's
  * `usage_events` ledger insert failed and the review continued, so the row is
- * the only record of the dropped metered attempt (it carries the `reviewId`).
+ * the only record of the dropped metered attempt (it carries the `reviewId`);
+ * `recheck` = the recheck round produced no usable document or its own status
+ * said `failed` (the round continues with unverifiable rows; the row is the
+ * attribution that survives a lost container stderr).
  */
 export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "parse",
@@ -52,9 +55,10 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "sandbox",
   "pipeline",
   "usage",
+  "recheck",
 ]);
 
-export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline" | "usage";
+export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline" | "usage" | "recheck";
 
 /**
  * One failure event to record. `head_sha` is the AUTHORITATIVE checkout sha

@@ -113,6 +113,9 @@ export type RecheckStatus = {
   rejected: number; reason: string | null; error: string | null;
 };
 
+/** Status `error` bound — the seat truncates it here, the consumer's failure row too. */
+export const RECHECK_STATUS_ERROR_MAX_CHARS = 500;
+
 export const RECHECK_MAX_TARGETS = 25;
 export const ASSESSMENT_TARGET_CAP = 25;
 export const RECHECK_MAX_RUNTIME_MS = 180_000;

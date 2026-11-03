@@ -40,6 +40,7 @@ import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import {
   RECHECK_MAX_RUNTIME_MS,
   RECHECK_MIN_REMAINING_MS,
+  RECHECK_STATUS_ERROR_MAX_CHARS,
   validateRecheckDoc,
   type RecheckDoc,
   type RecheckGateResult,
@@ -47,9 +48,6 @@ import {
   type RecheckStatus,
 } from "../../shared/src/recheck-wire";
 import type { ReviewLevel } from "../../shared/src/runtime";
-
-/** Cap on a status document's error text — a status line, not a stack dump. */
-const STATUS_ERROR_MAX_CHARS = 500;
 
 /**
  * Strict shape schema for the recheck seat's structured yield. The enum
@@ -335,12 +333,12 @@ export async function runRecheckSeat(input: {
     });
     gate = validateRecheckDoc(recheckStructuredData(result), input.input);
   } catch (error) {
-    const message = (error as Error).message.slice(0, STATUS_ERROR_MAX_CHARS);
+    const message = (error as Error).message.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
     console.error(JSON.stringify({ event: "recheck_seat_failed", error: message }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, error: message } };
   }
   if (!gate.ok) {
-    const error = gate.error.slice(0, STATUS_ERROR_MAX_CHARS);
+    const error = gate.error.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
     console.error(JSON.stringify({ event: "recheck_seat_failed", error: `recheck document failed validation: ${error}` }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "invalid-document", rejected: 0, error } };
   }

@@ -222,6 +222,12 @@ let diffStdout = "";
  */
 let recheckFileContent = "";
 let recheckFileOverflow = "0";
+/**
+ * The seat's STATUS document as written to RECHECK_STATUS_PATH. `null` (the
+ * reset default) = the runner never wrote one — the sandbox double then fails
+ * the `head` chain for that path exactly like a missing file.
+ */
+let recheckStatusContent: string | null = null;
 
 /**
  * Optional gate on the FIRST runner exec: a test parks a review inside the
@@ -260,6 +266,11 @@ const fakeSandbox = {
       const match = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(cmd);
       writtenInputJson = match ? Buffer.from(match[1]!, "base64").toString("utf8") : undefined;
       return { stdout: "", stderr: "", exitCode: writeInputExitCode };
+    }
+    if (cmd.includes("head -c") && cmd.includes("/tmp/mstar-recheck-status.json")) {
+      // A missing status file fails the head chain, exactly like the real one.
+      if (recheckStatusContent === null) return { stdout: "", stderr: "no such file", exitCode: 1 };
+      return { stdout: `${recheckStatusContent}\n0\n`, stderr: "", exitCode: 0 };
     }
     if (cmd.includes("head -c") && cmd.includes("/tmp/mstar-recheck.json")) {
       // Byte-for-byte the audited fixed-path recheck read's stdout.
@@ -457,6 +468,7 @@ function reset(): void {
   diffStdout = "";
   recheckFileContent = "";
   recheckFileOverflow = "0";
+  recheckStatusContent = null;
   kvPutError = undefined;
   kvGetValue = null;
   checkRequests.length = 0;
@@ -3263,6 +3275,213 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     // truly assessed targets advance last_assessed_ms / get history).
     const rounds = db.raw.query("SELECT COUNT(*) AS n FROM review_finding_rounds").get() as { n: number };
     expect(rounds.n).toBe(0);
+  });
+
+  test("a failed seat status with no document makes the round attributable: every row invalid-output, one recheck failure row", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The seat never wrote a document and said why.
+    recheckFileContent = "";
+    recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "seat-failed",
+      rejected: 0,
+      error: "session aborted",
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+    // ONE failure row, naming the round and carrying the status triple.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
+    expect(rows[0]!.error).toBe("failed: seat-failed: session aborted");
+    // The single accounting line carries the structured attribution.
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    expect(line.level).toBe("warn");
+    expect(line.fields).toMatchObject({
+      recheck_outcome: "failed",
+      recheck_reason: "seat-failed",
+      recheck_error: "session aborted",
+      rejected: 0,
+      assessed: 0,
+    });
+  });
+
+  test("rejected rows of an accepted document are invalid-output, never omitted; the rest still assess", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    // 25 selected rows: 23 the seat answers assessably, 2 it answers badly.
+    const seeded: string[] = [];
+    for (let i = 0; i < 25; i += 1) {
+      const rowId = `rejected-case-row-${i}`;
+      seeded.push(rowId);
+      db.raw
+        .prepare(
+          `INSERT INTO review_findings
+             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+              first_seen_round, last_seen_round, state, created_ms, updated_ms)
+           VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
+        )
+        .run(
+          rowId,
+          TEST_APP_ID,
+          `finding-${i}`,
+          JSON.stringify({ ...TARGET_ORIGINAL, fingerprintHint: `old-fp-${i}` }),
+          PRIOR_PUB_ID,
+          PRIOR_PUB_ID,
+          PRIOR_SHA,
+          PRIOR_SHA,
+          2_000 + i,
+          2_000 + i,
+        );
+    }
+    const rejectedRowIds = [seeded[0]!, seeded[1]!];
+    const assessableRowIds = seeded.slice(2);
+    // Rows the gate drops (foreign slice citation) still occupy a results slot.
+    const badRow = (rowId: string) => ({
+      rowId,
+      disposition: "addressed",
+      reason: "verified-fix",
+      evidence: {
+        kind: "current-code",
+        sliceId: "no-such-slice",
+        startLine: 20,
+        endLine: 21,
+        quote: ADDRESSED_QUOTE,
+        explanation: "x",
+      },
+      relatedCurrentFindingIndexes: [],
+    });
+    recheckFileContent = JSON.stringify({
+      schema: "mstar.recheck/v1",
+      headSha: SHA,
+      results: [
+        ...rejectedRowIds.map(badRow),
+        ...assessableRowIds.map((rowId) => ({
+          rowId,
+          disposition: "unverifiable",
+          reason: "no-evidence",
+          evidence: null,
+          relatedCurrentFindingIndexes: [],
+        })),
+      ],
+    });
+    recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "ok",
+      reason: null,
+      rejected: 2,
+      error: null,
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    // 23 truly assessed; the 2 rejected rows are accounted as not-assessed
+    // (coverage) but their closure reason names the real cause.
+    expect(prepared.body).toContain("Reassessed 23/25 open prior finding(s)");
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+    expect(prepared.body).not.toContain("unverifiable (omitted)");
+    // The 23 assessable rows really persisted a round row; the rejected two did not.
+    const roundRows = db.raw.query("SELECT finding_row_id FROM review_finding_rounds").all() as Array<{
+      finding_row_id: string;
+    }>;
+    expect(roundRows).toHaveLength(23);
+    const persisted = new Set(roundRows.map((r) => r.finding_row_id));
+    for (const rowId of assessableRowIds) expect(persisted.has(rowId)).toBe(true);
+    for (const rowId of rejectedRowIds) expect(persisted.has(rowId)).toBe(false);
+    // A usable document means no failure row.
+    expect(failureRows(db)).toHaveLength(0);
+    const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 2, assessed: 23 });
+  });
+
+  test("an ok seat status with a valid document records no failure and keeps the accounting unchanged", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    recheckFileContent = recheckDocWith({});
+    recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "ok",
+      reason: null,
+      rejected: 0,
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    commenterState.discussion = {
+      items: [],
+      issueCoverage: "complete",
+      issueDigest: "issue-digest",
+      capturedMs: 0,
+      threads: [
+        {
+          associationId: ASSOC_ID,
+          threadId: "PRRT_thread1",
+          commentId: 8,
+          headSha: SHA,
+          digest: "thread-digest-1",
+          commentCount: 2,
+          capturedMs: 0,
+          coverage: "complete",
+          modelCoverage: "complete",
+        },
+      ],
+    };
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(failureRows(db)).toHaveLength(0);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("Reassessed 1/1 open prior finding(s)");
+    expect(prepared.body).toContain("addressed (verified-fix)");
+    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(true);
+  });
+
+  test("a missing status file keeps the conservative path: invalid-output, no throw, no failure row", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Neither file exists (recheckStatusContent stays null from reset()).
+    recheckFileContent = "";
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload())); // resolves — never throws
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "recheck" });
+    // `absent` is the honest outcome when the seat wrote no status at all.
+    expect(failureRows(db)[0]!.error).toBe("absent: null: null");
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
   });
 
   test("same-SHA issue-comment-triggered review with a pending journal row → hands off to recovery and acks (no recheck, no resolve, rows untouched)", async () => {

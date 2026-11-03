@@ -30,7 +30,7 @@
  */
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { RECHECK_FILE_MAX_BYTES } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_FILE_MAX_BYTES, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 export type GitOpsInput = {
@@ -180,6 +180,17 @@ export function readRecheckCommand(path: string): ShellCommand {
     `head -c '${RECHECK_FILE_MAX_BYTES}' '${path}' && printf '\\n' && ` +
       `tail -c '+${RECHECK_FILE_MAX_BYTES + 1}' '${path}' | head -c '1' | wc -c`,
   );
+}
+
+/**
+ * Bounded read of the seat's recheck STATUS document — the same audited
+ * transport (byte bound + overflow flag) over the fixed
+ * RECHECK_STATUS_PATH, never a caller-chosen path. A missing file fails the
+ * `head` chain exactly like the document read, which the consumer maps to
+ * "no status recorded".
+ */
+export function readRecheckStatusCommand(): ShellCommand {
+  return readRecheckCommand(RECHECK_STATUS_PATH);
 }
 
 /** Main-flow commands in execution order (clone → sha → diff → numstat → runner). */

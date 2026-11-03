@@ -21,6 +21,7 @@ import {
   diffCommand,
   numstatCommand,
   readRecheckCommand,
+  readRecheckStatusCommand,
   runnerCommand,
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
@@ -87,6 +88,12 @@ describe("gitops command builders", () => {
     ]) {
       expect(() => readRecheckCommand(evil)).toThrow(/unsafe recheck output path/);
     }
+  });
+
+  test("readRecheckStatusCommand rides the same bounded transport over the fixed status path", () => {
+    // No second transport: the status read IS the audited read command bound
+    // to RECHECK_STATUS_PATH (the runner's write target).
+    expect(readRecheckStatusCommand()).toEqual(readRecheckCommand("/tmp/mstar-recheck-status.json"));
   });
 
   test("readRecheckCommand's REAL stdout is content + newline + newline-terminated flag (P67-QC-006)", async () => {

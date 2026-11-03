@@ -106,6 +106,7 @@ import {
 import {
   ASSESSMENT_TARGET_CAP,
   RECHECK_OUTPUT_PATH,
+  RECHECK_STATUS_ERROR_MAX_CHARS,
   validateRecheckDoc,
   type Assessment,
   type Coverage,
@@ -113,13 +114,14 @@ import {
   type EvidenceSlice,
   type RecheckDoc,
   type RecheckInput,
+  type RecheckStatus,
   type RecheckTarget,
   type Scope,
 } from "../../packages/shared/src/recheck-wire";
 import { boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
-import { buildGitOpsCommands, readRecheckCommand, runnerCommand, writeJsonCommand } from "./gitops";
+import { buildGitOpsCommands, readRecheckCommand, readRecheckStatusCommand, runnerCommand, writeJsonCommand } from "./gitops";
 import {
   assertSandboxGrant,
   buildClosureSection,
@@ -362,6 +364,24 @@ export type ConsumerLogFields = {
    */
   degraded_delete_deleted?: number;
   degraded_delete_skipped?: number;
+  /**
+   * S-3 / qc3 F-003: the previous-round fingerprint query
+   * THREW — repeat dedup degraded to first-round semantics (empty set).
+   * Set only on the dedup-failure warn; an empty previous round is silent.
+   */
+  dedup?: "degraded";
+  /**
+   * Recheck round attribution (§7.8): the seat's own status outcome
+   * (`ok` / `skipped` / `failed`, or `absent` when no status document was
+   * written), its reason, the redacted error, the rows the gate rejected and
+   * the rows the document actually assessed. Present on the round's single
+   * accounting line.
+   */
+  recheck_outcome?: RecheckStatus["outcome"] | "absent";
+  recheck_reason?: string | null;
+  recheck_error?: string | null;
+  rejected?: number;
+  assessed?: number;
 };
 
 export type ConsumerLog = {
@@ -974,6 +994,8 @@ function reconcileRecheckRound(input: {
   staleContext: boolean;
   /** Selected rows excluded from the recheck input by the §7.3 size budget. */
   budgetExcluded: ReadonlySet<string>;
+  /** Rows the gate dropped from an otherwise accepted document (row content errors). */
+  rejectedRowIds: ReadonlySet<string>;
 }): {
   assessments: Assessment[];
   outcomeByRowId: Map<string, Assessment>;
@@ -981,7 +1003,7 @@ function reconcileRecheckRound(input: {
   assessedCount: number;
   omittedCount: number;
 } {
-  const { targets, doc, discussion, output, staleContext, budgetExcluded } = input;
+  const { targets, doc, discussion, output, staleContext, budgetExcluded, rejectedRowIds } = input;
   const outcomeByRowId = new Map<string, Assessment>();
   const assessments: Assessment[] = [];
   const forceUnverifiable = (rowId: string, reason: Assessment["reason"]): Assessment => ({
@@ -1004,6 +1026,11 @@ function reconcileRecheckRound(input: {
       // Stale lifecycle state (pending-journal apply or capture failed):
       // nothing may close this round, assessed or not.
       assessment = forceUnverifiable(target.rowId, "context-incomplete");
+    } else if (rejectedRowIds.has(target.rowId)) {
+      // The seat answered this row but the gate dropped it (shape / enum /
+      // evidence error) — the row WAS attempted, so it is invalid output,
+      // never "omitted" (never ran) or "budget" (never sent).
+      assessment = forceUnverifiable(target.rowId, "invalid-output");
     } else if (docResult === undefined) {
       // Omitted selected row: no recheck ran for it. Honest conservative
       // accounting by WHY — invalid/absent document, §7.3 size budget, or
@@ -1107,6 +1134,53 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 }
 
 /**
+ * Payload text of one bounded read command, or null (non-zero exit, overflow
+ * beyond the byte bound, or no flag line). Shared by the recheck document and
+ * status reads — the transport is identical, only the file differs.
+ */
+async function boundedRead(sandbox: ReviewSandbox, command: ReturnType<typeof readRecheckCommand>): Promise<string | null> {
+  let read;
+  try {
+    read = await sandbox.runCommand(command, { timeout: EXEC_TIMEOUT_GIT_MS });
+  } catch {
+    return null;
+  }
+  if (read.exitCode !== 0) return null;
+  const out = read.stdout.trimEnd();
+  const split = out.lastIndexOf("\n");
+  if (split < 0) return null;
+  if (out.slice(split + 1).trim() !== "0") return null; // overflow beyond the byte bound
+  return out.slice(0, split);
+}
+
+/**
+ * The seat's recheck status document (`RecheckStatus`), or null when the file
+ * is absent/unreadable or carries a foreign schema or HEAD. Anything but this
+ * round's own status for this HEAD is no attribution at all — never a
+ * fabricated outcome.
+ */
+function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus | null {
+  if (text === null) return null;
+  try {
+    const value = JSON.parse(text) as Record<string, unknown> | null;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+    if (value["schema"] !== "mstar.recheck-status/v1" || value["headSha"] !== headSha) return null;
+    const outcome = value["outcome"];
+    if (outcome !== "ok" && outcome !== "skipped" && outcome !== "failed") return null;
+    return {
+      schema: "mstar.recheck-status/v1",
+      headSha,
+      outcome,
+      rejected: typeof value["rejected"] === "number" ? value["rejected"] : 0,
+      reason: typeof value["reason"] === "string" ? value["reason"] : null,
+      error: typeof value["error"] === "string" ? value["error"] : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Bounded read + validation of the runner's recheck output:
  * the audited fixed-path command (`src/pipeline/gitops.ts`
  * `readRecheckCommand`) emits `<content>\n<overflow-flag>` where the flag is
@@ -1117,25 +1191,34 @@ function roundContextCoverage(discussion: Discussion): Coverage {
  * (non-zero exit, overflow, malformed JSON, failed validation) is NO recheck:
  * the round proceeds with every selected row conservatively omitted, never a
  * fabricated document.
+ *
+ * The SAME transport reads the seat's status document, which is what makes a
+ * round that produced no usable document attributable in D1 without container
+ * stderr. Rows `validateRecheckDoc` dropped come back as `rejected` so the
+ * reconciliation can name them `invalid-output` instead of `omitted`.
  */
-async function readRecheckDoc(sandbox: ReviewSandbox, recheckInput: RecheckInput): Promise<RecheckDoc | null> {
-  let read;
-  try {
-    read = await sandbox.runCommand(readRecheckCommand(RECHECK_OUTPUT_PATH), { timeout: EXEC_TIMEOUT_GIT_MS });
-  } catch {
-    return null;
+async function readRecheckDoc(
+  sandbox: ReviewSandbox,
+  recheckInput: RecheckInput,
+): Promise<{ doc: RecheckDoc | null; rejected: ReadonlySet<string>; status: RecheckStatus | null }> {
+  const [docText, statusText] = await Promise.all([
+    boundedRead(sandbox, readRecheckCommand(RECHECK_OUTPUT_PATH)),
+    boundedRead(sandbox, readRecheckStatusCommand()),
+  ]);
+  let doc: RecheckDoc | null = null;
+  const rejected = new Set<string>();
+  if (docText !== null) {
+    try {
+      const gate = validateRecheckDoc(JSON.parse(docText), recheckInput);
+      if (gate.ok) {
+        doc = gate.doc;
+        for (const row of gate.rejected) if (row.rowId !== null) rejected.add(row.rowId);
+      }
+    } catch {
+      doc = null;
+    }
   }
-  if (read.exitCode !== 0) return null;
-  const out = read.stdout.trimEnd();
-  const split = out.lastIndexOf("\n");
-  if (split < 0) return null;
-  if (out.slice(split + 1).trim() !== "0") return null; // overflow beyond the byte bound
-  try {
-    const gate = validateRecheckDoc(JSON.parse(out.slice(0, split)), recheckInput);
-    return gate.ok ? gate.doc : null;
-  } catch {
-    return null;
-  }
+  return { doc, rejected, status: parseRecheckStatus(statusText, recheckInput.headSha) };
 }
 
 /**
@@ -2729,18 +2812,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // post/KV/put orchestration is worker-side) are "pipeline" again.
     failureStage = "pipeline";
 
-    // §7.7 step 5 (cont): read the concurrent recheck seat's document
-    // through the audited fixed-path bounded read (§7.3: Worker validates
-    // against ITS OWN trusted input — never a model echo). Anything other
-    // than a valid document is NO recheck; the round proceeds with every
-    // selected row conservatively accounted (§7.4).
-    const recheckDoc = recheckInput !== undefined ? await readRecheckDoc(sandbox, recheckInput) : null;
-    if (recheckInput !== undefined && recheckDoc === null) {
-      deps.log.warn(
-        fields,
-        "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable",
-      );
-    }
+    // §7.7 step 5 (cont): read the concurrent recheck seat's document AND its
+    // status through the audited fixed-path bounded reads (§7.3: Worker
+    // validates against ITS OWN trusted input — never a model echo). Anything
+    // other than a valid document is NO recheck; the round proceeds with every
+    // selected row conservatively accounted (§7.4), and the seat's status makes
+    // that loss attributable in D1. Rows the gate dropped are carried as
+    // rejected so they are never mistaken for rows the seat never reached.
+    const recheck = recheckInput !== undefined ? await readRecheckDoc(sandbox, recheckInput) : null;
+    const recheckDoc = recheck?.doc ?? null;
+    const rejectedRowIds = recheck?.rejected ?? new Set<string>();
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
@@ -2831,7 +2912,51 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       output,
       staleContext,
       budgetExcluded,
+      rejectedRowIds,
     });
+    // §7.8 attribution: ONE line per recheck round carrying the seat's own
+    // status next to this round's accounting. A lost round therefore leaves a
+    // D1 failure row and this line even when the container's stderr is gone.
+    if (recheckInput !== undefined) {
+      const status = recheck?.status ?? null;
+      const recheckOutcome = status?.outcome ?? "absent";
+      const recheckDetail = redactExactSecrets(
+        redactSecrets(`${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`),
+        secretValues,
+      ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
+      deps.log[recheckDoc === null ? "warn" : "info"](
+        {
+          ...fields,
+          recheck_outcome: recheckOutcome,
+          recheck_reason: status?.reason ?? null,
+          recheck_error: status?.error === null || status?.error === undefined
+            ? null
+            : redactExactSecrets(redactSecrets(status.error), secretValues),
+          rejected: rejectedRowIds.size,
+          assessed: reconciled.assessedCount,
+        },
+        recheckDoc === null
+          ? "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
+          : "recheck round accounted",
+      );
+      if (recheckDoc === null || recheckOutcome === "failed") {
+        // Best-effort: the insert must never mask the round (AL-6 pattern).
+        try {
+          await deps.failureStore.record({
+            installation_id: payload.installation_id,
+            owner: payload.owner,
+            repo: payload.repo,
+            pr_number: payload.pr_number,
+            head_sha: headSha,
+            stage: "recheck",
+            error: recheckDetail,
+          });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(fields, `review_failures insert failed (recheck round continues): ${detail}`);
+        }
+      }
+    }
     const contextCoverage: Coverage = staleContext
       ? "unavailable"
       : roundContextCoverage(discussion);
