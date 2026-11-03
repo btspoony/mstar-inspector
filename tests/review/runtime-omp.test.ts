@@ -1184,6 +1184,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     // The retained finding and the coverage note describe the SAME assigned
     // scope: the note must report that coverage is incomplete, never that the
     // scope went unscanned — the contradiction the reviewer called out.
+    expect(envelope.summary_md).toBeDefined();
     const notes = noteLines(envelope.summary_md ?? "");
     expect(envelope.findings.map((finding) => finding.file_path)).toEqual(["src/a.ts"]);
     expect(notes).toHaveLength(1);
@@ -1207,6 +1208,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
 
     const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, reconFacts: facts });
 
+    expect(envelope.summary_md).toBeDefined();
     const notes = noteLines(envelope.summary_md ?? "");
     // Every capped seat keeps its coverage line (a note is never dropped by a
     // sibling's length), each line is bounded by CHARACTERS, and the whole body
@@ -1229,6 +1231,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
 
     const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", reconFacts: facts });
 
+    expect(envelope.summary_md).toBeDefined();
     const notes = noteLines(envelope.summary_md ?? "");
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("its assigned scope is not fully covered");
@@ -1250,6 +1253,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
 
     const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
 
+    expect(envelope.summary_md).toBeDefined();
     expect(noteLines(envelope.summary_md ?? "")).toEqual([
       `- notes: seat full-diff-combined was stopped by ${CAP_REASON}; ` +
         `its assigned scope is not fully covered: lib/c.ts, src/a.ts, src/b.ts`,
