@@ -12,7 +12,7 @@
 
 ## 粒度派生（唯一规则）
 
-- **granularity = clamped `windowDays > 30` → `"week"`，否则 `"day"`**（insights-store.ts:207）。UI segmented 7/30 → day、90 → week；31–89 的直连 URL 窗同样落 week。
+- **granularity = clamped `windowDays > 30` → `"week"`，否则 `"day"`**（insights-store.ts:204）。UI segmented 7/30 → day、90 → week；31–89 的直连 URL 窗同样落 week。
 - 日桶表达式 = UTC `date(r.reviewed_at)`（与窗口谓词同一 UTC 域）。
 - 周桶表达式 = `WEEK_BUCKET_SQL`（Monday-anchored，insights-store.ts 单一定义）；JS 镜像 `mondayOf` / `weekGrid`（src/dashboard/insights-dates.ts，S-1 concrete-date pin 锁同步）。
 - **禁止出现第二种周或日桶定义**（SQL 或 JS 皆然）。
@@ -22,7 +22,7 @@
 | wire 键 | 粒度 | 填充 | 计数语义 | 状态 |
 |---|---|---|---|---|
 | `weekly_trend` | 恒周桶（任意窗） | 原样 SQL 输出（不零填充；空周不出桶） | reviews = COUNT(DISTINCT r.id)（LEFT JOIN，零 findings 的 review 计 1）；findings = COUNT(f.id) | 冻结（既有键） |
-| `findings_distribution` | 按窗派生 day\|week | JS 网格零填充（`dayGrid`/`weekGrid`，∪ 观测桶起点，首末桶 partial，网格定序） | by_severity 零填充网格（`by_category` 于 2026-11-03 移除：category 为模型输出命名的开放集自由 slug，跨 provider 不稳定，桶并集不构成可比较的指标） | 冻结（020 / AD-652；2026-11-03 收窄为 by_severity 单系列） |
+| `findings_distribution` | 按窗派生 day\|week | JS 网格零填充（`dayGrid`/`weekGrid`，∪ 观测桶起点，首末桶 partial，网格定序） | by_severity 零填充网格（`by_category` 于 2026-11-03 移除：category 为模型输出命名的开放集自由 slug，跨 provider 不稳定，桶并集不构成可比较的指标） | 冻结（020 / AD-652；2026-11-03 收窄为 by_severity 单系列（见「变更记录」）） |
 | `daily_trend` | 仅天窗（clamped ≤30）产出；周窗返回 `[]`（不运行查询） | `dayGrid` 零填充（∪ 观测 day start，网格定序） | 镜像 `weekly_trend` 计数语义，桶为日 | 024 新增（additive；本迭代裁决） |
 
 - `daily_trend` 行形 `{ day_start: string; reviews: number; findings: number }`（形对齐 `weekly_trend` 的 `week_start`）。
@@ -38,3 +38,7 @@
 
 - 新增时间桶面：复用 `WEEK_BUCKET_SQL` / `date()` 表达式与 `dayGrid`/`weekGrid`；粒度从 clamped 窗派生；additive 新键 + REQUIRED 解析 + 行级 guard。
 - 改动本表中任何冻结键的形、填充或计数语义 = 架构 STOP，须重新裁决（不可作为实现细节顺带完成）。
+
+## 变更记录
+
+- **2026-11-03 — `findings_distribution` 收窄为 `by_severity` 单系列**：架构裁决移除 `by_category` 桶。理由：category 由模型输出命名，是跨 provider 不稳定的开放集自由 slug，其桶并集不构成可比较的指标；recurrence 在跨 repo 的 App 面同样无稳定语义。窗口谓词、粒度派生、零填充网格与 `weekly_trend`/`daily_trend` 行形均未改变。

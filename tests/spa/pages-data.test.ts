@@ -123,6 +123,9 @@ describe("insights search wiring", () => {
     expect(parseInsights({ ...body, findings_distribution: "2026-08-17" })).toBeNull();
     expect(parseInsights({ ...body, findings_distribution: [{ bucket_start: "2026-08-17" }] })).toBeNull();
     expect(
+      parseInsights({ ...body, findings_distribution: [{ bucket_start: "2026-08-17", granularity: "day" }] }),
+    ).toBeNull();
+    expect(
       parseInsights({
         ...body,
         findings_distribution: [{ bucket_start: "2026-08-17", granularity: "month", by_severity: {} }],
