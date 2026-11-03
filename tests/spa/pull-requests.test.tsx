@@ -415,26 +415,37 @@ describe("pull request detail face (static SSR)", () => {
     const history = Array.from({ length: 12 }, (_, index) => ({
       verdict: "needs fixes",
       summary_md: `Round ${index}`,
-      model: "kimi-for-coding",
-      provider: "openrouter",
+      // The timeline's meta line renders the review's model, so a per-review
+      // model is the one stable, rendered marker of WHICH rows survived.
+      model: `model-${String(index).padStart(2, "0")}`,
+      provider: "",
       // Newest first, as the store orders them; one hour apart.
       reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
       head_sha: `sha${index}`,
     }));
     const markup = render({
       ...DETAIL,
-      pull_request: { ...DETAIL.pull_request, latest_review: { verdict: "needs fixes", reviewed_at: history[0]?.reviewed_at as string } },
+      pull_request: {
+        ...DETAIL.pull_request,
+        latest_review: { verdict: "needs fixes", reviewed_at: history[0]?.reviewed_at ?? "" },
+      },
       reviews: history,
     });
-    // Eight rows: seven newest activity entries, then the anchor.
-    expect(markup.match(/<li class="flex gap-2">/g) ?? []).toHaveLength(8);
+    // `· model-NN` is the timeline's meta separator: the header names the model
+    // without it, so the marker identifies exactly the rows that rendered.
+    const marker = (index: number) => ` · model-${String(index).padStart(2, "0")}`;
+    // Newest seven (indices 0..6) survive, in newest-first order, and the anchor
+    // closes the list — a cap that kept the OLDEST seven would fail below.
     const order = positions(markup, [
-      t("en", "pullRequests.timelineReview", { verdict: "needs fixes" }),
+      ...[0, 1, 2, 3, 4, 5, 6].map(marker),
       t("en", "pullRequests.timelineFirstSeen"),
     ]);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
-    // The oldest reviews fall outside the cap.
-    expect(markup).not.toContain("12:00:00");
+    for (const index of [7, 8, 9, 10, 11]) {
+      expect(markup, marker(index)).not.toContain(marker(index));
+    }
+    // Additional evidence: eight rows — seven activity entries plus the anchor.
+    expect(markup.match(/<li class="flex gap-2">/g) ?? []).toHaveLength(8);
   });
 
   test("a failure's first line renders as escaped text and its full output stays in details", () => {
