@@ -21,8 +21,10 @@ import { readFileSync } from "node:fs";
 /**
  * Path families the image copies in — the gate's whole input vocabulary, as
  * globs. `AGENTS.md` § Sandbox image rebuild and `docs/deploy.md` § Image
- * rebuild gate state the same six; the parity test reads all three surfaces,
- * so editing one alone fails.
+ * rebuild gate state the same list; the parity test reads all three surfaces,
+ * so editing one alone fails. The root `.dockerignore` belongs here because it
+ * decides which of those sources reach the build context at all: excluding one
+ * changes the image without touching anything the Dockerfile names.
  */
 export const IMAGE_INPUT_FAMILIES: readonly string[] = [
   "packages/runner/src/**",
@@ -31,6 +33,7 @@ export const IMAGE_INPUT_FAMILIES: readonly string[] = [
   "packages/runner/bun.lock",
   "packages/runner/verify-synthesis.sh",
   "sandbox-image/**",
+  ".dockerignore",
 ];
 
 /** One family glob as an anchored path regex (`**` = anything below). */

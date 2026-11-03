@@ -512,15 +512,24 @@ function handleGuardHeld(
   // is the failure event, not each refused attempt. `pr-held` is excluded: a
   // live review for the same PR does the work. Best-effort: a warn only.
   if (admission.reason === "pr-held") return;
+  // Convention for a job that never resolved a sha (comment trigger —
+  // `head_sha` is null in the payload): the row's `head_sha` is `""` (the
+  // 0010 column allows it; only `reviews` forbids it), and the PR identity
+  // stays in the error text so the row is joinable back to the PR — a bare
+  // `""` row tells an operator nothing about which PR was dropped.
+  const headSha = message.body.head_sha ?? "";
+  const identity = `${message.body.owner}/${message.body.repo}#${message.body.pr_number}`;
   return deps.failureStore
     .record({
       installation_id: message.body.installation_id,
       owner: message.body.owner,
       repo: message.body.repo,
       pr_number: message.body.pr_number,
-      head_sha: message.body.head_sha ?? "",
+      head_sha: headSha,
       stage: "pipeline",
-      error: `review dropped after ${delays.length} refused retries: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap}${cause})`,
+      error: `review dropped after ${delays.length} refused retries: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap}${cause}) — PR ${identity}, head_sha ${
+        headSha === "" ? "unresolved (comment trigger, no sha in payload)" : headSha
+      }`,
     })
     .catch((err: unknown) => {
       const detail = err instanceof Error ? err.message : String(err);

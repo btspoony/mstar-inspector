@@ -18,6 +18,8 @@
  *     coerced (`["16"]`, `true` and `{}` all degrade)
  *   - a read failure answers the conservative cap with `degraded: true` and
  *     never throws
+ *   - a retired workspace (`deleted_at` set) is ABSENT to both reads — the
+ *     default applies, matching the write's live-workspace predicate
  *   - a refused write changes no row and appends no audit row
  *   - accepted writes are audited through `platform_audit_events`
  */
@@ -289,6 +291,23 @@ describe("runtime-config-store", () => {
     const db = fixture();
     await expect(setWorkspaceConcurrency(db, "ws_missing", 4, ACTOR)).rejects.toThrow();
     expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a retired workspace reads as the default on both reads, never its pinned value", async () => {
+    // The settings WRITE already requires a live workspace; the READ must use
+    // the same predicate, or a deleted workspace keeps governing its queued
+    // jobs with a value nobody can change any more.
+    const db = fixture();
+    await setWorkspaceConcurrency(db, WS, 12, ACTOR);
+    db.raw.prepare("UPDATE workspaces SET deleted_at = '2026-11-04T00:00:00.000Z' WHERE id = ?").run(WS);
+    expect(await getWorkspaceConcurrency(db, WS)).toBe(WORKSPACE_CONCURRENCY_DEFAULT);
+    // Absence (not untrusted data), so the effective read is NOT degraded.
+    expect(await getEffectiveConcurrency(db, WS)).toEqual({
+      system: SYSTEM_CONCURRENCY_DEFAULT,
+      workspace: WORKSPACE_CONCURRENCY_DEFAULT,
+      effective: WORKSPACE_CONCURRENCY_DEFAULT,
+      degraded: false,
+    });
   });
 
   test("non-integer and out-of-range system values are refused and write nothing", async () => {

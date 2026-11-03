@@ -15,7 +15,10 @@
  *   - release deletes only the row its own `attempt_id` wrote
  *   - a storage failure → `error` with a `fault` cause naming the exception,
  *     never `ok`; a raced refusal names `released-between-statements`
- *   - a malformed `now` or non-finite TTL → `error`, never a throw
+ *   - a malformed `now`, a non-finite TTL, or a TTL of zero or less → `error`,
+ *     never a throw and never an already-expired row reported as success
+ *   - `owner`/`repo` are matched case-insensitively across insert, refusal and
+ *     release (GitHub is case-insensitive; the PRIMARY KEY is not)
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -207,6 +210,39 @@ describe("inflight-store", () => {
     const badTtl = await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: Number.NaN });
     expect(badTtl).toMatchObject({ reason: "error", cause: { kind: "fault" } });
     // Neither refusal wrote a row — fail-closed never admits.
+    expect(db.raw.query("SELECT * FROM review_inflight").all()).toHaveLength(0);
+  });
+
+  test("a zero or negative TTL is refused, never an already-expired success", async () => {
+    // A non-positive TTL writes `expires_at <= now`: the row holds no PR and
+    // reserves no slot, so reporting `ok` would admit a review the lock never
+    // guarded. Both must answer the fault refusal and write nothing.
+    const db = freshDb();
+    for (const ttlSeconds of [0, -1, -600]) {
+      expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds })).toMatchObject({
+        ok: false,
+        reason: "error",
+        cause: { kind: "fault" },
+      });
+    }
+    expect(db.raw.query("SELECT * FROM review_inflight").all()).toHaveLength(0);
+  });
+
+  test("owner/repo case does not split or evade the per-PR lock", async () => {
+    // GitHub owner/repo are case-insensitive; the row's PRIMARY KEY is not.
+    // Insert, refusal read and release must all land on ONE normalized key.
+    const db = freshDb();
+    expect(await acquireInflight(db, { ...KEY, owner: "Acme", repo: "Widgets" }, OPTS)).toEqual({
+      ok: true,
+    });
+    expect(
+      await acquireInflight(db, { ...KEY, owner: "acme", repo: "widgets" }, { ...OPTS, attemptId: "attempt-2" }),
+    ).toEqual({ ok: false, reason: "pr-held" });
+    const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.owner).toBe("acme");
+    // Release through the OTHER spelling frees the row the first spelling wrote.
+    await releaseInflight(db, { ...KEY, owner: "ACME", repo: "WIDGETS" }, OPTS.attemptId);
     expect(db.raw.query("SELECT * FROM review_inflight").all()).toHaveLength(0);
   });
 });

@@ -11,6 +11,13 @@
 -- a comment-mention job carries no sha and must still serialize against the
 -- same PR.
 --
+-- Key normalization: SQLite compares these TEXT columns case-SENSITIVELY,
+-- while GitHub treats owner/repo case-insensitively. The store
+-- (src/store/inflight-store.ts) folds both to lower case at its one
+-- key-building boundary before binding, so `Acme/Repo` and `acme/repo` are the
+-- same row for the insert, the refusal read and the release. A row written by
+-- any other producer in mixed case would be invisible to that lock.
+--
 -- `workspace_id` is the tenant the message resolves to (the App's workspace),
 -- so the workspace cap counts rows without a join.
 --

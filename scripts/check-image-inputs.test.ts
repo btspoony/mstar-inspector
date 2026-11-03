@@ -2,8 +2,10 @@
  * The image rebuild gate's decision seam (`scripts/check-image-inputs.ts`).
  *
  * The git invocation is the CLI's, not this test's: what must hold is the
- * VERDICT — the six declared path families fail without a marker change,
- * nothing else does, and a diff that changes the marker passes.
+ * VERDICT — the declared path families fail without a marker change, nothing
+ * else does, and a diff that changes the marker passes. The vocabulary is also
+ * proved COMPLETE against the image: every `COPY <src>` in the Dockerfile must
+ * be matched by a family, so a newly copied path cannot escape the gate.
  *
  * The vocabulary is hand-mirrored in prose (`AGENTS.md`, `docs/deploy.md`), so
  * the parity block below reads all three surfaces and fails when one drifts.
@@ -38,11 +40,29 @@ function documentedFamilies(text: string, startMarker: string, endMarker: string
     .slice(start, end)
     .split("\n")
     .filter((line) => line.startsWith("- "))
-    .flatMap((line) => [...line.matchAll(/`(packages\/[^`]+|sandbox-image\/[^`]+)`/g)].map((m) => m[1]!));
+    .flatMap((line) => [...line.matchAll(/`(packages\/[^`]+|sandbox-image\/[^`]+|\.dockerignore)`/g)].map((m) => m[1]!));
+}
+
+/**
+ * The `COPY <src>…` sources of a Dockerfile. Multi-stage `COPY --from=` reads
+ * from another image, not the build context, so it is not an input family.
+ */
+function copySources(dockerfile: string): string[] {
+  return dockerfile
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("COPY ") && !line.startsWith("COPY --from="))
+    .flatMap((line) =>
+      line
+        .slice("COPY ".length)
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, -1),
+    );
 }
 
 describe("image input vocabulary parity", () => {
-  test("AGENTS.md, docs/deploy.md and the gate declare the same six families", () => {
+  test("AGENTS.md, docs/deploy.md and the gate declare the same families", () => {
     const agents = documentedFamilies(
       readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8"),
       "Touch the `# rebuild:` marker block",
@@ -50,12 +70,25 @@ describe("image input vocabulary parity", () => {
     );
     const deploy = documentedFamilies(
       readFileSync(join(REPO_ROOT, "docs", "deploy.md"), "utf8"),
-      "The six input path families it covers",
-      "A diff that touches an image input passes",
+      "The input path families it covers",
+      "`scripts/check-image-inputs.test.ts` proves the list is complete",
     );
     const declared = [...IMAGE_INPUT_FAMILIES].sort();
     expect([...new Set(agents)].sort()).toEqual(declared);
     expect([...new Set(deploy)].sort()).toEqual(declared);
+  });
+
+  test("every COPY source in the Dockerfile is covered by an input family", () => {
+    // The vocabulary is only complete if it covers what the image actually
+    // copies in: a new `COPY` that no family matches would change the image
+    // while the gate stayed silent. Families name paths INSIDE a directory
+    // (`X/**`), so a `COPY <dir>` is covered by the family for its contents.
+    const sources = copySources(readFileSync(join(REPO_ROOT, "sandbox-image", "Dockerfile"), "utf8"));
+    expect(sources.length).toBeGreaterThan(0);
+    const uncovered = sources.filter(
+      (source) => !touchesImageInput([source]) && !touchesImageInput([`${source}/probe`]),
+    );
+    expect(uncovered).toEqual([]);
   });
 
   test("the CLI's Dockerfile path is the one wrangler.jsonc builds, and it exists", () => {
@@ -119,11 +152,12 @@ describe("touchesImageInput", () => {
     "packages/runner/bun.lock",
     "packages/runner/verify-synthesis.sh",
     "sandbox-image/cli-global/package.json",
+    ".dockerignore",
   ];
 
-  test("matches each of the six declared path families", () => {
+  test("matches each declared path family", () => {
     for (const path of declared) expect(touchesImageInput([path])).toBe(true);
-    expect(IMAGE_INPUT_PATTERNS).toHaveLength(6);
+    expect(IMAGE_INPUT_PATTERNS).toHaveLength(declared.length);
   });
 
   test("an untouched path list passes", () => {
