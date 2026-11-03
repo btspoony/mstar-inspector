@@ -22,7 +22,9 @@
  *   - a retired workspace (`deleted_at` set) is ABSENT to both reads — the
  *     default applies, matching the write's live-workspace predicate
  *   - a refused write changes no row and appends no audit row
- *   - accepted writes are audited through `platform_audit_events`
+ *   - accepted writes are audited through `platform_audit_events`, and the
+ *     system row's `before` is `null` whenever the stored value is not one the
+ *     readers would trust — never a `CAST`ed number nothing ever used
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -74,6 +76,17 @@ function auditRows(db: TestD1): Array<{ action: string; target_id: string }> {
   return db.raw
     .prepare("SELECT action, target_id FROM platform_audit_events ORDER BY action")
     .all() as Array<{ action: string; target_id: string }>;
+}
+
+/** The system write's ledger detail, parsed, in insert order. */
+function systemAuditDetails(db: TestD1): Array<{ before: unknown; after: unknown }> {
+  const rows = db.raw
+    .prepare(
+      `SELECT detail_json FROM platform_audit_events
+        WHERE action = 'runtime.concurrency.system.set' ORDER BY rowid`,
+    )
+    .all() as Array<{ detail_json: string }>;
+  return rows.map((row) => JSON.parse(row.detail_json) as { before: unknown; after: unknown });
 }
 
 /** A D1 face whose every statement fails — the degraded read path. */
@@ -320,6 +333,32 @@ describe("runtime-config-store", () => {
     await setSystemConcurrency(db, 8, ACTOR);
     await expect(setSystemConcurrency(db, CONCURRENCY_MAX + 1, ACTOR)).rejects.toThrow();
     expect(storedSystemRows(db)).toEqual([{ value: "8" }]);
+  });
+
+  test("a corrupt system row audits before: null and the write repairs it", async () => {
+    const db = fixture();
+    const seed = db.raw.prepare(
+      `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+       VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
+    );
+    // A bare CAST would ledger 0 for 'abc', 8 for ' 8' and 99 for the
+    // out-of-range row: numbers no reader and no write predicate ever used.
+    for (const corrupt of ["abc", " 8", String(CONCURRENCY_MAX + 1)]) {
+      seed.run(SYSTEM_CONCURRENCY_KEY, corrupt);
+      expect(await setSystemConcurrency(db, 20, ACTOR)).toBe(20);
+      expect(storedSystemRows(db)).toEqual([{ value: "20" }]);
+      expect(systemAuditDetails(db).at(-1)).toEqual({ before: null, after: 20 });
+    }
+  });
+
+  test("a readable system row audits its stored value as before", async () => {
+    const db = fixture();
+    await setSystemConcurrency(db, 20, ACTOR);
+    await setSystemConcurrency(db, 24, ACTOR);
+    expect(systemAuditDetails(db)).toEqual([
+      { before: null, after: 20 },
+      { before: 20, after: 24 },
+    ]);
   });
 
   test("a refused workspace value below 1 writes nothing", async () => {
