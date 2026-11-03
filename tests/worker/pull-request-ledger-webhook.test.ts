@@ -8,45 +8,14 @@
  * status.
  */
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { createTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
-const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const SECRET = "test-webhook-secret";
-
-function createMigratedD1(): TestD1 {
-  const db = createTestD1();
-  // The per-App face's own dependencies (github_apps rebuild chain, workspace
-  // plane, the delivery log) plus 0039 itself — the ledger table.
-  for (const name of [
-    "0003_dashboard_users.sql",
-    "0004_github_apps.sql",
-    "0036_app_identity.sql",
-    "0005_reviews_app_id.sql",
-    "0008_github_apps_ops.sql",
-    "0011_webhook_deliveries.sql",
-    "0010_review_failures.sql",
-    "0022_app_trigger_mode.sql",
-    "0026_workspaces.sql",
-    "0033_platform_admin.sql",
-    "0018_app_sandbox_images.sql",
-    "0019_github_apps_metadata.sql",
-    "0037_github_metadata_attempt.sql",
-    "0038_webhook_path_drop.sql",
-    "0039_pull_requests.sql",
-    // 0044: head_at — upsertPullRequest writes it on every ledger write.
-    "0044_pull_request_head_at.sql",
-  ]) {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-  }
-  return db;
-}
 
 async function seedApp(db: TestD1, mode: "open" | "every_push" | "manual"): Promise<string> {
   const id = `app-${mode}`;
@@ -113,7 +82,7 @@ function ledger(db: TestD1, appId: string): Array<Record<string, unknown>> {
 
 describe("pull_request delivery → PR ledger", () => {
   test("a job delivery records the PR row", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     const res = await deliver(appId, PR_PAYLOAD, makeEnv(db));
     expect(res.status).toBe(200);
@@ -130,7 +99,7 @@ describe("pull_request delivery → PR ledger", () => {
   });
 
   test("an `ignore` delivery still records the PR (mode blocks the auto face)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     // `manual` mode never auto-triggers a pull_request → classifier ignores.
     const appId = await seedApp(db, "manual");
     const res = await deliver(appId, PR_PAYLOAD, makeEnv(db));
@@ -140,7 +109,7 @@ describe("pull_request delivery → PR ledger", () => {
   });
 
   test("merged: true is promoted to state 'merged'", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     await deliver(
       appId,
@@ -151,7 +120,7 @@ describe("pull_request delivery → PR ledger", () => {
   });
 
   test("a later `opened` delivery leaves a merged PR merged", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     await deliver(
       appId,
@@ -172,7 +141,7 @@ describe("pull_request delivery → PR ledger", () => {
   });
 
   test("an unparsable updated_at is dropped by the caller, not swallowed by datetime()", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     // `datetime('not-a-timestamp')` yields NULL, which used to be hidden by a
     // COALESCE inside the SQL. The caller now filters it, so the store takes
@@ -188,7 +157,7 @@ describe("pull_request delivery → PR ledger", () => {
   });
 
   test("last_seen_at comes from the payload's updated_at", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     await deliver(
       appId,
@@ -199,14 +168,14 @@ describe("pull_request delivery → PR ledger", () => {
   });
 
   test("a pull_request-shaped ignore records nothing on a non-pull_request event", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     await deliver(appId, { ...PR_PAYLOAD, action: "assigned" }, makeEnv(db), "check_run");
     expect(ledger(db, appId).length).toBe(0);
   });
 
   test("a rejected payload records nothing", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     // 401 — the signature does not verify, so the classifier rejects before
     // any ledger write.
@@ -224,7 +193,7 @@ describe("pull_request delivery → PR ledger", () => {
   });
 
   test("a payload with no owner/repo/number is skipped VISIBLY, not silently", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     const warns: string[] = [];
     const originalWarn = console.warn;
@@ -249,7 +218,7 @@ describe("pull_request delivery → PR ledger", () => {
   });
 
   test("a store failure logs a warn and leaves the HTTP status untouched", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
     // Drop the ledger table under the route: the upsert throws, the response
     // must not change — and the failure must still be visible in the log,

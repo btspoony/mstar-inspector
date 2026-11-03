@@ -13,81 +13,25 @@
  * failure (missing DASHBOARD_ENCRYPTION_KEY, tampered envelope) → 500
  * fail-closed (lock L1), zero enqueue.
  *
- * The D1 double is the real bun:sqlite helper over migrations 0001/0002 (the
- * base schema `createTestD1()` applies) plus 0003…0039 applied by
- * `createMigratedD1` below; production-shaped, the store CRUD itself is pinned
- * by tests/worker/apps-store.test.ts — here the rows are seeded raw with
- * secretbox envelopes so the route exercises the real lookup + decrypt).
+ * The D1 double is the shared `createMigratedTestD1()` (tests/store/helpers.ts),
+ * which reads every `migrations/*.sql` from disk — production-shaped, with no
+ * second hand-pinned list to keep in step. The store CRUD itself is pinned by
+ * tests/worker/apps-store.test.ts — here the rows are seeded raw with secretbox
+ * envelopes so the route exercises the real lookup + decrypt).
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
-import { createTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
-const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-
-function createMigratedD1(): ReturnType<typeof createTestD1> {
-  const db = createTestD1();
-  // 0004: github_apps + app_installations — the two tables the install
-  // bookkeeping writes: every delivery upserts `account_login` into
-  // app_installations (and the installation outcome path does too).
-  // 0008: the github_apps ops columns (review_enabled /
-  // last_webhook_at) the pause gate + touch read and write on every delivery.
-  // 0005: reviews.app_id — applied after the 0004 parent table exists.
-  // 0011: webhook_deliveries — the route's post-classify
-  // recordDelivery is best-effort in production; with the table present the
-  // fixture can pin WHAT it records (an invalid signature lands
-  // a `rejected` row, never `ok`). Both append-only / additive — the fixture
-  // must stay production-shaped.
-  // 0022: github_apps.review_trigger_mode — the trigger context the route
-  // threads into classifyWebhook (spec review-trigger-policy §2).
-  // 0003/0026: the workspace data plane the strict read face joins
-  // (`app_workspaces`, seeded with the single `default` workspace). Seeded
-  // Apps here have NO mapping, so they are exactly the strict-mode orphan.
-  // 0033: platform_admin — `server_flags`, the table the global
-  // `review_global` enqueue gate reads.
-  // 0036/0037/0018/0019/0038: the app-identity + ops columns, and the
-  // parent-table rebuild that must carry every one of them.
-  // 0039: pull_requests — the route writes one ledger row on EVERY verified,
-  // non-reject `pull_request` delivery, so a fixture without it would send
-  // every PR delivery down the `pull_request_record_failed` warn branch.
-  for (const name of [
-    "0003_dashboard_users.sql",
-    "0004_github_apps.sql",
-    // 0036: webhook_path (renamed from slug) + the cached github_slug.
-    "0036_app_identity.sql",
-    "0005_reviews_app_id.sql",
-    "0008_github_apps_ops.sql",
-    "0011_webhook_deliveries.sql",
-    "0022_app_trigger_mode.sql",
-    "0026_workspaces.sql",
-    // 0033: the enqueue decision reads the `review_global` server flag.
-    "0033_platform_admin.sql",
-    // 0038 rebuilds github_apps, so the fixture must carry every column the
-    // rebuild copies.
-    "0018_app_sandbox_images.sql",
-    "0019_github_apps_metadata.sql",
-    "0037_github_metadata_attempt.sql",
-    "0038_webhook_path_drop.sql",
-    // 0039 references github_apps, so it runs after the 0038 rebuild.
-    "0039_pull_requests.sql",
-    // 0044: head_at — upsertPullRequest writes it on every ledger write.
-    "0044_pull_request_head_at.sql",
-  ]) {
-    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-  }
-  return db;
-}
 
 type SeedOptions = {
   slug: string;
@@ -110,7 +54,7 @@ type SeedOptions = {
 
 /** Raw-insert an active, non-deleted github_apps row with real envelopes. */
 async function seedApp(
-  db: ReturnType<typeof createTestD1>,
+  db: TestD1,
   opts: SeedOptions,
 ): Promise<{ id: string; slug: string }> {
   // The row id is the webhook URL's app segment, so this fixture uses the
@@ -179,7 +123,7 @@ function makeKv() {
 // retired on both the route and here.
 type RouteEnv = Env;
 
-function makeEnv(db: ReturnType<typeof createTestD1>, overrides: Partial<RouteEnv> = {}): RouteEnv {
+function makeEnv(db: TestD1, overrides: Partial<RouteEnv> = {}): RouteEnv {
   const { kv } = makeKv();
   const { queue } = makeQueue();
   return {
@@ -206,7 +150,7 @@ async function sigHeaders(secret: string, body: string, event = "pull_request"):
 }
 
 /** Close the global enqueue face: `review_global = 0` (migration 0033). */
-function setReviewGlobalOff(db: ReturnType<typeof createTestD1>): void {
+function setReviewGlobalOff(db: TestD1): void {
   db.raw
     .prepare("INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES ('review_global', 0, datetime('now'), 'fixture')")
     .run();
@@ -261,7 +205,7 @@ const PR_PAYLOAD = {
 
 describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   test("valid signature with the App's own secret → 200 accepted, enqueued with appRef {appId}", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -299,7 +243,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("the queued head_at is byte-identical to the ledger's head_at (offset normalized)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -317,6 +261,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     );
 
     expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
     const { head_at } = sent[0] as ReviewJobPayload;
     const row = db.raw
       .query("SELECT head_at FROM pull_requests WHERE app_id = ?")
@@ -331,7 +276,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("wrong-App secret signature → 401, zero enqueue (sibling-App isolation, AC-B5-isolation)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appX = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const appY = await seedApp(db, { slug: "app-y", secret: "secret-y" });
     const { queue, sent } = makeQueue();
@@ -364,7 +309,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   // never `ok` (AL-20-1: rejected rows are the fail-closed evidence the
   // diagnostics face exists to show).
   test("invalid signature → 401, zero enqueue, delivery row rejected — never ok", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -386,7 +331,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("unknown webhook path → 404, zero enqueue", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -404,7 +349,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("disabled app → 404, zero enqueue", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     expect(await createAppsStore(db).setAppStatus(appRow.id, "disabled")).toBe(true);
     const { queue, sent } = makeQueue();
@@ -423,7 +368,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("soft-deleted app → 404, zero enqueue", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     await createAppsStore(db).softDeleteApp(appRow.id);
     const { queue, sent } = makeQueue();
@@ -442,7 +387,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("body-size cap precedes the webhook-path lookup → 413, zero enqueue (spec ordering)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -465,7 +410,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   // at-limit body still passes (the streamed-decoded rawBody is
   // decode-identical, so the HMAC signature verifies exactly as before).
   test("truthful content-length header over the limit → 413 fast path, zero enqueue", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -502,7 +447,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("lying short content-length + oversized body → 413 (byte count, not the header), zero enqueue", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -539,7 +484,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("headerless chunked oversized body → 413 + webhook_body_too_large warn, zero enqueue", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -586,7 +531,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("at-limit body (exactly WEBHOOK_BODY_LIMIT bytes) → 200 accepted, enqueued (HMAC verifies the streamed rawBody)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -613,7 +558,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   // cap. Acceptance + HMAC verify = the streamed gate counted bytes and the
   // decode stayed byte-identical.
   test("at-limit multi-byte UTF-8 body (exactly WEBHOOK_BODY_LIMIT bytes) → 200 accepted, enqueued (HMAC verifies)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -633,7 +578,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("small valid webhook unchanged by the streamed cap → 200 accepted, enqueued", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -647,7 +592,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("missing signature header → 401, zero enqueue", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -660,7 +605,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("DASHBOARD_ENCRYPTION_KEY missing → 500 fail-closed, zero enqueue (AC-SEC)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DASHBOARD_ENCRYPTION_KEY: undefined });
@@ -678,7 +623,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("tampered webhook-secret envelope (wrong AAD) → 500 fail-closed, zero enqueue", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x", wrongAad: true });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -696,7 +641,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("DB binding unbound → 500 fail-closed, zero enqueue (T4 Env fold)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DB: undefined });
@@ -714,7 +659,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("bot mention via the per-App route enqueues the issue_comment payload with the appRef", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -749,7 +694,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("mode threading: a manual-mode App ignores pull_request.opened but a bot mention still enqueues", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", reviewTriggerMode: "manual" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -796,7 +741,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     // sync. A `manual`-mode App has the mention as its ONLY trigger, which is
     // exactly the silent regression this warn makes observable. The delivery
     // outcome vocabulary stays unchanged — this is still an `ignored`.
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, {
       slug: "app-x",
       secret: "secret-x",
@@ -853,7 +798,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   test("a comment with no bot mention on an unsynced App stays a silent ignore (no mention_unresolved)", async () => {
     // The warn is reserved for a mention that WOULD have matched: an ordinary
     // comment on a never-synced App is the pre-existing, correct ignore.
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -896,7 +841,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   test("a mention on a [bot]-authored PR on an unsynced App stays silent (no mention_unresolved)", async () => {
     // The author guard runs before the mention grammar, so the classifier
     // reports the author reason and the route's warn gate cannot fire.
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -932,7 +877,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   test("a mention on a plain issue (no PR thread) stays silent (no mention_unresolved)", async () => {
     // The not-a-PR gate precedes the mention grammar: an unsynced App's slug
     // is never consulted, so the warn cannot fire on a non-PR thread.
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -969,7 +914,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     // Negative control for the `mention_unresolved` warn: THIS App IS synced, so
     // a mention aimed at `@app-y` is an ordinary ignore — and must stay silent.
     // Fails if the `appSlug === ""` conjunct is dropped from that gate.
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1003,7 +948,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   });
 
   test("idempotency: a second identical delivery is KV-skipped", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { kv, store } = makeKv();
     const { queue, sent } = makeQueue();
@@ -1024,12 +969,12 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
 
 describe("tenant attribution on the webhook read face", () => {
   /** Drop the seed's mapping: what a pre-0026 row looks like before backfill. */
-  function dropWorkspaceMapping(db: ReturnType<typeof createTestD1>, appId: string): void {
+  function dropWorkspaceMapping(db: TestD1, appId: string): void {
     db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = ?").run(appId);
   }
 
   test("an unmapped (orphan) App answers 404 with zero decrypt, zero delivery row, zero enqueue", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     dropWorkspaceMapping(db, appRow.id);
     const { queue, sent } = makeQueue();
@@ -1050,7 +995,7 @@ describe("tenant attribution on the webhook read face", () => {
   });
 
   test("a workspace-mapped App serves and enqueues", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1067,7 +1012,7 @@ describe("tenant attribution on the webhook read face", () => {
 
 describe("installations upsert wiring", () => {
   test("per-App webhook with installation_id → app_installations row INSERTED (seen_at set, login from the delivery)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1093,7 +1038,7 @@ describe("installations upsert wiring", () => {
   });
 
   test("second delivery touches the SAME row — seen_at refreshed, stored login left alone (inferred never overwrites)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1140,7 +1085,7 @@ describe("installations upsert wiring", () => {
     // (`accountAuthoritative: false`), so it never replaces a stored login —
     // only an `installation.*` event may. Store-level directions are pinned in
     // tests/worker/apps-store.test.ts.
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1168,7 +1113,7 @@ describe("installations upsert wiring", () => {
   });
 
   test("KV-skipped duplicate delivery (identical body) still refreshes seen_at (QC F-006: upsert on ANY webhook)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { kv, store } = makeKv();
     const { queue, sent } = makeQueue();
@@ -1203,7 +1148,7 @@ describe("installations upsert wiring", () => {
   });
 
   test("a later delivery that omits the login preserves the stored one (COALESCE bare touch)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1234,7 +1179,7 @@ describe("installations upsert wiring", () => {
   });
 
   test("the installation's own account is persisted, not the inferred repository owner", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1256,7 +1201,7 @@ describe("installations upsert wiring", () => {
   });
 
   test("paused App still records the login from a review-type delivery (bookkeeping is gate-independent)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     expect(await createAppsStore(db).setReviewEnabled(appRow.id, false)).toBe(true);
     const { queue, sent } = makeQueue();
@@ -1275,7 +1220,7 @@ describe("installations upsert wiring", () => {
   });
 
   test("review_global OFF still records the login from a review-type delivery (the flag gates enqueue only)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     setReviewGlobalOff(db);
     const { queue, sent } = makeQueue();
@@ -1294,7 +1239,7 @@ describe("installations upsert wiring", () => {
   });
 
   test("upsert failure → structured warn, enqueue still succeeds (fire-and-forget bookkeeping)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     // Only the installation upsert fails: the slug lookup / decrypt / delivery
@@ -1333,7 +1278,7 @@ describe("installations upsert wiring", () => {
  */
 describe("installation event path", () => {
   function installationRows(
-    db: ReturnType<typeof createTestD1>,
+    db: TestD1,
   ): Array<{ app_id: string; installation_id: number; account_login: string | null }> {
     return db.raw
       .query("SELECT app_id, installation_id, account_login FROM app_installations")
@@ -1341,7 +1286,7 @@ describe("installation event path", () => {
   }
 
   function deliveryRows(
-    db: ReturnType<typeof createTestD1>,
+    db: TestD1,
     appId: string,
   ): Array<{ event_name: string | null; outcome: string; status_code: number | null }> {
     return db.raw
@@ -1357,7 +1302,7 @@ describe("installation event path", () => {
   test.each(["created", "new_permissions_accepted"])(
     "installation.%s with account.login → row written with that login, zero enqueue, delivery ignored",
     async (action) => {
-      const db = createMigratedD1();
+      const db = createMigratedTestD1();
       const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
       const { queue, sent } = makeQueue();
       const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1389,7 +1334,7 @@ describe("installation event path", () => {
   );
 
   test("an install event OVERWRITES a stored login — the route passes the authoritative source", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     // A login the review path inferred earlier: an install event states the
     // installation's own account, so it must replace this value. The two
@@ -1422,7 +1367,7 @@ describe("installation event path", () => {
   });
 
   test("paused App (review_enabled=0) still records the installation — the pause gate does not apply", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     expect(await createAppsStore(db).setReviewEnabled(appRow.id, false)).toBe(true);
     const { queue, sent } = makeQueue();
@@ -1445,7 +1390,7 @@ describe("installation event path", () => {
   });
 
   test("global review_global flag OFF still records the installation — the flag gates enqueue only", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     // Same D1 table `tests/worker/admin-flags.test.ts` uses: an ABSENT row
     // reads as enabled, so this row is what closes the global enqueue face.
@@ -1471,7 +1416,7 @@ describe("installation event path", () => {
   });
 
   test("installation.deleted → 200 ignored, no installation row", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1496,7 +1441,7 @@ describe("installation event path", () => {
   });
 
   test("malformed installation body (no installation.id) → 400, delivery rejected", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1519,7 +1464,7 @@ describe("installation event path", () => {
   });
 
   test("upsert failure → structured warn, still 200 accepted, zero enqueue (fire-and-forget bookkeeping)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     // Only the installation upsert fails: the slug lookup / decrypt / delivery
@@ -1549,7 +1494,7 @@ describe("installation event path", () => {
 describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => {
   /** Read the App row's ops columns back raw. */
   function appOps(
-    db: ReturnType<typeof createTestD1>,
+    db: TestD1,
     id: string,
   ): { review_enabled: number; last_webhook_at: string | null; updated_at: string } {
     return db.raw
@@ -1558,7 +1503,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   }
 
   test("enabled App → job enqueued AND last_webhook_at touched (2xx job outcome)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1574,7 +1519,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("paused App (review_enabled=0) → 2xx ignored, ZERO enqueue, last_webhook_at STILL touched", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     expect(await createAppsStore(db).setReviewEnabled(appRow.id, false)).toBe(true);
     const { queue, sent } = makeQueue();
@@ -1606,7 +1551,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("review_global OFF → 2xx ignored, ZERO enqueue, delivery recorded `paused` (never `ok`)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     setReviewGlobalOff(db);
     const { queue, sent } = makeQueue();
@@ -1633,7 +1578,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     // turn this 2xx into a 500, so make the table genuinely unreadable for
     // this request: the response, the delivery row and the ledger row then
     // pin the contract without inspecting SQL text.
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     db.raw.exec("DROP TABLE server_flags");
     const { queue, sent } = makeQueue();
@@ -1659,7 +1604,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("bot-authored PR → 2xx ignored, ZERO enqueue, delivery row recorded `ignored`", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1686,7 +1631,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("malformed issue_comment (no installation.id) → 400, delivery row rejected", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1717,7 +1662,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     // fails CLOSED: a broken read counts as "reviews disabled", so nothing
     // enqueues and the row reads `paused` — a broken flag read must never
     // silently defeat the kill switch. Response and diagnostics stay healthy.
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const broken = failingDb(db, flagRead);
@@ -1752,7 +1697,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("paused App, non-whitelisted event → 2xx ignored + touched (ignore outcome also counts)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     await createAppsStore(db).setReviewEnabled(appRow.id, false);
     const { queue, sent } = makeQueue();
@@ -1767,7 +1712,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("reject path (bad signature → 401) never touches last_webhook_at", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
@@ -1789,7 +1734,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("disabled / soft-deleted Apps → 404 never touch last_webhook_at (gate matrix)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const disabledRow = await seedApp(db, { slug: "app-disabled", secret: "secret-d" });
     const deletedRow = await seedApp(db, { slug: "app-deleted", secret: "secret-r" });
     await createAppsStore(db).setAppStatus(disabledRow.id, "disabled");
@@ -1814,7 +1759,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("touchLastWebhook writes ONLY last_webhook_at — updated_at stays the operator timestamp (L5)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     // Backdate BOTH columns: only last_webhook_at may move.
     db.raw
@@ -1829,7 +1774,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("setReviewEnabled toggles review_enabled, writes updated_at, and refuses soft-deleted rows (setAppStatus precedent)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const store = createAppsStore(db);
     db.raw.prepare("UPDATE github_apps SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(appRow.id);
@@ -1855,7 +1800,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   });
 
   test("listInstallations returns THIS App's installations, most recently seen first (panel read face)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const sibling = await seedApp(db, { slug: "app-y", secret: "secret-y" });
     const store = createAppsStore(db);
@@ -1877,7 +1822,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
 
 describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
   test("rotated webhook secret verifies with the NEW secret only (secret mismatch → rebuild + replace)", async () => {
-    const db = createMigratedD1();
+    const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-v1" });
     const body = JSON.stringify(PR_PAYLOAD);
 
