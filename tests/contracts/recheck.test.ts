@@ -303,6 +303,32 @@ describe("validateRecheckDoc — schema/HEAD/duplicate/foreign rejection", () =>
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("foreign row");
   });
+
+  test("a duplicate row ID carrying an extra key still fails the whole document — identity is decided before row shape", () => {
+    const result = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: SHA,
+        results: [addressedResult(), { rowId: "row-1", extra: 1 }],
+      },
+      pairedInput(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("duplicate row ID");
+  });
+
+  test("a foreign row ID carrying an extra key still fails the whole document — identity is decided before row shape", () => {
+    const result = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: SHA,
+        results: [addressedResult(), { rowId: "row-999", extra: 1 }],
+      },
+      pairedInput(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("foreign row");
+  });
 });
 
 describe("validateRecheckDoc — addressed eligibility", () => {
@@ -622,6 +648,14 @@ describe("validateRecheckDoc — disposition/reason pairing and shapes", () => {
     // The strict shape fails, but the row already proved its rowId, so the
     // rejection stays attributable to row-1 instead of going unidentified.
     expectDroppedRow(result, { index: 0, rowId: "row-1", error: "exactly" });
+  });
+
+  test("a non-object row has no identity and only lands in rejected", () => {
+    const result = validateRecheckDoc(
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [SURVIVOR, "nope"] },
+      pairedInput(),
+    );
+    expectDroppedRow(result, { index: 1, rowId: null, error: "must be an object with exactly" });
   });
 
   test("non-object documents fail closed", () => {
