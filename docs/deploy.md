@@ -2384,10 +2384,11 @@ row expires.
   trailing 24h across the infra-failure stages only (parse +
   runner/sandbox/pipeline; the
   per-attempt rows written by migration 0010 make this table the sufficient failure
-  signal). `stage = 'recheck'` rows are per-round attribution written for
-  rounds that published normally (budget skip, dead seat, one invalid
-  document), so the count excludes them — they stay in the table as
-  attribution and never page ops.
+  signal). `stage IN ('recheck', 'usage')` rows are attribution written for a
+  review that kept going — a recheck round that budget-skipped, lost its seat
+  or produced an invalid document, and a `usage_events` insert that failed
+  while the review continued — so the count excludes them. They stay in the
+  table as attribution and never page ops.
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
   Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,

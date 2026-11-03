@@ -127,4 +127,11 @@ describe("normalizeQuoteText", () => {
     expect(normalizeQuoteText("a  \r\nb\t\nc\r\n")).toBe("a\nb\nc");
     expect(normalizeQuoteText("  indented")).toBe("  indented");
   });
+
+  test("a lone CR is a line ending, and only ONE trailing newline is dropped", () => {
+    // Old-Mac line endings: one line boundary, never a literal CR left behind.
+    expect(normalizeQuoteText("a\rb")).toBe("a\nb");
+    // The blank line before EOF is significant and stays.
+    expect(normalizeQuoteText("a\n\n")).toBe("a\n");
+  });
 });

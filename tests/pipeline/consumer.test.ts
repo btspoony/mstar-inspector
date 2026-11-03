@@ -83,6 +83,7 @@ import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_STATUS_ERROR_MAX_CHARS } from "../../packages/shared/src/recheck-wire";
 import { sk, gh, AWS_CANARY_KEY, fakePem } from "../helpers/fake-secrets";
 
 const VALID_OUTPUT: ReviewOutput = {
@@ -3401,6 +3402,149 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(failureRows(db)).toHaveLength(0);
     const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
     expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 2, assessed: 23 });
+  });
+
+  test("a budget-skipped round accounts every row as budget, never invalid-output", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The budget left no room, so the seat never ran: it wrote a status and
+    // no document. The row was not answered badly — nobody asked — so the
+    // reason is `budget`, not `invalid-output`.
+    recheckFileContent = "";
+    recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "skipped",
+      reason: "budget",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (budget)");
+    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
+    // Still attributable, and still open: nothing was assessed.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
+    expect(rows[0]!.error).toBe("skipped: budget: null");
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "skipped", recheck_reason: "budget", assessed: 0 });
+    const findingRow = db.raw.query("SELECT state, last_assessed_ms FROM review_findings").get() as {
+      state: string;
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.state).toBe("open");
+    expect(findingRow.last_assessed_ms).toBeNull();
+  });
+
+  test("a status from another HEAD attributes nothing: the row stays omitted, never invalid-output", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // A usable document that answers nothing, beside a status that DOES claim
+    // the sent row as rejected — but for a different HEAD. Trusting it would
+    // name a reason this round never established.
+    recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: "f".repeat(40),
+      outcome: "ok",
+      reason: null,
+      rejected: 1,
+      rejected_row_ids: [TARGET_ROW_ID],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (omitted)");
+    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
+    // The foreign status is no attribution at all: `absent`, no rejected ids,
+    // and a usable document means no failure row.
+    const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "absent", rejected: 0 });
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a status naming a row this round never sent cannot attribute it: that id is ignored", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The seat dropped the SENT row from its own document and also named a row
+    // from another round. Only the sent-row membership makes a name credible.
+    recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "ok",
+      reason: null,
+      rejected: 2,
+      rejected_row_ids: [TARGET_ROW_ID, "row-from-another-round"],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+    expect(prepared.body).not.toContain("unverifiable (omitted)");
+    // The count is the sent-row union: the foreign id never entered it.
+    const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 1, assessed: 0 });
+  });
+
+  test("an oversized status error is bounded at parse time, so the log field and the D1 text share one value", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    recheckFileContent = "";
+    // `z` matches no secret shape, so what comes back is the bound alone.
+    const longError = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS + 200);
+    const capped = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS);
+    recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "seat-failed",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: longError,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    expect(line.fields).toMatchObject({ recheck_error: capped });
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.error).toBe(`failed: seat-failed: ${capped}`.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS));
+    expect(String(rows[0]!.error)).toHaveLength(RECHECK_STATUS_ERROR_MAX_CHARS);
   });
 
   test("an ok seat status with a valid document records no failure and keeps the accounting unchanged", async () => {

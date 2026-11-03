@@ -628,15 +628,6 @@ export async function main(
 
     try {
       const { envelope, recheck, recheckStatus } = await runtime.runReview(input);
-      // The STATUS is written whenever a recheck round ran — including the
-      // null-document ones (budget skip, seat failure, invalid document) that
-      // used to vanish into container stderr — and it goes FIRST, so the
-      // document write's own I/O failure (exit 1 below) still leaves the round
-      // attributable. Best-effort: a status write failure is noise, never a
-      // failed review.
-      if (recheckOutPath !== undefined && recheckStatus !== undefined) {
-        writeRecheckStatus(recheckStatus);
-      }
       // The optional --recheck-out file is written only when a
       // recheck result exists, and BEFORE the envelope reaches stdout — a
       // write failure is a genuine I-O failure (exit 1, no stdout), not a
@@ -647,8 +638,22 @@ export async function main(
           writeFileSync(recheckOutPath, JSON.stringify(recheck));
         } catch (error) {
           console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
+          // The validated document is lost, so the seat's `ok` is not this
+          // round's truth: record the write failure as the status the Worker
+          // reads, or D1 would keep a round that published nothing as clean.
+          if (recheckStatus !== undefined) {
+            writeRecheckStatus({ ...recheckStatus, outcome: "failed", reason: "write-failed" });
+          }
           return 1;
         }
+      }
+      // The STATUS is written AFTER the document succeeds (and whenever no
+      // document was produced — the budget skip, seat failure and invalid
+      // document rounds) so it never claims an outcome the run did not
+      // deliver. Best-effort: a status write failure is noise, never a failed
+      // review.
+      if (recheckOutPath !== undefined && recheckStatus !== undefined) {
+        writeRecheckStatus(recheckStatus);
       }
       // stdout carries ONLY the envelope JSON (plan Module contracts).
       console.log(JSON.stringify(envelope));

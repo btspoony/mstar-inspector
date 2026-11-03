@@ -121,6 +121,9 @@ describe("runSweep", () => {
     expect(captured[2]).toContain("UPDATE workspace_invites");
     expect(captured[3]).toContain("FROM review_failures");
     expect(captured[3]).toContain("created_at > datetime('now', '-24 hours')");
+    // Both attribution stages for a review that continued are outside the
+    // paging signal — `usage` was silently inside it before.
+    expect(captured[3]).toContain("stage NOT IN ('recheck', 'usage')");
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,
@@ -496,6 +499,25 @@ describe("runSweep", () => {
     expect(quiet.thresholdBreached).toBe(false);
     expect(calls).toHaveLength(0);
     // The rows stay in D1 as attribution — only the paging count ignores them.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 6 });
+
+    await store.record({ ...BASE, stage: "runner", error: "boom" });
+    const counted = await runSweep(db, { log: captureLog().log });
+    expect(counted.failures24h).toBe(1);
+    expect(counted.thresholdBreached).toBe(false);
+  });
+
+  test("usage-failure rows never page ops; a runner row still does", async () => {
+    const db = createMigratedTestD1();
+    const store = createFailureStore(db);
+    // Six `usage` rows are reviews that KEPT GOING after a usage_events insert
+    // failed — degraded accounting, not a review failure. They must not page.
+    for (let i = 0; i < 6; i++) {
+      await store.record({ ...BASE, stage: "usage", error: `usage_events insert failed: boom-${i}` });
+    }
+    const quiet = await runSweep(db, { log: captureLog().log });
+    expect(quiet.failures24h).toBe(0);
+    expect(quiet.thresholdBreached).toBe(false);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 6 });
 
     await store.record({ ...BASE, stage: "runner", error: "boom" });

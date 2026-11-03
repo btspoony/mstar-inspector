@@ -34,6 +34,22 @@ category: Fixed
   document's `evidence` catalog instead of retyping them, and truncation
   downgrades only the conclusions that depend on the missing context rather
   than every row in the round.
+- **A budget-skipped round no longer reads as invalid output.** The seat's own
+  `skipped` status now accounts every selected row as `unverifiable/budget`
+  (never sent) instead of `invalid-output` (sent and answered badly), and the
+  worker bounds a status `reason`/`error` at parse time so the D1 failure text
+  and the log field carry one capped value. A status from another HEAD — or one
+  naming a row this round never sent — attributes nothing.
+- **A recheck document-write failure is recorded, not hidden.** The runner
+  writes the round status only after the document lands; a failed document
+  write records `failed/write-failed` instead of the seat's `ok`, so D1 can no
+  longer keep a round that published nothing as clean. The status error is
+  redacted with the worker's own credential-pattern list
+  (`packages/shared/src/secret-shapes.ts` — one canonical list for both halves).
+- **`usage` failures stop paging ops.** The cron failure sweep excluded only
+  `stage = 'recheck'`, so `usage` rows — a review that continued after its usage
+  event failed to record — counted toward the alert threshold. Both attribution
+  stages are now outside the paging signal.
 
 <!-- CN -->
 - **单行不合格不再丢弃整轮重审。** 重审文档校验现在区分两级不信任。文档级故障
@@ -58,3 +74,15 @@ category: Fixed
 - **重审席位现在明确了引用方式与上下文缺口的影响范围。** 其 assignment 现在要求
   从输入文档 `evidence` 目录中**逐字复制**被引用行，而不是凭记忆重打；截断
   只降级依赖缺失上下文的那部分结论，而不是整轮所有行。
+- **预算跳过的轮次不再被记成无效输出。** 席位自己写的 `skipped` 状态现在把每个
+  选中行记为 `unverifiable/budget`（根本没发送），而不是 `invalid-output`
+  （发送后被答坏）；worker 在解析时就把状态的 `reason`/`error` 截断，因此 D1 的
+  失败文本与日志字段是同一个上限值。别的 HEAD 写下的状态、或点名了本轮从未发送
+  的行的状态，都不产生任何归因。
+- **重审文档写失败会被记录，而不是被掩盖。** runner 只有在文档写成功之后才写轮次
+  状态；文档写失败时记录 `failed/write-failed`，而不是席位的 `ok`，因此 D1 不会
+  再把「什么都没发布」的轮次留成干净记录。状态错误的脱敏使用 worker 同一份凭据
+  模式表（`packages/shared/src/secret-shapes.ts`——两侧共用唯一一份列表）。
+- **`usage` 失败不再触发告警。** 定时失败扫描此前只排除 `stage = 'recheck'`，
+  于是 `usage` 行——用量事件写入失败但评审继续——也计入告警阈值。现在两个归因
+  阶段都在告警统计之外。

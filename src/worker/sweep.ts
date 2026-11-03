@@ -6,11 +6,12 @@
  * the "DLQ-bound failure leaves zero D1 trace" blind spot) and alert when
  * the count breaches the threshold.
  *
- * `stage = 'recheck'` is EXCLUDED from that count. Those rows are per-round
- * attribution written for rounds that published normally (a budget skip, a
- * dead seat, one invalid document), so counting them would page ops for
- * degraded-but-successful reviews. They stay in `review_failures` — only the
- * paging signal ignores them.
+ * `stage IN ('recheck', 'usage')` rows are EXCLUDED from that count. Both are
+ * degraded-but-successful attribution written for a review that continued:
+ * `recheck` marks a budget skip, a dead seat or one invalid document;
+ * `usage` marks a `usage_events` insert that failed while the review went on.
+ * Counting them would page ops for reviews that published normally. They stay
+ * in `review_failures` — only the paging signal ignores them.
  *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
  * - DLQ depth is NOT read: there is no CF API token surface,
@@ -261,13 +262,13 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // the single source) so the SQL cannot drift from the pinned threshold
   // table. The composed text is byte-identical to the pre-constant form
   // (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
-  // `stage <> 'recheck'` is the paging exclusion: those rows are per-round
-  // attribution for rounds that published normally (see the header).
+  // `stage NOT IN ('recheck', 'usage')` is the paging exclusion: both rows are
+  // attribution for reviews that continued (see the header).
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM review_failures
        WHERE created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
-         AND stage <> 'recheck'`,
+         AND stage NOT IN ('recheck', 'usage')`,
     )
     .first<{ n: number }>();
   const failures24h = row?.n ?? 0;

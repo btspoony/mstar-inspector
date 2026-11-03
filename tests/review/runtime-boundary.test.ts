@@ -286,6 +286,7 @@ describe("in-image module graph — the image ships packages/runner/src plus the
       "packages/shared/src/credential-payload.ts",
       "packages/shared/src/recheck-wire.ts",
       "packages/shared/src/runtime.ts",
+      "packages/shared/src/secret-shapes.ts",
     ]);
   });
 

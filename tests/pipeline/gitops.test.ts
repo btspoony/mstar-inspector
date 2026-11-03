@@ -10,7 +10,7 @@
  * back with checkedOutShaCommand, so clone/diff/commit_id always agree.
  */
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -91,14 +91,40 @@ describe("gitops command builders", () => {
     }
   });
 
-  test("readRecheckStatusCommand bounds the status read at 262,144 bytes and probes for overflow", () => {
-    // The product is the command string itself: the same audited transport as
-    // the document read (byte bound + newline separator + bound+1 probe), bound
-    // to the fixed status path rather than a caller-chosen one.
-    const command = readRecheckStatusCommand();
-    expect(command).toContain(`head -c '${RECHECK_FILE_MAX_BYTES}' '${RECHECK_STATUS_PATH}'`);
-    expect(command).toContain(`printf '\\n'`);
-    expect(command).toContain(`tail -c '+${RECHECK_FILE_MAX_BYTES + 1}' '${RECHECK_STATUS_PATH}'`);
+  test("readRecheckStatusCommand's REAL stdout is content + newline + newline-terminated flag", async () => {
+    // Same oracle as the document read above, over the ONLY path the status
+    // command is bound to. Prior bytes are restored afterwards, so running the
+    // fixed production path leaves nothing behind.
+    const prior = await readFile(RECHECK_STATUS_PATH).catch(() => null);
+    try {
+      const fitText = JSON.stringify({
+        schema: "mstar.recheck-status/v1",
+        headSha: "x",
+        outcome: "ok",
+        rejected: 0,
+        rejected_row_ids: [],
+        reason: null,
+        error: null,
+      });
+      const overflowText = "b".repeat(RECHECK_FILE_MAX_BYTES + 1);
+      for (const [text, flag, content] of [
+        [fitText, "0", fitText],
+        [overflowText, "1", overflowText.slice(0, RECHECK_FILE_MAX_BYTES)],
+      ] as const) {
+        await Bun.write(RECHECK_STATUS_PATH, text);
+        const proc = Bun.spawn(["sh", "-c", readRecheckStatusCommand()]);
+        const stdout = await new Response(proc.stdout).text();
+        expect(await proc.exited).toBe(0);
+        // Newline-terminated, flag last, content cut at the byte bound.
+        expect(stdout.endsWith("\n")).toBe(true);
+        const trimmed = stdout.trimEnd();
+        expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
+        expect(trimmed.slice(0, trimmed.lastIndexOf("\n"))).toBe(content);
+      }
+    } finally {
+      if (prior === null) await rm(RECHECK_STATUS_PATH, { force: true });
+      else await Bun.write(RECHECK_STATUS_PATH, prior);
+    }
   });
 
   test("readRecheckCommand's REAL stdout is content + newline + newline-terminated flag (P67-QC-006)", async () => {

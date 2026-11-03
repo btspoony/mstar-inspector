@@ -983,11 +983,15 @@ type OriginalFindingProjection = RecheckTarget["original"];
  * Rows the document omitted are accounted as `unverifiable/omitted` for the
  * closure and coverage but are NOT truly assessed — they never enter
  * `lifecycle.assessments`, so `last_assessed_ms` advances only for real
- * assessments (fair-rotation §7.2).
+ * assessments (fair-rotation §7.2). The seat's own status decides WHY a row
+ * has no document row: a budget-skipped round (`outcome: "skipped"`) never
+ * sent it (`budget`), while a failed/absent round is invalid output.
  */
 function reconcileRecheckRound(input: {
   targets: RecheckTarget[];
   doc: RecheckDoc | null;
+  /** The seat's own status document — the reason a round produced no document row. */
+  status: RecheckStatus | null;
   discussion: Discussion;
   output: ReviewOutput;
   /** Stale lifecycle state (failed pending-journal apply or capture): no closure. */
@@ -1003,7 +1007,7 @@ function reconcileRecheckRound(input: {
   assessedCount: number;
   omittedCount: number;
 } {
-  const { targets, doc, discussion, output, staleContext, budgetExcluded, rejectedRowIds } = input;
+  const { targets, doc, status, discussion, output, staleContext, budgetExcluded, rejectedRowIds } = input;
   const outcomeByRowId = new Map<string, Assessment>();
   const assessments: Assessment[] = [];
   const forceUnverifiable = (rowId: string, reason: Assessment["reason"]): Assessment => ({
@@ -1033,10 +1037,17 @@ function reconcileRecheckRound(input: {
       assessment = forceUnverifiable(target.rowId, "invalid-output");
     } else if (docResult === undefined) {
       // Omitted selected row: no recheck ran for it. Honest conservative
-      // accounting by WHY — invalid/absent document, §7.3 size budget, or
-      // omitted from an otherwise valid document. Never "assessed".
+      // accounting by WHY — the seat's own budget skip, invalid/absent
+      // document, §7.3 size budget, or omitted from an otherwise valid
+      // document. Never "assessed".
       const reason: Assessment["reason"] =
-        doc === null ? "invalid-output" : budgetExcluded.has(target.rowId) ? "budget" : "omitted";
+        status?.outcome === "skipped"
+          ? "budget"
+          : doc === null
+            ? "invalid-output"
+            : budgetExcluded.has(target.rowId)
+              ? "budget"
+              : "omitted";
       assessment = forceUnverifiable(target.rowId, reason);
     } else {
       assessment = { ...docResult };
@@ -1175,8 +1186,18 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
       rejected_row_ids: Array.isArray(value["rejected_row_ids"])
         ? value["rejected_row_ids"].filter((id): id is string => typeof id === "string")
         : [],
-      reason: typeof value["reason"] === "string" ? value["reason"] : null,
-      error: typeof value["error"] === "string" ? value["error"] : null,
+      // `reason`/`error` are bounded HERE so the D1 failure text and the log
+      // field carry one capped value — the runner already redacts-then-bounds
+      // its own copy, but a foreign or hand-rolled status must not be able to
+      // push an unbounded string into either sink.
+      reason:
+        typeof value["reason"] === "string"
+          ? value["reason"].slice(0, RECHECK_STATUS_ERROR_MAX_CHARS)
+          : null,
+      error:
+        typeof value["error"] === "string"
+          ? value["error"].slice(0, RECHECK_STATUS_ERROR_MAX_CHARS)
+          : null,
     };
   } catch {
     return null;
@@ -2919,6 +2940,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const reconciled = reconcileRecheckRound({
       targets,
       doc: recheckDoc,
+      status: recheck?.status ?? null,
       discussion,
       output,
       staleContext,

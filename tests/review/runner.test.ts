@@ -49,7 +49,7 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -300,6 +300,20 @@ function cleanupAgentDirs(): void {
   runDirs.length = 0;
 }
 
+/**
+ * The fixed status path is the production one — the runner has no other — so
+ * its bytes at load are the state every test must give back. `null` means the
+ * path was absent, and only a file/dir this test created is then removed.
+ */
+const STATUS_PATH_PRIOR = existsSync(RECHECK_STATUS_PATH) ? readFileSync(RECHECK_STATUS_PATH) : null;
+
+/** Remove the fixed status path without a recursive delete of someone else's tree. */
+function clearStatusPath(): void {
+  if (!existsSync(RECHECK_STATUS_PATH)) return;
+  if (statSync(RECHECK_STATUS_PATH).isDirectory()) rmdirSync(RECHECK_STATUS_PATH);
+  else unlinkSync(RECHECK_STATUS_PATH);
+}
+
 afterEach(() => {
   fakeEnvelope = ENVELOPE;
   fakeRecheck = null;
@@ -315,7 +329,8 @@ afterEach(() => {
   for (const name of Object.keys(process.env)) {
     if (name.startsWith("MSTAR_POOL_")) delete process.env[name];
   }
-  rmSync(RECHECK_STATUS_PATH, { recursive: true, force: true });
+  if (STATUS_PATH_PRIOR === null) clearStatusPath();
+  else writeFileSync(RECHECK_STATUS_PATH, STATUS_PATH_PRIOR);
 });
 
 /** A shape-valid recheck INPUT document (the runner guards shape only). */
@@ -707,7 +722,7 @@ describe("runner entry — --recheck-out channel", () => {
     expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual(fakeRecheckStatus);
   });
 
-  test("document write failure → exit 1, no stdout, status file still written with the seat's outcome", async () => {
+  test("document write failure → exit 1, no stdout, status records the write failure not the seat's ok", async () => {
     fakeEnvelope = ENVELOPE;
     fakeRecheck = RECHECK_RESULT_DOC;
     fakeRecheckStatus = {
@@ -721,7 +736,8 @@ describe("runner entry — --recheck-out channel", () => {
     };
     const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
     // A directory at the --recheck-out path makes the write throw (EISDIR):
-    // the validated document is lost, so the status is the round's only record.
+    // the validated document is lost, so the status is the round's only record
+    // — and it must say the round delivered nothing, not that the seat said ok.
     const outPath = join(outDir, "recheck.json");
     mkdirSync(outPath);
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
@@ -737,13 +753,17 @@ describe("runner entry — --recheck-out channel", () => {
     expect(code).toBe(1);
     expect(stdout).toBe("");
     expect(stderr).toContain("cannot write recheck output");
-    expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual(fakeRecheckStatus);
+    expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual({
+      ...fakeRecheckStatus,
+      outcome: "failed",
+      reason: "write-failed",
+    });
   });
 
   test("status write is best-effort: an unwritable status path never fails the run", () => {
     // The real helper, no container: a directory at the fixed path makes the
     // write throw (EISDIR), which must be swallowed.
-    rmSync(RECHECK_STATUS_PATH, { recursive: true, force: true });
+    clearStatusPath();
     mkdirSync(RECHECK_STATUS_PATH);
     const original = console.error;
     const errors: string[] = [];
@@ -763,7 +783,7 @@ describe("runner entry — --recheck-out channel", () => {
       expect(errors.join("\n")).toContain("cannot write recheck status");
     } finally {
       console.error = original;
-      rmSync(RECHECK_STATUS_PATH, { recursive: true, force: true });
+      clearStatusPath();
     }
   });
 

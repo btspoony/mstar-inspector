@@ -48,6 +48,7 @@ import {
   type RecheckInput,
   type RecheckStatus,
 } from "../../shared/src/recheck-wire";
+import { redactSecretShapes } from "../../shared/src/secret-shapes";
 import type { ReviewLevel } from "../../shared/src/runtime";
 
 /**
@@ -281,24 +282,15 @@ export function recheckAssignment(input: RecheckInput): string {
 }
 
 /**
- * Secret shapes the runner must never write to the status document. The
- * runner is packaged beside `packages/shared` in the sandbox image, so it
- * cannot import the consumer's `src/pipeline/redact.ts`; these are the
- * credential-prefix patterns that module applies, kept tiny on purpose.
+ * Redact secret-shaped spans, then bound the result — never the reverse: a
+ * secret straddling the cut would survive as a fragment. The patterns are the
+ * SHARED canonical list (`packages/shared/src/secret-shapes.ts`): the runner
+ * is packaged beside `packages/shared` in the sandbox image and cannot import
+ * the Worker's `src/pipeline/redact.ts`, so it consumes the same list instead
+ * of keeping a narrower copy of its own.
  */
-const SECRET_SHAPES: RegExp[] = [
-  /\bBearer\s+[A-Za-z0-9._~+/=-]+/g,
-  /gh[pous]_[A-Za-z0-9]+/g,
-  /github_pat_[A-Za-z0-9_]+/g,
-  /sk-[A-Za-z0-9_-]{8,}/g,
-];
-
-/** Redact secret-shaped spans, then bound the result — never the reverse: a
- * secret straddling the cut would survive as a fragment. */
 function redactedStatusError(text: string): string {
-  let out = text;
-  for (const pattern of SECRET_SHAPES) out = out.replace(pattern, "[REDACTED]");
-  return out.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
+  return redactSecretShapes(text).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
 }
 
 /** Unwrap the strict-validated structured payload of the recheck child. */

@@ -41,6 +41,11 @@
 # whole round. A stale runner writes no status at all, so the worker reads
 # `absent` and every recheck round lands in `review_failures` as a degraded
 # attribution row it did not have to write.
+# rebuild: the runner's status redaction now uses the shared credential-pattern
+# list (`packages/shared/src/secret-shapes.ts`) instead of a narrow local
+# subset, and a recheck document-write failure is recorded as
+# `failed/write-failed` rather than the seat's optimistic `ok`. A stale image
+# still writes `ok` for a round whose document never landed.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and
