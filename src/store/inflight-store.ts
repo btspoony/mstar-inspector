@@ -46,9 +46,9 @@ export type InflightRefusal = "pr-held" | "system-cap" | "workspace-cap" | "erro
 export type InflightAcquireResult = { ok: true } | { ok: false; reason: InflightRefusal };
 
 export type AcquireInflightOptions = {
-  /** System-wide live-row ceiling (plan 309's effective system cap). */
+  /** System-wide live-row ceiling (the per-message system cap the caller read). */
   systemCap: number;
-  /** This workspace's live-row ceiling (plan 309's effective workspace cap). */
+  /** This workspace's live-row ceiling (the per-message workspace cap the caller read). */
   workspaceCap: number;
   /** This attempt's release fence; release only deletes the row it wrote. */
   attemptId: string;

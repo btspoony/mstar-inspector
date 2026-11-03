@@ -265,7 +265,8 @@ export type ConsumerLogFields = {
    * `review_paused` (architect lock L4 — union widened ADDITIVELY):
    * the ack-skip line for a paused App's in-flight message; it overrides the
    * trigger fields' event on that one log line.
-   * `review_concurrency_degraded` (plan 308 — union widened ADDITIVELY): the
+   * `review_concurrency_degraded` (the review-concurrency cutover, 2026-11 —
+   * union widened ADDITIVELY): the
    * concurrency reader's degraded-read warn, relayed on this channel.
    */
   event: "pull_request" | "issue_comment" | "review_paused" | "review_concurrency_degraded";
