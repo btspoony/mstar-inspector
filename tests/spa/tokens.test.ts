@@ -542,6 +542,9 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // stylesheet and HTML shell exists — not the two this link first listed.
     const consumers = stylesheetConsumers();
     expect(consumers.length).toBeGreaterThan(0);
+    // The design-system prototypes are on the same walk: a reference page that
+    // reads a retired token fails here like any stylesheet does.
+    expect(consumers).toContain("src/design-system/prototypes/record-detail.html");
     for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
       expect(danglingReferences(file, css), file).toEqual([]);

@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="../../spa/styles/tokens.css" />
+<!--
+  Pull request detail — record-detail face (proposal).
+
+  Origin: the approved prototype for the pull-request detail density work (2026-11-03).
+  Status: proposal. A static reference page — not built, not a shipped component. The
+  shipped face is `src/spa/pages/AppPullRequestsTab.tsx` (PullRequestDetailView).
+
+  Every colour, radius, rule and type stack below reads a DESIGN.md token through
+  var(...), and the page links the generated stylesheet, so a retired token shows up
+  as a dangling reference in `bun scripts/design-system-check.ts`.
+-->
+<title>PR 详情原型 — mstar-inspector</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface-page); color: var(--text-primary);
+    font-family: var(--font-sans); font-size: 14px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px 64px; }
+  .back { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 14px; text-decoration: none; }
+  .back:hover { color: var(--text-primary); text-decoration: underline; }
+
+  /* ---------- header ---------- */
+  header.pr { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; }
+  .crumb { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; color: var(--text-muted); }
+  .crumb .repo { color: var(--text-secondary); }
+  .crumb .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+  h1 { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; }
+  .sub { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-faint); }
+  .sub b { font-weight: 400; color: var(--text-muted); }
+
+  .pill {
+    display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
+    border-radius: 999px; border: 1px solid var(--tone-neutral-border); background: var(--tone-neutral-bg);
+    color: var(--tone-neutral-fg); font-size: 12px; font-weight: 500; white-space: nowrap;
+  }
+  .pill.ok { background: var(--tone-success-bg); border-color: var(--tone-success-border); color: var(--tone-success-fg); }
+  .pill.dn { background: var(--tone-danger-bg); border-color: var(--tone-danger-border); color: var(--tone-danger-fg); }
+  .pill.wn { background: var(--tone-warn-bg); border-color: var(--tone-warn-border); color: var(--tone-warn-fg); }
+  .pill.ac { background: var(--tone-accent-bg); border-color: var(--tone-accent-border); color: var(--tone-accent-fg); }
+  .sha {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+    border: 1px solid var(--border-default); border-radius: var(--radius-control); padding: 1px 6px;
+    background: transparent; cursor: default;
+  }
+
+  /* ---------- metric band ---------- */
+  .band { margin-top: 20px; border-top: 1px solid var(--border-subtle); display: flex; }
+  .band .m { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 8px; }
+  .band .m + .m { border-left: 1px solid var(--border-subtle); }
+  .band .k { font-size: 12px; letter-spacing: .04em; color: var(--text-faint); text-transform: uppercase; white-space: nowrap; }
+  .band .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .band .v.dn { color: var(--tone-danger-fg); }
+  .band .v .note { font-size: 12px; font-weight: 400; color: var(--text-muted); margin-left: 4px; }
+
+  /* ---------- tabs ---------- */
+  .tabs {
+    margin-top: 24px; display: inline-flex; gap: 4px; padding: 3px;
+    background: var(--surface-inset); border-radius: var(--radius-control);
+  }
+  .tab {
+    appearance: none; border: 0; background: transparent; color: var(--text-muted);
+    font: inherit; font-size: 14px; padding: 5px 12px; border-radius: 4px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .tab .n { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-faint); }
+  .tab[aria-selected="true"] { background: var(--surface-card); color: var(--text-primary); }
+  .tab[aria-selected="true"] .n { color: var(--text-muted); }
+  .tab .dot { width: 6px; height: 6px; border-radius: 999px; background: var(--tone-danger-fg); }
+
+  /* ---------- layout ---------- */
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 272px; gap: 32px; margin-top: 20px; align-items: start; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } .aside { order: -1; } }
+  [role="tabpanel"][hidden] { display: none; }
+
+  /* ---------- findings ---------- */
+  .group + .group { margin-top: 22px; }
+  .group-h {
+    display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;
+    font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-faint);
+  }
+  .group-h .count { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+  .group-h .rule { flex: 1; border-top: 1px solid var(--border-subtle); transform: translateY(-3px); }
+
+  .finding {
+    border: 1px solid var(--border-default); background: var(--surface-card); border-radius: var(--radius-container);
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 6px;
+    border-left-width: 3px;
+  }
+  .finding + .finding { margin-top: 8px; }
+  .finding.must { border-left-color: var(--tone-danger-fg); }
+  .finding.should { border-left-color: var(--tone-warn-fg); }
+  .finding.nit { border-left-color: var(--border-subtle); }
+  .finding .row1 { display: flex; align-items: baseline; gap: 10px; }
+  .finding .title { font-weight: 500; flex: 1; min-width: 0; }
+  .finding .loc {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+    background: var(--surface-inset); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 1px 6px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 230px;
+  }
+  .finding .body { font-size: 14px; color: var(--text-secondary); }
+  .finding .body[hidden] { display: none; }
+  .finding .toggle {
+    appearance: none; border: 0; background: transparent; color: var(--text-muted);
+    font: inherit; font-size: 12px; cursor: pointer; padding: 0; display: inline-flex;
+    align-items: center; gap: 4px; align-self: flex-start;
+  }
+  .finding .toggle:hover { color: var(--text-primary); }
+  .finding .toggle svg { transition: transform .15s ease; }
+  .finding .toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+
+  /* ---------- reviews ---------- */
+  .review {
+    border: 1px solid var(--border-default); background: var(--surface-card); border-radius: var(--radius-container);
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .review + .review { margin-top: 8px; }
+  .review.latest { border-color: var(--border-strong); }
+  .review .head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12px; color: var(--text-faint); }
+  .review .head .meta { color: var(--text-muted); }
+  .review .head .spacer { flex: 1; }
+  .review .summary { margin: 0; font-size: 14px; color: var(--text-secondary); white-space: pre-wrap; }
+  .review .summary[hidden] { display: none; }
+  .review .fold { appearance: none; border: 0; background: transparent; font: inherit; font-size: 12px; color: var(--text-muted); cursor: pointer; padding: 0; align-self: flex-start; }
+  .review .fold:hover { color: var(--text-primary); }
+
+  /* ---------- failures ---------- */
+  .failure {
+    border: 1px solid var(--tone-danger-border); background: var(--tone-danger-bg); border-radius: var(--radius-container);
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .failure + .failure { margin-top: 8px; }
+  .failure .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+  .failure .stage { font-family: var(--font-mono); font-size: 12px; color: var(--tone-danger-fg); border: 1px solid var(--tone-danger-border); border-radius: 4px; padding: 1px 6px; }
+  .failure .when { color: var(--text-faint); margin-left: auto; }
+  .failure .first { font-family: var(--font-mono); font-size: 12px; color: var(--tone-danger-fg); white-space: pre-wrap; word-break: break-word; margin: 0; }
+  .failure details { margin: 0; }
+  .failure summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+  .failure pre {
+    margin: 8px 0 0; padding: 10px 12px; background: var(--surface-page); border: 1px solid var(--tone-danger-border);
+    border-radius: var(--radius-control); font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+    color: var(--text-secondary); overflow: auto; max-height: 260px; white-space: pre;
+  }
+  .failure .acts { display: flex; gap: 12px; }
+
+  /* ---------- aside ---------- */
+  .side-card { border: 1px solid var(--border-default); background: var(--surface-card); border-radius: var(--radius-container); padding: 14px 16px; }
+  .side-card + .side-card { margin-top: 16px; }
+  .side-h { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-faint); margin: 0 0 10px; }
+  dl.kv { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 13px; }
+  dl.kv dt { color: var(--text-faint); }
+  dl.kv dd { margin: 0; color: var(--text-secondary); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  dl.kv dd code { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+
+  .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
+  .timeline li { position: relative; padding: 0 0 14px 18px; font-size: 13px; color: var(--text-secondary); }
+  .timeline li:last-child { padding-bottom: 0; }
+  .timeline li::before {
+    content: ""; position: absolute; left: 0; top: 6px; width: 7px; height: 7px; border-radius: 999px;
+    background: var(--border-subtle); border: 1px solid var(--border-strong);
+  }
+  .timeline li::after { content: ""; position: absolute; left: 3px; top: 15px; bottom: 0; width: 1px; background: var(--border-subtle); }
+  .timeline li:last-child::after { display: none; }
+  .timeline li.ok::before { background: var(--tone-success-fg); border-color: var(--tone-success-fg); }
+  .timeline li.dn::before { background: var(--tone-danger-fg); border-color: var(--tone-danger-fg); }
+  .timeline .what { color: var(--text-primary); }
+  .timeline .when { display: block; font-size: 12px; color: var(--text-faint); }
+
+  .footnote { margin-top: 28px; font-size: 12px; color: var(--text-faint); border-top: 1px solid var(--border-subtle); padding-top: 12px; }
+  svg.i { width: 12px; height: 12px; flex: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <a class="back" href="#" onclick="return false">
+    <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+    返回列表
+  </a>
+
+  <header class="pr">
+    <div class="crumb">
+      <span class="repo">acme / web</span>
+      <span class="num">#133</span>
+      <span class="pill ok">已合并</span>
+      <button class="sha" title="点击复制完整 SHA">aaa111b</button>
+    </div>
+    <h1>Fix the login flow</h1>
+    <div class="sub">
+      <span>首次出现 <b>4 天前</b></span>
+      <span>最近活动 <b>6 小时前</b></span>
+      <span>最新审查 <b>kimi-for-coding</b></span>
+    </div>
+  </header>
+
+  <div class="band">
+    <div class="m"><span class="k">最新结论</span><span class="v dn">needs fixes</span></div>
+    <div class="m"><span class="k">审查</span><span class="v">3</span></div>
+    <div class="m"><span class="k">失败</span><span class="v dn">1</span></div>
+    <div class="m"><span class="k">发现</span><span class="v">6<span class="note">1 必须修复</span></span></div>
+  </div>
+
+  <div class="tabs" role="tablist" aria-label="PR 记录">
+    <button class="tab" role="tab" aria-selected="true" data-panel="p-findings">发现<span class="n">6</span><span class="dot"></span></button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="p-reviews">审查<span class="n">3</span></button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="p-failures">失败<span class="n">1</span></button>
+  </div>
+
+  <div class="cols">
+    <div>
+      <!-- findings -->
+      <div id="p-findings" role="tabpanel">
+        <div class="group">
+          <div class="group-h"><span>必须修复</span><span class="count">1</span><span class="rule"></span></div>
+
+          <div class="finding must">
+            <div class="row1">
+              <span class="title">Use a parameterized query</span>
+              <span class="loc" title="src/db.ts:42">src/db.ts:42</span>
+            </div>
+            <div class="body">String interpolation reaches the SQL engine. `query(\`SELECT * FROM users WHERE id = ${id}\`)` must be a prepared statement with bound parameters.</div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-h"><span>建议修复</span><span class="count">3</span><span class="rule"></span></div>
+
+          <div class="finding should">
+            <div class="row1">
+              <span class="title">Session cookie lacks HttpOnly</span>
+              <span class="loc">src/auth/session.ts:88</span>
+            </div>
+            <div class="body" id="b1" hidden>The refresh cookie is set with <code>secure: true</code> only. Scripts on the origin can read it; add <code>httpOnly: true</code>.</div>
+            <button class="toggle" aria-expanded="false" aria-controls="b1" onclick="fold(this)">
+              <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+              展开
+            </button>
+          </div>
+
+          <div class="finding should">
+            <div class="row1">
+              <span class="title">Race in refresh lock</span>
+              <span class="loc">src/auth/refresh.ts:120</span>
+            </div>
+            <div class="body" id="b2" hidden>Two concurrent refreshes both pass the check and rotate the token; the later write invalidates the earlier session.</div>
+            <button class="toggle" aria-expanded="false" aria-controls="b2" onclick="fold(this)">
+              <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+              展开
+            </button>
+          </div>
+
+          <div class="finding should">
+            <div class="row1">
+              <span class="title">Missing test for logout path</span>
+              <span class="loc">src/auth/routes.ts:57</span>
+            </div>
+            <div class="body" id="b3" hidden>The new logout handler has no route test; a regression would ship silently.</div>
+            <button class="toggle" aria-expanded="false" aria-controls="b3" onclick="fold(this)">
+              <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+              展开
+            </button>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-h"><span>可忽略</span><span class="count">2</span><span class="rule"></span></div>
+
+          <div class="finding nit">
+            <div class="row1">
+              <span class="title">Rename <code>tmp</code> to <code>pending</code></span>
+              <span class="loc">src/auth/login.ts:31</span>
+            </div>
+            <div class="body" id="b4" hidden>The variable holds the pending redirect target, not a temporary value.</div>
+            <button class="toggle" aria-expanded="false" aria-controls="b4" onclick="fold(this)">
+              <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+              展开
+            </button>
+          </div>
+
+          <div class="finding nit">
+            <div class="row1">
+              <span class="title">Duplicate 3-line comment</span>
+              <span class="loc">src/auth/login.ts:64</span>
+            </div>
+            <div class="body" id="b5" hidden>Same explanation appears above the handler and inside it.</div>
+            <button class="toggle" aria-expanded="false" aria-controls="b5" onclick="fold(this)">
+              <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+              展开
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- reviews -->
+      <div id="p-reviews" role="tabpanel" hidden>
+        <div class="review latest">
+          <div class="head">
+            <span class="pill ok">ship it</span>
+            <span class="meta">kimi-for-coding · openrouter</span>
+            <span class="spacer"></span>
+            <span>6 小时前</span>
+            <span class="sha">aaa111b</span>
+          </div>
+          <p class="summary" id="s1">Looks good overall. The parameterized query fixes the injection path, and the session cookie now carries HttpOnly. The refresh race is still reachable under concurrent tabs.</p>
+          <button class="fold" onclick="foldText(this, 's1')">收起</button>
+        </div>
+
+        <div class="review">
+          <div class="head">
+            <span class="pill dn">needs fixes</span>
+            <span class="meta">claude-sonnet-4.5 · anthropic</span>
+            <span class="spacer"></span>
+            <span>2 天前</span>
+            <span class="sha">f00d12c</span>
+          </div>
+          <p class="summary" id="s2" hidden>One must-fix on the SQL construction. The refresh lock is not atomic; two tabs can rotate the same token.</p>
+          <button class="fold" onclick="foldText(this, 's2')">展开</button>
+        </div>
+
+        <div class="review">
+          <div class="head">
+            <span class="pill dn">needs fixes</span>
+            <span class="meta">kimi-for-coding · openrouter</span>
+            <span class="spacer"></span>
+            <span>4 天前</span>
+            <span class="sha">9cb0021</span>
+          </div>
+          <p class="summary" id="s3" hidden>Session cookie is not HttpOnly; the logout path has no coverage.</p>
+          <button class="fold" onclick="foldText(this, 's3')">展开</button>
+        </div>
+      </div>
+
+      <!-- failures -->
+      <div id="p-failures" role="tabpanel" hidden>
+        <div class="failure">
+          <div class="head">
+            <span class="stage">sandbox</span>
+            <span>审查运行失败</span>
+            <span class="when">2 天前</span>
+          </div>
+          <p class="first">runner failed: exit 124, stdout 0B, stderr empty</p>
+          <details>
+            <summary>展开完整输出</summary>
+            <pre>[sandbox] starting review runner
+[sandbox] image mstar-inspector-sandbox:8f2c1a4
+[sandbox] exec bound reached after 900000ms
+runner failed: exit 124, stdout 0B, stderr empty</pre>
+          </details>
+          <div class="acts">
+            <button class="toggle" onclick="return false">
+              <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              复制错误
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="aside">
+      <div class="side-card">
+        <h2 class="side-h">拉取请求</h2>
+        <dl class="kv">
+          <dt>仓库</dt><dd>acme/web</dd>
+          <dt>编号</dt><dd>#133</dd>
+          <dt>状态</dt><dd>已合并</dd>
+          <dt>Head</dt><dd><code>aaa111b</code></dd>
+          <dt>首次出现</dt><dd>4 天前</dd>
+          <dt>最近出现</dt><dd>6 小时前</dd>
+        </dl>
+      </div>
+
+      <div class="side-card">
+        <h2 class="side-h">活动</h2>
+        <ul class="timeline">
+          <li class="ok"><span class="what">审查通过 · ship it</span><span class="when">6 小时前 · kimi-for-coding</span></li>
+          <li class="dn"><span class="what">审查失败 · sandbox</span><span class="when">2 天前</span></li>
+          <li><span class="what">审查 · needs fixes</span><span class="when">2 天前 · claude-sonnet-4.5</span></li>
+          <li><span class="what">审查 · needs fixes</span><span class="when">4 天前 · kimi-for-coding</span></li>
+          <li><span class="what">PR 出现</span><span class="when">4 天前</span></li>
+        </ul>
+      </div>
+    </aside>
+  </div>
+
+  <p class="footnote">原型仅演示信息架构与层级（dark 默认主题、960px 内容列、现有组件语汇）。数据字段全部来自现有 <code>PullRequestDetail</code> 载荷，未新增后端字段。</p>
+</div>
+
+<script>
+  const tabs = [...document.querySelectorAll('.tab')];
+  const panels = [...document.querySelectorAll('[role="tabpanel"]')];
+  for (const tab of tabs) {
+    tab.addEventListener('click', () => {
+      for (const t of tabs) t.setAttribute('aria-selected', String(t === tab));
+      for (const p of panels) p.hidden = p.id !== tab.dataset.panel;
+    });
+  }
+  function fold(btn) {
+    const body = document.getElementById(btn.getAttribute('aria-controls'));
+    const open = btn.getAttribute('aria-expanded') === 'true';
+    btn.setAttribute('aria-expanded', String(!open));
+    body.hidden = open;
+    btn.lastChild.textContent = open ? ' 展开' : ' 收起';
+  }
+  function foldText(btn, id) {
+    const body = document.getElementById(id);
+    body.hidden = !body.hidden;
+    btn.textContent = body.hidden ? '展开' : '收起';
+  }
+</script>
+</body>
+</html>

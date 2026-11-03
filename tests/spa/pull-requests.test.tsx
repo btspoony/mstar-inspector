@@ -135,14 +135,24 @@ const DETAIL: PullRequestDetail = {
     latest_review: { verdict: "needs fixes", reviewed_at: "2026-11-01 08:00:00" },
     failure_count: 1,
   },
+  // Newest first, as the store orders them: the first row is the latest verdict.
   reviews: [
     {
-      verdict: "ship it",
-      summary_md: "Looks good overall.",
+      verdict: "needs fixes",
+      summary_md: "The refresh race is still reachable.",
       model: "kimi-for-coding",
       provider: "openrouter",
       reviewed_at: "2026-11-01 08:00:00",
       head_sha: "aaa111bbb222",
+    },
+    {
+      verdict: "ship it",
+      summary_md: "Looks good overall.",
+      model: "claude-sonnet-4.5",
+      // v1 never records a provider — the separator must disappear with it.
+      provider: "",
+      reviewed_at: "2026-10-30 08:00:00",
+      head_sha: "f00d12c1",
     },
   ],
   failures: [
@@ -161,6 +171,23 @@ const DETAIL: PullRequestDetail = {
       file_path: "src/db.ts",
       line: 42,
       body: "String interpolation reaches the SQL engine.",
+    },
+    {
+      finding_id: "f-2",
+      severity: "should-fix",
+      title: "Session cookie lacks HttpOnly",
+      file_path: "src/auth/session.ts",
+      line: 88,
+      body: "The refresh cookie is set with secure only.",
+    },
+    {
+      finding_id: "f-3",
+      severity: "nit",
+      title: "Rename tmp to pending",
+      // A repo-wide finding: no file_path, so the location chip disappears.
+      file_path: "",
+      line: null,
+      body: "The variable holds the pending redirect target.",
     },
   ],
 };
@@ -207,36 +234,149 @@ describe("pull requests list face (static SSR)", () => {
 });
 
 describe("pull request detail face (static SSR)", () => {
-  test("the header names title, address, state and head sha", () => {
-    const markup = renderToStaticMarkup(
-      createElement(PullRequestDetailView, { locale: "en", detail: DETAIL }),
-    );
+  const render = (detail: PullRequestDetail) =>
+    renderToStaticMarkup(createElement(PullRequestDetailView, { locale: "en", detail }));
+
+  /** The family triggers in render order: selected state + their text content. */
+  const familyTabs = (markup: string) =>
+    [...markup.matchAll(/<button[^>]*role="tab"[^>]*>([\s\S]*?)<\/button>/g)].map((match) => ({
+      selected: /aria-selected="true"/.test(match[0]),
+      text: (match[1] ?? "").replace(/<[^>]*>/g, ""),
+    }));
+
+  /** The positions of `needles` in `markup`, asserted to be present first. */
+  const positions = (markup: string, needles: readonly string[]) =>
+    needles.map((needle) => {
+      const at = markup.indexOf(needle);
+      expect(at, needle).toBeGreaterThan(-1);
+      return at;
+    });
+
+  /**
+   * A failure-only detail: no finding carries a must-fix, so the face opens on
+   * the failures family and the diagnostic payload is in the markup.
+   */
+  const FAILING: PullRequestDetail = { ...DETAIL, findings: [] };
+
+  test("the header names the PR's own facts; the band aggregates them", () => {
+    const markup = render(DETAIL);
     expect(markup).toContain("Fix the login flow");
     expect(markup).toContain("acme/web #133");
     expect(markup).toContain(t("en", "pullRequests.state.merged"));
-    // The short-sha chip renders the head sha prefix.
-    expect(markup).toContain("aaa111b");
+    // Short-sha chip over the head sha, titled with the full-name tooltip.
+    expect(markup).toContain(">aaa111b<");
+    expect(markup).toContain(t("en", "pullRequests.headSha"));
+    // Meta line: first seen, last seen, latest review attribution.
+    for (const label of ["firstSeen", "lastSeen", "latestReview"] as const) {
+      expect(markup).toContain(t("en", `pullRequests.${label}`));
+    }
+    expect(markup).toContain("kimi-for-coding · openrouter");
+    // Band: four metrics — verdict, reviews, failures, findings with its note.
+    expect(markup.match(/data-slot="metric"/g) ?? []).toHaveLength(4);
+    expect(markup).toContain("needs fixes");
+    expect(markup).toContain(t("en", "pullRequests.mustFixNote", { count: 1 }));
   });
 
-  test("a failure renders its stage and error — the error as escaped text, never HTML", () => {
-    const markup = renderToStaticMarkup(
-      createElement(PullRequestDetailView, { locale: "en", detail: DETAIL }),
+  test("the band wears the danger face for a non-shipping verdict and any failure", () => {
+    const tones = [...render(DETAIL).matchAll(/data-slot="metric-value" class="([^"]*)"/g)].map(
+      (match) => match[1] ?? "",
     );
+    // Verdict (needs fixes) and failures (1); a review count is never an alert.
+    expect(tones.filter((classes) => classes.includes("--tone-danger-fg"))).toHaveLength(2);
+  });
+
+  test("a must-fix finding opens the findings family, grouped by severity", () => {
+    const markup = render(DETAIL);
+    const tabs = familyTabs(markup);
+    expect(tabs.map((tab) => tab.selected)).toEqual([true, false, false]);
+    expect(tabs[0]?.text.startsWith(t("en", "pullRequests.findings"))).toBe(true);
+    // Counts are text, so the trigger reads "Findings3".
+    expect(tabs.map((tab) => tab.text)).toEqual([
+      `${t("en", "pullRequests.findings")}3`,
+      `${t("en", "pullRequests.reviews")}2`,
+      `${t("en", "pullRequests.failures")}1`,
+    ]);
+    // Group headers in severity order, each carrying its own count.
+    const groups = positions(markup, [
+      t("en", "pullRequests.severityMustFix"),
+      t("en", "pullRequests.severityShouldFix"),
+      t("en", "pullRequests.severityNit"),
+    ]);
+    expect([...groups].sort((a, b) => a - b)).toEqual(groups);
+    expect(markup).toContain("Use a parameterized query");
+    expect(markup).toContain("src/db.ts:42");
+    // A repo-wide finding (empty file_path) renders no location at all.
+    expect(markup).toContain("Rename tmp to pending");
+    expect(markup).not.toContain(":null");
+  });
+
+  test("only the must-fix body opens; every other group starts folded", () => {
+    const markup = render(DETAIL);
+    expect(markup).toContain("String interpolation reaches the SQL engine.");
+    expect(markup).not.toContain("The refresh cookie is set with secure only.");
+    expect(markup).not.toContain("The variable holds the pending redirect target.");
+    // One expanded control (the must-fix finding), two folded ones.
+    expect(markup.match(/aria-expanded="true"/g) ?? []).toHaveLength(1);
+    expect(markup.match(/aria-expanded="false"/g) ?? []).toHaveLength(2);
+  });
+
+  test("a clean detail opens on the reviews family with the latest summary readable", () => {
+    const clean: PullRequestDetail = {
+      pull_request: {
+        ...ROW_OPEN,
+        number: 7,
+        title: "Add the export button",
+        latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
+        failure_count: 0,
+      },
+      reviews: [
+        {
+          verdict: "ship it",
+          summary_md: "Everything the last round asked for is in.",
+          model: "kimi-for-coding",
+          provider: "openrouter",
+          reviewed_at: "2026-11-01 09:00:00",
+          head_sha: "aaa111b",
+        },
+      ],
+      failures: [],
+      findings: [],
+    };
+    const markup = render(clean);
+    expect(familyTabs(markup).map((tab) => tab.selected)).toEqual([false, true, false]);
+    expect(markup).toContain("Everything the last round asked for is in.");
+    expect(markup).not.toContain(t("en", "pullRequests.noReviews"));
+  });
+
+  test("a failure's first line renders as escaped text and its full output stays in details", () => {
+    const markup = render(FAILING);
+    expect(familyTabs(markup).map((tab) => tab.selected)).toEqual([false, false, true]);
     expect(markup).toContain("sandbox");
     expect(markup).toContain("exit 1: &lt;script&gt;alert(1)&lt;/script&gt;");
     expect(markup).not.toContain("<script>");
+    // A multi-line error folds its full output behind a native details block.
+    const multiline = render({
+      ...FAILING,
+      failures: [{ stage: "sandbox", error: "first line\nsecond line", created_at: "2026-10-31 23:00:00" }],
+    });
+    expect(multiline).toContain("<details>");
+    expect(multiline).toContain(t("en", "pullRequests.failureFullOutput"));
+    expect(multiline).toContain("second line");
   });
 
-  test("reviews and findings render their own facts", () => {
-    const markup = renderToStaticMarkup(
-      createElement(PullRequestDetailView, { locale: "en", detail: DETAIL }),
-    );
-    expect(markup).toContain("ship it");
-    expect(markup).toContain("kimi-for-coding · openrouter");
-    expect(markup).toContain("Looks good overall.");
-    expect(markup).toContain("Use a parameterized query");
-    expect(markup).toContain("must-fix");
-    expect(markup).toContain("src/db.ts:42");
+  test("the aside carries the PR facts and one merged timeline, newest first", () => {
+    const markup = render(DETAIL);
+    for (const label of ["factRepo", "factNumber", "factState", "factHead"] as const) {
+      expect(markup).toContain(t("en", `pullRequests.${label}`));
+    }
+    expect(markup).toContain(t("en", "pullRequests.asideActivity"));
+    // Review (11-01 08:00) → failure (10-31 23:00) → the PR's first sighting.
+    const order = positions(markup, [
+      t("en", "pullRequests.timelineReview", { verdict: "needs fixes" }),
+      t("en", "pullRequests.timelineFailure", { stage: "sandbox" }),
+      t("en", "pullRequests.timelineFirstSeen"),
+    ]);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 });
 

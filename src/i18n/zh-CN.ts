@@ -130,15 +130,41 @@ export const zhCN: Dictionary = {
     /** 短 SHA 徽标的悬浮提示。 */
     headSha: "头部 SHA",
     reviews: "审查",
-    reviewsCount: "审查数：{count}",
     noReviews: "此拉取请求还没有审查。",
     reviewMeta: "{model} · {provider}",
     failures: "失败",
-    failuresCount: "失败数：{count}",
     noFailures: "此拉取请求没有失败记录。",
     findings: "发现",
-    findingsCount: "发现数：{count}",
     noFindings: "此拉取请求没有发现问题。",
+    /** 详情头部的元信息行。 */
+    firstSeen: "首次出现",
+    lastSeen: "最近出现",
+    latestReview: "最新审查",
+    /** 三个记录类别上的分段胶囊。 */
+    recordsLabel: "拉取请求记录",
+    /** 发现指标中数量旁的提示。 */
+    mustFixNote: "{count} 项必须修复",
+    /** 严重度分组标题，按渲染顺序。 */
+    severityMustFix: "必须修复",
+    severityShouldFix: "建议修复",
+    severityNit: "可忽略",
+    severityOther: "其他",
+    /** 每条发现正文与审查摘要各有一个折叠控件。 */
+    expand: "展开",
+    collapse: "收起",
+    /** 失败块的完整输出折叠与复制动作。 */
+    failureFullOutput: "完整输出",
+    copyError: "复制错误",
+    /** 侧栏：拉取请求事实与合并后的活动时间线。 */
+    asideFacts: "拉取请求",
+    asideActivity: "活动",
+    factRepo: "仓库",
+    factNumber: "编号",
+    factState: "状态",
+    factHead: "Head",
+    timelineReview: "审查 · {verdict}",
+    timelineFailure: "审查失败 · {stage}",
+    timelineFirstSeen: "PR 出现",
   },
   /** Per-App 洞察标签页。7/30/90 窗口分段与仓库筛选语义保持不变。 */
   insights: {

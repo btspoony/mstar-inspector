@@ -1,12 +1,22 @@
-import { useEffect, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { useEffect, useId, useState, type ReactNode } from "react";
+import { ArrowLeft, ChevronRight, Copy } from "lucide-react";
 import { t } from "../../i18n";
-import { Button, FlowSection, StatusBadge } from "@design-system";
+import {
+  Button,
+  cn,
+  StatusBadge,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+  type StatusTone,
+} from "@design-system";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import { apiBase } from "../workspace-base";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
+import { MetricBand, type Metric } from "../components/MetricBand";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import {
@@ -18,7 +28,9 @@ import {
   pullRequestStatePill,
   type AppDetailSearch,
   type PullRequestDetail,
+  type PullRequestFinding,
   type PullRequestRef,
+  type PullRequestReview,
   type PullRequestRow,
 } from "./data";
 
@@ -304,14 +316,90 @@ export function PullRequestsListView({
   );
 }
 
+/** The three record families the detail face switches between. */
+type RecordFamily = "findings" | "reviews" | "failures";
+
+/**
+ * Severity buckets in the order an operator asks about them. `severity` is a
+ * free string in the payload, so the last bucket catches every spelling these
+ * three do not name.
+ */
+const SEVERITY_GROUPS = [
+  { severity: "must-fix", labelKey: "pullRequests.severityMustFix", tone: "danger" },
+  { severity: "should-fix", labelKey: "pullRequests.severityShouldFix", tone: "warn" },
+  { severity: "nit", labelKey: "pullRequests.severityNit", tone: "neutral" },
+] as const;
+
+/**
+ * The severity left rule per group. Literal class strings: Tailwind scans
+ * source text, so a composed `border-l-(--tone-${tone}-fg)` never compiles.
+ */
+const SEVERITY_RULE: Record<(typeof SEVERITY_GROUPS)[number]["tone"], string> = {
+  danger: "border-l-(--tone-danger-fg)",
+  warn: "border-l-(--tone-warn-fg)",
+  neutral: "border-l-(--border-strong)",
+};
+
+/** A timeline dot's fill, same rule: literal strings for the scanner. */
+const TIMELINE_DOT: Record<StatusTone, string> = {
+  danger: "bg-(--tone-danger-fg)",
+  success: "bg-(--tone-success-fg)",
+  warn: "bg-(--tone-warn-fg)",
+  accent: "bg-(--tone-accent-fg)",
+  neutral: "bg-(--border-strong)",
+};
+
+/** One merged activity row: a review, a failure, or the PR's first sighting. */
+type ActivityEntry = { at: string; key: string; tone: StatusTone; label: string; meta: string };
+
+/** The family the face opens on: the actionable record first, history last. */
+function defaultFamily(detail: PullRequestDetail): RecordFamily {
+  if (detail.findings.some((finding) => finding.severity === "must-fix")) return "findings";
+  if (detail.failures.length > 0) return "failures";
+  return "reviews";
+}
+
+/** Findings bucketed by severity, empty groups dropped, `other` last. */
+function severityGroups(
+  locale: SpaBoot["locale"],
+  findings: readonly PullRequestFinding[],
+): { key: string; label: string; tone: (typeof SEVERITY_GROUPS)[number]["tone"]; items: { finding: PullRequestFinding; index: number }[] }[] {
+  const indexed = findings.map((finding, index) => ({ finding, index }));
+  const known = new Set(SEVERITY_GROUPS.map((group) => group.severity as string));
+  const groups = SEVERITY_GROUPS.map((group) => ({
+    key: group.severity as string,
+    label: t(locale, group.labelKey),
+    tone: group.tone,
+    items: indexed.filter(({ finding }) => finding.severity === group.severity),
+  }));
+  const other = indexed.filter(({ finding }) => !known.has(finding.severity));
+  if (other.length > 0) {
+    groups.push({
+      key: "other",
+      label: t(locale, "pullRequests.severityOther"),
+      tone: "neutral",
+      items: other,
+    });
+  }
+  return groups.filter((group) => group.items.length > 0);
+}
+
+/** `model · provider`, the separator dropped when the payload records no provider. */
+function reviewAttribution(locale: SpaBoot["locale"], review: PullRequestReview): string {
+  if (review.provider === "") return review.model;
+  if (review.model === "") return review.provider;
+  return t(locale, "pullRequests.reviewMeta", { model: review.model, provider: review.provider });
+}
+
 /**
  * The detail face — pure `t()` + data rendering, no window/router access.
- * One content plane divided by hairlines (the FlowSection idiom): the
- * reviews, then the failures (stage + error — the diagnostic payload this
- * feature exists for; the error is model/runtime output and renders as
- * TEXT, never as HTML), then the findings. summary_md/body arrive as
- * markdown-ish plain text and render verbatim in whitespace-preserving
- * blocks.
+ *
+ * One bounded first screen instead of one expanding column: the PR's address
+ * and aggregates on top, one record family at a time behind the embedded
+ * segmented pill, long text folded, and the PR's own facts and activity in the
+ * aside. Everything shown is a payload field; `severity` is grouped as the free
+ * string it is. Review summaries, finding bodies and failure output are
+ * model/runtime text and render as TEXT, never as HTML.
  */
 export function PullRequestDetailView({
   locale,
@@ -322,117 +410,399 @@ export function PullRequestDetailView({
 }) {
   const pr = detail.pull_request;
   const pill = pullRequestStatePill(locale, pr.state);
+  const [family, setFamily] = useState<RecordFamily>(() => defaultFamily(detail));
+  // Fold overrides only: an unset key keeps the entry's own default, so a
+  // remount never has to seed state from props.
+  const [openFindings, setOpenFindings] = useState<Readonly<Record<string, boolean>>>({});
+  const [openReviews, setOpenReviews] = useState<Readonly<Record<string, boolean>>>({});
+  const baseId = useId();
+
+  const mustFix = detail.findings.filter((finding) => finding.severity === "must-fix").length;
+  const groups = severityGroups(locale, detail.findings);
+  // Reviews arrive newest first from the store, so the first row is the latest.
+  const latestReview = detail.reviews[0] ?? null;
+  const copyAvailable = typeof navigator !== "undefined" && "clipboard" in navigator;
+  const bodyId = (key: string): string => `${baseId}-${key}`;
+  // Radix hands the trigger's value back as a string; only our three triggers
+  // can reach this, but the guard keeps the narrowing honest.
+  const selectFamily = (next: string): void => {
+    if (next === "findings" || next === "reviews" || next === "failures") setFamily(next);
+  };
+
+  const metrics: Metric[] = [
+    {
+      key: t(locale, "pullRequests.columnVerdict"),
+      value: pr.latest_review === null ? <span aria-hidden="true">—</span> : pr.latest_review.verdict,
+      tone: pr.latest_review !== null && pr.latest_review.verdict !== "ship it" ? "danger" : undefined,
+    },
+    { key: t(locale, "pullRequests.reviews"), value: detail.reviews.length },
+    {
+      key: t(locale, "pullRequests.failures"),
+      value: detail.failures.length,
+      tone: detail.failures.length > 0 ? "danger" : undefined,
+    },
+    {
+      key: t(locale, "pullRequests.findings"),
+      value: (
+        <>
+          {detail.findings.length}
+          {mustFix > 0 ? (
+            <span className="ml-1 text-(length:--typo-label-12-size) font-normal text-(--text-muted)">
+              {t(locale, "pullRequests.mustFixNote", { count: mustFix })}
+            </span>
+          ) : null}
+        </>
+      ),
+    },
+  ];
+
+  const facts: { label: string; value: ReactNode }[] = [
+    { label: t(locale, "pullRequests.factRepo"), value: `${pr.owner}/${pr.repo}` },
+    { label: t(locale, "pullRequests.factNumber"), value: `#${pr.number}` },
+    { label: t(locale, "pullRequests.factState"), value: pill.label },
+    { label: t(locale, "pullRequests.factHead"), value: <code className="font-mono">{pr.head_sha.slice(0, 7)}</code> },
+    {
+      label: t(locale, "pullRequests.firstSeen"),
+      value: (
+        <span title={pr.first_seen_at} className="tabular-nums">
+          {formatRelativeTime(pr.first_seen_at, locale)}
+        </span>
+      ),
+    },
+    {
+      label: t(locale, "pullRequests.lastSeen"),
+      value: (
+        <span title={pr.last_seen_at} className="tabular-nums">
+          {formatRelativeTime(pr.last_seen_at, locale)}
+        </span>
+      ),
+    },
+  ];
+
+  // Both tables stamp `datetime('now')` (UTC), so the raw text orders
+  // chronologically; `first_seen_at` closes the list as the oldest entry.
+  const activity: ActivityEntry[] = [
+    ...detail.reviews.map((review, index) => ({
+      at: review.reviewed_at,
+      key: `review-${index}`,
+      tone: (review.verdict === "ship it" ? "success" : "neutral") as StatusTone,
+      label: t(locale, "pullRequests.timelineReview", { verdict: review.verdict }),
+      meta: `${formatRelativeTime(review.reviewed_at, locale)}${review.model === "" ? "" : ` · ${review.model}`}`,
+    })),
+    ...detail.failures.map((failure, index) => ({
+      at: failure.created_at,
+      key: `failure-${index}`,
+      tone: "danger" as StatusTone,
+      label: t(locale, "pullRequests.timelineFailure", { stage: failure.stage }),
+      meta: formatRelativeTime(failure.created_at, locale),
+    })),
+  ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  activity.push({
+    at: pr.first_seen_at,
+    key: "first-seen",
+    tone: "neutral",
+    label: t(locale, "pullRequests.timelineFirstSeen"),
+    meta: formatRelativeTime(pr.first_seen_at, locale),
+  });
+
   return (
     <div className="flex flex-col">
-      <div className="flex flex-col gap-1.5 border-b border-(--border-subtle) pb-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-muted-foreground tabular-nums">
+      <header className="flex flex-col gap-2.5">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-(--text-secondary) tabular-nums">
             {t(locale, "pullRequests.prNumber", { owner: pr.owner, repo: pr.repo, number: pr.number })}
           </span>
           <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           <span
-            className="rounded border border-(--border-default) px-1.5 py-0.5 font-mono text-xs text-muted-foreground"
+            className="rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 font-mono text-xs text-(--text-muted)"
             title={t(locale, "pullRequests.headSha")}
           >
             {pr.head_sha.slice(0, 7)}
           </span>
         </div>
-        <h2 className="text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking) font-(weight:--typo-heading-16-weight) text-(--text-primary)">
+        <h2 className="text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking) font-(weight:--typo-heading-20-weight) text-(--text-primary)">
           {pr.title}
         </h2>
+        <div className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--text-faint)">
+          <span>
+            {t(locale, "pullRequests.firstSeen")}{" "}
+            <span className="text-(--text-muted) tabular-nums" title={pr.first_seen_at}>
+              {formatRelativeTime(pr.first_seen_at, locale)}
+            </span>
+          </span>
+          <span>
+            {t(locale, "pullRequests.lastSeen")}{" "}
+            <span className="text-(--text-muted) tabular-nums" title={pr.last_seen_at}>
+              {formatRelativeTime(pr.last_seen_at, locale)}
+            </span>
+          </span>
+          {latestReview === null ? null : (
+            <span>
+              {t(locale, "pullRequests.latestReview")}{" "}
+              <span className="text-(--text-muted)">{reviewAttribution(locale, latestReview)}</span>
+            </span>
+          )}
+        </div>
+      </header>
+
+      <div className="mt-(--spacing-6)">
+        <MetricBand metrics={metrics} />
       </div>
-      <FlowSection
-        title={t(locale, "pullRequests.reviews")}
-        subtitle={t(locale, "pullRequests.reviewsCount", { count: detail.reviews.length })}
-      >
-        {detail.reviews.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "pullRequests.noReviews")}</p>
-        ) : (
-          <ul className="flex flex-col">
-            {detail.reviews.map((review, index) => (
-              <li
-                key={`${review.reviewed_at}-${review.head_sha}-${index}`}
-                className="flex flex-col gap-1 border-b border-(--border-subtle) py-3 last:border-b-0"
-              >
-                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
-                  <span className="font-medium">{review.verdict}</span>
-                  <span className="text-muted-foreground">
-                    {t(locale, "pullRequests.reviewMeta", {
-                      model: review.model,
-                      provider: review.provider,
-                    })}
-                  </span>
-                  <span
-                    className="text-muted-foreground tabular-nums"
-                    title={review.reviewed_at}
-                  >
-                    {formatRelativeTime(review.reviewed_at, locale)}
-                  </span>
+
+      <Tabs value={family} onValueChange={selectFamily} className="mt-(--spacing-6)">
+        {/* Embedded segmented pill (DESIGN.md ### Tabs). Counts are text so a
+            family's size never depends on colour alone; the danger dot marks
+            the one fact an operator must not miss. */}
+        <TabsList variant="default" aria-label={t(locale, "pullRequests.recordsLabel")}>
+          <TabsTrigger value="findings">
+            {t(locale, "pullRequests.findings")}
+            <span className="text-xs tabular-nums text-(--text-faint)">{detail.findings.length}</span>
+            {mustFix > 0 ? (
+              <span aria-hidden="true" className="size-1.5 rounded-full bg-(--tone-danger-fg)" />
+            ) : null}
+          </TabsTrigger>
+          <TabsTrigger value="reviews">
+            {t(locale, "pullRequests.reviews")}
+            <span className="text-xs tabular-nums text-(--text-faint)">{detail.reviews.length}</span>
+          </TabsTrigger>
+          <TabsTrigger value="failures">
+            {t(locale, "pullRequests.failures")}
+            <span className="text-xs tabular-nums text-(--text-faint)">{detail.failures.length}</span>
+            {detail.failures.length > 0 ? (
+              <span aria-hidden="true" className="size-1.5 rounded-full bg-(--tone-danger-fg)" />
+            ) : null}
+          </TabsTrigger>
+        </TabsList>
+
+        <div className="mt-(--spacing-5) flex flex-col gap-(--spacing-6) lg:flex-row lg:items-start lg:gap-(--spacing-8)">
+          <div className="min-w-0 flex-1">
+            <TabsContent value="findings">
+              {detail.findings.length === 0 ? (
+                <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noFindings")}</p>
+              ) : (
+                <div className="flex flex-col gap-(--spacing-6)">
+                  {groups.map((group) => (
+                    <section key={group.key} className="flex flex-col gap-2">
+                      <h3 className="flex items-baseline gap-2 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">
+                        <span>{group.label}</span>
+                        <span className="tabular-nums text-(--text-muted)">{group.items.length}</span>
+                        <span aria-hidden="true" className="h-px flex-1 self-center bg-(--border-subtle)" />
+                      </h3>
+                      <ul className="flex flex-col gap-2">
+                        {group.items.map(({ finding, index }) => {
+                          const open = openFindings[finding.finding_id] ?? finding.severity === "must-fix";
+                          const location =
+                            finding.file_path === ""
+                              ? ""
+                              : `${finding.file_path}${finding.line === null ? "" : `:${finding.line}`}`;
+                          const id = bodyId(`finding-${index}`);
+                          return (
+                            <li
+                              key={id}
+                              className={cn(
+                                "flex flex-col gap-1.5 rounded-(--radius-container) border border-(--border-default) border-l-2 bg-(--surface-card) px-3.5 py-3",
+                                SEVERITY_RULE[group.tone],
+                              )}
+                            >
+                              <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+                                <span className="min-w-0 flex-1 text-sm font-medium">{finding.title}</span>
+                                {/* A coerced-empty file_path (repo-wide finding)
+                                    renders no location at all — never a bare `:line`. */}
+                                {location === "" ? null : (
+                                  <span
+                                    className="max-w-56 overflow-hidden text-ellipsis whitespace-nowrap rounded-(--radius-control) border border-(--border-subtle) bg-(--surface-inset) px-1.5 py-0.5 font-mono text-xs text-(--text-muted)"
+                                    title={location}
+                                  >
+                                    {location}
+                                  </span>
+                                )}
+                              </div>
+                              {open ? (
+                                <p id={id} className="whitespace-pre-wrap break-words text-sm text-(--text-secondary)">
+                                  {finding.body}
+                                </p>
+                              ) : null}
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="xs"
+                                className="self-start text-(--text-muted)"
+                                aria-expanded={open}
+                                aria-controls={id}
+                                onClick={() =>
+                                  setOpenFindings((previous) => ({ ...previous, [finding.finding_id]: !open }))
+                                }
+                              >
+                                <ChevronRight
+                                  aria-hidden="true"
+                                  className={cn("transition-transform", open && "rotate-90")}
+                                />
+                                {t(locale, open ? "pullRequests.collapse" : "pullRequests.expand")}
+                              </Button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </section>
+                  ))}
                 </div>
-                <p className="whitespace-pre-wrap text-sm text-muted-foreground">{review.summary_md}</p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </FlowSection>
-      <FlowSection
-        title={t(locale, "pullRequests.failures")}
-        subtitle={t(locale, "pullRequests.failuresCount", { count: detail.failures.length })}
-      >
-        {detail.failures.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "pullRequests.noFailures")}</p>
-        ) : (
-          <ul className="flex flex-col">
-            {detail.failures.map((failure, index) => (
-              <li
-                key={`${failure.created_at}-${index}`}
-                className="flex flex-col gap-1 border-b border-(--border-subtle) py-3 last:border-b-0"
-              >
-                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
-                  <span className="font-medium">{failure.stage}</span>
-                  <span className="text-muted-foreground tabular-nums" title={failure.created_at}>
-                    {formatRelativeTime(failure.created_at, locale)}
-                  </span>
-                </div>
-                {/* Model/runtime output — rendered as text, never as HTML. */}
-                <p className="whitespace-pre-wrap break-words font-mono text-xs text-(--tone-danger-fg)">
-                  {failure.error}
-                </p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </FlowSection>
-      <FlowSection
-        title={t(locale, "pullRequests.findings")}
-        subtitle={t(locale, "pullRequests.findingsCount", { count: detail.findings.length })}
-      >
-        {detail.findings.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "pullRequests.noFindings")}</p>
-        ) : (
-          <ul className="flex flex-col">
-            {detail.findings.map((finding) => (
-              <li
-                key={finding.finding_id}
-                className="flex flex-col gap-1 border-b border-(--border-subtle) py-3 last:border-b-0"
-              >
-                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
-                  <span className="font-medium">{finding.title}</span>
-                  <span className="text-muted-foreground">{finding.severity}</span>
-                  <span className="text-muted-foreground">
-                    {/* A coerced-empty file_path (repo-wide finding) renders
-                        no location at all — never a bare `:line` (N12). */}
-                    {finding.file_path === ""
-                      ? ""
-                      : `${finding.file_path}${finding.line === null ? "" : `:${finding.line}`}`}
-                  </span>
-                </div>
-                <p className="whitespace-pre-wrap text-sm text-muted-foreground">{finding.body}</p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </FlowSection>
+              )}
+            </TabsContent>
+
+            <TabsContent value="reviews">
+              {detail.reviews.length === 0 ? (
+                <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noReviews")}</p>
+              ) : (
+                <ul className="flex flex-col gap-2">
+                  {detail.reviews.map((review, index) => {
+                    const open = openReviews[index] ?? index === 0;
+                    const id = bodyId(`review-${index}`);
+                    return (
+                      <li
+                        key={id}
+                        className={cn(
+                          "flex flex-col gap-2 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5",
+                          index === 0 ? "border-(--border-strong)" : "",
+                        )}
+                      >
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)">
+                          <StatusBadge tone={review.verdict === "ship it" ? "success" : "danger"}>
+                            {review.verdict}
+                          </StatusBadge>
+                          <span className="text-(--text-muted)">{reviewAttribution(locale, review)}</span>
+                          <span className="ml-auto tabular-nums text-(--text-faint)" title={review.reviewed_at}>
+                            {formatRelativeTime(review.reviewed_at, locale)}
+                          </span>
+                          {review.head_sha === "" ? null : (
+                            <span
+                              className="rounded-(--radius-control) border border-(--border-default) px-1.5 py-0.5 font-mono text-(--text-muted)"
+                              title={t(locale, "pullRequests.headSha")}
+                            >
+                              {review.head_sha.slice(0, 7)}
+                            </span>
+                          )}
+                        </div>
+                        {open ? (
+                          <p id={id} className="whitespace-pre-wrap break-words text-sm text-(--text-secondary)">
+                            {review.summary_md}
+                          </p>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          className="self-start text-(--text-muted)"
+                          aria-expanded={open}
+                          aria-controls={id}
+                          onClick={() => setOpenReviews((previous) => ({ ...previous, [index]: !open }))}
+                        >
+                          <ChevronRight aria-hidden="true" className={cn("transition-transform", open && "rotate-90")} />
+                          {t(locale, open ? "pullRequests.collapse" : "pullRequests.expand")}
+                        </Button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </TabsContent>
+
+            <TabsContent value="failures">
+              {detail.failures.length === 0 ? (
+                <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noFailures")}</p>
+              ) : (
+                <ul className="flex flex-col gap-2">
+                  {detail.failures.map((failure, index) => {
+                    // The first line is the diagnosis; the rest is evidence.
+                    const lines = failure.error.split("\n");
+                    return (
+                      <li
+                        key={`${failure.created_at}-${index}`}
+                        className="flex flex-col gap-2 rounded-(--radius-container) border border-(--tone-danger-border) bg-(--tone-danger-bg) px-3.5 py-3"
+                      >
+                        <div className="flex flex-wrap items-center gap-2 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)">
+                          <span className="rounded-(--radius-control) border border-(--tone-danger-border) px-1.5 py-0.5 font-mono text-(--tone-danger-fg)">
+                            {failure.stage}
+                          </span>
+                          <span className="ml-auto tabular-nums text-(--text-faint)" title={failure.created_at}>
+                            {formatRelativeTime(failure.created_at, locale)}
+                          </span>
+                        </div>
+                        {/* Model/runtime output — rendered as text, never as HTML. */}
+                        <p className="whitespace-pre-wrap break-words font-mono text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--tone-danger-fg)">
+                          {lines[0]}
+                        </p>
+                        {lines.length > 1 ? (
+                          <details>
+                            <summary className="cursor-pointer text-(length:--typo-label-12-size) text-(--text-secondary)">
+                              {t(locale, "pullRequests.failureFullOutput")}
+                            </summary>
+                            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre rounded-(--radius-control) border border-(--tone-danger-border) bg-(--surface-page) p-2.5 font-mono text-(length:--typo-label-12-size) leading-relaxed text-(--text-secondary)">
+                              {failure.error}
+                            </pre>
+                          </details>
+                        ) : null}
+                        {copyAvailable ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            className="self-start text-(--text-secondary)"
+                            onClick={() => {
+                              void navigator.clipboard.writeText(failure.error);
+                            }}
+                          >
+                            <Copy aria-hidden="true" />
+                            {t(locale, "pullRequests.copyError")}
+                          </Button>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </TabsContent>
+          </div>
+
+          <aside
+            aria-label={t(locale, "pullRequests.asideFacts")}
+            className="order-first flex w-full shrink-0 flex-col gap-(--spacing-4) lg:order-none lg:w-64"
+          >
+            <section className="flex flex-col gap-2.5 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5">
+              <h2 className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">
+                {t(locale, "pullRequests.asideFacts")}
+              </h2>
+              <dl className="flex flex-col gap-1.5 text-(length:--typo-copy-14-size)">
+                {facts.map((fact) => (
+                  <div key={fact.label} className="flex items-baseline justify-between gap-3">
+                    <dt className="text-(--text-faint)">{fact.label}</dt>
+                    <dd className="min-w-0 truncate text-right text-(--text-secondary)">{fact.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+
+            <section className="flex flex-col gap-2.5 rounded-(--radius-container) border border-(--border-default) bg-(--surface-card) px-4 py-3.5">
+              <h2 className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">
+                {t(locale, "pullRequests.asideActivity")}
+              </h2>
+              <ol className="flex flex-col gap-(--spacing-3)">
+                {activity.map((entry) => (
+                  <li key={entry.key} className="flex gap-2">
+                    <span
+                      aria-hidden="true"
+                      className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", TIMELINE_DOT[entry.tone])}
+                    />
+                    <div className="flex min-w-0 flex-col">
+                      <span className="text-(length:--typo-copy-14-size) text-(--text-primary)">{entry.label}</span>
+                      <span className="text-(length:--typo-label-12-size) text-(--text-faint)">{entry.meta}</span>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          </aside>
+        </div>
+      </Tabs>
     </div>
   );
 }

@@ -61,6 +61,8 @@ const ROOT = path.resolve(import.meta.dir, "..");
 const FIXTURE_PATH = path.join(ROOT, "src/design-system/fixture.json");
 const DESIGN_PATH = path.join(ROOT, "DESIGN.md");
 const SPA_ROOT = path.join(ROOT, "src/spa");
+/** Hand-written reference pages under the design system: static, never built. */
+const PROTOTYPES_ROOT = path.join(ROOT, "src/design-system/prototypes");
 /** The one stylesheet under `src/spa` the token source derives — link 1 owns it. */
 const GENERATED_STYLESHEET = "src/spa/styles/tokens.css";
 const CONSUMER_FILE = /\.(?:css|html)$/;
@@ -75,29 +77,38 @@ const GENERATORS = [
   { script: "scripts/build-design-preview.tsx", label: "source → preview" },
 ] as const;
 
+/** The trees whose hand-written CSS/HTML answers to the token source. */
+const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
+
 /**
- * Every hand-written stylesheet and HTML shell under `src/spa` — the consumers
- * no generator link sees: nothing derives them, so nothing notices when a name
- * they reference stops existing.
+ * Every hand-written stylesheet and HTML shell the token source does not
+ * derive — the consumers no generator link sees: nothing derives them, so
+ * nothing notices when a name they reference stops existing.
  *
- * Derived from the tree, not listed: a list is a guard whose coverage is its
- * own contents, and the first cut of this link named two of the four consumers
- * that already existed. A new stylesheet joins the link by existing.
+ * Two forests, derived from the trees rather than listed: the SPA's
+ * stylesheets/shells, and the design-system prototypes, which are hand-written
+ * HTML reference pages that read the same tokens. A list would be a guard whose
+ * coverage is its own contents; a new stylesheet joins the link by existing.
  * The generated stylesheet is the one exclusion — link 1 already proves it
  * equals the token source.
  */
-export function stylesheetConsumers(dir: string = SPA_ROOT): string[] {
+export function stylesheetConsumers(dirs: readonly string[] = CONSUMER_ROOTS): string[] {
+  return dirs.flatMap((dir) => walkConsumers(dir)).sort();
+}
+
+function walkConsumers(dir: string): string[] {
+  if (!existsSync(dir)) return [];
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
     const full = path.join(dir, entry);
     if (statSync(full).isDirectory()) {
-      out.push(...stylesheetConsumers(full));
+      out.push(...walkConsumers(full));
     } else if (CONSUMER_FILE.test(entry)) {
       const file = path.relative(ROOT, full);
       if (file !== GENERATED_STYLESHEET) out.push(file);
     }
   }
-  return out.sort();
+  return out;
 }
 
 /**
@@ -590,7 +601,11 @@ if (import.meta.main) {
   // A walk that found no stylesheet proves nothing (wrong root, moved tree):
   // that is a failure, not an empty pass.
   console.log(`${consumers.length > 0 && dangling.length === 0 ? "ok  " : "fail"}  consumers → source`);
-  if (consumers.length === 0) console.log(`        no stylesheet found under ${path.relative(ROOT, SPA_ROOT)}`);
+  if (consumers.length === 0) {
+    console.log(
+      `        no stylesheet found under ${CONSUMER_ROOTS.map((dir) => path.relative(ROOT, dir)).join(" or ")}`,
+    );
+  }
   for (const { file, name, theme } of dangling) {
     console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
   }
