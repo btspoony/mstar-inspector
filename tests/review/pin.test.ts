@@ -77,9 +77,9 @@ describe("sandbox image base / tool pins", () => {
     expect(DOCKERFILE).toContain(`@${OMP_SANDBOX_IMAGE_PINS.baseImageDigest}`);
   });
 
-  test("Dockerfile COPYs the shim from the declared sandbox tag", () => {
+  test("Dockerfile COPYs the shim from the declared sandbox tag and digest", () => {
     expect(DOCKERFILE).toContain(
-      `COPY --from=docker.io/cloudflare/sandbox:${OMP_SANDBOX_IMAGE_PINS.sandboxShimTag} `,
+      `COPY --from=docker.io/cloudflare/sandbox:${OMP_SANDBOX_IMAGE_PINS.sandboxShimTag}@${OMP_SANDBOX_IMAGE_PINS.sandboxShimDigest} `,
     );
   });
 

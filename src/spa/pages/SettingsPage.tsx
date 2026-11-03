@@ -1091,16 +1091,8 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
   const [concurrencyNotice, setConcurrencyNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
   // A degraded read is re-read on demand: the stored value is untrusted, so
-  // "try again" is a first-class action next to saving a fresh value.
+  // "try again" is the only action until a read lands.
   const [attempt, setAttempt] = useState(0);
-  // The value this workspace ACTUALLY gets: the server refuses a workspace cap
-  // above the system cap, but an operator can lower the system cap below an
-  // already-stored workspace value. The form then seeds from the effective
-  // value — a draft seeded from the stale stored number would sit above `max`
-  // on mount and the browser would refuse the submit, while the server (the
-  // authority) would have accepted the lowered value. The stored value stays
-  // visible in the card's copy.
-  const effective = loaded === null ? 0 : Math.min(loaded.concurrency, loaded.system);
 
   useEffect(() => {
     let live = true;
@@ -1126,8 +1118,17 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy || loaded === null) return; // in-flight guard — no double submit
+    // A degraded read carries the conservative fallback, not this tenant's
+    // value: writing it would replace a number nobody could read. The only
+    // action in that state is the re-read.
+    if (loaded.degraded) return;
+    // An untouched form must submit the STORED value, never a derived one: the
+    // stored number is what the tenant set. Above the system cap there is no
+    // honest untouched submit — the server would refuse it — so the form stays
+    // disabled until the operator types a value inside the range.
+    if (draft === null && loaded.concurrency > loaded.system) return;
     setBusy(true);
-    const submitted = Number((draft ?? String(effective)).trim());
+    const submitted = Number((draft ?? String(loaded.concurrency)).trim());
     try {
       const { status, body } = await putJson(`${apiBase()}/api/settings/concurrency`, {
         concurrency: submitted,
@@ -1163,44 +1164,20 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
       ) : loaded === null ? (
         <LoadingNotice locale={locale} />
       ) : loaded.degraded ? (
-        // The store could not trust the stored cap, so both numbers in this
-        // payload are the conservative fallback (serial). Rendering that as a
-        // normal value would invite a save of a number nobody stored, so the
-        // card states the read failed and offers two honest recoveries: re-read,
-        // or replace the unreadable value with one the operator types.
+        // The store could not trust the stored cap, so both numbers in the
+        // payload are the conservative fallback (serial). Saving one would
+        // replace a value nobody read, so Save is shown disabled and the only
+        // action until a read lands is the re-read.
         <div className="flex flex-col gap-3">
           <PageNotice kind="warn" message={t(locale, "workspace.concurrencyUnreadable")} />
-          <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-medium" htmlFor="workspace-concurrency">
-                {t(locale, "workspace.concurrencyLabel")}
-              </label>
-              <Input
-                id="workspace-concurrency"
-                type="number"
-                min={loaded.min}
-                // Not `loaded.system`: in this state that number is the fallback,
-                // so using it as the browser bound would make the field refuse
-                // every value a real cap could be. The server still refuses
-                // anything above the cap its write predicate enforces.
-                max={loaded.max}
-                className="w-32"
-                autoComplete="off"
-                required
-                value={draft ?? ""}
-                onChange={(event) => setDraft(event.target.value)}
-              />
-              {/* No "system cap" line here: `loaded.system` is the conservative
-                  fallback in this state, and stating it as the ceiling would name
-                  a number no write was compared against. */}
-            </div>
-            <Button type="submit" disabled={busy}>
+          <div className="flex flex-wrap items-end gap-2">
+            <Button type="button" disabled>
               {t(locale, "workspace.concurrencySave")}
             </Button>
             <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
               {t(locale, "common.retry")}
             </Button>
-          </form>
+          </div>
         </div>
       ) : (
         <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
@@ -1215,16 +1192,17 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
               max={loaded.system}
               className="w-32"
               autoComplete="off"
-              value={draft ?? String(effective)}
+              value={draft ?? String(loaded.concurrency)}
               onChange={(event) => setDraft(event.target.value)}
             />
             <span className="text-xs text-muted-foreground">
               {t(locale, "workspace.concurrencySystemCap", { system: loaded.system })}
             </span>
             {loaded.concurrency > loaded.system ? (
-              // The stored value is above the system cap (an operator lowered
-              // it afterwards). The input shows what actually applies; this
-              // line keeps the stored number visible and says why they differ.
+              // An operator lowered the system cap after this workspace stored
+              // its own. The stored number is what the tenant set, so it stays
+              // in the field — but it is outside the input's range, so Save is
+              // disabled until the operator types a value the server accepts.
               <span className="text-xs text-muted-foreground">
                 {t(locale, "workspace.concurrencyStoredAboveSystem", {
                   stored: loaded.concurrency,
@@ -1233,7 +1211,7 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
               </span>
             ) : null}
           </div>
-          <Button type="submit" disabled={busy}>
+          <Button type="submit" disabled={busy || (draft === null && loaded.concurrency > loaded.system)}>
             {t(locale, "workspace.concurrencySave")}
           </Button>
         </form>

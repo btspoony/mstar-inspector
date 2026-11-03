@@ -84,6 +84,8 @@ export type SandboxImagePins = {
   readonly baseImageDigest: string;
   /** `docker.io/cloudflare/sandbox` shim tag the Dockerfile COPYs from. */
   readonly sandboxShimTag: string;
+  /** The shim image's manifest digest — moves only together with `sandboxShimTag`. */
+  readonly sandboxShimDigest: string;
   /** Bun release tag (base ships none; omp needs a floor). */
   readonly bunVersion: string;
   /** gh CLI release version. */
@@ -109,6 +111,7 @@ export const HARNESS_VERSION = "4.1.2";
 export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
   baseImageDigest: "sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483",
   sandboxShimTag: "1.0.0",
+  sandboxShimDigest: "sha256:5bc187515bad0d9d486a4f1476f7d8ad39fe97c57965f044e4b0a0dcc93eac06",
   bunVersion: "1.4.0",
   ghVersion: "2.98.0",
   harnessVersion: HARNESS_VERSION,

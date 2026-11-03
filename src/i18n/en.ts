@@ -383,10 +383,10 @@ export const en = {
     concurrencySystemCap: "System cap: {system}.",
     /** {stored} > {system}: an operator lowered the system cap after this workspace's value was stored. */
     concurrencyStoredAboveSystem:
-      "Stored value: {stored} — above the current system cap of {system}, so {system} applies until you save a lower value.",
+      "Stored value: {stored} — above the current system cap of {system}. Enter a value of {system} or less to save; until then the system cap applies.",
     /** The stored cap could not be read — the numbers are a fallback, not this workspace's setting. */
     concurrencyUnreadable:
-      "The stored review concurrency could not be read, so reviews are running one at a time. Nothing was changed — retry the read.",
+      "The stored review concurrency could not be read, so reviews are running one at a time. Nothing was changed and saving is disabled — retry the read.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the
