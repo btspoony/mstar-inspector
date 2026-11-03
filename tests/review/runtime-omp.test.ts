@@ -2208,6 +2208,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
           oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
           newStart: 8,
           newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
+          addedNewLines: [9],
           oldBlobOid: "oid-old",
           headBlobOid: "oid-head",
           absentAtHead: false,

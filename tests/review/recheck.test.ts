@@ -70,6 +70,7 @@ function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
         oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
         newStart: 8,
         newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
+        addedNewLines: [9],
         oldBlobOid: "oid-old",
         headBlobOid: "oid-head",
         absentAtHead: false,

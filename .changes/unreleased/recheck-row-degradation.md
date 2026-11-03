@@ -72,6 +72,20 @@ category: Fixed
   drop still reports `ok` with the rejected IDs. The status's
   `rejected` count is derived from `rejected_row_ids` on read, so the two faces
   of the count cannot disagree.
+- **`current-code` closure needs a line the change ADDED.** A verified fix used
+  to be provable with an unchanged context line: the quote matched and the range
+  sat inside the hunk, so citing pre-change code closed the row. The catalog
+  slice now carries `addedNewLines` (the new-side line numbers its `+` lines
+  occupy) and a `current-code` citation must include at least one of them; a
+  presence-only citation is dropped as `invalid-output`, and a real replacement
+  cites `replaced-code`, whose old-side proof already tests that the code
+  changed.
+- **An empty-result round no longer charges a never-sent row.** The rejection
+  covered every unanswered row, so a row the trusted catalog could not prove (or
+  whose slices lost the catalog byte budget) still advanced its rotation clock
+  even though the seat never received it. Only rows that actually rode the wire
+  are now `invalid-output` and counted as attempted; catalog-excluded rows keep
+  `no-evidence`, catalog-budget rows keep `budget`, and both keep their clocks.
 - **Still-present evidence is tested line by line.** The `removed-code` /
   `replaced-code` "old lines are gone" guard no longer searches the joined
   new-side block for the joined quote: an insertion inside the cited block
@@ -171,6 +185,15 @@ category: Fixed
   `invalid-output`（答坏了），绝不算作 `omitted`（从未运行）。部分行被拒仍是 `ok`
   并携带被拒行 ID。读取时 `rejected` 计数由 `rejected_row_ids` 推导，两个计数面
   不可能互相矛盾。
+- **`current-code` 结案必须引用本次变更「新增」的行。** 此前一条未改动的上下文行也能
+  证明修复：引用逐字匹配、范围落在 hunk 内，于是引用变更前的代码就把该行结案了。证据
+  切片现在携带 `addedNewLines`（该 hunk 中 `+` 行占用的新侧行号），`current-code`
+  引用必须命中其中之一；只证明「代码还在」的引用会随行丢弃为 `invalid-output`，
+  真实替换则引用 `replaced-code`——它的旧侧证明本来就要求代码确有变更。
+- **empty-result 轮次不再为从未发送的行计费。** 该判定此前覆盖所有未应答行，因此被
+  可信目录无法证明的行（或其切片输给了目录字节预算的行）即使席位从未收到，也会推进
+  轮转时钟。现在只有真正上过线的行才是 `invalid-output` 并计入已尝试；目录排除的行
+  保持 `no-evidence`，目录预算排除的行保持 `budget`，两者的时钟都不动。
 - **「旧行已消失」按行判定。** `removed-code` / `replaced-code` 的守卫不再在拼接后的新侧
   块里搜索拼接后的引用：在被引用块中间插入一行会打断整块，从而伪造出一次删除。现在要求
   每一条非空白的规范化被引用行都不出现在新侧行集合中，插入因此不再能证明任何删除；而

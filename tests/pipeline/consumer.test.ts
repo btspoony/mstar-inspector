@@ -38,7 +38,7 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -48,7 +48,7 @@ import { createArtifactStore } from "../../src/store/artifact-store";
 import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
-import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
 import type { InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
 import {
@@ -105,18 +105,18 @@ import {
   recheckDocWith,
   createFakeSandbox,
   createTestLog,
+  registerGitOpsCommands,
   resetFakeSandboxState,
 } from "../helpers/consumer-fixtures";
 
 /**
  * The migrations after the 0036 identity rewrite, in wrangler's apply order.
- * Derived from the directory so a future migration cannot leave the
- * equivalence fixture on a stale schema; the 0036 boundary stays explicit
- * because that fixture reconstructs a specific historical shape.
+ * Derived from the directory (numeric prefix order, so `1000_*` follows
+ * `999_*`) so a future migration cannot leave the equivalence fixture on a
+ * stale schema; the 0036 boundary stays explicit because that fixture
+ * reconstructs a specific historical shape.
  */
-const MIGRATIONS_AFTER_0036 = readdirSync(join(import.meta.dir, "../../migrations"))
-  .filter((name) => name.endsWith(".sql") && name > "0036_app_identity.sql")
-  .sort();
+const MIGRATIONS_AFTER_0036 = migrationsAfter(36);
 
 // --- sandbox fake (injected via createReviewConsumer overrides) -------------
 // The double and its per-test knobs live in tests/helpers/consumer-fixtures:
@@ -233,6 +233,8 @@ function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayloa
 }
 
 function makeBatch(payload: ReviewJobPayload): MessageBatch<ReviewJobPayload> {
+  // Declare the payload's own commands before the consumer can exec them.
+  registerGitOpsCommands(sandbox, payload);
   return {
     queue: "review-queue",
     messages: [

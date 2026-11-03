@@ -1,131 +1,44 @@
 /**
- * Consumer recheck-round attribution (spec §7.7/§7.4/§7.10) — the status
- * document's parse bounds and the round's accounting in D1 and the published
- * body. Moved out of tests/pipeline/consumer.test.ts; the sandbox/log doubles,
- * the App-seeded D1 and the finding-lifecycle seeds all come from
- * ../helpers/consumer-fixtures (one copy, both suites).
+ * Consumer recheck-round STATUS and per-row accounting (spec §7.7/§7.10): the
+ * seat's status document, the reasons each selected row ends the round with,
+ * and the D1/log attribution that makes a lost round visible.
  *
- * Same DI technique as the parent suite: sandbox + commenter injected through
- * createReviewConsumer's overrides (no process-wide mock.module on relative
- * module paths, which leaks across test files sharing a worker).
+ * Sibling files cover the trusted evidence catalog (`consumer-recheck-catalog`)
+ * and the conservative precedence guards (`consumer-recheck-precedence`); the
+ * doubles, D1 seeders and payload builders come from
+ * ../helpers/consumer-harness, shared by all three.
  */
-import { describe, expect, mock, test } from "bun:test";
-import type { MessageBatch } from "@cloudflare/workers-types";
-import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import type { PipelineEnv } from "../../src/pipeline/consumer";
-import type { CommenterCall } from "../helpers/review-commenter";
-import type { TestD1 } from "../store/helpers";
-import { createFakeCommenter, initialFakeCommenterState } from "../helpers/review-commenter";
+import { describe, expect, test } from "bun:test";
 import { RECHECK_STATUS_ERROR_MAX_CHARS } from "../../packages/shared/src/recheck-wire";
 import { REDACTED } from "../../src/pipeline/redact";
 import {
-  SHA,
-  VALID_OUTPUT,
-  VALID_DIFF,
-  TEST_KEY,
-  TEST_APP_ID,
   ASSOC_ID,
+  SHA,
   TARGET_ROW_ID,
-  TARGET_ORIGINAL,
-  PRIOR_PUB_ID,
-  PRIOR_SHA,
+  VALID_DIFF,
+  VALID_OUTPUT,
   createSeededTestD1,
-  seedPriorPublication,
-  seedOpenTarget,
-  seedAssociation,
   recheckDocWith,
-  createFakeSandbox,
-  createTestLog,
-  resetFakeSandboxState,
+  seedAssociation,
+  seedOpenTarget,
+  seedPriorPublication,
 } from "../helpers/consumer-fixtures";
+import {
+  commenterCalls,
+  commenterState,
+  createReviewConsumer,
+  failureRows,
+  logLines,
+  makeBatch,
+  makeEnv,
+  makePayload,
+  reset,
+  sandbox,
+  testLog,
+  testOverrides,
+} from "../helpers/consumer-harness";
 
-// --- sandbox fake (injected via createReviewConsumer overrides) -------------
-// The double and its per-test knobs live in tests/helpers/consumer-fixtures:
-// it answers ONLY the commands consumer.ts issues and throws on anything else.
-const fakeSandbox = createFakeSandbox();
-const sandbox = fakeSandbox.state;
-
-// Load-shim only: consumer.ts statically imports ./sandbox → the workerd
-// builtin `cloudflare:workers` (unresolvable in Bun's test runner).
-import "../helpers/cloudflare-workers-mock";
-
-// --- commenter fake (injected via createReviewConsumer overrides) -----------
-const commenterCalls: CommenterCall[] = [];
-const commenterState = initialFakeCommenterState();
-const fakeCommenter = createFakeCommenter(commenterState, commenterCalls);
-
-// Injected into every consumer under test (DI replaces the old mock.module).
-const testOverrides = {
-  createAppCommenter: () => fakeCommenter,
-  getSandbox: async () => fakeSandbox,
-};
-
-// --- consumer under test (dynamic import: mocks must be registered first) ---
-const { createReviewConsumer } = await import("../../src/pipeline/consumer");
-
-// --- test log sink (injected via the consumer's optional log param) --------
-const { lines: logLines, log: testLog } = createTestLog();
-
-// --- helpers ----------------------------------------------------------------
-const kv = {
-  get: mock(async () => null),
-  put: mock(async () => {}),
-  delete: mock(async () => {}),
-};
-
-async function makeEnv(overrides: Partial<PipelineEnv> = {}): Promise<PipelineEnv> {
-  return {
-    DB: (await createSeededTestD1()) as never,
-    IDEMPOTENCY_KV: kv as never,
-    SANDBOX: {} as never,
-    DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
-    ...overrides,
-  };
-}
-
-function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
-  return {
-    installation_id: 123,
-    owner: "acme",
-    repo: "widgets",
-    pr_number: 42,
-    head_sha: SHA,
-    action: "opened",
-    triggered_by: "pull_request",
-    appRef: { appId: TEST_APP_ID },
-    ...overrides,
-  };
-}
-
-function makeBatch(payload: ReviewJobPayload): MessageBatch<ReviewJobPayload> {
-  return {
-    queue: "review-queue",
-    messages: [
-      {
-        id: "m1",
-        timestamp: new Date(),
-        attempts: 1,
-        body: payload,
-        retry: () => {},
-        ack: () => {},
-      },
-    ],
-  } as unknown as MessageBatch<ReviewJobPayload>;
-}
-
-function reset(): void {
-  resetFakeSandboxState(sandbox);
-  commenterCalls.length = 0;
-  Object.assign(commenterState, initialFakeCommenterState());
-  logLines.length = 0;
-}
-
-/** All rows of the review_failures table in the real D1 double. */
-function failureRows(db: TestD1): Array<Record<string, unknown>> {
-  return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
-}
-
-describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
+describe("recheck round attribution — status and row accounting (§7.7/§7.4/§7.10)", () => {
   test("a failed seat status with no document makes the round attributable: every row invalid-output, one recheck failure row", async () => {
     reset();
     sandbox.diffStdout = VALID_DIFF;
@@ -456,6 +369,59 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(excluded.last_assessed_ms).toBeNull();
   });
 
+  test("an empty-result round keeps a catalog-excluded row on its own reason and clock: only sent rows are blamed", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Two selected rows: the seeded target is provable from the captured diff,
+    // the second row's file never appears there, so only the target rode the
+    // wire. The empty result says nothing about the unprovable row.
+    sandbox.recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "empty-result",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    const excludedRowId = "eeeeeeee-0000-4000-8000-000000000007";
+    await seedOpenTarget(db, {
+      rowId: excludedRowId,
+      findingId: "finding-unprovable",
+      original: {
+        title: "Unprovable concern",
+        filePath: "src/elsewhere.ts",
+        lineStart: 1,
+      },
+      nowMs: 2_100,
+    });
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    // The sent row was attempted and answered badly; the catalog-excluded row
+    // keeps `no-evidence` — it was never sent, so the round cannot blame it.
+    expect(prepared.body).toContain("| Old null deref on the config path | unverifiable (invalid-output) ");
+    expect(prepared.body).toContain("| Unprovable concern | unverifiable (no-evidence) ");
+    // The rotation clock follows the same split: the sent row advanced, the
+    // never-sent row did not.
+    const clocks = db.raw
+      .query("SELECT id, last_assessed_ms FROM review_findings ORDER BY id")
+      .all() as Array<{ id: string; last_assessed_ms: number | null }>;
+    const clockById = new Map(clocks.map((row) => [row.id, row.last_assessed_ms]));
+    expect(clockById.get(TARGET_ROW_ID)).not.toBeNull();
+    expect(clockById.get(excludedRowId)).toBeNull();
+    const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "failed", recheck_reason: "empty-result", assessed: 0 });
+  });
+
   test("a captured-but-unprovable round blames the capture, not the catalog budget", async () => {
     // The discussion capture failed, so the input is suppressed before the
     // catalog can: the accounting line must name THAT cause, never the §7.3
@@ -607,343 +573,6 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (invalid-output)");
     expect(String(failureRows(db)[0]!.error)).toBe("absent: null: null");
-  });
-
-  test("a row the trusted catalog cannot prove never rides the wire: no-evidence, never budget, never assessed", async () => {
-    reset();
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    // The concern's file is absent from the captured diff, so no slice can
-    // prove it and no honest verdict is possible.
-    db.raw.prepare(`UPDATE review_findings SET original_json = ? WHERE id = ?`).run(
-      JSON.stringify({ ...TARGET_ORIGINAL, filePath: "src/elsewhere.ts" }),
-      TARGET_ROW_ID,
-    );
-    await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    // Not sent: the runner gains no --recheck-out and the input has no recheck.
-    expect(sandbox.calls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
-    expect((JSON.parse(sandbox.writtenInputJson!) as { recheck?: unknown }).recheck).toBeUndefined();
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
-    // The reason names the real cause — an unprovable row is not oversized.
-    expect(prepared.body).toContain("unverifiable (no-evidence)");
-    expect(prepared.body).not.toContain("unverifiable (budget)");
-    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
-    // Nothing was attempted, so nothing is assessed and no failure is recorded.
-    const findingRow = db.raw.query("SELECT last_assessed_ms FROM review_findings").get() as {
-      last_assessed_ms: number | null;
-    };
-    expect(findingRow.last_assessed_ms).toBeNull();
-    expect(failureRows(db)).toHaveLength(0);
-  });
-
-  test("slices belonging to a budget-excluded row do not ride the recheck input, and the budget is measured without them", async () => {
-    reset();
-    // Two files in the captured diff, one selected row per file.
-    sandbox.diffStdout = [
-      VALID_DIFF,
-      "diff --git a/src/other.ts b/src/other.ts",
-      "index 3333333..4444444 100644",
-      "--- a/src/other.ts",
-      "+++ b/src/other.ts",
-      "@@ -1,2 +1,3 @@",
-      " export const a = 1;",
-      "+export const b = 2;",
-      " export const c = 3;",
-      "",
-    ].join("\n");
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    // The second row is oversized, so the §7.3 budget drops it AFTER the
-    // catalog already holds its slice.
-    await seedOpenTarget(db, {
-      rowId: "eeeeeeee-0000-4000-8000-000000000005",
-      findingId: "finding-oversized",
-      original: {
-        title: "Oversized concern",
-        filePath: "src/other.ts",
-        lineStart: 1,
-        body: "y".repeat(600 * 1024),
-      },
-      nowMs: 2_100,
-    });
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
-      recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ id: string; path: string }> };
-    };
-    expect(runnerInput.recheck.targets.map((t) => t.rowId)).toEqual([TARGET_ROW_ID]);
-    // Only the surviving row's slice rides — the dropped row's file is gone.
-    expect(runnerInput.recheck.evidence.length).toBeGreaterThan(0);
-    expect(runnerInput.recheck.evidence.every((slice) => slice.path === "src/auth.ts")).toBe(true);
-    // Slice ids stay stable (the shared catalog numbering, not a rebuilt one).
-    expect(runnerInput.recheck.evidence[0]!.id).toBe("ev-1");
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("unverifiable (budget)");
-  });
-
-  /**
-   * A src/auth.ts diff whose ONE hunk is `lineCount` lines (1-based numbering).
-   * One ADDED line closes the first 80-line window, so the old and new sides
-   * genuinely differ: the added text exists on the new side only, and every
-   * later window starts one line further into the file on the new side
-   * (`oldStart !== newStart`). A context-only hunk carries the same strings on
-   * both sides, so a side swap or an offset error would pass every window
-   * assertion below unchanged.
-   */
-  function oversizedAuthDiff(lineCount: number): string {
-    return [
-      "diff --git a/src/auth.ts b/src/auth.ts",
-      "index 1111111..2222222 100644",
-      "--- a/src/auth.ts",
-      "+++ b/src/auth.ts",
-      `@@ -1,${lineCount - 1} +1,${lineCount} @@`,
-      ...Array.from({ length: lineCount }, (_, i) =>
-        i === 79
-          ? "+const added = 1;"
-          : ` const v${String(i + 1).padStart(3, "0")} = 1;`,
-      ),
-      "",
-    ].join("\n");
-  }
-
-  /**
-   * One file per row, each a 320-line hunk (four 80-line windows of ~7.8 KiB
-   * slices), so the 256 KiB catalog budget runs out before the last rows. Each
-   * file carries one ADDED line in its first window, so every later window's
-   * `newStart` is one line ahead of its `oldStart` — the fixture can tell the
-   * two sides apart.
-   */
-  function catalogBudgetDiff(files: number): string {
-    const body = Array.from({ length: 320 }, (_, i) =>
-      (i === 10 ? `+const added${String(i + 1).padStart(3, "0")} = 1;` : ` const v${String(i + 1).padStart(3, "0")} = 1;`).padEnd(
-        45,
-        " ",
-      ),
-    );
-    return Array.from({ length: files }, (_, i) => {
-      const path = `src/b${String(i + 1).padStart(2, "0")}.ts`;
-      return [
-        `diff --git a/${path} b/${path}`,
-        "index 1111111..2222222 100644",
-        `--- a/${path}`,
-        `+++ b/${path}`,
-        "@@ -1,319 +1,320 @@",
-        ...body,
-      ].join("\n");
-    }).join("\n") + "\n";
-  }
-
-  test("a row the catalog byte budget drops is a budget exclusion, never no-evidence", async () => {
-    reset();
-    // Twelve provable rows whose slices all fit individually, but not together:
-    // the catalog budget stops adding slices partway through the target list.
-    const rowCount = 12;
-    sandbox.diffStdout = catalogBudgetDiff(rowCount);
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.recheckFileContent = ""; // no document: every row is accounted by WHY it has no verdict
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    for (let i = 0; i < rowCount; i++) {
-      await seedOpenTarget(db, {
-        rowId: `eeeeeeee-0000-4000-8000-000000000${String(i + 10).padStart(3, "0")}`,
-        findingId: `finding-budget-${i + 1}`,
-        original: {
-          title: `Budget row ${i + 1}`,
-          filePath: `src/b${String(i + 1).padStart(2, "0")}.ts`,
-          lineStart: 1,
-          lineEnd: 1,
-        },
-        nowMs: 1_000 + i,
-      });
-    }
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
-      recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ path: string }> };
-    };
-    // The budget really bit: not every provable row could ride.
-    expect(runnerInput.recheck.targets.length).toBeLessThan(rowCount);
-    expect(new Set(runnerInput.recheck.evidence.map((slice) => slice.path)).size).toBeLessThan(rowCount);
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    // The dropped rows were never sent because their slices lost a BYTE budget
-    // — the same cause as the size budget. `no-evidence` would claim their
-    // files cannot prove them at all.
-    expect(prepared.body).toMatch(/Budget row 12 \| unverifiable \(budget\)/);
-    expect(prepared.body).not.toContain("unverifiable (no-evidence)");
-  });
-
-  test("an oversized hunk is sliced into windows that still contain the target line", async () => {
-    reset();
-    sandbox.diffStdout = oversizedAuthDiff(200);
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // The concern sits at line 21 — inside the FIRST window, so its local
-    // evidence exists even though the whole hunk (200 lines) exceeds the bound.
-    sandbox.recheckFileContent = JSON.stringify({
-      schema: "mstar.recheck/v1",
-      headSha: SHA,
-      results: [
-        {
-          rowId: TARGET_ROW_ID,
-          disposition: "addressed",
-          reason: "verified-fix",
-          evidence: {
-            kind: "current-code",
-            sliceId: "ev-1",
-            startLine: 21,
-            endLine: 22,
-            quote: "const v021 = 1;\nconst v022 = 1;",
-            explanation: "The guard now bounds the value.",
-          },
-          relatedCurrentFindingIndexes: [],
-        },
-      ],
-    });
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
-      recheck: {
-        evidence: Array<{ id: string; oldStart: number; newStart: number; oldLines: string[]; newLines: string[] }>;
-      };
-    };
-    const window = runnerInput.recheck.evidence.find((slice) => slice.id === "ev-1")!;
-    // Header arithmetic stays exact: window one starts at file line 1 and its
-    // 80 NEW-side lines really do cover the target line 21.
-    expect(window.oldStart).toBe(1);
-    expect(window.newStart).toBe(1);
-    expect(window.newLines).toHaveLength(80);
-    expect(window.newLines[20]).toBe("const v021 = 1;");
-    // The sides are genuinely different: the added line exists on the new side
-    // only, so this window reads 79 old lines against 80 new ones.
-    expect(window.oldLines).toHaveLength(79);
-    expect(window.newLines[79]).toBe("const added = 1;");
-    expect(window.oldLines).not.toContain("const added = 1;");
-    // Slice ids stay the shared catalog's stable numbering.
-    expect(runnerInput.recheck.evidence.map((slice) => slice.id)).toEqual(["ev-1", "ev-2", "ev-3"]);
-    // The in-window quote validates: the row closes as a verified fix.
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("addressed (verified-fix)");
-  });
-
-  test("windows are ordered nearest the concern first, so the third one is ev-1 with its own starts", async () => {
-    reset();
-    sandbox.diffStdout = oversizedAuthDiff(200);
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // The concern sits at line 180 — window THREE in file order (lines 161-200)
-    // and the NEAREST window to the cited line. Nearest-first ordering must put
-    // it first and number it ev-1, with the partition's own exact starts.
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    db.raw.prepare(`UPDATE review_findings SET original_json = ? WHERE id = ?`).run(
-      JSON.stringify({ ...TARGET_ORIGINAL, lineStart: 180, lineEnd: 180 }),
-      TARGET_ROW_ID,
-    );
-    sandbox.recheckFileContent = JSON.stringify({
-      schema: "mstar.recheck/v1",
-      headSha: SHA,
-      results: [
-        {
-          rowId: TARGET_ROW_ID,
-          disposition: "addressed",
-          reason: "verified-fix",
-          evidence: {
-            kind: "current-code",
-            sliceId: "ev-1",
-            startLine: 180,
-            endLine: 180,
-            quote: "const v180 = 1;",
-            explanation: "The guard now bounds the value.",
-          },
-          relatedCurrentFindingIndexes: [],
-        },
-      ],
-    });
-    await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const runnerInput = JSON.parse(sandbox.writtenInputJson!) as {
-      recheck: {
-        evidence: Array<{ id: string; oldStart: number; newStart: number; newLines: string[] }>;
-      };
-    };
-    // Nearest first, then by distance: 160 (distance 20), 80 (100), 1 (179).
-    expect(runnerInput.recheck.evidence.map((slice) => [slice.id, slice.oldStart])).toEqual([
-      ["ev-1", 160],
-      ["ev-2", 80],
-      ["ev-3", 1],
-    ]);
-    const nearest = runnerInput.recheck.evidence[0]!;
-    // The window's two sides are genuinely offset: the added line makes every
-    // window past it start one line later on the new side.
-    expect(nearest.oldStart).toBe(160);
-    expect(nearest.newStart).toBe(161);
-    expect(nearest.newLines).toHaveLength(40); // 161-200: the tail window
-    expect(nearest.newLines[19]).toBe("const v180 = 1;");
-    // The line-180 quote validates against THAT window, so the nearest slice is
-    // the one the seat can actually cite.
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("addressed (verified-fix)");
-  });
-
-  test("a quote outside the cited window still fails validation", async () => {
-    reset();
-    sandbox.diffStdout = oversizedAuthDiff(200);
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // Line 190 lives in window THREE (ev-3). Citing ev-1 (lines 1-80) with that
-    // quote is out of range, so the row is dropped and cannot close anything.
-    sandbox.recheckFileContent = JSON.stringify({
-      schema: "mstar.recheck/v1",
-      headSha: SHA,
-      results: [
-        {
-          rowId: TARGET_ROW_ID,
-          disposition: "addressed",
-          reason: "verified-fix",
-          evidence: {
-            kind: "current-code",
-            sliceId: "ev-1",
-            startLine: 190,
-            endLine: 190,
-            quote: "const v190 = 1;",
-            explanation: "Cited far outside the slice it names.",
-          },
-          relatedCurrentFindingIndexes: [],
-        },
-      ],
-    });
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("unverifiable (invalid-output)");
-    expect(prepared.body).not.toContain("addressed (verified-fix)");
   });
 
   test("a row the document answers AND the status names keeps its real assessment, never invalid-output", async () => {
@@ -1287,41 +916,6 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(commenterCalls.some((c) => c.op === "resolve")).toBe(true);
   });
 
-  test("the per-slice byte bound measures the slice AS SERIALIZED, id included", async () => {
-    reset();
-    // One 3-line hunk whose middle context line is padded so the slice lands in
-    // the window between the two measurement points: the id-less object is
-    // within 8 KiB (8190 bytes) while the slice as serialized — with its
-    // `ev-N` id — is 8194, over the bound. Measuring before the id is assigned
-    // let this slice ride the wire over the bound it claims to enforce.
-    sandbox.diffStdout = [
-      "diff --git a/src/auth.ts b/src/auth.ts",
-      "index 1111111..2222222 100644",
-      "--- a/src/auth.ts",
-      "+++ b/src/auth.ts",
-      "@@ -19,3 +19,3 @@",
-      " const header = req.headers;",
-      ` const filler = "${"x".repeat(3854)}";`,
-      " const claims = decode(token);",
-      "",
-    ].join("\n");
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    // The oversized slice is dropped, so nothing proves the row and no recheck
-    // input is sent at all — the row is `no-evidence`, never an invalid answer.
-    expect(sandbox.calls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("unverifiable (no-evidence)");
-    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
-  });
-
   test("an unreadable document or status read keeps the conservative path: invalid-output, no throw, exactly one `recheck` attribution row", async () => {
     // Three ways a read can yield nothing: no file, a stream past the byte
     // bound (flag 1), and a failed shell chain — each on the status side, plus
@@ -1395,91 +989,5 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     // The row still reads as an attempted-but-unusable answer.
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (invalid-output)");
-  });
-
-  test("a related index the final envelope cannot resolve is fabrication: unverifiable/conflict, no resolution", async () => {
-    // The seat cites finding #1 while the round's final envelope carries one
-    // finding (#0): the index names nothing the consumer can verify, so the
-    // closure claim is never trusted (§7.4 conservative precedence).
-    reset();
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [1] });
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("unverifiable (conflict)");
-    expect(prepared.body).not.toContain("addressed (verified-fix)");
-    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
-    const round = db.raw
-      .query(`SELECT assessment_json FROM review_finding_rounds WHERE finding_row_id = ?`)
-      .get(TARGET_ROW_ID) as { assessment_json: string } | null;
-    expect(JSON.parse(round!.assessment_json)).toMatchObject({ disposition: "unverifiable", reason: "conflict" });
-  });
-
-  test("an addressed row that names any in-range related concern is still a conflict, never a closure", async () => {
-    // The related concern exists in the final envelope, so it is unresolved
-    // by definition: closure loses to the surviving concern.
-    reset();
-    sandbox.diffStdout = VALID_DIFF;
-    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [0] });
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("unverifiable (conflict)");
-    expect(prepared.body).not.toContain("addressed (verified-fix)");
-    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
-    const row = db.raw.query("SELECT state FROM review_findings").get() as { state: string };
-    expect(row.state).toBe("open");
-  });
-
-  test("an in-range related index on a non-closure row is not a conflict: the guard only bites `addressed`", async () => {
-    // Same in-range index, but the seat did not claim a fix: `dismissed` and
-    // `unverifiable` keep their own verdict instead of being rewritten.
-    for (const verdict of [
-      { disposition: "dismissed", reason: "non-fix-dismissal", expected: "dismissed (non-fix-dismissal)" },
-      { disposition: "unverifiable", reason: "no-evidence", expected: "unverifiable (no-evidence)" },
-    ] as const) {
-      reset();
-      sandbox.diffStdout = VALID_DIFF;
-      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-      sandbox.recheckFileContent = recheckDocWith({
-        disposition: verdict.disposition,
-        reason: verdict.reason,
-        evidence: null,
-        relatedCurrentFindingIndexes: [0],
-      });
-      const db = await createSeededTestD1();
-      await seedPriorPublication(db);
-      await seedOpenTarget(db);
-      await seedAssociation(db, "PRRT_thread1");
-      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-      await consumer(makeBatch(makePayload()));
-
-      const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-      expect(prepared.body).toContain(verdict.expected);
-      expect(prepared.body).not.toContain("unverifiable (conflict)");
-      const round = db.raw
-        .query(`SELECT assessment_json FROM review_finding_rounds WHERE finding_row_id = ?`)
-        .get(TARGET_ROW_ID) as { assessment_json: string } | null;
-      expect(JSON.parse(round!.assessment_json)).toMatchObject({
-        disposition: verdict.disposition,
-        reason: verdict.reason,
-      });
-    }
   });
 });

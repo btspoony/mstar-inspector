@@ -60,6 +60,13 @@ export type EvidenceSlice = {
   id: string; headSha: string; baseSha: string; path: string;
   oldPath: string | null; kind: 'hunk' | 'deleted-file';
   oldStart: number; oldLines: string[]; newStart: number; newLines: string[];
+  /**
+   * New-side line numbers this hunk ADDED (a `+` line), empty on a
+   * deleted-file slice. A `current-code` closure must cite at least one of
+   * them: an unchanged context line proves the code is still THERE, not that
+   * the change fixed anything.
+   */
+  addedNewLines: number[];
   oldBlobOid: string | null; headBlobOid: string | null;
   absentAtHead: boolean; complete: boolean;
 };
@@ -283,7 +290,9 @@ function oldLinesStillPresent(quote: string, newLines: readonly string[]): boole
  * trusted catalog slice (spec §7.3 "Validation"): the slice must exist and
  * be complete; the cited range must be integer/ordered and fall entirely
  * inside the appropriate old/new side; the quote must equal those lines
- * after `normalizeQuoteText`; every proof cites the original concern's file
+ * after `normalizeQuoteText`; a `current-code` fix must additionally cite at
+ * least one line the hunk ADDED (an unchanged context line proves presence,
+ * not a fix); every proof cites the original concern's file
  * (a `current-code` fix may move lines, never files), and removed/replaced
  * proof must intersect the original concern's old range and demonstrate the
  * relevant structural change. Returns null when eligible, else the failure
@@ -320,6 +329,14 @@ function addressedProofError(
     }
     if (normalizeQuoteText(expected) !== quote) {
       return 'current-code quote does not match the cited new-side lines';
+    }
+    // Proof of CHANGE, not of presence: the cited range must include at least
+    // one line this hunk actually added. A context line merely repeats the
+    // pre-change code, so citing it alone proves nothing was fixed (a
+    // replacement proof belongs to `replaced-code`, which also tests the old
+    // side).
+    if (!slice.addedNewLines.some((line) => line >= evidence.startLine && line <= evidence.endLine)) {
+      return 'current-code cites only unchanged context lines (no added line in the cited range)';
     }
     // Binding to the concern's own file: a fix may move the code (and the
     // file itself may be renamed, so either path identifies it), but a

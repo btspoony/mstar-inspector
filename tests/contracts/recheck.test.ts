@@ -50,7 +50,7 @@ const ORIGINAL = {
 const DELETED_FILE: EvidenceSlice = {
   id: "slice-del", headSha: SHA, baseSha: "b" + "0".repeat(39), path: "src/old.ts", oldPath: null,
   kind: "deleted-file",
-  oldStart: 5, oldLines: ["old line 5", "old line 6"], newStart: 0, newLines: [],
+  oldStart: 5, oldLines: ["old line 5", "old line 6"], newStart: 0, newLines: [], addedNewLines: [],
   oldBlobOid: "oid-old", headBlobOid: null,
   absentAtHead: true, complete: true,
 };
@@ -59,6 +59,7 @@ const REPLACED_HUNK: EvidenceSlice = {
   id: "slice-rep", headSha: SHA, baseSha: "b" + "0".repeat(39), path: "src/old.ts", oldPath: "src/old.ts",
   kind: "hunk",
   oldStart: 5, oldLines: ["count = a + b;", "render();"], newStart: 5, newLines: ["total = a + b;", "render();"],
+  addedNewLines: [5],
   oldBlobOid: "oid-old", headBlobOid: "oid-head",
   absentAtHead: false, complete: true,
 };
@@ -67,6 +68,7 @@ const REMOVED_STILL_PRESENT: EvidenceSlice = {
   id: "slice-still", headSha: SHA, baseSha: "b" + "0".repeat(39), path: "src/a.ts", oldPath: null,
   kind: "hunk",
   oldStart: 8, oldLines: ["const a = 1;", "const b = 2;"], newStart: 8, newLines: ["const a = 0;", "const b = 2;"],
+  addedNewLines: [8],
   oldBlobOid: "oid-old", headBlobOid: "oid-head",
   absentAtHead: false, complete: true,
 };
@@ -81,6 +83,7 @@ const INSERTED_INSIDE: EvidenceSlice = {
   kind: "hunk",
   oldStart: 8, oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
   newStart: 8, newLines: ["const a = 1;", "const inserted = 0;", "const b = 2;", "const c = 3;"],
+  addedNewLines: [9],
   oldBlobOid: "oid-old", headBlobOid: "oid-head",
   absentAtHead: false, complete: true,
 };
@@ -100,6 +103,7 @@ const FOREIGN_HUNK: EvidenceSlice = {
   kind: "hunk",
   oldStart: 8, oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
   newStart: 8, newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
+  addedNewLines: [9],
   oldBlobOid: "oid-old", headBlobOid: "oid-head",
   absentAtHead: false, complete: true,
 };
@@ -599,6 +603,7 @@ describe("validateRecheckDoc — addressed eligibility", () => {
       id: "slice-rep-context",
       oldLines: ["count = a + b;", "render();"],
       newLines: ["total = a + b;", "render();", "audit();"],
+      addedNewLines: [5, 7],
     };
     const outcome = validateRecheckDoc(
       { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({
@@ -657,13 +662,15 @@ describe("validateRecheckDoc — addressed eligibility", () => {
     expectDroppedRow(foreign, { index: 0, rowId: "row-1", error: "does not match the original concern file" });
 
     // The same file cited OUTSIDE the original line range stays eligible: a fix
-    // may move the code, so current-code is not range-bound.
+    // may move the code, so current-code is not range-bound. It still has to
+    // cite an ADDED line — moving the proof to the context line at 8 would
+    // prove presence only.
     const moved = validateRecheckDoc(
       {
         schema: "mstar.recheck/v1",
         headSha: SHA,
         results: [
-          addressedResult({ evidence: evidence({ startLine: 8, endLine: 8, quote: "const a = 1;" }) }),
+          addressedResult({ evidence: evidence({ startLine: 9, endLine: 9, quote: "const b = null ?? 2;" }) }),
         ],
       },
       input({ targets: [{ ...TARGET, original: { ...ORIGINAL, lineStart: 10, lineEnd: 10 } }] }),

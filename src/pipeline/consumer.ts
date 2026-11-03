@@ -122,7 +122,17 @@ import {
 import { boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
-import { buildGitOpsCommands, readRecheckCommand, readRecheckStatusCommand, runnerCommand, writeJsonCommand } from "./gitops";
+import {
+  buildGitOpsCommands,
+  CLONE_DIR,
+  DIFF_PATH,
+  readRecheckCommand,
+  readRecheckStatusCommand,
+  RUNNER_INPUT_PATH,
+  RUNNER_PATH,
+  runnerCommand,
+  writeJsonCommand,
+} from "./gitops";
 import {
   assertSandboxGrant,
   buildClosureSection,
@@ -200,11 +210,7 @@ export type PipelineEnv = {
    */
 };
 
-/** In-image paths (Dockerfile v2 / smoke — single source of truth). */
-const CLONE_DIR = "/workspace/repo";
-const DIFF_PATH = "/workspace/pr.diff";
-const RUNNER_INPUT_PATH = "/workspace/review-input.json";
-const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
+/** In-image paths (Dockerfile v2 / smoke — the gitops constants are the SSOT). */
 const HARNESS_ROOT = "/opt/mstar-harness";
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
@@ -931,7 +937,9 @@ function buildEvidenceCatalog(
   /**
    * One candidate slice body. `oldStart`/`newStart` come straight from the
    * hunk's own per-line counters, so a window's arithmetic stays exact against
-   * the hunk header (the file lines it names are the lines it carries).
+   * the hunk header (the file lines it names are the lines it carries), and
+   * `addedNewLines` carries the new-side numbers the hunk ADDED — the material
+   * a `current-code` closure must cite at least one of.
    */
   type Draft = {
     file: ParsedDiffFile;
@@ -940,6 +948,7 @@ function buildEvidenceCatalog(
     oldLines: string[];
     newStart: number;
     newLines: string[];
+    addedNewLines: number[];
     complete: boolean;
   };
 
@@ -952,6 +961,7 @@ function buildEvidenceCatalog(
       oldLines: window.flatMap((line) => (line.old === null ? [] : [line.text])),
       newStart: window[0]!.newBefore,
       newLines: window.flatMap((line) => (line.new === null ? [] : [line.text])),
+      addedNewLines: window.flatMap((line) => (line.old === null && line.new !== null ? [line.new] : [])),
       complete: true,
     };
   };
@@ -969,6 +979,9 @@ function buildEvidenceCatalog(
           oldLines: hunk.oldLines,
           newStart: hunk.newStart,
           newLines: hunk.newLines,
+          addedNewLines: file.deleted
+            ? []
+            : hunk.lines.flatMap((line) => (line.old === null && line.new !== null ? [line.new] : [])),
           complete: file.deleted ? hunk.oldStart === 1 : true,
         },
       ];
@@ -1002,6 +1015,7 @@ function buildEvidenceCatalog(
       oldLines: draft.oldLines,
       newStart: draft.newStart,
       newLines: draft.newLines,
+      addedNewLines: draft.addedNewLines,
       oldBlobOid: draft.file.oldBlobOid,
       headBlobOid: draft.file.headBlobOid,
       absentAtHead: draft.file.deleted,
@@ -1221,13 +1235,20 @@ function reconcileRecheckRound(input: {
 
   for (const target of targets) {
     const docResult = doc?.results.find((r) => r.rowId === target.rowId) ?? undefined;
+    // Never-sent rows: the catalog could not prove them, the catalog byte
+    // budget dropped their slices, or the §7.3 size budget excluded them.
+    // They keep BOTH their own reason and their own rotation clock — a seat
+    // that never received the row cannot have answered it.
+    const neverSent =
+      catalogExcluded.has(target.rowId) ||
+      catalogBudgetExcluded.has(target.rowId) ||
+      budgetExcluded.has(target.rowId);
     const rejected =
       rejectedRowIds.has(target.rowId) ||
       anonymouslyRejected.has(target.rowId) ||
       // Only a row that actually rode the wire can be blamed for the empty
-      // result; the catalog branches above and this size-budget guard keep
-      // every never-sent row on its own reason.
-      (emptyResultRound && docResult === undefined && !budgetExcluded.has(target.rowId));
+      // result; `neverSent` keeps every excluded row out of the attempt set.
+      (emptyResultRound && docResult === undefined && !neverSent);
     let assessment: Assessment;
     if (staleContext) {
       // Stale lifecycle state (pending-journal apply or capture failed):

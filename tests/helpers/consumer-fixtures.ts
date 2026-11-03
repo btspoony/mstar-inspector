@@ -10,7 +10,19 @@
 import { mock } from "bun:test";
 import type { ReviewOutput } from "../../src/review/schema";
 import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
-import { readRecheckCommand, readRecheckStatusCommand } from "../../src/pipeline/gitops";
+import {
+  buildGitOpsCommands,
+  CLONE_DIR,
+  DIFF_PATH,
+  readRecheckCommand,
+  readRecheckStatusCommand,
+  RUNNER_INPUT_PATH,
+  RUNNER_PATH,
+  runnerCommand,
+  writeJsonCommand,
+} from "../../src/pipeline/gitops";
+import type { GitOpsCommands } from "../../src/pipeline/gitops";
+import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
@@ -131,20 +143,95 @@ export const VALID_DIFF = [
 // ---------------------------------------------------------------------------
 // Sandbox exec double (spec §7.7 steps 1–8). It answers ONLY the commands
 // consumer.ts issues: anything else throws, so a new/renamed product command
-// fails the suite instead of reading as an empty success.
+// fails the suite instead of reading as an empty success. Every expected
+// string is BUILT by the production builders from the same path constants the
+// consumer passes, so a command-shape change edits the product, not this
+// double — re-typing the strings here would turn the lockstep edit into a
+// contract assertion that never fails.
 // ---------------------------------------------------------------------------
 
-/** The in-image paths consumer.ts execs against (its private constants). */
-const CLONE_DIR = "/workspace/repo";
-const DIFF_PATH = "/workspace/pr.diff";
-const RUNNER_INPUT_PATH = "/workspace/review-input.json";
-const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
+/**
+ * The fixed review job every consumer suite sends. The double derives its
+ * expected commands from THESE through the builders, so a payload change
+ * fails loudly (`unrecognized command`) instead of silently answering the
+ * wrong command.
+ */
+export const TEST_INSTALLATION_ID = 123;
+export const TEST_OWNER = "acme";
+export const TEST_REPO = "widgets";
+export const TEST_PR_NUMBER = 42;
+/** Review tier the harness env leaves unset (resolveReviewLevel's landing tier). */
+const TEST_REVIEW_LEVEL = "default";
+
+/**
+ * The payload-derived commands the consumer WILL issue for this job, built by
+ * the production builders and keyed by the command string the double sees.
+ * Tests that assemble a batch inline (without `makeBatch`) still run the
+ * canonical payload, so its commands are declared by default below; `makeBatch`
+ * adds the commands for its own payload.
+ */
+function gitOpsCommandsFor(payload: {
+  owner: string;
+  repo: string;
+  pr_number: number;
+}): Map<string, keyof GitOpsCommands> {
+  const commands = buildGitOpsCommands({
+    owner: payload.owner,
+    repo: payload.repo,
+    prNumber: payload.pr_number,
+    cloneDir: CLONE_DIR,
+    diffPath: DIFF_PATH,
+    runnerPath: RUNNER_PATH,
+    level: TEST_REVIEW_LEVEL,
+    inputPath: RUNNER_INPUT_PATH,
+  });
+  return new Map(
+    Object.entries(commands).map(([kind, command]) => [command, kind as keyof GitOpsCommands] as const),
+  );
+}
+
+export function registerGitOpsCommands(
+  state: FakeSandboxState,
+  payload: { owner: string; repo: string; pr_number: number },
+): void {
+  for (const [command, kind] of gitOpsCommandsFor(payload)) state.gitOps.set(command, kind);
+}
+
+/** The canonical test job's commands, declared for every sandbox state. */
+const DEFAULT_GITOPS = gitOpsCommandsFor({
+  owner: TEST_OWNER,
+  repo: TEST_REPO,
+  pr_number: TEST_PR_NUMBER,
+});
+/**
+ * The runner exec for EVERY legal tier, with and without the optional
+ * `--recheck-out`: the consumer forwards REVIEW_LEVEL verbatim.
+ */
+const RUNNER_CMDS: ReadonlySet<string> = new Set(
+  REVIEW_LEVELS.flatMap((level) => [
+    runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH),
+    runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH),
+  ]),
+);
 /** The audited bounded reads, built by production code from the fixed paths. */
 const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
 const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
+/**
+ * The input write is the one command with a per-round payload; its fixed head
+ * and tail come from the builder itself, so only the base64 body is asserted
+ * by shape.
+ */
+const WRITE_INPUT_PLACEHOLDER = "QUJD"; // base64("ABC")
+const WRITE_INPUT_PROBE = writeJsonCommand(RUNNER_INPUT_PATH, WRITE_INPUT_PLACEHOLDER);
+const WRITE_INPUT_HEAD = WRITE_INPUT_PROBE.slice(0, WRITE_INPUT_PROBE.indexOf(WRITE_INPUT_PLACEHOLDER));
+const WRITE_INPUT_TAIL = WRITE_INPUT_PROBE.slice(
+  WRITE_INPUT_PROBE.indexOf(WRITE_INPUT_PLACEHOLDER) + WRITE_INPUT_PLACEHOLDER.length,
+);
 
 export type FakeSandboxState = {
   calls: Array<{ cmd: string; opts?: unknown }>;
+  /** Commands built by the production builders for the batch's payload. */
+  gitOps: Map<string, keyof GitOpsCommands>;
   /** Authoritative sha the checkout reports (becomes the round's HEAD). */
   resolvedSha: string;
   revParseExitCode: number;
@@ -180,6 +267,7 @@ export type FakeSandboxState = {
 export function initialFakeSandboxState(): FakeSandboxState {
   return {
     calls: [],
+    gitOps: new Map(DEFAULT_GITOPS),
     resolvedSha: SHA,
     revParseExitCode: 0,
     cloneExitCode: 0,
@@ -215,21 +303,23 @@ type ExecResult = { stdout: string; stderr: string; exitCode: number };
 
 /** The declared command set; an unlisted command is a test failure, not a pass. */
 function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
-  if (cmd.startsWith(`rm -rf '${CLONE_DIR}' && git init '${CLONE_DIR}'`)) {
-    return { stdout: "", stderr: "", exitCode: state.cloneExitCode };
+  switch (state.gitOps.get(cmd)) {
+    case "clone":
+      return { stdout: "", stderr: "", exitCode: state.cloneExitCode };
+    case "checkedOutSha":
+      return { stdout: `${state.resolvedSha}\n`, stderr: "", exitCode: state.revParseExitCode };
+    case "diff":
+      return { stdout: state.diffStdout, stderr: "", exitCode: state.diffExitCode };
+    case "numstat":
+      return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };
+    case "runner":
+      return { stdout: state.runnerStdout, stderr: state.runnerStderr, exitCode: state.runnerExitCode };
+    default:
+      break;
   }
-  if (cmd === `git -C '${CLONE_DIR}' rev-parse HEAD`) {
-    return { stdout: `${state.resolvedSha}\n`, stderr: "", exitCode: state.revParseExitCode };
-  }
-  if (cmd.startsWith("gh pr diff '") && cmd.includes(` > '${DIFF_PATH}'`)) {
-    return { stdout: state.diffStdout, stderr: "", exitCode: state.diffExitCode };
-  }
-  if (cmd === `git apply --numstat '${DIFF_PATH}'`) {
-    return { stdout: state.numstatStdout, stderr: "", exitCode: state.numstatExitCode };
-  }
-  if (cmd.startsWith("printf '%s' '") && cmd.endsWith(`| base64 -d > '${RUNNER_INPUT_PATH}'`)) {
-    const match = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(cmd);
-    state.writtenInputJson = match ? Buffer.from(match[1]!, "base64").toString("utf8") : undefined;
+  if (cmd.startsWith(WRITE_INPUT_HEAD) && cmd.endsWith(WRITE_INPUT_TAIL)) {
+    const payload = cmd.slice(WRITE_INPUT_HEAD.length, cmd.length - WRITE_INPUT_TAIL.length);
+    state.writtenInputJson = Buffer.from(payload, "base64").toString("utf8");
     return { stdout: "", stderr: "", exitCode: state.writeInputExitCode };
   }
   if (cmd === RECHECK_DOC_READ) {
@@ -246,7 +336,7 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
     if (state.recheckStatusContent === null) return { stdout: "", stderr: "no such file", exitCode: 1 };
     return { stdout: `${state.recheckStatusContent}\n${state.recheckStatusOverflow}\n`, stderr: "", exitCode: 0 };
   }
-  if (cmd.startsWith(`bun run '${RUNNER_PATH}' --level '`) && cmd.includes(`--input '${RUNNER_INPUT_PATH}'`)) {
+  if (RUNNER_CMDS.has(cmd)) {
     return { stdout: state.runnerStdout, stderr: state.runnerStderr, exitCode: state.runnerExitCode };
   }
   throw new Error(`fake sandbox: unrecognized command — declare it in tests/helpers/consumer-fixtures.ts: ${cmd}`);

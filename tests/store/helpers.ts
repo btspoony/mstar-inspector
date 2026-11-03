@@ -31,12 +31,18 @@ const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** Earliest review-store schema (production before the github_apps work). */
 const BASE_MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
 /**
- * Full migration list, read from disk: filename order = wrangler apply order.
- * Reading the directory keeps this list correct as migrations are added.
+ * Wrangler applies migrations in NUMERIC prefix order, so a lexical filename
+ * compare would put `1000_*` before `999_*`. Every migration selector below
+ * (and the equivalence fixtures in the pipeline suites) goes through this.
  */
-const ALL_MIGRATIONS = readdirSync(MIGRATIONS_DIR)
-  .filter((name) => name.endsWith(".sql"))
-  .sort();
+export function migrationsAfter(number: number): string[] {
+  return readdirSync(MIGRATIONS_DIR)
+    .filter((name) => name.endsWith(".sql") && Number.parseInt(name, 10) > number)
+    .sort((a, b) => Number.parseInt(a, 10) - Number.parseInt(b, 10));
+}
+
+/** Full migration list, in wrangler's apply order (numeric, not lexical). */
+const ALL_MIGRATIONS = migrationsAfter(0);
 
 /** Execute the migration DDL on a fresh in-memory database. */
 function applyMigration(db: Database, migrations: readonly string[]): void {

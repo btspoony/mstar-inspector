@@ -59,6 +59,18 @@ export type GitOpsCommands = {
   runner: ShellCommand;
 };
 
+/**
+ * The in-image layout every review run execs against. They live HERE so the
+ * Step 1–8 commands have ONE source: the consumer passes these paths into the
+ * builders, and the sandbox double in the consumer suites derives its
+ * expected commands from the same builders (a re-typed literal on either side
+ * would turn a real contract assertion into a lockstep edit).
+ */
+export const CLONE_DIR = "/workspace/repo";
+export const DIFF_PATH = "/workspace/pr.diff";
+export const RUNNER_INPUT_PATH = "/workspace/review-input.json";
+export const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
+
 /** GitHub name charset (owner/repo) — matches signed webhook payload reality. */
 const GITHUB_NAME_RE = /^[A-Za-z0-9._-]+$/;
 
