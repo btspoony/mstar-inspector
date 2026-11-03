@@ -2,7 +2,7 @@
  * The image rebuild gate's decision seam (`scripts/check-image-inputs.ts`).
  *
  * The git invocation is the CLI's, not this test's: what must hold is the
- * VERDICT — the five declared path families fail without a marker change,
+ * VERDICT — the six declared path families fail without a marker change,
  * nothing else does, and a diff that changes the marker passes.
  */
 import { describe, expect, test } from "bun:test";
@@ -37,6 +37,12 @@ describe("image gate", () => {
       reason: "image-input-without-marker",
     }));
 
+  test("a verify-synthesis.sh change alone fails without the marker", () =>
+    expect(evaluateImageGate(["packages/runner/verify-synthesis.sh"], "")).toEqual({
+      ok: false,
+      reason: "image-input-without-marker",
+    }));
+
   test("a Dockerfile change that does not touch the marker fails", () =>
     expect(evaluateImageGate(["sandbox-image/Dockerfile"], "-FROM old\n+FROM new")).toEqual({
       ok: false,
@@ -50,12 +56,13 @@ describe("touchesImageInput", () => {
     "packages/shared/src/credential-payload.ts",
     "packages/runner/package.json",
     "packages/runner/bun.lock",
+    "packages/runner/verify-synthesis.sh",
     "sandbox-image/cli-global/package.json",
   ];
 
-  test("matches each of the five declared path families", () => {
+  test("matches each of the six declared path families", () => {
     for (const path of declared) expect(touchesImageInput([path])).toBe(true);
-    expect(IMAGE_INPUT_PATTERNS).toHaveLength(5);
+    expect(IMAGE_INPUT_PATTERNS).toHaveLength(6);
   });
 
   test("an untouched path list passes", () => {

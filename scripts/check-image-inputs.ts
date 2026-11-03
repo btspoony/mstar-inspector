@@ -21,6 +21,7 @@ export const IMAGE_INPUT_PATTERNS: readonly RegExp[] = [
   /^packages\/shared\/src\//,
   /^packages\/runner\/package\.json$/,
   /^packages\/runner\/bun\.lock$/,
+  /^packages\/runner\/verify-synthesis\.sh$/,
   /^sandbox-image\//,
 ];
 
@@ -39,6 +40,7 @@ export const IMAGE_REBUILD_INSTRUCTION = [
   "- `packages/shared/src/**`",
   "- `packages/runner/package.json` or `packages/runner/bun.lock` (the image",
   "  installs from them, so an omp SDK bump is an image change)",
+  "- `packages/runner/verify-synthesis.sh` (copied to `/opt/verify-synthesis.sh`)",
   "- `sandbox-image/**` — the CLI shims and their lockfiles",
 ].join("\n");
 

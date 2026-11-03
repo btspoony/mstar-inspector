@@ -2063,12 +2063,13 @@ turns that mismatch into a failing check: it diffs the pull request against its
 base commit and fails when the diff touches an image input without also changing
 the `# rebuild:` marker block in `sandbox-image/Dockerfile`.
 
-The five input path families it covers — the gate's whole input vocabulary:
+The six input path families it covers — the gate's whole input vocabulary:
 
 - `packages/runner/src/**`
 - `packages/shared/src/**`
 - `packages/runner/package.json`
 - `packages/runner/bun.lock`
+- `packages/runner/verify-synthesis.sh`
 - `sandbox-image/**`
 
 A diff that touches an image input passes only with one added or removed
