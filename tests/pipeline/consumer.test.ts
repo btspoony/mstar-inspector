@@ -3289,6 +3289,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       outcome: "failed",
       reason: "seat-failed",
       rejected: 0,
+      rejected_row_ids: [],
       error: "session aborted",
     });
     const db = await createSeededTestD1();
@@ -3352,34 +3353,20 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     }
     const rejectedRowIds = [seeded[0]!, seeded[1]!];
     const assessableRowIds = seeded.slice(2);
-    // Rows the gate drops (foreign slice citation) still occupy a results slot.
-    const badRow = (rowId: string) => ({
-      rowId,
-      disposition: "addressed",
-      reason: "verified-fix",
-      evidence: {
-        kind: "current-code",
-        sliceId: "no-such-slice",
-        startLine: 20,
-        endLine: 21,
-        quote: ADDRESSED_QUOTE,
-        explanation: "x",
-      },
-      relatedCurrentFindingIndexes: [],
-    });
+    // The seat writes the ALREADY-FILTERED document: the rows its gate dropped
+    // are gone from `results`, so a second validation pass cannot recover them.
+    // The status's `rejected_row_ids` is the only record, and the reconciliation
+    // must still name them `invalid-output`.
     recheckFileContent = JSON.stringify({
       schema: "mstar.recheck/v1",
       headSha: SHA,
-      results: [
-        ...rejectedRowIds.map(badRow),
-        ...assessableRowIds.map((rowId) => ({
-          rowId,
-          disposition: "unverifiable",
-          reason: "no-evidence",
-          evidence: null,
-          relatedCurrentFindingIndexes: [],
-        })),
-      ],
+      results: assessableRowIds.map((rowId) => ({
+        rowId,
+        disposition: "unverifiable",
+        reason: "no-evidence",
+        evidence: null,
+        relatedCurrentFindingIndexes: [],
+      })),
     });
     recheckStatusContent = JSON.stringify({
       schema: "mstar.recheck-status/v1",
@@ -3387,6 +3374,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       outcome: "ok",
       reason: null,
       rejected: 2,
+      rejected_row_ids: rejectedRowIds,
       error: null,
     });
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -3424,6 +3412,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       outcome: "ok",
       reason: null,
       rejected: 0,
+      rejected_row_ids: [],
       error: null,
     });
     const db = await createSeededTestD1();

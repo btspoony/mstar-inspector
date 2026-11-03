@@ -26,8 +26,9 @@
  * throws and never loses the review. The status document is the attributable
  * record (outcome + reason + error) the runner writes for D1; the stderr
  * event stays for container logs. Validation is `validateRecheckDoc`
- * (fail-closed at document level, row-level drops counted in
- * `status.rejected`); the strict outputSchema only enforces shape.
+ * (fail-closed at document level, row-level drops named in
+ * `status.rejected_row_ids` and counted by `status.rejected`); the strict
+ * outputSchema only enforces shape.
  *
  * Shared soft clock: the same `anchorRecheckDeadline` call also anchors the
  * tier's SOFT clock, and `remainingSoftMinutes(now)` is its pure view — one
@@ -279,6 +280,27 @@ export function recheckAssignment(input: RecheckInput): string {
   ].join("\n");
 }
 
+/**
+ * Secret shapes the runner must never write to the status document. The
+ * runner is packaged beside `packages/shared` in the sandbox image, so it
+ * cannot import the consumer's `src/pipeline/redact.ts`; these are the
+ * credential-prefix patterns that module applies, kept tiny on purpose.
+ */
+const SECRET_SHAPES: RegExp[] = [
+  /\bBearer\s+[A-Za-z0-9._~+/=-]+/g,
+  /gh[pous]_[A-Za-z0-9]+/g,
+  /github_pat_[A-Za-z0-9_]+/g,
+  /sk-[A-Za-z0-9_-]{8,}/g,
+];
+
+/** Redact secret-shaped spans, then bound the result — never the reverse: a
+ * secret straddling the cut would survive as a fragment. */
+function redactedStatusError(text: string): string {
+  let out = text;
+  for (const pattern of SECRET_SHAPES) out = out.replace(pattern, "[REDACTED]");
+  return out.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
+}
+
 /** Unwrap the strict-validated structured payload of the recheck child. */
 function recheckStructuredData(result: Awaited<ReturnType<typeof runStructuredSubagent>>): unknown {
   const single = result.result;
@@ -318,7 +340,7 @@ export async function runRecheckSeat(input: {
   const maxRuntimeMs = currentRecheckBudget(Date.now());
   if (maxRuntimeMs === 0) {
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget" }));
-    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, error: null } };
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], error: null } };
   }
   let gate: RecheckGateResult;
   try {
@@ -337,14 +359,30 @@ export async function runRecheckSeat(input: {
     });
     gate = validateRecheckDoc(recheckStructuredData(result), input.input);
   } catch (error) {
-    const message = (error as Error).message.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
+    const message = redactedStatusError((error as Error).message);
     console.error(JSON.stringify({ event: "recheck_seat_failed", error: message }));
-    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, error: message } };
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, rejected_row_ids: [], error: message } };
   }
   if (!gate.ok) {
-    const error = gate.error.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
+    const error = redactedStatusError(gate.error);
     console.error(JSON.stringify({ event: "recheck_seat_failed", error: `recheck document failed validation: ${error}` }));
-    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "invalid-document", rejected: 0, error } };
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "invalid-document", rejected: 0, rejected_row_ids: [], error } };
   }
-  return { doc: gate.doc, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "ok", reason: null, rejected: gate.rejected.length, error: null } };
+  // Rows without an identity (non-object / no usable rowId) cannot be named, so
+  // the counted figure is exactly the named set — both faces say the same thing.
+  const rejectedRowIds = gate.rejected
+    .flatMap((row) => (row.rowId === null ? [] : [row.rowId]))
+    .sort();
+  return {
+    doc: gate.doc,
+    status: {
+      schema: "mstar.recheck-status/v1",
+      headSha,
+      outcome: "ok",
+      reason: null,
+      rejected: rejectedRowIds.length,
+      rejected_row_ids: rejectedRowIds,
+      error: null,
+    },
+  };
 }

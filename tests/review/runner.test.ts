@@ -668,6 +668,7 @@ describe("runner entry — --recheck-out channel", () => {
       outcome: "failed",
       reason: "seat-failed",
       rejected: 0,
+      rejected_row_ids: [],
       error: "provider boom",
     };
     const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
@@ -680,6 +681,29 @@ describe("runner entry — --recheck-out channel", () => {
     // No document exists, yet the round is attributable in D1.
     expect(existsSync(outPath)).toBe(false);
     expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual(fakeRecheckStatus);
+  });
+
+  test("the written status carries rejected_row_ids, and rejected matches its length", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeRecheck = RECHECK_RESULT_DOC;
+    fakeRecheckStatus = {
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_INPUT_DOC.headSha,
+      outcome: "ok",
+      reason: null,
+      rejected: 2,
+      rejected_row_ids: ["row-1", "row-2"],
+      error: null,
+    };
+    const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+    const outPath = join(outDir, "recheck.json");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
+    const { code } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+
+    expect(code).toBe(0);
+    const written = JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8")) as RecheckStatus;
+    expect(written.rejected_row_ids).toEqual(["row-1", "row-2"]);
+    expect(written.rejected).toBe(written.rejected_row_ids.length);
   });
 
   test("status write is best-effort: an unwritable status path never fails the run", () => {
@@ -698,6 +722,7 @@ describe("runner entry — --recheck-out channel", () => {
           outcome: "skipped",
           reason: "budget",
           rejected: 0,
+          rejected_row_ids: [],
           error: null,
         }),
       ).not.toThrow();

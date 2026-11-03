@@ -2289,6 +2289,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       outcome: "failed",
       reason: "invalid-document",
       rejected: 0,
+      rejected_row_ids: [],
       error: expect.stringContaining("stale document"),
     });
     const logged = errorCalls.map((args) => args.join(" ")).join("\n");
@@ -2312,6 +2313,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       outcome: "skipped",
       reason: "budget",
       rejected: 0,
+      rejected_row_ids: [],
       error: null,
     });
     // Only the review seat ran — no recheck child was dispatched.
@@ -2333,6 +2335,25 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(result.recheckStatus?.outcome).toBe("failed");
     expect(result.recheckStatus?.reason).toBe("seat-failed");
     expect(result.recheckStatus?.error).toBe("provider boom");
+  });
+
+  test("a long secret-bearing seat error is redacted BEFORE it is truncated", async () => {
+    // The secret straddles the 500-char cut: slicing first would leave
+    // `ghp_…` as a fragment, so the status is redacted first and bounded second.
+    const token = `ghp_${"A".repeat(80)}`;
+    seatResults = [{ reject: `${"x".repeat(480)} ${token} tail` }, { data: seatPayload() }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const error = result.recheckStatus?.error ?? "";
+    expect(error.length).toBeLessThanOrEqual(500);
+    expect(error).not.toContain("ghp_");
+    expect(error).toContain("[REDACTED]");
   });
 
   test("row-level drops are counted: two rejected rows still yield an ok status with rejected: 2", async () => {
@@ -2370,6 +2391,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       headSha: RECHECK_SHA,
       outcome: "ok",
       rejected: 2,
+      rejected_row_ids: ["row-1", "row-2"],
       reason: null,
       error: null,
     });

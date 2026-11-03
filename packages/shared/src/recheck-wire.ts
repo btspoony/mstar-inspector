@@ -103,17 +103,20 @@ export const RECHECK_OUTPUT_PATH = '/tmp/mstar-recheck.json';
 /**
  * Why a recheck round ended — written by the runner beside the document so a
  * round that produced no document is still attributable in D1.
- * `rejected` counts the rows validateRecheckDoc dropped; `reason`/`error` are
- * null unless the round degraded.
+ * `rejected_row_ids` names the rows validateRecheckDoc dropped (sorted) and
+ * `rejected` is its length, so both faces of the count agree; a row with no
+ * readable rowId cannot be named and is not counted. `reason`/`error` are null
+ * unless the round degraded.
  */
 export const RECHECK_STATUS_PATH = '/tmp/mstar-recheck-status.json';
 export type RecheckStatus = {
   schema: 'mstar.recheck-status/v1'; headSha: string;
   outcome: 'ok' | 'skipped' | 'failed';
-  rejected: number; reason: string | null; error: string | null;
+  rejected: number; rejected_row_ids: string[];
+  reason: string | null; error: string | null;
 };
 
-/** Status `error` bound — the seat truncates it here, the consumer's failure row too. */
+/** Status `error` bound — the seat redacts then truncates here, the consumer's failure row too. */
 export const RECHECK_STATUS_ERROR_MAX_CHARS = 500;
 
 export const RECHECK_MAX_TARGETS = 25;
@@ -153,6 +156,18 @@ function exactObject(value: unknown, keys: readonly string[]): Record<string, un
 
 function isNonemptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+/**
+ * The rowId a raw result claims, read WITHOUT trusting its shape: identity
+ * must be settled before any other row-level check, or a malformed row could
+ * degrade per-row when the real fault is a duplicate/foreign ID. Null when
+ * the value is not an object, or carries no nonempty string rowId.
+ */
+function rawResultRowId(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const rowId = (value as Record<string, unknown>).rowId;
+  return isNonemptyString(rowId) ? rowId : null;
 }
 
 function isInt(value: unknown): value is number {
@@ -246,8 +261,10 @@ function addressedProofError(
       return null;
     }
     // Hunk slice: the cited old lines must no longer exist verbatim on the
-    // new side — otherwise the code was not removed by this change.
-    if (slice.newLines.length > 0 && slice.newLines.join('\n').includes(evidence.quote)) {
+    // new side — otherwise the code was not removed by this change. Both
+    // sides are normalized, so a trailing blank cannot disguise present code.
+    const newSide = normalizeQuoteText(slice.newLines.join('\n'));
+    if (slice.newLines.length > 0 && newSide.includes(normalizeQuoteText(evidence.quote))) {
       return 'removed-code cites old lines still present on the hunk new side';
     }
     return null;
@@ -373,7 +390,9 @@ function rowContentError(
  * schema, stale HEAD, non-array or oversized results, a duplicate or foreign
  * row ID — fails closed as a whole. A row-level content error instead drops
  * that one row into `rejected` and the surviving rows form `doc.results`, so
- * one imprecise citation cannot discard the rest of the report.
+ * one imprecise citation cannot discard the rest of the report. Row identity
+ * is decided before any other row-level check: a malformed row carrying a
+ * duplicate or foreign rowId still fails the whole document.
  * Omitted selected rows becoming unverifiable is the consumer's
  * reconciliation job, not this validator's.
  */
@@ -404,6 +423,17 @@ export function validateRecheckDoc(
   for (let i = 0; i < doc.results.length; i++) {
     const where = `results[${i}]`;
     const raw = doc.results[i];
+    // Identity FIRST: a row that carries a rowId has its duplicate/foreign
+    // verdict decided before any shape check, so a malformed row can never
+    // degrade into a per-row drop when the real fault is document-level.
+    const rawRowId = rawResultRowId(raw);
+    if (rawRowId !== null) {
+      if (seenRowIds.has(rawRowId)) return fail(`${where}.rowId ${JSON.stringify(rawRowId)} is a duplicate row ID`);
+      seenRowIds.add(rawRowId);
+      if (!inputRowIds.has(rawRowId)) {
+        return fail(`${where}.rowId ${JSON.stringify(rawRowId)} is not in the input targets (foreign row)`);
+      }
+    }
     const result = exactObject(raw, ['rowId', 'disposition', 'reason', 'evidence', 'relatedCurrentFindingIndexes']);
     if (result === null) {
       rejected.push({ rowId: null, index: i, error: `${where} must be an object with exactly {rowId, disposition, reason, evidence, relatedCurrentFindingIndexes}` });
@@ -412,11 +442,6 @@ export function validateRecheckDoc(
     if (!isNonemptyString(result.rowId)) {
       rejected.push({ rowId: null, index: i, error: `${where}.rowId must be a nonempty string` });
       continue;
-    }
-    if (seenRowIds.has(result.rowId)) return fail(`${where}.rowId ${JSON.stringify(result.rowId)} is a duplicate row ID`);
-    seenRowIds.add(result.rowId);
-    if (!inputRowIds.has(result.rowId)) {
-      return fail(`${where}.rowId ${JSON.stringify(result.rowId)} is not in the input targets (foreign row)`);
     }
 
     const contentError = rowContentError(result, result.rowId, where, slices, input.targets);

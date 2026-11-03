@@ -1172,6 +1172,9 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
       headSha,
       outcome,
       rejected: typeof value["rejected"] === "number" ? value["rejected"] : 0,
+      rejected_row_ids: Array.isArray(value["rejected_row_ids"])
+        ? value["rejected_row_ids"].filter((id): id is string => typeof id === "string")
+        : [],
       reason: typeof value["reason"] === "string" ? value["reason"] : null,
       error: typeof value["error"] === "string" ? value["error"] : null,
     };
@@ -1195,7 +1198,11 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
  * The SAME transport reads the seat's status document, which is what makes a
  * round that produced no usable document attributable in D1 without container
  * stderr. Rows `validateRecheckDoc` dropped come back as `rejected` so the
- * reconciliation can name them `invalid-output` instead of `omitted`.
+ * reconciliation can name them `invalid-output` instead of `omitted` — but the
+ * written document is ALREADY filtered by the seat, so a second validation
+ * pass sees no drops; the status's `rejected_row_ids` is the only surviving
+ * record of them and is therefore the primary source. It is trusted only for
+ * the row IDs this round actually sent.
  */
 async function readRecheckDoc(
   sandbox: ReviewSandbox,
@@ -1206,19 +1213,23 @@ async function readRecheckDoc(
     boundedRead(sandbox, readRecheckStatusCommand()),
   ]);
   let doc: RecheckDoc | null = null;
-  const rejected = new Set<string>();
+  const validated = new Set<string>();
   if (docText !== null) {
     try {
       const gate = validateRecheckDoc(JSON.parse(docText), recheckInput);
       if (gate.ok) {
         doc = gate.doc;
-        for (const row of gate.rejected) if (row.rowId !== null) rejected.add(row.rowId);
+        for (const row of gate.rejected) if (row.rowId !== null) validated.add(row.rowId);
       }
     } catch {
       doc = null;
     }
   }
-  return { doc, rejected, status: parseRecheckStatus(statusText, recheckInput.headSha) };
+  const status = parseRecheckStatus(statusText, recheckInput.headSha);
+  const sent = new Set(recheckInput.targets.map((target) => target.rowId));
+  const rejected = new Set(validated);
+  for (const rowId of status?.rejected_row_ids ?? []) if (sent.has(rowId)) rejected.add(rowId);
+  return { doc, rejected, status };
 }
 
 /**

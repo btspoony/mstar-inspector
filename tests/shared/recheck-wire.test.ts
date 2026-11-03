@@ -166,6 +166,52 @@ describe("validateRecheckDoc — document-level distrust still fails closed", ()
     if (outcome.ok) return;
     expect(outcome.error).toContain("foreign row");
   });
+
+  test("a duplicate row ID with an extra key still fails the whole document", () => {
+    // Identity is decided BEFORE the row-shape check: the extra key must not
+    // downgrade a document-level duplicate into one dropped row.
+    const outcome = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: SHA,
+        results: [addressed("row-1"), { rowId: "row-1", extra: 1 }],
+      },
+      input(),
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toContain("duplicate row ID");
+  });
+
+  test("a foreign row ID with an extra key still fails the whole document", () => {
+    const outcome = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: SHA,
+        results: [addressed("row-1"), { rowId: "row-999", extra: 1 }],
+      },
+      input(),
+    );
+
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toContain("foreign row");
+  });
+
+  test("a non-object row has no identity and only lands in rejected", () => {
+    const outcome = validateRecheckDoc(
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressed("row-1"), "nope"] },
+      input(),
+    );
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.doc.results.map((row) => row.rowId)).toEqual(["row-1"]);
+    expect(outcome.rejected).toHaveLength(1);
+    expect(outcome.rejected[0]!.rowId).toBeNull();
+    expect(outcome.rejected[0]!.index).toBe(1);
+  });
 });
 
 describe("normalizeQuoteText", () => {

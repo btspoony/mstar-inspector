@@ -466,6 +466,26 @@ describe("validateRecheckDoc — addressed eligibility", () => {
     expectDroppedRow(result, { index: 0, rowId: "row-1", error: "still present" });
   });
 
+  test("a trailing blank on a still-present removed-code quote cannot forge closure", () => {
+    // The quote still matches the cited OLD lines after normalization, so the
+    // presence check is the only thing standing between present code and a
+    // false closure — it must normalize too, or one trailing space passes.
+    const result = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: SHA,
+        results: [
+          addressedResult({
+            evidence: evidence({ kind: "removed-code", sliceId: "slice-still", startLine: 9, endLine: 9, quote: "const b = 2; " }),
+          }),
+          SURVIVOR,
+        ],
+      },
+      pairedInput({ targets: [{ ...TARGET, original: { ...ORIGINAL, lineStart: 9, lineEnd: 9 } }, TARGET_2] }),
+    );
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "still present" });
+  });
+
   test("removed-code on a path unrelated to the original concern drops that row", () => {
     const result = validateRecheckDoc(
       {
