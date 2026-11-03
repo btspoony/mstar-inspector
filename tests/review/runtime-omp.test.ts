@@ -1270,7 +1270,10 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
 
     const notes = noteLines(envelope.summary_md);
-    // The summary never restates the verdict, so no engine template is cut here.
+    // The summary never restates the verdict, so the engine's header and tally
+    // templates cannot appear in it — that is the fact this pins.
+    expect(envelope.summary_md).not.toContain("## Verdict:");
+    expect(envelope.summary_md).not.toContain("must-fix=");
     expect(envelope.summary_md).not.toContain("summary truncated");
     expect(envelope.summary_md).toContain("No narrative summary was produced by the review seats.");
     // Both capped seats keep their slug, the cause and the coverage statement.
@@ -1650,7 +1653,6 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     // and never a throw over the missing text. The cause is the declared fact.
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
     expect(envelope.summary_md).toBe("No narrative summary was produced by the deep parent session.");
-    expect(envelope.summary_md).not.toContain("cause:");
   });
 
   test("a reported yield error is the cause of a stopped turn", async () => {

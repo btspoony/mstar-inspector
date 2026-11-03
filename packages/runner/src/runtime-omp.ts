@@ -1749,6 +1749,15 @@ export const ompAgentRuntime: AgentRuntime = {
         // (verdict, tally, finding titles) is published from the envelope by the
         // body, which is what made a real review print each of them twice. This
         // layer has no narrative to offer, so it says exactly that.
+        //
+        // KNOWN GAP, accepted here: a surface that renders this string verbatim
+        // and reads no structured field (the dashboard review row, whose table
+        // stores no scorePct/tally/incomplete) rendered those facts out of the
+        // fallback and now has nothing. Re-adding any of them to prose puts
+        // machine text into a markdown field and re-duplicates the published
+        // body — the two defects this change removes. The fix is structured
+        // columns on the review row plus the engine-side renderer, tracked
+        // upstream; it is not a wording change.
         summary_md: "No narrative summary was produced by the review seats.",
         ...(stoppedSeats === 0
           ? {}
