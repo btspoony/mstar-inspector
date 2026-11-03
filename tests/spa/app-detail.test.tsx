@@ -28,11 +28,13 @@ import {
   appInsightsSummaryUrl,
   appStatusPill,
   parseAppDetailSearch,
+  type AppDetailTab,
   type InsightsSummary,
   type SettingsManagePayload,
   type SettingsPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailPage, AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
+import { SettingsView } from "../../src/spa/pages/SettingsPage";
 import { apiBase } from "../../src/spa/workspace-base";
 import { AppInsightsTab, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/spa/pages/AppInsightsTab";
 import { installDom } from "./dom";
@@ -93,7 +95,7 @@ const search = { tab: "settings" as const, window: "30" as const, repo: "", pr: 
 const noReload = async () => true;
 const noSearch = () => {};
 
-function renderDetail(payload: SettingsPayload, canManage: boolean) {
+function renderDetail(payload: SettingsPayload, canManage: boolean, tab: AppDetailTab = "settings") {
   return renderToStaticMarkup(
     createElement(AppDetailView, {
       locale: "en",
@@ -101,7 +103,7 @@ function renderDetail(payload: SettingsPayload, canManage: boolean) {
       payload,
       groups: [],
       notice: null,
-      search,
+      search: { ...search, tab },
       onReload: noReload,
       onSearch: noSearch,
     }),
@@ -111,10 +113,12 @@ function renderDetail(payload: SettingsPayload, canManage: boolean) {
 describe("app detail URL state (shared pure helpers)", () => {
   test("default tab is settings on the bare path; ?tab=insights only for a manager", () => {
     expect(parseAppDetailSearch("", true)).toEqual({ tab: "settings", window: "30", repo: "", pr: "" });
+    expect(parseAppDetailSearch("?tab=installations", true).tab).toBe("installations");
     expect(parseAppDetailSearch("?tab=insights", true).tab).toBe("insights");
     expect(parseAppDetailSearch("?tab=pull-requests", true).tab).toBe("pull-requests");
     // A non-manager never resolves to a manager tab — the URL cannot
     // grant the tab the payload denies.
+    expect(parseAppDetailSearch("?tab=installations", false).tab).toBe("settings");
     expect(parseAppDetailSearch("?tab=insights", false).tab).toBe("settings");
     expect(parseAppDetailSearch("?tab=pull-requests", false).tab).toBe("settings");
     // Unknown tab values fall back to settings.
@@ -168,9 +172,10 @@ describe("app detail URL state (shared pure helpers)", () => {
 });
 
 describe("tab shell rendering (static SSR)", () => {
-  test("default tab is 应用设置 for both roles; the manager sees BOTH tabs", () => {
+  test("default tab is 应用设置 for both roles; the manager sees ALL three manager tabs", () => {
     const manage = renderDetail(managePayload, true);
     expect(manage).toContain(">Settings</button>");
+    expect(manage).toContain(">Installed</button>");
     expect(manage).toContain(">Insights</button>");
     // The identity header serves both tabs — the GitHub display name (D6).
     expect(manage).toContain(">Demo</h1>");
@@ -180,9 +185,82 @@ describe("tab shell rendering (static SSR)", () => {
   test("a non-manager sees identity-only with NO 洞察 tab rendered — absence pinned", () => {
     const identity = renderDetail(identityPayload, false);
     expect(identity).toContain(">Settings</button>");
+    expect(identity).not.toContain(">Installed</button>");
     expect(identity).not.toContain(">Insights</button>");
     // No insights panel markup anywhere on the face.
     expect(identity).not.toContain("Review health");
+  });
+
+  test("the settings tab no longer carries the installations table or the delivery list — both moved to the Installed tab", () => {
+    const settingsOnly = renderToStaticMarkup(
+      createElement(SettingsView, {
+        locale: "en",
+        payload: {
+          ...managePayload,
+          installations: [{ installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" }],
+          deliveries: [
+            {
+              event_name: "pull_request",
+              outcome: "ok",
+              status_code: null,
+              repository_full_name: "acme/web",
+              created_at: "2026-01-01 00:00:00",
+            },
+          ],
+        },
+        groups: [],
+        onReload: noReload,
+      }),
+    );
+    expect(settingsOnly).not.toContain(t("en", "settings.installationsAccount"));
+    expect(settingsOnly).not.toContain(t("en", "settings.recentDeliveries"));
+    expect(settingsOnly).not.toContain("acme/web");
+  });
+
+  test("the Installed tab renders the installations table and leads each delivery with its source repo", () => {
+    const installed = renderDetail(
+      {
+        ...managePayload,
+        installations: [
+          { installation_id: 123, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
+          { installation_id: 456, account_login: null, seen_at: "2026-01-01 00:00:00" },
+        ],
+        deliveries: [
+          {
+            event_name: "pull_request",
+            outcome: "ok",
+            status_code: null,
+            repository_full_name: "acme/web",
+            created_at: "2026-01-01 00:00:00",
+          },
+          {
+            event_name: "ping",
+            outcome: "ignored",
+            status_code: null,
+            repository_full_name: null,
+            created_at: "2026-01-01 00:00:00",
+          },
+        ],
+      },
+      true,
+      "installations",
+    );
+    expect(installed).toContain(">Installed</button>");
+    // The table lives in the installations panel, and that panel is the ACTIVE
+    // one when the Installed tab is selected (the other panels are mounted but
+    // inactive — the forceMount idiom).
+    const at = installed.indexOf(t("en", "settings.installationsAccount"));
+    const panelTag = installed.slice(
+      installed.lastIndexOf("<div", installed.lastIndexOf('data-slot="tabs-content"', at)),
+      at,
+    );
+    expect(panelTag).toContain('data-state="active"');
+    expect(installed).toContain(t("en", "settings.installationsAccount"));
+    expect(installed).toContain("acme");
+    // The delivery line leads with its repo; a pre-0040 row (NULL source)
+    // falls back to the unknown-source label rather than a blank line.
+    expect(installed).toContain("acme/web");
+    expect(installed).toContain(t("en", "settings.unknownSource"));
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {
@@ -278,7 +356,8 @@ describe("tab shell source contracts", () => {
       ),
       "line",
     );
-    expect(page).toHaveLength(3);
+    // Four triggers on the manager face: 应用设置 + the three manager tabs.
+    expect(page).toHaveLength(4);
     expect(primitive).toHaveLength(1);
     for (const face of page) expect(face).toBe(primitive[0] ?? "");
     // …and that shared face is the documented line tab: the heading-16 type

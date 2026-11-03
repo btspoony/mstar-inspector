@@ -28,6 +28,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Webhooks } from "@octokit/webhooks";
 import worker, { deliveryOutcomeFromWebhook } from "../../src/worker/index";
+import { webhookRepositoryFullName } from "../../src/worker/webhooks";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
@@ -169,6 +170,28 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
   });
 });
 
+describe("webhookRepositoryFullName (delivery source repo, migration 0040)", () => {
+  test("full_name wins, owner/name is the fallback, and a body with no source is null — never throws", () => {
+    expect(
+      webhookRepositoryFullName(
+        JSON.stringify({ repository: { name: "widgets", owner: { login: "acme" }, full_name: "acme/widgets" } }),
+      ),
+    ).toBe("acme/widgets");
+    expect(
+      webhookRepositoryFullName(JSON.stringify({ repository: { name: "widgets", owner: { login: "acme" } } })),
+    ).toBe("acme/widgets");
+    // An empty name is not a repository; an absent repository block is not one either.
+    expect(
+      webhookRepositoryFullName(JSON.stringify({ repository: { name: "", owner: { login: "acme" } } })),
+    ).toBeNull();
+    expect(webhookRepositoryFullName(JSON.stringify({ zen: "Keep it logically awesome." }))).toBeNull();
+    expect(webhookRepositoryFullName(JSON.stringify({ repository: null }))).toBeNull();
+    // Malformed / non-object bodies degrade to "unknown source", never throw.
+    expect(webhookRepositoryFullName("{not json")).toBeNull();
+    expect(webhookRepositoryFullName("null")).toBeNull();
+  });
+});
+
 describe("apps-store delivery face (recordDelivery / deliverySummary / listRecentDeliveries)", () => {
   /** Raw-insert one github_apps row (dummy envelopes — no decryption here). */
   function seedAppRow(db: ReturnType<typeof createTestD1>, id = "app-1"): void {
@@ -188,8 +211,8 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     seedAppRow(db);
     const store = createAppsStore(db);
 
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null });
-    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "rejected", statusCode: 401 });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "rejected", statusCode: 401, repositoryFullName: null });
 
     const rows = db.raw.query("SELECT * FROM webhook_deliveries ORDER BY rowid").all() as Array<{
       id: string;
@@ -224,6 +247,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
         eventName: "pull_request",
         outcome: "not-an-outcome" as DeliveryOutcome,
         statusCode: null,
+        repositoryFullName: null,
       }),
     ).rejects.toThrow(/not on the producer vocabulary/);
     const count = db.raw.query("SELECT COUNT(*) AS n FROM webhook_deliveries").get() as { n: number };
@@ -241,10 +265,10 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     const store = createAppsStore(db);
     // Backdate every row but the newest so the order is observable
     // (datetime('now') has second resolution).
-    await store.recordDelivery({ appId: "app-1", eventName: "ping", outcome: "ignored", statusCode: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401 });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "paused", statusCode: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "paused", statusCode: null, repositoryFullName: null });
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
@@ -262,9 +286,9 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     const db = createMigratedTestD1();
     seedAppRow(db);
     const store = createAppsStore(db);
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401 });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null });
-    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 500 });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
+    await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "rejected", statusCode: 500, repositoryFullName: null });
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
@@ -292,9 +316,9 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     seedAppRow(db, "app-2");
     const store = createAppsStore(db);
     for (let i = 1; i <= 7; i++) {
-      await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null });
+      await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null });
     }
-    await store.recordDelivery({ appId: "app-2", eventName: "ping", outcome: "ignored", statusCode: null });
+    await store.recordDelivery({ appId: "app-2", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null });
     // Backdate the first six so the newest-first order is observable.
     db.raw
       .prepare(
@@ -311,6 +335,23 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     expect(await store.listRecentDeliveries("no-such-app", 5)).toEqual([]);
   });
 
+  test("listRecentDeliveries defaults to 10 rows when the caller passes no limit", async () => {
+    const db = createMigratedTestD1();
+    seedAppRow(db);
+    const store = createAppsStore(db);
+    for (let i = 1; i <= 12; i++) {
+      await store.recordDelivery({
+        appId: "app-1",
+        eventName: "pull_request",
+        outcome: "ok",
+        statusCode: null,
+        repositoryFullName: null,
+      });
+    }
+
+    expect(await store.listRecentDeliveries("app-1")).toHaveLength(10);
+  });
+
   test("recordDelivery caps event_name at 64 chars at persist time (seat2 hygiene pin)", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
@@ -323,8 +364,9 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
       eventName: "x".repeat(200),
       outcome: "ok",
       statusCode: null,
+      repositoryFullName: null,
     });
-    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "ignored", statusCode: null });
+    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "ignored", statusCode: null, repositoryFullName: null });
 
     const rows = db.raw
       .query("SELECT event_name FROM webhook_deliveries ORDER BY rowid")
@@ -362,7 +404,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       "0038_webhook_path_drop.sql",
     ];
     if (withDeliveries) {
-      names.push("0011_webhook_deliveries.sql");
+      names.push("0011_webhook_deliveries.sql", "0040_webhook_delivery_repository.sql");
     }
     for (const name of names) {
       db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
@@ -496,6 +538,42 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(deliveriesFor(db, appRow.id)).toEqual([
       { event_name: "pull_request", outcome: "ok", status_code: null },
     ]);
+  });
+
+  test("a pull_request delivery persists the payload's source repository (repository.full_name)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const body = JSON.stringify({
+      ...PR_PAYLOAD,
+      repository: { name: "test-repo", owner: { login: "test-owner" }, full_name: "test-owner/test-repo" },
+    });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), makeEnv(db));
+
+    expect(res.status).toBe(200);
+    const rows = db.raw
+      .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ repository_full_name: string | null }>;
+    expect(rows).toEqual([{ repository_full_name: "test-owner/test-repo" }]);
+  });
+
+  test("a payload without a repository persists NULL — the unknown-source row still records", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const body = JSON.stringify({ zen: "Keep it logically awesome." });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "ping"),
+      makeEnv(db),
+    );
+
+    expect(res.status).toBe(200);
+    const rows = db.raw
+      .query("SELECT event_name, repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ event_name: string | null; repository_full_name: string | null }>;
+    expect(rows).toEqual([{ event_name: "ping", repository_full_name: null }]);
   });
 
   test("paused path: review_enabled=0 → 2xx ignored, zero enqueue + row outcome='paused'", async () => {
