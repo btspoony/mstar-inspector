@@ -301,8 +301,17 @@ export type ConsumerLogFields = {
    * `workspace-cap` (that capacity bound was reached), or `error` (the
    * storage decision failed and fail-closed refused). Set on the guard-held
    * lines only.
+   * `superseded` is the ONE non-admission value: the ledger already holds a
+   * newer commit for this PR, so the delivery was acked before the guard,
+   * the config gate and any container (never a retry, never a failure row).
    */
-  reason?: InflightRefusal;
+  reason?: InflightRefusal | "superseded";
+  /**
+   * On a `superseded` line only: the ledger's newer `head_at` that overtook
+   * this delivery, so an operator can explain the missing review without a
+   * second query.
+   */
+  superseded_by_head_at?: string;
   /** The system-wide cap the refusal was measured against (the admission-time read). */
   system_cap?: number;
   /** The workspace's own cap at that same decision — both ride the line so an
@@ -424,16 +433,25 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
 
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
- * — the first delivery is attempt 1). quick/default: 60s → 120s → 240s; deep: 180s → 360s → 720s
- * — every entry below the LEVEL's guard TTL (1452s / 1692s) so the held guard
- * can never expire mid-backoff into a duplicate race. Attempts past the
- * schedule's end have consumed the queue's max_retries and must be acked, not
- * retried (a further retry() would land the job on the DLQ).
+ * — the first delivery is attempt 1). quick/default: 60s → 300s → 1200s; deep: 90s → 480s → 1200s.
+ *
+ * The schedule must COVER the level's guard TTL, and its last entry must be
+ * able to reclaim it: every entry stays BELOW the level's guard TTL
+ * (1452s / 1692s) so no single delay outlives the lock, while the CUMULATIVE
+ * sum (1560s / 1770s) EXCEEDS it — so by the final delayed attempt the
+ * in-flight row has expired and the admission's expired-reclaim branch lets
+ * this message take the lock instead of being dropped. Without that sum, a
+ * legal review (600s+ runner) could hold the PR past the whole backoff and a
+ * `synchronize` for a NEW commit would never be reviewed.
+ *
+ * Attempts past the schedule's end have consumed the queue's max_retries and
+ * must be acked, not retried (a further retry() would land the job on the
+ * DLQ).
  */
 const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly [number, number, number]> = {
-  quick: [60, 120, 240],
-  default: [60, 120, 240],
-  deep: [180, 360, 720],
+  quick: [60, 300, 1200],
+  default: [60, 300, 1200],
+  deep: [90, 480, 1200],
 };
 
 /** Guard-held backoff schedule for the job's review level (spec d5-budget L4). */
@@ -443,7 +461,7 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
 
 /**
  * Outcome of one message pass (bugbot BB-3 + architect lock L4 + AL-1).
- * THREE DISTINCT typed outcomes never throw: a guard-held message
+ * FOUR DISTINCT typed outcomes never throw: a guard-held message
  * is scheduled for a per-message delayed retry and finally acked with a
  * warning — it is never rethrown into the immediate-retry ×3 → DLQ path; a
  * PAUSED message (the App's review_enabled=0) is acked directly — an
@@ -451,7 +469,9 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
  * throw would be the wrong semantics for an operator pause); a DEGRADED
  * message (parse-fail) is acked directly after its best-effort
  * review_failures row + degraded comment — a deterministic model-output
- * failure where retry is deterministic waste. Infra failures keep the
+ * failure where retry is deterministic waste; a SUPERSEDED message is acked
+ * directly because the ledger already holds a newer commit for its PR.
+ * Infra failures keep the
  * existing throw → retry → DLQ behavior (plus the AL-6 best-effort failure
  * row before the rethrow).
  */
@@ -464,7 +484,14 @@ export type ProcessOutcome =
    */
   | { kind: "guard-held"; admission: AdmissionRefusalFields; heldHeadSha: string | null }
   | { kind: "paused" }
-  | { kind: "degraded" };
+  | { kind: "degraded" }
+  /**
+   * The ledger already holds a NEWER commit for this PR (`pull_requests`
+   * migration 0044): this delivery is acked directly before any config read,
+   * admission row or container — no retry, no DLQ, no failure row. The next
+   * delivery for the PR reviews the newest commit.
+   */
+  | { kind: "superseded" };
 
 /**
  * Why the guard held a message plus the caps it was measured against
@@ -473,10 +500,11 @@ export type ProcessOutcome =
  * carries the storage cause, so a D1 fault is never read as the benign
  * released-between-statements race.
  */
-export type AdmissionRefusalFields = Required<
-  Pick<ConsumerLogFields, "reason" | "system_cap" | "workspace_cap">
-> &
-  Pick<ConsumerLogFields, "error_cause">;
+export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_cap" | "workspace_cap">> &
+  Pick<ConsumerLogFields, "error_cause"> & {
+    /** Narrowed: the guard outcomes never carry the `superseded` skip value. */
+    reason: InflightRefusal;
+  };
 
 /**
  * Handle a guard-held message (bugbot BB-3). The guard is not an error
@@ -492,11 +520,13 @@ export type AdmissionRefusalFields = Required<
  * the checked-out sha).
  *
  * `heldHeadSha` is the live row's sha: a `pr-held` drop is only benign while
- * that review covers THIS message's commit. The backoff window (420s
- * quick/default) is shorter than a legal review (600s+ runner), so a
- * `synchronize` for a new commit can exhaust it against a review of the
- * previous one — that commit would then never be reviewed and leave no trace,
- * so the terminal ack records the drop row for it.
+ * that review covers THIS message's commit. The cumulative backoff
+ * (1560s quick/default, 1770s deep) now EXCEEDS the level's guard TTL
+ * (1452s / 1692s), so the final delayed attempt can reclaim the expired row
+ * and review the new commit. A drop that still happens — a cap/storage
+ * refusal, or a row that outlived the schedule — must leave a trace, so the
+ * terminal ack records the drop row for a commit the live review never
+ * covers.
  */
 function handleGuardHeld(
   message: Message<ReviewJobPayload>,
@@ -1460,6 +1490,37 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
 }
 
 /**
+ * Read the PR's head watermark from the App ledger (migration 0044) — ONE
+ * select-only point read on `pull_requests`' UNIQUE key, used to tell a
+ * delivery the queue has already overtaken from the newest one.
+ *
+ * Fail-open by construction: an absent row, a column the row never had, or a
+ * storage fault all return `null`, and the caller then reviews normally. A
+ * skip is only ever the product of two readable, strictly ordered stamps —
+ * never of a missing input.
+ */
+async function readPrHead(
+  deps: ProcessDeps,
+  payload: ReviewJobPayload,
+): Promise<{ headSha: string | null; headAt: string | null } | null> {
+  try {
+    return await createAppsStore(deps.env.DB).selectPrHead({
+      appId: payload.appRef.appId,
+      owner: payload.owner,
+      repo: payload.repo,
+      prNumber: payload.pr_number,
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(
+      { ...payloadIdentityFields(payload), app_id: payload.appRef.appId },
+      `PR head watermark read failed (fail-open: reviewing normally): ${detail}`,
+    );
+    return null;
+  }
+}
+
+/**
  * Resolve the review tier from PipelineEnv.REVIEW_LEVEL (AC-S7-level).
  * Unset/empty → "default" (the harness no-flag landing tier).
  * Anything else throws — the port rejects unknown levels fail-loud and never
@@ -2049,6 +2110,11 @@ export function createReviewConsumer(
         // model-output failure — retry re-runs the same pure function on the
         // same stdout), never a retry and never a DLQ entry.
         message.ack();
+      } else if (outcome.kind === "superseded") {
+        // The ledger already holds a newer commit for this PR: this delivery
+        // is a leftover, acked directly before any container. No retry (the
+        // newer delivery is the one that reviews) and no DLQ.
+        message.ack();
       }
     }
   };
@@ -2161,6 +2227,34 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       return { kind: "paused" };
     }
     const { commenter, githubAppId, workspaceId } = resolution;
+    // Supersede skip (migration 0044): a queued delivery whose PR head has
+    // already advanced must cost nothing — no config read, no admission row,
+    // no container. The read is select-only and sits AFTER the paused gate
+    // (a paused App keeps today's ack-and-stop) and BEFORE
+    // assertAppConfigComplete / admission, so a storage fault can only add
+    // this one read, never a side effect.
+    //
+    // `issue_comment` jobs and pre-migration messages carry no stamp and take
+    // today's path untouched — not even this read.
+    const payloadHeadSha = payload.head_sha;
+    const payloadHeadAt = payload.head_at;
+    if (payloadHeadSha && payloadHeadAt) {
+      const ledgerHead = await readPrHead(deps, payload);
+      // Two readable stamps on both sides, the ledger strictly newer, and a
+      // different commit: only then is this delivery a leftover. Missing or
+      // unreadable input (no stamp on either side) never skips.
+      if (
+        ledgerHead?.headAt &&
+        ledgerHead.headAt > payloadHeadAt &&
+        ledgerHead.headSha !== payloadHeadSha
+      ) {
+        deps.log.info(
+          { ...baseFields, reason: "superseded", superseded_by_head_at: ledgerHead.headAt },
+          `delivery superseded — the PR head has advanced to ${ledgerHead.headAt} (head_sha ${ledgerHead.headSha ?? "unknown"}), acking with zero side effects (no retry, no DLQ, no container)`,
+        );
+        return { kind: "superseded" };
+      }
+    }
     // Per-App AI config: hangs off the SAME appRef resolution as
     // the commenter — one getAppConfig read per message, before the
     // guard/sandbox so an unresolvable config (undecryptable key envelope,
@@ -2201,8 +2295,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // ONE conditional D1 insert is both the per-PR lock and the capacity
     // reservation, so a duplicate for this PR or a reached cap returns the
     // DISTINCT guard-held outcome — NOT a throw. The consumer schedules a
-    // per-message delayed retry (per level: 60/120/240s quick/default,
-    // 180/360/720s deep); after the final delayed attempt the job is acked
+    // per-message delayed retry (per level: 60/300/1200s quick/default,
+    // 90/480/1200s deep); after the final delayed attempt the job is acked
     // with a warning — guard-held is not an error state and never goes to the
     // DLQ. Admission precedes EVERY sandbox step, so a refused message costs
     // no container.
