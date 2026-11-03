@@ -7,7 +7,9 @@
  *
  * The fixture is the real migration DDL (`createMigratedTestD1` walks
  * `migrations/`), so 0044's ALTER TABLE is what these assertions run against.
- * Stamps are RFC 3339 exactly as `pullRequestRecord` passes them.
+ * Stamps use the `.000Z` spelling `pullRequestRecord` emits
+ * (`normalizeRfc3339` → `new Date(v).toISOString()`); the write compares them
+ * as text, so the fixture spelling is the one the ledger actually holds.
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -38,23 +40,23 @@ describe("upsertPullRequest head watermark (0044)", () => {
   test("a first delivery naming a sha stores the sha and the stamp it arrived with", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00Z" }));
+    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
     expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
-      headAt: "2026-03-01T10:00:00Z",
+      headAt: "2026-03-01T10:00:00.000Z",
     });
   });
 
   test("a newer stamp advances BOTH the sha and the watermark", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00Z" }));
+    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
     await createAppsStore(db).upsertPullRequest(
-      delivery({ headSha: "sha-2", updatedAt: "2026-03-01T10:05:00Z" }),
+      delivery({ headSha: "sha-2", updatedAt: "2026-03-01T10:05:00.000Z" }),
     );
     expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-2",
-      headAt: "2026-03-01T10:05:00Z",
+      headAt: "2026-03-01T10:05:00.000Z",
     });
   });
 
@@ -62,14 +64,14 @@ describe("upsertPullRequest head watermark (0044)", () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createAppsStore(db).upsertPullRequest(
-      delivery({ headSha: "sha-new", updatedAt: "2026-03-01T10:05:00Z" }),
+      delivery({ headSha: "sha-new", updatedAt: "2026-03-01T10:05:00.000Z" }),
     );
     await createAppsStore(db).upsertPullRequest(
-      delivery({ headSha: "sha-old", updatedAt: "2026-03-01T10:00:00Z" }),
+      delivery({ headSha: "sha-old", updatedAt: "2026-03-01T10:00:00.000Z" }),
     );
     expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-new",
-      headAt: "2026-03-01T10:05:00Z",
+      headAt: "2026-03-01T10:05:00.000Z",
     });
   });
 
@@ -77,14 +79,14 @@ describe("upsertPullRequest head watermark (0044)", () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createAppsStore(db).upsertPullRequest(
-      delivery({ headSha: "sha-a", updatedAt: "2026-03-01T10:00:00Z" }),
+      delivery({ headSha: "sha-a", updatedAt: "2026-03-01T10:00:00.000Z" }),
     );
     await createAppsStore(db).upsertPullRequest(
-      delivery({ headSha: "sha-b", updatedAt: "2026-03-01T10:00:00Z" }),
+      delivery({ headSha: "sha-b", updatedAt: "2026-03-01T10:00:00.000Z" }),
     );
     expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-b",
-      headAt: "2026-03-01T10:00:00Z",
+      headAt: "2026-03-01T10:00:00.000Z",
     });
   });
 
@@ -99,19 +101,46 @@ describe("upsertPullRequest head watermark (0044)", () => {
     });
   });
 
+  test("a stamped delivery fills a pre-0044 row's unknown watermark", async () => {
+    // The upgrade path: a row written before 0044 has a sha but no stamp, and
+    // only the `head_at IS NULL` disjunct of the write CASE can ever fill it.
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest({ ...ADDRESS, title: null, state: "open", headSha: null });
+    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: null }));
+    await createAppsStore(db).upsertPullRequest(
+      delivery({ headSha: "sha-2", updatedAt: "2026-03-01T10:00:00.000Z" }),
+    );
+    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+      headSha: "sha-2",
+      headAt: "2026-03-01T10:00:00.000Z",
+    });
+  });
+
+  test("a newer stamp for the SAME sha advances only the watermark", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
+    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:05:00.000Z" }));
+    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+      headSha: "sha-1",
+      headAt: "2026-03-01T10:05:00.000Z",
+    });
+  });
+
   test("a stamp without a sha dates no sha it never had", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00Z" }));
+    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
     // A later delivery that carries only a state change (no head sha).
     await createAppsStore(db).upsertPullRequest({
       ...ADDRESS,
       state: "open",
-      updatedAt: "2026-03-01T11:00:00Z",
+      updatedAt: "2026-03-01T11:00:00.000Z",
     });
     expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
       headSha: "sha-1",
-      headAt: "2026-03-01T10:00:00Z",
+      headAt: "2026-03-01T10:00:00.000Z",
     });
   });
 

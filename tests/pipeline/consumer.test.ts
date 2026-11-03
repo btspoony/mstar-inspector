@@ -371,9 +371,16 @@ const messageRetryCalls: Array<{ attempts: number; delaySeconds?: number }> = []
 const messageAckCalls: Array<{ attempts: number }> = [];
 let messageAttempts = 1;
 let kvPutError: Error | undefined;
-let kvGetValue: string | null = null;
+let kvGetError: Error | undefined;
+/** Per-key KV answers (the enqueue claims the worker writes). */
+const kvEntries = new Map<string, string>();
+/** Answer for keys absent from `kvEntries` — `null` = miss. */
+let kvGetDefault: string | null = null;
 const kv = {
-  get: mock(async (_key: string) => kvGetValue),
+  get: mock(async (key: string) => {
+    if (kvGetError) throw kvGetError;
+    return kvEntries.get(key) ?? kvGetDefault;
+  }),
   put: mock(async (key: string, value: string, options?: unknown) => {
     kvPuts.push({ key, value, options });
     if (kvPutError) throw kvPutError;
@@ -459,7 +466,9 @@ function reset(): void {
   recheckFileContent = "";
   recheckFileOverflow = "0";
   kvPutError = undefined;
-  kvGetValue = null;
+  kvGetError = undefined;
+  kvEntries.clear();
+  kvGetDefault = null;
   checkRequests.length = 0;
   checkRuns.clear();
   checkRequestOverrides = {};
@@ -1549,7 +1558,7 @@ describe("createReviewConsumer", () => {
 
   test("KV done-state hit → ack without post/insert (B3)", async () => {
     reset();
-    kvGetValue = "done";
+    kvGetDefault = "done";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -2131,12 +2140,18 @@ describe("createReviewConsumer", () => {
   const OLD_AT = "2026-01-01T00:00:00.000Z";
   const NEW_AT = "2026-01-01T00:05:00.000Z";
   const NEW_SHA = "1111111111111111111111111111111111111111";
+  // The worker's enqueue claim for one commit (value "1" = queued, not done).
+  const ENQUEUED_KEY = (sha: string): string =>
+    `idem:123:acme/widgets:42:${sha}`;
 
   test("a delivery the ledger has overtaken is acked as superseded with zero containers (AC-1)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    // The advancing delivery enqueued its own job — the KV claim the worker
+    // writes after a successful send is the skip's proof.
+    kvEntries.set(ENQUEUED_KEY(NEW_SHA), "1");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
@@ -2149,12 +2164,49 @@ describe("createReviewConsumer", () => {
     expect(commenterCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(0);
+    // The skip runs BEFORE admission: no per-PR lock, no capacity reservation
+    // and no metered usage row for a delivery that does nothing.
+    expect(inflightRows(db)).toHaveLength(0);
+    expect(usageRows(db)).toHaveLength(0);
     const line = logLines.find((l) => l.fields.reason === "superseded");
     expect(line).toBeDefined();
     expect(line!.level).toBe("info");
     expect(line!.fields.superseded_by_head_at).toBe(NEW_AT);
     // No sandbox id on the skip line — nothing was created.
     expect(line!.fields.sandbox_id).toBeUndefined();
+  });
+
+  test("a newer ledger commit with NO queued job is reviewed, not skipped (open mode / ignored delivery)", async () => {
+    // The ledger advances on deliveries that enqueue nothing (`synchronize` in
+    // `open` mode, a paused App, a failed send). Skipping on the ledger alone
+    // would drop the PR's only review, so the missing KV claim keeps this
+    // delivery alive.
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(sandboxCalls.length).toBeGreaterThan(0);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("a KV fault on the skip's proof read reviews normally and says so once", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvGetError = new Error("kv down");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+    expect(logLines.filter((l) => l.level === "warn" && l.msg.includes("supersede KV read failed"))).toHaveLength(1);
   });
 
   test("the ledger's own sha is never skipped, whatever the stamps say (AC-2)", async () => {

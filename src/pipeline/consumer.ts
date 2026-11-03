@@ -2027,6 +2027,42 @@ async function kvDoneHit(
     return false;
   }
 }
+
+/**
+ * Does the ledger's newer commit own a QUEUED job? The worker claims the
+ * idempotency key only AFTER a successful `REVIEW_QUEUE.send`, so a present
+ * key proves that commit was enqueued. The ledger alone proves nothing: every
+ * verified non-reject delivery advances it, including ones that enqueue
+ * nothing (a `synchronize` in `open` mode, a paused App, a failed send), so a
+ * skip backed by the ledger alone would drop a PR's only review.
+ *
+ * Fail-open: an absent ledger sha, an absent key or a KV fault all mean "no
+ * proof" → review normally (a fault logs one warn line).
+ */
+async function newerCommitHasJob(
+  deps: ProcessDeps,
+  payload: ReviewJobPayload,
+  headSha: string | null,
+  fields: ConsumerLogFields,
+): Promise<boolean> {
+  if (!headSha) return false;
+  try {
+    // Inside the try: an empty ledger sha makes `idemKey` throw, and that is
+    // "no proof" too — never a failed delivery.
+    const key = idemKey({
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: headSha,
+    });
+    return (await deps.env.IDEMPOTENCY_KV.get(key)) !== null;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `supersede KV read failed — reviewing normally: ${detail}`);
+    return false;
+  }
+}
 /**
  * Test seam for createReviewConsumer: additive overrides for the process
  * dependencies (store / failureStore / per-App commenter factory /
@@ -2228,27 +2264,26 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // assertAppConfigComplete / admission, so a storage fault can only add
     // this one read, never a side effect.
     //
-    // The skip assumes the delivery that advanced the ledger also enqueued
-    // its own job. That holds for the pull_request route, where the same
-    // delivery writes the ledger and the queue message; it does NOT hold when
-    // that job never runs (manual trigger mode, a paused App, a failed
-    // enqueue) — the skipped commit is then reviewed by nobody. The info line
-    // below is the only trace, so the assumption stays observable rather than
-    // silently assumed.
+    // The ledger advances on EVERY verified non-reject delivery, including the
+    // ones that enqueue nothing (a `synchronize` in `open` mode, a paused App,
+    // a failed enqueue), so the ledger alone cannot stand as the skip's proof:
+    // the newer commit must also own a queued job, proven by its idempotency
+    // key (claimed only after a successful send).
     //
     // `issue_comment` jobs and pre-migration messages carry no stamp and take
-    // today's path untouched — not even this read.
+    // today's path untouched — not even these reads.
     const payloadHeadSha = payload.head_sha;
     const payloadHeadAt = payload.head_at;
     if (payloadHeadSha && payloadHeadAt) {
       const ledgerHead = await readPrHead(deps, payload);
-      // Two readable stamps on both sides, the ledger strictly newer, and a
-      // different commit: only then is this delivery a leftover. Missing or
-      // unreadable input (no stamp on either side) never skips.
+      // Two readable stamps on both sides, the ledger strictly newer, a
+      // different commit, and a queued job for that commit: only then is this
+      // delivery a leftover. Missing or unreadable input never skips.
       if (
         ledgerHead?.headAt &&
         ledgerHead.headAt > payloadHeadAt &&
-        ledgerHead.headSha !== payloadHeadSha
+        ledgerHead.headSha !== payloadHeadSha &&
+        (await newerCommitHasJob(deps, payload, ledgerHead.headSha, baseFields))
       ) {
         deps.log.info(
           { ...baseFields, reason: "superseded", superseded_by_head_at: ledgerHead.headAt },
