@@ -11,9 +11,10 @@
  *     appears twice;
  *   - the harness verdict is never mapped onto a GitHub review event
  *     (SEC-01, structural; mapping spec §2);
- *   - the Inspector-only tail survives: the omitted-findings footer, the
- *     repeat callout and the assembled §7.10 closure section;
- *   - summary_md truncated at 8000 chars (the degraded chain's budget);
+ *   - the Inspector-only tail survives: the omitted-findings footer and the
+ *     assembled §7.10 closure section;
+ *   - summary_md truncated at 8000 chars before the engine renders it, so a
+ *     long narrative cannot push the findings and the closure off the end;
  *   - the assembled body carries NO line-comment fields (overall review only)
  *   - T5 upsert: marker parse, create-on-miss, patch-on-hit with round
  *     increment, malformed marker treated as a miss (same PR never gets a
@@ -218,6 +219,21 @@ describe("buildReviewBody", () => {
     expect(body).toContain("  cause: runner timed out (indented snippet)");
     expect(body).toContain("Cause: capitalised prose");
     expect(body.match(/^cause:/gm)).toHaveLength(1);
+  });
+
+  test("a narrative over the summary budget is cut, so the tail survives the body clamp", () => {
+    // The runner fits its coverage notes to SUMMARY_MD_LIMIT and relies on this
+    // publisher keeping the head from there; without the cut the body clamp —
+    // which also keeps the head — would be what removes the closure.
+    const closure = "## Prior findings recheck\n\nReassessed 1/1";
+    const body = buildReviewBody(
+      { ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT * 2) },
+      3,
+      closure,
+    );
+    expect(body).toContain("more findings omitted");
+    expect(body).toContain(closure);
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
   });
 
   test("the closure section is appended last", () => {

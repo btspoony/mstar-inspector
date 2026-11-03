@@ -7,8 +7,8 @@
  *     `## 📋 Review` (with the seat narrative when the envelope carries one)
  *     and the finding blocks in envelope order;
  *   - this module appends only what the engine has no vocabulary for: the
- *     omitted-findings footer (merge-class cap), the repeat callout, and the
- *     assembled §7.10 closure section;
+ *     omitted-findings footer (merge-class cap) and the assembled §7.10
+ *     closure section;
  *   - the overall body carries NO per-line comment fields — anchored line
  *     comments are a SEPARATE chain (pulls.createReview COMMENT, see
  *     "Line comments" below);
@@ -146,10 +146,17 @@ export function buildReviewBody(
   omittedFindings = 0,
   closure?: string,
 ): string {
-  const rendered =
+  let rendered =
     output.incomplete === undefined || output.summary_md === undefined
       ? output
       : { ...output, summary_md: stripFactEcho(output.summary_md, output.incomplete) };
+  // The runner fits its coverage notes to SUMMARY_MD_LIMIT and documents that
+  // this publisher keeps the head from there (runtime-omp.ts). Without the cap
+  // a long narrative inflates the body toward REVIEW_BODY_LIMIT, and that clamp
+  // keeps the head — so the findings and the closure would be what is lost.
+  if (rendered.summary_md !== undefined) {
+    rendered = { ...rendered, summary_md: truncateSummary(rendered.summary_md) };
+  }
   const sections = [renderReviewMarkdown(rendered)];
   if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
   if (closure) sections.push(closure);

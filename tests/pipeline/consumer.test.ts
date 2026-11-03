@@ -2850,7 +2850,7 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
     expect(String(rows[0]!.error)).not.toContain(gh("s", "installation_token"));
   });
 });
-describe("cross-round repeat dedup (AL-21-2)", () => {
+describe("fingerprint choke point (S-1)", () => {
   test("oversized fingerprint_hint is clamped at the choke point — never lands verbatim in the D1 fingerprint column (S-1)", async () => {
     reset();
     const oversizedHint = "hint-" + "x".repeat(FINDING_TITLE_MAX + 100);

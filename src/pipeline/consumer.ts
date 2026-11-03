@@ -362,12 +362,6 @@ export type ConsumerLogFields = {
    */
   degraded_delete_deleted?: number;
   degraded_delete_skipped?: number;
-  /**
-   * S-3 / qc3 F-003: the previous-round fingerprint query
-   * THREW — repeat dedup degraded to first-round semantics (empty set).
-   * Set only on the dedup-failure warn; an empty previous round is silent.
-   */
-  dedup?: "degraded";
 };
 
 export type ConsumerLog = {
@@ -2824,11 +2818,6 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), secretValues)),
     );
     const output = capped.output;
-    // 10a. Cross-round repeat dedup (AL-21-2): read the
-    // previous round's fingerprint set BEFORE the post (the current sha row
-    // does not exist yet at this point; post → put order). A query THROW is
-    // first-round semantics: log a structured warn (dedup: "degraded") and
-    // continue — dedup is display-layer, never a review blocker. An empty
     // 11. §7.7 step 6 — validation + conservative reconciliation + closure
     // assembly + final body. The recheck document is reconciled against the
     // SAME round's final capped findings (§7.4 conservative precedence:
