@@ -1,0 +1,145 @@
+/**
+ * Payloads and the gated-fetch mount shared by the pull-requests suites.
+ *
+ * The list/detail split imports the same PR payloads; keeping them here means
+ * neither file pins its own copy of the data the other one asserts on.
+ */
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { AppPullRequestsTab } from "../../src/spa/pages/AppPullRequestsTab";
+import type { PullRequestDetail, PullRequestRow } from "../../src/spa/pages/data";
+import { installDom } from "./dom";
+
+export const ROW_OPEN: PullRequestRow = {
+  number: 42,
+  owner: "acme",
+  repo: "web",
+  title: "Add the export button",
+  state: "open",
+  head_sha: "aaa111bbb222",
+  first_seen_at: "2026-10-28 08:00:00",
+  last_seen_at: "2026-11-01 10:00:00",
+  latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
+  failure_count: 0,
+};
+
+export const DETAIL: PullRequestDetail = {
+  pull_request: {
+    ...ROW_OPEN,
+    number: 133,
+    title: "Fix the login flow",
+    state: "merged",
+    latest_review: { verdict: "needs fixes", reviewed_at: "2026-11-01 08:00:00" },
+    failure_count: 1,
+  },
+  // Newest first, as the store orders them: the first row is the latest verdict.
+  reviews: [
+    {
+      verdict: "needs fixes",
+      summary_md: "The refresh race is still reachable.",
+      model: "kimi-for-coding",
+      provider: "openrouter",
+      reviewed_at: "2026-11-01 08:00:00",
+      head_sha: "aaa111bbb222",
+    },
+    {
+      verdict: "ship it",
+      summary_md: "Looks good overall.",
+      model: "claude-sonnet-4.5",
+      // v1 never records a provider — the separator must disappear with it.
+      provider: "",
+      reviewed_at: "2026-10-30 08:00:00",
+      head_sha: "f00d12c1",
+    },
+  ],
+  failures: [
+    {
+      stage: "sandbox",
+      // Model/runtime output — must render escaped, never as HTML.
+      error: "exit 1: <script>alert(1)</script>",
+      created_at: "2026-10-31 23:00:00",
+    },
+  ],
+  findings: [
+    {
+      finding_id: "f-1",
+      severity: "must-fix",
+      title: "Use a parameterized query",
+      file_path: "src/db.ts",
+      line: 42,
+      body: "String interpolation reaches the SQL engine.",
+    },
+    {
+      finding_id: "f-2",
+      severity: "should-fix",
+      title: "Session cookie lacks HttpOnly",
+      file_path: "src/auth/session.ts",
+      line: 88,
+      body: "The refresh cookie is set with secure only.",
+    },
+    {
+      finding_id: "f-3",
+      severity: "nit",
+      title: "Rename tmp to pending",
+      // A repo-wide finding: no file_path, so the location chip disappears.
+      file_path: "",
+      line: null,
+      body: "The variable holds the pending redirect target.",
+    },
+  ],
+};
+
+export const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+/**
+ * Mount the tab with every fetch gated until the test resolves it by URL
+ * suffix, so a transition frame is observable instead of raced. The mount of
+ * `initialPr` is the helper's own first act; teardown restores `fetch` and the
+ * DOM in one call.
+ */
+export async function mountTabWithGatedFetch(initialPr: string) {
+  const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+  const realFetch = globalThis.fetch;
+  type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
+  const gates = new Map<string, Gate>();
+  globalThis.fetch = (async (input: unknown) => {
+    const gate: Gate = Promise.withResolvers<Response>();
+    gates.set(String(input), gate);
+    return gate.promise;
+  }) as unknown as typeof fetch;
+  const resolve = (suffix: string, response: Response) => {
+    const url = [...gates.keys()].reverse().find((key) => key.endsWith(suffix));
+    const gate = url === undefined ? undefined : gates.get(url);
+    if (!gate) throw new Error(`no fetch issued for ${suffix}`);
+    gate.resolve(response);
+  };
+  const tabElementFor = (pr: string) =>
+    createElement(AppPullRequestsTab, {
+      locale: "en",
+      appId: "1",
+      search: { tab: "pull-requests", window: "30", repo: "", pr },
+      onSearch: () => {},
+    });
+  const container = win.document.createElement("div");
+  win.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  await act(async () => root.render(tabElementFor(initialPr)));
+  await act(async () => {});
+  return {
+    container,
+    text: () => container.textContent ?? "",
+    win,
+    /** Re-render the tab for another pr — the switch the read stamp follows. */
+    rerender: async (pr: string) => {
+      await act(async () => root.render(tabElementFor(pr)));
+      await act(async () => {});
+    },
+    resolve,
+    unmount: async () => {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    },
+  };
+}

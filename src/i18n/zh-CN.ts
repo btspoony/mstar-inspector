@@ -171,6 +171,8 @@ export const zhCN: Dictionary = {
     /** 载荷未记录结论的审查：整行仍渲染，不留下悬空的分隔符。 */
     timelineReviewNoVerdict: "审查 · 暂无结论",
     timelineFailure: "审查失败 · {stage}",
+    /** 载荷未记录阶段的失败：整行仍渲染，不留下悬空的分隔符。 */
+    timelineFailureNoStage: "审查失败",
     timelineFirstSeen: "PR 出现",
     /** 上限截断时，末尾说明还有多少条更早的事件未显示（count 为 1 时同样通顺）。 */
     timelineHidden: "更早事件未显示：{count} 条",

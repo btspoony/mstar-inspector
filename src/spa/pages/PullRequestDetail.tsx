@@ -275,18 +275,25 @@ export function PullRequestDetailView({
   // then "", and an empty meta item or span would read as a missing value.
   const latestAttribution = latestReview === null ? "" : reviewAttribution(locale, latestReview);
   // A copy's outcome is transient and per failure block: the button flips to
-  // the result, then reverts, and the live region below announces it. Each
-  // block owns its timer, so copying block B cannot cancel block A's revert
-  // and leave A's label standing.
+  // the result, then reverts. Each block owns its timer, so copying block B
+  // cannot cancel block A's revert and leave A's label standing. The button's
+  // own label is the single channel — focus stays on the pressed control, whose
+  // accessible-name change is announced once; no live region repeats it.
   const [copyOutcome, setCopyOutcome] = useState<Readonly<Record<string, "copied" | "failed">>>({});
   const copyTimers = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
+  // A clipboard write can settle after the face is gone; by then the cleanup
+  // below has already run, so a late outcome would schedule a timer nothing
+  // would clear.
+  const mounted = useRef(true);
   useEffect(
     () => () => {
+      mounted.current = false;
       for (const timer of Object.values(copyTimers.current)) clearTimeout(timer);
     },
     [],
   );
   const announceCopy = (key: string, outcome: "copied" | "failed"): void => {
+    if (!mounted.current) return;
     setCopyOutcome((previous) => ({ ...previous, [key]: outcome }));
     clearTimeout(copyTimers.current[key]);
     copyTimers.current[key] = setTimeout(() => {
@@ -401,7 +408,10 @@ export function PullRequestDetailView({
       at: failure.created_at,
       key: `failure-${index}`,
       tone: "danger" as StatusTone,
-      label: t(locale, "pullRequests.timelineFailure", { stage: failure.stage }),
+      label:
+        failure.stage === ""
+          ? t(locale, "pullRequests.timelineFailureNoStage")
+          : t(locale, "pullRequests.timelineFailure", { stage: failure.stage }),
       meta: formatRelativeTime(failure.created_at, locale),
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
@@ -502,7 +512,12 @@ export function PullRequestDetailView({
               ) : (
                 <div className="flex flex-col gap-(--spacing-6)">
                   {groups.map((group) => (
-                    <section key={group.key} className="flex flex-col gap-2">
+                    <section
+                      key={group.key}
+                      data-slot="severity-group"
+                      data-severity={group.key}
+                      className="flex flex-col gap-2"
+                    >
                       <h3 className="flex items-baseline gap-2 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">
                         <span>{group.label}</span>
                         <span className="tabular-nums text-(--text-muted)">{group.items.length}</span>
@@ -677,9 +692,16 @@ export function PullRequestDetailView({
                         className="flex flex-col gap-2 rounded-(--radius-container) border border-(--tone-danger-border) bg-(--tone-danger-bg) px-3.5 py-3"
                       >
                         <div className="flex flex-wrap items-center gap-2 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)">
-                          <span className="rounded-(--radius-control) border border-(--tone-danger-border) px-1.5 py-0.5 font-mono text-(--tone-danger-fg)">
-                            {failure.stage}
-                          </span>
+                          {/* The payload can record no stage: an empty chip
+                              would read as a fact, so it disappears. */}
+                          {failure.stage === "" ? null : (
+                            <span
+                              data-slot="failure-stage"
+                              className="rounded-(--radius-control) border border-(--tone-danger-border) px-1.5 py-0.5 font-mono text-(--tone-danger-fg)"
+                            >
+                              {failure.stage}
+                            </span>
+                          )}
                           <span className="ml-auto tabular-nums text-(--text-faint)" title={failure.created_at}>
                             {formatRelativeTime(failure.created_at, locale)}
                           </span>
@@ -731,11 +753,6 @@ export function PullRequestDetailView({
                             <Copy aria-hidden="true" />
                             {copyOutcomeLabel(locale, outcome)}
                           </Button>
-                          {/* Present from mount so the announcement has a live
-                              region to land in; empty while idle. */}
-                          <span role="status" aria-live="polite" className="sr-only">
-                            {outcome === undefined ? "" : copyOutcomeLabel(locale, outcome)}
-                          </span>
                         </div>
                       </li>
                     );
@@ -769,7 +786,7 @@ export function PullRequestDetailView({
               </h2>
               <ol className="flex flex-col gap-(--spacing-3)">
                 {activity.map((entry) => (
-                  <li key={entry.key} data-slot="activity-entry" className="flex gap-2">
+                  <li key={entry.key} data-slot="activity-entry" data-tone={entry.tone} className="flex gap-2">
                     <span
                       aria-hidden="true"
                       className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", TIMELINE_DOT[entry.tone])}

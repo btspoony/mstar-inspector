@@ -195,6 +195,8 @@ export const en = {
     /** A review whose verdict the payload did not record: the row still renders, without a dangling separator. */
     timelineReviewNoVerdict: "Review · no verdict",
     timelineFailure: "Review failed · {stage}",
+    /** A failure whose payload recorded no stage: the row still renders, without a dangling separator. */
+    timelineFailureNoStage: "Review failed",
     timelineFirstSeen: "PR first seen",
     /** The trailing row when the cap dropped older events (count reads correctly at 1). */
     timelineHidden: "Earlier events not shown: {count}",
