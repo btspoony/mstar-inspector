@@ -38,6 +38,7 @@ import { describe, expect, test } from "bun:test";
 
 import { survivorSteps } from "../../src/design-system/tokens";
 import {
+  consumerWalk,
   documentSync,
   danglingReferences,
   parseFixture,
@@ -613,6 +614,29 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       expect(files.some((file) => file.endsWith("ok.css"))).toBe(true);
       expect(failures).toHaveLength(1);
       expect(failures[0]).toContain("broken.css");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreadable root reports unreadability, never emptiness", () => {
+    // A declared root that exists but cannot be listed must not read as a
+    // moved/emptied tree: that names the wrong cause and would green-light a
+    // link that never saw the tree. A file stands in for the unreadable root
+    // because it fails to list with ENOTDIR whatever the runner's uid.
+    const dir = mkdtempSync(join(tmpdir(), "consumer-root-"));
+    try {
+      const file = join(dir, "not-a-directory.css");
+      writeFileSync(file, ":root { color: var(--surface-page); }");
+      const walk = consumerWalk([file]);
+      expect(walk.files).toEqual([]);
+      expect(walk.roots).toHaveLength(1);
+      expect(walk.roots[0]?.consumers).toBe(0);
+      expect(walk.roots[0]?.failure).toContain("unreadable");
+      expect(walk.failures).toHaveLength(1);
+      expect(walk.failures[0]).toContain("unreadable");
+      // The emptiness predicate leaves it out; the failure names it instead.
+      expect(rootsWithoutConsumers([file])).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

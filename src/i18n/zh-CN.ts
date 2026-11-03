@@ -157,6 +157,9 @@ export const zhCN: Dictionary = {
     /** 失败块的完整输出折叠与复制动作。 */
     failureFullOutput: "完整输出",
     copyError: "复制错误",
+    /** 复制动作的瞬时结果，在按钮上显示约两秒。 */
+    copyCopied: "已复制",
+    copyFailed: "复制失败",
     /** 侧栏：拉取请求事实与合并后的活动时间线。 */
     asideFacts: "拉取请求",
     asideActivity: "活动",

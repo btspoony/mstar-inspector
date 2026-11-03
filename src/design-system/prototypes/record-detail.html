@@ -11,42 +11,49 @@
   Status: proposal. A static reference page — not built, not a shipped component. The
   shipped face is `src/spa/pages/AppPullRequestsTab.tsx` (PullRequestDetailView).
 
-  Every colour, radius, rule and type stack below reads a DESIGN.md token through
-  var(...), and the page links the generated stylesheet, so a retired token shows up
-  as a dangling reference in `bun scripts/design-system-check.ts`.
+  Every colour, radius, rule and type step below reads a DESIGN.md token through
+  var(...): the type steps come from the generated `--typo-*` roles (heading-20,
+  label-14/12, copy-14, button-12) rather than literal px/weight/tracking values,
+  so a retired role is a dangling reference here, not a silently repainted page.
+  The page links the generated stylesheet, so `bun scripts/design-system-check.ts`
+  reports it.
 -->
 <title>PR 详情原型 — mstar-inspector</title>
 <style>
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--surface-page); color: var(--text-primary);
-    font-family: var(--font-sans); font-size: 14px; line-height: 1.5;
+    font-family: var(--typo-copy-14-family); font-size: var(--typo-copy-14-size);
+    line-height: var(--typo-copy-14-line);
     -webkit-font-smoothing: antialiased;
   }
   .wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px 64px; }
-  .back { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 14px; text-decoration: none; }
+  .back { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: var(--typo-copy-14-size); text-decoration: none; }
   .back:hover { color: var(--text-primary); text-decoration: underline; }
 
   /* ---------- header ---------- */
   header.pr { margin-top: 20px; display: flex; flex-direction: column; gap: 10px; }
-  .crumb { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; color: var(--text-muted); }
+  .crumb { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: var(--typo-copy-14-size); color: var(--text-muted); }
   .crumb .repo { color: var(--text-secondary); }
-  .crumb .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-secondary); }
-  h1 { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 600; letter-spacing: -0.01em; }
-  .sub { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-faint); }
-  .sub b { font-weight: 400; color: var(--text-muted); }
+  .crumb .num { font-family: var(--typo-mono-13-family); font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+  h1 {
+    margin: 0; font-size: var(--typo-heading-20-size); line-height: var(--typo-heading-20-line);
+    font-weight: var(--typo-heading-20-weight); letter-spacing: var(--typo-heading-20-tracking);
+  }
+  .sub { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: var(--typo-label-12-size); color: var(--text-faint); }
+  .sub b { font-weight: var(--typo-copy-14-weight); color: var(--text-muted); }
 
   .pill {
     display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
     border-radius: var(--radius-pill); border: 1px solid var(--tone-neutral-border); background: var(--tone-neutral-bg);
-    color: var(--tone-neutral-fg); font-size: 12px; font-weight: 500; white-space: nowrap;
+    color: var(--tone-neutral-fg); font-size: var(--typo-label-12-size); font-weight: var(--typo-label-12-weight); white-space: nowrap;
   }
   .pill.ok { background: var(--tone-success-bg); border-color: var(--tone-success-border); color: var(--tone-success-fg); }
   .pill.dn { background: var(--tone-danger-bg); border-color: var(--tone-danger-border); color: var(--tone-danger-fg); }
   .pill.wn { background: var(--tone-warn-bg); border-color: var(--tone-warn-border); color: var(--tone-warn-fg); }
   .pill.ac { background: var(--tone-accent-bg); border-color: var(--tone-accent-border); color: var(--tone-accent-fg); }
   .sha {
-    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+    font-family: var(--font-mono); font-size: var(--typo-label-12-size); color: var(--text-muted);
     border: 1px solid var(--border-default); border-radius: var(--radius-control); padding: 1px 6px;
     background: transparent; cursor: default;
   }
@@ -55,10 +62,17 @@
   .band { margin-top: 20px; border-top: 1px solid var(--border-subtle); display: flex; }
   .band .m { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 8px; }
   .band .m + .m { border-left: 1px solid var(--border-subtle); }
-  .band .k { font-size: 12px; letter-spacing: .04em; color: var(--text-faint); text-transform: uppercase; white-space: nowrap; }
-  .band .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .band .k {
+    font-size: var(--typo-label-12-size); line-height: var(--typo-label-12-line);
+    letter-spacing: var(--typo-label-12-tracking); font-weight: var(--typo-label-12-weight);
+    color: var(--text-faint); text-transform: uppercase; white-space: nowrap;
+  }
+  .band .v {
+    font-size: var(--typo-heading-20-size); line-height: var(--typo-heading-20-line);
+    font-weight: var(--typo-heading-20-weight); font-variant-numeric: tabular-nums;
+  }
   .band .v.dn { color: var(--tone-danger-fg); }
-  .band .v .note { font-size: 12px; font-weight: 400; color: var(--text-muted); margin-left: 4px; }
+  .band .v .note { font-size: var(--typo-label-12-size); font-weight: var(--typo-copy-14-weight); color: var(--text-muted); margin-left: 4px; }
 
   /* ---------- tabs ---------- */
   .tabs {
@@ -67,10 +81,10 @@
   }
   .tab {
     appearance: none; border: 0; background: transparent; color: var(--text-muted);
-    font: inherit; font-size: 14px; padding: 5px 12px; border-radius: var(--radius-control); cursor: pointer;
+    font: inherit; font-size: var(--typo-label-14-size); padding: 5px 12px; border-radius: var(--radius-control); cursor: pointer;
     display: inline-flex; align-items: center; gap: 6px;
   }
-  .tab .n { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-faint); }
+  .tab .n { font-size: var(--typo-label-12-size); font-variant-numeric: tabular-nums; color: var(--text-faint); }
   .tab[aria-selected="true"] { background: var(--surface-card); color: var(--text-primary); }
   .tab[aria-selected="true"] .n { color: var(--text-muted); }
   .tab .dot { width: 6px; height: 6px; border-radius: var(--radius-pill); background: var(--tone-danger-fg); }
@@ -86,7 +100,9 @@
   .group + .group { margin-top: 22px; }
   .group-h {
     display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;
-    font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-faint);
+    font-size: var(--typo-label-12-size); line-height: var(--typo-label-12-line);
+    letter-spacing: var(--typo-label-12-tracking); font-weight: var(--typo-label-12-weight);
+    text-transform: uppercase; color: var(--text-faint);
   }
   .group-h .count { font-variant-numeric: tabular-nums; color: var(--text-muted); }
   .group-h .rule { flex: 1; border-top: 1px solid var(--border-subtle); transform: translateY(-3px); }
@@ -101,17 +117,17 @@
   .finding.should { border-left-color: var(--tone-warn-fg); }
   .finding.nit { border-left-color: var(--border-strong); }
   .finding .row1 { display: flex; align-items: baseline; gap: 10px; }
-  .finding .title { font-weight: 500; flex: 1; min-width: 0; }
+  .finding .title { font-weight: var(--typo-label-14-weight); flex: 1; min-width: 0; }
   .finding .loc {
-    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+    font-family: var(--font-mono); font-size: var(--typo-label-12-size); color: var(--text-muted);
     background: var(--surface-inset); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 1px 6px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 224px;
   }
-  .finding .body { font-size: 14px; color: var(--text-secondary); }
+  .finding .body { font-size: var(--typo-copy-14-size); line-height: var(--typo-copy-14-line); color: var(--text-secondary); }
   .finding .body[hidden] { display: none; }
   .finding .toggle {
     appearance: none; border: 0; background: transparent; color: var(--text-muted);
-    font: inherit; font-size: 12px; cursor: pointer; padding: 0; display: inline-flex;
+    font: inherit; font-size: var(--typo-button-12-size); cursor: pointer; padding: 0; display: inline-flex;
     align-items: center; gap: 4px; align-self: flex-start;
   }
   .finding .toggle:hover { color: var(--text-primary); }
@@ -125,12 +141,12 @@
   }
   .review + .review { margin-top: 8px; }
   .review.latest { border-color: var(--border-strong); }
-  .review .head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12px; color: var(--text-faint); }
+  .review .head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: var(--typo-label-12-size); line-height: var(--typo-label-12-line); color: var(--text-faint); }
   .review .head .meta { color: var(--text-muted); }
   .review .head .spacer { flex: 1; }
-  .review .summary { margin: 0; font-size: 14px; color: var(--text-secondary); white-space: pre-wrap; }
+  .review .summary { margin: 0; font-size: var(--typo-copy-14-size); line-height: var(--typo-copy-14-line); color: var(--text-secondary); white-space: pre-wrap; }
   .review .summary[hidden] { display: none; }
-  .review .fold { appearance: none; border: 0; background: transparent; font: inherit; font-size: 12px; color: var(--text-muted); cursor: pointer; padding: 0; align-self: flex-start; }
+  .review .fold { appearance: none; border: 0; background: transparent; font: inherit; font-size: var(--typo-button-12-size); color: var(--text-muted); cursor: pointer; padding: 0; align-self: flex-start; }
   .review .fold:hover { color: var(--text-primary); }
 
   /* ---------- failures ---------- */
@@ -139,15 +155,16 @@
     padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
   }
   .failure + .failure { margin-top: 8px; }
-  .failure .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
-  .failure .stage { font-family: var(--font-mono); font-size: 12px; color: var(--tone-danger-fg); border: 1px solid var(--tone-danger-border); border-radius: var(--radius-control); padding: 1px 6px; }
+  .failure .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: var(--typo-label-12-size); line-height: var(--typo-label-12-line); }
+  .failure .stage { font-family: var(--font-mono); font-size: var(--typo-label-12-size); color: var(--tone-danger-fg); border: 1px solid var(--tone-danger-border); border-radius: var(--radius-control); padding: 1px 6px; }
   .failure .when { color: var(--text-faint); margin-left: auto; }
-  .failure .first { font-family: var(--font-mono); font-size: 12px; color: var(--tone-danger-fg); white-space: pre-wrap; word-break: break-word; margin: 0; }
+  .failure .first { font-family: var(--font-mono); font-size: var(--typo-label-12-size); line-height: var(--typo-label-12-line); color: var(--tone-danger-fg); white-space: pre-wrap; word-break: break-word; margin: 0; }
   .failure details { margin: 0; }
-  .failure summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+  .failure summary { cursor: pointer; font-size: var(--typo-label-12-size); color: var(--text-secondary); }
   .failure pre {
     margin: 8px 0 0; padding: 10px 12px; background: var(--surface-page); border: 1px solid var(--tone-danger-border);
-    border-radius: var(--radius-control); font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+    border-radius: var(--radius-control); font-family: var(--font-mono); font-size: var(--typo-label-12-size);
+    line-height: var(--typo-copy-16-line);
     color: var(--text-secondary); overflow: auto; max-height: 260px; white-space: pre;
   }
   .failure .acts { display: flex; gap: 12px; }
@@ -155,14 +172,18 @@
   /* ---------- aside ---------- */
   .side-card { border: 1px solid var(--border-default); background: var(--surface-card); border-radius: var(--radius-container); padding: 14px 16px; }
   .side-card + .side-card { margin-top: 16px; }
-  .side-h { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-faint); margin: 0 0 10px; }
-  dl.kv { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 13px; }
+  .side-h {
+    font-size: var(--typo-label-12-size); line-height: var(--typo-label-12-line);
+    letter-spacing: var(--typo-label-12-tracking); font-weight: var(--typo-label-12-weight);
+    text-transform: uppercase; color: var(--text-faint); margin: 0 0 10px;
+  }
+  dl.kv { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: var(--typo-copy-14-size); line-height: var(--typo-copy-14-line); }
   dl.kv dt { color: var(--text-faint); }
   dl.kv dd { margin: 0; color: var(--text-secondary); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  dl.kv dd code { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+  dl.kv dd code { font-family: var(--font-mono); font-size: var(--typo-label-12-size); color: var(--text-secondary); }
 
   .timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
-  .timeline li { position: relative; padding: 0 0 14px 18px; font-size: 13px; color: var(--text-secondary); }
+  .timeline li { position: relative; padding: 0 0 14px 18px; font-size: var(--typo-copy-14-size); line-height: var(--typo-copy-14-line); color: var(--text-secondary); }
   .timeline li:last-child { padding-bottom: 0; }
   .timeline li::before {
     content: ""; position: absolute; left: 0; top: 6px; width: 7px; height: 7px; border-radius: var(--radius-pill);
@@ -173,9 +194,9 @@
   .timeline li.ok::before { background: var(--tone-success-fg); border-color: var(--tone-success-fg); }
   .timeline li.dn::before { background: var(--tone-danger-fg); border-color: var(--tone-danger-fg); }
   .timeline .what { color: var(--text-primary); }
-  .timeline .when { display: block; font-size: 12px; color: var(--text-faint); }
+  .timeline .when { display: block; font-size: var(--typo-label-12-size); line-height: var(--typo-label-12-line); color: var(--text-faint); }
 
-  .footnote { margin-top: 28px; font-size: 12px; color: var(--text-faint); border-top: 1px solid var(--border-subtle); padding-top: 12px; }
+  .footnote { margin-top: 28px; font-size: var(--typo-label-12-size); line-height: var(--typo-label-12-line); color: var(--text-faint); border-top: 1px solid var(--border-subtle); padding-top: 12px; }
   svg.i { width: 12px; height: 12px; flex: none; }
 </style>
 </head>

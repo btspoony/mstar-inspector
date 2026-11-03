@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, ChevronRight, Copy } from "lucide-react";
 import { t } from "../../i18n";
 import {
@@ -358,8 +358,15 @@ const TIMELINE_DOT: Record<StatusTone, string> = {
 /** One merged activity row: a review, a failure, or the PR's first sighting. */
 type ActivityEntry = { at: string; key: string; tone: StatusTone; label: string; meta: string };
 
-/** Rows the aside timeline renders, the closing first-sighting entry included. */
+/**
+ * Activity rows the aside timeline renders: `TIMELINE_LIMIT - 1` events plus the
+ * PR's first-sighting entry. The optional "earlier events not shown" disclosure
+ * is one row more, rendered only when the cap actually dropped an event.
+ */
 const TIMELINE_LIMIT = 8;
+
+/** How long the copy action's outcome stays on the button before it reverts. */
+const COPY_OUTCOME_MS = 2000;
 
 /** The family the face opens on: the actionable record first, history last. */
 function defaultFamily(detail: PullRequestDetail): RecordFamily {
@@ -413,6 +420,13 @@ function foldLabel(locale: SpaBoot["locale"], open: boolean, record: string): st
   return record === "" ? action : `${action} — ${record}`;
 }
 
+/** The copy action's label: its action while idle, its transient outcome after a press. */
+function copyOutcomeLabel(locale: SpaBoot["locale"], outcome: "copied" | "failed" | undefined): string {
+  if (outcome === "copied") return t(locale, "pullRequests.copyCopied");
+  if (outcome === "failed") return t(locale, "pullRequests.copyFailed");
+  return t(locale, "pullRequests.copyError");
+}
+
 /**
  * The detail face — pure `t()` + data rendering, no window/router access.
  *
@@ -450,6 +464,19 @@ export function PullRequestDetailView({
   // then "", and an empty meta item or span would read as a missing value.
   const latestAttribution = latestReview === null ? "" : reviewAttribution(locale, latestReview);
   const copyAvailable = typeof navigator !== "undefined" && "clipboard" in navigator;
+  // A copy's outcome is transient and per failure block: the button flips to
+  // the result, then reverts, and the live region below announces it.
+  const [copyOutcome, setCopyOutcome] = useState<Readonly<Record<string, "copied" | "failed">>>({});
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
+  const announceCopy = (key: string, outcome: "copied" | "failed"): void => {
+    setCopyOutcome((previous) => ({ ...previous, [key]: outcome }));
+    clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => {
+      copyTimer.current = undefined;
+      setCopyOutcome({});
+    }, COPY_OUTCOME_MS);
+  };
   // Radix hands the trigger's value back as a string; only our three triggers
   // can reach this, but the guard keeps the narrowing honest.
   const selectFamily = (next: string): void => {
@@ -813,9 +840,14 @@ export function PullRequestDetailView({
                     // The first line is the diagnosis; the rest is evidence.
                     const lines = failure.error.split(/\r?\n/);
                     const firstLine = lines[0] ?? "";
+                    // The row's identity is its key; the copy outcome rides the
+                    // same key so the message names the block it belongs to.
+                    const failureKey = `${failure.created_at}-${index}`;
+                    const outcome = copyOutcome[failureKey];
                     return (
                       <li
-                        key={`${failure.created_at}-${index}`}
+                        key={failureKey}
+                        data-tone="danger"
                         className="flex flex-col gap-2 rounded-(--radius-container) border border-(--tone-danger-border) bg-(--tone-danger-bg) px-3.5 py-3"
                       >
                         <div className="flex flex-wrap items-center gap-2 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)">
@@ -843,22 +875,32 @@ export function PullRequestDetailView({
                           </details>
                         ) : null}
                         {copyAvailable ? (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="xs"
-                            className="self-start text-(--text-secondary)"
-                            onClick={() => {
-                              // A rejected write (permission, insecure
-                              // context) must not surface as an unhandled
-                              // rejection: the button is the only affordance
-                              // and the error text is right above it.
-                              navigator.clipboard.writeText(failure.error).catch(() => {});
-                            }}
-                          >
-                            <Copy aria-hidden="true" />
-                            {t(locale, "pullRequests.copyError")}
-                          </Button>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="xs"
+                              className="self-start text-(--text-secondary)"
+                              onClick={() => {
+                                // Both branches set the outcome: a rejected write
+                                // (permission, insecure context) leaves the
+                                // previous clipboard content in place, so silence
+                                // would let the operator paste the wrong text.
+                                navigator.clipboard.writeText(failure.error).then(
+                                  () => announceCopy(failureKey, "copied"),
+                                  () => announceCopy(failureKey, "failed"),
+                                );
+                              }}
+                            >
+                              <Copy aria-hidden="true" />
+                              {copyOutcomeLabel(locale, outcome)}
+                            </Button>
+                            {/* Present from mount so the announcement has a live
+                                region to land in; empty while idle. */}
+                            <span role="status" aria-live="polite" className="sr-only">
+                              {outcome === undefined ? "" : copyOutcomeLabel(locale, outcome)}
+                            </span>
+                          </div>
                         ) : null}
                       </li>
                     );

@@ -88,6 +88,52 @@ const GENERATORS = [
 const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
 
 /**
+ * The consumers under `dirs` and the per-root record the link needs: one walk
+ * answers both "what does the token source have to keep alive" and "did every
+ * declared root contribute" — a second pass would traverse the same trees and,
+ * worse, could disagree with the first.
+ */
+export interface ConsumerWalk {
+  /** Every consumer found, repo-relative, sorted. */
+  readonly files: readonly string[];
+  /** One row per declared root, in the order given, with its repo-relative path. */
+  readonly roots: readonly ConsumerRoot[];
+  /** Every unreadable entry, each naming its path and cause. */
+  readonly failures: readonly string[];
+}
+
+export interface ConsumerRoot {
+  readonly root: string;
+  /** Consumers this root contributed. */
+  readonly consumers: number;
+  /**
+   * Why the root could not be read through, or null when it could. A root
+   * reported as unreadable is never reported as empty: that would name the
+   * wrong cause for a tree the walk never saw.
+   */
+  readonly failure: string | null;
+}
+
+export function consumerWalk(dirs: readonly string[] = CONSUMER_ROOTS): ConsumerWalk {
+  const files: string[] = [];
+  const failures: string[] = [];
+  const roots = dirs.map((dir) => {
+    const failureMark = failures.length;
+    const found = walkConsumers(dir, failures);
+    files.push(...found);
+    const unreadable = failures.length > failureMark;
+    return {
+      root: path.relative(ROOT, dir),
+      consumers: found.length,
+      // Empty AND unreadable proves nothing either way, so the failure speaks
+      // and the emptiness claim stays silent.
+      failure: unreadable && found.length === 0 ? (failures[failureMark] ?? null) : null,
+    };
+  });
+  return { files: files.sort(), roots, failures };
+}
+
+/**
  * Every hand-written stylesheet and HTML shell the token source does not
  * derive — the consumers no generator link sees: nothing derives them, so
  * nothing notices when a name they reference stops existing.
@@ -103,7 +149,9 @@ export function stylesheetConsumers(
   dirs: readonly string[] = CONSUMER_ROOTS,
   failures: string[] = [],
 ): string[] {
-  return dirs.flatMap((dir) => walkConsumers(dir, failures)).sort();
+  const walk = consumerWalk(dirs);
+  failures.push(...walk.failures);
+  return [...walk.files];
 }
 
 /**
@@ -141,7 +189,7 @@ function readdirEntries(dir: string, failures: string[]): string[] {
   try {
     return readdirSync(dir);
   } catch (error) {
-    failures.push(`${path.relative(ROOT, dir)}: ${error instanceof Error ? error.message : String(error)}`);
+    failures.push(`${path.relative(ROOT, dir)}: unreadable (${error instanceof Error ? error.message : String(error)})`);
     return [];
   }
 }
@@ -151,20 +199,21 @@ function statIsDirectory(full: string, failures: string[]): boolean | null {
   try {
     return statSync(full).isDirectory();
   } catch (error) {
-    failures.push(`${path.relative(ROOT, full)}: ${error instanceof Error ? error.message : String(error)}`);
+    failures.push(`${path.relative(ROOT, full)}: unreadable (${error instanceof Error ? error.message : String(error)})`);
     return null;
   }
 }
 
 /**
- * The declared roots that contributed no consumer, repo-relative. One predicate
- * for both callers: the gate fails a link per declared root, and the test holds
- * the same roots to the same rule. Roots must be absolute paths into this
- * checkout; a relative one is a caller bug and throws rather than reading as
- * empty.
+ * The declared roots that contributed no consumer, repo-relative. One walk for
+ * both callers: the gate fails a link per declared root, and the test holds the
+ * same roots to the same rule. A root whose walk failed is not "empty" — it is
+ * reported through `ConsumerWalk.failures`, which names the real cause.
  */
 export function rootsWithoutConsumers(dirs: readonly string[] = CONSUMER_ROOTS): string[] {
-  return dirs.filter((dir) => walkConsumers(dir).length === 0).map((dir) => path.relative(ROOT, dir));
+  return consumerWalk(dirs)
+    .roots.filter((root) => root.consumers === 0 && root.failure === null)
+    .map((root) => root.root);
 }
 
 /**
@@ -653,11 +702,12 @@ if (import.meta.main) {
   // One unreadable file or directory is a fact about this tree, not the end of
   // the run: it is reported by name and the remaining links still run.
   try {
-    const walkFailures: string[] = [];
-    const consumers = stylesheetConsumers(CONSUMER_ROOTS, walkFailures);
-    const emptyRoots = rootsWithoutConsumers();
+    // One traversal of both roots: the consumers to read and the per-root facts
+    // the emptiness rule needs come from the same walk, so the gate never
+    // reaches one tree twice or reports two answers for it.
+    const walk = consumerWalk(CONSUMER_ROOTS);
     const readFailures: string[] = [];
-    const dangling = consumers.flatMap((file) => {
+    const dangling = walk.files.flatMap((file) => {
       try {
         return danglingReferences(file, readFileSync(path.join(ROOT, file), "utf8"));
       } catch (error) {
@@ -665,19 +715,22 @@ if (import.meta.main) {
         return [];
       }
     });
-    const failures = [...walkFailures, ...readFailures];
+    const failures = [...walk.failures, ...readFailures];
     // A root that contributed nothing proves nothing (wrong root, moved tree):
-    // that is a failure per root, not an empty pass.
-    const consumersOk = failures.length === 0 && emptyRoots.length === 0 && dangling.length === 0;
+    // that is a failure per root, not an empty pass. A root that could not be
+    // read is already named by its failure, so it is never reported as empty.
+    const consumersOk = failures.length === 0 && walk.roots.every((root) => root.consumers > 0) && dangling.length === 0;
     console.log(`${consumersOk ? "ok  " : "fail"}  consumers → source`);
     for (const { file, name, theme } of dangling) {
       console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
     }
-    for (const root of emptyRoots) {
-      console.log(`        no stylesheet or HTML shell found under ${root}`);
-    }
     for (const failure of failures) {
       console.log(`        ${failure}`);
+    }
+    for (const root of walk.roots) {
+      if (root.consumers === 0 && root.failure === null) {
+        console.log(`        no stylesheet or HTML shell found under ${root.root}`);
+      }
     }
     if (!consumersOk) brokenLinks.push("consumers → source");
   } catch (error) {

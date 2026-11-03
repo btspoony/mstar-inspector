@@ -50,6 +50,7 @@ export function MetricBand({ metrics }: { metrics: readonly Metric[] }) {
               </span>
               <span
                 data-slot="metric-value"
+                data-tone={metric.tone}
                 className={`text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking) font-semibold tabular-nums${
                   metric.tone === "danger" ? " text-(--tone-danger-fg)" : ""
                 }`}

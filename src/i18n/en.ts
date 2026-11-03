@@ -181,6 +181,9 @@ export const en = {
     /** The failure block's full-output fold and copy action. */
     failureFullOutput: "Full output",
     copyError: "Copy error",
+    /** The copy action's transient outcome, shown on the button for a couple of seconds. */
+    copyCopied: "Copied",
+    copyFailed: "Copy failed",
     /** The aside: PR facts and the merged activity timeline. */
     asideFacts: "Pull request",
     asideActivity: "Activity",
