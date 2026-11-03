@@ -66,6 +66,7 @@
  * src/dashboard/insights-dates.ts — the single copy of the bucket-boundary
  * math, still zero imports from store/pipeline/review.
  */
+import { FINDING_SEVERITIES } from "../contracts/finding-severity";
 import { dayGrid, weekGrid } from "./insights-dates";
 
 /** Optional filters for the insights aggregation (AL-22-1). */
@@ -172,14 +173,6 @@ export function clampWindow(windowDays: number | undefined): number {
  * (`mondayOf`, via insights-dates.ts `weekGrid`) stays in lockstep (S-1 pin).
  */
 const WEEK_BUCKET_SQL = "date(r.reviewed_at, '-' || ((strftime('%w', r.reviewed_at)+6)%7) || ' days')";
-
-/**
- * Fixed per-bucket severity key set of the distribution (AD-652):
- * the v1 merge-class vocab the era gate guarantees. The vocab itself is the
- * harness `MERGE_CLASSES`; it is declared locally because the dashboard leaf
- * boundary (AL-22-1) forbids importing the store/pipeline/review layers.
- */
-const DISTRIBUTION_SEVERITY_KEYS = ["must-fix", "should-fix", "nit"] as const;
 
 /**
  * Resolve the insights aggregation for the review store behind `db`.
@@ -353,16 +346,16 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       {
         bucket_start,
         granularity,
-        by_severity: Object.fromEntries(DISTRIBUTION_SEVERITY_KEYS.map((key) => [key, 0])),
+        by_severity: Object.fromEntries(FINDING_SEVERITIES.map((key) => [key, 0])),
       },
     ]),
   );
   for (const row of distributionSeverities.results) {
     const bucket = distributionBuckets.get(row.bucket_start)!;
-    // Vocab coupling (qc fix-1): a future severity vocabulary must
-    // extend DISTRIBUTION_SEVERITY_KEYS (here) and the SPA-side wire
-    // vocabulary together — this accumulation would otherwise grow keys the
-    // UI's closed series silently ignore. The live pins for the series
+    // Vocab coupling (qc fix-1): the series vocabulary is the shared
+    // FINDING_SEVERITIES contract (src/contracts/finding-severity.ts) — this
+    // accumulation would otherwise grow keys the UI's closed series silently
+    // ignore. The live pins for the series
     // vocabulary live in tests/worker/insights-ui.test.ts (the
     // findings_by_severity ordering/zero-fill cases) and in the wire-guard
     // docblock + by_severity parse in src/spa/pages/data.ts. Unreachable

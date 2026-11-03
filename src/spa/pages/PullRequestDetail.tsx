@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, ChevronRight, Copy, ExternalLink } from "lucide-react";
+import { MUST_FIX_SEVERITY } from "../../contracts/finding-severity";
 import { t } from "../../i18n";
 import {
   Button,
@@ -43,7 +44,6 @@ import {
   recordId,
   reviewAttribution,
   SEVERITY_GROUPS,
-  SEVERITY_KEYS,
   severityGroups,
   timelineRows,
   verdictTone,
@@ -803,7 +803,7 @@ export function PullRequestDetailView({
                           // together, so position joins it — and the fold
                           // state, the React key and the body id all read it.
                           const findingKey = `${finding.finding_id || "finding"}-${index}`;
-                          const open = openFindings[findingKey] ?? finding.severity === SEVERITY_KEYS.mustFix;
+                          const open = openFindings[findingKey] ?? finding.severity === MUST_FIX_SEVERITY;
                           const location =
                             finding.file_path === ""
                               ? ""

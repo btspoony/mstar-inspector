@@ -798,7 +798,12 @@ export function pullRequestRecord(parsed: unknown): {
  *
  * Takes the ALREADY PARSED body (the one `classifyEvent` read), never the raw
  * text: a delivery record must not re-parse the payload the classifier just
- * parsed.
+ * parsed. That document is also why the field is trusted: `classifyEvent` runs
+ * only after `verifySignature` succeeds, so `null` (no classification ran) or
+ * a document both mean an HMAC-verified body — never an unauthenticated one.
+ * The store still truncates the value as defence-in-depth against GitHub's own
+ * name ceilings; unlike `event_name` (an x-github-event HEADER, which the
+ * unauthenticated reject path does reach), that bound is not a payload bound.
  *
  * The preferred source is read on its own: a delivery that states only
  * `full_name`, or states it beside a malformed `owner`/`name`, still has the

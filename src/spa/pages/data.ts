@@ -1048,17 +1048,20 @@ export type AppDetailTab = "settings" | "installations" | "insights" | "pull-req
  */
 export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string; pr: string };
 
-/** The `pr` search param shape: `owner/repo/number`, number = decimal digits. */
-const PR_PARAM_PATTERN = /^[^/]+\/[^/]+\/\d+$/;
-
 /**
- * The `pr` param string → a detail address, or null when the param is
- * absent or malformed (the tab then renders the list). `.`/`..` segments
- * are rejected outright — encoding cannot neutralise a dot-segment
- * (`encodeURIComponent("..")` is `".."`), so the boundary has to be here.
+ * The `pr` param string → a detail address, or null when the param is absent
+ * or malformed (the tab then renders the list). This function IS the `pr`
+ * grammar — `parseAppDetailSearch` accepts exactly what it resolves, so the
+ * URL state can never carry an address the detail read refuses. `.`/`..`
+ * segments are rejected outright — encoding cannot neutralise a dot-segment
+ * (`encodeURIComponent("..")` is `".."`), so the boundary has to be here —
+ * and exactly three segments are accepted, so a longer path is not silently
+ * read as its first three.
  */
 export function pullRequestRefOf(pr: string): PullRequestRef | null {
-  const [owner, repo, number] = pr.split("/");
+  const parts = pr.split("/");
+  if (parts.length !== 3) return null;
+  const [owner, repo, number] = parts;
   if (owner === undefined || repo === undefined || number === undefined) return null;
   if (!/^\d+$/.test(number) || owner === "" || repo === "") return null;
   if (owner === "." || owner === ".." || repo === "." || repo === "..") return null;
@@ -1072,8 +1075,9 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
  * (off-set windows resolve to the default segment). The manager-gated tab
  * values (`installations`, `insights`, `pull-requests`) are honored only for
  * managers; a non-manager — or any other tab value — always resolves to the
- * settings tab. `pr` rides verbatim when it matches the `owner/repo/number`
- * shape.
+ * settings tab. `pr` rides verbatim only when `pullRequestRefOf` resolves it —
+ * the same predicate the detail face reads — so the address bar never
+ * advertises an open detail that can never open.
  */
 export function parseAppDetailSearch(search: string, canManage: boolean): AppDetailSearch {
   const insights = parseInsightsSearch(search);
@@ -1089,7 +1093,7 @@ export function parseAppDetailSearch(search: string, canManage: boolean): AppDet
     ? (insights.window as InsightsWindow)
     : "30";
   const rawPr = params.get("pr");
-  const pr = rawPr !== null && PR_PARAM_PATTERN.test(rawPr) ? rawPr : "";
+  const pr = rawPr !== null && pullRequestRefOf(rawPr) !== null ? rawPr : "";
   return { tab, window, repo: insights.repo, pr };
 }
 

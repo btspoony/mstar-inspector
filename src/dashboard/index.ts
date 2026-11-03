@@ -142,6 +142,7 @@ import {
 // Display-only picker grouping (AD-547). Never a mechanics input —
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
+import { isFindingSeverity } from "../contracts/finding-severity";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
 import { isCommandConfigKey } from "../../packages/shared/src/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
@@ -4356,15 +4357,6 @@ const appPullRequestsRoute = async (c: DashboardContext) => {
 const RECORD_PAGE_LIMIT = { default: 10, min: 1, max: 50 } as const;
 
 /**
- * The finding severities the ledger can filter on: the v1 merge-class vocab
- * (`MERGE_CLASSES`), declared locally because the dashboard leaf boundary
- * (AL-22-1) forbids importing the store/pipeline/review layers. A value
- * outside it has no server-side predicate, so it is a 400 rather than an empty
- * page — a typo must not read as "this PR has no findings".
- */
-const FINDING_SEVERITIES = ["must-fix", "should-fix", "nit"] as const;
-
-/**
  * Upper bound on `offset`. A PR's record families are its own history — a few
  * thousand rows at most — so a window past this cannot address a real page:
  * it is a 400 like any other malformed paging, rather than an offset handed to
@@ -4456,9 +4448,10 @@ type PullRequestRecordSection = "findings" | "reviews" | "failures";
 /**
  * One paged record family. The section is fixed by the registered literal path
  * (three paths share this handler); `severity` is read for findings only — a
- * `mergeClass` spelling from `FINDING_SEVERITIES`, where empty or absent is no
- * filter and the returned `total` is filtered. A spelling outside that set is a
- * 400: it has no predicate, so an empty page would claim a filter that never ran.
+ * `mergeClass` spelling from the shared `FINDING_SEVERITIES` contract, where
+ * empty or absent is no filter and the returned `total` is filtered. A
+ * spelling outside that set is a 400: it has no predicate, so an empty page
+ * would claim a filter that never ran.
  * A miss is the detail's 404 on every family (decided inside the family's own
  * batch, so a section read stays one roundtrip); malformed paging is a 400, and
  * an out-of-bounds `limit` is clamped into `[1, 50]`. Every page echoes the
@@ -4490,7 +4483,7 @@ const appPullRequestRecordsRoute = async (
     // discards. 404 still outranks 400 — a PR this App never received beats a
     // malformed filter on it — so the refusal keeps one head probe instead of
     // the family's batch.
-    if (rawSeverity !== "" && !(FINDING_SEVERITIES as readonly string[]).includes(rawSeverity)) {
+    if (rawSeverity !== "" && !isFindingSeverity(rawSeverity)) {
       const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
       if (head === null) return c.json({ error: "unknown pull request" }, 404);
       return c.json({ error: "invalid severity" }, 400);

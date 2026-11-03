@@ -24,6 +24,7 @@ import {
   appInsightsSummaryUrl,
   appStatusPill,
   parseAppDetailSearch,
+  pullRequestRefOf,
   type AppDetailSearch,
   type AppDetailTab,
   type InsightsSummary,
@@ -130,6 +131,33 @@ describe("app detail URL state (shared pure helpers)", () => {
     expect(parseAppDetailSearch("?pr=42", true).pr).toBe("");
     expect(parseAppDetailSearch("?pr=acme/web/abc", true).pr).toBe("");
     expect(parseAppDetailSearch("?pr=a/b/1/2", true).pr).toBe("");
+  });
+
+  test("the pr param and the detail resolver accept exactly the same grammar", () => {
+    // ONE grammar: whatever the URL state accepts, the detail read resolves —
+    // and vice versa. The dot-segment spellings the old shape regex let
+    // through are rejected on both sides, so the address bar can never
+    // advertise a detail that can never open.
+    const accepted = ["acme/web/42", "acme/web/0042", "a/b/1"];
+    for (const pr of accepted) {
+      expect(pullRequestRefOf(pr)).not.toBeNull();
+      expect(parseAppDetailSearch(`?pr=${encodeURIComponent(pr)}`, true).pr).toBe(pr);
+    }
+    const rejected = [
+      "42",
+      "acme/web/abc",
+      "acme/web/",
+      "/web/42",
+      "a/b/1/2",
+      "../settings/1",
+      "./repo/1",
+      "acme/./1",
+      "acme/../1",
+    ];
+    for (const pr of rejected) {
+      expect(pullRequestRefOf(pr)).toBeNull();
+      expect(parseAppDetailSearch(`?pr=${encodeURIComponent(pr)}`, true).pr).toBe("");
+    }
   });
 
   test("insights filter params ride the same query (window segments + repo)", () => {

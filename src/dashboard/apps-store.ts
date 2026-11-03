@@ -90,11 +90,12 @@
  *     every requested app in exactly TWO statements regardless of N;
  *     deliverySummary(appId) stays the single-settings-page face.
  *   - event_name is bounded to EVENT_NAME_MAX_LENGTH (64) chars at
- *     persist time — the x-github-event header is attacker-influenced on
+ *     persist time — the x-github-event HEADER is attacker-influenced on
  *     the unauthenticated reject path; the DDL has no length constraint.
- *     repository_full_name gets the same bound (REPOSITORY_FULL_NAME_MAX_LENGTH,
- *     160) for the same reason: it comes from the body, not from a verified
- *     signature.
+ *     repository_full_name carries a bound too (REPOSITORY_FULL_NAME_MAX_LENGTH,
+ *     160), but for a different reason: it is a verified-body field,
+ *     defence-in-depth against GitHub's own name ceilings — never an
+ *     attacker payload bound.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention); createApp ids are caller-supplied (the reviews.id
  *     caller-UUID convention — review pin: secretbox AAD rowKey MUST
@@ -106,6 +107,7 @@
  *     caller-visible errors, never swallowed.
  */
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
+import { MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
@@ -321,12 +323,14 @@ export const EVENT_NAME_MAX_LENGTH = 64;
 
 /**
  * Persist bound for the source repository name (`owner/name`, migration 0043).
- * `repository.full_name` rides in the BODY of an HMAC-verified delivery — the
- * signature check runs before classification, so this field is not
- * attacker-supplied — which is why it is bounded differently from
- * EVENT_NAME_MAX_LENGTH: this is defence-in-depth against GitHub's own
- * ceilings (39-char owner + 100-char repo = 139), and the DDL has no length
- * constraint. 160 is headroom, never a truncation risk for a real delivery.
+ * A verified-body field: `repository.full_name` rides in the BODY of an
+ * HMAC-verified delivery, and the signature check runs before classification,
+ * so an unverified request never reaches the read that produces it — this is
+ * not attacker-supplied. The bound is therefore defence-in-depth against
+ * GitHub's own ceilings (39-char owner + 100-char repo = 139), and the DDL has
+ * no length constraint. 160 is headroom, never a truncation risk for a real
+ * delivery. The `event_name` bound next to it is the other case: that value is
+ * a HEADER, which the unauthenticated reject path really does hand us.
  */
 export const REPOSITORY_FULL_NAME_MAX_LENGTH = 160;
 
@@ -401,8 +405,9 @@ export type RecordDeliveryInput = {
   /**
    * The delivery's source repository (`owner/name`, migration 0043) — NULL
    * when the payload carried no `repository` (an install / bypass event).
-   * Truncated to REPOSITORY_FULL_NAME_MAX_LENGTH (160) chars at persist — the
-   * value is attacker-influenced on the unauthenticated reject path.
+   * Truncated to REPOSITORY_FULL_NAME_MAX_LENGTH (160) chars at persist; see
+   * that constant for the trust model (a verified-body field, bounded as
+   * defence-in-depth — not an attacker payload bound like `eventName`).
    */
   repositoryFullName: string | null;
 };
@@ -1272,9 +1277,9 @@ export function createAppsStore(db: AppsStoreD1) {
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings
              WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'
-               AND json_extract(original_json, '$.mergeClass') = 'must-fix'`,
+               AND json_extract(original_json, '$.mergeClass') = ?`,
           )
-          .bind(appId, owner, repo, prNumber),
+          .bind(appId, owner, repo, prNumber, MUST_FIX_SEVERITY),
       ]);
       return {
         findings: countOf(results[0]!),

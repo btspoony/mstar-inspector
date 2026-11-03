@@ -6,6 +6,7 @@
  * tone, and the fold/copy labels. No React import — the component module owns
  * state, effects and JSX, and these rules are pinnable without a DOM.
  */
+import { FINDING_SEVERITIES } from "../../contracts/finding-severity";
 import { t, type Locale } from "../../i18n";
 import { formatRelativeTime } from "../relative-time";
 import type {
@@ -19,23 +20,23 @@ import type {
 /** The three record families the detail face switches between. */
 export type RecordFamily = "findings" | "reviews" | "failures";
 
-/** The three severity words this face names; every other spelling is `other`. */
-export const SEVERITY_KEYS = {
-  mustFix: "must-fix",
-  shouldFix: "should-fix",
-  nit: "nit",
-} as const;
-
 /**
- * Severity buckets in the order an operator asks about them. `severity` is a
- * free string in the payload; the table names three spellings and the catch-all
+ * The severity buckets in the order an operator asks about them, built from
+ * the shared merge-class vocabulary (`FINDING_SEVERITIES`) so a filter chip is
+ * always a spelling the record route accepts. `severity` is a free string in
+ * the payload; this table names the contract's classes and the catch-all
  * bucket (`OTHER_BUCKET`) collects every other one.
  */
-export const SEVERITY_GROUPS = [
-  { severity: SEVERITY_KEYS.mustFix, labelKey: "pullRequests.severityMustFix", tone: "danger" },
-  { severity: SEVERITY_KEYS.shouldFix, labelKey: "pullRequests.severityShouldFix", tone: "warn" },
-  { severity: SEVERITY_KEYS.nit, labelKey: "pullRequests.severityNit", tone: "neutral" },
-] as const;
+const SEVERITY_PRESENTATION = {
+  "must-fix": { labelKey: "pullRequests.severityMustFix", tone: "danger" },
+  "should-fix": { labelKey: "pullRequests.severityShouldFix", tone: "warn" },
+  nit: { labelKey: "pullRequests.severityNit", tone: "neutral" },
+} as const;
+
+export const SEVERITY_GROUPS = FINDING_SEVERITIES.map((severity) => ({
+  severity,
+  ...SEVERITY_PRESENTATION[severity],
+}));
 
 /** The bucket every spelling outside the table lands in, rendered last. */
 const OTHER_BUCKET = {
@@ -44,7 +45,8 @@ const OTHER_BUCKET = {
   tone: "neutral",
 } as const;
 
-export type SeverityTone = (typeof SEVERITY_GROUPS)[number]["tone"];
+/** A tone a severity bucket can wear. */
+export type SeverityTone = "danger" | "warn" | "neutral";
 
 export type SeverityGroup = {
   key: string;

@@ -12,6 +12,15 @@
 -- event, a bypass event) genuinely has none. NULL therefore means "unknown
 -- source", never "the store lost it".
 --
+-- Trust model: the value is read from the BODY of an HMAC-verified delivery —
+-- the signature is checked before classification, so an unverified request
+-- never reaches the read. It is truncated to 160 chars at persist time
+-- (REPOSITORY_FULL_NAME_MAX_LENGTH), which is defence-in-depth against
+-- GitHub's own name ceilings (39-char owner + 100-char repo = 139), NOT an
+-- attacker payload bound; unlike `event_name` in 0011, which comes from the
+-- x-github-event HEADER and is bounded for that reason. Neither column has a
+-- DDL length constraint.
+--
 -- Forward-only `ALTER TABLE … ADD COLUMN`: append-only in spirit (no table
 -- rewrite, no backfill, existing rows keep reading NULL). SQLite has no down.
 
