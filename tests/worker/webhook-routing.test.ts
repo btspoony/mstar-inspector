@@ -229,21 +229,35 @@ function brokenInstallDb(db: ReturnType<typeof createTestD1>): ReturnType<typeof
 }
 
 /**
- * D1 double that fails ONLY the `server_flags` read — every other statement
- * (webhook-path lookup, delivery record, ledger, touch) stays healthy, so a
- * delivery against it exercises exactly the flag-read failure.
+ * D1 double that records every statement text the route prepares, and
+ * optionally fails ONLY the `server_flags` read — every other statement
+ * (webhook-path lookup, delivery record, ledger, touch) stays healthy.
+ *
+ * Two faces: `failFlagRead` exercises the flag-read failure path, and the
+ * recorded queries are the negative half of the job-scoped read — an `ignore`
+ * delivery must prepare ZERO `server_flags` statements, which no
+ * response/row assertion can see (a stray read there would still answer 2xx
+ * `ignored` and still record `ignored`).
  */
-function brokenFlagReadDb(db: ReturnType<typeof createTestD1>): ReturnType<typeof createTestD1> {
+function recordPrepareDb(
+  db: ReturnType<typeof createTestD1>,
+  { failFlagRead = false }: { failFlagRead?: boolean } = {},
+): { db: ReturnType<typeof createTestD1>; queries: string[] } {
+  const queries: string[] = [];
   return {
-    raw: db.raw,
-    batch: db.batch.bind(db),
-    prepare(query: string) {
-      if (query.includes("FROM server_flags")) {
-        throw new Error("d1 unavailable (test injection)");
-      }
-      return db.prepare(query);
-    },
-  } as unknown as ReturnType<typeof createTestD1>;
+    db: {
+      raw: db.raw,
+      batch: db.batch.bind(db),
+      prepare(query: string) {
+        queries.push(query);
+        if (failFlagRead && query.includes("FROM server_flags")) {
+          throw new Error("d1 unavailable (test injection)");
+        }
+        return db.prepare(query);
+      },
+    } as unknown as ReturnType<typeof createTestD1>,
+    queries,
+  };
 }
 
 /** Swap `console.warn` for a mock until `stop()` restores it. */
@@ -1532,11 +1546,15 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   test("flag read failure does not reach an `ignore` delivery → 2xx ignored + delivery row recorded", async () => {
     // Job-scoped flag read: only a `job` can enqueue, so an `ignore` never
     // consults `review_global` — a failing read must not turn this 2xx into a
-    // 500 that also drops the delivery row.
+    // 500 that also drops the delivery row. The response and the row are
+    // identical on a healthy DB, so the negative is the statement log: a route
+    // that started reading the flag for `ignore` would still answer 2xx
+    // `ignored` here, and only this assertion can catch it.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    const env = makeEnv(brokenFlagReadDb(db), { REVIEW_QUEUE: queue as never });
+    const { db: recordingDb, queries } = recordPrepareDb(db, { failFlagRead: true });
+    const env = makeEnv(recordingDb, { REVIEW_QUEUE: queue as never });
     // `closed` is not a whitelisted pull_request action → classify → ignore.
     const body = JSON.stringify({ ...PR_PAYLOAD, action: "closed" });
 
@@ -1545,21 +1563,26 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
+    // The negative: zero flag reads on an `ignore` path.
+    expect(queries.filter((query) => query.includes("server_flags"))).toEqual([]);
     const rows = db.raw
       .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
   });
 
-  test("flag read failure on a `job` delivery → 2xx accepted, enqueued, and every diagnostic write still lands", async () => {
+  test("flag read failure on a `job` delivery → 2xx ignored, ZERO enqueue, `paused`, all diagnostics kept", async () => {
     // The read sits before the delivery row, the PR ledger and the
     // last_webhook_at touch, so an unguarded failure would 500 an
-    // already-verified job and drop all three. The read is best-effort:
-    // fail-open to "enabled" (the flag's absent-row default), one warn.
+    // already-verified job and drop all three. The read is best-effort and
+    // fails CLOSED: a broken read counts as "reviews disabled", so nothing
+    // enqueues and the row reads `paused` — a broken flag read must never
+    // silently defeat the kill switch. Response and diagnostics stay healthy.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    const env = makeEnv(brokenFlagReadDb(db), { REVIEW_QUEUE: queue as never });
+    const { db: brokenDb } = recordPrepareDb(db, { failFlagRead: true });
+    const env = makeEnv(brokenDb, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
     const { warn, stop } = captureWarn();
@@ -1571,13 +1594,15 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     }
 
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1);
-    // Delivery row: `ok` (the job really enqueued), not `paused`.
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    // Delivery row: `paused` (the fail-closed flag blocked the enqueue), never
+    // `ok` — `ok` would claim a job ran while the kill switch was closed.
     const deliveries = db.raw
       .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
-    expect(deliveries).toEqual([{ event_name: "pull_request", outcome: "ok", status_code: null }]);
+    expect(deliveries).toEqual([{ event_name: "pull_request", outcome: "paused", status_code: null }]);
+    // The three diagnostics of an already-verified delivery all still land.
     const ledger = db.raw
       .query("SELECT pr_number, state FROM pull_requests WHERE app_id = ?")
       .all(appRow.id) as Array<{ pr_number: number; state: string }>;

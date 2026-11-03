@@ -407,17 +407,22 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // read itself is best-effort: it sits before the delivery row, the PR ledger
   // and the last_webhook_at touch, so a D1 failure here would drop all three
   // diagnostics of an already-verified job. It logs one structured warn and
-  // falls back to enabled — the flag's own documented absent-row default.
+  // falls back CLOSED — a failed read counts as "reviews disabled", never as
+  // "enabled", so a broken read can never silently defeat the kill switch by
+  // enqueueing a review while an operator believes it is on. The delivery row
+  // then reads `paused` (nothing enqueued); the response and every
+  // diagnostic write stay exactly as on a healthy read.
   let reviewGlobal = true;
   if (outcome.kind === "job") {
     try {
       reviewGlobal = await isFlagEnabled(db, "review_global");
     } catch (err) {
+      reviewGlobal = false;
       const detail = err instanceof Error ? err.message : String(err);
       webhookWarn(
         "review_global_read_failed",
         detail,
-        "review_global flag read failed — assuming enabled (fail-open); webhook response and bookkeeping unaffected",
+        "review_global flag read failed — treating reviews as disabled (fail-closed); webhook response and bookkeeping unaffected",
       );
     }
   }
