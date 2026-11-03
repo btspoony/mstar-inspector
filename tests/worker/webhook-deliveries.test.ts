@@ -33,7 +33,7 @@ import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
 import type { DeliveryOutcome } from "../../src/dashboard/apps-store";
-import { createMigratedTestD1, createTestD1 } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, migrationsAfter } from "../store/helpers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -167,6 +167,57 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     expect(() => insertDelivery(db, { id: "delivery-fk", app_id: "no-such-app" })).toThrow(
       /FOREIGN KEY constraint failed/,
     );
+  });
+});
+
+describe("migrations/0043_webhook_delivery_repository.sql", () => {
+  /** The delivery table's pre-0043 shape: github_apps (post-0036) + 0011. */
+  function preSourceDb(): ReturnType<typeof createTestD1> {
+    const db = createTestD1();
+    for (const name of ["0004_github_apps.sql", "0036_app_identity.sql", "0011_webhook_deliveries.sql"]) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("applies over existing delivery rows: they survive with a NULL source, and a new insert can carry owner/name", () => {
+    const db = preSourceDb();
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps
+           (id, webhook_path, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+            created_by, status, deleted_at, created_at, updated_at)
+         VALUES ('app-1', 'app-1', 'app-1', 1001, 'App 1', 'v1.primary.aXZpdi5jdA==', 'v1.primary.aXZpdi5jdA==',
+                 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+      )
+      .run();
+    // A delivery recorded BEFORE the column existed — the row the
+    // unknown-source label is for.
+    db.raw
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code)
+         VALUES ('delivery-old', 'app-1', 'pull_request', 'ok', NULL)`,
+      )
+      .run();
+
+    // Forward-only ALTER: no table rewrite, so the old row is still there.
+    expect(() =>
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_webhook_delivery_repository.sql"), "utf8")),
+    ).not.toThrow();
+    expect(db.raw.query("SELECT id, repository_full_name FROM webhook_deliveries").all()).toEqual([
+      { id: "delivery-old", repository_full_name: null },
+    ]);
+
+    // …and a post-0043 insert carries the source.
+    db.raw
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name)
+         VALUES ('delivery-new', 'app-1', 'pull_request', 'ok', NULL, 'acme/widgets')`,
+      )
+      .run();
+    expect(
+      db.raw.query("SELECT repository_full_name FROM webhook_deliveries WHERE id = 'delivery-new'").get(),
+    ).toEqual({ repository_full_name: "acme/widgets" });
   });
 });
 
@@ -431,7 +482,10 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       "0038_webhook_path_drop.sql",
     ];
     if (withDeliveries) {
-      names.push("0011_webhook_deliveries.sql", "0043_webhook_delivery_repository.sql");
+      // 0011 plus every migration after the 0038 rebuild — derived from the
+      // directory, so a new one (0043's source column included) joins
+      // automatically. The failure fixture stops before the delivery table.
+      names.push("0011_webhook_deliveries.sql", ...migrationsAfter("0038_webhook_path_drop.sql"));
     }
     for (const name of names) {
       db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));

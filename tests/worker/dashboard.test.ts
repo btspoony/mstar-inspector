@@ -18,6 +18,7 @@ import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
+import { migrationsAfter } from "../store/helpers";
 import { APP_VERSION } from "../../src/version";
 import { exchangeCodeForToken, fetchGitHubUser } from "../../src/dashboard/oauth";
 import type { Env } from "../../src/worker/env";
@@ -2518,7 +2519,7 @@ describe("existing routes unaffected", () => {
 
   test("bare POST /webhook is 404 — the legacy face is retired and the dashboard mount does not intercept it", async () => {
     const db = createDashboardTestD1();
-    applyMigrationFile(db.raw, "0011_webhook_deliveries.sql");
+    applyDeliveries(db.raw);
     const sent: unknown[] = [];
     const env = makeDbEnv(db, {
       REVIEW_QUEUE: { send: async (msg: unknown) => { sent.push(msg); } } as unknown as Env["REVIEW_QUEUE"],
@@ -2550,6 +2551,18 @@ describe("existing routes unaffected", () => {
 
 function applyMigrationFile(db: Database, name: string): void {
   db.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
+}
+
+/**
+ * The delivery log at its current shape: 0011 plus the directory-derived tail
+ * after the 0038 rebuild (0043 adds the source column the health face's
+ * summary selects), so a new migration joins automatically. The dashboard
+ * fixture stops at 0038, so the tail starts there rather than at 0011 — the
+ * files in between expect tables this fixture deliberately omits.
+ */
+function applyDeliveries(db: Database): void {
+  applyMigrationFile(db, "0011_webhook_deliveries.sql");
+  for (const name of migrationsAfter("0038_webhook_path_drop.sql")) applyMigrationFile(db, name);
 }
 
 const DASHBOARD_MIGRATION_SEQUENCE = [
@@ -3071,7 +3084,7 @@ describe("dashboard users store (users.ts)", () => {
   test("an accepted invite lets the member read the workspace App list", async () => {
     const env = makeEnv();
     const db = dbOf(env);
-    applyMigrationFile(db.raw, "0011_webhook_deliveries.sql"); // the list's health face
+    applyDeliveries(db.raw); // the list's health face
     await envDb(env).createApp({
       id: crypto.randomUUID(),
       githubSlug: CONVERSION.slug,

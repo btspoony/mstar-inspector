@@ -239,14 +239,16 @@ export type TimelineRow = ActivityEntry | { key: "timeline-truncated"; hidden: n
  * Derive the aside timeline from the LOADED pages: the merged review/failure
  * history capped at `TIMELINE_LIMIT`, the truncation note when the cap dropped
  * anything, then the PR's own first sighting as the anchor. A section that is
- * not loaded yet contributes nothing — the aside describes the reads the face
- * actually made, never rows it never fetched.
+ * not loaded yet contributes no rows — the aside describes the reads the face
+ * actually made — but the truncation count reads the per-section TOTALS, so it
+ * reports the PR's real remaining history rather than the loaded window's.
  */
 export function timelineRows(
   locale: Locale,
   pr: PullRequestRow,
   reviews: readonly PullRequestReview[],
   failures: readonly PullRequestFailure[],
+  totals: PullRequestCounts,
 ): TimelineRow[] {
   // Both tables stamp `datetime('now')` (UTC), so the raw text orders
   // chronologically.
@@ -282,10 +284,11 @@ export function timelineRows(
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const shown = history.slice(0, TIMELINE_LIMIT);
+  // `history` is the loaded window only (one page per family), so the events
+  // beyond it are the sections' TOTALS minus the rows the window handed over.
+  const hidden = totals.reviews + totals.failures - shown.length;
   const truncated: TimelineRow[] =
-    history.length > shown.length
-      ? [{ key: "timeline-truncated", hidden: history.length - shown.length }]
-      : [];
+    hidden > 0 ? [{ key: "timeline-truncated", hidden }] : [];
   return [
     ...shown,
     ...truncated,

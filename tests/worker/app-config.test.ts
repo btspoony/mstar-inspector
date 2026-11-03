@@ -29,7 +29,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
-import { createTestD1, type TestD1 } from "../store/helpers";
+import { createTestD1, migrationsAfter, type TestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
   CUSTOM_PROVIDER_API_IDS,
@@ -199,6 +199,10 @@ function createAppConfigD1(): TestD1 {
   applyMigration(db, "0031_plans_usage.sql");
   applyMigration(db, "0032_unlimited_plan.sql");
   applyMigration(db, "0033_platform_admin.sql");
+  // The derived tail (0039–…): the settings health face reads the delivery
+  // summary, which names the 0043 source column, and the workspace plan
+  // tables stay complete. A new migration joins here automatically.
+  for (const name of migrationsAfter("0038_webhook_path_drop.sql")) applyMigration(db, name);
   return db;
 }
 

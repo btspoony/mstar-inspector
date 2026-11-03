@@ -590,7 +590,7 @@ export function createAppsStore(db: AppsStoreD1) {
     const [latestRes, rejectedRes] = await Promise.all([
       db
         .prepare(
-          `SELECT app_id, id, event_name, outcome, status_code, created_at FROM (
+          `SELECT app_id, id, event_name, outcome, status_code, repository_full_name, created_at FROM (
              SELECT *, ROW_NUMBER() OVER (PARTITION BY app_id
                ORDER BY ${DELIVERY_VERDICT_TIER_SQL},
                         created_at DESC, rowid DESC) AS rn
@@ -1175,8 +1175,9 @@ export function createAppsStore(db: AppsStoreD1) {
      * so a number-only lookup would answer with a different repo's PR. A miss
      * is `null` — never a same-number row from another repo.
      *
-     * The latest review rides along: it is the header's verdict fallback while
-     * the reviews section is still unloaded. The counts are a separate read
+     * The newest review rides along as a whole row: it is the header's ONE
+     * authoritative verdict/attribution source, so paging the reviews section
+     * can never rewrite the headline. The counts are a separate read
      * (`countPullRequestRecords`), so the head stays one row plus one lookup.
      */
     async getPullRequestHead(
@@ -1194,7 +1195,7 @@ export function createAppsStore(db: AppsStoreD1) {
           .bind(appId, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT verdict, reviewed_at FROM reviews
+            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha FROM reviews
              WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
              ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
           )
@@ -1202,11 +1203,9 @@ export function createAppsStore(db: AppsStoreD1) {
       ]);
       const row = results[0]!.results[0] as PullRequestBaseRow | undefined;
       if (row === undefined) return null;
-      const latest = results[1]!.results[0] as { verdict: string; reviewed_at: string } | undefined;
       return {
         ...row,
-        latest_verdict: latest?.verdict ?? null,
-        latest_reviewed_at: latest?.reviewed_at ?? null,
+        latest_review: (results[1]!.results[0] as PullRequestReviewDetailRow | undefined) ?? null,
       };
     },
 
@@ -1405,10 +1404,12 @@ export type PullRequestReviewDetailRow = {
 
 export type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
 
-/** The detail head: the ledger row plus its latest review, for the header's verdict fallback. */
+/**
+ * The detail head: the ledger row plus its newest review (whole row, nullable)
+ * — the header's authoritative verdict and attribution.
+ */
 export type PullRequestHeadRow = PullRequestBaseRow & {
-  latest_verdict: string | null;
-  latest_reviewed_at: string | null;
+  latest_review: PullRequestReviewDetailRow | null;
 };
 
 /** The three record families' totals (the detail payload's `counts`). */

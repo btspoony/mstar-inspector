@@ -22,6 +22,7 @@ import {
   parsePullRequestDetail,
   parseRecordPage,
   type PullRequestDetail,
+  type PullRequestReview,
   type PullRequestRow,
 } from "../../src/spa/pages/data";
 import {
@@ -53,8 +54,12 @@ const render = (detail: PullRequestDetail, records = recordsOf()) =>
   );
 
 /** A complete face for a page set (counts derived from the pages' totals). */
-const face = (over: Partial<RecordPages> = {}, row: Partial<PullRequestRow> = {}) => {
-  const built = scene(over, row);
+const face = (
+  over: Partial<RecordPages> = {},
+  row: Partial<PullRequestRow> = {},
+  latest: Partial<PullRequestReview> | null = DETAIL.latest_review,
+) => {
+  const built = scene(over, row, latest);
   return render(built.detail, recordsOf(built.pages));
 };
 
@@ -121,6 +126,10 @@ describe("pull request detail data plane (pure helpers)", () => {
       parsePullRequestDetail({ ...DETAIL, pull_request: { ...DETAIL.pull_request, owner: null } }),
     ).toBeNull();
     expect(parsePullRequestDetail(null)).toBeNull();
+    // The head's newest review is nullable, and a drifted one drops to null
+    // rather than failing the envelope (no headline verdict, face still renders).
+    expect(parsePullRequestDetail({ ...DETAIL, latest_review: null })?.latest_review).toBeNull();
+    expect(parsePullRequestDetail({ ...DETAIL, latest_review: { verdict: "ship it" } })?.latest_review).toBeNull();
 
     // One drifted failure / finding drops that entry, not the whole page.
     expect(parseRecordPage("failures", { items: [{ stage: 1 }], total: 1 })).toEqual({ items: [], total: 1 });
@@ -163,6 +172,8 @@ describe("pull request detail data plane (pure helpers)", () => {
     const detail: PullRequestDetail = {
       ...DETAIL,
       counts: { ...DETAIL.counts, reviews: 1, findings: 1 },
+      // The head carries the same unattributed review the page holds.
+      latest_review: reviews?.items[0] ?? null,
     };
     const markup = render(
       detail,
@@ -337,18 +348,22 @@ describe("pull request detail face (static SSR)", () => {
     // show: the line disappears rather than rendering an empty label.
     expect(
       await withMarkup(
-        face({
-          reviews: page([
-            {
-              verdict: "needs fixes",
-              summary_md: "An unattributed round.",
-              model: "",
-              provider: "",
-              reviewed_at: "2026-11-01 08:00:00",
-              head_sha: "aaa111b",
-            },
-          ]),
-        }),
+        face(
+          {
+            reviews: page([
+              {
+                verdict: "needs fixes",
+                summary_md: "An unattributed round.",
+                model: "",
+                provider: "",
+                reviewed_at: "2026-11-01 08:00:00",
+                head_sha: "aaa111b",
+              },
+            ]),
+          },
+          {},
+          { verdict: "needs fixes", reviewed_at: "2026-11-01 08:00:00", model: "", provider: "" },
+        ),
         (container) => container.querySelector('[data-slot="pr-meta"]') !== null,
       ),
     ).toBe(false);
@@ -393,6 +408,7 @@ describe("pull request detail face (static SSR)", () => {
           ]),
         },
         { latest_review: { verdict, reviewed_at: "2026-11-01 08:00:00" } },
+        { verdict, reviewed_at: "2026-11-01 08:00:00" },
       );
     const read = async (markup: string) =>
       withMarkup(markup, (container) => ({
@@ -705,6 +721,7 @@ describe("pull request detail face (static SSR)", () => {
         ]),
       },
       { latest_review: { verdict: "", reviewed_at: "2026-11-01 08:00:00" } },
+      { verdict: "", reviewed_at: "2026-11-01 08:00:00" },
     );
     const read = await withMarkup(empty, (container) => {
       const verdict = container.querySelectorAll('[data-slot="metric-value"]')[0];
@@ -764,6 +781,7 @@ describe("pull request detail face (static SSR)", () => {
       {
         latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
       },
+      { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
     );
     const read = await withMarkup(markup, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
@@ -803,6 +821,7 @@ describe("pull request detail face (static SSR)", () => {
       // row's summary, which is absent too.
       { reviews: page([]) },
       { head_sha: "", latest_review: null },
+      null,
     );
     // The PR-level chip disappears rather than rendering an empty one; its
     // tooltip and the aside's Head row go with it.
@@ -834,6 +853,7 @@ describe("pull request detail face (static SSR)", () => {
     const markup = face(
       { reviews: history },
       { latest_review: { verdict: "needs fixes", reviewed_at: history.items[0]?.reviewed_at ?? "" } },
+      { verdict: "needs fixes", reviewed_at: history.items[0]?.reviewed_at ?? "" },
     );
     // `· model-NN` is the timeline's meta separator: the header names the model
     // without it, so the marker identifies exactly the rows that rendered.
@@ -870,6 +890,31 @@ describe("pull request detail face (static SSR)", () => {
         };
       }),
     ).toEqual({ count: 9, last: "activity-entry", beforeAnchor: "timeline-truncated", text: truncation });
+  });
+
+  test("the truncation count names the PR's whole history, not the loaded page", async () => {
+    // The loaded window is one page per family; the PR's real history is the
+    // sections' totals. A count derived from the page would report 0 here.
+    const reviews = page(
+      Array.from({ length: 3 }, (_, index) => ({
+        verdict: "needs fixes",
+        summary_md: `Round ${index}`,
+        model: `model-${index}`,
+        provider: "",
+        reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
+        head_sha: `sha${index}`,
+      })),
+      30,
+    );
+    const built = scene({ reviews, failures: page([], 5) });
+    const read = await withMarkup(render(built.detail, recordsOf(built.pages)), (container) => ({
+      entries: container.querySelectorAll('[data-slot="activity-entry"]').length,
+      text: container.querySelector('[data-slot="timeline-truncated"]')?.textContent ?? "",
+    }));
+    // Three loaded reviews, each shown, plus the PR's own anchor row; the
+    // history behind them is 30 reviews + 5 failures.
+    expect(read.entries).toBe(4);
+    expect(read.text).toBe(t("en", "pullRequests.timelineHidden", { count: 32 }));
   });
 
   test("a timeline that fits the cap renders no truncation row", async () => {

@@ -62,6 +62,16 @@ export function migrationsAfter(number: number): string[] {
 /** Full migration list, in wrangler's apply order (numeric, not lexical). */
 const ALL_MIGRATIONS = migrationsAfter(0);
 
+/**
+ * The directory-derived migrations whose filename sorts after `name` (the
+ * wrangler apply order). A fixture lists the shape it must reconstruct up to
+ * some migration, then appends this tail — so a new migration joins it with
+ * no lockstep edit, and the fixture keeps the exact starting point it declares.
+ */
+export function migrationsAfter(name: string): string[] {
+  return ALL_MIGRATIONS.filter((migration) => migration > name);
+}
+
 /** Execute the migration DDL on a fresh in-memory database. */
 function applyMigration(db: Database, migrations: readonly string[]): void {
   // SQLite enforces foreign keys per-connection; D1 has them on by default.

@@ -171,6 +171,50 @@ describe("pull request detail (mounted)", () => {
     }
   });
 
+  test("paging the reviews list never rewrites the headline verdict or its attribution", async () => {
+    // >1 page of reviews: page 2's first row is an OLDER review, so a header
+    // that reads the loaded page flips the verdict and the attribution as soon
+    // as the operator presses Next. The head's `latest_review` is the one
+    // authoritative source.
+    const corpus = Array.from({ length: 12 }, (_, index) => ({
+      verdict: index === 0 ? "ship it" : "blocked",
+      summary_md: `Round ${index}`,
+      model: `model-${String(index).padStart(2, "0")}`,
+      provider: "openrouter",
+      reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
+      head_sha: `sha${index}`,
+    }));
+    const newest = corpus[0]!;
+    const { container, win, unmount } = await mountDetailView(
+      scene({ reviews: page(corpus) }, {}, newest),
+    );
+    try {
+      const read = () => ({
+        verdict: container.querySelectorAll('[data-slot="metric-value"]')[0]?.textContent ?? "",
+        meta: container.querySelector('[data-slot="pr-meta"]')?.textContent ?? "",
+      });
+      // The head's verdict and attribution, on the opening family.
+      expect(read().verdict).toBe("ship it");
+      expect(read().meta).toContain("model-00");
+
+      await press(win, container.querySelectorAll<HTMLElement>('[role="tab"]')[1]);
+      const pagerButton = (label: string) =>
+        [...container.querySelectorAll<HTMLButtonElement>('[data-slot="pager"] button')].find(
+          (button) => button.textContent === label,
+        );
+      expect(pagerButton(t("en", "pullRequests.pageNext"))?.disabled).toBe(false);
+      await press(win, pagerButton(t("en", "pullRequests.pageNext")));
+
+      // Page 2 is on screen (its rows are the older reviews)…
+      expect(container.textContent ?? "").toContain("Round 10");
+      // …and the headline still reports the newest review, not the page's first.
+      expect(read()).toEqual({ verdict: "ship it", meta: expect.stringContaining("model-00") });
+      expect(read().meta).not.toContain("model-10");
+    } finally {
+      await unmount();
+    }
+  });
+
   test("the severity filter reloads findings from the first page", async () => {
     const corpus: PullRequestFinding[] = [
       ...Array.from({ length: 12 }, (_, index) => ({

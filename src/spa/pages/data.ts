@@ -756,10 +756,13 @@ export type PullRequestCounts = { findings: number; reviews: number; failures: n
 /**
  * The PR detail payload (`GET …/pull-requests/:owner/:repo/:number`): the head
  * row plus its record totals. The families themselves are paged reads.
+ * `latest_review` is the PR's newest review — the header's ONE source for
+ * verdict and attribution, independent of whichever reviews page is loaded.
  */
 export type PullRequestDetail = {
   pull_request: PullRequestRow;
   counts: PullRequestCounts;
+  latest_review: PullRequestReview | null;
 };
 
 /** The three record families, one paged read each. */
@@ -890,7 +893,8 @@ export function parsePullRequestDetail(data: unknown): PullRequestDetail | null 
   if (pull_request === null) return null;
   const counts = parsePullRequestCounts(data.counts);
   if (counts === null) return null;
-  return { pull_request, counts };
+  // Absent/drifted → null (no headline verdict); the envelope itself still parses.
+  return { pull_request, counts, latest_review: parsePullRequestReview(data.latest_review) };
 }
 
 /** A count is required and finite; anything else fails the payload. */

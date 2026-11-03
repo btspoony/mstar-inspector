@@ -388,11 +388,11 @@ export function PullRequestDetailView({
   // is not yet actionable — absent is quiet, never assumed.
   const findingsActionable =
     findingsPage !== null && findingsPage.items.some((finding) => isActionable(finding.severity));
-  // The reviews page's first row is the newest review and carries the
-  // attribution. The PR row's summary is the fallback while that page is not
-  // loaded — the band and the header meta read this one value.
-  const latestReview = reviewsPage?.items[0] ?? null;
-  const latestVerdict = latestReview?.verdict ?? pr.latest_review?.verdict ?? "";
+  // The PR's newest review comes from the head payload, never the loaded page:
+  // paging the reviews list must not rewrite the headline verdict, its tone or
+  // the model/provider attribution.
+  const latestReview = detail.latest_review;
+  const latestVerdict = latestReview?.verdict ?? "";
   // Both fields can be empty (a v1 payload records neither): the attribution is
   // then "", and an empty meta item or span would read as a missing value.
   const latestAttribution = latestReview === null ? "" : reviewAttribution(locale, latestReview);
@@ -521,6 +521,7 @@ export function PullRequestDetailView({
     pr,
     reviewsPage?.items ?? [],
     failuresPage?.items ?? [],
+    counts,
   );
 
   return (

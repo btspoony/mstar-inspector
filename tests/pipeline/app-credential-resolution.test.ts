@@ -111,10 +111,11 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     // must carry it before the derived tail runs.
     "0011_webhook_deliveries.sql",
     "0036_app_identity.sql",
-    // Every later migration, derived from the directory (0040–0043 included):
+    // Every later migration, derived from the directory (0040–… included):
     // the consumer's per-message admission reads the runtime caps and writes
-    // the `review_inflight` row on EVERY admitted message.
-    ...MIGRATIONS_AFTER_0036,
+    // the `review_inflight` row on EVERY admitted message, and 0043 adds the
+    // delivery source column.
+    ...migrationsAfter("0036_app_identity.sql"),
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

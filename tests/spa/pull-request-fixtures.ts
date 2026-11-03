@@ -120,6 +120,9 @@ export const DETAIL: PullRequestDetailPayload = {
     failure_count: FAILURES.length,
   },
   counts: { findings: FINDINGS.length, reviews: REVIEWS.length, failures: FAILURES.length },
+  // The head's authoritative newest review — what the headline reads, whatever
+  // page the reviews section has loaded.
+  latest_review: REVIEWS[0] ?? null,
 };
 
 /** A head and the pages it describes, as both mount helpers take them. */
@@ -128,14 +131,21 @@ export type DetailScene = { detail: PullRequestDetailPayload; pages: RecordPages
 /**
  * A detail scene: `over` replaces a family's page, and every count follows the
  * supplied totals — so a scene's head can never claim more records than the
- * stub will serve.
+ * stub will serve. `latest` overrides the head's newest review (the headline's
+ * only source), leaving the section pages untouched.
  */
-export function scene(over: Partial<RecordPages> = {}, row: Partial<PullRequestRow> = {}): DetailScene {
+export function scene(
+  over: Partial<RecordPages> = {},
+  row: Partial<PullRequestRow> = {},
+  latest: Partial<PullRequestReview> | null = DETAIL.latest_review,
+): DetailScene {
   const pages: RecordPages = { ...RECORDS, ...over };
+  const base = DETAIL.latest_review;
   return {
     detail: {
       pull_request: { ...DETAIL.pull_request, failure_count: pages.failures.total, ...row },
       counts: { findings: pages.findings.total, reviews: pages.reviews.total, failures: pages.failures.total },
+      latest_review: latest === null || base === null ? null : { ...base, ...latest },
     },
     pages,
   };

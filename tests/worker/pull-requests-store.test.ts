@@ -418,9 +418,16 @@ describe("pull request detail reads", () => {
 
     const head = await store.getPullRequestHead(APP_ID, "acme", "widgets", 131);
     expect(head?.title).toBe("Add a thing");
-    // The latest review rides the head for the header's verdict fallback.
-    expect(head?.latest_verdict).toBe("approve");
-    expect(head?.latest_reviewed_at).toBe("2026-01-02 00:00:00");
+    // The newest review rides the head as a whole row — the header's one
+    // authoritative verdict + attribution source.
+    expect(head?.latest_review).toEqual({
+      verdict: "approve",
+      summary_md: "looks good",
+      model: "m1",
+      provider: "p1",
+      reviewed_at: "2026-01-02 00:00:00",
+      head_sha: "sha-r1",
+    });
 
     expect(await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131)).toEqual({
       findings: 1,

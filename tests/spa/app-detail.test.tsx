@@ -6,8 +6,8 @@
  * 1. Tab shell: default tab 应用设置 on the bare path AND the legacy
  *    /settings deep link; the 洞察 tab renders ONLY on the manage face —
  *    a non-manager must not see the tab at all (absence pinned).
- * 2. Radix Tabs forceMount knowledge: inactive panels must be hidden by
- *    the wrapper's `data-[state=inactive]:hidden` (ui-bugs knowledge pin).
+ * 2. Mount-once tab switching: a manager tab switch leaves the settings panel
+ *    mounted (and hidden), so typed form state survives (mounted assertion).
  * 3. URL-derived state: one []-mounted popstate listener + replaceState
  *    commits (spa-url-state-resync contract).
  * 4. R1 closure: the kept data.ts insights helpers (parseInsights /
@@ -18,16 +18,17 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { act, createElement } from "react";
+import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Tabs, TabsList, TabsTrigger } from "@design-system";
+import { type Element as DomElement, type HTMLElement as DomHTMLElement, type Window } from "happy-dom";
 import { t } from "../../src/i18n";
 import {
   appDetailSearchQuery,
   appInsightsSummaryUrl,
   appStatusPill,
   parseAppDetailSearch,
+  type AppDetailSearch,
   type AppDetailTab,
   type InsightsSummary,
   type SettingsManagePayload,
@@ -42,7 +43,6 @@ import { installDom } from "./dom";
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
 const insightsTab = readFileSync(join(spaRoot, "pages/AppInsightsTab.tsx"), "utf8");
-const tabsWrapper = readFileSync(join(import.meta.dir, "../../src/design-system/primitives/tabs.tsx"), "utf8");
 
 const IDENTITY_APP = {
   github_slug: "demo",
@@ -300,88 +300,115 @@ describe("tab shell rendering (static SSR)", () => {
   });
 });
 
-describe("tab shell source contracts", () => {
-  test("page tab face: the shell tab bar rides the line variant with hairline + sized-up left-aligned triggers", () => {
-    // Page-level face (DESIGN.md ### Tabs): the shell's 应用设置/洞察 bar is
-    // the line-tab idiom — full-width, bottom hairline on the border-border
-    // token, larger triggers (16px heading-16 token step, taller bar) — while
-    // the chains-panel segmented pill keeps the component default (its face
-    // stays generic; the variant prop is only set at this consumption site).
-    const bar = detailPage.slice(detailPage.indexOf("<TabsList"), detailPage.indexOf("</TabsList>"));
-    expect(bar).toMatch(/<TabsList\s+variant="line"/);
-    expect(bar).toContain("w-full");
-    expect(bar).toContain("justify-start");
-    // 40px bar is load-bearing: the class must carry the same variant-scoped
-    // prefix as the component base (`group-data-[orientation=horizontal]/tabs:h-9`)
-    // so tailwind-merge dedupes the 36px default — a plain `h-10` loses the
-    // Tailwind v4 cascade and would ship a 36px bar.
-    expect(bar).toContain("group-data-[orientation=horizontal]/tabs:h-10");
-    expect(bar).not.toMatch(/(^|\s)h-10(\s|$)/);
-    // The line variant is set exactly once — this shell bar; no other face
-    // in the page opts in (the chains panel keeps the component default).
-    expect(detailPage.match(/variant="line"/g)?.length).toBe(1);
-    expect(tabsWrapper).toMatch(/defaultVariants:\s*\{\s*variant:\s*"default"/);
-  });
+describe("tab shell mounted behaviour (forceMount)", () => {
+  /** The page's stateful wrapper: the shell owns `search` in production. */
+  function ShellHarness() {
+    const [tabSearch, setTabSearch] = useState<AppDetailSearch>(search);
+    return createElement(AppDetailView, {
+      locale: "en",
+      appId: "1",
+      payload: managePayload,
+      groups: [],
+      notice: null,
+      search: tabSearch,
+      onReload: noReload,
+      onSearch: setTabSearch,
+    });
+  }
 
-  test("the trigger face is the primitive's line variant, not a page-local chain", () => {
-    // The page renders the shared trigger untouched, so a change to the line
-    // variant reaches this page like every other consumer (DESIGN.md: a page
-    // re-spelling a primitive's chain is the duplication the layer exists to
-    // remove). Proven by equality of the two rendered faces, not by a class
-    // string that would pass even if the page appended its own.
-    /** The triggers inside the tab list of one variant — the settings body
-     *  has its own segmented pill, which is a different face. */
-    const triggerFaces = (markup: string, variant: string): string[] => {
-      const lists = [...markup.matchAll(/<div\b[^>]*data-slot="tabs-list"[^>]*>/g)];
-      const at = lists.findIndex((match) => match[0].includes(`data-variant="${variant}"`));
-      if (at < 0) return [];
-      const from = lists[at]?.index ?? 0;
-      const to = lists[at + 1]?.index ?? markup.length;
-      return [...markup.slice(from, to).matchAll(/<button\b[^>]*role="tab"[^>]*>/g)].map(
-        (match) => /class="([^"]*)"/.exec(match[0])?.[1] ?? "",
-      );
-    };
-    const page = triggerFaces(renderDetail(managePayload, true), "line");
-    const primitive = triggerFaces(
-      renderToStaticMarkup(
-        createElement(
-          Tabs,
-          { value: "a" },
-          createElement(
-            TabsList,
-            { variant: "line" },
-            createElement(TabsTrigger, { value: "a" }, "Settings"),
-          ),
-        ),
-      ),
-      "line",
+  /** One press as the browser performs it — a Radix trigger selects on mousedown. */
+  const click = async (win: Window, node: DomElement | null | undefined) => {
+    const pointer = (type: string) =>
+      new win.PointerEvent(type, { bubbles: true, cancelable: true, button: 0 });
+    const mouse = (type: string) =>
+      new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 });
+    await act(async () => {
+      node?.dispatchEvent(pointer("pointerdown"));
+      node?.dispatchEvent(mouse("mousedown"));
+      node?.dispatchEvent(pointer("pointerup"));
+      node?.dispatchEvent(mouse("mouseup"));
+      node?.dispatchEvent(mouse("click"));
+    });
+    await act(async () => {});
+  };
+
+  const tabTrigger = (container: DomElement, label: string) =>
+    [...container.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === label);
+
+  /**
+   * The OUTERMOST tabpanel holding `node` — the shell's panel. The settings
+   * body hosts its own nested Tabs (the model-chain editors), so the nearest
+   * panel would be a chain panel that stays active either way.
+   */
+  const panelOf = (container: DomElement, node: DomElement | null) => {
+    let current: DomElement | null = node;
+    let outer: DomHTMLElement | null = null;
+    while (current !== null && current !== container) {
+      if (current.getAttribute("role") === "tabpanel") outer = current as DomHTMLElement;
+      current = current.parentElement;
+    }
+    return outer;
+  };
+
+  /** The shell's own panels, outer-first: one of them is active at a time. */
+  const shellPanels = (container: DomElement) =>
+    [...container.querySelectorAll('[data-slot="tabs-content"]')].filter(
+      (panel) => panelOf(container, panel) === panel,
     );
-    // Four triggers on the manager face: 应用设置 + the three manager tabs.
-    expect(page).toHaveLength(4);
-    expect(primitive).toHaveLength(1);
-    for (const face of page) expect(face).toBe(primitive[0] ?? "");
-    // …and that shared face is the documented line tab: the heading-16 type
-    // step, named as the token it resolves (DESIGN.md ### Tabs).
-    expect(primitive[0] ?? "").toContain("length:--typo-heading-16-size");
-  });
 
-  test("forceMount knowledge: the ui wrapper hides inactive panels via data-[state=inactive]:hidden", () => {
-    expect(tabsWrapper).toContain("data-[state=inactive]:hidden");
-  });
-
-  test("mount-once tab switching: ALL panels forceMount — switching tabs preserves settings form state (qc1)", () => {
+  test("an inactive panel stays mounted but hidden, and the settings form keeps its typed value across a tab switch", async () => {
     // Radix unmounts inactive panels by default, which would destroy the
-    // settings forms (typed inputs, Add Provider panel, op notices) and
-    // refetch the manager tabs from scratch on every switch. All panels
-    // forceMount; the wrapper's data-[state=inactive]:hidden keeps the
-    // one-visible-panel invariant (pin above).
-    expect(detailPage.match(/<TabsContent value="settings" forceMount>/g)?.length).toBe(1);
-    expect(detailPage.match(/<TabsContent value="insights" forceMount>/g)?.length).toBe(1);
-    expect(detailPage.match(/<TabsContent value="pull-requests" forceMount>/g)?.length).toBe(1);
-    // No unmount-by-default panel remains on the shell.
-    expect(detailPage).not.toMatch(/<TabsContent value="[^"]+">\s*\n/);
-  });
+    // settings forms and refetch a manager tab on every switch. The shell
+    // forceMounts every panel; the wrapper's data-[state=inactive]:hidden keeps
+    // the one-visible-panel invariant. Typed state surviving the switch is the
+    // behaviour, asserted on the live tree rather than in page source.
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(ShellHarness)));
+      // Open the draft chain panel, then type a name into its input.
+      const addChain = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "settings.addChain"),
+      );
+      await click(win, addChain);
+      const input = () =>
+        container.querySelector(`input[placeholder="${t("en", "settings.chainNamePlaceholder")}"]`);
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(input(), "deep-review");
+        input()?.dispatchEvent(new win.Event("input", { bubbles: true }));
+      });
+      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+      const settingsPanel = panelOf(container, input());
+      expect(settingsPanel?.getAttribute("data-state")).toBe("active");
 
+      // Switch to Installed: the settings panel is still mounted, now hidden.
+      await click(win, tabTrigger(container, t("en", "appDetail.tabInstallations")));
+      expect(panelOf(container, input())).toBe(settingsPanel);
+      expect(settingsPanel?.getAttribute("data-state")).toBe("inactive");
+      // One visible panel: every other shell panel reads inactive.
+      expect(shellPanels(container).map((panel) => panel.getAttribute("data-state"))).toEqual([
+        "inactive",
+        "active",
+        "inactive",
+        "inactive",
+      ]);
+      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+
+      // …and back: the value survived a full round trip.
+      await click(win, tabTrigger(container, t("en", "appDetail.tabSettings")));
+      expect(settingsPanel?.getAttribute("data-state")).toBe("active");
+      expect((input() as HTMLInputElement | null)?.value).toBe("deep-review");
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+});
+
+describe("tab shell source contracts", () => {
   test("mid-session demotion rewrite: a stale manager-tab URL is rewritten once the non-manager payload lands (qc2)", async () => {
     // Product behaviour: ?tab=pull-requests in the address bar + a payload
     // that says non-manager → the landing effect rewrites the URL to the

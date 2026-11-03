@@ -295,7 +295,16 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
       owner: "acme",
       repo: "widgets",
       failure_count: 1,
-      latest_review: { verdict: "comment", reviewed_at: "2026-01-02 00:00:00" },
+      // The newest review rides the head whole — the header never reads a
+      // reviews page for its verdict or attribution.
+      latest_review: {
+        verdict: "comment",
+        summary_md: "",
+        model: "",
+        provider: "",
+        reviewed_at: "2026-01-02 00:00:00",
+        head_sha: "sha-1",
+      },
     });
     expect(body.counts).toEqual({ findings: 2, reviews: 2, failures: 1 });
   });
