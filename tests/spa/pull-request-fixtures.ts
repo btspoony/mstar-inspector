@@ -110,9 +110,9 @@ export const FAILURES: PullRequestFailure[] = [
 export type RecordPages = { [K in RecordSection]: RecordPage<RecordPageItems[K]> };
 
 export const RECORDS: RecordPages = {
-  findings: { items: FINDINGS, total: FINDINGS.length },
-  reviews: { items: REVIEWS, total: REVIEWS.length },
-  failures: { items: FAILURES, total: FAILURES.length },
+  findings: page(FINDINGS),
+  reviews: page(REVIEWS),
+  failures: page(FAILURES),
 };
 
 /**
@@ -311,14 +311,19 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
             : sceneValue.pages.failures.items;
       const offset = Number(url.searchParams.get("offset") ?? "0");
       const limit = Number(url.searchParams.get("limit") ?? "10");
+      // The applied page size, and the payload echoes it: a scene can state a
+      // smaller one (`pages.x.limit`), exactly as the route's clamp would, and
+      // the pager must stride on what came back rather than on what it asked.
+      const applied = Math.min(limit, sceneValue.pages[section].limit ?? limit);
       // The page's declared `total` is authoritative: the head was built from
       // it, so a scene can state a total its served window never reaches. A
       // severity filter has no declared total of its own — like the route, it
       // reports the rows it filtered.
       const filtered = section === "findings" && severity !== "";
       return jsonResponse({
-        items: rows.slice(offset, offset + limit),
+        items: rows.slice(offset, offset + applied),
         total: filtered ? rows.length : sceneValue.pages[section].total,
+        limit: applied,
       });
     }
     return jsonResponse(sceneValue.detail);
@@ -472,5 +477,5 @@ export async function mountTabAcrossApps(initialPr: string, sceneFor: (appId: st
  * page) — the shape a shrunk page or a stale offset produces.
  */
 export function page<T>(items: T[], total = items.length): RecordPage<T> {
-  return { items, total };
+  return { items, total, dropped: 0 };
 }

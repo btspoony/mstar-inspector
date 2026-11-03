@@ -187,6 +187,17 @@ export const en = {
     pagePrev: "Previous",
     pageNext: "Next",
     pageRange: "{from}–{to} / {total}",
+    /**
+     * Beside the range: rows this page's parser refused. They stay inside
+     * `total`, so the list cannot reach them from any window.
+     */
+    pageDropped: "{count} rows could not be shown",
+    /**
+     * A severity group's count. The groups are built from the loaded window,
+     * while the tab's count is the PR's whole total — so the header names
+     * which one it counts.
+     */
+    groupPageCount: "{count} on this page",
     /** Severity group headers, in the order the groups render. */
     severityMustFix: "Must fix",
     severityShouldFix: "Should fix",

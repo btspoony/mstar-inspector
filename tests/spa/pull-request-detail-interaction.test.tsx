@@ -181,6 +181,36 @@ describe("pull request detail (mounted)", () => {
     }
   });
 
+  test("the pager strides on the limit the server applied, not on the size it asked for", async () => {
+    const corpus: PullRequestFinding[] = Array.from({ length: 7 }, (_, index) => ({
+      finding_id: `f-${index}`,
+      severity: "must-fix",
+      title: `Finding ${String(index).padStart(2, "0")}`,
+      file_path: "",
+      line: null,
+      body: "",
+    }));
+    // The scene's page states a limit of 3: the route clamps to it and echoes
+    // it back, so page 2 starts at 3. A stride re-derived from the client's own
+    // constant (10) would ask for a window past the end and skip rows 4–7.
+    const { container, win, fetches, unmount } = await mountDetailView(
+      scene({ findings: { ...page(corpus), limit: 3 } }),
+    );
+    try {
+      expect(container.textContent ?? "").toContain("Finding 00");
+      expect(container.textContent ?? "").not.toContain("Finding 03");
+
+      const next = [...container.querySelectorAll<HTMLButtonElement>('[data-slot="pager"] button')].find(
+        (button) => button.textContent === t("en", "pullRequests.pageNext"),
+      );
+      await press(win, next);
+      expect(fetches.at(-1)).toContain("offset=3");
+      expect(container.textContent ?? "").toContain("Finding 03");
+    } finally {
+      await unmount();
+    }
+  });
+
   test("a pager press commits only with its page: no skipped page, no range that outruns the rows", async () => {
     // >1 page of findings with the reads HELD open, so the frame a press leaves
     // on screen is observable: the range and both controls must describe the

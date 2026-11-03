@@ -4461,7 +4461,9 @@ type PullRequestRecordSection = "findings" | "reviews" | "failures";
  * 400: it has no predicate, so an empty page would claim a filter that never ran.
  * A miss is the detail's 404 on every family (decided inside the family's own
  * batch, so a section read stays one roundtrip); malformed paging is a 400, and
- * an out-of-bounds `limit` is clamped into `[1, 50]`.
+ * an out-of-bounds `limit` is clamped into `[1, 50]`. Every page echoes the
+ * `limit` the clamp applied, so the pager strides on the server's page size
+ * instead of re-deriving it.
  */
 const appPullRequestRecordsRoute = async (
   c: DashboardContext,
@@ -4483,17 +4485,22 @@ const appPullRequestRecordsRoute = async (
   const { offset, limit } = paging;
   if (section === "findings") {
     const rawSeverity = c.req.query("severity") ?? "";
+    // A spelling the route refuses must not drive the read: decide it BEFORE
+    // the page query, so the 400 never pays for the count + paged scan it
+    // discards. 404 still outranks 400 — a PR this App never received beats a
+    // malformed filter on it — so the refusal keeps one head probe instead of
+    // the family's batch.
+    if (rawSeverity !== "" && !(FINDING_SEVERITIES as readonly string[]).includes(rawSeverity)) {
+      const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
+      if (head === null) return c.json({ error: "unknown pull request" }, 404);
+      return c.json({ error: "invalid severity" }, 400);
+    }
     const page = await gate.store.listPullRequestFindings(gate.app.id, owner, repo, number, {
       offset,
       limit,
       severity: rawSeverity === "" ? null : rawSeverity,
     });
-    // 404 before 400: a PR this App never received outranks a malformed
-    // filter on it, exactly as the pre-read probe ordered the two answers.
     if (page === null) return c.json({ error: "unknown pull request" }, 404);
-    if (rawSeverity !== "" && !(FINDING_SEVERITIES as readonly string[]).includes(rawSeverity)) {
-      return c.json({ error: "invalid severity" }, 400);
-    }
     return c.json({
       items: page.items.map((finding) => ({
         finding_id: finding.finding_id,
@@ -4504,6 +4511,7 @@ const appPullRequestRecordsRoute = async (
         body: finding.body ?? "",
       })),
       total: page.total,
+      limit,
     });
   }
   if (section === "reviews") {
@@ -4519,11 +4527,12 @@ const appPullRequestRecordsRoute = async (
         head_sha: review.head_sha,
       })),
       total: page.total,
+      limit,
     });
   }
   const page = await gate.store.listPullRequestFailures(gate.app.id, owner, repo, number, { offset, limit });
   if (page === null) return c.json({ error: "unknown pull request" }, 404);
-  return c.json({ items: page.items, total: page.total });
+  return c.json({ items: page.items, total: page.total, limit });
 };
 
 // --- App + member route table ----------------------------------------------

@@ -502,32 +502,48 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     }
   });
 
-  test("a manager's ?tab=insights deep link never first-paints the settings tab", async () => {
+  test("a manager's ?tab=insights deep link never activates the settings panel in any commit", async () => {
     // Mounting with the gate still unknown would resolve ?tab=insights to
-    // settings; the shell withholds the tab face until the payload's gate is
-    // committed, so the FIRST committed panel state already has insights
-    // active — an observer per mutation proves no settings frame was painted.
+    // settings, so the shell withholds the tab face until the payload's gate
+    // is committed. Proving "no settings frame was ever painted" needs a
+    // FRAME-accurate sample: a MutationObserver is delivered as a coalesced
+    // batch and reads the DOM at callback time, so a settings paint immediately
+    // replaced by insights inside one batch is invisible to it. React writes
+    // `data-state` synchronously during each commit, so patching the setter
+    // records every panel activation the tree ever had — one entry per commit,
+    // never coalesced.
     const page = await mountPageWithHeldPayload("http://localhost/dashboard/apps/1?tab=insights", managePayload);
-    const observed: string[] = [];
-    const observer = new page.win.MutationObserver(() => {
-      const label = activeTabLabel(page.win, page.container);
-      if (label !== "") observed.push(label);
-    });
-    observer.observe(page.container as unknown as Parameters<typeof observer.observe>[0], {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["data-state"],
-    });
+    const everActive = new Set<DomElement>();
+    const setAttribute = page.win.Element.prototype.setAttribute;
+    page.win.Element.prototype.setAttribute = function (name: string, value: string) {
+      if (name === "data-state" && value === "active") everActive.add(this);
+      return setAttribute.call(this, name, value);
+    };
     try {
+      // While the settings read is held the tab face does not exist at all —
+      // the skeleton is the only committed face.
+      expect(page.container.querySelector('[data-slot="page-skeleton"]')).not.toBeNull();
+      expect(shellPanels(page.container)).toEqual([]);
+
       await page.release();
-      // The settled face is the insights tab, and it is the only active tab any
-      // committed frame ever showed — settings never flashed.
-      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabInsights"));
-      expect(observed.length).toBeGreaterThan(0);
-      expect([...new Set(observed)]).toEqual([t("en", "appDetail.tabInsights")]);
+      // The shell panels live across commits (forceMount), so every activation
+      // the probe recorded can still be labelled from the settled tree.
+      const activated = [...everActive].filter(
+        (element) =>
+          element.getAttribute("data-slot") === "tabs-content" &&
+          shellPanels(page.container).includes(element as DomHTMLElement),
+      );
+      expect(
+        activated.map(
+          (element) =>
+            page.win.document.getElementById(element.getAttribute("aria-labelledby") ?? "")?.textContent,
+        ),
+      ).toEqual([t("en", "appDetail.tabInsights")]);
+      // The gate confirmed the deep link instead of demoting it: the address
+      // still names the insights tab, so no later popstate re-reads settings.
+      expect(page.win.location.search).toContain("tab=insights");
     } finally {
-      observer.disconnect();
+      page.win.Element.prototype.setAttribute = setAttribute;
       await page.unmount();
     }
   });

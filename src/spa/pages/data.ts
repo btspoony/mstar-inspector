@@ -778,8 +778,16 @@ export type PullRequestDetail = {
 /** The three record families, one paged read each. */
 export type RecordSection = "findings" | "reviews" | "failures";
 
-/** One record section's page: its rows plus the total the pager counts against. */
-export type RecordPage<T> = { items: T[]; total: number };
+/**
+ * One record section's page: the rows that could be shown, the server's own
+ * total, and the read's two bookkeeping facts. `dropped` counts rows this
+ * parser refused (they are inside `total`, so the pager would otherwise
+ * promise rows no window can render); `limit` is the page size the server
+ * actually applied — it clamps, so the pager must stride on this rather than
+ * on the size it asked for. `limit` is absent from a payload that predates
+ * the echo, and the pager then falls back to its own constant.
+ */
+export type RecordPage<T> = { items: T[]; total: number; dropped: number; limit?: number };
 
 /** Each section's row type — what `parseRecordPage` yields for that section. */
 export type RecordPageItems = {
@@ -941,9 +949,11 @@ const RECORD_PARSERS = {
 } satisfies { [K in RecordSection]: (value: unknown) => RecordPageItems[K] | null };
 
 /**
- * One record page: `{ items, total }`. The envelope is strict (a missing
- * `items` array or a non-finite `total` fails the page), but every row is
- * parsed per entry — one drifted record is dropped, not the whole page.
+ * One record page: `{ items, total, limit }` in, `{ items, total, dropped,
+ * limit }` out. The envelope is strict (a missing `items` array or a
+ * non-finite `total` fails the page), but every row is parsed per entry — one
+ * drifted record is dropped, not the whole page — and the drop is REPORTED,
+ * because the server's `total` still counts the row it could not render.
  */
 export function parseRecordPage<S extends RecordSection>(
   section: S,
@@ -953,7 +963,14 @@ export function parseRecordPage<S extends RecordSection>(
   const total = finiteCount(data.total);
   if (total === null) return null;
   const parse = RECORD_PARSERS[section] as (value: unknown) => RecordPageItems[S] | null;
-  return { items: data.items.map(parse).filter(present), total };
+  const items = data.items.map(parse).filter(present);
+  const limit = finiteCount(data.limit);
+  return {
+    items,
+    total,
+    dropped: data.items.length - items.length,
+    ...(limit === null || limit <= 0 ? {} : { limit }),
+  };
 }
 
 export function appPullRequestsUrl(base: string, appId: string): string {

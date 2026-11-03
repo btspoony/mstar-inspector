@@ -135,11 +135,22 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(parsePullRequestDetail({ ...DETAIL, latest_review: null })?.latest_review).toBeNull();
     expect(parsePullRequestDetail({ ...DETAIL, latest_review: { verdict: "ship it" } })?.latest_review).toBeNull();
 
-    // One drifted failure / finding drops that entry, not the whole page.
-    expect(parseRecordPage("failures", { items: [{ stage: 1 }], total: 1 })).toEqual({ items: [], total: 1 });
+    // One drifted failure / finding drops that entry, not the whole page — and
+    // the drop is reported, because the server's total still counts the row
+    // this page can never render.
+    expect(parseRecordPage("failures", { items: [{ stage: 1 }], total: 1 })).toEqual({
+      items: [],
+      total: 1,
+      dropped: 1,
+    });
     expect(
       parseRecordPage("findings", { items: [{ ...FINDINGS[0], line: "42" }], total: 1 })?.items,
     ).toEqual([]);
+    // The applied limit rides the page when the server echoes it (the pager
+    // strides on THAT, not on the size it asked for); absent, it is omitted so
+    // the pager falls back to its own constant.
+    expect(parseRecordPage("reviews", { items: [], total: 0, limit: 50 })?.limit).toBe(50);
+    expect(parseRecordPage("reviews", { items: [], total: 0 })?.limit).toBeUndefined();
     // The page envelope itself stays strict.
     expect(parseRecordPage("reviews", { items: [], total: Number.NaN })).toBeNull();
     expect(parseRecordPage("reviews", { total: 1 })).toBeNull();
@@ -481,11 +492,14 @@ describe("pull request detail face (static SSR)", () => {
       `${t("en", "pullRequests.failures")} (1)`,
     ]);
     expect(read.counts).toEqual(["3", "2", "1"]);
-    // Group headers in severity order, each carrying its own count.
+    // Group headers in severity order, each carrying its own count. The count
+    // is the LOADED PAGE's — the tab's count is the head's PR-wide total — so
+    // the header says which one it counts.
+    const pageCount = t("en", "pullRequests.groupPageCount", { count: 1 });
     expect(read.groups).toEqual([
-      { severity: "must-fix", header: `${t("en", "pullRequests.severityMustFix")}1` },
-      { severity: "should-fix", header: `${t("en", "pullRequests.severityShouldFix")}1` },
-      { severity: "nit", header: `${t("en", "pullRequests.severityNit")}1` },
+      { severity: "must-fix", header: `${t("en", "pullRequests.severityMustFix")}${pageCount}` },
+      { severity: "should-fix", header: `${t("en", "pullRequests.severityShouldFix")}${pageCount}` },
+      { severity: "nit", header: `${t("en", "pullRequests.severityNit")}${pageCount}` },
     ]);
     expect(markup).toContain("Use a parameterized query");
     expect(markup).toContain("src/db.ts:42");
@@ -587,8 +601,11 @@ describe("pull request detail face (static SSR)", () => {
       };
     });
     expect(read.groups.map((group) => group.severity)).toEqual(["must-fix", "should-fix", "nit", "other"]);
-    // The bucket carries its own count, and its findings render under it.
-    expect(read.groups.at(-1)?.header).toBe(`${t("en", "pullRequests.severityOther")}2`);
+    // The bucket carries its own page-scoped count, and its findings render
+    // under it.
+    expect(read.groups.at(-1)?.header).toBe(
+      `${t("en", "pullRequests.severityOther")}${t("en", "pullRequests.groupPageCount", { count: 2 })}`,
+    );
     expect(read.other).toContain("Drop the unsafe default");
     expect(read.other).toContain("this one untitled");
     expect(read.otherFolds).toEqual([
@@ -1133,6 +1150,21 @@ describe("pull request detail face (static SSR)", () => {
       { label: t("en", "pullRequests.pagePrev"), disabled: false },
       { label: t("en", "pullRequests.pageNext"), disabled: true },
     ]);
+  });
+
+  test("a page that dropped rows says so beside the range; a clean page says nothing", async () => {
+    // Two of the head's three findings could be rendered: the third still sits
+    // inside `total`, so the range alone would promise a row no window can show.
+    const built = scene({ ...RECORDS, findings: page(FINDINGS.slice(0, 2), 3) });
+    const note = (pages: RecordPages) =>
+      withMarkup(render(built.detail, recordsOf(pages)), (container) => ({
+        note: container.querySelector('[data-slot="pager-dropped"]')?.textContent ?? null,
+      }));
+    expect(
+      await note({ ...built.pages, findings: { ...built.pages.findings, dropped: 1 } }),
+    ).toEqual({ note: t("en", "pullRequests.pageDropped", { count: 1 }) });
+    // Nothing dropped, no note.
+    expect(await note(built.pages)).toEqual({ note: null });
   });
 
   test("a page that shrank under a stale offset renders a clamped range, and the range is a live region", async () => {

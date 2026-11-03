@@ -68,7 +68,11 @@ export function currentDetailRead(read: DetailRead | null, pr: string): DetailRe
   return read !== null && read.pr === pr ? read : null;
 }
 
-/** Rows per record-section page — the server clamps to the same 10 by default. */
+/**
+ * The page size every section read REQUESTS. The server clamps it and echoes
+ * what it applied, and the pager strides on that; this constant is only the
+ * request and the fallback for a payload that does not echo a limit back.
+ */
 const RECORD_PAGE_SIZE = 10;
 
 /** The findings filter's "no filter" value; the other choices are `mergeClass` severities. */
@@ -190,20 +194,36 @@ function SectionPager<K extends RecordSection>({
   // below `from`. Both bounds read the same page the rows come from, and the
   // buttons stay inert while a read is in flight — the next window is only a
   // move from the window on screen.
+  // The stride is the limit the SERVER applied (it clamps the requested one),
+  // so a page boundary can never overlap or skip: the constant is only the
+  // fallback for a payload that does not echo it back.
   const loading = state.status === "loading";
+  const stride = page.limit ?? RECORD_PAGE_SIZE;
   const from = Math.min(state.offset + 1, page.total);
   const to = Math.max(from, Math.min(state.offset + page.items.length, page.total));
   return (
     <div data-slot="pager" className="flex flex-wrap items-center justify-between gap-2">
-      <span
-        data-slot="pager-range"
-        // The range is the page transition's only non-visual report; it is the
-        // live region for it, so nothing else announces the same text.
-        aria-live="polite"
-        className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tabular-nums text-(--text-faint)"
-      >
-        {t(locale, "pullRequests.pageRange", { from, to, total: page.total })}
-      </span>
+      <div className="flex flex-wrap items-baseline gap-2">
+        <span
+          data-slot="pager-range"
+          // The range is the page transition's only non-visual report; it is the
+          // live region for it, so nothing else announces the same text.
+          aria-live="polite"
+          className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tabular-nums text-(--text-faint)"
+        >
+          {t(locale, "pullRequests.pageRange", { from, to, total: page.total })}
+        </span>
+        {/* Rows the row parser refused still sit inside `total`, so the range
+            would otherwise count rows this list can never show on any page. */}
+        {page.dropped === 0 ? null : (
+          <span
+            data-slot="pager-dropped"
+            className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--tone-danger-fg)"
+          >
+            {t(locale, "pullRequests.pageDropped", { count: page.dropped })}
+          </span>
+        )}
+      </div>
       <div className="flex items-center gap-2">
         <Button
           type="button"
@@ -212,7 +232,7 @@ function SectionPager<K extends RecordSection>({
           disabled={loading || state.offset === 0}
           onClick={() =>
             onLoadPage(section, {
-              offset: Math.max(0, state.offset - RECORD_PAGE_SIZE),
+              offset: Math.max(0, state.offset - stride),
               severity: state.severity,
             })
           }
@@ -223,10 +243,8 @@ function SectionPager<K extends RecordSection>({
           type="button"
           variant="outline"
           size="xs"
-          disabled={loading || state.offset + RECORD_PAGE_SIZE >= page.total}
-          onClick={() =>
-            onLoadPage(section, { offset: state.offset + RECORD_PAGE_SIZE, severity: state.severity })
-          }
+          disabled={loading || state.offset + stride >= page.total}
+          onClick={() => onLoadPage(section, { offset: state.offset + stride, severity: state.severity })}
         >
           {t(locale, "pullRequests.pageNext")}
         </Button>
@@ -770,7 +788,12 @@ export function PullRequestDetailView({
                     >
                       <h3 className="flex items-baseline gap-2 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-(--text-faint)">
                         <span>{group.label}</span>
-                        <span className="tabular-nums text-(--text-muted)">{group.items.length}</span>
+                        {/* The groups are built from the loaded window, while
+                            the tab's count is the head's PR-wide total — so the
+                            header says which one it counts. */}
+                        <span className="tabular-nums text-(--text-muted)">
+                          {t(locale, "pullRequests.groupPageCount", { count: group.items.length })}
+                        </span>
                         <span aria-hidden="true" className="h-px flex-1 self-center bg-(--border-subtle)" />
                       </h3>
                       <ul className="flex flex-col gap-2">

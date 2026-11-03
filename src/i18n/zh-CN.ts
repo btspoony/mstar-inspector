@@ -163,6 +163,10 @@ export const zhCN: Dictionary = {
     pagePrev: "上一页",
     pageNext: "下一页",
     pageRange: "{from}–{to} / {total}",
+    /** 分页区间旁：本页解析被拒绝的行数，它们仍计入总数，任何窗口都取不到。 */
+    pageDropped: "{count} 行无法显示",
+    /** 严重度分组的计数：分组来自已加载的一页，而标签页的计数是全 PR 总数。 */
+    groupPageCount: "本页 {count}",
     /** 严重度分组标题，按渲染顺序。 */
     severityMustFix: "必须修复",
     severityShouldFix: "建议修复",

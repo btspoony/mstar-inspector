@@ -354,16 +354,22 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     const first = (await (await getFace(sectionPath("reviews"), db)).json()) as {
       items: Array<{ reviewed_at: string }>;
       total: number;
+      limit: number;
     };
     expect(first.total).toBe(12);
     expect(first.items).toHaveLength(10);
     expect(first.items[0]?.reviewed_at).toBe("2026-01-12 00:00:00");
+    // The applied page size rides the payload: the pager strides on THIS, so it
+    // cannot disagree with the window the server actually returned.
+    expect(first.limit).toBe(10);
 
     const paged = (await (await getFace(`${sectionPath("reviews")}?limit=2&offset=2`, db)).json()) as {
       items: Array<{ reviewed_at: string }>;
       total: number;
+      limit: number;
     };
     expect(paged.total).toBe(12);
+    expect(paged.limit).toBe(2);
     expect(paged.items.map((item) => item.reviewed_at)).toEqual([
       "2026-01-10 00:00:00",
       "2026-01-09 00:00:00",
@@ -404,6 +410,16 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     const unknown = await getFace(`${sectionPath("findings")}?severity=blocker`, db);
     expect(unknown.status).toBe(400);
     expect(await unknown.json()).toEqual({ error: "invalid severity" });
+
+    // 404 still outranks 400: a PR this App never received answers 404 even
+    // when the filter is also malformed. The refusal is decided BEFORE the
+    // section read, so the existence probe is what keeps this order.
+    const unknownPr = await getFace(
+      `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999/findings?severity=blocker`,
+      db,
+    );
+    expect(unknownPr.status).toBe(404);
+    expect(await unknownPr.json()).toEqual({ error: "unknown pull request" });
   });
 
   test("malformed paging is a 400 on every section", async () => {
@@ -442,17 +458,21 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     // limit=0 clamps up to 1: a one-row page, not a 400.
     const floorLimit = await getFace(`${sectionPath("reviews")}?limit=0`, db);
     expect(floorLimit.status).toBe(200);
-    const floored = (await floorLimit.json()) as { items: unknown[]; total: number };
+    const floored = (await floorLimit.json()) as { items: unknown[]; total: number; limit: number };
     expect(floored.items).toHaveLength(1);
     expect(floored.total).toBe(51);
+    // The clamp's RESULT is what the payload reports, so the pager strides on
+    // the page size actually applied rather than on the 0 it asked for.
+    expect(floored.limit).toBe(1);
 
     // limit=51 clamps down to 50: one full maximum page, and the total stays the
     // unpaged count of the whole corpus.
     const ceilingLimit = await getFace(`${sectionPath("reviews")}?limit=51`, db);
     expect(ceilingLimit.status).toBe(200);
-    const ceilinged = (await ceilingLimit.json()) as { items: unknown[]; total: number };
+    const ceilinged = (await ceilingLimit.json()) as { items: unknown[]; total: number; limit: number };
     expect(ceilinged.items).toHaveLength(50);
     expect(ceilinged.total).toBe(51);
+    expect(ceilinged.limit).toBe(50);
   });
 
   test("an unknown PR number → 404", async () => {
