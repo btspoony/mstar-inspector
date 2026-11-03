@@ -1128,10 +1128,10 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
     // action in that state is the re-read.
     if (loaded.degraded) return;
     // An untouched form must submit the STORED value, never a derived one: the
-    // stored number is what the tenant set. Above the system cap there is no
-    // honest untouched submit — the server would refuse it — so the form stays
-    // disabled until the operator types a value inside the range.
-    if (draft === null && loaded.concurrency > loaded.system) return;
+    // stored number is what the tenant set. Above the cap currently in force
+    // there is no honest untouched submit — the server would refuse it — so the
+    // form stays disabled until the operator types a value inside the range.
+    if (draft === null && loaded.aboveLimit) return;
     setBusy(true);
     const submitted = Number((draft ?? String(loaded.concurrency)).trim());
     try {
@@ -1194,29 +1194,29 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
               id="workspace-concurrency"
               type="number"
               min={loaded.min}
-              max={loaded.system}
+              max={loaded.max}
               className="w-32"
               autoComplete="off"
               value={draft ?? String(loaded.concurrency)}
               onChange={(event) => setDraft(event.target.value)}
             />
             <span className="text-xs text-muted-foreground">
-              {t(locale, "workspace.concurrencySystemCap", { system: loaded.system })}
+              {t(locale, "workspace.concurrencyRange", { max: loaded.max })}
             </span>
-            {loaded.concurrency > loaded.system ? (
-              // An operator lowered the system cap after this workspace stored
-              // its own. The stored number is what the tenant set, so it stays
-              // in the field — but it is outside the input's range, so Save is
-              // disabled until the operator types a value the server accepts.
+            {loaded.aboveLimit ? (
+              // The applicable cap was lowered after this workspace stored its
+              // own. The stored number is what the tenant set, so it stays in
+              // the field — but it is above what applies, so Save is disabled
+              // until the operator types a value the server accepts. The
+              // platform's number is never shown here.
               <span className="text-xs text-muted-foreground">
                 {t(locale, "workspace.concurrencyStoredAboveSystem", {
                   stored: loaded.concurrency,
-                  system: loaded.system,
                 })}
               </span>
             ) : null}
           </div>
-          <Button type="submit" disabled={busy || (draft === null && loaded.concurrency > loaded.system)}>
+          <Button type="submit" disabled={busy || (draft === null && loaded.aboveLimit)}>
             {t(locale, "workspace.concurrencySave")}
           </Button>
         </form>

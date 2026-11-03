@@ -8,10 +8,11 @@
  *     exactly like `/api/flags`.
  *
  * Both routes write through the Task-1 store, so these tests also prove the
- * route-level mapping of every store refusal: a value outside 1..64 is a keyed
- * 400, and a workspace value above the current system cap is a keyed 400 —
- * never a silent clamp. Accepted writes land with their `platform_audit_events`
- * row; refused writes change no row and append no audit row.
+ * route-level mapping of every store refusal: a workspace value outside 1..32
+ * (or a system value outside 1..250) is a keyed 400, and a workspace value above
+ * the current system cap is a keyed 400 — never a silent clamp. Accepted writes
+ * land with their `platform_audit_events` row; refused writes change no row and
+ * append no audit row. The tenant read never returns the system value.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -218,9 +219,9 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     seedSystemCap(db, 8);
     const res = await putConcurrency(db, "ws-acme", "dana", { concurrency: 20 });
     expect(res.status).toBe(400);
-    expect(await res.json()).toMatchObject({
+    expect(await res.json()).toEqual({
       key: "settings.error.concurrencyAboveSystem",
-      params: { system: 8 },
+      message: expect.any(String),
     });
     // Nothing was stored and nothing was audited — a clamp would show up here.
     expect(storedWorkspace(db)).toBeNull();
@@ -244,33 +245,32 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     expect(await (await getConcurrency(db, "ws-acme", "dana")).json()).toEqual({
       // One statement answers both levels, so an untrusted system value
       // degrades the pair together: the face never reports a mixed or torn
-      // pair as if the workspace had stored 16 alongside a serial system cap.
+      // pair as if the workspace had stored 32 alongside a serial system cap.
       concurrency: 1,
-      system: 1,
       min: 1,
-      max: 64,
+      max: 32,
       degraded: true,
+      aboveLimit: false,
     });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
       concurrency: 1,
       min: 1,
-      max: 64,
+      max: 256,
       degraded: true,
     });
   });
 
-  test("an unreadable stored cap is reported as the cap the write actually enforced", async () => {
+  test("an unreadable stored cap refuses the write without naming the platform number", async () => {
     // `systemCapSql` answers the conservative 1 for an untrusted value, so the
-    // write is refused against 1 — the keyed 400 must say 1, not the 32 a
-    // second parse would read from the same row.
+    // write is refused against 1 — but the tenant face never learns that number.
     const { db } = fixture();
     seed(db, "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
       "review.concurrency.system", "not-a-number", new Date().toISOString());
     const res = await putConcurrency(db, "ws-acme", "dana", { concurrency: 4 });
     expect(res.status).toBe(400);
-    expect(await res.json()).toMatchObject({
+    expect(await res.json()).toEqual({
       key: "settings.error.concurrencyAboveSystem",
-      params: { system: 1 },
+      message: expect.any(String),
     });
     expect(storedWorkspace(db)).toBeNull();
   });
@@ -279,7 +279,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     const { db } = fixture();
     for (const body of [
       { concurrency: 0 },
-      { concurrency: 65 },
+      { concurrency: 33 },
       { concurrency: 2.5 },
       { concurrency: "8" },
       { concurrency: null },
@@ -294,20 +294,20 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     expect(auditRows(db)).toEqual([]);
   });
 
-  test("GET reports the workspace value, the system ceiling and the range to a manager", async () => {
+  test("GET reports only the workspace value and its own range to a manager", async () => {
     const { db } = fixture();
     seedSystemCap(db, 20);
     await putConcurrency(db, "ws-acme", "dana", { concurrency: 8 });
     for (const login of ["dana", "erin"]) {
       const res = await getConcurrency(db, "ws-acme", login);
       expect(res.status, login).toBe(200);
-      // NULL column reads as the documented default 16; here it was written.
+      // No `system` field: the platform cap is not the tenant's data.
       expect(await res.json()).toEqual({
         concurrency: 8,
-        system: 20,
         min: 1,
-        max: 64,
+        max: 32,
         degraded: false,
+        aboveLimit: false,
       });
     }
   });
@@ -315,13 +315,22 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
   test("GET answers the documented default before any write, and the 404 for a member", async () => {
     const { db } = fixture();
     expect(await (await getConcurrency(db, "ws-acme", "dana")).json()).toEqual({
-      concurrency: 16,
-      system: 32,
+      concurrency: 32,
       min: 1,
-      max: 64,
+      max: 32,
       degraded: false,
+      aboveLimit: false,
     });
     expect((await getConcurrency(db, "ws-acme", "frank")).status).toBe(404);
+  });
+
+  test("GET flags a stored value above the cap in force without echoing that cap", async () => {
+    const { db } = fixture();
+    await putConcurrency(db, "ws-acme", "dana", { concurrency: 20 });
+    seedSystemCap(db, 6);
+    const body = await (await getConcurrency(db, "ws-acme", "dana")).json();
+    expect(body).toMatchObject({ concurrency: 20, aboveLimit: true });
+    expect(body).not.toHaveProperty("system");
   });
 });
 
@@ -345,16 +354,16 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
   test("GET reports the stored cap, and the documented default before any write", async () => {
     const { db } = fixture();
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
-      concurrency: 32,
+      concurrency: 256,
       min: 1,
-      max: 64,
+      max: 256,
       degraded: false,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
       concurrency: 5,
       min: 1,
-      max: 64,
+      max: 256,
       degraded: false,
     });
   });
@@ -379,7 +388,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
     const { db } = fixture();
     for (const body of [
       JSON.stringify({ concurrency: 0 }),
-      JSON.stringify({ concurrency: 251 }),
+      JSON.stringify({ concurrency: 257 }),
       JSON.stringify({ concurrency: 2.5 }),
       JSON.stringify({ concurrency: "24" }),
       JSON.stringify({}),

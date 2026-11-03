@@ -183,9 +183,9 @@ import {
 import { clampWindow, createInsightsStore } from "./insights-store";
 import {
   AboveSystemError,
-  CONCURRENCY_MAX,
   CONCURRENCY_MIN,
   RuntimeConfigError,
+  WORKSPACE_CONCURRENCY_MAX,
   getEffectiveConcurrency,
   isConcurrencyValue,
   setWorkspaceConcurrency,
@@ -2301,10 +2301,12 @@ const workspaceNameRoute = async (c: DashboardContext) => {
 // --- Workspace settings: the review-concurrency cap ---
 //
 // The tenant half of the runtime configuration (iteration spec §1.1): the
-// effective cap is min(system, this). Owner/admin may read and change it; a
-// plain member gets the tenant 404 — the value is not theirs either way. The
-// store owns validation and refuses a value above the system cap rather than
-// clamping it, so no request can store a number that would never apply.
+// effective cap is min(system, this), but the system level is platform data —
+// the tenant payload exposes only the workspace's own value and its own
+// maximum. Owner/admin may read and change it; a plain member gets the tenant
+// 404 — the value is not theirs either way. The store owns validation and
+// refuses a value above the system cap rather than clamping it, so no request
+// can store a number that would never apply.
 const workspaceConcurrencyGate = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return { ok: false as const, response: member.response };
@@ -2322,10 +2324,12 @@ const workspaceConcurrencyReadRoute = async (c: DashboardContext) => {
   const caps = await getEffectiveConcurrency(gate.member.db, gate.member.scope.workspaceId);
   return c.json({
     concurrency: caps.workspace,
-    system: caps.system,
     min: CONCURRENCY_MIN,
-    max: CONCURRENCY_MAX,
+    max: WORKSPACE_CONCURRENCY_MAX,
     degraded: caps.degraded,
+    // Only the fact that the stored value is above what currently applies:
+    // the system number itself is platform data and stays out of this face.
+    aboveLimit: caps.workspace > Math.min(caps.system, WORKSPACE_CONCURRENCY_MAX),
   });
 };
 
@@ -2340,10 +2344,10 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
-  if (!isConcurrencyValue(value)) {
+  if (!isConcurrencyValue(value, WORKSPACE_CONCURRENCY_MAX)) {
     return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
       min: CONCURRENCY_MIN,
-      max: CONCURRENCY_MAX,
+      max: WORKSPACE_CONCURRENCY_MAX,
     });
   }
   try {
@@ -2355,11 +2359,12 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
     // against, so this route never re-derives it.
     if (err.reason === "unknown_workspace") return await tenantNotFound(c);
     if (err instanceof AboveSystemError) {
-      return keyed400(c, SETTINGS_400_KEYS.concurrencyAboveSystem, { system: err.system });
+      // No params: the refusal must not echo the platform cap.
+      return keyed400(c, SETTINGS_400_KEYS.concurrencyAboveSystem);
     }
     return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
       min: CONCURRENCY_MIN,
-      max: CONCURRENCY_MAX,
+      max: WORKSPACE_CONCURRENCY_MAX,
     });
   }
 };

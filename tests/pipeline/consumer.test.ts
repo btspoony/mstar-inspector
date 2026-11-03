@@ -1745,8 +1745,8 @@ describe("createReviewConsumer", () => {
     // Review-concurrency §1.3: the refusal is observable — which bound held the
     // message, against which caps. The live row is this PR's own.
     expect(infoLine!.fields.reason).toBe("pr-held");
-    expect(infoLine!.fields.system_cap).toBe(32);
-    expect(infoLine!.fields.workspace_cap).toBe(16);
+    expect(infoLine!.fields.system_cap).toBe(256);
+    expect(infoLine!.fields.workspace_cap).toBe(32);
   });
 
   test("guard-held backoff escalates 60s → 120s → 240s across attempts (BB-3)", async () => {
@@ -1996,7 +1996,7 @@ describe("createReviewConsumer", () => {
     const heldLine = logLines.find((l) => l.msg.includes("review not admitted"));
     expect(heldLine!.fields.reason).toBe("system-cap");
     expect(heldLine!.fields.system_cap).toBe(1);
-    expect(heldLine!.fields.workspace_cap).toBe(16);
+    expect(heldLine!.fields.workspace_cap).toBe(32);
     // W-1: a retried refusal is NOT yet a failure — the attempt may still be
     // admitted later, so no failure row is owed.
     expect(failureRows(db)).toHaveLength(0);
@@ -2006,7 +2006,7 @@ describe("createReviewConsumer", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The system cap stays at its default 32; this workspace may hold ONE review.
+    // The system cap stays at its default 256; this workspace may hold ONE review.
     db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
     // A DIFFERENT PR of the SAME workspace holds that one slot.
     await seedInflight(db, { pr_number: 7 });
@@ -2022,7 +2022,7 @@ describe("createReviewConsumer", () => {
     // so the operator can tell a busy workspace from a full deployment.
     const heldLine = logLines.find((l) => l.msg.includes("review not admitted"));
     expect(heldLine!.fields.reason).toBe("workspace-cap");
-    expect(heldLine!.fields.system_cap).toBe(32);
+    expect(heldLine!.fields.system_cap).toBe(256);
     expect(heldLine!.fields.workspace_cap).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
   });

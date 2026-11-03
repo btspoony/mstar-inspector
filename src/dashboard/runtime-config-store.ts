@@ -5,8 +5,10 @@
  *
  * Level contract:
  *   - System cap lives in `review_runtime_settings` under
- *     `review.concurrency.system`; an ABSENT row reads as 32.
- *   - Workspace cap is the `workspaces` column; NULL reads as 16.
+ *     `review.concurrency.system`; an ABSENT row reads as the platform
+ *     quota (256).
+ *   - Workspace cap is the `workspaces` column; NULL reads as 32 — the
+ *     per-workspace maximum, so no tenant may exceed it.
  *   - Effective = min(system, workspace). The per-PR lock (1) is not
  *     configurable and is not this store's business.
  *
@@ -14,7 +16,7 @@
  * same predicate the settings WRITE uses (`WORKSPACE_AUDIT_SQL` /
  * `WORKSPACE_UPDATE_SQL`). A retired workspace is therefore absent to the read
  * exactly as it is unavailable to the write: it falls back to
- * WORKSPACE_CONCURRENCY_DEFAULT (16, a real bound) rather than continuing to
+ * WORKSPACE_CONCURRENCY_DEFAULT (32, a real bound) rather than continuing to
  * govern its queued jobs with a pinned value nobody can change any more.
  * `deleted_at IS NULL` never degrades a read — it is absence, not untrusted
  * data — so `degraded` stays false on that path.
@@ -31,9 +33,13 @@
  * nobody stored. The structured warn belongs
  * to the consumer that has a logger (the pipeline reader), not here.
  *
- * Write discipline: values are integers in 1..64 (`CONCURRENCY_MAX` is the
- * deploy-time queue ceiling — a cap above it could never take effect). A
- * workspace value above the CURRENT system value is refused, never clamped.
+ * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
+ * (the platform-wide quota; the deploy-time queue ceiling can deliver at most
+ * QUEUE_CONCURRENCY_CEILING of it at once);
+ * the workspace value is an integer in 1..WORKSPACE_CONCURRENCY_MAX, which is
+ * the per-workspace maximum the tenant face never has to derive from the system
+ * cap. A workspace value above the CURRENT system value is refused, never
+ * clamped.
  * The cap is part of the UPDATE's own predicate, so the refusal is decided by
  * the write against the cap as it stands at that moment — a concurrent
  * lowering cannot slip between a check and the write. Both writes land with
@@ -47,47 +53,53 @@ import type { DashboardD1 } from "./users";
 
 /** PK of the system row in `review_runtime_settings`. */
 export const SYSTEM_CONCURRENCY_KEY = "review.concurrency.system";
-/** Absent system row. */
-export const SYSTEM_CONCURRENCY_DEFAULT = 32;
-/** NULL / absent workspace column. */
-export const WORKSPACE_CONCURRENCY_DEFAULT = 16;
+/** Absent system row: the platform-wide quota. */
+export const SYSTEM_CONCURRENCY_DEFAULT = 256;
+/** NULL / absent workspace column: the per-workspace maximum. */
+export const WORKSPACE_CONCURRENCY_DEFAULT = 32;
 /** Lower bound of a stored value; also the degraded read fallback. */
 export const CONCURRENCY_MIN = 1;
 /**
  * The deploy-time queue ceiling: `queues.consumers[].max_concurrency` in
- * `wrangler.jsonc` (top level and `env.production`). A cap above it is
- * accepted by D1 yet can never take effect, so it is also the accepted
- * maximum — `tests/contracts/wrangler-env-parity.test.ts` locks the two
- * together (change one, change the other, or a deploy admits fewer reviews
- * than the settings allow).
+ * `wrangler.jsonc` (top level and `env.production`). Cloudflare Queues caps
+ * concurrent consumer invocations at 250, so this is the most the platform can
+ * ever run at once — `tests/contracts/wrangler-env-parity.test.ts` locks the
+ * config to this constant.
+ *
+ * It is NOT the system quota's upper bound: the system cap is a business
+ * parameter (default and maximum 256), and a value above this ceiling simply
+ * cannot be saturated — admission runs at most 250 reviews concurrently. The
+ * two numbers answer different questions and must not be collapsed.
  */
-export const QUEUE_CONCURRENCY_CEILING = 64;
-/** Upper bound of a stored value: the ceiling the platform can deliver. */
-export const CONCURRENCY_MAX = QUEUE_CONCURRENCY_CEILING;
+export const QUEUE_CONCURRENCY_CEILING = 250;
+/** Upper bound of the system value: the platform-wide quota, independent of the queue ceiling. */
+export const SYSTEM_CONCURRENCY_MAX = 256;
+/** Upper bound of the workspace value: the per-workspace maximum. */
+export const WORKSPACE_CONCURRENCY_MAX = 32;
 
-/** Integer 1..64 — the one predicate every write and every read re-parses with. */
-export function isConcurrencyValue(value: unknown): value is number {
+/** Integer 1..max — the one predicate every write and every read re-parses with. */
+export function isConcurrencyValue(value: unknown, max: number): value is number {
   return (
     typeof value === "number" &&
     Number.isInteger(value) &&
     value >= CONCURRENCY_MIN &&
-    value <= CONCURRENCY_MAX
+    value <= max
   );
 }
 
 /**
  * Parse one stored value. `undefined` = the row/column is ABSENT, so the
  * caller's default applies; `NaN` = the value is present but not a trusted
- * 1..64 integer, which no reader may treat as a default. Only a number or a
+ * 1..max integer, which no reader may treat as a default. Only a number or a
  * string counts: D1's declared column types do not constrain what a row
  * actually carries, so any other runtime value is untrusted, never something
  * `Number()` may coerce into a cap (`["16"]` → 16, `true` → 1).
  */
-function parseStored(value: unknown): number | undefined {
+function parseStored(value: unknown, max: number): number | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value !== "string" && typeof value !== "number") return Number.NaN;
   const parsed = typeof value === "number" ? value : Number(value);
-  return isConcurrencyValue(parsed) ? parsed : Number.NaN;
+  return isConcurrencyValue(parsed, max) ? parsed : Number.NaN;
 }
 
 /** One single-level read: the cap, plus whether the stored value could be trusted. */
@@ -98,17 +110,21 @@ export type ConcurrencyRead = { concurrency: number; degraded: boolean };
  * caller's default applies; a present row whose selected field is missing is a
  * malformed result — untrusted, never absent.
  */
-function resolveRow(row: { value?: unknown } | null, fallback: number): ConcurrencyRead {
+function resolveRow(
+  row: { value?: unknown } | null,
+  fallback: number,
+  max: number,
+): ConcurrencyRead {
   if (row === null) return { concurrency: fallback, degraded: false };
   if (row.value === undefined) return { concurrency: CONCURRENCY_MIN, degraded: true };
-  const parsed = parseStored(row.value);
+  const parsed = parseStored(row.value, max);
   if (parsed === undefined) return { concurrency: fallback, degraded: false };
   return Number.isNaN(parsed)
     ? { concurrency: CONCURRENCY_MIN, degraded: true }
     : { concurrency: parsed, degraded: false };
 }
 
-/** Why a write was refused. `invalid_value` is the 1..64 range; `above_system`
+/** Why a write was refused. `invalid_value` is the level's accepted range; `above_system`
  * is a workspace value over the system cap, refused so the route can answer a
  * keyed 400 instead of storing a number that would never apply;
  * `unknown_workspace` is a target that does not exist, so nothing was written.
@@ -127,18 +143,14 @@ export class RuntimeConfigError extends Error {
 }
 
 /**
- * A workspace value above the system cap. It carries the cap the write
- * predicate itself compared against — the same `systemCapSql` expression, not a
- * second parse of the row — so the refusal can never quote a different number
- * than the one that decided it.
+ * A workspace value above the system cap. The message never carries the system
+ * number: the value is platform data, and the tenant face answers a refusal
+ * without echoing it.
  */
 export class AboveSystemError extends RuntimeConfigError {
-  readonly system: number;
-
-  constructor(value: number, system: number) {
-    super("above_system", `workspace concurrency ${value} exceeds the system cap ${system}`);
+  constructor(value: number) {
+    super("above_system", `workspace concurrency ${value} exceeds the current platform cap`);
     this.name = "AboveSystemError";
-    this.system = system;
   }
 }
 
@@ -162,7 +174,7 @@ export async function getSystemConcurrency(db: DashboardD1): Promise<Concurrency
     .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
     .bind(SYSTEM_CONCURRENCY_KEY)
     .first<RuntimeSettingRow>();
-  return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT);
+  return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT, SYSTEM_CONCURRENCY_MAX);
 }
 
 /**
@@ -205,8 +217,8 @@ export async function getEffectiveConcurrency(
     if (row.system_value === undefined || row.workspace_value === undefined) {
       return degradedConcurrency();
     }
-    const storedSystem = parseStored(row.system_value);
-    const storedWorkspace = parseStored(row.workspace_value);
+    const storedSystem = parseStored(row.system_value, SYSTEM_CONCURRENCY_MAX);
+    const storedWorkspace = parseStored(row.workspace_value, WORKSPACE_CONCURRENCY_MAX);
     if (Number.isNaN(storedSystem) || Number.isNaN(storedWorkspace)) {
       return degradedConcurrency();
     }
@@ -220,13 +232,13 @@ export async function getEffectiveConcurrency(
 
 /**
  * One stored concurrency value as SQL, under the trust rule every write
- * predicate and every `before` ledger entry shares: a canonical 1..64 numeric
+ * predicate and every `before` ledger entry shares: a canonical 1..max numeric
  * value is that integer, anything else is `untrusted`. One fragment, so the
  * system row and the workspace column cannot drift apart on what "trusted"
  * means.
  */
-const trustedConcurrencySql = (value: string, untrusted: string) => `CASE
-      WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${CONCURRENCY_MAX}
+const trustedConcurrencySql = (value: string, untrusted: string, max: number) => `CASE
+      WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${max}
       THEN CAST(${value} AS INTEGER) ELSE ${untrusted} END`;
 
 /**
@@ -235,12 +247,12 @@ const trustedConcurrencySql = (value: string, untrusted: string) => `CASE
  * upgrade if a non-canonical writer ever exists`.)
  */
 const storedSystemCapSql = (keyParam: string, untrusted: string) =>
-  `(SELECT ${trustedConcurrencySql("value", untrusted)} FROM review_runtime_settings WHERE key = ${keyParam})`;
+  `(SELECT ${trustedConcurrencySql("value", untrusted, SYSTEM_CONCURRENCY_MAX)} FROM review_runtime_settings WHERE key = ${keyParam})`;
 
 /**
  * The system cap as SQL, so a write statement can read the cap inside its own
  * predicate instead of trusting an earlier read. An absent row is the default;
- * anything not a trusted 1..64 integer is the conservative bound, matching what
+ * anything not a trusted system integer is the conservative bound, matching what
  * a degraded read answers.
  */
 const systemCapSql = (keyParam: string) =>
@@ -280,11 +292,12 @@ const WORKSPACE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   SELECT ?1, ?2, 'workspace.concurrency.set', 'workspace', ?3,
-         json_object('before', (SELECT ${trustedConcurrencySql("max_concurrent_reviews", "NULL")}
+         json_object('before', (SELECT ${trustedConcurrencySql("max_concurrent_reviews", "NULL", WORKSPACE_CONCURRENCY_MAX)}
                                   FROM workspaces WHERE id = ?3),
                      'after', ?4),
          ?5
    WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)
+     AND ?4 <= ${WORKSPACE_CONCURRENCY_MAX}
      AND ?4 <= ${systemCapSql("?6")}`;
 
 /**
@@ -296,7 +309,9 @@ const WORKSPACE_AUDIT_SQL = `
  */
 const WORKSPACE_UPDATE_SQL = `
   UPDATE workspaces SET max_concurrent_reviews = ?2
-   WHERE id = ?1 AND deleted_at IS NULL AND ?2 <= ${systemCapSql("?3")}`;
+   WHERE id = ?1 AND deleted_at IS NULL
+     AND ?2 <= ${WORKSPACE_CONCURRENCY_MAX}
+     AND ?2 <= ${systemCapSql("?3")}`;
 
 /** Set the system cap. Audited with the actor; returns the stored value. */
 export async function setSystemConcurrency(
@@ -304,10 +319,10 @@ export async function setSystemConcurrency(
   value: number,
   actor: string,
 ): Promise<number> {
-  if (!isConcurrencyValue(value)) {
+  if (!isConcurrencyValue(value, SYSTEM_CONCURRENCY_MAX)) {
     throw new RuntimeConfigError(
       "invalid_value",
-      `concurrency must be an integer in ${CONCURRENCY_MIN}..${CONCURRENCY_MAX}`,
+      `concurrency must be an integer in ${CONCURRENCY_MIN}..${SYSTEM_CONCURRENCY_MAX}`,
     );
   }
   const now = new Date().toISOString();
@@ -331,10 +346,10 @@ export async function setWorkspaceConcurrency(
   value: number,
   actor: string,
 ): Promise<number> {
-  if (!isConcurrencyValue(value)) {
+  if (!isConcurrencyValue(value, WORKSPACE_CONCURRENCY_MAX)) {
     throw new RuntimeConfigError(
       "invalid_value",
-      `concurrency must be an integer in ${CONCURRENCY_MIN}..${CONCURRENCY_MAX}`,
+      `concurrency must be an integer in ${CONCURRENCY_MIN}..${WORKSPACE_CONCURRENCY_MAX}`,
     );
   }
   const now = new Date().toISOString();
@@ -348,19 +363,19 @@ export async function setWorkspaceConcurrency(
   ]);
   if (update?.meta.changes === 1) return value;
 
-  // Zero rows: the write was refused, so nothing was written. Which refusal it
-  // was comes from the state after the attempt, never from a check before it.
-  // The cap is read through `systemCapSql` — the expression the UPDATE compared
-  // against — so the message cannot quote a number a second parser decided.
+  // Zero rows: the write was refused, so nothing was written. The stored value
+  // was already validated against WORKSPACE_CONCURRENCY_MAX, so the only
+  // remaining refusal is the system cap — decided by the UPDATE's own
+  // predicate, never by a check before it. The refusal message carries no
+  // platform number.
   const post = await db
     .prepare(
-      `SELECT (SELECT 1 FROM workspaces WHERE id = ?1 AND deleted_at IS NULL) AS target,
-              ${systemCapSql("?2")} AS system_cap`,
+      `SELECT (SELECT 1 FROM workspaces WHERE id = ?1 AND deleted_at IS NULL) AS target`,
     )
-    .bind(workspaceId, SYSTEM_CONCURRENCY_KEY)
-    .first<{ target: unknown; system_cap?: unknown }>();
+    .bind(workspaceId)
+    .first<{ target: unknown }>();
   if (post === null || post.target === null) throw new UnknownWorkspaceError(workspaceId);
-  throw new AboveSystemError(value, Number(post.system_cap));
+  throw new AboveSystemError(value);
 }
 
 /** A refused write against a workspace id that does not exist. */

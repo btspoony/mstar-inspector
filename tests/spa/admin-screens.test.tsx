@@ -334,7 +334,7 @@ describe("Flags screen", () => {
 });
 
 describe("Runtime screen", () => {
-  const RUNTIME = { concurrency: 24, min: 1, max: 64, degraded: false };
+  const RUNTIME = { concurrency: 24, min: 1, max: 256, degraded: false };
 
   test("a failed read renders the error with a retry that reloads", async () => {
     let failing = true;
@@ -374,7 +374,7 @@ describe("Runtime screen", () => {
   test("a refusal reports the generic failure plus the server's detail", async () => {
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
-        ? new Response(JSON.stringify({ error: "body must be { concurrency: <integer in 1..64> }" }), {
+        ? new Response(JSON.stringify({ error: "body must be { concurrency: <integer in 1..256> }" }), {
             status: 400,
             headers: { "Content-Type": "application/json" },
           })
@@ -384,7 +384,7 @@ describe("Runtime screen", () => {
     await surface.click(surface.container.querySelector('button[type="submit"]'));
 
     expect(surface.text()).toContain("Could not change the system concurrency.");
-    expect(surface.text()).toContain("body must be { concurrency: <integer in 1..64> }");
+    expect(surface.text()).toContain("body must be { concurrency: <integer in 1..256> }");
     // The rejected write leaves the stored value as it was.
     expect(surface.text()).toContain("Effective on the next review: 24.");
     await surface.close();
@@ -395,7 +395,7 @@ describe("Runtime screen", () => {
     // Showing 1 as a normal value would invite saving a number nobody stored.
     let degraded = true;
     const surface = await runtimeScreen(() =>
-      json({ concurrency: 1, min: 1, max: 64, degraded }),
+      json({ concurrency: 1, min: 1, max: 256, degraded }),
     );
     expect(surface.text()).toContain(
       "The stored system concurrency could not be read, so every workspace is running one review at a time. Nothing was changed — retry the read.",
@@ -426,7 +426,7 @@ describe("Runtime screen", () => {
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
         ? json({ concurrency: 41 })
-        : json({ concurrency: 1, min: 1, max: 64, degraded: true }),
+        : json({ concurrency: 1, min: 1, max: 256, degraded: true }),
     );
     expect(surface.text()).toContain("could not be read");
 

@@ -203,7 +203,7 @@ describe("workspace name card", () => {
         });
       }
       if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250, degraded: false }), {
+        return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false, aboveLimit: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -230,7 +230,7 @@ describe("workspace name card", () => {
       // The read lands the stored value, not the documented default.
       const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
       expect(input.value).toBe("8");
-      expect(container.textContent).toContain(t("en", "workspace.concurrencySystemCap", { system: 32 }));
+      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
 
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
@@ -276,7 +276,7 @@ describe("workspace name card", () => {
         });
       }
       if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 6, system: 32, min: 1, max: 250, degraded: false }), {
+        return new Response(JSON.stringify({ concurrency: 6, min: 1, max: 32, degraded: false, aboveLimit: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -334,7 +334,7 @@ describe("workspace name card", () => {
         });
       }
       if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 8, system: 4, min: 1, max: 250, degraded: false }), {
+        return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false, aboveLimit: true }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -354,7 +354,7 @@ describe("workspace name card", () => {
       // The field shows what the tenant stored, never the derived minimum.
       expect(input.value).toBe("8");
       expect(container.textContent).toContain(
-        t("en", "workspace.concurrencyStoredAboveSystem", { stored: 8, system: 4 }),
+        t("en", "workspace.concurrencyStoredAboveSystem", { stored: 8 }),
       );
       const save = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "workspace.concurrencySave"),
@@ -413,7 +413,7 @@ describe("workspace name card", () => {
           headers: { "Content-Type": "text/html" },
         });
       }
-      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250, degraded: false }), {
+      return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false, aboveLimit: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -467,12 +467,12 @@ describe("workspace name card", () => {
         });
       }
       if (url === "/dashboard/ws_beta/api/settings/concurrency") {
-        return new Response(JSON.stringify({ concurrency: 5, system: 12, min: 1, max: 250, degraded: false }), {
+        return new Response(JSON.stringify({ concurrency: 5, min: 1, max: 32, degraded: false, aboveLimit: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
       }
-      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250, degraded: false }), {
+      return new Response(JSON.stringify({ concurrency: 8, min: 1, max: 32, degraded: false, aboveLimit: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -507,8 +507,7 @@ describe("workspace name card", () => {
       // B's read replaced A's: its stored value and ceiling, never A's draft.
       const reloaded = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
       expect(reloaded.value).toBe("5");
-      expect(container.textContent).toContain(t("en", "workspace.concurrencySystemCap", { system: 12 }));
-      expect(container.textContent).not.toContain(t("en", "workspace.concurrencySystemCap", { system: 32 }));
+      expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
       expect(calls.map((call) => call.url)).toContain("/dashboard/ws_beta/api/settings/concurrency");
 
       await act(async () => {
@@ -542,7 +541,7 @@ describe("workspace name card", () => {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       calls.push({ method: init?.method ?? "GET", url: String(input), body: String(init?.body ?? "") });
       return new Response(
-        JSON.stringify({ concurrency: 1, system: 1, min: 1, max: 250, degraded }),
+        JSON.stringify({ concurrency: 1, min: 1, max: 32, degraded, aboveLimit: false }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }) as unknown as typeof fetch;
@@ -557,8 +556,8 @@ describe("workspace name card", () => {
       // workspace's setting, and there is no value an operator could type into
       // a form built from an unreadable payload.
       expect(win.document.querySelector("#workspace-concurrency")).toBeNull();
-      // Nor may the "system cap" line state the fallback as the real ceiling.
-      expect(container.textContent).not.toContain(t("en", "workspace.concurrencySystemCap", { system: 1 }));
+      // Nor may a range line state the fallback as the real ceiling.
+      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyRange", { max: 32 }));
       // Saving is disabled outright: with the stored value unreadable, any
       // write would replace a number nobody could read.
       const save = [...container.querySelectorAll("button")].find(

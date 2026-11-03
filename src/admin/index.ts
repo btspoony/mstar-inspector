@@ -14,8 +14,8 @@ import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
 import {
-  CONCURRENCY_MAX,
   CONCURRENCY_MIN,
+  SYSTEM_CONCURRENCY_MAX,
   getSystemConcurrency,
   isConcurrencyValue,
   setSystemConcurrency,
@@ -119,8 +119,9 @@ async function setFlag(c: AdminContext): Promise<Response> {
 /**
  * The system review-concurrency cap — the operator half of the runtime
  * configuration (iteration spec §1.1). One row in `review_runtime_settings`,
- * absent = the documented default; the leaf store owns the parse, the 1..64
- * range and the audit row, so this handler only gates, shapes and maps.
+ * absent = the documented default; the leaf store owns the parse, the
+ * 1..SYSTEM_CONCURRENCY_MAX range and the audit row, so this handler only
+ * gates, shapes and maps.
  */
 async function readRuntime(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
@@ -131,7 +132,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   return c.json({
     concurrency: system.concurrency,
     min: CONCURRENCY_MIN,
-    max: CONCURRENCY_MAX,
+    max: SYSTEM_CONCURRENCY_MAX,
     degraded: system.degraded,
   });
 }
@@ -148,9 +149,9 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   } catch {
     // malformed body → the shape gate's 400, never a 500
   }
-  if (!isConcurrencyValue(value)) {
+  if (!isConcurrencyValue(value, SYSTEM_CONCURRENCY_MAX)) {
     return c.json(
-      { error: `body must be { concurrency: <integer in ${CONCURRENCY_MIN}..${CONCURRENCY_MAX}> }` },
+      { error: `body must be { concurrency: <integer in ${CONCURRENCY_MIN}..${SYSTEM_CONCURRENCY_MAX}> }` },
       400,
     );
   }

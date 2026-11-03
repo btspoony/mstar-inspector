@@ -25,6 +25,8 @@ import { join } from "node:path";
 import { stripJsonComments } from "../../scripts/check-image-inputs";
 import {
   QUEUE_CONCURRENCY_CEILING,
+  SYSTEM_CONCURRENCY_MAX,
+  WORKSPACE_CONCURRENCY_MAX,
   isConcurrencyValue,
 } from "../../src/dashboard/runtime-config-store";
 
@@ -268,7 +270,7 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
    * admission is min(system, workspace) read from D1 per message — so parity
    * alone would pass with any equal value. Both blocks therefore pin the same
    * constant, `QUEUE_CONCURRENCY_CEILING`, which the runtime cap range reads as
-   * its own maximum (asserted immediately below): above the platform's 32/16
+   * its own maximum (asserted immediately below): above the platform's 250/32
    * defaults and bounded because each attempt's own sandbox id starts its own
    * container. The other tuning values (`max_batch_size`, retries, DLQ) stay
    * config decisions: set-equality above already keeps the two blocks from
@@ -293,10 +295,15 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
    * unreachable at admission. Asserted through the predicate the writes and
    * reads actually run, so the bound is behaviour rather than a re-statement of
    * the constant that defines it. */
-  test("the accepted cap range ends at the deployed ceiling", () => {
-    expect(isConcurrencyValue(QUEUE_CONCURRENCY_CEILING)).toBe(true);
-    expect(isConcurrencyValue(QUEUE_CONCURRENCY_CEILING + 1)).toBe(false);
-    expect(isConcurrencyValue(0)).toBe(false);
+  test("the accepted cap ranges end at their maxima, and the queue ceiling stays deployable", () => {
+    // The system quota may name more than the queue can saturate (256 vs 250):
+    // the difference is a documented, intentional gap, never a config drift.
+    expect(SYSTEM_CONCURRENCY_MAX).toBeGreaterThanOrEqual(QUEUE_CONCURRENCY_CEILING);
+    expect(isConcurrencyValue(SYSTEM_CONCURRENCY_MAX, SYSTEM_CONCURRENCY_MAX)).toBe(true);
+    expect(isConcurrencyValue(SYSTEM_CONCURRENCY_MAX + 1, SYSTEM_CONCURRENCY_MAX)).toBe(false);
+    expect(isConcurrencyValue(WORKSPACE_CONCURRENCY_MAX, WORKSPACE_CONCURRENCY_MAX)).toBe(true);
+    expect(isConcurrencyValue(WORKSPACE_CONCURRENCY_MAX + 1, WORKSPACE_CONCURRENCY_MAX)).toBe(false);
+    expect(isConcurrencyValue(0, SYSTEM_CONCURRENCY_MAX)).toBe(false);
   });
 
   /** A second/unregistered container entry must fail the lock, not hide behind

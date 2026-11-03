@@ -434,17 +434,16 @@ export const en = {
     nameFailed: "Could not change the workspace name — try again.",
     /** The owner/admin concurrency card (iteration spec §1.1). */
     concurrencyHeading: "Review concurrency",
-    concurrencyDescription:
-      "How many reviews this workspace runs at once. The platform's system cap always applies on top.",
+    concurrencyDescription: "How many reviews this workspace runs at once.",
     concurrencyLabel: "Concurrent reviews",
     concurrencySave: "Save concurrency",
     concurrencySaved: "Review concurrency updated.",
     concurrencyFailed: "Could not change the review concurrency — try again.",
-    /** {system} = the platform's system cap this workspace cannot exceed. */
-    concurrencySystemCap: "System cap: {system}.",
-    /** {stored} > {system}: an operator lowered the system cap after this workspace's value was stored. */
+    /** {max} = this workspace's own maximum. */
+    concurrencyRange: "Up to {max} concurrent reviews.",
+    /** {stored} is above the cap currently in force (the platform number is never shown). */
     concurrencyStoredAboveSystem:
-      "Stored value: {stored} — above the current system cap of {system}. Enter a value of {system} or less to save; until then the system cap applies.",
+      "Stored value: {stored} — above the cap currently in force. Enter a smaller value to save; until then the current cap applies.",
     /** The stored cap could not be read — the numbers are a fallback, not this workspace's setting. */
     concurrencyUnreadable:
       "The stored review concurrency could not be read, so reviews are running one at a time. Nothing was changed and saving is disabled — retry the read.",
@@ -615,8 +614,7 @@ export const en = {
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
       concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",
-      concurrencyAboveSystem:
-        "That concurrency is above this platform's system cap ({system}). Lower it to {system} or less — nothing was stored.",
+      concurrencyAboveSystem: "That concurrency is above the cap currently in force — nothing was stored.",
     },
     ops: "Operations",
     opsCopy: "These actions change how this App answers incoming deliveries.",

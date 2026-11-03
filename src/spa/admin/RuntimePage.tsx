@@ -35,7 +35,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     // Retry is the only action until the read succeeds.
     if (degraded) return;
     // `Number("")` is 0 and `Number("8abc")` is NaN — both fail the server's
-    // 1..64 gate, so the browser's own parsing needs no second validator.
+    // accepted-range gate, so the browser's own parsing needs no second validator.
     const next = Number((draft ?? String(stored)).trim());
     setBusy(true);
     setNotice(null);
