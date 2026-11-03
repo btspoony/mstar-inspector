@@ -41,8 +41,12 @@
  *   - optional `--recheck-out <path>` (spec review-lifecycle
  *     §7.8): when the runtime result carries a recheck document, its JSON is
  *     written to <path> BEFORE the envelope reaches stdout (a write failure
- *     → exit 1, no stdout). No flag or no result writes nothing — absent
- *     flag/file leaves legacy behavior byte-identical;
+ *     → exit 1, no stdout). The round's STATUS is always written to
+ *     RECHECK_STATUS_PATH when a flag was given — including when the document
+ *     is null (budget skip, seat failure, invalid document) — so a round that
+ *     produced no document is still attributable; that write is best-effort
+ *     and never fails the run. No flag writes nothing — absent flag/file
+ *     leaves legacy behavior byte-identical;
  *   - exit codes: 0 success, 1 runtime/I-O failure, 2 usage error. There is
  *     no summary-degrade path: any seat/parse/validation failure exits 1 and
  *     the consumer must not post or persist.
@@ -90,7 +94,7 @@ import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
-import type { RecheckInput } from "../../shared/src/recheck-wire";
+import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
 
 const USAGE =
   `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> [--recheck-out <path>] ` +
@@ -494,6 +498,21 @@ export async function readCredentialStdin(
 }
 
 /**
+ * Write the recheck round's status document to RECHECK_STATUS_PATH.
+ * Best-effort by contract: the status is attribution evidence, so a failure
+ * to write it must never turn a completed review into a failed run — it is
+ * logged and swallowed. Exported so the write path is testable without a
+ * container.
+ */
+export function writeRecheckStatus(status: RecheckStatus): void {
+  try {
+    writeFileSync(RECHECK_STATUS_PATH, JSON.stringify(status));
+  } catch (error) {
+    console.error(`review: cannot write recheck status ${RECHECK_STATUS_PATH}: ${(error as Error).message}`);
+  }
+}
+
+/**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
  * envelope JSON to stdout and diagnostics to stderr. Exported for
  * deterministic tests, which inject a fake `runtime` AND a fake credential
@@ -608,7 +627,7 @@ export async function main(
     }
 
     try {
-      const { envelope, recheck } = await runtime.runReview(input);
+      const { envelope, recheck, recheckStatus } = await runtime.runReview(input);
       // The optional --recheck-out file is written only when a
       // recheck result exists, and BEFORE the envelope reaches stdout — a
       // write failure is a genuine I-O failure (exit 1, no stdout), not a
@@ -621,6 +640,13 @@ export async function main(
           console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
           return 1;
         }
+      }
+      // The STATUS is written whenever a recheck round ran — including the
+      // null-document ones (budget skip, seat failure, invalid document) that
+      // used to vanish into container stderr. Best-effort: a status write
+      // failure is noise, never a failed review.
+      if (recheckOutPath !== undefined && recheckStatus !== undefined) {
+        writeRecheckStatus(recheckStatus);
       }
       // stdout carries ONLY the envelope JSON (plan Module contracts).
       console.log(JSON.stringify(envelope));

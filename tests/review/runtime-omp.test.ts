@@ -2266,7 +2266,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(subagentRequests[2]!.assignment).toContain("changeset-2-lib");
   });
 
-  test("invalid recheck payload → recheck null + stderr log; the envelope is untouched", async () => {
+  test("invalid recheck payload → recheck null + failed status (invalid-document); the envelope is untouched", async () => {
     seatResults = [{ data: staleRecheckDoc() }, { data: seatPayload() }];
     const errorCalls: unknown[][] = [];
     const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
@@ -2282,20 +2282,104 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(result.recheck).toBeNull();
     expect(result.envelope.schema).toBe("mstar.review/v1");
     expect(result.envelope.verdict).toBe("blocked");
+    // The round is attributable even though it produced no document.
+    expect(result.recheckStatus).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_SHA,
+      outcome: "failed",
+      reason: "invalid-document",
+      rejected: 0,
+      error: expect.stringContaining("stale document"),
+    });
     const logged = errorCalls.map((args) => args.join(" ")).join("\n");
     expect(logged).toContain("recheck_seat_failed");
     expect(logged).toContain("stale document");
   });
 
-  test("exhausted budget → the seat is skipped entirely (no child started)", async () => {
+  test("exhausted budget → the seat is skipped entirely (no child started), status reason budget", async () => {
     anchorRecheckDeadline(Date.now() - 600_000, "quick"); // outer deadline already past → 0
     seatResults = [{ data: seatPayload() }];
-    const { recheck } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+    const { recheck, recheckStatus } = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      recheck: recheckInput(),
+    });
 
     expect(recheck).toBeNull();
+    expect(recheckStatus).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_SHA,
+      outcome: "skipped",
+      reason: "budget",
+      rejected: 0,
+      error: null,
+    });
     // Only the review seat ran — no recheck child was dispatched.
     expect(subagentRequests).toHaveLength(1);
     expect(subagentRequests[0]!.outputSchema).not.toBe(RECHECK_OUTPUT_SCHEMA);
+  });
+
+  test("a seat throw → recheck null + failed status (seat-failed) carrying the message", async () => {
+    seatResults = [{ reject: "provider boom" }, { data: seatPayload() }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result.recheck).toBeNull();
+    expect(result.recheckStatus?.outcome).toBe("failed");
+    expect(result.recheckStatus?.reason).toBe("seat-failed");
+    expect(result.recheckStatus?.error).toBe("provider boom");
+  });
+
+  test("row-level drops are counted: two rejected rows still yield an ok status with rejected: 2", async () => {
+    const twoTargets = recheckInput({
+      targets: [
+        ...recheckInput().targets,
+        {
+          ...recheckInput().targets[0]!,
+          rowId: "row-2",
+          findingId: "f-2",
+          associationIds: [],
+        },
+      ],
+    });
+    // Both rows carry a legal enum value in the wrong pairing slot: each is
+    // dropped by the row-level rules, the (empty) document still stands.
+    const docWithRejectedRows = {
+      schema: "mstar.recheck/v1",
+      headSha: RECHECK_SHA,
+      results: [
+        { rowId: "row-1", disposition: "addressed", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+        { rowId: "row-2", disposition: "dismissed", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
+      ],
+    };
+    seatResults = [{ data: docWithRejectedRows }, { data: seatPayload() }];
+    const { recheck, recheckStatus } = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      recheck: twoTargets,
+    });
+
+    expect(recheck?.results).toEqual([]);
+    expect(recheckStatus).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_SHA,
+      outcome: "ok",
+      rejected: 2,
+      reason: null,
+      error: null,
+    });
+  });
+
+  test("legacy input (no recheck document) → no status at all", async () => {
+    seatResults = [{ data: seatPayload() }];
+    const result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+    expect(result.recheck).toBeNull();
+    expect("recheckStatus" in result).toBe(false);
   });
 
   test("a review failure aborts the recheck child and still rejects (never lose the review)", async () => {

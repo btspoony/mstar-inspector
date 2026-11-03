@@ -22,9 +22,12 @@
  * it when the review settles).
  *
  * Failure contract: ANY seat failure/timeout/invalid payload logs one
- * structured stderr event and resolves `null` — it never throws and never
- * loses the review. Validation is `validateRecheckDoc` (fail-closed, whole
- * document); the strict outputSchema only enforces shape.
+ * structured stderr event and resolves `{ doc: null, status }` — it never
+ * throws and never loses the review. The status document is the attributable
+ * record (outcome + reason + error) the runner writes for D1; the stderr
+ * event stays for container logs. Validation is `validateRecheckDoc`
+ * (fail-closed at document level, row-level drops counted in
+ * `status.rejected`); the strict outputSchema only enforces shape.
  *
  * Shared soft clock: the same `anchorRecheckDeadline` call also anchors the
  * tier's SOFT clock, and `remainingSoftMinutes(now)` is its pure view — one
@@ -39,9 +42,14 @@ import {
   RECHECK_MIN_REMAINING_MS,
   validateRecheckDoc,
   type RecheckDoc,
+  type RecheckGateResult,
   type RecheckInput,
+  type RecheckStatus,
 } from "../../shared/src/recheck-wire";
 import type { ReviewLevel } from "../../shared/src/runtime";
+
+/** Cap on a status document's error text — a status line, not a stack dump. */
+const STATUS_ERROR_MAX_CHARS = 500;
 
 /**
  * Strict shape schema for the recheck seat's structured yield. The enum
@@ -286,25 +294,31 @@ function recheckStructuredData(result: Awaited<ReturnType<typeof runStructuredSu
   return structured.data;
 }
 
+/** What the seat always resolves: the document (or null) plus the attributable status. */
+export type RecheckSeatResult = { doc: RecheckDoc | null; status: RecheckStatus };
+
 /**
  * Run the bounded recheck seat (spec §7.8) against `session` —
  * the caller owns concurrency (started alongside the review work, aborted
  * via `signal` when the normal review settles) and this function NEVER
- * throws: any failure/timeout/invalid payload logs one structured stderr
- * event and resolves `null`. The budget is evaluated from the anchored
- * outer deadline at start; 0 = skip (logged, no seat started).
+ * throws: every exit path resolves `{ doc, status }`, where `doc` is null
+ * unless a validated document came back and `status` says why. The budget is
+ * evaluated from the anchored outer deadline at start; 0 = skip (logged, no
+ * seat started).
  */
 export async function runRecheckSeat(input: {
   session: ToolSession;
   input: RecheckInput;
   model: string[];
   signal: AbortSignal;
-}): Promise<RecheckDoc | null> {
+}): Promise<RecheckSeatResult> {
+  const headSha = input.input.headSha;
   const maxRuntimeMs = currentRecheckBudget(Date.now());
   if (maxRuntimeMs === 0) {
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget" }));
-    return null;
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, error: null } };
   }
+  let gate: RecheckGateResult;
   try {
     const result = await runStructuredSubagent({
       session: input.session,
@@ -319,13 +333,16 @@ export async function runRecheckSeat(input: {
       maxRuntimeMs,
       signal: input.signal,
     });
-    const gate = validateRecheckDoc(recheckStructuredData(result), input.input);
-    if (!gate.ok) {
-      throw new Error(`recheck document failed validation: ${gate.error}`);
-    }
-    return gate.doc;
+    gate = validateRecheckDoc(recheckStructuredData(result), input.input);
   } catch (error) {
-    console.error(JSON.stringify({ event: "recheck_seat_failed", error: (error as Error).message }));
-    return null;
+    const message = (error as Error).message.slice(0, STATUS_ERROR_MAX_CHARS);
+    console.error(JSON.stringify({ event: "recheck_seat_failed", error: message }));
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, error: message } };
   }
+  if (!gate.ok) {
+    const error = gate.error.slice(0, STATUS_ERROR_MAX_CHARS);
+    console.error(JSON.stringify({ event: "recheck_seat_failed", error: `recheck document failed validation: ${error}` }));
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "invalid-document", rejected: 0, error } };
+  }
+  return { doc: gate.doc, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "ok", reason: null, rejected: gate.rejected.length, error: null } };
 }

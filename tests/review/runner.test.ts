@@ -49,7 +49,7 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -59,13 +59,16 @@ import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, Rev
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { capabilityHostsYaml } from "../../packages/runner/src/models-synthesis";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
-import { createInMemoryAuthStorage, main, readCredentialStdin } from "../../packages/runner/src/runner";
+import { RECHECK_STATUS_PATH, type RecheckStatus } from "../../packages/shared/src/recheck-wire";
+import { createInMemoryAuthStorage, main, readCredentialStdin, writeRecheckStatus } from "../../packages/runner/src/runner";
 import { sk } from "../helpers/fake-secrets";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
 let fakeEnvelope: Record<string, unknown> | undefined;
 /** Recheck document the fake runtime resolves with (null = no result). */
 let fakeRecheck: Record<string, unknown> | null = null;
+/** Recheck status the fake runtime resolves with (undefined = no recheck round ran). */
+let fakeRecheckStatus: RecheckStatus | undefined;
 /** Error the fake runtime rejects with; takes precedence when set. */
 let runtimeError: Error | undefined;
 /** Captured runReview inputs. */
@@ -112,7 +115,11 @@ const fakeRuntime: AgentRuntime = {
     inFlight = { dir: input.agentDir, hadStore: existsSync(join(input.agentDir, "agent.db")) };
     preserveAgentDir(input.agentDir);
     if (runtimeError) throw runtimeError;
-    return { envelope: fakeEnvelope as MstarReviewV1, recheck: fakeRecheck as ReviewRunResult["recheck"] };
+    return {
+      envelope: fakeEnvelope as MstarReviewV1,
+      recheck: fakeRecheck as ReviewRunResult["recheck"],
+      ...(fakeRecheckStatus !== undefined ? { recheckStatus: fakeRecheckStatus } : {}),
+    };
   }),
 };
 
@@ -296,6 +303,7 @@ function cleanupAgentDirs(): void {
 afterEach(() => {
   fakeEnvelope = ENVELOPE;
   fakeRecheck = null;
+  fakeRecheckStatus = undefined;
   runtimeError = undefined;
   cleanupAgentDirs();
   runInputs.length = 0;
@@ -307,6 +315,7 @@ afterEach(() => {
   for (const name of Object.keys(process.env)) {
     if (name.startsWith("MSTAR_POOL_")) delete process.env[name];
   }
+  rmSync(RECHECK_STATUS_PATH, { recursive: true, force: true });
 });
 
 /** A shape-valid recheck INPUT document (the runner guards shape only). */
@@ -650,16 +659,53 @@ describe("runner entry — --recheck-out channel", () => {
     expect(runInputs[0]).toMatchObject({ recheck: RECHECK_INPUT_DOC });
   });
 
-  test("null recheck result → no file created at the --recheck-out path", async () => {
+  test("null recheck result → no doc file, but the STATUS file is written (the whole point)", async () => {
     fakeEnvelope = ENVELOPE;
     fakeRecheck = null;
+    fakeRecheckStatus = {
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_INPUT_DOC.headSha,
+      outcome: "failed",
+      reason: "seat-failed",
+      rejected: 0,
+      error: "provider boom",
+    };
     const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
     const outPath = join(outDir, "recheck.json");
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
-    const { code } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+    const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
 
     expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    // No document exists, yet the round is attributable in D1.
     expect(existsSync(outPath)).toBe(false);
+    expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual(fakeRecheckStatus);
+  });
+
+  test("status write is best-effort: an unwritable status path never fails the run", () => {
+    // The real helper, no container: a directory at the fixed path makes the
+    // write throw (EISDIR), which must be swallowed.
+    rmSync(RECHECK_STATUS_PATH, { recursive: true, force: true });
+    mkdirSync(RECHECK_STATUS_PATH);
+    const original = console.error;
+    const errors: string[] = [];
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      expect(() =>
+        writeRecheckStatus({
+          schema: "mstar.recheck-status/v1",
+          headSha: RECHECK_INPUT_DOC.headSha,
+          outcome: "skipped",
+          reason: "budget",
+          rejected: 0,
+          error: null,
+        }),
+      ).not.toThrow();
+      expect(errors.join("\n")).toContain("cannot write recheck status");
+    } finally {
+      console.error = original;
+      rmSync(RECHECK_STATUS_PATH, { recursive: true, force: true });
+    }
   });
 
   test("legacy input (no recheck field) → runtime input carries no recheck key, no file written", async () => {

@@ -99,6 +99,20 @@ export type RecheckInput = {
 export type RecheckDoc = { schema: 'mstar.recheck/v1'; headSha: string; results: Assessment[] };
 
 export const RECHECK_OUTPUT_PATH = '/tmp/mstar-recheck.json';
+
+/**
+ * Why a recheck round ended — written by the runner beside the document so a
+ * round that produced no document is still attributable in D1.
+ * `rejected` counts the rows validateRecheckDoc dropped; `reason`/`error` are
+ * null unless the round degraded.
+ */
+export const RECHECK_STATUS_PATH = '/tmp/mstar-recheck-status.json';
+export type RecheckStatus = {
+  schema: 'mstar.recheck-status/v1'; headSha: string;
+  outcome: 'ok' | 'skipped' | 'failed';
+  rejected: number; reason: string | null; error: string | null;
+};
+
 export const RECHECK_MAX_TARGETS = 25;
 export const ASSESSMENT_TARGET_CAP = 25;
 export const RECHECK_MAX_RUNTIME_MS = 180_000;
@@ -275,6 +289,11 @@ function evidenceShapeError(
 /** A row dropped for its own content: the document stands without it. */
 export type RecheckRowRejection = { rowId: string | null; index: number; error: string };
 
+/** validateRecheckDoc's verdict: the surviving document plus the dropped rows, or the document-level error. */
+export type RecheckGateResult =
+  | { ok: true; doc: RecheckDoc; rejected: RecheckRowRejection[] }
+  | { ok: false; error: string };
+
 /**
  * Row-level content rules (shape, closed enums, disposition/reason pairing,
  * evidence, index list, addressed proof). Returns the failure reason, or null
@@ -358,7 +377,7 @@ function rowContentError(
 export function validateRecheckDoc(
   value: unknown,
   input: RecheckInput,
-): { ok: true; doc: RecheckDoc; rejected: RecheckRowRejection[] } | Err {
+): RecheckGateResult {
   const doc = exactObject(value, ['schema', 'headSha', 'results']);
   if (doc === null) return fail('document must be an object with exactly {schema, headSha, results}');
   if (doc.schema !== 'mstar.recheck/v1') {
