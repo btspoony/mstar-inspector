@@ -2098,6 +2098,66 @@ describe("createReviewConsumer", () => {
     expect(inflightRows(db)).toHaveLength(1);
   });
 
+  test("a reached WORKSPACE cap refuses admission while the global count has headroom (spec §1.3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The system cap stays at its default 32; this workspace may hold ONE review.
+    db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
+    // A DIFFERENT PR of the SAME workspace holds that one slot.
+    await seedInflight(db, { pr_number: 7 });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(inflightRows(db)).toHaveLength(1);
+  });
+
+  test("a workspace cap below the system cap bounds only its own workspace — a foreign live review admits", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
+    // The live row belongs to ANOTHER workspace, so `default` still has its slot.
+    // Collapsing both caps into `effective` (1) would refuse this message.
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls.length).toBeGreaterThan(0);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(inflightRows(db)).toHaveLength(1); // the foreign row, untouched
+  });
+
+  test("the global count is bounded by the system cap even when every workspace is under its own cap", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '2', datetime('now'), 'tester')`,
+      )
+      .run();
+    // Two live reviews spread over two OTHER workspaces: each well under its
+    // workspace cap (default 16), and the message's own workspace holds none.
+    await seedInflight(db, { owner: "a", repo: "app", pr_number: 1, workspace_id: "a" });
+    await seedInflight(db, { owner: "b", repo: "app", pr_number: 2, workspace_id: "b" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(inflightRows(db)).toHaveLength(2);
+  });
+
   test("a D1 error at admission fails closed → guard-held, never admitted (spec §1.3)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);

@@ -33,26 +33,27 @@ export type ReviewConcurrencyLog = {
   warn: (fields: ReviewConcurrencyLogFields, msg?: string) => void;
 };
 
-/** The two fields the admission gate acts on. */
-export type ReviewConcurrency = Pick<EffectiveConcurrency, "effective" | "degraded">;
-
 /**
- * The effective review-concurrency cap for one workspace: ONE D1 read, no
- * cache. A read failure or an untrusted stored value answers the conservative
- * cap (1, i.e. serial) with `degraded: true`, never throws, and logs one
- * structured warn; an absent setting answers its documented default silently.
+ * Both caps for one workspace: ONE D1 read, no cache. A read failure or an
+ * untrusted stored value answers the conservative cap (1, i.e. serial) for both
+ * levels with `degraded: true`, never throws, and logs one structured warn; an
+ * absent setting answers its documented default silently.
+ *
+ * The two caps stay separate through this boundary — the admission gate binds
+ * `system` to the global count and `workspace` to the tenant's own, so neither
+ * may be collapsed into `effective` here.
  */
 export async function readReviewConcurrency(
   db: DashboardD1,
   workspaceId: string,
   log: ReviewConcurrencyLog,
-): Promise<ReviewConcurrency> {
-  const { effective, degraded } = await getEffectiveConcurrency(db, workspaceId);
-  if (degraded) {
+): Promise<EffectiveConcurrency> {
+  const caps = await getEffectiveConcurrency(db, workspaceId);
+  if (caps.degraded) {
     log.warn(
-      { event: "review_concurrency_degraded", workspace_id: workspaceId, effective },
+      { event: "review_concurrency_degraded", workspace_id: workspaceId, effective: caps.effective },
       "review concurrency read degraded — admitting at the conservative cap (serial)",
     );
   }
-  return { effective, degraded };
+  return caps;
 }

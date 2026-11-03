@@ -2087,13 +2087,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     };
     const attemptId = crypto.randomUUID();
     const ttlSeconds = reviewGuardTtlSeconds(level);
-    // shortcut: the reader exposes ONE effective cap (min of the system and
-    // workspace caps), so it feeds both store conditions — a workspace quota
-    // below the system cap then also bounds the global count. Upgrade when
-    // the reader exposes the two levels separately.
     const admission = await acquireInflight(deps.env.DB, inflightKey, {
-      systemCap: concurrency.effective,
-      workspaceCap: concurrency.effective,
+      // Each cap binds to its own predicate: `system` bounds the global live
+      // count, `workspace` the tenant's — never the effective min here.
+      systemCap: concurrency.system,
+      workspaceCap: concurrency.workspace,
       attemptId,
       ttlSeconds,
       now: new Date().toISOString(),
