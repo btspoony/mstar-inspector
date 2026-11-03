@@ -759,12 +759,22 @@ async function applyPendingLifecycleJournals(
   return true;
 }
 
+/**
+ * One hunk line: `old`/`new` are its own file line numbers (null when the
+ * side has no counterpart), `oldBefore`/`newBefore` the counters BEFORE the
+ * line was consumed, and `text` the line content without the diff marker.
+ * A sub-window of an oversized hunk states its start lines from these
+ * counters, so the arithmetic stays exact against the hunk header.
+ */
+type HunkLine = { old: number | null; new: number | null; oldBefore: number; newBefore: number; text: string };
+
 /** A parsed unified-diff hunk with its old/new line arrays (evidence raw material). */
 type ParsedDiffHunk = {
   oldStart: number;
   oldLines: string[];
   newStart: number;
   newLines: string[];
+  lines: HunkLine[];
 };
 
 type ParsedDiffFile = {
@@ -790,15 +800,30 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
   let hunk: ParsedDiffHunk | null = null;
   let remainingOld = 0;
   let remainingNew = 0;
+  // Running file line numbers for the hunk being read (the header's starts).
+  let oldNo = 0;
+  let newNo = 0;
   for (const line of diffText.split("\n")) {
     if (hunk !== null && (remainingOld > 0 || remainingNew > 0)) {
       const marker = line.charAt(0);
+      const text = line.slice(1);
+      if (marker === " " || marker === "-" || marker === "+") {
+        hunk.lines.push({
+          old: marker === "+" ? null : oldNo,
+          new: marker === "-" ? null : newNo,
+          oldBefore: oldNo,
+          newBefore: newNo,
+          text,
+        });
+      }
       if (marker === " " || marker === "-") {
-        hunk.oldLines.push(line.slice(1));
+        hunk.oldLines.push(text);
+        oldNo += 1;
         remainingOld -= 1;
       }
       if (marker === " " || marker === "+") {
-        hunk.newLines.push(line.slice(1));
+        hunk.newLines.push(text);
+        newNo += 1;
         remainingNew -= 1;
       }
       // "\" ("\ No newline at end of file") consumes neither tally.
@@ -842,10 +867,13 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
         oldLines: [],
         newStart: Number(hunkHeader[3]),
         newLines: [],
+        lines: [],
       };
       current.hunks.push(hunk);
       remainingOld = hunkHeader[2] === undefined ? 1 : Number(hunkHeader[2]);
       remainingNew = hunkHeader[4] === undefined ? 1 : Number(hunkHeader[4]);
+      oldNo = hunk.oldStart;
+      newNo = hunk.newStart;
       if (remainingOld <= 0 && remainingNew <= 0) hunk = null;
     }
   }
@@ -856,17 +884,21 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
  * Build the §7.3 trusted evidence catalog for the selected targets from the
  * worker-captured diff: per target at most `RECHECK_SLICES_PER_TARGET`
  * slices from its file (nearest the original concern's line first), each
- * bounded to 80 lines / 8 KiB per side, whole catalog bounded to 256 KiB —
- * oversized/unsupported slices are EXCLUDED (no eligible slice), never
- * silently truncated. Deleted files yield one `deleted-file` slice proving
- * absence at HEAD (complete when the hunk starts at old line 1). Every
- * slice is pinned to the capture's anchor: `headSha`/`baseSha` both carry
- * the AUTHORITATIVE checkout SHA the diff was captured for (the worker runs
- * one diff per pinned checkout — the per-file old/new blob oids on each
- * slice carry the finer-grained pins). Returns the slices plus the
- * per-target excluded flags (honest coverage) and, for every provable target,
- * the slice ids it references — the input builder keeps only those slices, so
- * a row that never rides the wire leaves no orphan evidence behind.
+ * bounded to 80 lines / 8 KiB per side, whole catalog bounded to 256 KiB.
+ * A hunk that fits becomes ONE slice; an oversized hunk is split into
+ * consecutive ≤80-line windows (nearest the original concern first), so a
+ * finding inside a large hunk still has provable local evidence instead of
+ * losing the whole hunk. A slice still over the per-side line/byte bound is
+ * EXCLUDED (no eligible slice), never silently truncated. Deleted files yield
+ * one `deleted-file` slice proving absence at HEAD (complete when the hunk
+ * starts at old line 1). Every slice is pinned to the capture's anchor:
+ * `headSha`/`baseSha` both carry the AUTHORITATIVE checkout SHA the diff was
+ * captured for (the worker runs one diff per pinned checkout — the per-file
+ * old/new blob oids on each slice carry the finer-grained pins). Returns the
+ * slices plus the per-target excluded flags (honest coverage) and, for every
+ * provable target, the slice ids it references — the input builder keeps only
+ * those slices, so a row that never rides the wire leaves no orphan evidence
+ * behind.
  */
 function buildEvidenceCatalog(
   diffText: string,
@@ -885,23 +917,77 @@ function buildEvidenceCatalog(
   const sliceIdByKey = new Map<string, string>();
   const sizeOf = (slice: EvidenceSlice): number => jsonByteLength(slice);
 
-  const addSlice = (file: ParsedDiffFile, hunk: ParsedDiffHunk, kind: EvidenceSlice["kind"]): EvidenceSlice | null => {
-    if (hunk.oldLines.length > RECHECK_SLICE_MAX_LINES || hunk.newLines.length > RECHECK_SLICE_MAX_LINES) return null;
+  /**
+   * One candidate slice body. `oldStart`/`newStart` come straight from the
+   * hunk's own per-line counters, so a window's arithmetic stays exact against
+   * the hunk header (the file lines it names are the lines it carries).
+   */
+  type Draft = {
+    file: ParsedDiffFile;
+    kind: EvidenceSlice["kind"];
+    oldStart: number;
+    oldLines: string[];
+    newStart: number;
+    newLines: string[];
+    complete: boolean;
+  };
+
+  const windowDraft = (file: ParsedDiffFile, hunk: ParsedDiffHunk, from: number, to: number): Draft => {
+    const window = hunk.lines.slice(from, to);
+    return {
+      file,
+      kind: "hunk",
+      oldStart: window[0]!.oldBefore,
+      oldLines: window.flatMap((line) => (line.old === null ? [] : [line.text])),
+      newStart: window[0]!.newBefore,
+      newLines: window.flatMap((line) => (line.new === null ? [] : [line.text])),
+      complete: true,
+    };
+  };
+
+  /** A hunk as ONE draft when it fits, else consecutive ≤80-line windows. */
+  const draftsOf = (file: ParsedDiffFile, hunk: ParsedDiffHunk): Draft[] => {
+    const fits =
+      hunk.oldLines.length <= RECHECK_SLICE_MAX_LINES && hunk.newLines.length <= RECHECK_SLICE_MAX_LINES;
+    if (fits) {
+      return [
+        {
+          file,
+          kind: file.deleted ? "deleted-file" : "hunk",
+          oldStart: hunk.oldStart,
+          oldLines: hunk.oldLines,
+          newStart: hunk.newStart,
+          newLines: hunk.newLines,
+          complete: file.deleted ? hunk.oldStart === 1 : true,
+        },
+      ];
+    }
+    // An oversized DELETED file stays excluded: absence is proven by the whole
+    // file, so a fragment of it would be a weaker claim, not a local one.
+    if (file.deleted) return [];
+    const drafts: Draft[] = [];
+    for (let from = 0; from < hunk.lines.length; from += RECHECK_SLICE_MAX_LINES) {
+      drafts.push(windowDraft(file, hunk, from, Math.min(from + RECHECK_SLICE_MAX_LINES, hunk.lines.length)));
+    }
+    return drafts;
+  };
+
+  const addSlice = (draft: Draft): EvidenceSlice | null => {
     const slice: EvidenceSlice = {
       id: "",
       headSha: captureSha,
       baseSha: captureSha,
-      path: file.path,
-      oldPath: file.oldPath,
-      kind,
-      oldStart: hunk.oldStart,
-      oldLines: hunk.oldLines,
-      newStart: hunk.newStart,
-      newLines: hunk.newLines,
-      oldBlobOid: file.oldBlobOid,
-      headBlobOid: file.headBlobOid,
-      absentAtHead: file.deleted,
-      complete: kind === "deleted-file" ? hunk.oldStart === 1 : true,
+      path: draft.file.path,
+      oldPath: draft.file.oldPath,
+      kind: draft.kind,
+      oldStart: draft.oldStart,
+      oldLines: draft.oldLines,
+      newStart: draft.newStart,
+      newLines: draft.newLines,
+      oldBlobOid: draft.file.oldBlobOid,
+      headBlobOid: draft.file.headBlobOid,
+      absentAtHead: draft.file.deleted,
+      complete: draft.complete,
     };
     const bytes = sizeOf(slice);
     if (bytes > RECHECK_SLICE_MAX_BYTES || bytes > budget) return null;
@@ -920,27 +1006,24 @@ function buildEvidenceCatalog(
       continue;
     }
     const lineAnchor = target.original.lineStart ?? 0;
-    const candidates: { file: ParsedDiffFile; hunk: ParsedDiffHunk }[] = matching.flatMap((file) =>
-      file.hunks.map((hunk) => ({ file, hunk })),
-    );
+    const candidates: Draft[] = matching.flatMap((file) => file.hunks.flatMap((hunk) => draftsOf(file, hunk)));
     candidates.sort(
       (a, b) =>
-        Math.abs(a.hunk.oldStart - lineAnchor) - Math.abs(b.hunk.oldStart - lineAnchor) ||
-        a.hunk.oldStart - b.hunk.oldStart,
+        Math.abs(a.oldStart - lineAnchor) - Math.abs(b.oldStart - lineAnchor) ||
+        a.oldStart - b.oldStart,
     );
     let included = 0;
     const referenced: string[] = [];
-    for (const { file, hunk } of candidates) {
+    for (const draft of candidates) {
       if (included >= RECHECK_SLICES_PER_TARGET) break;
-      const key = `${file.path}\u0000${hunk.oldStart}:${hunk.oldLines.length}+${hunk.newStart}:${hunk.newLines.length}`;
+      const key = `${draft.file.path}\u0000${draft.oldStart}:${draft.oldLines.length}+${draft.newStart}:${draft.newLines.length}`;
       const shared = sliceIdByKey.get(key);
       if (shared !== undefined) {
         referenced.push(shared);
         included += 1; // the hunk is already in the catalog — targets share slices
         continue;
       }
-      const kind: EvidenceSlice["kind"] = file.deleted ? "deleted-file" : "hunk";
-      const built = addSlice(file, hunk, kind);
+      const built = addSlice(draft);
       if (built === null) continue;
       built.id = `ev-${slices.length + 1}`;
       slices.push(built);
@@ -1217,14 +1300,18 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
     if (value["schema"] !== "mstar.recheck-status/v1" || value["headSha"] !== headSha) return null;
     const outcome = value["outcome"];
     if (outcome !== "ok" && outcome !== "skipped" && outcome !== "failed") return null;
+    // `rejected` is DERIVED from the row-id list, never read from the document:
+    // one source survives, so the two faces of the count cannot disagree in a
+    // foreign or hand-rolled status.
+    const rejectedRowIds = Array.isArray(value["rejected_row_ids"])
+      ? value["rejected_row_ids"].filter((id): id is string => typeof id === "string")
+      : [];
     return {
       schema: "mstar.recheck-status/v1",
       headSha,
       outcome,
-      rejected: typeof value["rejected"] === "number" ? value["rejected"] : 0,
-      rejected_row_ids: Array.isArray(value["rejected_row_ids"])
-        ? value["rejected_row_ids"].filter((id): id is string => typeof id === "string")
-        : [],
+      rejected: rejectedRowIds.length,
+      rejected_row_ids: rejectedRowIds,
       // `reason`/`error` are redacted and bounded HERE so the D1 failure text
       // and the log field carry one capped value — the runner already does the
       // same for its own copy, but a foreign or hand-rolled status must not be

@@ -16,8 +16,13 @@ export const REDACTED = '[REDACTED]';
  * contains base64/hex lines that the later fine-grained patterns would
  * otherwise shred in pieces. Every pattern is global, so `String.replace`
  * applies it to all matches and resets its own `lastIndex`.
+ *
+ * Module-private on purpose: these are STATEFUL `/g` regexes. A caller that
+ * exported and reused them in `.test()`/`.exec()` order would carry
+ * `lastIndex` across calls and silently skip matches. Consumers get the
+ * stateless `redactSecretShapes` entry point instead.
  */
-export const SECRET_PATTERNS: readonly RegExp[] = [
+const SECRET_PATTERNS: readonly RegExp[] = [
   // PEM private-key blocks (any header/body form).
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   // Authorization-style bearer tokens.

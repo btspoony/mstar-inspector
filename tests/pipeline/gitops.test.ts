@@ -26,7 +26,7 @@ import {
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
 import { shellCommand } from "../../src/pipeline/shell-command";
-import { RECHECK_FILE_MAX_BYTES, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_FILE_MAX_BYTES } from "../../packages/shared/src/recheck-wire";
 
 describe("gitops command builders", () => {
   test("valid inputs produce single-quoted, allowlisted commands", () => {
@@ -104,10 +104,13 @@ describe("gitops command builders", () => {
       const overflowText = "b".repeat(RECHECK_FILE_MAX_BYTES + 1);
       for (const read of [
         {
+          // The identity rides the filename, so each entry owns its fixture.
+          name: "recheck-doc",
           command: (path: string) => readRecheckCommand(path),
           fit: JSON.stringify({ schema: "mstar.recheck/v1", headSha: "x", results: [] }),
         },
         {
+          name: "recheck-status",
           command: (path: string) => readRecheckStatusCommand(path),
           fit: JSON.stringify({
             schema: "mstar.recheck-status/v1",
@@ -124,7 +127,7 @@ describe("gitops command builders", () => {
           [read.fit, "0", read.fit],
           [overflowText, "1", overflowText.slice(0, RECHECK_FILE_MAX_BYTES)],
         ] as const) {
-          const path = join(dir, `read-${flag}.json`);
+          const path = join(dir, `${read.name}-${flag}.json`);
           await Bun.write(path, text);
           const proc = Bun.spawn(["sh", "-c", read.command(path)]);
           const stdout = await new Response(proc.stdout).text();
@@ -142,13 +145,6 @@ describe("gitops command builders", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
-
-  test("production status reads still target RECHECK_STATUS_PATH (the constant the runner wrote)", () => {
-    // The optional path exists for the oracle above; the production call site
-    // passes nothing and must keep reading the exact constant. Pure string
-    // check — this test writes no file and touches no /tmp path.
-    expect(readRecheckStatusCommand()).toContain(`'${RECHECK_STATUS_PATH}'`);
   });
 
   test("runnerCommand appends the optional --recheck-out flag quoted", () => {

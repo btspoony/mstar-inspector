@@ -2385,7 +2385,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(error).toContain("[REDACT");
   });
 
-  test("row-level drops are counted: two rejected rows still yield an ok status with rejected: 2", async () => {
+  test("row-level drops are counted: when EVERY submitted row is dropped the round is failed/all-rows-rejected", async () => {
     const twoTargets = recheckInput({
       targets: [
         ...recheckInput().targets,
@@ -2398,7 +2398,9 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       ],
     });
     // Both rows carry a legal enum value in the wrong pairing slot: each is
-    // dropped by the row-level rules, the (empty) document still stands.
+    // dropped by the row-level rules, leaving an EMPTY document. The gate
+    // accepted the document but nothing survived it, so the round delivered
+    // nothing usable — `failed`/`all-rows-rejected`, not `ok`.
     const docWithRejectedRows = {
       schema: "mstar.recheck/v1",
       headSha: RECHECK_SHA,
@@ -2418,11 +2420,46 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(recheckStatus).toEqual({
       schema: "mstar.recheck-status/v1",
       headSha: RECHECK_SHA,
-      outcome: "ok",
+      outcome: "failed",
       rejected: 2,
       rejected_row_ids: ["row-1", "row-2"],
-      reason: null,
+      reason: "all-rows-rejected",
       error: null,
+    });
+  });
+
+  test("a partial drop keeps the round ok: surviving rows still make it a usable document", async () => {
+    const twoTargets = recheckInput({
+      targets: [
+        ...recheckInput().targets,
+        {
+          ...recheckInput().targets[0]!,
+          rowId: "row-2",
+          findingId: "f-2",
+          associationIds: [],
+        },
+      ],
+    });
+    const docWithOneRejectedRow = {
+      schema: "mstar.recheck/v1",
+      headSha: RECHECK_SHA,
+      results: [
+        { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+        { rowId: "row-2", disposition: "dismissed", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
+      ],
+    };
+    seatResults = [{ data: docWithOneRejectedRow }, { data: seatPayload() }];
+    const { recheckStatus } = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      recheck: twoTargets,
+    });
+
+    expect(recheckStatus).toMatchObject({
+      outcome: "ok",
+      reason: null,
+      rejected: 1,
+      rejected_row_ids: ["row-2"],
     });
   });
 

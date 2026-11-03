@@ -6,10 +6,11 @@
  * the "DLQ-bound failure leaves zero D1 trace" blind spot) and alert when
  * the count breaches the threshold.
  *
- * `stage IN ('recheck', 'usage')` rows are EXCLUDED from that count. Both are
- * degraded-but-successful attribution written for a review that continued:
- * `recheck` marks a budget skip, a dead seat or one invalid document;
- * `usage` marks a `usage_events` insert that failed while the review went on.
+ * The attribution stages (PAGING_EXCLUDED_STAGES) are EXCLUDED from that
+ * count. Both are degraded-but-successful attribution written for a review
+ * that continued: `recheck` marks a budget skip, a dead seat or one invalid
+ * document; `usage` marks a `usage_events` insert that failed while the
+ * review went on.
  * Counting them would page ops for reviews that published normally. They stay
  * in `review_failures` — only the paging signal ignores them.
  *
@@ -34,6 +35,7 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createAppsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
+import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../store/failure-store";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
@@ -262,13 +264,14 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // the single source) so the SQL cannot drift from the pinned threshold
   // table. The composed text is byte-identical to the pre-constant form
   // (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
-  // `stage NOT IN ('recheck', 'usage')` is the paging exclusion: both rows are
-  // attribution for reviews that continued (see the header).
+  // `stage NOT IN (<attribution stages>)` is the paging exclusion: both rows are
+  // attribution for reviews that continued (see the header). The list comes
+  // from the failure store's one written partition, never a local literal.
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS n FROM review_failures
        WHERE created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
-         AND stage NOT IN ('recheck', 'usage')`,
+         AND stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})`,
     )
     .first<{ n: number }>();
   const failures24h = row?.n ?? 0;

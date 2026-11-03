@@ -33,6 +33,7 @@
  * artifact-store.ts).
  */
 
+import { PAGING_EXCLUDED_STAGES } from "../contracts/failure-stages";
 import type { D1Like } from "./types";
 
 /**
@@ -54,11 +55,18 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "runner",
   "sandbox",
   "pipeline",
-  "usage",
-  "recheck",
+  ...PAGING_EXCLUDED_STAGES,
 ]);
 
 export type FailureStage = "parse" | "runner" | "sandbox" | "pipeline" | "usage" | "recheck";
+
+/**
+ * The attribution partition of the vocabulary, re-exported from the
+ * zero-dependency contract so the store and the dashboard interpolate the
+ * SAME lists (the dashboard may not import this module — architect decision
+ * Q2 — so the contract is where they are written).
+ */
+export { HISTORY_EXCLUDED_STAGES, PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 
 /**
  * One failure event to record. `head_sha` is the AUTHORITATIVE checkout sha

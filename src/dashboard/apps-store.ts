@@ -11,9 +11,11 @@
  *
  * Module boundary (the global constraints, lock L1): zero-dependency leaf
  * consumed by dashboard routes, the worker webhook face, and the pipeline
- * consumer. Its one import is the zero-dependency sandbox-image contract
- * (src/contracts/sandbox-images.ts — the registry, not
- * pipeline/review code), which bounds the sandbox_image_id value domain.
+ * consumer. Its imports are zero-dependency contracts only
+ * (src/contracts/sandbox-images.ts — the registry, not pipeline/review code —
+ * and src/contracts/failure-stages.ts — the `review_failures` stage
+ * partition), which bound the sandbox_image_id value domain and keep the
+ * failure-count/history SQL off hand-written stage literals.
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
@@ -100,6 +102,7 @@
  *     (app_id, installation_id) pairs, and unknown app references are
  *     caller-visible errors, never swallowed.
  */
+import { HISTORY_EXCLUDED_STAGES, PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { getSandboxImage } from "../contracts/sandbox-images";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
@@ -1072,15 +1075,15 @@ export function createAppsStore(db: AppsStoreD1) {
      * cross-App duplicate is a config mistake visible in the delivery health
      * panel, not a silent data problem.
      *
-     * `stage IN ('recheck', 'usage')` rows are NOT failures of the review:
+     * `PAGING_EXCLUDED_STAGES` rows are NOT failures of the review:
      * both are per-round attribution written for rounds that continued
      * (`recheck` a budget skip / dead seat / invalid document, `usage` a
      * failed `usage_events` insert), so a clean PR would otherwise read a
      * non-zero failure count. The count excludes both; the sweep excludes the
      * same two stages from paging. The detail face keeps `usage` rows in its
      * failure history (a lost metered-usage record needs a surface) while
-     * still excluding `recheck`, whose accounting already rides the published
-     * coverage line.
+     * still excluding `HISTORY_EXCLUDED_STAGES` (`recheck`), whose accounting
+     * already rides the published coverage line.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -1109,7 +1112,7 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage NOT IN ('recheck', 'usage')
+             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
                AND (f.owner, f.repo, f.pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
              GROUP BY f.owner, f.repo, f.pr_number`,
           )
@@ -1163,7 +1166,7 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage <> 'recheck'
+             WHERE f.stage NOT IN (${sqlStageList(HISTORY_EXCLUDED_STAGES)})
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC`,
           )

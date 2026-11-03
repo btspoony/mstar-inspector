@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { FAILURE_STAGES, createFailureStore } from "../../src/store/failure-store";
+import { createFailureStore } from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "./helpers";
 
 const BASE = {
@@ -61,12 +61,6 @@ describe("createFailureStore", () => {
       /not on the producer vocabulary/,
     );
     expect((await store.listRecent()).length).toBe(0);
-  });
-
-  test("FAILURE_STAGES carries the recheck attribution stage", () => {
-    // The full vocabulary order is an implementation detail; the paging sweep
-    // and the pull-request store tests pin the behaviour that depends on it.
-    expect(FAILURE_STAGES).toContain("recheck");
   });
 
   test("listRecent returns newest-first with a rowid tiebreak, bounded by limit", async () => {

@@ -59,7 +59,8 @@ import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, Rev
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { capabilityHostsYaml } from "../../packages/runner/src/models-synthesis";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
-import type { RecheckStatus } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_STATUS_PATH, type RecheckStatus } from "../../packages/shared/src/recheck-wire";
+import { readRecheckStatusCommand } from "../../src/pipeline/gitops";
 import { createInMemoryAuthStorage, main, readCredentialStdin, writeRecheckStatus } from "../../packages/runner/src/runner";
 import { sk } from "../helpers/fake-secrets";
 
@@ -789,6 +790,65 @@ describe("runner entry — --recheck-out channel", () => {
       expect(errors.join("\n")).toContain("cannot write recheck status");
     } finally {
       console.error = original;
+    }
+  });
+
+  test("the production default status path is the file the consumer's read command targets (round-trip)", async () => {
+    // The runner's production call sites pass no path (main's 4th arg and
+    // writeRecheckStatus both default to RECHECK_STATUS_PATH), and the Worker's
+    // read command defaults to the same constant. Nothing above proves those
+    // two defaults still MEET at the same file, so this test writes through the
+    // production write path and reads back through the production read command
+    // in a real shell. The path is shared with any real runner on the machine,
+    // so the prior bytes are saved and restored in `finally`.
+    const prior = existsSync(RECHECK_STATUS_PATH) ? readFileSync(RECHECK_STATUS_PATH) : null;
+    try {
+      const status: RecheckStatus = {
+        schema: "mstar.recheck-status/v1",
+        headSha: RECHECK_INPUT_DOC.headSha,
+        outcome: "ok",
+        reason: null,
+        rejected: 0,
+        rejected_row_ids: [],
+        error: null,
+      };
+      // 1. The writer's default target.
+      writeRecheckStatus(status);
+      // 2. The reader's default command, executed by a real shell: the stdout
+      //    is `<content>\n<flag>\n`, the flag being `wc -c`'s own newline.
+      const readBack = async (): Promise<unknown> => {
+        const proc = Bun.spawn(["sh", "-c", readRecheckStatusCommand()]);
+        const stdout = await new Response(proc.stdout).text();
+        expect(await proc.exited).toBe(0);
+        const trimmed = stdout.trimEnd();
+        expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe("0");
+        return JSON.parse(trimmed.slice(0, trimmed.lastIndexOf("\n")));
+      };
+      expect(await readBack()).toEqual(status);
+
+      // 3. main() without the 4th argument writes the SAME file: the runtime
+      //    double returns a status, the runner transports it to its default.
+      fakeEnvelope = ENVELOPE;
+      fakeRecheck = null;
+      fakeRecheckStatus = status;
+      const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+      const outPath = join(outDir, "recheck.json");
+      const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
+      const originalLog = console.log;
+      const originalError = console.error;
+      console.log = () => {};
+      console.error = () => {};
+      try {
+        const code = await main(["--level", "quick", "--input", inputPath, "--recheck-out", outPath], fakeRuntime);
+        expect(code).toBe(0);
+      } finally {
+        console.log = originalLog;
+        console.error = originalError;
+      }
+      expect(await readBack()).toEqual(status);
+    } finally {
+      if (prior === null) rmSync(RECHECK_STATUS_PATH, { force: true });
+      else writeFileSync(RECHECK_STATUS_PATH, prior);
     }
   });
 

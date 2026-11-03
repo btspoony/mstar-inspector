@@ -368,13 +368,18 @@ export async function runRecheckSeat(input: {
   const rejectedRowIds = gate.rejected
     .flatMap((row) => (row.rowId === null ? [] : [row.rowId]))
     .sort();
+  // The gate accepted the document, yet not one submitted row survived it: the
+  // round produced nothing usable, so it is a FAILED round (the consumer writes
+  // a `review_failures` row for it). Reporting `ok` here would make a round
+  // that rejected everything indistinguishable from a clean one.
+  const allRowsRejected = gate.doc.results.length === 0 && gate.rejected.length > 0;
   return {
     doc: gate.doc,
     status: {
       schema: "mstar.recheck-status/v1",
       headSha,
-      outcome: "ok",
-      reason: null,
+      outcome: allRowsRejected ? "failed" : "ok",
+      reason: allRowsRejected ? "all-rows-rejected" : null,
       rejected: rejectedRowIds.length,
       rejected_row_ids: rejectedRowIds,
       error: null,

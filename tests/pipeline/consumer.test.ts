@@ -3717,6 +3717,111 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).toContain("unverifiable (budget)");
   });
 
+  /** A src/auth.ts diff whose ONE hunk is `lineCount` context lines (1-based numbering). */
+  function oversizedAuthDiff(lineCount: number): string {
+    return [
+      "diff --git a/src/auth.ts b/src/auth.ts",
+      "index 1111111..2222222 100644",
+      "--- a/src/auth.ts",
+      "+++ b/src/auth.ts",
+      `@@ -1,${lineCount} +1,${lineCount} @@`,
+      ...Array.from({ length: lineCount }, (_, i) => ` const v${String(i + 1).padStart(3, "0")} = 1;`),
+      "",
+    ].join("\n");
+  }
+
+  test("an oversized hunk is sliced into windows that still contain the target line", async () => {
+    reset();
+    diffStdout = oversizedAuthDiff(200);
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The concern sits at line 21 — inside the FIRST window, so its local
+    // evidence exists even though the whole hunk (200 lines) exceeds the bound.
+    recheckFileContent = JSON.stringify({
+      schema: "mstar.recheck/v1",
+      headSha: SHA,
+      results: [
+        {
+          rowId: TARGET_ROW_ID,
+          disposition: "addressed",
+          reason: "verified-fix",
+          evidence: {
+            kind: "current-code",
+            sliceId: "ev-1",
+            startLine: 21,
+            endLine: 22,
+            quote: "const v021 = 1;\nconst v022 = 1;",
+            explanation: "The guard now bounds the value.",
+          },
+          relatedCurrentFindingIndexes: [],
+        },
+      ],
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(writtenInputJson!) as {
+      recheck: {
+        evidence: Array<{ id: string; oldStart: number; newStart: number; oldLines: string[]; newLines: string[] }>;
+      };
+    };
+    const window = runnerInput.recheck.evidence.find((slice) => slice.id === "ev-1")!;
+    // Header arithmetic stays exact: window one starts at file line 1 and its
+    // 80 lines really do cover the target line 21.
+    expect(window.oldStart).toBe(1);
+    expect(window.newStart).toBe(1);
+    expect(window.newLines).toHaveLength(80);
+    expect(window.newLines[20]).toBe("const v021 = 1;");
+    // Slice ids stay the shared catalog's stable numbering.
+    expect(runnerInput.recheck.evidence.map((slice) => slice.id)).toEqual(["ev-1", "ev-2", "ev-3"]);
+    // The in-window quote validates: the row closes as a verified fix.
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("addressed (verified-fix)");
+  });
+
+  test("a quote outside the cited window still fails validation", async () => {
+    reset();
+    diffStdout = oversizedAuthDiff(200);
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Line 190 lives in window THREE (ev-3). Citing ev-1 (lines 1-80) with that
+    // quote is out of range, so the row is dropped and cannot close anything.
+    recheckFileContent = JSON.stringify({
+      schema: "mstar.recheck/v1",
+      headSha: SHA,
+      results: [
+        {
+          rowId: TARGET_ROW_ID,
+          disposition: "addressed",
+          reason: "verified-fix",
+          evidence: {
+            kind: "current-code",
+            sliceId: "ev-1",
+            startLine: 190,
+            endLine: 190,
+            quote: "const v190 = 1;",
+            explanation: "Cited far outside the slice it names.",
+          },
+          relatedCurrentFindingIndexes: [],
+        },
+      ],
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+    expect(prepared.body).not.toContain("addressed (verified-fix)");
+  });
+
   test("a status naming a row this round never sent cannot attribute it: that id is ignored", async () => {
     reset();
     diffStdout = VALID_DIFF;

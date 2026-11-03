@@ -53,6 +53,19 @@ category: Fixed
   longer keep a round that published nothing as clean. The status error is
   redacted with the worker's own credential-pattern list
   (`packages/shared/src/secret-shapes.ts` — one canonical list for both halves).
+- **A round that rejected every row reports `failed`, not `ok`.** When the gate
+  accepts a document but not one submitted row survives it, the status is
+  `failed` with reason `all-rows-rejected`, so the worker writes its
+  `review_failures` row instead of keeping a round that delivered nothing as
+  clean. A partial drop still reports `ok` with the rejected IDs. The status's
+  `rejected` count is derived from `rejected_row_ids` on read, so the two faces
+  of the count cannot disagree.
+- **A finding inside an oversized hunk keeps local evidence.** A hunk larger
+  than the 80-line slice bound is no longer excluded whole (which left every
+  finding inside it permanently `no-evidence`): it is split into consecutive
+  ≤80-line windows, nearest the concern's line first, and each window states
+  its start lines from the hunk header's own arithmetic. A quote from inside
+  the window validates; a quote outside it still fails.
 - **`recheck` and `usage` failures stop paging ops.** The cron failure sweep
   counted every `review_failures` row in the window: its query had no stage
   predicate, and `recheck` was not even an accepted stage yet, so both
@@ -62,7 +75,9 @@ category: Fixed
   normally. Both stages are now outside the paging signal, and both are out of
   the per-PR failure count. The per-PR failure history still lists `usage`
   rows, so a lost metered-usage record keeps a surface; `recheck` rows stay out
-  of it, their accounting already rides the published coverage line.
+  of it, their accounting already rides the published coverage line. The
+  stage lists live once in `src/contracts/failure-stages.ts` and are
+  interpolated into the sweep and dashboard queries.
 
 <!-- CN -->
 - **单行不合格不再丢弃整轮重审。** 重审文档校验现在区分两级不信任。文档级故障
@@ -101,10 +116,20 @@ category: Fixed
   状态；文档写失败时记录 `failed/write-failed`，而不是席位的 `ok`，因此 D1 不会
   再把「什么都没发布」的轮次留成干净记录。状态错误的脱敏使用 worker 同一份凭据
   模式表（`packages/shared/src/secret-shapes.ts`——两侧共用唯一一份列表）。
+- **整轮全部行被拒时状态报 `failed` 而非 `ok`。** 当校验接受了文档、但没有任何一行
+  提交行通过时，状态为 `failed`，reason 为 `all-rows-rejected`，因此 worker 会写入
+  自己的 `review_failures` 行，而不会把「什么都没交付」的轮次留成干净记录。部分行
+  被拒仍是 `ok` 并携带被拒行 ID。读取时 `rejected` 计数由 `rejected_row_ids` 推导，
+  两个计数面不可能互相矛盾。
+- **超大 hunk 内的 finding 仍保有局部证据。** 超过 80 行切片上限的 hunk 不再被整体
+  排除（那会让它内部的每个 finding 永久成为 `no-evidence`）：它按连续 ≤80 行切成
+  多个窗口，离原始关注行最近的优先，每个窗口的起始行号直接来自 hunk 头的行号算术。
+  窗口内的引用可校验通过；窗口外的引用仍然失败。
 - **`recheck` 与 `usage` 失败不再触发告警。** 定时失败扫描此前统计窗口内所有
   `review_failures` 行——查询没有任何 stage 条件，且 `recheck` 当时还不是可选
   stage——因此两类归因行都可能为正常发布的评审唤来 on-call：预算跳过 / 席位失联 /
   文档无效的重审轮，以及用量事件写入失败但评审继续的轮次。现在两个阶段都在告警
   统计之外，也都不计入单个 PR 的失败数量。单个 PR 的失败历史仍会列出 `usage` 行，
   让丢失的计量记录有可见面；`recheck` 行仍不进该列表，它的账目已经随发布覆盖行
-  呈现。
+  呈现。阶段清单只在 `src/contracts/failure-stages.ts` 写一次，并插值进扫描与
+  仪表盘查询。

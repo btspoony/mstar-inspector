@@ -2384,11 +2384,14 @@ row expires.
   trailing 24h across the infra-failure stages only (parse +
   runner/sandbox/pipeline; the
   per-attempt rows written by migration 0010 make this table the sufficient failure
-  signal). `stage IN ('recheck', 'usage')` rows are attribution written for a
+  signal). The attribution stages (`PAGING_EXCLUDED_STAGES` in
+  `src/contracts/failure-stages.ts`) are rows written for a
   review that kept going — a recheck round that budget-skipped, lost its seat
   or produced an invalid document, and a `usage_events` insert that failed
   while the review continued — so the count excludes them. They stay in the
-  table as attribution and never page ops.
+  table as attribution and never page ops. The same contract supplies the
+  per-PR count exclusion and the narrower detail-history exclusion, so the
+  stage lists are written once.
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
   Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,
