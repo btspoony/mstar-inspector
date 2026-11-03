@@ -1,18 +1,16 @@
 /**
- * (AD-652/653): daily stacked bar chart — one column per
+ * (AD-652): daily stacked bar chart — one column per
  * time bucket (day buckets for the 7/30-day windows, Monday-anchored week
  * buckets for 90d, from the additive `findings_distribution` API field),
- * each column stacked by the caller's closed `series` vocabulary (severity
- * merge-classes or category slugs). Replaces the retired aggregate
- * BarChart on the two insights stat cards.
+ * each column stacked by the caller's closed `series` vocabulary (the
+ * severity merge-classes). Replaces the retired aggregate
+ * BarChart on the insights stat card.
  *
  * Component API (the chart discipline): `{ buckets, series,
- * ariaLabel }`. `buckets` = the payload's findings_distribution rows (the
- * page merges the schema-permitted "" category key into "uncategorized"
- * before passing — QC F-004 semantics, one layer down); the
- * component reads each series value as
- * `by_severity[key] ?? by_category[key] ?? 0`, so it stays generic over
- * the two distribution grids. `series` is the closed vocabulary: the PAGE
+ * ariaLabel }`. `buckets` = the payload's findings_distribution rows
+ * (passed through as the page receives them); the
+ * component reads each series value as `by_severity[key] ?? 0`.
+ * `series` is the closed vocabulary: the PAGE
  * maps semantics → a D14 slot (`slot: ChartSlot`, 1–6) and unknown keys never
  * enter the array — the component never invents a color, and a value outside
  * the six slots does not typecheck. Each entry renders one
@@ -58,9 +56,9 @@ import { useContainerWidth } from "./useContainerWidth";
 
 /** One closed-vocabulary stacked series: the page-mapped label + chart slot. */
 export interface StackedSeries {
-  /** Distribution grid key (`by_severity` / `by_category`). */
+  /** Distribution grid key (`by_severity`). */
   key: string;
-  /** Legend + tooltip name — the raw engine slug or the uncategorized i18n label. */
+  /** Legend + tooltip name — the raw engine slug. */
   label: string;
   /** The D14 slot (1–6); the component derives the fill and mark class names. */
   slot: ChartSlot;
@@ -76,7 +74,6 @@ export interface DistributionBucket {
   bucket_start: string;
   granularity: "day" | "week";
   by_severity: Record<string, number>;
-  by_category: Record<string, number>;
 }
 
 const LEGEND_H = 24;
@@ -106,21 +103,11 @@ export function StackedBarChart({
   if (buckets.length === 0 || series.length === 0) return null;
 
   // Flat rows for recharts: one column per bucket, one numeric field per
-  // series key. INVARIANT: a series key lives in exactly ONE grid — the
-  // severity merge-class vocabulary and the category slug vocabulary are
-  // disjoint (qc fix-1). `by_severity` winning this lookup is only
-  // unambiguous under that invariant: a category slug equal to a merge
-  // class would silently read the severity count — the vocabularies are
-  // disjoint by construction (merge classes vs category slugs), and the
-  // per-App insights face (insights-ui.test.ts) feeds these buckets
-  // straight through from the store, so a constants-level collision would
-  // surface there as swapped counts. `?? 0` keeps a missing grid cell at
-  // an honest zero.
+  // series key. `?? 0` keeps a missing grid cell at an honest zero (the
+  // API zero-fills the merge-class keys, so only a drifted payload hits it).
   const data = buckets.map((bucket) => ({
     bucket_start: bucket.bucket_start,
-    ...Object.fromEntries(
-      series.map((s): [string, number] => [s.key, bucket.by_severity[s.key] ?? bucket.by_category[s.key] ?? 0]),
-    ),
+    ...Object.fromEntries(series.map((s): [string, number] => [s.key, bucket.by_severity[s.key] ?? 0])),
   }));
 
   return (

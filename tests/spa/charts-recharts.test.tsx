@@ -76,8 +76,8 @@ describe("recharts pin probe", () => {
   test("bars render as real series geometry — rect with non-empty x/y/height and data-driven labels", () => {
     const html = renderBar();
     expect(geometryRects(html).length).toBeGreaterThanOrEqual(1);
-    // The datum flowed the full pipeline: category labels render as axis
-    // tick text, not just geometry from nowhere.
+    // The datum flowed the full pipeline: the severity series labels render
+    // as axis tick text, not just geometry from nowhere.
     expect(html).toContain("must-fix");
     expect(html).toContain("should-fix");
     expect(html).toContain("nit");
@@ -189,12 +189,10 @@ const trendFixture = (overrides: Partial<InsightsSummary>): InsightsSummary => (
   repo: "",
   reviews_total: 5,
   findings_by_severity: [],
-  findings_by_category: [],
   verdict_distribution: [],
   weekly_trend: [],
   daily_trend: [],
   findings_distribution: [],
-  recurring_top: [],
   ...overrides,
 });
 
@@ -221,14 +219,12 @@ const WEEK_WINDOW = trendFixture({
       bucket_start: "2026-08-31",
       granularity: "week",
       by_severity: { "must-fix": 2, "should-fix": 1, nit: 0 },
-      by_category: { DEBT: 3 },
     },
-    { bucket_start: "2026-09-07", granularity: "week", by_severity: {}, by_category: {} },
+    { bucket_start: "2026-09-07", granularity: "week", by_severity: {} },
     {
       bucket_start: "2026-09-14",
       granularity: "week",
       by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
-      by_category: { DEBT: 1 },
     },
   ],
 });

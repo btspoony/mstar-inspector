@@ -54,10 +54,8 @@ export type InsightsSearch = { window: string; repo: string };
  * One per-bucket distribution row of `findings_distribution` (AD-652) —
  * structurally mirrors the store's FindingsDistributionBucket
  * (the dashboard leaf exports no types). `by_severity` is zero-filled over
- * the fixed merge-class set {must-fix, should-fix, nit}; `by_category` is
- * zero-filled over the window-level union of observed categories plus the
- * single "uncategorized" fallback (NULL/unknown) — identical key set on
- * every bucket, so the SPA's series vocabulary is stable per window.
+ * the fixed merge-class set {must-fix, should-fix, nit} — identical key set
+ * on every bucket, so the SPA's series vocabulary is stable per window.
  */
 export type FindingsDistributionBucket = {
   /** UTC bucket start `YYYY-MM-DD` — a day, or a Monday for week buckets. */
@@ -65,7 +63,6 @@ export type FindingsDistributionBucket = {
   /** "day" for clamped windowDays <= 30, "week" above (AD-652 mapping). */
   granularity: "day" | "week";
   by_severity: Record<string, number>;
-  by_category: Record<string, number>;
 };
 
 export type InsightsSummary = {
@@ -73,7 +70,6 @@ export type InsightsSummary = {
   repo?: string;
   reviews_total: number;
   findings_by_severity: Array<{ severity: string; count: number }>;
-  findings_by_category: Array<{ category: string | null; count: number }>;
   verdict_distribution: Array<{ verdict: string; count: number }>;
   weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
   /**
@@ -88,13 +84,12 @@ export type InsightsSummary = {
   daily_trend: Array<{ day_start: string; reviews: number; findings: number }>;
   /**
    * Per-bucket findings distribution (AD-652 — additive): the
-   * severity/category cards' stacked time-series grid. REQUIRED like the
+   * severity card's stacked time-series grid. REQUIRED like the
    * other aggregations — a payload missing it (or carrying malformed rows)
    * takes the same null fallback as any other shape drift; it is never
    * tolerate-absent (that is the `repos` precedent only).
    */
   findings_distribution: FindingsDistributionBucket[];
-  recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
   /**
    * Window-scoped distinct owner/repo values. Independent of
    * `repo`. Absent on payloads that did not request `include=repos`
@@ -548,8 +543,8 @@ function isNumberRecord(value: unknown): value is Record<string, number> {
 
 /**
  * Row-level guard for the distribution grid: every bucket must
- * carry the bucket start, the day|week granularity, and both zero-filled
- * count grids — the stacked charts read these shapes directly, so a
+ * carry the bucket start, the day|week granularity, and the zero-filled
+ * count grid — the stacked chart reads this shape directly, so a
  * drifted row fails the parse into the page's error face instead of
  * rendering NaN/undefined series. (The field is required;
  * missing or malformed → the existing null fallback path, and no existing
@@ -563,8 +558,7 @@ function isDistributionList(value: unknown): value is FindingsDistributionBucket
         isRecord(row) &&
         typeof row.bucket_start === "string" &&
         (row.granularity === "day" || row.granularity === "week") &&
-        isNumberRecord(row.by_severity) &&
-        isNumberRecord(row.by_category),
+        isNumberRecord(row.by_severity),
     )
   );
 }
@@ -593,8 +587,11 @@ function isDailyTrendList(
 
 export function parseInsights(data: unknown): InsightsSummary | null {
   if (!isRecord(data) || typeof data.window_days !== "number" || typeof data.reviews_total !== "number") return null;
-  if (!Array.isArray(data.findings_by_severity) || !Array.isArray(data.findings_by_category)) return null;
-  if (!Array.isArray(data.verdict_distribution) || !Array.isArray(data.weekly_trend) || !Array.isArray(data.recurring_top)) {
+  if (
+    !Array.isArray(data.findings_by_severity) ||
+    !Array.isArray(data.verdict_distribution) ||
+    !Array.isArray(data.weekly_trend)
+  ) {
     return null;
   }
   // (AD-652): required — a rolled-back Worker's payload (no field)

@@ -305,7 +305,6 @@ const INSIGHTS: InsightsSummary = {
   repo: "",
   reviews_total: 3,
   findings_by_severity: [{ severity: "must-fix", count: 2 }],
-  findings_by_category: [{ category: "DEBT", count: 2 }],
   verdict_distribution: [{ verdict: "approve", count: 3 }],
   weekly_trend: [{ week_start: "2026-09-07", reviews: 3, findings: 2 }],
   daily_trend: [{ day_start: "2026-09-10", reviews: 3, findings: 2 }],
@@ -314,10 +313,8 @@ const INSIGHTS: InsightsSummary = {
       bucket_start: "2026-09-10",
       granularity: "day",
       by_severity: { "must-fix": 2, "should-fix": 0, nit: 0 },
-      by_category: { DEBT: 2, uncategorized: 0 },
     },
   ],
-  recurring_top: [{ fingerprint: "fp1", title_sample: "Off-by-one", count: 2, repos: ["acme/web"] }],
   repos: ["acme/web"],
 };
 

@@ -186,12 +186,10 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
       window_days: number;
       reviews_total: number;
       findings_by_severity: Array<{ severity: string; count: number }>;
-      findings_by_category: Array<{ category: string | null; count: number }>;
       verdict_distribution: Array<{ verdict: string; count: number }>;
       weekly_trend: unknown[];
       daily_trend: Array<{ day_start: string; reviews: number; findings: number }>;
       findings_distribution: unknown[];
-      recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
       repos: string[];
     };
     // Exact key set: store return + the echoed window (snake_case API).
@@ -200,12 +198,10 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
         "window_days",
         "reviews_total",
         "findings_by_severity",
-        "findings_by_category",
         "verdict_distribution",
         "weekly_trend",
         "daily_trend",
         "findings_distribution",
-        "recurring_top",
         "repos",
       ].sort(),
     );
@@ -217,16 +213,9 @@ describe("GET /dashboard/api/apps/:appId/insights/summary", () => {
       { severity: "must-fix", count: 2 },
       { severity: "nit", count: 1 },
     ]);
-    expect(body.findings_by_category).toEqual([
-      { category: "logic", count: 2 },
-      { category: null, count: 1 },
-    ]);
     expect(body.verdict_distribution).toEqual([
       { verdict: "approve", count: 2 },
       { verdict: "comment", count: 1 },
-    ]);
-    expect(body.recurring_top).toEqual([
-      { fingerprint: "fp-x", title_sample: "Null deref risk", count: 2, repos: ["acme/widgets"] },
     ]);
     // repos is opt-in: without include=repos the field is empty.
     expect(body.repos).toEqual([]);

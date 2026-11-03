@@ -46,6 +46,6 @@ tags:
 
 ## Examples
 
-- 实现：`src/store/fingerprint.ts`（纯函数、零 import）+ `artifact-store.ts` put/previousRoundFingerpoints/recurrenceByFingerprint
+- 实现：`src/store/fingerprint.ts`（纯函数、零 import）+ `artifact-store.ts` 的两处消费点：persist 写入时算指纹（put）、跨 round 对账时读回上一轮指纹集（previousRoundFingerprints）——身份只在写入时生成，读取端只按指纹分组比对
 - 测试 pin 形状：`tests/store/fingerprint.test.ts`（golden 向量 `c3f136c3fe89ebbb`、REDACTED 双 finding 不等、CJK 标点）
 - QC 交互发现全文：v0.8 第二席 QC 深审 F-001

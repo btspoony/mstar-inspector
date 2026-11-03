@@ -18,7 +18,7 @@
  * resolved to the fill (the defect this split exists to prevent) fails.
  *
  * (B4): the aggregate BarChart and its describe block retired
- * with the component (the insights severity/category cards consume
+ * with the component (the insights severity card consumes
  * StackedBarChart now).
  * (B8): the stacked-chart SSR pins — StackedBarChart renders the
  * same terminal stacked geometry through the idiom below (createElement in
@@ -26,7 +26,7 @@
  * the per-segment fill classes + tooltip series names, the stackId
  * bottom-up adjacency, the svg <title> mirror, the zero-count buckets kept
  * on the axis (time continuity, AC-C), and the day/week label face. The
- * severity/category page faces ride the InsightsPage pins in
+ * severity page face rides the InsightsPage pins in
  * insights-page.test.ts.
  * QC fix-1: the pins dropped with the BarChart retirement
  * restate on the stacked face — the charts.css token-binding pin (every slot's
@@ -193,7 +193,6 @@ describe("StackedBarChart SSR (stacked face)", () => {
       bucket_start: "2026-08-17",
       granularity: "day",
       by_severity: { "must-fix": 7, "should-fix": 5, nit: 3 },
-      by_category: {},
     },
   ];
   const severitySeries: StackedSeries[] = [
@@ -288,13 +287,11 @@ describe("StackedBarChart SSR (stacked face)", () => {
         bucket_start: "2026-08-17",
         granularity: "day",
         by_severity: { "must-fix": 0, "should-fix": 0, nit: 0 },
-        by_category: {},
       },
       {
         bucket_start: "2026-08-18",
         granularity: "day",
         by_severity: { "must-fix": 2, "should-fix": 1, nit: 1 },
-        by_category: {},
       },
     ];
     const html = stackedChart(buckets, severitySeries);
@@ -315,7 +312,6 @@ describe("StackedBarChart SSR (stacked face)", () => {
         bucket_start: "2026-08-17",
         granularity: "week",
         by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
-        by_category: {},
       },
     ];
     expect(stackedChart(weekBuckets, severitySeries)).toContain("8/17");
@@ -332,7 +328,6 @@ describe("StackedBarChart SSR (stacked face)", () => {
       bucket_start,
       granularity: "day",
       by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
-      by_category: {},
     });
     const dense = stackedChart(days.map((day) => bucket(`2026-${day}`)), severitySeries);
     // Even indices labeled (8/10 .. 8/18); odd days dropped.
@@ -349,13 +344,12 @@ describe("StackedBarChart SSR (stacked face)", () => {
     expect(full).toContain("8/17");
   });
 
-  test("a hostile category label renders as escaped text on every label surface (legend + tooltip name)", () => {
-    // XSS pin (qc2-S-3, restated): category labels are
-    // open-set wire strings (review/schema.ts) that travel MORE surfaces
-    // now — the HTML legend text and the tooltip series name — plus the
-    // axis tick face via a hostile bucket_start (next pin). All travel the
-    // React text/attribute path: hostile markup surfaces escaped, never a
-    // raw <img>/<script> element in the chart output.
+  test("a hostile series label renders as escaped text on every label surface (legend + tooltip name)", () => {
+    // XSS pin (qc2-S-3, restated): series labels are wire strings that
+    // travel several surfaces — the HTML legend text and the tooltip series
+    // name — plus the axis tick face via a hostile bucket_start (next pin).
+    // All travel the React text/attribute path: hostile markup surfaces
+    // escaped, never a raw <img>/<script> element in the chart output.
     const hostileSeries: StackedSeries[] = [
       { key: "<img src=x>", label: "<img src=x>", slot: 5 },
       { key: "<script>alert(1)</script>", label: "<script>alert(1)</script>", slot: 1 },
@@ -364,8 +358,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
       {
         bucket_start: "2026-08-17",
         granularity: "day",
-        by_severity: {},
-        by_category: { "<img src=x>": 2, "<script>alert(1)</script>": 5 },
+        by_severity: { "<img src=x>": 2, "<script>alert(1)</script>": 5 },
       },
     ];
     const html = stackedChart(hostileBuckets, hostileSeries);
@@ -390,7 +383,6 @@ describe("StackedBarChart SSR (stacked face)", () => {
           bucket_start: "<script>alert(1)</script>",
           granularity: "day",
           by_severity: { "must-fix": 2, "should-fix": 0, nit: 0 },
-          by_category: {},
         },
       ],
       severitySeries,

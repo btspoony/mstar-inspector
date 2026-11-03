@@ -34,7 +34,7 @@ import {
 } from "../../src/spa/pages/data";
 import { AppDetailPage, AppDetailView, loadAppDetail } from "../../src/spa/pages/AppDetailPage";
 import { apiBase } from "../../src/spa/workspace-base";
-import { AppInsightsTab, CATEGORY_SLOTS, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/spa/pages/AppInsightsTab";
+import { AppInsightsTab, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/spa/pages/AppInsightsTab";
 import { installDom } from "./dom";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
@@ -427,7 +427,6 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     repo: "",
     reviews_total: 3,
     findings_by_severity: [{ severity: "must-fix", count: 2 }],
-    findings_by_category: [{ category: "DEBT", count: 2 }],
     verdict_distribution: [{ verdict: "approve", count: 3 }],
     weekly_trend: [{ week_start: "2026-09-07", reviews: 3, findings: 2 }],
     // (window-bucketing contract 2026-09-20): the 7-day window's trend
@@ -438,50 +437,29 @@ describe("insights tab face (static SSR over the kept charts)", () => {
         bucket_start: "2026-09-10",
         granularity: "day",
         by_severity: { "must-fix": 2, "should-fix": 0, nit: 0 },
-        by_category: { DEBT: 2, uncategorized: 0 },
       },
     ],
-    recurring_top: [{ fingerprint: "fp1", title_sample: "Off-by-one", count: 2, repos: ["acme/web"] }],
     repos: ["acme/web"],
   };
 
-  test("the records face renders the four sections over the shared charts (recharts 2.x static face)", () => {
+  test("the records face renders the three sections over the shared charts (recharts 2.x static face)", () => {
     const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data }));
     expect(html).toContain("Review health");
     expect(html).toContain("Findings by severity");
     // Window-neutral trend card title (window-bucketing contract
     // 2026-09-20) — day windows no longer claim "Weekly".
     expect(html).toContain("Trend");
-    expect(html).toContain("Recurring findings");
     expect(html).toContain("recharts-surface");
   });
 
-  test("the records face is one section flow; the findings table keeps its three columns", () => {
+  test("the records face is one section flow of summary + severity + trend", () => {
     const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data }));
-    // One content plane divided by hairlines — health, the two findings
-    // charts, the trend and the recurring findings.
-    expect(html.match(/data-slot="flow-section"/g) ?? []).toHaveLength(5);
-    for (const title of [
-      "Review health",
-      "Findings by severity",
-      "Findings by category",
-      "Trend",
-      "Recurring findings",
-    ]) {
+    // One content plane divided by hairlines — health, the severity chart
+    // and the trend.
+    expect(html.match(/data-slot="flow-section"/g) ?? []).toHaveLength(3);
+    for (const title of ["Review health", "Findings by severity", "Trend"]) {
       expect(html, title).toContain(`>${title}</h2>`);
     }
-    // The recurring findings are the shared table: one column per row fact,
-    // no column the payload does not carry.
-    expect(html).toContain('data-slot="table"');
-    for (const header of [
-      t("en", "insights.columnFinding"),
-      t("en", "insights.columnReviews"),
-      t("en", "insights.columnRepos"),
-    ]) {
-      expect(html, header).toContain(`>${header}</th>`);
-    }
-    expect(html).toContain(">Off-by-one</span>");
-    expect(html).toContain(">acme/web</span>");
   });
 
   test("chart series fill from --chart-{n} and legend swatches from --chart-{n}-mark (D14 split)", () => {
@@ -491,9 +469,9 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     expect(fills.length).toBeGreaterThan(0);
     expect(swatches.length).toBeGreaterThan(0);
     // The surface maps semantics onto the page's slots only: the severity
-    // and category charts paint their declared slug's slot, and the trend's
-    // two series keep the pair the chart fixes.
-    for (const slot of [SEVERITY_SLOTS["must-fix"], CATEGORY_SLOTS.DEBT, 5, 3]) {
+    // chart paints its declared merge-class slot, and the trend's two
+    // series keep the pair the chart fixes.
+    for (const slot of [SEVERITY_SLOTS["must-fix"], 5, 3]) {
       expect(fills, `fill ${slot}`).toContain(String(slot));
       expect(swatches, `swatch ${slot}`).toContain(String(slot));
     }
@@ -507,7 +485,7 @@ describe("insights tab face (static SSR over the kept charts)", () => {
   });
 
   test("the zero-review window renders the composed empty state, never a bare axis", () => {
-    const empty: InsightsSummary = { ...data, reviews_total: 0, findings_by_severity: [], findings_by_category: [] };
+    const empty: InsightsSummary = { ...data, reviews_total: 0, findings_by_severity: [] };
     const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data: empty }));
     expect(html).toContain("No reviews yet");
   });

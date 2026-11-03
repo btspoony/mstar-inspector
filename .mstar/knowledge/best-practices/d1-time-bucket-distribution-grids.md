@@ -24,7 +24,7 @@ related_components:
 
 ## Context
 
-2026-09-12 的 insights 堆叠图表迭代给 `/api/insights/summary` 增加按天/周分桶的 findings 分布（`findings_distribution`），供 SPA 堆叠柱状时间序列消费。约束：**additive-only**（既有字段逐字节零 diff）、D1（SQLite 方言）、窗口 7/30/90 天、category 为 open-set 字符串。本文沉淀桶网格的构造纪律——这些点在 review 中被反复问询，且每一处都有明确的「错法」。
+2026-09-12 的 insights 堆叠图表迭代给 `/api/insights/summary` 增加按天/周分桶的 findings 分布（`findings_distribution`），供 SPA 堆叠柱状时间序列消费。约束：**additive-only**（既有字段逐字节零 diff）、D1（SQLite 方言）、窗口 7/30/90 天、桶内 series 是固定的 severity 键集（schema enum 锁定）。本文沉淀桶网格的构造纪律——这些点在 review 中被反复问询，且每一处都有明确的「错法」。
 
 ## Guidance
 
@@ -32,7 +32,7 @@ related_components:
 2. **零填充网格在 JS 生成，不在 SQL 里造行**：以 clamped window 生成全窗桶网格（day = 以当前 UTC 日收尾；week = 与窗口相交的 Monday 桶，首尾桶可为部分周），SQL 只回真实计数行，JS 按网格补零。零计数桶诚实出现在轴上（时间连续性），不靠 GROUP BY 的稀疏输出。
 3. **day 网格是 N+1 个桶（today−N .. today 双闭）**：窗口谓词 `>= datetime('now','-N days')` 能返回 today−N 当天的行——左端inclusive 是唯一同时满足「零丢数」与「网格合计 == 页级合计」的读法；周网格首尾部分桶是对称惯例。别按「恰好 N 个桶」想当然。
 4. **SQL 观测桶并入网格 = 时钟漂移护栏**：`starts = grid ∪ observed`（observed 只可能来自真实行）——JS/SQLite 时钟跨零点时不会静默丢桶；Map 键控保证不重复不丢失，`get()!` 因预并集而安全。并集只加不造（fabricate 不可能，因为 observed 来自 GROUP BY 实际行）。
-5. **键集逐桶稳定**：`by_severity` = 固定全集（schema enum 锁定）每桶补零；`by_category` = 窗口级 union 键集（含 `"uncategorized"` 恒在）每桶补零——SPA 拿到的是闭包词表 series，无需二次并集，堆叠色板才可能稳定。
+5. **键集逐桶稳定**：`by_severity` = 固定全集（schema enum 锁定）每桶补零——SPA 拿到的是闭包词表 series，无需二次并集，堆叠色板才可能稳定。（category series 已于 2026-11-03 移除：它是 open-set 自由文本 slug，不是可比较的指标。）
 6. **granularity 由 clamped window 派生**：`windowDays > 30 → week`，否则 `day`。UI 段集（7/30/90）精确命中；URL 直入 31–89 也归 week（防横向拥挤的初衷一致）。派生只读 clamped 值，不读原始入参。
 7. **additive-only 用测试锁死**：既有字段的 zero-diff 断言（路由层 pin）与新字段形状测试同一 commit 落地——「加一个键」的 PR 才有可能被 review 看出顺手改了旧行为。
 

@@ -4,9 +4,8 @@
  *
  * Locked surface (AL-22-1):
  *   - createInsightsStore(db, { windowDays, repo? }) resolves to
- *     { reviewsTotal, findingsBySeverity, findingsByCategory,
- *       verdictDistribution, weeklyTrend, dailyTrend, recurringTop,
- *       findingsDistribution }.
+ *     { reviewsTotal, findingsBySeverity, verdictDistribution, weeklyTrend,
+ *       dailyTrend, findingsDistribution, repos }.
  *   - windowDays: integer days, default 30; >90 is CLAMPED to 90 at the
  *     store entry (the single clamp point); non-integer/negative values are
  *     the ROUTE's 400 (T2) — the store never sees them in production.
@@ -20,10 +19,6 @@
  *     2026-09-20): weeklyTrend's count semantics at day granularity,
  *     zero-filled over dayGrid — only for day windows (clamped <= 30);
  *     week windows return [] and prepare no extra query.
- * - recurringTop inlines the recurrence semantics (count >= 2
- *     distinct reviews, NULL fingerprints excluded) — parity-locked against
- *     store.recurrenceByFingerprint below (bidirectional anchor with
- *     src/store/artifact-store.ts).
  *   - Module boundary (candidate A): the store declares its own narrow D1
  *     face locally — zero imports from store/pipeline/review.
  *
@@ -40,10 +35,9 @@ import { describe, expect, test } from "bun:test";
 import { createInsightsStore } from "../../src/dashboard/insights-store";
 import { reviewedAt, mondayOf, dayGrid, weekGrid } from "../../src/dashboard/insights-dates";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
-import { recurrenceByFingerprint } from "../../src/store/artifact-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
-/** Fingerprint shared by the recurring fixture findings (same path/bucket/title). */
+/** Fingerprint shared by the fixture findings (same path/bucket/title). */
 const FP_X = computeFindingFingerprint({
   mergeClass: "should-fix",
   category: "logic",
@@ -114,11 +108,11 @@ function insertReview(
 
 /**
  * The canonical multi-review multi-finding fixture:
- *   - r-a acme/widgets PR 1, 1 day ago, "needs fixes": must-fix/logic FP_X,
- *     should-fix/logic FP_Y
- *   - r-b acme/widgets PR 2, 8 days ago, "approved": must-fix/logic FP_X,
- *     nit/style FP_Z
- *   - r-c other/lib PR 3, 15 days ago, "needs fixes": should-fix/NULL-category FP_X
+ *   - r-a acme/widgets PR 1, 1 day ago, "needs fixes": must-fix/logic,
+ *     should-fix/logic
+ *   - r-b acme/widgets PR 2, 8 days ago, "approved": must-fix/logic,
+ *     nit/style
+ *   - r-c other/lib PR 3, 15 days ago, "needs fixes": should-fix/NULL-category
  * 1/8/15 days ago are exactly 7 days apart → three distinct Monday-anchored
  * weeks, all inside the default 30-day window.
  */
@@ -159,8 +153,7 @@ function seedFixture(db: TestD1): void {
   // M1-era row (Bugbot wave-1): envelope NULL + old vocab (critical/comment)
   // — must be excluded from EVERY aggregate by the era gate
   // (`envelope IS NOT NULL` ⇔ v1 row, migration 0002), not by the window or
-  // repo filter. NULL fingerprint keeps the recurrence parity lock with
-  // store.recurrenceByFingerprint intact (both sides exclude it).
+  // repo filter.
   insertReview(db, {
     id: "r-m1",
     owner: "acme",
@@ -177,7 +170,7 @@ function seedFixture(db: TestD1): void {
 }
 
 describe("createInsightsStore", () => {
-  test("aggregates severity/category/verdict/reviews over the window (default 30)", async () => {
+  test("aggregates severity/verdict/reviews over the window (default 30)", async () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
@@ -189,12 +182,6 @@ describe("createInsightsStore", () => {
       { severity: "must-fix", count: 2 },
       { severity: "should-fix", count: 2 },
       { severity: "nit", count: 1 },
-    ]);
-    // count DESC, then category ASC — SQLite sorts NULL first.
-    expect(insights.findingsByCategory).toEqual([
-      { category: "logic", count: 3 },
-      { category: null, count: 1 },
-      { category: "style", count: 1 },
     ]);
     expect(insights.verdictDistribution).toEqual([
       { verdict: "needs fixes", count: 2 },
@@ -208,10 +195,9 @@ describe("createInsightsStore", () => {
 
     const insights = await createInsightsStore(db);
 
-    // Old-vocab severity/verdict/category never surface in any aggregate.
+    // Old-vocab severity/verdict never surface in any aggregate.
     expect(insights.findingsBySeverity.some((s) => s.severity === "critical")).toBe(false);
     expect(insights.verdictDistribution.some((v) => v.verdict === "comment")).toBe(false);
-    expect(insights.findingsByCategory.some((c) => c.category === "security")).toBe(false);
     // The M1 review shares r-a's timestamp — the era gate, not the window,
     // is what keeps it out of weeklyTrend: the week containing that
     // timestamp shows ONLY r-a's counts (reviews: 1, findings: 2), never
@@ -221,10 +207,6 @@ describe("createInsightsStore", () => {
       reviews: 1,
       findings: 2,
     });
-    // NULL fingerprint + envelope NULL → never in recurringTop.
-    expect(insights.recurringTop).toEqual([
-      { fingerprint: FP_X, title_sample: "Null deref risk", count: 3, repos: ["acme/widgets", "other/lib"] },
-    ]);
   });
 
   test("weeklyTrend buckets by Monday-anchored UTC week, ascending", async () => {
@@ -246,17 +228,6 @@ describe("createInsightsStore", () => {
     ]);
   });
 
-  test("recurringTop matches the recurrence semantics (count >= 2, NULL excluded, repos aggregated)", async () => {
-    const db = createMigratedTestD1();
-    seedFixture(db);
-
-    const insights = await createInsightsStore(db);
-
-    expect(insights.recurringTop).toEqual([
-      { fingerprint: FP_X, title_sample: "Null deref risk", count: 3, repos: ["acme/widgets", "other/lib"] },
-    ]);
-  });
-
   test("repo filter restricts every aggregation to one owner/repo pair", async () => {
     const db = createMigratedTestD1();
     seedFixture(db);
@@ -269,18 +240,11 @@ describe("createInsightsStore", () => {
            { severity: "nit", count: 1 },
       { severity: "should-fix", count: 1 },
     ]);
-    expect(insights.findingsByCategory).toEqual([
-      { category: "logic", count: 3 },
-      { category: "style", count: 1 },
-    ]);
     expect(insights.verdictDistribution).toEqual([
            { verdict: "approved", count: 1 },
       { verdict: "needs fixes", count: 1 },
     ]);
     expect(insights.weeklyTrend).toHaveLength(2);
-    expect(insights.recurringTop).toEqual([
-      { fingerprint: FP_X, title_sample: "Null deref risk", count: 2, repos: ["acme/widgets"] },
-    ]);
   });
 
   test("window excludes out-of-window reviews; >90 clamps to 90 (single clamp point)", async () => {
@@ -313,22 +277,20 @@ describe("createInsightsStore", () => {
       findings: [{ id: "f-3", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
 
-    // Default window (30): only the 1-day-old review → count 1 → no recurrence.
+    // Default window (30): only the 1-day-old review is in.
     const d30 = await createInsightsStore(db);
     expect(d30.reviewsTotal).toBe(1);
-    expect(d30.recurringTop).toEqual([]);
+    expect(d30.findingsBySeverity).toEqual([{ severity: "must-fix", count: 1 }]);
 
     // windowDays=60: 1d + 50d in, 100d out → count 2.
     const d60 = await createInsightsStore(db, { windowDays: 60 });
     expect(d60.reviewsTotal).toBe(2);
-    expect(d60.recurringTop).toEqual([
-      { fingerprint: FP_X, title_sample: "Null deref risk", count: 2, repos: ["acme/widgets"] },
-    ]);
+    expect(d60.findingsBySeverity).toEqual([{ severity: "must-fix", count: 2 }]);
 
     // windowDays=200 clamps to 90: 100d still out → identical to 60.
     const clamped = await createInsightsStore(db, { windowDays: 200 });
     expect(clamped.reviewsTotal).toBe(2);
-    expect(clamped.recurringTop).toEqual(d60.recurringTop);
+    expect(clamped.findingsBySeverity).toEqual(d60.findingsBySeverity);
   });
 
   test("empty database → zero counts, empty arrays, zero-filled day grid (no division, no NULL rows)", async () => {
@@ -339,126 +301,22 @@ describe("createInsightsStore", () => {
     expect(insights).toEqual({
       reviewsTotal: 0,
       findingsBySeverity: [],
-      findingsByCategory: [],
       verdictDistribution: [],
       weeklyTrend: [],
       // the daily trend (additive `daily_trend`) is the same zero-filled
       // day grid on the empty day window.
       dailyTrend: dayGrid(30).map((day_start) => ({ day_start, reviews: 0, findings: 0 })),
-      recurringTop: [],
       repos: [],
       // the distribution grid is zero-count-honest, not empty —
-      // every UTC day of the default 30-day window, all zeros, with only the
-      // "uncategorized" fallback in the (empty) category union.
+      // every UTC day of the default 30-day window, all zeros.
       findingsDistribution: dayGrid(30).map((bucket_start) => ({
         bucket_start,
         granularity: "day" as const,
         by_severity: { "must-fix": 0, "should-fix": 0, nit: 0 },
-        by_category: { uncategorized: 0 },
       })),
     });
   });
 
-  test("NULL fingerprints never enter recurringTop (era gate parity)", async () => {
-    const db = createMigratedTestD1();
-    insertReview(db, {
-      id: "r-1",
-      owner: "acme",
-      repo: "widgets",
-      pr_number: 1,
-      reviewedAt: reviewedAt(1),
-      verdict: "needs fixes",
-      findings: [{ id: "f-1", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
-    });
-    insertReview(db, {
-      id: "r-2",
-      owner: "acme",
-      repo: "widgets",
-      pr_number: 2,
-      reviewedAt: reviewedAt(2),
-      verdict: "needs fixes",
-      findings: [{ id: "f-2", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
-    });
-    // A NULL-fingerprint finding that would join the group IF it carried one.
-    insertReview(db, {
-      id: "r-3",
-      owner: "acme",
-      repo: "widgets",
-      pr_number: 3,
-      reviewedAt: reviewedAt(3),
-      verdict: "needs fixes",
-      findings: [{ id: "f-3", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: null }],
-    });
-
-    const insights = await createInsightsStore(db);
-    expect(insights.recurringTop).toEqual([
-      { fingerprint: FP_X, title_sample: "Null deref risk", count: 2, repos: ["acme/widgets"] },
-    ]);
-  });
-
-  test("recurringTop is parity-locked against store.recurrenceByFingerprint (bidirectional anchor)", async () => {
-    const db = createMigratedTestD1();
-    seedFixture(db);
-
-    const insights = await createInsightsStore(db, { windowDays: 30 });
-    const storeRows = await recurrenceByFingerprint(db, { window_days: 30 });
-    expect(insights.recurringTop).toEqual(storeRows);
-
-    const filtered = await createInsightsStore(db, { windowDays: 30, repo: { owner: "acme", repo: "widgets" } });
-    const filteredStoreRows = await recurrenceByFingerprint(db, {
-      window_days: 30,
-      repo: { owner: "acme", repo: "widgets" },
-    });
-    expect(filtered.recurringTop).toEqual(filteredStoreRows);
-  });
-  test("recurringTop is bounded: 15 qualifying fingerprints → exactly the top 10 (W-E)", async () => {
-    const db = createMigratedTestD1();
-    // 15 distinct fingerprints with counts 15..2 — the top 10 by count DESC
-    // (fp-01..fp-10) must be returned; fp-11..fp-15 are cut by LIMIT 10.
-    const counts = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 2];
-    let seq = 0;
-    counts.forEach((count, i) => {
-      const fp = `fp-${String(i + 1).padStart(2, "0")}`;
-      for (let k = 0; k < count; k++) {
-        seq += 1;
-        insertReview(db, {
-          id: `r-${String(seq).padStart(3, "0")}`,
-          owner: "acme",
-          repo: "widgets",
-          pr_number: seq,
-          reviewedAt: reviewedAt(1),
-          verdict: "needs fixes",
-          findings: [
-            {
-              id: `f-${String(seq).padStart(3, "0")}`,
-              severity: "must-fix",
-              category: "logic",
-              title: `Recurring ${fp}`,
-              fingerprint: fp,
-            },
-          ],
-        });
-      }
-    });
-
-    const insights = await createInsightsStore(db);
-    expect(insights.recurringTop).toHaveLength(10);
-    expect(insights.recurringTop.map((g) => g.fingerprint)).toEqual(
-      Array.from({ length: 10 }, (_, i) => `fp-${String(i + 1).padStart(2, "0")}`),
-    );
-    expect(insights.recurringTop[0]).toEqual({
-      fingerprint: "fp-01",
-      title_sample: "Recurring fp-01",
-      count: 15,
-      repos: ["acme/widgets"],
-    });
-    expect(insights.recurringTop[9]).toEqual({
-      fingerprint: "fp-10",
-      title_sample: "Recurring fp-10",
-      count: 6,
-      repos: ["acme/widgets"],
-    });
-  });
 
   /**
    * Relative week-boundary anchor (S-1 residual remedy): the most recent
@@ -702,11 +560,11 @@ describe("createInsightsStore", () => {
     expect(grid.every((b) => b.granularity === "day")).toBe(true);
     // The full intersecting grid: today-30 .. today, ascending.
     expect(grid.map((b) => b.bucket_start)).toEqual(dayGrid(30));
-    // Stable series keys on EVERY bucket — severity is the fixed merge-class
-    // set, category the window-level union + "uncategorized" fallback last.
+    // Stable series keys on EVERY bucket — severity is the fixed
+    // merge-class set, and it is the bucket's only series map.
     for (const bucket of grid) {
+      expect(Object.keys(bucket)).toEqual(["bucket_start", "granularity", "by_severity"]);
       expect(Object.keys(bucket.by_severity)).toEqual(["must-fix", "should-fix", "nit"]);
-      expect(Object.keys(bucket.by_category)).toEqual(["logic", "style", "uncategorized"]);
     }
     // Bucket lookup keyed by the seed timestamp's own UTC date (independent
     // derivation — reviewedAt pins hour 12:00 UTC, so the date part is stable).
@@ -715,17 +573,14 @@ describe("createInsightsStore", () => {
     // r-a (1d ago): must-fix/logic + should-fix/logic.
     expect(at(1)).toMatchObject({
       by_severity: { "must-fix": 1, "should-fix": 1, nit: 0 },
-      by_category: { logic: 2, style: 0, uncategorized: 0 },
     });
     // r-b (8d ago): must-fix/logic + nit/style.
     expect(at(8)).toMatchObject({
       by_severity: { "must-fix": 1, "should-fix": 0, nit: 1 },
-      by_category: { logic: 1, style: 1, uncategorized: 0 },
     });
-    // r-c (15d ago): should-fix, NULL category → the uncategorized fallback.
+    // r-c (15d ago): its single should-fix finding.
     expect(at(15)).toMatchObject({
       by_severity: { "must-fix": 0, "should-fix": 1, nit: 0 },
-      by_category: { logic: 0, style: 0, uncategorized: 1 },
     });
     // A no-review day is honestly zero — and era-gated r-m1 (critical /
     // security, envelope NULL, same timestamp as r-a) contributes nothing.
@@ -733,13 +588,11 @@ describe("createInsightsStore", () => {
       bucket_start: reviewedAt(2).slice(0, 10),
       granularity: "day",
       by_severity: { "must-fix": 0, "should-fix": 0, nit: 0 },
-      by_category: { logic: 0, style: 0, uncategorized: 0 },
     });
     // Totals across the grid equal the page-level finding count (5 v1
     // findings; the era-gated 6th never distributes).
     const sum = (record: Record<string, number>) => Object.values(record).reduce((a, c) => a + c, 0);
     expect(grid.reduce((acc, b) => acc + sum(b.by_severity), 0)).toBe(5);
-    expect(grid.reduce((acc, b) => acc + sum(b.by_category), 0)).toBe(5);
   });
 
   test("findingsDistribution: week grid for windowDays=90, same week definition as weeklyTrend", async () => {
@@ -761,13 +614,12 @@ describe("createInsightsStore", () => {
     expect(grid.map((b) => b.bucket_start)).toEqual(weekGrid(90));
     expect(grid[0]!.bucket_start).toBe(mondayOf(reviewedAt(90)));
     expect(grid[grid.length - 1]!.bucket_start).toBe(mondayOf(reviewedAt(0)));
-    // Same week definition as weekly_trend: per-week severity/category sums
-    // match that week's weekly_trend findings count.
+    // Same week definition as weekly_trend: per-week severity sums match
+    // that week's weekly_trend findings count.
     const sum = (record: Record<string, number>) => Object.values(record).reduce((a, c) => a + c, 0);
     for (const week of insights.weeklyTrend) {
       const bucket = grid.find((b) => b.bucket_start === week.week_start)!;
       expect(sum(bucket.by_severity)).toBe(week.findings);
-      expect(sum(bucket.by_category)).toBe(week.findings);
     }
     // Era-gated r-m1 never inflates any week bucket: the grid total stays at
     // the 5 v1 findings.
@@ -804,21 +656,15 @@ describe("createInsightsStore", () => {
 
     const insights = await createInsightsStore(db, { repo: { owner: "acme", repo: "widgets" } });
 
-    // r-c (other/lib, 15d ago, NULL category) drops out: the window-level
-    // category union shrinks to acme's {logic, style} + uncategorized, and
-    // the 15d bucket goes honestly all-zero.
-    for (const bucket of insights.findingsDistribution) {
-      expect(Object.keys(bucket.by_category)).toEqual(["logic", "style", "uncategorized"]);
-    }
+    // r-c (other/lib, 15d ago) drops out, so the 15d bucket goes honestly
+    // all-zero.
     const at = (daysAgo: number) =>
       insights.findingsDistribution.find((b) => b.bucket_start === reviewedAt(daysAgo).slice(0, 10))!;
     expect(at(15)).toMatchObject({
       by_severity: { "must-fix": 0, "should-fix": 0, nit: 0 },
-      by_category: { logic: 0, style: 0, uncategorized: 0 },
     });
     expect(at(1)).toMatchObject({
       by_severity: { "must-fix": 1, "should-fix": 1, nit: 0 },
-      by_category: { logic: 2, style: 0, uncategorized: 0 },
     });
   });
 
@@ -880,23 +726,19 @@ describe("createInsightsStore", () => {
 
     expect(insights.reviewsTotal).toBe(1);
     expect(insights.findingsBySeverity).toEqual([{ severity: "must-fix", count: 1 }]);
-    expect(insights.findingsByCategory).toEqual([{ category: "logic", count: 1 }]);
     expect(insights.verdictDistribution).toEqual([{ verdict: "needs fixes", count: 1 }]);
     // Only app-a's week survives the filter.
     expect(insights.weeklyTrend).toEqual([
       { week_start: mondayOf(reviewedAt(1)), reviews: 1, findings: 1 },
     ]);
-    // Distribution: app-b (8d) and legacy (15d) buckets go honestly zero,
-    // and the category union carries only app-a's observed keys.
+    // Distribution: app-b (8d) and legacy (15d) buckets go honestly zero.
     const at = (daysAgo: number) =>
       insights.findingsDistribution.find((b) => b.bucket_start === reviewedAt(daysAgo).slice(0, 10))!;
     expect(at(1)).toMatchObject({
       by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
-      by_category: { logic: 1, uncategorized: 0 },
     });
     expect(at(8)).toMatchObject({ by_severity: { "must-fix": 0, nit: 0 } });
     expect(at(15)).toMatchObject({ by_severity: { "must-fix": 0, "should-fix": 0 } });
-    expect(Object.keys(insights.findingsDistribution[0]!.by_category)).toEqual(["logic", "uncategorized"]);
   });
 
   test("appId + includeRepos: repos lists only the app's own repos, never other apps'", async () => {
