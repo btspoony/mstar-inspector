@@ -92,6 +92,13 @@ const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
  * answers both "what does the token source have to keep alive" and "did every
  * declared root contribute" — a second pass would traverse the same trees and,
  * worse, could disagree with the first.
+ *
+ * Two forests, derived from the trees rather than listed: the SPA's
+ * stylesheets/shells, and the design-system prototypes, which are hand-written
+ * HTML reference pages that read the same tokens. A list would be a guard whose
+ * coverage is its own contents; a new stylesheet joins the link by existing.
+ * The generated stylesheet is the one exclusion — link 1 already proves it
+ * equals the token source.
  */
 export interface ConsumerWalk {
   /** Every consumer found, repo-relative, sorted. */
@@ -132,27 +139,6 @@ export function consumerWalk(dirs: readonly string[] = CONSUMER_ROOTS): Consumer
     };
   });
   return { files: files.sort(), roots, failures };
-}
-
-/**
- * Every hand-written stylesheet and HTML shell the token source does not
- * derive — the consumers no generator link sees: nothing derives them, so
- * nothing notices when a name they reference stops existing.
- *
- * Two forests, derived from the trees rather than listed: the SPA's
- * stylesheets/shells, and the design-system prototypes, which are hand-written
- * HTML reference pages that read the same tokens. A list would be a guard whose
- * coverage is its own contents; a new stylesheet joins the link by existing.
- * The generated stylesheet is the one exclusion — link 1 already proves it
- * equals the token source.
- */
-export function stylesheetConsumers(
-  dirs: readonly string[] = CONSUMER_ROOTS,
-  failures: string[] = [],
-): string[] {
-  const walk = consumerWalk(dirs);
-  failures.push(...walk.failures);
-  return [...walk.files];
 }
 
 /**
@@ -206,15 +192,13 @@ function statIsDirectory(full: string, failures: string[]): boolean | null {
 }
 
 /**
- * The declared roots that contributed no consumer, repo-relative. One walk for
- * both callers: the gate fails a link per declared root, and the test holds the
- * same roots to the same rule. A root whose walk failed is not "empty" — it is
- * reported through `ConsumerWalk.failures`, which names the real cause.
+ * The declared roots that contributed no consumer, repo-relative — the one
+ * emptiness rule, reading a `consumerWalk` result so the gate and the test
+ * cannot restate it differently. A root whose walk failed is not "empty": it
+ * is named through `ConsumerWalk.failures`, which carries the real cause.
  */
-export function rootsWithoutConsumers(dirs: readonly string[] = CONSUMER_ROOTS): string[] {
-  return consumerWalk(dirs)
-    .roots.filter((root) => root.consumers === 0 && root.failure === null)
-    .map((root) => root.root);
+export function rootsWithoutConsumers(roots: readonly ConsumerRoot[]): string[] {
+  return roots.filter((root) => root.consumers === 0 && root.failure === null).map((root) => root.root);
 }
 
 /**
@@ -707,6 +691,7 @@ if (import.meta.main) {
     // the emptiness rule needs come from the same walk, so the gate never
     // reaches one tree twice or reports two answers for it.
     const walk = consumerWalk(CONSUMER_ROOTS);
+    const emptyRoots = rootsWithoutConsumers(walk.roots);
     const readFailures: string[] = [];
     const dangling = walk.files.flatMap((file) => {
       try {
@@ -720,7 +705,7 @@ if (import.meta.main) {
     // A root that contributed nothing proves nothing (wrong root, moved tree):
     // that is a failure per root, not an empty pass. A root that could not be
     // read is already named by its failure, so it is never reported as empty.
-    const consumersOk = failures.length === 0 && walk.roots.every((root) => root.consumers > 0) && dangling.length === 0;
+    const consumersOk = failures.length === 0 && emptyRoots.length === 0 && dangling.length === 0;
     console.log(`${consumersOk ? "ok  " : "fail"}  consumers → source`);
     for (const { file, name, theme } of dangling) {
       console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
@@ -728,10 +713,8 @@ if (import.meta.main) {
     for (const failure of failures) {
       console.log(`        ${failure}`);
     }
-    for (const root of walk.roots) {
-      if (root.consumers === 0 && root.failure === null) {
-        console.log(`        no stylesheet or HTML shell found under ${root.root}`);
-      }
+    for (const root of emptyRoots) {
+      console.log(`        no stylesheet or HTML shell found under ${root}`);
     }
     if (!consumersOk) brokenLinks.push("consumers → source");
   } catch (error) {

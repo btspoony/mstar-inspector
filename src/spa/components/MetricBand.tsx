@@ -1,10 +1,10 @@
 /**
  * Metric band (DESIGN.md `composition primitives`; compass D4): the r3 strip
- * under the page title, inside the header plane. Each metric is a quiet key
- * over a tabular figure; the strip is separated from the title block by one
- * hairline and its metrics from each other by one apiece — hairlines are
- * rendered separators, so the count is a markup fact (four metrics, four
- * rules: the header rule plus the three between them), never a trailing edge.
+ * under a page title, inside the header plane. Each metric is a quiet key
+ * over a tabular figure; the strip sits below one hairline and its metrics
+ * are separated from each other by one apiece — hairlines are rendered
+ * separators, never a trailing edge, so what the band draws never depends on
+ * how many metrics a caller passes.
  *
  * Tone is the caller's call, never the band's: an entry carries `tone` only
  * when the page knows the figure means something bad (a refused webhook is a

@@ -28,13 +28,8 @@ import {
   type SettingsPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
-import {
-  AppPullRequestsTab,
-  currentDetailRead,
-  PullRequestDetailView,
-  PullRequestsListView,
-  type DetailRead,
-} from "../../src/spa/pages/AppPullRequestsTab";
+import { AppPullRequestsTab, PullRequestsListView } from "../../src/spa/pages/AppPullRequestsTab";
+import { currentDetailRead, PullRequestDetailView, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
 import { installDom, withMarkup } from "./dom";
 
 const IDENTITY_APP = {
@@ -255,15 +250,16 @@ describe("pull request detail face (static SSR)", () => {
   /**
    * The head line (verdict, attribution, when, sha) of the review row that owns
    * `summary` — the row's own text, so a claim about it reads the rendered
-   * content rather than the serialized tag around it. The summary paragraph is
-   * the stable anchor: the head carries no identifying text of its own.
+   * content rather than the serialized tag around it. The head carries no
+   * identifying text of its own, so it is selected by its slot inside the row
+   * the summary identifies.
    */
   const reviewHead = (container: HTMLElement, summary: string): string => {
-    const body = [...container.querySelectorAll<HTMLElement>('[role="tabpanel"] p')].find(
-      (node) => node.textContent === summary,
+    const row = [...container.querySelectorAll<HTMLElement>("li")].find((item) =>
+      [...item.querySelectorAll("p")].some((node) => node.textContent === summary),
     );
-    expect(body, summary).toBeDefined();
-    return body?.parentElement?.querySelector<HTMLElement>("div")?.textContent ?? "";
+    expect(row, summary).toBeDefined();
+    return row?.querySelector<HTMLElement>('[data-slot="review-head"]')?.textContent ?? "";
   };
 
   /**
@@ -279,7 +275,10 @@ describe("pull request detail face (static SSR)", () => {
     expect(markup).toContain("acme/web #133");
     expect(markup).toContain(t("en", "pullRequests.state.merged"));
     // Short-sha chip over the head sha, titled with the full-name tooltip.
-    expect(markup).toContain(">aaa111b<");
+    const chips = withMarkup(render(DETAIL), (container) =>
+      [...container.querySelectorAll<HTMLElement>('[data-slot="head-sha"]')].map((chip) => chip.textContent ?? ""),
+    );
+    expect(chips).toEqual(["aaa111b"]);
     expect(markup).toContain(t("en", "pullRequests.headSha"));
     // Meta line: first seen, last seen.
     for (const label of ["firstSeen", "lastSeen"] as const) {
@@ -337,6 +336,39 @@ describe("pull request detail face (static SSR)", () => {
     );
     // Verdict (needs fixes) and failures (1) are alerts; the two counts are not.
     expect(tones).toEqual(["danger", null, "danger", null]);
+  });
+
+  test("the band and the timeline paint a verdict with the same rule", () => {
+    // One rule, two surfaces: `ship it` is success, any other non-empty
+    // verdict is danger. The band's figure and the timeline's dot must agree,
+    // so a non-shipping verdict cannot read as an alarm in one and quiet in
+    // the other.
+    const dots = (detail: PullRequestDetail) =>
+      withMarkup(render(detail), (container) =>
+        [...container.querySelectorAll('[data-slot="activity-entry"] > span:first-child')].map(
+          (dot) => dot.className,
+        ),
+      );
+    const shipped: PullRequestDetail = {
+      ...DETAIL,
+      pull_request: {
+        ...DETAIL.pull_request,
+        latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 08:00:00" },
+      },
+      reviews: [
+        {
+          verdict: "ship it",
+          summary_md: "Looks good overall.",
+          model: "kimi-for-coding",
+          provider: "openrouter",
+          reviewed_at: "2026-11-01 08:00:00",
+          head_sha: "aaa111bbb222",
+        },
+      ],
+    };
+    // The review is the newest event on both faces.
+    expect(dots(DETAIL)[0]).toContain("--tone-danger-fg");
+    expect(dots(shipped)[0]).toContain("--tone-success-fg");
   });
 
   test("a must-fix finding opens the findings family, grouped by severity", () => {
@@ -621,13 +653,18 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("an empty head sha renders neither chip nor aside row", () => {
-    const markup = render({
+    const emptySha: PullRequestDetail = {
       ...DETAIL,
       pull_request: { ...DETAIL.pull_request, head_sha: "", latest_review: null },
-    });
-    // The review rows still carry their own shas; only the PR-level ones go —
-    // chip, tooltip and the aside's Head row all disappear together.
-    expect(markup.match(/>aaa111b</g) ?? []).toHaveLength(0);
+    };
+    const markup = render(emptySha);
+    // The PR-level chip disappears rather than rendering an empty one; its
+    // tooltip and the aside's Head row go with it.
+    expect(
+      withMarkup(render(emptySha), (container) =>
+        [...container.querySelectorAll<HTMLElement>('[data-slot="head-sha"]')].map((chip) => chip.textContent ?? ""),
+      ),
+    ).toEqual([]);
     expect(markup).not.toContain(t("en", "pullRequests.headSha"));
     expect(markup).not.toContain(t("en", "pullRequests.factHead"));
     // The verdict figure is announced rather than left blank.
@@ -1350,6 +1387,64 @@ describe("pull requests tab (mounted)", () => {
       expect(reads).toBe(1);
       expect(text()).toContain("Fix the login flow");
       expect(text()).not.toContain(t("en", "common.loading"));
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("a deep link reads only the detail; closing it issues the list read once (S4)", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const realFetch = globalThis.fetch;
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      urls.push(url);
+      return url.endsWith("/pull-requests") ? jsonResponse({ pull_requests: [ROW_OPEN] }) : jsonResponse(DETAIL);
+    }) as unknown as typeof fetch;
+    const listReads = () => urls.filter((url) => url.endsWith("/pull-requests"));
+    // The shell owns the search, so closing the detail commits `pr: ""` here
+    // exactly as the real page's onSearch does.
+    function Harness() {
+      const [search, setSearch] = useState<AppDetailSearch>({
+        tab: "pull-requests",
+        window: "30",
+        repo: "",
+        pr: "acme/web/133",
+      });
+      return createElement(AppPullRequestsTab, { locale: "en", appId: "1", search, onSearch: setSearch });
+    }
+    const press = async (target: Element | null | undefined) => {
+      const pointer = (type: string) =>
+        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
+      await act(async () => {
+        target?.dispatchEvent(pointer("mousedown"));
+        target?.dispatchEvent(pointer("click"));
+      });
+      await act(async () => {});
+    };
+    const host = win.document.createElement("div");
+    win.document.body.appendChild(host);
+    const container = host as unknown as HTMLElement;
+    const root = createRoot(host as unknown as Element);
+    const text = () => container.textContent ?? "";
+    try {
+      await act(async () => root.render(createElement(Harness)));
+      await act(async () => {});
+      // The detail is the whole face the deep link asked for: no list read.
+      expect(text()).toContain("Fix the login flow");
+      expect(listReads()).toHaveLength(0);
+
+      // Closing the detail is the list's cue — exactly one read, whose rows
+      // replace the unmounted detail.
+      await press(
+        [...container.querySelectorAll("button")].find(
+          (button) => button.textContent === t("en", "pullRequests.backToList"),
+        ),
+      );
+      expect(listReads()).toHaveLength(1);
+      expect(text()).toContain("Add the export button");
     } finally {
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;

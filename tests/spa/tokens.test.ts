@@ -43,7 +43,6 @@ import {
   danglingReferences,
   parseFixture,
   rootsWithoutConsumers,
-  stylesheetConsumers,
 } from "../../scripts/design-system-check";
 
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
@@ -557,24 +556,25 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("every var() the hand-written stylesheets and shells consume still names a token", () => {
     // The set is derived from the tree, so the assertion below covers whatever
     // stylesheet and HTML shell exists — not the two this link first listed.
-    const consumers = stylesheetConsumers();
+    const walk = consumerWalk();
+    const consumers = walk.files;
     expect(consumers.length).toBeGreaterThan(0);
     // The predicate itself, on a root it must reject: an empty or missing root
     // is the drift (moved, renamed, emptied) the link exists to catch. Stated
     // explicitly, so the rule is proven even while the live tree is healthy.
     const root = fileURLToPath(new URL("../../", import.meta.url));
     const missing = join(root, "src/does-not-exist");
-    expect(rootsWithoutConsumers([missing])).toEqual(["src/does-not-exist"]);
+    expect(rootsWithoutConsumers(consumerWalk([missing]).roots)).toEqual(["src/does-not-exist"]);
     // A root with a consumer contributes nothing to that list.
-    expect(rootsWithoutConsumers([join(root, "src/spa")])).toEqual([]);
+    expect(rootsWithoutConsumers(consumerWalk([join(root, "src/spa")]).roots)).toEqual([]);
     // A relative root would resolve against the CWD and read as empty: loud
     // failure instead, so a caller bug cannot masquerade as a moved tree.
-    expect(() => rootsWithoutConsumers(["src/spa"])).toThrow(/must be absolute/);
+    expect(() => consumerWalk(["src/spa"])).toThrow(/must be absolute/);
     // And per root, not just in aggregate: every DECLARED root contributes.
     // The prototypes forest is the one a dropped `CONSUMER_ROOTS` entry would
     // silently stop checking, so its presence is asserted, not assumed.
     expect(consumers.some((file) => file.startsWith("src/design-system/prototypes/"))).toBe(true);
-    expect(rootsWithoutConsumers()).toEqual([]);
+    expect(rootsWithoutConsumers(walk.roots)).toEqual([]);
     for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
       expect(danglingReferences(file, css), file).toEqual([]);
@@ -609,11 +609,10 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     try {
       writeFileSync(join(dir, "ok.css"), ":root { color: var(--surface-page); }");
       symlinkSync(join(dir, "gone"), join(dir, "broken.css"));
-      const failures: string[] = [];
-      const files = stylesheetConsumers([dir], failures);
-      expect(files.some((file) => file.endsWith("ok.css"))).toBe(true);
-      expect(failures).toHaveLength(1);
-      expect(failures[0]).toContain("broken.css");
+      const walk = consumerWalk([dir]);
+      expect(walk.files.some((file) => file.endsWith("ok.css"))).toBe(true);
+      expect(walk.failures).toHaveLength(1);
+      expect(walk.failures[0]).toContain("broken.css");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -636,7 +635,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       expect(walk.failures).toHaveLength(1);
       expect(walk.failures[0]).toContain("unreadable");
       // The emptiness predicate leaves it out; the failure names it instead.
-      expect(rootsWithoutConsumers([file])).toEqual([]);
+      expect(rootsWithoutConsumers(walk.roots)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
