@@ -78,7 +78,6 @@ import { Octokit } from "@octokit/rest";
 import { REVIEW_EMOJI, renderReviewMarkdown } from "@mstar-harness/engine";
 import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../review/schema";
 import { redactSecrets } from "./redact";
-import { computeFindingFingerprint } from "../store/fingerprint";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
@@ -115,27 +114,6 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
   return md.length <= limit ? md : `${md.slice(0, limit - 1)}…`;
 }
 
-/**
- * Findings already published in an earlier round, named in an
- * Inspector-owned section. The engine owns the finding blocks, so annotating
- * them in place is not an option — rewriting those blocks would re-create
- * the duplicated layout this module no longer renders. Folded like the
- * closure section: a repeat is a re-vote nobody needs open by default.
- */
-function renderRepeatSection(findings: ReviewFinding[], previousFingerprints?: ReadonlySet<string>): string {
-  if (previousFingerprints === undefined || previousFingerprints.size === 0) return "";
-  const repeats = findings
-    .filter((finding) => previousFingerprints.has(computeFindingFingerprint(finding)))
-    .map((finding) => {
-      const location = finding.file_path
-        ? `${finding.file_path}${finding.line_start != null ? `:${finding.line_start}` : ""}`
-        : "repo-wide";
-      return `- ${finding.title} — ${location}`;
-    });
-  if (repeats.length === 0) return "";
-  const summary = `🔁 Repeats from earlier rounds — ${repeats.length}`;
-  return `<details>\n<summary>${summary}</summary>\n\n### 🔁 Repeat findings\n\n${repeats.join("\n")}\n\n</details>`;
-}
 
 /**
  * Assemble the overall review body: the engine's `renderReviewMarkdown`
@@ -148,22 +126,14 @@ function renderRepeatSection(findings: ReviewFinding[], previousFingerprints?: R
  * over-limit body). `omittedFindings` is the count of findings dropped by the
  * consumer's merge-class cap (B4) — the footer tells readers the review is a
  * Top-N subset.
- *
- * AL-21-2: `previousFingerprints` is the repeat-dedup data
- * channel — assembly INPUT only (the consumer queries the store; this module
- * never does). Publication structure (marker/header/line comments) is
- * untouched.
  */
 export function buildReviewBody(
   output: ReviewOutput,
   omittedFindings = 0,
-  previousFingerprints?: ReadonlySet<string>,
   closure?: string,
 ): string {
   const sections = [renderReviewMarkdown(output)];
   if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
-  const repeats = renderRepeatSection(output.findings, previousFingerprints);
-  if (repeats !== "") sections.push(repeats);
   if (closure) sections.push(closure);
   const body = sections.join("\n\n");
   if (body.length <= REVIEW_BODY_LIMIT) return body;
@@ -287,7 +257,6 @@ export function buildPreparedReviewBody(input: {
   omittedFindings: number;
   round: number;
   headSha: string;
-  previousFingerprints?: ReadonlySet<string>;
   closure?: string;
   publicationMarker: string;
 }): string {
@@ -299,7 +268,7 @@ export function buildPreparedReviewBody(input: {
   // it already uses.
   const header = `Review ${input.round} · commit ${input.headSha.slice(0, 7)}`;
   const core = stripInspectorMarkerSyntax(
-    buildReviewBody(input.output, input.omittedFindings, input.previousFingerprints, input.closure),
+    buildReviewBody(input.output, input.omittedFindings, input.closure),
   );
   // Both markers and the header are reserved before the clamp: two blank-line
   // separators (after the round marker, before the header), the header↔marker

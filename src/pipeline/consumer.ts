@@ -83,7 +83,7 @@ import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type Revi
 import { providerEnvName } from "./provider-catalog";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
-import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
+import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
@@ -2829,24 +2829,6 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // does not exist yet at this point; post → put order). A query THROW is
     // first-round semantics: log a structured warn (dedup: "degraded") and
     // continue — dedup is display-layer, never a review blocker. An empty
-    // set (no previous round) is a SILENT first round — no warn (S-7).
-    let previousFingerprints: ReadonlySet<string> | undefined;
-    try {
-      const set = await previousRoundFingerprints(deps.env.DB, {
-        installation_id: payload.installation_id,
-        owner: payload.owner,
-        repo: payload.repo,
-        pr_number: payload.pr_number,
-      });
-      previousFingerprints = set.size > 0 ? set : undefined;
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(
-        { ...fields, dedup: "degraded" },
-        `previous-round fingerprint query failed — treating as first round: ${detail}`,
-      );
-    }
-
     // 11. §7.7 step 6 — validation + conservative reconciliation + closure
     // assembly + final body. The recheck document is reconciled against the
     // SAME round's final capped findings (§7.4 conservative precedence:
@@ -2905,7 +2887,6 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       omittedFindings: capped.omitted,
       round,
       headSha,
-      previousFingerprints,
       closure,
       publicationMarker,
     });

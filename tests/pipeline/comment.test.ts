@@ -58,7 +58,6 @@ import {
   type PostOctokit,
 } from "../../src/pipeline/comment";
 import type { ReviewFinding, ReviewOutput } from "../../src/review/schema";
-import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { testAppPem } from "../helpers/rsa-key";
 
 function finding(mergeClass: ReviewFinding["mergeClass"], title: string): ReviewFinding {
@@ -193,33 +192,8 @@ describe("buildReviewBody", () => {
     expect(body).not.toContain("more findings omitted");
   });
 
-  test("a repeat is folded into its own details block after the engine body (AL-21-2)", () => {
-    const repeat = finding("should-fix", "Fractional expiry comparison");
-    const fresh = finding("should-fix", "Fresh issue");
-    const body = buildReviewBody(
-      { ...output, findings: [repeat, fresh] },
-      0,
-      new Set([computeFindingFingerprint(repeat)]),
-    );
-    expect(body.endsWith(
-      "<details>\n<summary>🔁 Repeats from earlier rounds — 1</summary>\n\n" +
-        "### 🔁 Repeat findings\n\n- Fractional expiry comparison — src/auth.ts:21\n\n</details>",
-    )).toBe(true);
-    expect(body.indexOf("<details>")).toBeGreaterThan(body.indexOf("### Findings"));
-    expect(body).not.toContain("- Fresh issue");
-    // The engine's finding blocks are never rewritten: no inline repeat tag.
-    expect(body).not.toContain("*(repeat)*");
-  });
-
-  test("no repeat section on the first round or when nothing repeats", () => {
-    expect(buildReviewBody(output)).not.toContain("Repeat findings");
-    const other = finding("should-fix", "A different issue");
-    const body = buildReviewBody(output, 0, new Set([computeFindingFingerprint(other)]));
-    expect(body).not.toContain("Repeat findings");
-  });
-
   test("the closure section is appended last", () => {
-    const body = buildReviewBody(output, 10, undefined, "## Prior findings recheck\n\nReassessed 1/1");
+    const body = buildReviewBody(output, 10, "## Prior findings recheck\n\nReassessed 1/1");
     expect(body.endsWith("\n\n## Prior findings recheck\n\nReassessed 1/1")).toBe(true);
     expect(body.indexOf("more findings omitted")).toBeLessThan(body.indexOf("Prior findings recheck"));
   });
@@ -455,7 +429,6 @@ describe("review comment upsert (T5)", () => {
         omittedFindings: 0,
         round: 3,
         headSha: "0123456789abcdef0123456789abcdef01234567",
-        previousFingerprints: new Set(["deadbeefdeadbeef"]),
         publicationMarker,
       });
       const lines = body.split("\n");
@@ -512,18 +485,18 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
       assessed: 25,
       omitted: 0,
       capped: 0,
-      contextCoverage: "full",
+      contextCoverage: "complete",
     };
     const rows: ClosureRow[] = Array.from({ length: 25 }, (_, index) => ({
       title: `prior finding ${index}`,
-      disposition: "still-open",
-      reason: "not-addressed",
+      disposition: "unverifiable",
+      reason: "no-evidence",
       evidenceKind: null,
       thread: "-",
     }));
     // Sized so the closure fold opens before the cut and would end after it.
     const clogged: ReviewOutput = { ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT - 400) };
-    const body = buildReviewBody(clogged, 0, undefined, buildClosureSection(coverage, rows));
+    const body = buildReviewBody(clogged, 0, buildClosureSection(coverage, rows));
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
     expect(body).toContain("<details>");
     expect((body.match(/<details>/g) ?? []).length).toBe((body.match(/<\/details>/g) ?? []).length);
