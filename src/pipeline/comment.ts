@@ -116,6 +116,25 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
 
 
 /**
+ * Cut `text` to `budget` chars, keeping the head — and close any fold the cut
+ * left open. An unclosed `<details>` makes GitHub route the rest of the
+ * comment into the collapsed block, so the trailer and the publication marker
+ * would vanish behind a fold nobody opened. Every clamp that can cut inside a
+ * fold goes through here.
+ */
+function clampKeepingHead(text: string, budget: number): string {
+  if (text.length <= budget) return text;
+  const close = "\n\n</details>";
+  const head = text.slice(0, Math.max(0, budget - 1));
+  const folds = (head.match(/<details>/g) ?? []).length - (head.match(/<\/details>/g) ?? []).length;
+  const cut =
+    folds > 0 && budget - 1 - close.length > 0
+      ? head.slice(0, budget - 1 - close.length) + close
+      : head;
+  return `${cut}…`;
+}
+
+/**
  * The engine renders the `cause:`/`unscanned:` pair from the envelope and
  * publishes the seat narrative verbatim, so a narrative that restates the pair
  * shows it twice. Strip only the exact lines the pair renders: a line that
@@ -160,18 +179,7 @@ export function buildReviewBody(
   const sections = [renderReviewMarkdown(rendered)];
   if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
   if (closure) sections.push(closure);
-  const body = sections.join("\n\n");
-  if (body.length <= REVIEW_BODY_LIMIT) return body;
-  // A cut that lands inside a fold drops its close tag, and GitHub then routes
-  // the rest of the comment into the collapsed block — the same swallow a stray
-  // `<` causes in `wire`. Close the fold the cut left open, paying its length
-  // out of the budget rather than overshooting it.
-  const close = "\n\n</details>";
-  const head = body.slice(0, REVIEW_BODY_LIMIT - 1);
-  const folds =
-    (head.match(/<details>/g) ?? []).length - (head.match(/<\/details>/g) ?? []).length;
-  const cut = folds > 0 ? head.slice(0, REVIEW_BODY_LIMIT - 1 - close.length) + close : head;
-  return `${cut}…`;
+  return clampKeepingHead(sections.join("\n\n"), REVIEW_BODY_LIMIT);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,8 +308,7 @@ export function buildPreparedReviewBody(input: {
   // newline, and the clamp's own ellipsis fit inside the 8.
   const reserve = roundMarker.length + header.length + input.publicationMarker.length + 8;
   const budget = REVIEW_BODY_LIMIT - reserve;
-  const clamped = core.length <= budget ? core : `${core.slice(0, Math.max(0, budget - 1))}…`;
-  return `${roundMarker}\n\n${clamped}\n\n${header}\n${input.publicationMarker}`;
+  return `${roundMarker}\n\n${clampKeepingHead(core, budget)}\n\n${header}\n${input.publicationMarker}`;
 }
 
 /**
@@ -322,8 +329,7 @@ export function buildPreparedDegradedBody(input: {
   );
   const reserve = roundMarker.length + input.publicationMarker.length + 4;
   const budget = REVIEW_BODY_LIMIT - reserve;
-  const clamped = core.length <= budget ? core : `${core.slice(0, Math.max(0, budget - 1))}…`;
-  return `${roundMarker}\n${clamped}\n${input.publicationMarker}`;
+  return `${roundMarker}\n${clampKeepingHead(core, budget)}\n${input.publicationMarker}`;
 }
 // ---------------------------------------------------------------------------
 // Single-comment upsert
