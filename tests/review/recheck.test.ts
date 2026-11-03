@@ -20,8 +20,8 @@ import { describe, expect, test } from "bun:test";
 
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
-import { anchorRecheckDeadline, currentRecheckBudget, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
-import { RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type RecheckInput } from "../../packages/shared/src/recheck-wire";
+import { anchorRecheckDeadline, currentRecheckBudget, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, recheckRoundStatus, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
+import { RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type Assessment, type RecheckGateResult, type RecheckInput, type RecheckRowRejection } from "../../packages/shared/src/recheck-wire";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -397,5 +397,56 @@ describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)"
     // process-global and this anchor is now ancient).
     anchorRecheckDeadline(Date.now() + 3_600_000, "deep");
     expect(currentRecheckBudget(Date.now())).toBe(180_000);
+  });
+});
+
+describe("recheckRoundStatus (a round that delivered nothing is failed, never clean)", () => {
+  const gateOf = (results: Assessment[], rejected: RecheckRowRejection[]): RecheckGateResult & { ok: true } => ({
+    ok: true,
+    doc: { schema: "mstar.recheck/v1", headSha: SHA, results },
+    rejected,
+  });
+
+  test("a valid document with zero results over a non-empty target list → failed/empty-result", () => {
+    expect(recheckRoundStatus(gateOf([], []), 1, SHA)).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "empty-result",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: null,
+    });
+  });
+
+  test("every submitted row gate-dropped → failed/all-rows-rejected with the named and nameless drops", () => {
+    const status = recheckRoundStatus(
+      gateOf(
+        [],
+        [
+          { rowId: "row-1", index: 0, error: "results[0].disposition is outside the closed enum" },
+          { rowId: null, index: 1, error: "results[1].rowId must be a nonempty string" },
+        ],
+      ),
+      2,
+      SHA,
+    );
+    expect(status).toMatchObject({
+      outcome: "failed",
+      reason: "all-rows-rejected",
+      rejected: 1,
+      rejected_row_ids: ["row-1"],
+      rejected_unnamed: 1,
+    });
+  });
+
+  test("a surviving row keeps the round ok, and an empty target list is not a failure", () => {
+    const survived: Assessment[] = [
+      { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+    ];
+    expect(recheckRoundStatus(gateOf(survived, []), 1, SHA)).toMatchObject({ outcome: "ok", reason: null });
+    // Nothing was sent, so there is no round to blame.
+    expect(recheckRoundStatus(gateOf([], []), 0, SHA)).toMatchObject({ outcome: "ok", reason: null });
   });
 });

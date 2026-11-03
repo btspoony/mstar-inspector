@@ -328,7 +328,27 @@ export async function seedPriorPublication(db: TestD1, nowMs = 1_000): Promise<v
     .run(PRIOR_PUB_ID, TEST_APP_ID, PRIOR_SHA, "{}", nowMs, nowMs);
 }
 
-export async function seedOpenTarget(db: TestD1, state = "open", nowMs = 2_000): Promise<void> {
+/**
+ * One open lifecycle row for the seeded target, or a variant of it: a case that
+ * needs another row (its own id, finding id, original body or rotation clock)
+ * passes the override instead of hand-copying the INSERT.
+ */
+export async function seedOpenTarget(
+  db: TestD1,
+  {
+    state = "open",
+    nowMs = 2_000,
+    rowId = TARGET_ROW_ID,
+    findingId = TARGET_ORIGINAL.fingerprintHint,
+    original = {},
+  }: {
+    state?: string;
+    nowMs?: number;
+    rowId?: string;
+    findingId?: string;
+    original?: Partial<typeof TARGET_ORIGINAL>;
+  } = {},
+): Promise<void> {
   db.raw
     .prepare(
       `INSERT INTO review_findings
@@ -338,10 +358,10 @@ export async function seedOpenTarget(db: TestD1, state = "open", nowMs = 2_000):
        VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)`,
     )
     .run(
-      TARGET_ROW_ID,
+      rowId,
       TEST_APP_ID,
-      TARGET_ORIGINAL.fingerprintHint,
-      JSON.stringify(TARGET_ORIGINAL),
+      findingId,
+      JSON.stringify({ ...TARGET_ORIGINAL, ...original }),
       PRIOR_PUB_ID,
       PRIOR_PUB_ID,
       PRIOR_SHA,

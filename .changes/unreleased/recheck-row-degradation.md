@@ -54,11 +54,15 @@ category: Fixed
   cannot keep a round that published nothing as clean. The status error is
   redacted with the worker's own credential-pattern list
   (`packages/shared/src/secret-shapes.ts` — one canonical list for both halves).
-- **A round that rejected every row reports `failed`, not `ok`.** When the gate
+- **A round that delivered nothing reports `failed`, not `ok`.** When the gate
   accepts a document but not one submitted row survives it, the status is
   `failed` with reason `all-rows-rejected`, so the worker writes its
   `review_failures` row instead of keeping a round that delivered nothing as
-  clean. A partial drop still reports `ok` with the rejected IDs. The status's
+  clean. A valid document with **zero** results for a non-empty target list is
+  the same failure without a gate drop and now reports `failed` with reason
+  `empty-result`: the round is attributable and the rows it was sent are
+  `invalid-output` (answered badly), never `omitted` (never ran). A partial
+  drop still reports `ok` with the rejected IDs. The status's
   `rejected` count is derived from `rejected_row_ids` on read, so the two faces
   of the count cannot disagree.
 - **The published coverage line counts real seat answers.** A row the gate
@@ -129,11 +133,14 @@ category: Fixed
   因此不会有任何状态把从未送达 worker 的文档报成 `ok`，D1 也不会再把「什么都没发布」
   的轮次留成干净记录。状态错误的脱敏使用 worker 同一份凭据模式表
   （`packages/shared/src/secret-shapes.ts`——两侧共用唯一一份列表）。
-- **整轮全部行被拒时状态报 `failed` 而非 `ok`。** 当校验接受了文档、但没有任何一行
+- **整轮什么都没交付时状态报 `failed` 而非 `ok`。** 当校验接受了文档、但没有任何一行
   提交行通过时，状态为 `failed`，reason 为 `all-rows-rejected`，因此 worker 会写入
-  自己的 `review_failures` 行，而不会把「什么都没交付」的轮次留成干净记录。部分行
-  被拒仍是 `ok` 并携带被拒行 ID。读取时 `rejected` 计数由 `rejected_row_ids` 推导，
-  两个计数面不可能互相矛盾。
+  自己的 `review_failures` 行，而不会把「什么都没交付」的轮次留成干净记录。若文档
+  合法、目标非空、却零结果（没有任何行被校验丢弃），那是同一种失败，现在报
+  `failed`，reason 为 `empty-result`：该轮可归因，且它发送过的行记为
+  `invalid-output`（答坏了），绝不算作 `omitted`（从未运行）。部分行被拒仍是 `ok`
+  并携带被拒行 ID。读取时 `rejected` 计数由 `rejected_row_ids` 推导，两个计数面
+  不可能互相矛盾。
 - **发布覆盖行只统计席位真正给出的回答。** 被校验丢弃的行是「已尝试」的，轮转时钟
   （`last_assessed_ms`）照常前进，但它从未被真正评估：覆盖行与该轮的账目日志字段
   现在只统计携带文档结果的行，一轮再也无法声称席位从未交付的重审数量。生命周期时钟

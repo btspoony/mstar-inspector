@@ -314,6 +314,43 @@ function recheckStructuredData(result: Awaited<ReturnType<typeof runStructuredSu
 export type RecheckSeatResult = { doc: RecheckDoc | null; status: RecheckStatus };
 
 /**
+ * The status a gate-accepted round reports (spec §7.8). Two empty shapes share
+ * one verdict: every submitted row was dropped by the gate (`all-rows-rejected`),
+ * or the seat answered a non-empty target list with zero rows (`empty-result`).
+ * Either way the round produced nothing usable, so it is a FAILED round — the
+ * consumer writes its `review_failures` row and blames the sent rows
+ * `invalid-output`. Reporting `ok` would make such a round indistinguishable
+ * from a clean one, and its rows would read "never ran".
+ * Exported so that split is testable without the seat's SDK session.
+ */
+export function recheckRoundStatus(
+  gate: Extract<RecheckGateResult, { ok: true }>,
+  targetCount: number,
+  headSha: string,
+): RecheckStatus {
+  // A row without an identity (non-object / no usable rowId) cannot be named;
+  // it is counted in `rejected_unnamed` so the Worker can still attribute it by
+  // position among the rows it sent — the drop is never silently lost.
+  const rejectedRowIds = gate.rejected
+    .flatMap((row) => (row.rowId === null ? [] : [row.rowId]))
+    .sort();
+  const allRowsRejected = gate.doc.results.length === 0 && gate.rejected.length > 0;
+  const emptyResult =
+    gate.doc.results.length === 0 && gate.rejected.length === 0 && targetCount > 0;
+  const failureReason = allRowsRejected ? "all-rows-rejected" : emptyResult ? "empty-result" : null;
+  return {
+    schema: "mstar.recheck-status/v1",
+    headSha,
+    outcome: failureReason === null ? "ok" : "failed",
+    reason: failureReason,
+    rejected: rejectedRowIds.length,
+    rejected_row_ids: rejectedRowIds,
+    rejected_unnamed: gate.rejected.length - rejectedRowIds.length,
+    error: null,
+  };
+}
+
+/**
  * Run the bounded recheck seat (spec §7.8) against `session` —
  * the caller owns concurrency (started alongside the review work, aborted
  * via `signal` when the normal review settles) and this function NEVER
@@ -363,29 +400,8 @@ export async function runRecheckSeat(input: {
     console.error(JSON.stringify({ event: "recheck_seat_failed", error: `recheck document failed validation: ${error}` }));
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "invalid-document", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };
   }
-  // A row without an identity (non-object / no usable rowId) cannot be named;
-  // it is counted in `rejected_unnamed` so the Worker can still attribute it by
-  // position among the rows it sent — the drop is never silently lost.
-  const rejectedRowIds = gate.rejected
-    .flatMap((row) => (row.rowId === null ? [] : [row.rowId]))
-    .sort();
-  const rejectedUnnamed = gate.rejected.length - rejectedRowIds.length;
-  // The gate accepted the document, yet not one submitted row survived it: the
-  // round produced nothing usable, so it is a FAILED round (the consumer writes
-  // a `review_failures` row for it). Reporting `ok` here would make a round
-  // that rejected everything indistinguishable from a clean one.
-  const allRowsRejected = gate.doc.results.length === 0 && gate.rejected.length > 0;
   return {
     doc: gate.doc,
-    status: {
-      schema: "mstar.recheck-status/v1",
-      headSha,
-      outcome: allRowsRejected ? "failed" : "ok",
-      reason: allRowsRejected ? "all-rows-rejected" : null,
-      rejected: rejectedRowIds.length,
-      rejected_row_ids: rejectedRowIds,
-      rejected_unnamed: rejectedUnnamed,
-      error: null,
-    },
+    status: recheckRoundStatus(gate, input.input.targets.length, headSha),
   };
 }

@@ -124,6 +124,22 @@ function failureRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
+/**
+ * The attribution triple a recheck failure row carries — `outcome: reason:
+ * error`, as the round composed it. Parsed rather than string-matched so an
+ * assertion pins the attribution, not the `null`-interpolation spacing; an
+ * absent field comes back as `null`, not the literal text "null".
+ */
+function failureTriple(row: Record<string, unknown>): {
+  outcome: string | null;
+  reason: string | null;
+  error: string | null;
+} {
+  const field = (text: string): string | null => (text === "null" ? null : text);
+  const [outcome = "", reason = "", ...rest] = String(row.error).split(": ");
+  return { outcome: field(outcome), reason: field(reason), error: field(rest.join(": ")) };
+}
+
 describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
   test("a failed seat status with no document makes the round attributable: every row invalid-output, one recheck failure row", async () => {
     reset();
@@ -154,7 +170,11 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
-    expect(rows[0]!.error).toBe("failed: seat-failed: session aborted");
+    expect(failureTriple(rows[0]!)).toEqual({
+      outcome: "failed",
+      reason: "seat-failed",
+      error: "session aborted",
+    });
     // The single accounting line carries the structured attribution.
     const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
     expect(line.level).toBe("warn");
@@ -178,26 +198,12 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     for (let i = 0; i < 25; i += 1) {
       const rowId = `rejected-case-row-${i}`;
       seeded.push(rowId);
-      db.raw
-        .prepare(
-          `INSERT INTO review_findings
-             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
-              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-              first_seen_round, last_seen_round, state, created_ms, updated_ms)
-           VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
-        )
-        .run(
-          rowId,
-          TEST_APP_ID,
-          `finding-${i}`,
-          JSON.stringify({ ...TARGET_ORIGINAL, fingerprintHint: `old-fp-${i}` }),
-          PRIOR_PUB_ID,
-          PRIOR_PUB_ID,
-          PRIOR_SHA,
-          PRIOR_SHA,
-          2_000 + i,
-          2_000 + i,
-        );
+      await seedOpenTarget(db, {
+        rowId,
+        findingId: `finding-${i}`,
+        original: { fingerprintHint: `old-fp-${i}` },
+        nowMs: 2_000 + i,
+      });
     }
     const rejectedRowIds = [seeded[0]!, seeded[1]!];
     const assessableRowIds = seeded.slice(2);
@@ -304,7 +310,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
-    expect(rows[0]!.error).toBe("skipped: budget: null");
+    expect(failureTriple(rows[0]!)).toEqual({ outcome: "skipped", reason: "budget", error: null });
     const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
     expect(line.fields).toMatchObject({ recheck_outcome: "skipped", recheck_reason: "budget", assessed: 0 });
     const findingRow = db.raw.query("SELECT state, last_assessed_ms FROM review_findings").get() as {
@@ -313,6 +319,51 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     };
     expect(findingRow.state).toBe("open");
     expect(findingRow.last_assessed_ms).toBeNull();
+  });
+
+  test("an empty-result round is attributable: every sent row invalid-output, one recheck failure row, rotation clock advanced", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The seat returned a VALID document with zero results while one target was
+    // sent: it answered, badly. `omitted` ("never ran") would hide the round.
+    sandbox.recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "empty-result",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+    expect(prepared.body).not.toContain("unverifiable (omitted)");
+    expect(prepared.body).toContain("0 omitted");
+    // The round delivered nothing usable, so it is recorded once, named.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
+    expect(failureTriple(rows[0]!)).toEqual({ outcome: "failed", reason: "empty-result", error: null });
+    const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "failed", recheck_reason: "empty-result", assessed: 0 });
+    // The row WAS sent, so its rotation clock advanced — it is attempted-bad,
+    // not never-sent.
+    const findingRow = db.raw.query("SELECT state, last_assessed_ms FROM review_findings").get() as {
+      state: string;
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.state).toBe("open");
+    expect(findingRow.last_assessed_ms).not.toBeNull();
   });
 
   test("a size-budget-excluded round sends nothing: rows are budget, and the round is still attributed", async () => {
@@ -325,26 +376,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const oversizedBody = "x".repeat(600 * 1024);
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
-    db.raw
-      .prepare(
-        `INSERT INTO review_findings
-           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
-            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-            first_seen_round, last_seen_round, state, created_ms, updated_ms)
-         VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
-      )
-      .run(
-        TARGET_ROW_ID,
-        TEST_APP_ID,
-        TARGET_ORIGINAL.fingerprintHint,
-        JSON.stringify({ ...TARGET_ORIGINAL, body: oversizedBody }),
-        PRIOR_PUB_ID,
-        PRIOR_PUB_ID,
-        PRIOR_SHA,
-        PRIOR_SHA,
-        2_000,
-        2_000,
-      );
+    await seedOpenTarget(db, { original: { body: oversizedBody } });
     await seedAssociation(db, "PRRT_thread1");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -436,7 +468,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       expect(prepared.body).toContain("unverifiable (invalid-output)");
       const rows = failureRows(db);
       expect(rows).toHaveLength(1);
-      expect(rows[0]!.error).toBe("absent: null: null");
+      expect(failureTriple(rows[0]!)).toEqual({ outcome: "absent", reason: null, error: null });
     }
   });
 
@@ -459,7 +491,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (invalid-output)");
-    expect(failureRows(db)[0]!.error).toBe("absent: null: null");
+    expect(failureTriple(failureRows(db)[0]!)).toEqual({ outcome: "absent", reason: null, error: null });
   });
 
   test("a row the trusted catalog cannot prove never rides the wire: no-evidence, never budget, never assessed", async () => {
@@ -518,32 +550,17 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     await seedOpenTarget(db);
     // The second row is oversized, so the §7.3 budget drops it AFTER the
     // catalog already holds its slice.
-    const oversizedRowId = "eeeeeeee-0000-4000-8000-000000000005";
-    db.raw
-      .prepare(
-        `INSERT INTO review_findings
-           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
-            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-            first_seen_round, last_seen_round, state, created_ms, updated_ms)
-         VALUES (?, ?, 123, 'acme', 'widgets', 42, 'finding-oversized', ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
-      )
-      .run(
-        oversizedRowId,
-        TEST_APP_ID,
-        JSON.stringify({
-          ...TARGET_ORIGINAL,
-          title: "Oversized concern",
-          filePath: "src/other.ts",
-          lineStart: 1,
-          body: "y".repeat(600 * 1024),
-        }),
-        PRIOR_PUB_ID,
-        PRIOR_PUB_ID,
-        PRIOR_SHA,
-        PRIOR_SHA,
-        2_100,
-        2_100,
-      );
+    await seedOpenTarget(db, {
+      rowId: "eeeeeeee-0000-4000-8000-000000000005",
+      findingId: "finding-oversized",
+      original: {
+        title: "Oversized concern",
+        filePath: "src/other.ts",
+        lineStart: 1,
+        body: "y".repeat(600 * 1024),
+      },
+      nowMs: 2_100,
+    });
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -606,32 +623,17 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
     for (let i = 0; i < rowCount; i++) {
-      db.raw
-        .prepare(
-          `INSERT INTO review_findings
-             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
-              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-              first_seen_round, last_seen_round, state, created_ms, updated_ms)
-           VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
-        )
-        .run(
-          `eeeeeeee-0000-4000-8000-000000000${String(i + 10).padStart(3, "0")}`,
-          TEST_APP_ID,
-          `finding-budget-${i + 1}`,
-          JSON.stringify({
-            ...TARGET_ORIGINAL,
-            title: `Budget row ${i + 1}`,
-            filePath: `src/b${String(i + 1).padStart(2, "0")}.ts`,
-            lineStart: 1,
-            lineEnd: 1,
-          }),
-          PRIOR_PUB_ID,
-          PRIOR_PUB_ID,
-          PRIOR_SHA,
-          PRIOR_SHA,
-          1_000 + i,
-          1_000 + i,
-        );
+      await seedOpenTarget(db, {
+        rowId: `eeeeeeee-0000-4000-8000-000000000${String(i + 10).padStart(3, "0")}`,
+        findingId: `finding-budget-${i + 1}`,
+        original: {
+          title: `Budget row ${i + 1}`,
+          filePath: `src/b${String(i + 1).padStart(2, "0")}.ts`,
+          lineStart: 1,
+          lineEnd: 1,
+        },
+        nowMs: 1_000 + i,
+      });
     }
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -900,26 +902,12 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     await seedPriorPublication(db);
     // Two sent rows, ordered by their rotation clock: `anonymous-0` first.
     for (let i = 0; i < 2; i += 1) {
-      db.raw
-        .prepare(
-          `INSERT INTO review_findings
-             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
-              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-              first_seen_round, last_seen_round, state, created_ms, updated_ms)
-           VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
-        )
-        .run(
-          `anonymous-${i}`,
-          TEST_APP_ID,
-          `finding-anon-${i}`,
-          JSON.stringify({ ...TARGET_ORIGINAL, fingerprintHint: `anon-fp-${i}` }),
-          PRIOR_PUB_ID,
-          PRIOR_PUB_ID,
-          PRIOR_SHA,
-          PRIOR_SHA,
-          2_000 + i,
-          2_000 + i,
-        );
+      await seedOpenTarget(db, {
+        rowId: `anonymous-${i}`,
+        findingId: `finding-anon-${i}`,
+        original: { fingerprintHint: `anon-fp-${i}` },
+        nowMs: 2_000 + i,
+      });
     }
     // The seat wrote its ALREADY-FILTERED document, so the second validation
     // pass sees no drops at all: the status is the only record. Its unnamed
@@ -989,9 +977,11 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       expect(line.fields).toMatchObject(field === "error" ? { recheck_error: capped } : { recheck_reason: capped });
       const rows = failureRows(db);
       expect(rows).toHaveLength(1);
-      // The D1 text is the same two fields, so one overrun is enough to bound it.
-      expect(rows[0]!.error).toBe(`failed: ${reason}: ${error}`.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS));
-      expect(String(rows[0]!.error)).toHaveLength(RECHECK_STATUS_ERROR_MAX_CHARS);
+      // The D1 text is the same two fields, so one overrun is enough to bound
+      // it: the capped value rides inside the row and the row is capped too.
+      const persisted = String(rows[0]!.error);
+      expect(persisted).toContain(capped.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS - 100));
+      expect(persisted).toHaveLength(RECHECK_STATUS_ERROR_MAX_CHARS);
     }
   });
 
@@ -1115,7 +1105,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       expect(failureRows(db)).toHaveLength(1);
       expect(failureRows(db)[0]).toMatchObject({ stage: "recheck" });
       // `absent` is the honest outcome whenever the read yields no status.
-      expect(failureRows(db)[0]!.error).toBe("absent: null: null");
+      expect(failureTriple(failureRows(db)[0]!)).toEqual({ outcome: "absent", reason: null, error: null });
       const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
       expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
     }

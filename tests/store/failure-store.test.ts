@@ -36,7 +36,7 @@ describe("createFailureStore", () => {
       error: "not valid ReviewOutput JSON",
     });
     expect(typeof rows[0]!.id).toBe("string");
-    expect(rows[0]!.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(rows[0]!.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     // BUG-03 created_at contract: `record` NEVER writes created_at — the
     // column is ALWAYS the DDL DEFAULT `datetime('now')` (migration 0010),
     // i.e. the `YYYY-MM-DD HH:MM:SS` UTC format the sweep's TEXT window

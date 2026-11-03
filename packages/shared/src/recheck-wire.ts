@@ -418,6 +418,9 @@ function rowContentError(
 
   if (result.disposition === 'addressed' && evidence !== null) {
     const target = targets.find((t) => t.rowId === rowId);
+    if (target === undefined) {
+      return `${where}: row ID ${JSON.stringify(rowId)} is not in the input targets`;
+    }
     const proofError = addressedProofError(
       {
         kind: evidence.kind as string,
@@ -427,7 +430,7 @@ function rowContentError(
         quote: evidence.quote as string,
       },
       slices,
-      target!.original,
+      target.original,
     );
     if (proofError !== null) return `${where}: ${proofError}`;
   }
