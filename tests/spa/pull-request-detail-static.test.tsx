@@ -226,52 +226,13 @@ describe("pull request detail face (static SSR)", () => {
     expect(tones).toEqual(["danger", null, "danger", null]);
   });
 
-  test("the band and the timeline paint a verdict with the same rule", async () => {
-    // One table, two surfaces: the band's figure and the timeline's row must
-    // agree, so a verdict cannot read as an alarm in one and quiet in the
-    // other. Both tones are read off their own hooks — the band's
-    // `data-tone` on the verdict figure, the timeline row's own `data-tone`.
-    const tones = async (detail: PullRequestDetail) =>
-      withMarkup(render(detail), (container) => ({
-        band: container.querySelectorAll('[data-slot="metric-value"]')[0]?.getAttribute("data-tone") ?? null,
-        timeline: container.querySelector('[data-slot="activity-entry"]')?.getAttribute("data-tone"),
-      }));
-    /** The same detail with one review whose verdict is `verdict`. */
-    const verdict = (verdict: string, summary: string): PullRequestDetail => ({
-      ...DETAIL,
-      pull_request: {
-        ...DETAIL.pull_request,
-        latest_review: { verdict, reviewed_at: "2026-11-01 08:00:00" },
-      },
-      reviews: [
-        {
-          verdict,
-          summary_md: summary,
-          model: "kimi-for-coding",
-          provider: "openrouter",
-          reviewed_at: "2026-11-01 08:00:00",
-          head_sha: "aaa111bbb222",
-        },
-      ],
-    });
-    // The review is the newest event on both faces, and the same word paints
-    // both the same way: a shipping verdict is quiet, a change request is an
-    // alarm — never one of each.
-    expect(await tones(verdict("ship it", "Looks good overall."))).toEqual({ band: null, timeline: "success" });
-    expect(await tones(verdict("request_changes", "The race is still reachable."))).toEqual({
-      band: "danger",
-      timeline: "danger",
-    });
-    // An unknown verdict is not an alarm on either surface.
-    expect(await tones(verdict("looks fine", "An unknown verdict."))).toEqual({
-      band: null,
-      timeline: "neutral",
-    });
-  });
-
-  test("a legacy verdict keeps its meaning: approve is success, a change request is danger", async () => {
-    // Pre-v1 rows kept GitHub's review words. Reading them as alarms by
-    // default would paint `approve` red on the band, the badge and the dot.
+  test("the band, the badge and the timeline paint a verdict with the same rule", async () => {
+    // One table, three surfaces: the band's figure, the review badge and the
+    // timeline's row must agree, so a verdict cannot read as an alarm on one
+    // and quiet on another. All three tones are read off their own hooks — the
+    // band's `data-tone` on the verdict figure, the badge's on the row's pill,
+    // the timeline row's on itself. The fixtures are the pre-v1 words too:
+    // reading them as alarms by default used to paint `approve` red.
     const legacy = (verdict: string, summary: string): PullRequestDetail => ({
       ...DETAIL,
       pull_request: {
@@ -301,6 +262,8 @@ describe("pull request detail face (static SSR)", () => {
           ?.getAttribute("data-tone"),
         timeline: container.querySelector('[data-slot="activity-entry"]')?.getAttribute("data-tone"),
       }));
+    // An approval is quiet on the band and success on the dot and the badge; a
+    // change request is an alarm on all three — never one of each.
     expect(await read(legacy("approve", "Approved on an older round."))).toEqual({
       band: null,
       badge: "success",
