@@ -14,8 +14,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
 import {
-  BOT_PR_REASON,
-  MISSING_AUTHOR_REASON,
   classifyEvent,
   classifyWebhook,
   payloadMentionsALogin,
@@ -269,7 +267,7 @@ describe("classifyEvent — pull_request whitelist", () => {
         pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "GitHub-Actions[BOT]" } },
       }),
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
   });
 
   test("bot-authored PR skip logs an info line naming the reason", () => {
@@ -281,9 +279,9 @@ describe("classifyEvent — pull_request whitelist", () => {
       }),
       log,
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
     expect(log.info).toHaveBeenCalledWith(
-      { event: "pull_request", reason: BOT_PR_REASON, detail: "author=dependabot[bot]" },
+      { event: "pull_request", reason: "bot_author", detail: "author=dependabot[bot] pr=42" },
       "review skipped — PR author is not reviewable",
     );
   });
@@ -296,7 +294,7 @@ describe("classifyEvent — pull_request whitelist", () => {
           pull_request: user === undefined ? { number: 42, head: { sha: HEAD_SHA } } : { number: 42, head: { sha: HEAD_SHA }, user },
         }),
       );
-      expect(outcome).toEqual({ kind: "ignore", reason: MISSING_AUTHOR_REASON });
+      expect(outcome).toEqual({ kind: "ignore", reason: "payload carried no PR author login" });
     }
   });
 
@@ -377,7 +375,7 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
           undefined,
           { mode, appSlug: APP_SLUG },
         );
-        expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
+        expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
       });
     }
   }
@@ -506,7 +504,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       undefined,
       EVERY_PUSH,
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
   });
 
   test("comment on a PR with no author login is ignored, matching the pull_request face", () => {
@@ -522,7 +520,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
         undefined,
         EVERY_PUSH,
       );
-      expect(outcome).toEqual({ kind: "ignore", reason: MISSING_AUTHOR_REASON });
+      expect(outcome).toEqual({ kind: "ignore", reason: "payload carried no PR author login" });
     }
   });
 
@@ -577,8 +575,12 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       log,
       EVERY_PUSH,
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
     expect(log.warn).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledWith(
+      { event: "issue_comment", reason: "bot_author", detail: "author=dependabot[bot] pr=42" },
+      "review skipped — PR author is not reviewable",
+    );
   });
 
   test("human-accounted bot login without the [bot] suffix still triggers on the comment face", () => {

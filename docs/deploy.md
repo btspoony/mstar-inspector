@@ -1641,7 +1641,8 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    on an installed repo and
    confirm the review comment lands (the App's trigger mode must cover the
    event — the default `every_push` auto-triggers on open/update; from any
-   mode, a PR comment @mentioning the App's bot forces a run —
+   mode, a PR comment @mentioning the App's bot forces a run, unless the PR
+   was opened by a bot account —
    § Review triggers (per App)). To pin per-role overrides end-to-end,
    first configure a seat chain on the dashboard (a named chain in
    `app_model_chains` plus the seat's reference row in
@@ -1889,7 +1890,8 @@ column.
    and the `review_global` flag, § Secrets and vars inventory), open or update
    a PR on an installed
    repo of that App (default `every_push` mode auto-triggers; from any
-   mode, a PR comment @mentioning the App's bot works too —
+   mode, a PR comment @mentioning the App's bot works too — but a bot-authored
+   PR never triggers —
    § Review triggers (per App)).
 3. **Assert the column** — the review lands and the row records the chain
    head:
@@ -2185,7 +2187,8 @@ column (migration `0022`), set on the App's dashboard Settings page
 alongside the pause switch:
 
 - `every_push` (default) — review on `opened`, `synchronize` and
-  `reopened` (the historical behavior, preserved exactly).
+  `reopened` (the historical behavior, preserved exactly for human-authored
+  PRs — a bot-authored PR is skipped, see below).
 - `open` — the PR's first `opened` event only; pushes and reopens never
   auto-trigger.
 - `manual` — never auto-reviews.

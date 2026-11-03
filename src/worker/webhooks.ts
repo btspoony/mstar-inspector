@@ -198,11 +198,14 @@ function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
  */
 const BOT_LOGIN = /\[bot\]$/i;
 
-// Exported as test seams so the classifier tests assert the contract by
-// symbol; no production branch keys on either string.
-export const BOT_PR_REASON = "PR authored by a bot account";
+const BOT_PR_REASON = "PR authored by a bot account";
 
-export const MISSING_AUTHOR_REASON = "payload carried no PR author login";
+const MISSING_AUTHOR_REASON = "payload carried no PR author login";
+
+// Stable labels for reason-keyed log greps: the outcome `reason` stays prose,
+// the log line uses snake_case like every other webhook-face diagnostic.
+const BOT_AUTHOR_LABEL = "bot_author";
+const MISSING_AUTHOR_LABEL = "missing_author";
 
 /**
  * Both trigger faces share one author rule: a PR whose author is unknown is
@@ -213,14 +216,22 @@ export const MISSING_AUTHOR_REASON = "payload carried no PR author login";
 function ignoredForAuthor(
   login: string | null | undefined,
   event: "pull_request" | "issue_comment",
+  prNumber: number,
   log?: HandlerLog,
 ): WebhookOutcome | null {
-  const reason = !login ? MISSING_AUTHOR_REASON : BOT_LOGIN.test(login) ? BOT_PR_REASON : null;
-  if (reason === null) {
+  const isBot = login ? BOT_LOGIN.test(login) : false;
+  if (login && !isBot) {
     return null;
   }
-  log?.info({ event, reason, detail: `author=${login ?? "null"}` }, "review skipped — PR author is not reviewable");
-  return { kind: "ignore", reason };
+  log?.info(
+    {
+      event,
+      reason: isBot ? BOT_AUTHOR_LABEL : MISSING_AUTHOR_LABEL,
+      detail: `author=${login ?? "null"} pr=${prNumber}`,
+    },
+    "review skipped — PR author is not reviewable",
+  );
+  return { kind: "ignore", reason: isBot ? BOT_PR_REASON : MISSING_AUTHOR_REASON };
 }
 
 /** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
@@ -601,7 +612,7 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode, log?: Han
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
   }
-  const authorIgnore = ignoredForAuthor(pull_request?.user?.login, "pull_request", log);
+  const authorIgnore = ignoredForAuthor(pull_request?.user?.login, "pull_request", prNumber, log);
   if (authorIgnore) {
     return authorIgnore;
   }
@@ -659,7 +670,7 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   if (issue?.pull_request == null) {
     return { kind: "ignore", reason: "comment is not on a pull request thread" };
   }
-  const authorIgnore = ignoredForAuthor(issue?.user?.login, "issue_comment", log);
+  const authorIgnore = ignoredForAuthor(issue?.user?.login, "issue_comment", prNumber, log);
   if (authorIgnore) {
     return authorIgnore;
   }
