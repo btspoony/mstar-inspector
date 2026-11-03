@@ -2006,6 +2006,11 @@ describe("createReviewConsumer", () => {
     const infoLine = logLines.find((l) => l.level === "info" && l.msg.includes("already in flight"));
     expect(infoLine).toBeDefined();
     expect(infoLine!.msg).toContain("60s");
+    // Review-concurrency §1.3: the refusal is observable — which bound held the
+    // message, against which caps. The live row is this PR's own.
+    expect(infoLine!.fields.reason).toBe("pr-held");
+    expect(infoLine!.fields.system_cap).toBe(32);
+    expect(infoLine!.fields.workspace_cap).toBe(16);
   });
 
   test("guard-held backoff escalates 60s → 120s → 240s across attempts (BB-3)", async () => {
@@ -2096,6 +2101,12 @@ describe("createReviewConsumer", () => {
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     // The foreign row is neither deleted nor duplicated by the refusal.
     expect(inflightRows(db)).toHaveLength(1);
+    // §1.3 observability: the global bound is the one that held the message,
+    // and the line carries the caps it was measured against.
+    const heldLine = logLines.find((l) => l.msg.includes("already in flight"));
+    expect(heldLine!.fields.reason).toBe("system-cap");
+    expect(heldLine!.fields.system_cap).toBe(1);
+    expect(heldLine!.fields.workspace_cap).toBe(16);
   });
 
   test("a reached WORKSPACE cap refuses admission while the global count has headroom (spec §1.3)", async () => {
@@ -2114,6 +2125,12 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(0);
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     expect(inflightRows(db)).toHaveLength(1);
+    // §1.3 observability: the tenant's own bound held it, with both caps shown
+    // so the operator can tell a busy workspace from a full deployment.
+    const heldLine = logLines.find((l) => l.msg.includes("already in flight"));
+    expect(heldLine!.fields.reason).toBe("workspace-cap");
+    expect(heldLine!.fields.system_cap).toBe(32);
+    expect(heldLine!.fields.workspace_cap).toBe(1);
   });
 
   test("a workspace cap below the system cap bounds only its own workspace — a foreign live review admits", async () => {

@@ -155,7 +155,7 @@ import { createCheckBeginLatch, createCheckLifecycle, type CheckBeginLatch } fro
 // Review admission (review-concurrency §1.2): one `review_inflight` row is the
 // per-PR lock and the capacity reservation; the cap comes from the pipeline's
 // single runtime-config reader (never a dashboard route import).
-import { acquireInflight, releaseInflight, type InflightKey } from "../store/inflight-store";
+import { acquireInflight, releaseInflight, type InflightKey, type InflightRefusal } from "../store/inflight-store";
 import { readReviewConcurrency } from "./concurrency-reader";
 
 export type PipelineEnv = {
@@ -289,6 +289,19 @@ export type ConsumerLogFields = {
   workspace_id?: string;
   /** The degraded concurrency read's cap (always the conservative 1 when degraded). */
   effective?: number;
+  /**
+   * Review admission (§1.3): WHY the in-flight guard held this message —
+   * `pr-held` (this PR already has a live review), `system-cap` /
+   * `workspace-cap` (that capacity bound was reached), or `error` (the
+   * storage decision failed and fail-closed refused). Set on the guard-held
+   * lines only.
+   */
+  reason?: InflightRefusal;
+  /** The system-wide cap the refusal was measured against (the admission-time read). */
+  system_cap?: number;
+  /** The workspace's own cap at that same decision — both ride the line so an
+   * operator can tell a busy tenant from a full deployment. */
+  workspace_cap?: number;
   /** Whether a failed usage insert landed: true, false (verified absent), or unreadable. */
   usage_applied?: boolean | "unknown";
   /** Review tier resolved from REVIEW_LEVEL. */
@@ -415,9 +428,18 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
  */
 export type ProcessOutcome =
   | { kind: "ok" }
-  | { kind: "guard-held" }
+  | { kind: "guard-held"; admission: AdmissionRefusalFields }
   | { kind: "paused" }
   | { kind: "degraded" };
+
+/**
+ * Why the guard held a message plus the caps it was measured against
+ * (spec §1.3: the refusal is otherwise invisible — a held line without the
+ * reason cannot tell a busy PR from a full deployment).
+ */
+export type AdmissionRefusalFields = Required<
+  Pick<ConsumerLogFields, "reason" | "system_cap" | "workspace_cap">
+>;
 
 /**
  * Handle a guard-held message (bugbot BB-3). The guard is not an error
@@ -427,11 +449,20 @@ export type ProcessOutcome =
  * DELAYED retry via `message.retry({ delaySeconds })`. After the final
  * delayed attempt, ack with a warning: the job is dropped cleanly and the
  * next event for the PR (e.g. a later synchronize) re-reviews. Structured
- * log fields carry the PR identity + attempt count; the idempotency key is
- * not yet derivable at guard time (it comes from the checked-out sha).
+ * log fields carry the PR identity + attempt count + the admission refusal
+ * (`reason` and both caps — spec §1.3: a held line must say which bound held
+ * it); the idempotency key is not yet derivable at guard time (it comes from
+ * the checked-out sha).
  */
-function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps): void {
-  const fields = toBaseFields(message.body);
+function handleGuardHeld(
+  message: Message<ReviewJobPayload>,
+  deps: ProcessDeps,
+  admission: AdmissionRefusalFields,
+): void {
+  const fields = { ...toBaseFields(message.body), ...admission };
+  // Why this message was held, appended to both lines: the delay schedule alone
+  // never says whether the PR, the tenant, or the deployment is full.
+  const heldBecause = `held by ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap})`;
   // REVIEW_LEVEL is a Worker-level setting (one deployment = one level), and
   // processMessage already resolved it before touching the guard — re-resolving
   // here cannot throw on the guard-held path.
@@ -441,13 +472,13 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
   if (delaySeconds !== undefined) {
     deps.log.info(
       fields,
-      `review already in flight — scheduling delayed retry in ${delaySeconds}s (attempt ${message.attempts})`,
+      `review already in flight — scheduling delayed retry in ${delaySeconds}s (attempt ${message.attempts}; ${heldBecause})`,
     );
     message.retry({ delaySeconds });
   } else {
     deps.log.warn(
       fields,
-      `review still in flight after ${delays.length} delayed retries (attempt ${message.attempts}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
+      `review still in flight after ${delays.length} delayed retries (attempt ${message.attempts}; ${heldBecause}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
     );
     message.ack();
   }
@@ -1902,7 +1933,7 @@ export function createReviewConsumer(
       // delayed retry (or the final ack-with-warning) instead of throwing
       // into the queue's immediate ×3 retry → DLQ path.
       if (outcome.kind === "guard-held") {
-        handleGuardHeld(message, deps);
+        handleGuardHeld(message, deps, outcome.admission);
       } else if (outcome.kind === "paused") {
         // Architect lock L4: a paused App's in-flight message is
         // acked DIRECTLY — an intentional skip with zero side effects, never
@@ -2098,15 +2129,22 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       now: new Date().toISOString(),
     });
     if (!admission.ok) {
+      // §1.3 observability: one admission decision, one refusal record — the
+      // caps are the ones this decision was measured against.
+      const refusal: AdmissionRefusalFields = {
+        reason: admission.reason,
+        system_cap: concurrency.system,
+        workspace_cap: concurrency.workspace,
+      };
       if (admission.reason === "error") {
         // Fail closed (spec §1.3): a storage failure never admits, and the
         // store has no log channel — the operator line is this one.
         deps.log.warn(
-          baseFields,
+          { ...baseFields, ...refusal },
           "review admission failed (storage error) — treating as held; no review admitted",
         );
       }
-      return { kind: "guard-held" };
+      return { kind: "guard-held", admission: refusal };
     }
     inflight = { key: inflightKey, attemptId, ttlSeconds };
     // 1. Sandbox + installation token (created lazily; destroyed in finally).
