@@ -268,8 +268,10 @@ export type WebhookOutcome =
   | { kind: "reject"; status: 400 | 401 | 500; reason: string }
   | { kind: "ignore"; reason: string }
   /**
-   * A review job. `installationAccount` is the repository owner's login —
-   * the installing account for every App-owned install — carried OUTSIDE
+   * A review job. `installationAccount` is `installation.account.login`
+   * when the payload carries it, falling back to `repository.owner.login` —
+   * the installation's own account is authoritative and the repository
+   * owner only covers payloads that omit it. It is carried OUTSIDE
    * `payload` so it never enters the queue message (the consumer contract
    * `ReviewJobPayload` must not grow an account field) while the route can
    * still record it on `app_installations`.
