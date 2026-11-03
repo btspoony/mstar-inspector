@@ -76,8 +76,8 @@ describe("recharts pin probe", () => {
   test("bars render as real series geometry — rect with non-empty x/y/height and data-driven labels", () => {
     const html = renderBar();
     expect(geometryRects(html).length).toBeGreaterThanOrEqual(1);
-    // The datum flowed the full pipeline: category labels render as axis
-    // tick text, not just geometry from nowhere.
+    // The datum flowed the full pipeline: the severity series labels render
+    // as axis tick text, not just geometry from nowhere.
     expect(html).toContain("must-fix");
     expect(html).toContain("should-fix");
     expect(html).toContain("nit");
