@@ -291,11 +291,18 @@ function addressedProofError(
   return null;
 }
 
-/** Validate one result's evidence structurally (slice membership + bounds). */
+/**
+ * Validate one result's evidence structurally (slice membership + bounds).
+ * The non-blank quote requirement belongs to the `addressed` proof path only:
+ * a `dismissed`/`unverifiable` row may cite evidence without a usable quote
+ * (its rationale basis is the explanation or the input discussion), so only
+ * the bound applies there.
+ */
 function evidenceShapeError(
   evidence: Record<string, unknown>,
   slices: ReadonlyMap<string, EvidenceSlice>,
   where: string,
+  disposition: string,
 ): string | null {
   if (!EVIDENCE_KINDS.has(String(evidence.kind))) {
     return `${where}.evidence.kind is outside the closed enum`;
@@ -305,8 +312,10 @@ function evidenceShapeError(
     return `${where}.evidence range must be integers`;
   }
   if (typeof evidence.quote !== 'string') return `${where}.evidence.quote must be a string`;
-  const quote = visibleQuote(evidence.quote);
-  if (quote === null) return `${where}.evidence.quote must be nonblank (visible characters)`;
+  const quote = normalizeQuoteText(evidence.quote);
+  if (quote.trim() === '' && disposition === 'addressed') {
+    return `${where}.evidence.quote must be nonblank (visible characters)`;
+  }
   if (quote.length > QUOTE_MAX_CHARS) {
     return `${where}.evidence.quote must be 1–${QUOTE_MAX_CHARS} visible chars`;
   }
@@ -368,7 +377,7 @@ function rowContentError(
     if (evidence === null) {
       return `${where}.evidence must be an object with exactly {kind, sliceId, startLine, endLine, quote, explanation} or null`;
     }
-    const shapeError = evidenceShapeError(evidence, slices, where);
+    const shapeError = evidenceShapeError(evidence, slices, where, result.disposition as string);
     if (shapeError !== null) return shapeError;
   } else if (result.disposition === 'addressed') {
     return `${where}: addressed requires eligible evidence (got null)`;

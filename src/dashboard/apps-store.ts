@@ -1186,9 +1186,10 @@ export function createAppsStore(db: AppsStoreD1) {
           .bind(appId, row.owner, row.repo, prNumber),
       ]);
       // The histories ARE the aggregates: reviews come newest first, so the
-      // first one is the latest verdict; the failure COUNT excludes `usage`
-      // attribution (the review continued), while the history list keeps it
-      // so a lost metered-usage record still has a surface.
+      // first one is the latest verdict; the failure COUNT excludes the
+      // paging set (`PAGING_EXCLUDED_STAGES` — per-round attribution of a
+      // review that continued), while the history list keeps `usage` so a
+      // lost metered record still has a surface.
       const reviews = results[0]!.results as PullRequestReviewDetailRow[];
       const failures = results[1]!.results as PullRequestFailureDetailRow[];
       return {
@@ -1203,7 +1204,9 @@ export function createAppsStore(db: AppsStoreD1) {
           last_seen_at: row.last_seen_at,
           latest_review:
             reviews[0] === undefined ? null : { verdict: reviews[0].verdict, reviewed_at: reviews[0].reviewed_at },
-          failure_count: failures.filter((failure) => failure.stage !== "usage").length,
+          failure_count: failures.filter(
+            (failure) => !(PAGING_EXCLUDED_STAGES as readonly string[]).includes(failure.stage),
+          ).length,
         },
         reviews,
         failures,

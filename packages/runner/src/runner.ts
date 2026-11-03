@@ -41,12 +41,14 @@
  *   - optional `--recheck-out <path>` (spec review-lifecycle
  *     §7.8): when the runtime result carries a recheck document, its JSON is
  *     written to <path> BEFORE the envelope reaches stdout (a write failure
- *     → exit 1, no stdout). The round's STATUS is always written to
- *     RECHECK_STATUS_PATH when a flag was given — including when the document
- *     is null (budget skip, seat failure, invalid document) — so a round that
- *     produced no document is still attributable; that write is best-effort
- *     and never fails the run. No flag writes nothing — absent flag/file
- *     leaves legacy behavior byte-identical;
+ *     → exit 1, no stdout). The round's STATUS is written to
+ *     RECHECK_STATUS_PATH when a flag was given and the document write (if
+ *     any) succeeded — including when the document is null (budget skip, seat
+ *     failure, invalid document) — so a round that produced no document is
+ *     still attributable; that write is best-effort and never fails the run.
+ *     No flag writes nothing — absent flag/file leaves legacy behavior
+ *     byte-identical. MSTAR_RECHECK_STATUS_PATH redirects the status target
+ *     for tests only: no test may write the path a real runner uses;
  *   - exit codes: 0 success, 1 runtime/I-O failure, 2 usage error. There is
  *     no summary-degrade path: any seat/parse/validation failure exits 1 and
  *     the consumer must not post or persist.
@@ -499,14 +501,18 @@ export async function readCredentialStdin(
 
 /**
  * Write the recheck round's status document to `path` (production:
- * RECHECK_STATUS_PATH). The target is a parameter only so a test can write
- * into its own temp dir instead of the one path a real runner uses.
- * Best-effort by contract: the status is attribution evidence, so a failure
- * to write it must never turn a completed review into a failed run — it is
- * logged and swallowed. Exported so the write path is testable without a
- * container.
+ * RECHECK_STATUS_PATH; `MSTAR_RECHECK_STATUS_PATH` redirects it for tests, so
+ * no suite writes the file a real runner owns). The target is a parameter
+ * only so a test can write into its own temp dir instead of the one path a
+ * real runner uses. Best-effort by contract: the status is attribution
+ * evidence, so a failure to write it must never turn a completed review into
+ * a failed run — it is logged and swallowed. Exported so the write path is
+ * testable without a container.
  */
-export function writeRecheckStatus(status: RecheckStatus, path: string = RECHECK_STATUS_PATH): void {
+export function writeRecheckStatus(
+  status: RecheckStatus,
+  path: string = process.env.MSTAR_RECHECK_STATUS_PATH?.trim() || RECHECK_STATUS_PATH,
+): void {
   try {
     writeFileSync(path, JSON.stringify(status));
   } catch (error) {
@@ -525,7 +531,7 @@ export async function main(
   argv: string[],
   runtime: AgentRuntime = ompAgentRuntime,
   readStdin: () => Promise<string> = readCredentialStdin,
-  recheckStatusPath: string = RECHECK_STATUS_PATH,
+  statusPath: string = process.env.MSTAR_RECHECK_STATUS_PATH?.trim() || RECHECK_STATUS_PATH,
 ): Promise<number> {
   let level: string;
   let inputPath: string;
@@ -640,13 +646,11 @@ export async function main(
         try {
           writeFileSync(recheckOutPath, JSON.stringify(recheck));
         } catch (error) {
+          // The validated document is lost: exit 1 with no stdout, so the
+          // Worker takes its own runner-failure path. A `write-failed` status
+          // would be unreachable — the Worker never reads the status of a
+          // non-zero run.
           console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
-          // The validated document is lost, so the seat's `ok` is not this
-          // round's truth: record the write failure as the status the Worker
-          // reads, or D1 would keep a round that published nothing as clean.
-          if (recheckStatus !== undefined) {
-            writeRecheckStatus({ ...recheckStatus, outcome: "failed", reason: "write-failed" }, recheckStatusPath);
-          }
           return 1;
         }
       }
@@ -656,7 +660,7 @@ export async function main(
       // deliver. Best-effort: a status write failure is noise, never a failed
       // review.
       if (recheckOutPath !== undefined && recheckStatus !== undefined) {
-        writeRecheckStatus(recheckStatus, recheckStatusPath);
+        writeRecheckStatus(recheckStatus, statusPath);
       }
       // stdout carries ONLY the envelope JSON (plan Module contracts).
       console.log(JSON.stringify(envelope));

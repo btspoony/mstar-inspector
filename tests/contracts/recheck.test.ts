@@ -443,6 +443,35 @@ describe("validateRecheckDoc — addressed eligibility", () => {
     expectDroppedRow(oversized, { index: 0, rowId: "row-1", error: "4096" });
   });
 
+  test("a non-closure row may carry a whitespace-only or empty quote", () => {
+    // The visible-quote requirement belongs to the Addressed proof path: a
+    // dismissal or an unverifiable note cites evidence without claiming a code
+    // match, so a blank quote is not a row fault there.
+    for (const [disposition, reason] of [
+      ["dismissed", "non-fix-dismissal"],
+      ["unverifiable", "no-evidence"],
+    ] as const) {
+      for (const quote of ["", "   ", "\t"]) {
+        const result = validateRecheckDoc(
+          {
+            schema: "mstar.recheck/v1",
+            headSha: SHA,
+            results: [
+              { rowId: "row-1", disposition, reason, evidence: evidence({ quote }), relatedCurrentFindingIndexes: [] },
+              SURVIVOR,
+            ],
+          },
+          pairedInput(),
+        );
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) continue;
+        expect(result.rejected).toHaveLength(0);
+        expect(result.doc.results.map((row) => row.rowId)).toEqual(["row-1", "row-2"]);
+      }
+    }
+  });
+
   test("a blank or over-long explanation drops that row", () => {
     const blank = validateRecheckDoc(
       { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ explanation: "   " }) }), SURVIVOR] },

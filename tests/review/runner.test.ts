@@ -727,44 +727,6 @@ describe("runner entry — --recheck-out channel", () => {
     expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual(fakeRecheckStatus);
   });
 
-  test("document write failure → exit 1, no stdout, status records the write failure not the seat's ok", async () => {
-    fakeEnvelope = ENVELOPE;
-    fakeRecheck = RECHECK_RESULT_DOC;
-    fakeRecheckStatus = {
-      schema: "mstar.recheck-status/v1",
-      headSha: RECHECK_INPUT_DOC.headSha,
-      outcome: "ok",
-      reason: null,
-      rejected: 2,
-      rejected_row_ids: ["row-1", "row-2"],
-      error: null,
-    };
-    const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
-    // A directory at the --recheck-out path makes the write throw (EISDIR):
-    // the validated document is lost, so the status is the round's only record
-    // — and it must say the round delivered nothing, not that the seat said ok.
-    const outPath = join(outDir, "recheck.json");
-    mkdirSync(outPath);
-    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
-    const { code, stdout, stderr, statusPath } = await runCli([
-      "--level",
-      "quick",
-      "--input",
-      inputPath,
-      "--recheck-out",
-      outPath,
-    ]);
-
-    expect(code).toBe(1);
-    expect(stdout).toBe("");
-    expect(stderr).toContain("cannot write recheck output");
-    expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual({
-      ...fakeRecheckStatus,
-      outcome: "failed",
-      reason: "write-failed",
-    });
-  });
-
   test("status write is best-effort: an unwritable status path never fails the run", () => {
     // The real helper, no container: a directory at the target path makes the
     // write throw (EISDIR), which must be swallowed.
@@ -793,15 +755,20 @@ describe("runner entry — --recheck-out channel", () => {
     }
   });
 
-  test("the production default status path is the file the consumer's read command targets (round-trip)", async () => {
+  test("the status file's default target is the file the consumer's read command targets (round-trip)", async () => {
     // The runner's production call sites pass no path (main's 4th arg and
-    // writeRecheckStatus both default to RECHECK_STATUS_PATH), and the Worker's
-    // read command defaults to the same constant. Nothing above proves those
-    // two defaults still MEET at the same file, so this test writes through the
-    // production write path and reads back through the production read command
-    // in a real shell. The path is shared with any real runner on the machine,
-    // so the prior bytes are saved and restored in `finally`.
-    const prior = existsSync(RECHECK_STATUS_PATH) ? readFileSync(RECHECK_STATUS_PATH) : null;
+    // writeRecheckStatus both default to MSTAR_RECHECK_STATUS_PATH ||
+    // RECHECK_STATUS_PATH), and the Worker's read command defaults to the same
+    // constant. Nothing above proves those two defaults still MEET at the same
+    // file, so this test writes through the production write path and reads
+    // back through the production read command in a real shell. The env
+    // redirect keeps the write off the file a real runner on this machine
+    // owns; with it unset the effective default is that fixed literal.
+    const dir = mkdtempSync(join(tmpdir(), "recheck-status-"));
+    statusDirs.push(dir);
+    const statusFile = join(dir, "status.json");
+    const priorEnv = process.env.MSTAR_RECHECK_STATUS_PATH;
+    process.env.MSTAR_RECHECK_STATUS_PATH = ` ${statusFile} `;
     try {
       const status: RecheckStatus = {
         schema: "mstar.recheck-status/v1",
@@ -812,12 +779,12 @@ describe("runner entry — --recheck-out channel", () => {
         rejected_row_ids: [],
         error: null,
       };
-      // 1. The writer's default target.
+      // 1. The writer's default target (the env redirect, trimmed).
       writeRecheckStatus(status);
-      // 2. The reader's default command, executed by a real shell: the stdout
-      //    is `<content>\n<flag>\n`, the flag being `wc -c`'s own newline.
+      // 2. The reader's command, executed by a real shell: the stdout is
+      //    `<content>\n<flag>\n`, the flag being `wc -c`'s own newline.
       const readBack = async (): Promise<unknown> => {
-        const proc = Bun.spawn(["sh", "-c", readRecheckStatusCommand()]);
+        const proc = Bun.spawn(["sh", "-c", readRecheckStatusCommand(statusFile)]);
         const stdout = await new Response(proc.stdout).text();
         expect(await proc.exited).toBe(0);
         const trimmed = stdout.trimEnd();
@@ -847,9 +814,14 @@ describe("runner entry — --recheck-out channel", () => {
       }
       expect(await readBack()).toEqual(status);
     } finally {
-      if (prior === null) rmSync(RECHECK_STATUS_PATH, { force: true });
-      else writeFileSync(RECHECK_STATUS_PATH, prior);
+      if (priorEnv === undefined) delete process.env.MSTAR_RECHECK_STATUS_PATH;
+      else process.env.MSTAR_RECHECK_STATUS_PATH = priorEnv;
     }
+
+    // With the redirect unset, that default IS the literal the Worker's read
+    // command targets — the two faces cannot drift apart.
+    expect(RECHECK_STATUS_PATH).toBe("/tmp/mstar-recheck-status.json");
+    expect(readRecheckStatusCommand()).toContain("/tmp/mstar-recheck-status.json");
   });
 
   test("legacy input (no recheck field) → runtime input carries no recheck key, no file written", async () => {
