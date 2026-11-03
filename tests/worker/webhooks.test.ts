@@ -288,13 +288,19 @@ describe("classifyEvent — pull_request whitelist", () => {
 
   test("pull_request without an author login is ignored rather than reviewed", () => {
     for (const user of [undefined, null, { login: "" }]) {
+      const log = makeLog();
       const outcome = classifyEvent(
         "pull_request",
         pullRequestBody("opened", {
           pull_request: user === undefined ? { number: 42, head: { sha: HEAD_SHA } } : { number: 42, head: { sha: HEAD_SHA }, user },
         }),
+        log,
       );
       expect(outcome).toEqual({ kind: "ignore", reason: "payload carried no PR author login" });
+      expect(log.info).toHaveBeenCalledWith(
+        { event: "pull_request", reason: "missing_author", detail: "author=null pr=42" },
+        "review skipped — PR author is not reviewable",
+      );
     }
   });
 
@@ -514,13 +520,18 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       { number: 42, user: {}, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
       { number: 42, user: { login: "" }, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
     ]) {
+      const log = makeLog();
       const outcome = classifyEvent(
         "issue_comment",
         issueCommentBody({ issue, sender: { type: "User", login: "test-owner" } }),
-        undefined,
+        log,
         EVERY_PUSH,
       );
       expect(outcome).toEqual({ kind: "ignore", reason: "payload carried no PR author login" });
+      expect(log.info).toHaveBeenCalledWith(
+        { event: "issue_comment", reason: "missing_author", detail: "author=null pr=42" },
+        "review skipped — PR author is not reviewable",
+      );
     }
   });
 
@@ -598,6 +609,18 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       EVERY_PUSH,
     );
     expect(outcome.kind).toBe("job");
+  });
+
+  test("a plain issue with no mention reports the not-a-PR reason, not the mention miss", () => {
+    // Discriminating input for the guard order: a mention-less body on a plain
+    // issue would report MENTION_MISS_REASON under the old ordering.
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ comment: { body: "looks good to me" }, issue: { number: 7 } }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "comment is not on a pull request thread" });
   });
 
   test("comment sent by a bot is ignored (self-comment loop guard)", () => {

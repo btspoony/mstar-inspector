@@ -42,6 +42,14 @@ The comment trigger is a **bare mention**: no slash command, no magic wording. `
 
 Ignored paths keep today's structured-log discipline; classification never rejects (4xx) an event for policy reasons — reject is reserved for malformed payloads, and the malformed gates precede every policy gate on both faces (the comment face's 400 can therefore fire earlier than it used to, on a payload that could not have enqueued anyway).
 
+Guard precedence (the order the ignore `reason` labels follow): the action
+whitelist first, then the malformed-payload reject, then the author rule
+(bot login, then missing login), then the mode gate on the `pull_request`
+face. On `issue_comment`: whitelist, reject, not-a-PR gate, author rule,
+mention grammar, sender-bot guard, actor allowlist. A `pull_request.closed`
+by a bot therefore reports the action reason, while an `opened` by a bot in
+`open` mode reports the author reason.
+
 ## 3. Bot-mention comment trigger (normative)
 
 - **Mention target:** the App's own bot identity, taken from the row's cached `github_slug` — GitHub's App slug, refreshed from `GET /app` at manifest conversion and on every metadata refresh (migration `0036`). The webhook face routes by `{webhookPath}` (the opaque local route key) and resolves the row before classification, so matching is keyed to the resolved row — one App's mention never triggers another App. A comment body matches when it contains `@{github_slug}` (ASCII case-insensitive compare against the cached slug, matched as a literal) as a **standalone token**: the character immediately before `@` and the character immediately after the match, when present, must both be outside the GitHub login continuation set `A-Z a-z 0-9 -`. GitHub logins may contain hyphens, so `-` continues a mention rather than ending it: `@{github_slug}-other` and `@{github_slug}bot` never match, and an email-shaped body (`name@{github_slug}.host`) never matches. `@{github_slug}`, the canonical `@{github_slug}[bot]`, `@{github_slug},`, `@{github_slug}.` and a match at either end of the body all match (`[` is not a continuation character, so the `[bot]` suffix needs no separate grammar).

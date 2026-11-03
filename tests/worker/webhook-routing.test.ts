@@ -895,6 +895,42 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(lines.some((entry) => entry.includes("mention_unresolved"))).toBe(false);
   });
 
+  test("a mention on a plain issue (no PR thread) stays silent (no mention_unresolved)", async () => {
+    // The not-a-PR gate precedes the mention grammar: an unsynced App's slug
+    // is never consulted, so the warn cannot fire on a non-PR thread.
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x", githubSlug: null });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 123 },
+      comment: { body: "@app-x please review" },
+      issue: { number: 7, user: { login: "alice" } },
+      repository: { name: "test-repo", owner: { login: "alice" } },
+      sender: { type: "User", login: "alice" },
+    });
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
+        env,
+      );
+    } finally {
+      stop();
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((entry) => entry.includes("mention_unresolved"))).toBe(false);
+  });
+
   test("a sibling App's mention does not trigger this App (GitHub-slug-keyed matching)", async () => {
     // Negative control for the `mention_unresolved` warn: THIS App IS synced, so
     // a mention aimed at `@app-y` is an ordinary ignore — and must stay silent.

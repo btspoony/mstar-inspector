@@ -227,7 +227,7 @@ function ignoredForAuthor(
     {
       event,
       reason: isBot ? BOT_AUTHOR_LABEL : MISSING_AUTHOR_LABEL,
-      detail: `author=${login ?? "null"} pr=${prNumber}`,
+      detail: `author=${login || "null"} pr=${prNumber}`,
     },
     "review skipped — PR author is not reviewable",
   );
