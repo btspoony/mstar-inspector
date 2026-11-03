@@ -4322,28 +4322,47 @@ async function requireAppManagerJson(
   return { ok: true, app, db: member.db, store };
 }
 
+/**
+ * The ledger row's wire shape, shared by both PR faces — the list row and the
+ * detail's `pull_request` are one row type, so the two handlers must not map
+ * its nullable columns twice. The store reports what the tables hold; here the
+ * payload becomes total: `title` / `head_sha` are genuinely optional and
+ * become "", and `state` is GitHub's own domain — an unexpected value reads as
+ * the only state a client knows how to render.
+ */
+function pullRequestWireColumns(row: { title: string | null; state: string; head_sha: string | null }) {
+  return {
+    title: row.title ?? "",
+    // The three states a client renders; anything else reads as 'open'.
+    state: row.state === "merged" || row.state === "closed" ? row.state : "open",
+    head_sha: row.head_sha ?? "",
+  };
+}
+
 const appPullRequestsRoute = async (c: DashboardContext) => {
   // Set before the gate: a deny (403) and a 404 are answers about a specific
   // workspace's data too, so no intermediary may cache them either.
   c.header("Cache-Control", "private, no-store");
   const gate = await requireAppManagerJson(c);
   if (!gate.ok) return gate.response;
-  // The wire shape is total: every field the client reads is a string, so one
-  // nullable ledger column can never blank the whole list. `title` / `head_sha`
-  // are genuinely optional in the payload, and `state` is GitHub's own domain —
-  // an unexpected value reads as the only state a client knows how to render.
   const rows = (await gate.store.listPullRequests(gate.app.id)).map((row) => ({
     ...row,
-    title: row.title ?? "",
-    head_sha: row.head_sha ?? "",
-    // The three states a client renders; anything else reads as 'open'.
-    state: row.state === "merged" || row.state === "closed" ? row.state : "open",
+    ...pullRequestWireColumns(row),
   }));
   return c.json({ pull_requests: rows });
 };
 
 /** The record-section paging bounds, enforced here (never a silent default on a bad value). */
 const RECORD_PAGE_LIMIT = { default: 10, min: 1, max: 50 } as const;
+
+/**
+ * The finding severities the ledger can filter on: the v1 merge-class vocab
+ * (`MERGE_CLASSES`), declared locally because the dashboard leaf boundary
+ * (AL-22-1) forbids importing the store/pipeline/review layers. A value
+ * outside it has no server-side predicate, so it is a 400 rather than an empty
+ * page — a typo must not read as "this PR has no findings".
+ */
+const FINDING_SEVERITIES = ["must-fix", "should-fix", "nit"] as const;
 
 /**
  * Upper bound on `offset`. A PR's record families are its own history — a few
@@ -4400,20 +4419,18 @@ const appPullRequestRoute = async (c: DashboardContext) => {
   const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
   if (head === null) return c.json({ error: "unknown pull request" }, 404);
   const counts = await gate.store.countPullRequestRecords(gate.app.id, owner, repo, number);
-  // Same total-shape rule as the list: the store reports the tables' actual
-  // columns, and this boundary is where a nullable column becomes "". The
-  // record families are paged separately — the head carries only their totals.
+  // Same total-shape rule as the list, from the same mapping: the store reports
+  // the tables' actual columns, and this boundary is where a nullable column
+  // becomes "". The record families are paged separately — the head carries
+  // only their totals, in `counts`.
   return c.json({
     pull_request: {
       number: head.pr_number,
       owner: head.owner,
       repo: head.repo,
-      title: head.title ?? "",
-      state: head.state === "merged" || head.state === "closed" ? head.state : "open",
-      head_sha: head.head_sha ?? "",
+      ...pullRequestWireColumns(head),
       first_seen_at: head.first_seen_at,
       last_seen_at: head.last_seen_at,
-      failure_count: counts.failures,
     },
     counts,
     // The newest review, same nullable-to-"" rule as the section rows: it is
@@ -4438,8 +4455,10 @@ type PullRequestRecordSection = "findings" | "reviews" | "failures";
 
 /**
  * One paged record family. The section is fixed by the registered literal path
- * (three paths share this handler); `severity` is read for findings only — an
- * empty or absent value is no filter, and the returned `total` is filtered.
+ * (three paths share this handler); `severity` is read for findings only — a
+ * `mergeClass` spelling from `FINDING_SEVERITIES`, where empty or absent is no
+ * filter and the returned `total` is filtered. A spelling outside that set is a
+ * 400: it has no predicate, so an empty page would claim a filter that never ran.
  * A miss is the detail's 404 on every family; malformed paging is a 400, and
  * an out-of-bounds `limit` is clamped into `[1, 50]`.
  */
@@ -4464,6 +4483,9 @@ const appPullRequestRecordsRoute = async (
   const { offset, limit } = paging;
   if (section === "findings") {
     const rawSeverity = c.req.query("severity") ?? "";
+    if (rawSeverity !== "" && !(FINDING_SEVERITIES as readonly string[]).includes(rawSeverity)) {
+      return c.json({ error: "invalid severity" }, 400);
+    }
     const page = await gate.store.listPullRequestFindings(gate.app.id, owner, repo, number, {
       offset,
       limit,

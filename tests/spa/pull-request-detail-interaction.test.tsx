@@ -15,7 +15,6 @@ import type { PullRequestFailure, PullRequestFinding } from "../../src/spa/pages
 import { currentDetailRead, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
 import {
   DETAIL,
-  detailFetch,
   FAILURES,
   jsonResponse,
   mountDetailView,
@@ -52,21 +51,16 @@ describe("pull request detail (mounted)", () => {
     try {
       // A role/name query, the way an assistive technology finds the control:
       // the name a reader hears is label + count with a separator, never the
-      // run-together "Findings3" the visible spans alone would produce.
+      // run-together "Findings3" the visible spans alone would produce. The
+      // exact names are the static suite's claim; here the name must address a
+      // real control.
       const byRoleName = (name: string) =>
         [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
           (tab) => (tab.getAttribute("aria-label") ?? tab.textContent) === name,
         );
-      const names = [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map(
-        (tab) => tab.getAttribute("aria-label") ?? tab.textContent,
-      );
-      expect(names).toEqual([
-        `${t("en", "pullRequests.findings")} (3)`,
-        `${t("en", "pullRequests.reviews")} (2)`,
-        `${t("en", "pullRequests.failures")} (1)`,
-      ]);
-      // The name is not only a label: it addresses a real control.
-      expect(byRoleName("Findings")).toBeUndefined();
+      // The bare label is not the control's name...
+      expect(byRoleName(t("en", "pullRequests.findings"))).toBeUndefined();
+      // ...and the announced name selects its own panel.
       const reviews = byRoleName(`${t("en", "pullRequests.reviews")} (2)`);
       expect(reviews).toBeDefined();
       await press(win, reviews);
@@ -335,6 +329,54 @@ describe("pull request detail (mounted)", () => {
       expect(read().meta).not.toContain("model-10");
       // …and the aside still describes the newest window: page 2 must not turn
       // the activity list into the PR's oldest events.
+      expect(activity()).toEqual(aside);
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("the aside names the newest reviews and failures while the PR opens on findings", async () => {
+    // The counts open this PR on findings, so neither history family was
+    // selected: the aside must still describe the PR's newest reviews and
+    // failures, and its hidden count must not move when the operator pages.
+    const corpus = Array.from({ length: 12 }, (_, index) => ({
+      verdict: "ship it",
+      summary_md: `Round ${index}`,
+      model: `model-${String(index).padStart(2, "0")}`,
+      provider: "",
+      reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
+      head_sha: `sha${index}`,
+    }));
+    // Newest of all, so the failure is one of the seven rows the cap shows.
+    const failure = { stage: "sandbox", error: "exit 1", created_at: "2026-11-02 00:00:00" };
+    const { container, win, unmount } = await mountDetailView(
+      scene({ reviews: page(corpus), failures: page([failure]) }),
+    );
+    try {
+      const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
+      expect(tabs()[0]?.getAttribute("aria-selected")).toBe("true");
+      const text = () => container.textContent ?? "";
+      const activity = () =>
+        [...container.querySelectorAll('[data-slot="activity-entry"], [data-slot="timeline-truncated"]')].map(
+          (row) => row.textContent ?? "",
+        );
+      // Both history families reached the aside without a tab visit.
+      expect(text()).toContain(t("en", "pullRequests.timelineReview", { verdict: "ship it" }));
+      expect(text()).toContain(t("en", "pullRequests.timelineFailure", { stage: "sandbox" }));
+      // 12 reviews plus the failure, of which the cap shows seven: the six
+      // dropped events are named, from the PR's totals.
+      expect(text()).toContain(t("en", "pullRequests.timelineHidden", { count: 6 }));
+      const aside = activity();
+
+      // Paging the reviews list reads an older window; the aside keeps
+      // describing the newest one, count included.
+      await press(win, tabs()[1]);
+      const pagerButton = (label: string) =>
+        [...container.querySelectorAll<HTMLButtonElement>('[data-slot="pager"] button')].find(
+          (button) => button.textContent === label,
+        );
+      await press(win, pagerButton(t("en", "pullRequests.pageNext")));
+      expect(text()).toContain("model-10");
       expect(activity()).toEqual(aside);
     } finally {
       await unmount();
@@ -722,25 +764,5 @@ describe("pull request detail (mounted)", () => {
     } finally {
       await unmount();
     }
-  });
-});
-
-describe("the scene stub's section reads", () => {
-  test("a read reports the page's declared total, not the rows its window holds", async () => {
-    // A scene may state a head total its window never reaches (the stale-offset
-    // / shrunk-page shape the static suite covers), so the stub must serve that
-    // same total — otherwise the mounted face pages against a number its own
-    // head contradicts.
-    const { fetch } = detailFetch(() => scene({ findings: page([], 20) }));
-    const read = async (query: string) => {
-      const res = await fetch(
-        `http://localhost/dashboard/api/apps/1/pull-requests/acme/web/133/findings?${query}`,
-      );
-      return (await res.json()) as { items: unknown[]; total: number };
-    };
-    expect(await read("offset=0&limit=10")).toEqual({ items: [], total: 20 });
-    // A severity filter has no declared total of its own: like the route, it
-    // reports the rows it matched.
-    expect(await read("offset=0&limit=10&severity=must-fix")).toEqual({ items: [], total: 0 });
   });
 });

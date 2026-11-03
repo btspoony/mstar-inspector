@@ -12,7 +12,9 @@
  * tuple this App never received is a 404 on every path — the address is the
  * ledger's own key, so a same-number PR in another repo is a miss, never a
  * fallback. Bad paging is a 400, never a silent default — but a well-formed
- * `limit` outside `[1, 50]` is clamped into it rather than rejected.
+ * `limit` outside `[1, 50]` is clamped into it rather than rejected. A
+ * `severity` outside the merge-class vocabulary is a 400 too: it has no
+ * predicate, so an empty page would misreport it as "no match".
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -295,16 +297,16 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
       counts: Record<string, number>;
       latest_review: Record<string, unknown> | null;
     };
-    // The newest review rides the ENVELOPE, beside `counts`: the head row's
-    // shape is the list's row shape, and the header's verdict/attribution
-    // source outlives any paged reviews list.
+    // The newest review rides the ENVELOPE, beside `counts`, and the failure
+    // total rides `counts` alone: the head row is the list's row shape minus
+    // the list's aggregates, with one carrier per number.
     expect(Object.keys(body).sort()).toEqual(["counts", "latest_review", "pull_request"]);
     expect(body.pull_request).toMatchObject({
       number: 131,
       owner: "acme",
       repo: "widgets",
-      failure_count: 1,
     });
+    expect(body.pull_request).not.toHaveProperty("failure_count");
     expect(body.pull_request).not.toHaveProperty("latest_review");
     expect(body.latest_review).toEqual({
       verdict: "comment",
@@ -342,10 +344,6 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
       reviewed_at: "2026-01-02 00:00:00",
       head_sha: "sha-1",
     });
-    // The head row's own nullable slot stays empty (the wire no longer fills
-    // it): the review reaches the header only through the envelope, so the two
-    // ends provably agree on WHERE.
-    expect(parsed?.pull_request.latest_review).toBeNull();
   });
 
   test("each section pages with limit and offset, and defaults to 10 rows", async () => {
@@ -378,26 +376,34 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     seedFindings(db, [
       { id: "row-1", findingId: "F-1", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3 },
       { id: "row-2", findingId: "F-2", mergeClass: "nit", filePath: null, lineStart: null },
+      { id: "row-3", findingId: "F-3", mergeClass: "should-fix", filePath: null, lineStart: null },
     ]);
     const all = (await (await getFace(sectionPath("findings"), db)).json()) as { total: number };
-    expect(all.total).toBe(2);
+    expect(all.total).toBe(3);
 
-    const filtered = (await (
-      await getFace(`${sectionPath("findings")}?severity=must-fix`, db)
-    ).json()) as { items: Array<{ finding_id: string }>; total: number };
-    expect(filtered.total).toBe(1);
-    expect(filtered.items.map((item) => item.finding_id)).toEqual(["F-1"]);
+    const ids = async (severity: string) => {
+      const body = (await (await getFace(`${sectionPath("findings")}?severity=${severity}`, db)).json()) as {
+        items: Array<{ finding_id: string }>;
+        total: number;
+      };
+      return { ids: body.items.map((item) => item.finding_id), total: body.total };
+    };
+    // Every spelling in the vocabulary is a real predicate, not only the first.
+    expect(await ids("must-fix")).toEqual({ ids: ["F-1"], total: 1 });
+    expect(await ids("should-fix")).toEqual({ ids: ["F-3"], total: 1 });
+    expect(await ids("nit")).toEqual({ ids: ["F-2"], total: 1 });
 
-    // An empty severity is no filter; an unmatched one is an empty page.
+    // An empty severity is no filter.
     const noFilter = (await (await getFace(`${sectionPath("findings")}?severity=`, db)).json()) as {
       total: number;
     };
-    expect(noFilter.total).toBe(2);
-    const unmatched = (await (await getFace(`${sectionPath("findings")}?severity=blocker`, db)).json()) as {
-      items: unknown[];
-      total: number;
-    };
-    expect(unmatched).toEqual({ items: [], total: 0 });
+    expect(noFilter.total).toBe(3);
+
+    // An out-of-vocabulary spelling has no server-side predicate: it is a 400,
+    // never a 200 empty page that claims the filter matched nothing.
+    const unknown = await getFace(`${sectionPath("findings")}?severity=blocker`, db);
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toEqual({ error: "invalid severity" });
   });
 
   test("malformed paging is a 400 on every section", async () => {

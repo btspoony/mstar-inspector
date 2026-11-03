@@ -20,6 +20,7 @@ import type {
   PullRequestDetail as PullRequestDetailPayload,
   PullRequestFailure,
   PullRequestFinding,
+  PullRequestHead,
   PullRequestReview,
   PullRequestRow,
   RecordPage,
@@ -28,7 +29,8 @@ import type {
 } from "../../src/spa/pages/data";
 import { installDom } from "./dom";
 
-export const ROW_OPEN: PullRequestRow = {
+/** The head row both faces carry: the list adds its aggregates, the detail its totals. */
+export const ROW_HEAD: PullRequestHead = {
   number: 42,
   owner: "acme",
   repo: "web",
@@ -37,6 +39,10 @@ export const ROW_OPEN: PullRequestRow = {
   head_sha: "aaa111bbb222",
   first_seen_at: "2026-10-28 08:00:00",
   last_seen_at: "2026-11-01 10:00:00",
+};
+
+export const ROW_OPEN: PullRequestRow = {
+  ...ROW_HEAD,
   latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
   failure_count: 0,
 };
@@ -118,12 +124,10 @@ const MUST_FIX = FINDINGS.filter((finding) => finding.severity === "must-fix").l
 /** The detail head for `RECORDS`: the same PR, its totals derived from the pages. */
 export const DETAIL: PullRequestDetailPayload = {
   pull_request: {
-    ...ROW_OPEN,
+    ...ROW_HEAD,
     number: 133,
     title: "Fix the login flow",
     state: "merged",
-    latest_review: { verdict: "needs fixes", reviewed_at: "2026-11-01 08:00:00" },
-    failure_count: FAILURES.length,
   },
   counts: {
     findings: FINDINGS.length,
@@ -156,7 +160,7 @@ export type DetailScene = { detail: PullRequestDetailPayload; pages: RecordPages
  */
 export function scene(
   over: Partial<RecordPages> = {},
-  row: Partial<PullRequestRow> = {},
+  row: Partial<PullRequestHead> = {},
   latest: Partial<PullRequestReview> | null = DETAIL.latest_review,
   mustFix: number = MUST_FIX,
 ): DetailScene {
@@ -164,7 +168,7 @@ export function scene(
   const base = DETAIL.latest_review;
   return {
     detail: {
-      pull_request: { ...DETAIL.pull_request, failure_count: pages.failures.total, ...row },
+      pull_request: { ...DETAIL.pull_request, ...row },
       counts: {
         findings: pages.findings.total,
         reviews: pages.reviews.total,

@@ -34,7 +34,7 @@ import { AppDetailPage, AppDetailView, loadAppDetail } from "../../src/spa/pages
 import { SettingsView } from "../../src/spa/pages/SettingsPage";
 import { apiBase } from "../../src/spa/workspace-base";
 import { AppInsightsTab, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/spa/pages/AppInsightsTab";
-import { installDom } from "./dom";
+import { installDom, withMarkup } from "./dom";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 
@@ -166,21 +166,34 @@ describe("app detail URL state (shared pure helpers)", () => {
 });
 
 describe("tab shell rendering (static SSR)", () => {
-  test("default tab is 应用设置 for both roles; the manager sees ALL three manager tabs", () => {
+  /**
+   * The PAGE's tab bar: the outermost tab list. Nested editors (the model
+   * chain strip inside the settings panel) carry tab lists of their own, so a
+   * bare `[role="tab"]` query would read those too.
+   */
+  const pageTabs = (container: HTMLElement): string[] =>
+    [...(container.querySelector('[role="tablist"]')?.querySelectorAll('[role="tab"]') ?? [])].map(
+      (tab) => tab.textContent ?? "",
+    );
+
+  test("default tab is 应用设置 for both roles; the manager sees ALL three manager tabs", async () => {
     const manage = renderDetail(managePayload, true);
-    expect(manage).toContain(">Settings</button>");
-    expect(manage).toContain(">Installed</button>");
-    expect(manage).toContain(">Insights</button>");
+    // The triggers read by role and name, the way an assistive technology
+    // finds them — never by serialized tag adjacency.
+    expect(await withMarkup(manage, pageTabs)).toEqual([
+      t("en", "appDetail.tabSettings"),
+      t("en", "appDetail.tabInstallations"),
+      t("en", "appDetail.tabInsights"),
+      t("en", "appDetail.tabPullRequests"),
+    ]);
     // The identity header serves both tabs — the GitHub display name (D6).
     expect(manage).toContain(">Demo</h1>");
     expect(manage).toContain("by mallory");
   });
 
-  test("a non-manager sees identity-only with NO 洞察 tab rendered — absence pinned", () => {
+  test("a non-manager sees identity-only with NO manager tab rendered — absence pinned", async () => {
     const identity = renderDetail(identityPayload, false);
-    expect(identity).toContain(">Settings</button>");
-    expect(identity).not.toContain(">Installed</button>");
-    expect(identity).not.toContain(">Insights</button>");
+    expect(await withMarkup(identity, pageTabs)).toEqual([t("en", "appDetail.tabSettings")]);
     // No insights panel markup anywhere on the face.
     expect(identity).not.toContain("Review health");
   });

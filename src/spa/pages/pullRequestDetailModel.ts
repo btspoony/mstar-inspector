@@ -12,8 +12,8 @@ import type {
   PullRequestCounts,
   PullRequestFailure,
   PullRequestFinding,
+  PullRequestHead,
   PullRequestReview,
-  PullRequestRow,
 } from "./data";
 
 /** The three record families the detail face switches between. */
@@ -211,7 +211,7 @@ export type TimelineRow = ActivityEntry | { key: "timeline-truncated"; hidden: n
  */
 export function timelineRows(
   locale: Locale,
-  pr: PullRequestRow,
+  pr: PullRequestHead,
   reviews: readonly PullRequestReview[],
   failures: readonly PullRequestFailure[],
   totals: PullRequestCounts,

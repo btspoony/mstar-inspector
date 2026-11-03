@@ -314,6 +314,13 @@ export function PullRequestDetail({
         // The counts the head just landed decide the opening family — the same
         // derivation the view defaults to, so the visible section is loaded.
         ensureSection(defaultFamily(parsed.counts));
+        // The aside describes the PR's newest reviews and failures whatever
+        // family the operator opened, so both history first pages are read with
+        // the head rather than on a tab selection. `ensureSection` skips a
+        // section that already has a page, so this never re-reads a window the
+        // operator has paged to.
+        ensureSection("reviews");
+        ensureSection("failures");
       })
       .catch(() => {
         if (!cancelled) setRead({ pr: prKey, kind: "error" });
@@ -566,12 +573,13 @@ export function PullRequestDetailView({
 
   // The aside's one list: capped history, the truncation note (when the cap
   // dropped anything) directly above the PR's own first sighting, which always
-  // closes it. The rows come from each family's FIRST unfiltered page, not the
-  // window the operator has paged to — the aside describes the newest events of
-  // the PR, never the oldest page of whichever family is open. A family the
-  // aside has not read contributes neither rows nor a hidden count: a note
-  // claiming "earlier events not shown" with no row above it would describe
-  // events it has no window into.
+  // closes it. The rows come from each family's FIRST unfiltered page — the
+  // host reads both history first pages with the head, and captures them
+  // before any paging — so the aside describes the newest events of the PR,
+  // never the oldest page of whichever family is open. A section with no
+  // captured window (its read failed) contributes neither rows nor a hidden
+  // count: a note claiming "earlier events not shown" with no row above it
+  // would describe events it has no window into.
   const reviewsNewest = records.reviews.newest;
   const failuresNewest = records.failures.newest;
   const timeline = timelineRows(

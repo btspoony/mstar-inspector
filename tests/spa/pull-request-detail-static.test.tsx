@@ -23,7 +23,7 @@ import {
   parseRecordPage,
   type PullRequestDetail,
   type PullRequestReview,
-  type PullRequestRow,
+  type PullRequestHead,
 } from "../../src/spa/pages/data";
 import {
   PullRequestDetail as PullRequestDetailFace,
@@ -57,7 +57,7 @@ const render = (detail: PullRequestDetail, records = recordsOf()) =>
 /** A complete face for a page set (counts derived from the pages' totals). */
 const face = (
   over: Partial<RecordPages> = {},
-  row: Partial<PullRequestRow> = {},
+  row: Partial<PullRequestHead> = {},
   latest: Partial<PullRequestReview> | null = DETAIL.latest_review,
   // The head's own must-fix tally — stated, never read off the page under
   // test; defaults to the fixture PR's.
@@ -429,7 +429,7 @@ describe("pull request detail face (static SSR)", () => {
             },
           ]),
         },
-        { latest_review: { verdict, reviewed_at: "2026-11-01 08:00:00" } },
+        {},
         { verdict, reviewed_at: "2026-11-01 08:00:00" },
       );
     const read = async (markup: string) =>
@@ -764,7 +764,7 @@ describe("pull request detail face (static SSR)", () => {
           },
         ]),
       },
-      { latest_review: { verdict: "", reviewed_at: "2026-11-01 08:00:00" } },
+      {},
       { verdict: "", reviewed_at: "2026-11-01 08:00:00" },
     );
     const read = await withMarkup(empty, (container) => {
@@ -822,9 +822,7 @@ describe("pull request detail face (static SSR)", () => {
     ]);
     const markup = face(
       { findings: page([]), failures: page([]), reviews },
-      {
-        latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
-      },
+      {},
       { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
     );
     const read = await withMarkup(markup, (container) => ({
@@ -864,7 +862,7 @@ describe("pull request detail face (static SSR)", () => {
       // No review row either: the band's verdict then falls back to the PR
       // row's summary, which is absent too.
       { reviews: page([]) },
-      { head_sha: "", latest_review: null },
+      { head_sha: "" },
       null,
     );
     // The PR-level chip disappears rather than rendering an empty one; its
@@ -896,7 +894,7 @@ describe("pull request detail face (static SSR)", () => {
     );
     const markup = face(
       { reviews: history },
-      { latest_review: { verdict: "needs fixes", reviewed_at: history.items[0]?.reviewed_at ?? "" } },
+      {},
       { verdict: "needs fixes", reviewed_at: history.items[0]?.reviewed_at ?? "" },
     );
     // `· model-NN` is the timeline's meta separator: the header names the model

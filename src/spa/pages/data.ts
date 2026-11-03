@@ -708,14 +708,15 @@ export function appInsightsSummaryUrl(
   return `${base}/api/apps/${encodeURIComponent(appId)}/insights/summary?${params.toString()}`;
 }
 
-/**
- * The per-App pull-request ledger (the Pull requests tab). One row per PR
- * the App received — the list face and the detail's `pull_request` share
- * this exact shape.
- */
 export type PullRequestState = "open" | "closed" | "merged";
 
-export type PullRequestRow = {
+/**
+ * The per-App pull-request ledger's head row — the list's rows and the
+ * detail's `pull_request` are ONE shape: the list adds its two aggregates, the
+ * detail its record totals. `failure_count` is the list's alone; the detail
+ * already carries `counts.failures`, so one number has one carrier.
+ */
+export type PullRequestHead = {
   number: number;
   owner: string;
   repo: string;
@@ -724,6 +725,9 @@ export type PullRequestRow = {
   head_sha: string;
   first_seen_at: string;
   last_seen_at: string;
+};
+
+export type PullRequestRow = PullRequestHead & {
   latest_review: { verdict: string; reviewed_at: string } | null;
   failure_count: number;
 };
@@ -766,7 +770,7 @@ export type PullRequestCounts = {
  * verdict and attribution, independent of whichever reviews page is loaded.
  */
 export type PullRequestDetail = {
-  pull_request: PullRequestRow;
+  pull_request: PullRequestHead;
   counts: PullRequestCounts;
   latest_review: PullRequestReview | null;
 };
@@ -792,19 +796,16 @@ export type RecordPageItems = {
 export type PullRequestRef = { owner: string; repo: string; number: number };
 
 /**
- * Per-row list parse (QC: one nullable row must not blank the list). The
- * nullable DISPLAY fields coerce to "" and an unknown state clamps to
- * "open"; only the address and timestamp fields stay required — a row
- * without them cannot be listed or fetched, so it is dropped individually
- * and the rest of the list still renders. The returned row always carries
- * non-null strings (the type is not weakened).
+ * The head fields both faces read (QC: one nullable row must not blank the
+ * list). The nullable DISPLAY fields coerce to "" and an unknown state clamps
+ * to "open"; only the address and timestamp fields stay required — a row
+ * without them cannot be listed or fetched, so it is dropped individually.
  */
-function parsePullRequestRow(value: unknown): PullRequestRow | null {
+function parsePullRequestHead(value: unknown): PullRequestHead | null {
   if (!isRecord(value)) return null;
   if (typeof value.number !== "number" || !Number.isFinite(value.number)) return null;
   if (typeof value.owner !== "string" || typeof value.repo !== "string") return null;
   if (typeof value.first_seen_at !== "string" || typeof value.last_seen_at !== "string") return null;
-  if (typeof value.failure_count !== "number") return null;
   return {
     number: value.number,
     owner: value.owner,
@@ -814,6 +815,20 @@ function parsePullRequestRow(value: unknown): PullRequestRow | null {
     head_sha: typeof value.head_sha === "string" ? value.head_sha : "",
     first_seen_at: value.first_seen_at,
     last_seen_at: value.last_seen_at,
+  };
+}
+
+/**
+ * One LIST row: the head plus the two aggregates the list face renders. A row
+ * without a numeric `failure_count` cannot report the count it exists for, so
+ * it is dropped individually and the rest of the list still renders.
+ */
+function parsePullRequestRow(value: unknown): PullRequestRow | null {
+  const head = parsePullRequestHead(value);
+  if (head === null || !isRecord(value)) return null;
+  if (typeof value.failure_count !== "number") return null;
+  return {
+    ...head,
     latest_review: parseLatestReview(value.latest_review),
     failure_count: value.failure_count,
   };
@@ -895,7 +910,7 @@ export function parsePullRequestList(data: unknown): PullRequestRow[] | null {
  */
 export function parsePullRequestDetail(data: unknown): PullRequestDetail | null {
   if (!isRecord(data)) return null;
-  const pull_request = parsePullRequestRow(data.pull_request);
+  const pull_request = parsePullRequestHead(data.pull_request);
   if (pull_request === null) return null;
   const counts = parsePullRequestCounts(data.counts);
   if (counts === null) return null;
