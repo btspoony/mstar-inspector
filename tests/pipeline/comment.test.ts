@@ -236,6 +236,23 @@ describe("buildReviewBody", () => {
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
   });
 
+  test("an over-long incomplete reason is bounded, so the tail survives the body clamp", () => {
+    const closure = "## Prior findings recheck\n\nReassessed 1/1";
+    const body = buildReviewBody(
+      {
+        ...output,
+        verdict: "incomplete",
+        findings: [],
+        incomplete: { reason: "z".repeat(REVIEW_BODY_LIMIT * 2), unscanned: ["a.ts"] },
+      },
+      0,
+      closure,
+    );
+    expect(body).toContain(closure);
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    expect(body.match(/^cause: /gm)).toHaveLength(1);
+  });
+
   test("the closure section is appended last", () => {
     const body = buildReviewBody(output, 10, "## Prior findings recheck\n\nReassessed 1/1");
     expect(body.endsWith("\n\n## Prior findings recheck\n\nReassessed 1/1")).toBe(true);

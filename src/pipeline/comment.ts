@@ -116,6 +116,31 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
 
 
 /**
+ * Per-line bound for the rendered `cause:` / `unscanned:` lines. The engine
+ * renders the pair from the envelope without bounding it, and the body clamp
+ * cuts the END, so an unbounded reason would push the findings and the closure
+ * off the comment. The stored envelope keeps the validated values unchanged —
+ * this bounds the rendered line only.
+ */
+const FACT_LINE_BUDGET = 500;
+
+/** Bound one rendered fact line, keeping the head and marking the cut. */
+function boundFactLine(text: string): string {
+  return text.length <= FACT_LINE_BUDGET ? text : `${text.slice(0, FACT_LINE_BUDGET - 1)}…`;
+}
+
+/** The envelope fact, bounded for rendering only. */
+function boundIncomplete(fact: { reason: string; unscanned: readonly string[] }): {
+  reason: string;
+  unscanned: string[];
+} {
+  return {
+    reason: boundFactLine(fact.reason),
+    unscanned: [boundFactLine(fact.unscanned.length === 0 ? "none" : fact.unscanned.join(", "))],
+  };
+}
+
+/**
  * Cut `text` to `budget` chars, keeping the head — and close any fold the cut
  * left open. An unclosed `<details>` makes GitHub route the rest of the
  * comment into the collapsed block, so the trailer and the publication marker
@@ -165,10 +190,14 @@ export function buildReviewBody(
   omittedFindings = 0,
   closure?: string,
 ): string {
-  let rendered =
-    output.incomplete === undefined || output.summary_md === undefined
-      ? output
-      : { ...output, summary_md: stripFactEcho(output.summary_md, output.incomplete) };
+  let rendered = output;
+  if (output.incomplete !== undefined) {
+    const bounded = boundIncomplete(output.incomplete);
+    rendered = { ...rendered, incomplete: bounded };
+    if (rendered.summary_md !== undefined) {
+      rendered = { ...rendered, summary_md: stripFactEcho(rendered.summary_md, bounded) };
+    }
+  }
   // The runner fits its coverage notes to SUMMARY_MD_LIMIT and documents that
   // this publisher keeps the head from there (runtime-omp.ts). Without the cap
   // a long narrative inflates the body toward REVIEW_BODY_LIMIT, and that clamp
