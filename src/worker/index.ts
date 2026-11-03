@@ -403,17 +403,20 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // contract in src/admin/flags.ts; a second read for the gate is forbidden.
   // Job-scoped: only a `job` can enqueue, so reject / ignore / installation
   // deliveries must not gain a flag dependency (a failed read would turn their
-  // 2xx into a 500 and cost them their delivery row). For the SAME reason the
-  // read itself is best-effort: it sits before the delivery row, the PR ledger
-  // and the last_webhook_at touch, so a D1 failure here would drop all three
-  // diagnostics of an already-verified job. It logs one structured warn and
-  // falls back CLOSED — a failed read counts as "reviews disabled", never as
-  // "enabled", so a broken read can never silently defeat the kill switch by
-  // enqueueing a review while an operator believes it is on. The delivery row
-  // then reads `paused` (nothing enqueued); the response and every
-  // diagnostic write stay exactly as on a healthy read.
+  // 2xx into a 500 and cost them their delivery row). A `job` that the per-App
+  // switch already paused (review_enabled=0 → `paused`, zero enqueue) skips
+  // the read too: that switch decides the outcome before the flag can. For
+  // the SAME reason the read itself is best-effort: it sits before the
+  // delivery row, the PR ledger and the last_webhook_at touch, so a D1
+  // failure here would drop all three diagnostics of an already-verified job.
+  // It logs one structured warn and falls back CLOSED — a failed read counts
+  // as "reviews disabled", never as "enabled", so a broken read can never
+  // silently defeat the kill switch by enqueueing a review while an operator
+  // believes it is on. The delivery row then reads `paused` (nothing
+  // enqueued); the response and every diagnostic write stay exactly as on a
+  // healthy read.
   let reviewGlobal = true;
-  if (outcome.kind === "job") {
+  if (outcome.kind === "job" && row.review_enabled !== 0) {
     try {
       reviewGlobal = await isFlagEnabled(db, "review_global");
     } catch (err) {

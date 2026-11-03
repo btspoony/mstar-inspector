@@ -1272,7 +1272,22 @@ Plain vars — `wrangler.jsonc` `vars` / `env.production.vars`; redeploy to chan
 Review control is never a plain var, and it is two switches over D1.
 `github_apps.review_enabled` (dashboard Pause/Resume) gates one App, and the
 `review_global` server flag gates the enqueue face for every App (absent row =
-enabled; it is set through the console's flags page). An App with
+enabled). Both are D1 rows, so neither is subject to `keep_vars`. On a `saas`
+deployment the console's flags page (`/_internal_admin`) sets `review_global`;
+a `self-hosted` deployment mounts no admin console (`/_internal_admin` is a
+404 there), so the operator writes that row directly — the same statement the
+console issues, run through `wrangler d1 execute` against the target database:
+
+```sql
+INSERT INTO server_flags (key, enabled, updated_at, updated_by)
+VALUES ('review_global', 0, datetime('now'), '<your login>')
+ON CONFLICT (key) DO UPDATE SET
+  enabled = excluded.enabled,
+  updated_at = excluded.updated_at,
+  updated_by = excluded.updated_by;
+```
+
+An App with
 `review_enabled=1` reviews for real on a live Worker, so pause any App that must
 not review yet (`review_enabled=0`) before deploying — or turn `review_global`
 off to hold every App at once. Either switch still answers 2xx with zero
@@ -1870,8 +1885,9 @@ column.
 1. **Configure the chain** — on the App's settings page, set **Model chain**
    to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
    and save. The head (the first selector) is what the column must show.
-2. **Real PR** — with that App's `review_enabled` on (the only review
-   control), open or update a PR on an installed
+2. **Real PR** — with both review controls open (that App's `review_enabled`
+   and the `review_global` flag, § Secrets and vars inventory), open or update
+   a PR on an installed
    repo of that App (default `every_push` mode auto-triggers; from any
    mode, a PR comment @mentioning the App's bot works too —
    § Review triggers (per App)).
@@ -1964,8 +1980,10 @@ Operationally that means:
   is `wrangler deploy --env production`, and `env.production` cannot declare
   `keep_vars` (rejected inside an environment block), so every production
   deploy wipes dashboard-set plain vars — see § `env.production.vars` is the
-  plain-var roster. Review control is not a plain var at all: per-App
-  `review_enabled` lives in D1.
+  plain-var roster. Review control is not a plain var at all: it is two
+  switches, and both live in D1 (hence neither is touched by that wipe) — the
+  per-App `github_apps.review_enabled`, and the `review_global` server flag
+  (absent row = enabled) that closes the enqueue face for every App.
 
 ## Rollback
 
@@ -2178,8 +2196,11 @@ the canonical `@<slug>[bot]`, matched as a standalone token —
 repository owner (bot-sender comments are ignored; anyone else gets a
 structured warn). Two review controls gate every trigger path: the per-App
 pause (`review_enabled`) gates one App, and the server flag `review_global`
-closes the enqueue face for every App (absent row = enabled; set through the
-console's flags page). Neither deletes queued work — a flag turned off stops
+closes the enqueue face for every App (absent row = enabled). In `saas` the
+console's flags page (`/_internal_admin`) sets `review_global`; `self-hosted`
+mounts no admin console, so the operator writes the `server_flags` row for
+`review_global` directly (the `INSERT … ON CONFLICT` in § Secrets and vars
+inventory). Neither deletes queued work — a flag turned off stops
 new enqueues, not in-flight ones.
 Operator note: the structured-log `event` label for comment-triggered
 reviews retires `review_command` → `issue_comment`; operator-saved log

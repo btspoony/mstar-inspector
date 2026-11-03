@@ -13,8 +13,8 @@
  * failure (missing DASHBOARD_ENCRYPTION_KEY, tampered envelope) → 500
  * fail-closed (lock L1), zero enqueue.
  *
- * The D1 double is the real bun:sqlite helper over migrations 0003/0004/0005
- * (+ 0008/0011/0018/0019/0022/0026/0033/0036/0037/0038/0039 — see
+ * The D1 double is the real bun:sqlite helper over migrations 0001/0002 (the
+ * base schema `createTestD1()` applies) plus 0003…0039 applied by
  * `createMigratedD1` below; production-shaped, the store CRUD itself is pinned
  * by tests/worker/apps-store.test.ts — here the rows are seeded raw with
  * secretbox envelopes so the route exercises the real lookup + decrypt).
@@ -210,38 +210,25 @@ function setReviewGlobalOff(db: ReturnType<typeof createTestD1>): void {
     .run();
 }
 
-/**
- * D1 double that fails ONLY the `app_installations` upsert statement — the
- * slug lookup / decrypt / delivery record stay healthy, so a delivery against
- * it exercises exactly the bookkeeping-failure path.
- */
-function brokenInstallDb(db: ReturnType<typeof createTestD1>): ReturnType<typeof createTestD1> {
-  return {
-    raw: db.raw,
-    batch: db.batch.bind(db),
-    prepare(query: string) {
-      if (query.includes("INSERT INTO app_installations")) {
-        throw new Error("d1 unavailable (test injection)");
-      }
-      return db.prepare(query);
-    },
-  } as unknown as ReturnType<typeof createTestD1>;
-}
+/** Statement predicates for `failingDb` (the two injected failure faces). */
+const installUpsert = (query: string): boolean => query.includes("INSERT INTO app_installations");
+const flagRead = (query: string): boolean => query.includes("FROM server_flags");
 
 /**
- * D1 double that records every statement text the route prepares, and
- * optionally fails ONLY the `server_flags` read — every other statement
- * (webhook-path lookup, delivery record, ledger, touch) stays healthy.
+ * D1 double that fails the statements matching `match`, and records every
+ * statement text the route prepares. Every other statement (webhook-path
+ * lookup, delivery record, ledger, touch) stays healthy.
  *
- * Two faces: `failFlagRead` exercises the flag-read failure path, and the
- * recorded queries are the negative half of the job-scoped read — an `ignore`
- * delivery must prepare ZERO `server_flags` statements, which no
- * response/row assertion can see (a stray read there would still answer 2xx
- * `ignored` and still record `ignored`).
+ * Two call shapes: `match` is a substring test — `INSERT INTO app_installations`
+ * exercises the installation-bookkeeping failure, `FROM server_flags` the
+ * flag-read failure. The recorded queries are the negative half of the
+ * job-scoped flag read — an `ignore` delivery must prepare ZERO `server_flags`
+ * statements, which no response/row assertion can see (a stray read there
+ * would still answer 2xx `ignored` and still record `ignored`).
  */
-function recordPrepareDb(
+function failingDb(
   db: ReturnType<typeof createTestD1>,
-  { failFlagRead = false }: { failFlagRead?: boolean } = {},
+  match: (query: string) => boolean,
 ): { db: ReturnType<typeof createTestD1>; queries: string[] } {
   const queries: string[] = [];
   return {
@@ -250,7 +237,7 @@ function recordPrepareDb(
       batch: db.batch.bind(db),
       prepare(query: string) {
         queries.push(query);
-        if (failFlagRead && query.includes("FROM server_flags")) {
+        if (match(query)) {
           throw new Error("d1 unavailable (test injection)");
         }
         return db.prepare(query);
@@ -902,9 +889,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       sender: { type: "User", login: "alice" },
     });
 
-    const warn = mock((_msg: unknown) => {});
-    const origWarn = console.warn;
-    console.warn = warn;
+    const { warn, stop } = captureWarn();
     let res: Response;
     try {
       res = await postWebhook(
@@ -914,7 +899,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
         env,
       );
     } finally {
-      console.warn = origWarn;
+      stop();
     }
 
     expect(res.status).toBe(200);
@@ -1219,7 +1204,10 @@ describe("installations upsert wiring", () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    const env = makeEnv(brokenInstallDb(db), { REVIEW_QUEUE: queue as never });
+    // Only the installation upsert fails: the slug lookup / decrypt / delivery
+    // record stay healthy, so the delivery exercises exactly that path.
+    const { db: failing } = failingDb(db, installUpsert);
+    const env = makeEnv(failing, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
     const { warn, stop } = captureWarn();
@@ -1441,7 +1429,10 @@ describe("installation event path", () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    const env = makeEnv(brokenInstallDb(db), { REVIEW_QUEUE: queue as never });
+    // Only the installation upsert fails: the slug lookup / decrypt / delivery
+    // record stay healthy, so the delivery exercises exactly that path.
+    const { db: failing } = failingDb(db, installUpsert);
+    const env = makeEnv(failing, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(INSTALL_PAYLOAD);
 
     const { warn, stop } = captureWarn();
@@ -1494,7 +1485,10 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     expect(await createAppsStore(db).setReviewEnabled(appRow.id, false)).toBe(true);
     const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    // The pause already decides the outcome, so the route must not consult
+    // `review_global` for it — the statement log is the only place that shows.
+    const { db: recording, queries } = failingDb(db, flagRead);
+    const env = makeEnv(recording, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
     const info = mock((_msg: unknown) => {});
@@ -1519,6 +1513,8 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(line).toBeDefined();
     const fields = JSON.parse(line!) as { event: string };
     expect(fields.event).toBe("review_paused");
+    // A paused `job` skips the flag read (its outcome is already `paused`).
+    expect(queries.filter((query) => query.includes("server_flags"))).toEqual([]);
   });
 
   test("review_global OFF → 2xx ignored, ZERO enqueue, delivery recorded `paused` (never `ok`)", async () => {
@@ -1553,8 +1549,8 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    const { db: recordingDb, queries } = recordPrepareDb(db, { failFlagRead: true });
-    const env = makeEnv(recordingDb, { REVIEW_QUEUE: queue as never });
+    const { db: recording, queries } = failingDb(db, flagRead);
+    const env = makeEnv(recording, { REVIEW_QUEUE: queue as never });
     // `closed` is not a whitelisted pull_request action → classify → ignore.
     const body = JSON.stringify({ ...PR_PAYLOAD, action: "closed" });
 
@@ -1569,6 +1565,13 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
       .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
+    // The PR ledger is written BEFORE the ignore return, so an ignored
+    // delivery still lands its row — the double passes every non-`server_flags`
+    // statement through to this healthy DB.
+    const ledger = db.raw
+      .query("SELECT pr_number, state FROM pull_requests WHERE app_id = ?")
+      .all(appRow.id) as Array<{ pr_number: number; state: string }>;
+    expect(ledger).toEqual([{ pr_number: 42, state: "open" }]);
   });
 
   test("flag read failure on a `job` delivery → 2xx ignored, ZERO enqueue, `paused`, all diagnostics kept", async () => {
@@ -1581,8 +1584,8 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    const { db: brokenDb } = recordPrepareDb(db, { failFlagRead: true });
-    const env = makeEnv(brokenDb, { REVIEW_QUEUE: queue as never });
+    const { db: broken } = failingDb(db, flagRead);
+    const env = makeEnv(broken, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
     const { warn, stop } = captureWarn();
@@ -1644,6 +1647,9 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(res.status).toBe(401);
     expect(sent).toHaveLength(0);
     expect(appOps(db, appRow.id).last_webhook_at).toBeNull();
+    // A rejected delivery validates nothing past the signature, so it writes
+    // no PR ledger row either.
+    expect(db.raw.query("SELECT pr_number FROM pull_requests WHERE app_id = ?").all(appRow.id)).toEqual([]);
   });
 
   test("disabled / soft-deleted Apps → 404 never touch last_webhook_at (gate matrix)", async () => {
