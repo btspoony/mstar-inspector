@@ -417,6 +417,31 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(findingRow.last_assessed_ms).not.toBeNull();
   });
 
+  test("a captured-but-unprovable round blames the capture, not the catalog budget", async () => {
+    // The discussion capture failed, so the input is suppressed before the
+    // catalog can: the accounting line must name THAT cause, never the §7.3
+    // catalog/size-budget exclusion the round never reached.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.discussionError = new Error("discussion API down");
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandbox.calls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
+    const line = logLines.find((l) => l.msg.startsWith("recheck round accounted — no input sent"))!;
+    expect(line.msg).toContain("lifecycle context capture failed");
+    expect(line.msg).not.toContain("§7.3 size budget");
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (context-incomplete)");
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
   test("a size-budget-excluded round sends nothing: rows are budget, and the round is still attributed", async () => {
     reset();
     sandbox.diffStdout = VALID_DIFF;
@@ -1328,5 +1353,91 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     // The row still reads as an attempted-but-unusable answer.
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (invalid-output)");
+  });
+
+  test("a related index the final envelope cannot resolve is fabrication: unverifiable/conflict, no resolution", async () => {
+    // The seat cites finding #1 while the round's final envelope carries one
+    // finding (#0): the index names nothing the consumer can verify, so the
+    // closure claim is never trusted (§7.4 conservative precedence).
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [1] });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (conflict)");
+    expect(prepared.body).not.toContain("addressed (verified-fix)");
+    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+    const round = db.raw
+      .query(`SELECT assessment_json FROM review_finding_rounds WHERE finding_row_id = ?`)
+      .get(TARGET_ROW_ID) as { assessment_json: string } | null;
+    expect(JSON.parse(round!.assessment_json)).toMatchObject({ disposition: "unverifiable", reason: "conflict" });
+  });
+
+  test("an addressed row that names any in-range related concern is still a conflict, never a closure", async () => {
+    // The related concern exists in the final envelope, so it is unresolved
+    // by definition: closure loses to the surviving concern.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [0] });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (conflict)");
+    expect(prepared.body).not.toContain("addressed (verified-fix)");
+    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+    const row = db.raw.query("SELECT state FROM review_findings").get() as { state: string };
+    expect(row.state).toBe("open");
+  });
+
+  test("an in-range related index on a non-closure row is not a conflict: the guard only bites `addressed`", async () => {
+    // Same in-range index, but the seat did not claim a fix: `dismissed` and
+    // `unverifiable` keep their own verdict instead of being rewritten.
+    for (const verdict of [
+      { disposition: "dismissed", reason: "non-fix-dismissal", expected: "dismissed (non-fix-dismissal)" },
+      { disposition: "unverifiable", reason: "no-evidence", expected: "unverifiable (no-evidence)" },
+    ] as const) {
+      reset();
+      sandbox.diffStdout = VALID_DIFF;
+      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+      sandbox.recheckFileContent = recheckDocWith({
+        disposition: verdict.disposition,
+        reason: verdict.reason,
+        evidence: null,
+        relatedCurrentFindingIndexes: [0],
+      });
+      const db = await createSeededTestD1();
+      await seedPriorPublication(db);
+      await seedOpenTarget(db);
+      await seedAssociation(db, "PRRT_thread1");
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(makePayload()));
+
+      const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+      expect(prepared.body).toContain(verdict.expected);
+      expect(prepared.body).not.toContain("unverifiable (conflict)");
+      const round = db.raw
+        .query(`SELECT assessment_json FROM review_finding_rounds WHERE finding_row_id = ?`)
+        .get(TARGET_ROW_ID) as { assessment_json: string } | null;
+      expect(JSON.parse(round!.assessment_json)).toMatchObject({
+        disposition: verdict.disposition,
+        reason: verdict.reason,
+      });
+    }
   });
 });

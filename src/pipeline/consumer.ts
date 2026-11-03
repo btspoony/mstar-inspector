@@ -3313,12 +3313,17 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
               ? "recheck round cancelled by the runner — no row was answered, no failure recorded"
               : "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
             : "recheck round accounted"
-          : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
+          : captureFailed
+            ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
+            : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
       );
-      // A failure row names a round that RAN and produced nothing usable. A
-      // round that sent nothing — or that the runner cancelled by design —
-      // has no failure to record: its rows are already accounted as
-      // `budget`/`no-evidence`/`omitted` in the closure section.
+      // Shipped failure rule: a round that SENT rows records one row when its
+      // document is absent or the seat reported `failed` — a seat budget skip
+      // records one too, because that round ran and answered nothing. A round
+      // the runner cancelled by design, and a round that sent nothing at all
+      // (capture failed, catalog exclusion, §7.3 size budget), records none:
+      // its rows are already accounted as `budget`/`no-evidence`/`omitted` in
+      // the closure section.
       if (
         recheckInput !== undefined &&
         !roundCancelled &&
