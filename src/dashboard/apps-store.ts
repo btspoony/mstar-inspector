@@ -92,6 +92,9 @@
  *   - event_name is bounded to EVENT_NAME_MAX_LENGTH (64) chars at
  *     persist time — the x-github-event header is attacker-influenced on
  *     the unauthenticated reject path; the DDL has no length constraint.
+ *     repository_full_name gets the same bound (REPOSITORY_FULL_NAME_MAX_LENGTH,
+ *     160) for the same reason: it comes from the body, not from a verified
+ *     signature.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention); createApp ids are caller-supplied (the reviews.id
  *     caller-UUID convention — review pin: secretbox AAD rowKey MUST
@@ -317,6 +320,16 @@ const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'reject
 export const EVENT_NAME_MAX_LENGTH = 64;
 
 /**
+ * Persist bound for the source repository name (`owner/name`, migration 0040)
+ * — same rationale as EVENT_NAME_MAX_LENGTH: `repository.full_name` rides in
+ * the body, which is attacker-controlled on the unauthenticated reject path,
+ * and the DDL has no length constraint. GitHub's own ceilings (39-char owner +
+ * 100-char repo) add up to 140, so 160 is headroom, not a truncation risk for
+ * real deliveries.
+ */
+export const REPOSITORY_FULL_NAME_MAX_LENGTH = 160;
+
+/**
  * Bound on `listPullRequests`. Any third party who opens a PR mints a ledger
  * row and only TERMINAL rows are swept, so the live set grows with every open
  * PR across every installed repo. 200 is the newest window an operator can
@@ -367,6 +380,8 @@ export type RecordDeliveryInput = {
   /**
    * The delivery's source repository (`owner/name`, migration 0040) — NULL
    * when the payload carried no `repository` (an install / bypass event).
+   * Truncated to REPOSITORY_FULL_NAME_MAX_LENGTH (160) chars at persist — the
+   * value is attacker-influenced on the unauthenticated reject path.
    */
   repositoryFullName: string | null;
 };
@@ -923,8 +938,9 @@ export function createAppsStore(db: AppsStoreD1) {
      * FAILURE_STAGES precedent); FK violations (unknown appId) throw. The
      * webhook face wraps this in try/catch itself — an insert failure must
      * never change the webhook response (best-effort旁路). The event_name
-     * header is capped at EVENT_NAME_MAX_LENGTH chars at persist (seat2
-     * hygiene pin).
+     * header and the repository_full_name body field are capped at their
+     * MAX_LENGTH constants at persist (seat2 hygiene pin) — both are
+     * attacker-influenced on the unauthenticated reject path.
      */
     async recordDelivery(input: RecordDeliveryInput): Promise<void> {
       if (!DELIVERY_OUTCOMES.includes(input.outcome)) {
@@ -933,6 +949,10 @@ export function createAppsStore(db: AppsStoreD1) {
         );
       }
       const eventName = input.eventName === null ? null : input.eventName.slice(0, EVENT_NAME_MAX_LENGTH);
+      const repositoryFullName =
+        input.repositoryFullName === null
+          ? null
+          : input.repositoryFullName.slice(0, REPOSITORY_FULL_NAME_MAX_LENGTH);
       await db
         .prepare(
           `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name)
@@ -944,7 +964,7 @@ export function createAppsStore(db: AppsStoreD1) {
           eventName,
           input.outcome,
           input.statusCode,
-          input.repositoryFullName,
+          repositoryFullName,
         )
         .run();
     },

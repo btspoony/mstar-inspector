@@ -352,28 +352,32 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     expect(await store.listRecentDeliveries("app-1")).toHaveLength(10);
   });
 
-  test("recordDelivery caps event_name at 64 chars at persist time (seat2 hygiene pin)", async () => {
+  test("recordDelivery caps event_name at 64 chars and repository_full_name at 160 at persist time (seat2 hygiene pin)", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
     const store = createAppsStore(db);
 
-    // The x-github-event header is attacker-influenced on the
-    // unauthenticated reject path — the persisted value must be bounded.
+    // The x-github-event header and the body's repository.full_name are both
+    // attacker-influenced on the unauthenticated reject path — the persisted
+    // values must be bounded.
     await store.recordDelivery({
       appId: "app-1",
       eventName: "x".repeat(200),
       outcome: "ok",
       statusCode: null,
-      repositoryFullName: null,
+      repositoryFullName: "y".repeat(2000),
     });
     await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "ignored", statusCode: null, repositoryFullName: null });
 
     const rows = db.raw
-      .query("SELECT event_name FROM webhook_deliveries ORDER BY rowid")
-      .all() as Array<{ event_name: string | null }>;
+      .query("SELECT event_name, repository_full_name FROM webhook_deliveries ORDER BY rowid")
+      .all() as Array<{ event_name: string | null; repository_full_name: string | null }>;
     expect(rows).toHaveLength(2);
     expect(rows[0]!.event_name).toBe("x".repeat(64));
-    expect(rows[1]!.event_name).toBeNull(); // NULL (absent header) passes through untouched
+    expect(rows[0]!.repository_full_name).toBe("y".repeat(160));
+    // NULL (absent header / no repository) passes through untouched.
+    expect(rows[1]!.event_name).toBeNull();
+    expect(rows[1]!.repository_full_name).toBeNull();
   });
 });
 
