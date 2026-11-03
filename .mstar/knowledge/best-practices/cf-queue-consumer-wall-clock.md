@@ -34,7 +34,7 @@ Wrangler's config schema states it plainly: an unset consumer `max_concurrency` 
 
 - **`max_concurrency: 64` is the deploy-time CEILING only.** It sits above the platform's 32/16 defaults and bounds how many queue messages may be delivered at once; it is deliberately NOT env-configurable.
 - **The effective admission is per-message, read from D1.** `min(system, workspace)` comes from `src/pipeline/concurrency-reader.ts` → `review_inflight` admission on EVERY message, so per-PR serial and cross-PR parallel are runtime decisions, not config. A degraded read fails closed to the conservative cap of 1.
-- **`max_batch_size: 1` keeps the wall-clock model honest.** One review per batch means one runner budget owns the invocation, so the 15-minute consumer cap below still binds.
+- **`max_batch_size: 1` keeps the wall-clock model honest.** One review per batch means one runner budget owns the invocation, so the 15-minute consumer cap above still binds.
 - **The ceiling is bounded, not a concurrency licence.** Under `scheduling_policy: "durable_object"` each attempt's unique sandbox id (`SandboxV1` DO, `getSandbox(...)`) starts its **own** container, and the 0.12 `image` / `instance_type` / `max_instances` / `image_build_context` fields have no durable-object equivalent (`wrangler.jsonc` containers comment). The old per-attempt acquisition-blocking / `instanceGetTimeoutMS` back-pressure no longer exists, so a higher ceiling simply runs that many containers concurrently against the account's container limits — which is why the runtime caps, not the ceiling, carry the protection.
 
 This is why the parity contract pins the ceiling VALUE (64) in both blocks rather than trusting set-equality: an equal-but-wrong value would otherwise pass.
