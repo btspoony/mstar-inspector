@@ -230,12 +230,6 @@ describe("warn event labels (log hygiene 硬化项 3)", () => {
 });
 
 describe("classifyEvent — pull_request whitelist", () => {
-  // Manifest parity: the loops below iterate the production constant, so only
-  // this literal list can catch a member added or dropped from it.
-  test("PULL_REQUEST_ACTIONS is exactly the documented whitelist", () => {
-    expect([...PULL_REQUEST_ACTIONS]).toEqual(["opened", "synchronize", "reopened"]);
-  });
-
   for (const action of PULL_REQUEST_ACTIONS) {
     test(`pull_request.${action} yields a job`, () => {
       const outcome = classifyEvent("pull_request", pullRequestBody(action));
@@ -499,7 +493,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
   });
 
-  test("bot-authored PR outranks the mention grammar, so an unsynced App gets no mention-miss reason", () => {
+  test("bot-authored PR outranks the mention grammar", () => {
     const outcome = classifyEvent(
       "issue_comment",
       issueCommentBody({

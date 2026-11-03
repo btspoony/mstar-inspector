@@ -194,10 +194,12 @@ function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
  * them is machine-generated — release prep, dependency bumps, self-authored
  * PRs from another automation — and is never reviewed, on either trigger
  * face. Case-insensitive because GitHub logins are; the suffix is the whole
- * rule, so `renovate` (a human-accounted bot) still triggers.
+ * rule, so a login without it (whatever its account type) still triggers.
  */
 const BOT_LOGIN = /\[bot\]$/i;
 
+// Exported as test seams so the classifier tests assert the contract by
+// symbol; no production branch keys on either string.
 export const BOT_PR_REASON = "PR authored by a bot account";
 
 export const MISSING_AUTHOR_REASON = "payload carried no PR author login";
