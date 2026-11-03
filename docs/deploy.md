@@ -2165,6 +2165,37 @@ Contract:
   has no `max_instances` cap), >1 concurrency would run containers
   concurrently. Pinned, NOT env-configurable.
 
+### Review concurrency caps (runtime configuration)
+
+The queue consumer holds at most `min(system cap, workspace cap)` reviews at
+once, and never two attempts for the same PR (the per-PR `review_inflight`
+row). Both caps are read from D1 on **every** queue message — no KV, no
+request cache — so a change applies to the **next** message without a
+redeploy; reviews already running keep their slot until their `review_inflight`
+row expires.
+
+| Cap | Default | Stored in | Changed by |
+|---|---|---|---|
+| System | 32 | `review_runtime_settings`, key `review.concurrency.system` (migration `0040`; absent row = default) | platform operator — admin console `PATCH /_internal_admin/api/runtime` with `{"concurrency": <1..250>}` |
+| Workspace | 16 | `workspaces.max_concurrent_reviews` (migration `0040`; NULL = default) | workspace owner/admin — dashboard Settings, `PUT /<workspaceRef>/api/settings/concurrency` |
+| Per PR | 1 | `review_inflight` primary key | never configurable |
+
+- Values are integers in `1..250`. A workspace value above the **current**
+  system cap is refused with a keyed 400, never clamped; lowering the system
+  cap below an existing workspace value needs no workspace write — `min`
+  applies the system value from the next message on.
+- Every accepted write lands with its `platform_audit_events` row (actor
+  included) in one D1 batch; a refused write changes no row and audits
+  nothing.
+- Each Worker reads **its own** D1, so a cap is set per environment; these
+  caps are business quotas and sit **below** the deploy-time queue ceiling
+  (§ Queue consumer concurrency).
+- A read failure, or a stored value the reader cannot trust, answers the
+  conservative cap **1** (serial) and logs ONE `review_concurrency_degraded`
+  warn carrying `workspace_id` and `effective` — the gate degrades to serial,
+  never to unlimited. Absent settings are silent: they take the defaults
+  above.
+
 ### Cron failure sweep (architect verdict AL-6)
 
 - `wrangler.jsonc → triggers.crons: ["*/15 * * * *"]` — every 15 min the

@@ -33,7 +33,7 @@ import {
 import { AppAvatar } from "../components/AppAvatar";
 import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
-import { postForm, putJson } from "../api";
+import { fetchJson, postForm, putJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { workspaceRefOf } from "../routes";
 import { apiBase, currentOrigin } from "../workspace-base";
@@ -48,12 +48,15 @@ import {
   isPaused,
   isReviewTriggerMode,
   modelChainTabs,
+  parseConcurrencySettings,
+  parseStoredConcurrency,
   removeChanged,
   REVIEW_TRIGGER_MODES,
   seatRoleValues,
   seatSelectValue,
   splitModelChain,
   type ChainTab,
+  type ConcurrencySettings,
   type ModelOptionGroup,
   type ReviewTriggerMode,
   type SettingsAppMeta,
@@ -61,7 +64,7 @@ import {
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
-import { NoticeRegion, type OpNotice } from "./PageNotice";
+import { LoadingNotice, LoadFailedNotice, NoticeRegion, type OpNotice } from "./PageNotice";
 import { ProvidersSection } from "./settings-providers";
 
 export type PendingAction =
@@ -1070,6 +1073,100 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
         </Button>
       </form>
       <NoticeRegion notice={nameNotice} />
+    </FlowSection>
+  );
+}
+
+/**
+ * The workspace review-concurrency cap — the tenant half of the runtime
+ * configuration (iteration spec §1.1). Owner/admin only; the server re-checks
+ * the role and refuses a value above the system cap with a keyed 400, so this
+ * card only renders the range it was told.
+ */
+export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"] }) {
+  const [loaded, setLoaded] = useState<ConcurrencySettings | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [draft, setDraft] = useState<string | null>(null);
+  // Section-local channel, like the name card's: an op outcome never rides the page-level notice.
+  const [concurrencyNotice, setConcurrencyNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    fetchJson(`${apiBase()}/api/settings/concurrency`).then(
+      (data) => {
+        if (!live) return;
+        const parsed = parseConcurrencySettings(data);
+        if (parsed === null) setFailed(true);
+        else setLoaded(parsed);
+      },
+      () => {
+        if (live) setFailed(true);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (busy || loaded === null) return; // in-flight guard — no double submit
+    setBusy(true);
+    try {
+      const { status, body } = await putJson(`${apiBase()}/api/settings/concurrency`, {
+        concurrency: Number((draft ?? String(loaded.concurrency)).trim()),
+      });
+      const outcome = settingsOpOutcome(locale, status, body, t(locale, "workspace.concurrencySaved"));
+      if (outcome.kind === "success") {
+        // The stored value is the server's answer, never the typed draft.
+        const stored = parseStoredConcurrency(JSON.parse(body));
+        if (stored !== null) setLoaded((previous) => previous && { ...previous, concurrency: stored });
+        setDraft(null);
+      }
+      setConcurrencyNotice(outcome);
+    } catch {
+      setConcurrencyNotice({ kind: "error", message: t(locale, "workspace.concurrencyFailed") });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <FlowSection
+      title={t(locale, "workspace.concurrencyHeading")}
+      subtitle={t(locale, "workspace.concurrencyDescription")}
+    >
+      {failed ? (
+        <LoadFailedNotice locale={locale} />
+      ) : loaded === null ? (
+        <LoadingNotice locale={locale} />
+      ) : (
+        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium" htmlFor="workspace-concurrency">
+              {t(locale, "workspace.concurrencyLabel")}
+            </label>
+            <Input
+              id="workspace-concurrency"
+              type="number"
+              min={loaded.min}
+              max={loaded.system}
+              className="w-32"
+              autoComplete="off"
+              value={draft ?? String(loaded.concurrency)}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+            <span className="text-xs text-muted-foreground">
+              {t(locale, "workspace.concurrencySystemCap", { system: loaded.system })}
+            </span>
+          </div>
+          <Button type="submit" disabled={busy}>
+            {t(locale, "workspace.concurrencySave")}
+          </Button>
+        </form>
+      )}
+      <NoticeRegion notice={concurrencyNotice} />
     </FlowSection>
   );
 }
