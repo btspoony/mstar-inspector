@@ -101,6 +101,12 @@ type PageRequest = { offset: number; severity: string };
  * request ticket: a page or filter the reader has already moved past must not
  * overwrite the page now on screen. `endpoint` is read at call time only, so a
  * parent re-render cannot refetch anything.
+ *
+ * The offset and the filter are committed WITH the page they name, never when
+ * the read starts: the pager's range, its button bounds and the filter control
+ * all describe the rows on screen, so a window still in flight cannot make
+ * them report a page that has not landed. A failed read commits the request
+ * too — its retry must re-read the window that failed, not the one still shown.
  */
 function useRecordSection<K extends RecordSection>(
   section: K,
@@ -123,13 +129,15 @@ function useRecordSection<K extends RecordSection>(
     if (inFlight.current === key) return;
     inFlight.current = key;
     const mine = (ticket.current += 1);
-    setState((previous) => ({ ...previous, offset: request.offset, severity: request.severity, status: "loading" }));
+    setState((previous) => ({ ...previous, status: "loading" }));
     fetchJson(endpoint({ offset: request.offset, limit: RECORD_PAGE_SIZE, severity: request.severity }))
       .then((raw) => {
         if (mine !== ticket.current) return;
         const page = parseRecordPage(section, raw);
         setState((previous) => ({
           ...previous,
+          offset: request.offset,
+          severity: request.severity,
           status: page === null ? "error" : "ok",
           page: page ?? previous.page,
           // The aside describes the PR's newest events, so only the FIRST
@@ -142,7 +150,15 @@ function useRecordSection<K extends RecordSection>(
         }));
       })
       .catch(() => {
-        if (mine === ticket.current) setState((previous) => ({ ...previous, status: "error" }));
+        if (mine !== ticket.current) return;
+        // The failed window is the one its retry must re-read, so the request
+        // commits here even though no page arrived.
+        setState((previous) => ({
+          ...previous,
+          offset: request.offset,
+          severity: request.severity,
+          status: "error",
+        }));
       })
       .finally(() => {
         if (mine === ticket.current) inFlight.current = null;
@@ -171,8 +187,10 @@ function SectionPager<K extends RecordSection>({
   if (page === null || page.total === 0) return null;
   // The label is derived from the page in hand, so a total that shrank between
   // reads cannot invert it: `from` never passes `total`, and `to` never falls
-  // below `from`. The buttons keep their own bounds, so a stale offset heals
-  // on the next press.
+  // below `from`. Both bounds read the same page the rows come from, and the
+  // buttons stay inert while a read is in flight — the next window is only a
+  // move from the window on screen.
+  const loading = state.status === "loading";
   const from = Math.min(state.offset + 1, page.total);
   const to = Math.max(from, Math.min(state.offset + page.items.length, page.total));
   return (
@@ -191,7 +209,7 @@ function SectionPager<K extends RecordSection>({
           type="button"
           variant="outline"
           size="xs"
-          disabled={state.offset === 0}
+          disabled={loading || state.offset === 0}
           onClick={() =>
             onLoadPage(section, {
               offset: Math.max(0, state.offset - RECORD_PAGE_SIZE),
@@ -205,7 +223,7 @@ function SectionPager<K extends RecordSection>({
           type="button"
           variant="outline"
           size="xs"
-          disabled={state.offset + RECORD_PAGE_SIZE >= page.total}
+          disabled={loading || state.offset + RECORD_PAGE_SIZE >= page.total}
           onClick={() =>
             onLoadPage(section, { offset: state.offset + RECORD_PAGE_SIZE, severity: state.severity })
           }
@@ -398,6 +416,18 @@ export function PullRequestDetailView({
   const reviewsPage = records.reviews.page;
   const failuresPage = records.failures.page;
   const groups = severityGroups(locale, findingsPage?.items ?? []);
+  // A filtered window with no matches proves the FILTER is empty, not the PR:
+  // the head still counts findings, so the unfiltered copy would contradict the
+  // tab count. Name the severity the operator chose instead; an out-of-set
+  // value names itself, as the severity buckets already do.
+  const activeSeverity = records.findings.severity;
+  const severityGroup = SEVERITY_GROUPS.find((group) => group.severity === activeSeverity);
+  const emptyFindingsCopy =
+    activeSeverity === ""
+      ? t(locale, "pullRequests.noFindings")
+      : t(locale, "pullRequests.noFindingsForSeverity", {
+          severity: severityGroup === undefined ? activeSeverity : t(locale, severityGroup.labelKey),
+        });
   // The PR's newest review comes from the head payload, never the loaded page:
   // paging the reviews list must not rewrite the headline verdict, its tone or
   // the model/provider attribution.
@@ -671,11 +701,14 @@ export function PullRequestDetailView({
           <div className="min-w-0 flex-1">
             <TabsContent value="findings">
               {/* The filter sits above the list; changing it reloads from page
-                  one and the pager then counts the filtered total. */}
+                  one and the pager then counts the filtered total. It reads the
+                  committed filter (the one the loaded rows answer to), so it
+                  stays inert while a new one is in flight. */}
               {counts.findings === 0 ? null : (
                 <div className="mb-(--spacing-4) flex items-center gap-2">
                   <Select
                     value={records.findings.severity === "" ? SEVERITY_ALL : records.findings.severity}
+                    disabled={records.findings.status === "loading"}
                     onValueChange={(next) =>
                       onLoadPage("findings", { offset: 0, severity: next === SEVERITY_ALL ? "" : next })
                     }
@@ -717,7 +750,7 @@ export function PullRequestDetailView({
                   <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noFindings")}</p>
                 )
               ) : findingsPage.total === 0 ? (
-                <p className="text-sm text-(--text-muted)">{t(locale, "pullRequests.noFindings")}</p>
+                <p className="text-sm text-(--text-muted)">{emptyFindingsCopy}</p>
               ) : (
                 <div className="flex flex-col gap-(--spacing-6)">
                   {groups.map((group) => (

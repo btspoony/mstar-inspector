@@ -165,6 +165,9 @@ export const en = {
     noFailures: "No failures for this pull request.",
     findings: "Findings",
     noFindings: "No findings for this pull request.",
+    /** A filtered findings window with no match: it names the active severity,
+        not the PR (the head count still says the PR has findings). */
+    noFindingsForSeverity: "No findings with severity {severity}.",
     /** The detail header's meta line. */
     firstSeen: "First seen",
     lastSeen: "Last seen",

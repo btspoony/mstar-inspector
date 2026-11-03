@@ -141,6 +141,9 @@ export const zhCN: Dictionary = {
     noFailures: "此拉取请求没有失败记录。",
     findings: "发现",
     noFindings: "此拉取请求没有发现问题。",
+    /** 筛选后的发现窗口没有匹配项：文案点名当前严重程度，而不是整个 PR
+        （头部计数仍表明该 PR 有发现）。 */
+    noFindingsForSeverity: "没有严重程度为“{severity}”的发现。",
     /** 详情头部的元信息行。 */
     firstSeen: "首次出现",
     lastSeen: "最近出现",

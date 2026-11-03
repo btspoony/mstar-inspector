@@ -350,6 +350,14 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       (panel) => panelOf(container, panel) === panel,
     );
 
+  /** The label of the tab whose panel is active — empty when no panel is. */
+  const activeTabLabel = (win: Window, container: DomElement) => {
+    const active = shellPanels(container).filter((panel) => panel.getAttribute("data-state") === "active");
+    if (active.length !== 1) return active.length === 0 ? "" : "multiple";
+    const labelledBy = active[0]?.getAttribute("aria-labelledby") ?? "";
+    return win.document.getElementById(labelledBy)?.textContent ?? "";
+  };
+
   test("an inactive panel stays mounted but hidden, and the settings form keeps its typed value across a tab switch", async () => {
     // Radix unmounts inactive panels by default, which would destroy the
     // settings forms and refetch a manager tab on every switch. The shell
@@ -398,6 +406,116 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     } finally {
       await act(async () => root.unmount());
       cleanup();
+    }
+  });
+
+  /** A parseable insights summary, so the insights face renders its own body. */
+  const INSIGHTS_SUMMARY = {
+    window_days: 30,
+    repo: "",
+    reviews_total: 0,
+    findings_by_severity: [],
+    verdict_distribution: [],
+    weekly_trend: [],
+    daily_trend: [],
+    findings_distribution: [],
+    repos: [],
+  };
+
+  /**
+   * Mount the stateful page on `url` with the settings read held until the test
+   * releases it, so the frame the payload lands in can be observed rather than
+   * raced. The insights summary answers empty, like the demotion test.
+   */
+  async function mountPageWithHeldPayload(url: string, body: unknown) {
+    const { win, cleanup } = installDom(url);
+    const realFetch = globalThis.fetch;
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
+    globalThis.fetch = (async (input: unknown) => {
+      const target = String(input);
+      if (target.endsWith("/models")) return json({ groups: [] });
+      if (target.includes("/insights/summary")) return json(INSIGHTS_SUMMARY);
+      if (target.includes("/pull-requests")) return json({ pull_requests: [] });
+      await held;
+      return json(body);
+    }) as unknown as typeof fetch;
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
+    return {
+      win,
+      container,
+      release: async () => {
+        release();
+        for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+      },
+      unmount: async () => {
+        await act(async () => root.unmount());
+        globalThis.fetch = realFetch;
+        cleanup();
+      },
+    };
+  }
+
+  test("history traversal re-derives the tab from the URL, through the gate mirror", async () => {
+    // The popstate listener is registered once, so it reads the payload's
+    // can_manage through the ref mirror rather than a stale mount-time closure.
+    // A back/forward move onto ?tab=insights must therefore activate 洞察 even
+    // though the gate was still false when the listener was attached.
+    const page = await mountPageWithHeldPayload("http://localhost/dashboard/apps/1", managePayload);
+    try {
+      await page.release();
+      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabSettings"));
+
+      // A forward move: the address changes, then the router's popstate lands.
+      page.win.history.pushState(null, "", "/dashboard/apps/1?tab=insights");
+      await act(async () => page.win.dispatchEvent(new page.win.Event("popstate")));
+      await act(async () => {});
+      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabInsights"));
+
+      // …and back to the bare path returns to 应用设置.
+      page.win.history.pushState(null, "", "/dashboard/apps/1");
+      await act(async () => page.win.dispatchEvent(new page.win.Event("popstate")));
+      await act(async () => {});
+      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabSettings"));
+    } finally {
+      await page.unmount();
+    }
+  });
+
+  test("a manager's ?tab=insights deep link never first-paints the settings tab", async () => {
+    // Mounting with the gate still unknown would resolve ?tab=insights to
+    // settings; the shell withholds the tab face until the payload's gate is
+    // committed, so the FIRST committed panel state already has insights
+    // active — an observer per mutation proves no settings frame was painted.
+    const page = await mountPageWithHeldPayload("http://localhost/dashboard/apps/1?tab=insights", managePayload);
+    const observed: string[] = [];
+    const observer = new page.win.MutationObserver(() => {
+      const label = activeTabLabel(page.win, page.container);
+      if (label !== "") observed.push(label);
+    });
+    observer.observe(page.container as unknown as Parameters<typeof observer.observe>[0], {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-state"],
+    });
+    try {
+      await page.release();
+      // The settled face is the insights tab, and it is the only active tab any
+      // committed frame ever showed — settings never flashed.
+      expect(activeTabLabel(page.win, page.container)).toBe(t("en", "appDetail.tabInsights"));
+      expect(observed.length).toBeGreaterThan(0);
+      expect([...new Set(observed)]).toEqual([t("en", "appDetail.tabInsights")]);
+    } finally {
+      observer.disconnect();
+      await page.unmount();
     }
   });
 

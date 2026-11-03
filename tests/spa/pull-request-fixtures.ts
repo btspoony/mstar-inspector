@@ -149,8 +149,10 @@ export type DetailScene = { detail: PullRequestDetailPayload; pages: RecordPages
  * page under test: the page a caller overrides is a window (a later offset, a
  * severity filter), while the head describes the PR. It defaults to the
  * untouched first page's tally; a scene whose PR really has other must-fix
- * rows states its own. It is only bounded by the scene's own findings total —
- * a PR with no finding cannot claim a must-fix one.
+ * rows states its own. Callers keep it within the scene's findings total — a
+ * PR with no finding cannot claim a must-fix one — and the fixture does not
+ * enforce that: a clamp here would silently rewrite the stated fact and make
+ * the head agree with whichever page the test loaded.
  */
 export function scene(
   over: Partial<RecordPages> = {},
@@ -167,7 +169,7 @@ export function scene(
         findings: pages.findings.total,
         reviews: pages.reviews.total,
         failures: pages.failures.total,
-        must_fix: Math.min(mustFix, pages.findings.total),
+        must_fix: mustFix,
       },
       latest_review: latest === null || base === null ? null : { ...base, ...latest },
     },
@@ -175,16 +177,17 @@ export function scene(
   };
 }
 
-/** Static props for the pure view: every section loaded at `pages`' first page. */
-export function recordsOf(pages: RecordPages = RECORDS, offset = 0): RecordSections {
+/** Static props for the pure view: every section loaded at `pages`' window + filter. */
+export function recordsOf(pages: RecordPages = RECORDS, offset = 0, severity = ""): RecordSections {
   const section = <K extends RecordSection>(page: RecordPage<RecordPageItems[K]>): SectionState<K> => ({
     offset,
-    severity: "",
+    severity,
     status: "ok",
     page,
-    // A first-page render IS the newest window; a paged one describes a
-    // window the caller never supplied to the aside, so it stays unknown.
-    newest: offset === 0 ? page : null,
+    // A first-page render IS the newest window; a paged or filtered one
+    // describes a window the caller never supplied to the aside, so it stays
+    // unknown.
+    newest: offset === 0 && severity === "" ? page : null,
   });
   return {
     findings: section(pages.findings),
@@ -272,7 +275,7 @@ export async function mountView(
  * different Apps. Every request is recorded for the "one read per switch"
  * assertions.
  */
-function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
+export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
   const fetches: string[] = [];
   const impl = (async (input: unknown) => {
     const url = new URL(String(input), "http://localhost");
@@ -302,10 +305,22 @@ function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: typeof 
 /**
  * Mount the detail FACE (host + view) over a scene, optionally inside a
  * wrapper (StrictMode), and hand back the container, the window the clipboard
- * stubs hang off, and every request the reads issued.
+ * stubs hang off, and every request the reads issued. `fetch` replaces the
+ * scene stub for a test that must hold a read open and watch the frame it
+ * leaves on screen; the returned `fetches` still records every request.
  */
-export async function mountDetailView(sceneValue: DetailScene, wrap?: (view: ReactElement) => ReactElement) {
+export async function mountDetailView(
+  sceneValue: DetailScene,
+  wrap?: (view: ReactElement) => ReactElement,
+  { fetch: fetchImpl }: { fetch?: typeof globalThis.fetch } = {},
+) {
   const stub = detailFetch(() => sceneValue);
+  const fetches: string[] = [];
+  const reader = fetchImpl ?? stub.fetch;
+  const recording = ((input: RequestInfo | URL, init?: RequestInit) => {
+    fetches.push(String(input));
+    return reader(input, init);
+  }) as typeof globalThis.fetch;
   const pr = sceneValue.detail.pull_request;
   const view = createElement(PullRequestDetail, {
     locale: "en",
@@ -314,8 +329,8 @@ export async function mountDetailView(sceneValue: DetailScene, wrap?: (view: Rea
     prRef: { owner: pr.owner, repo: pr.repo, number: pr.number },
     onBack: () => {},
   });
-  const mounted = await mountView(wrap === undefined ? view : wrap(view), { fetch: stub.fetch });
-  return { ...mounted, fetches: stub.fetches };
+  const mounted = await mountView(wrap === undefined ? view : wrap(view), { fetch: recording });
+  return { ...mounted, fetches };
 }
 
 /**

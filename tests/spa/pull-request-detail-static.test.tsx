@@ -13,7 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { t } from "../../src/i18n";
+import { t, type DictionaryKey } from "../../src/i18n";
 import {
   appPullRequestDetailUrl,
   appPullRequestRecordsUrl,
@@ -33,6 +33,7 @@ import { defaultFamily, recordId } from "../../src/spa/pages/pullRequestDetailMo
 import { withMarkup } from "./dom";
 import {
   DETAIL,
+  FAILURES,
   FINDINGS,
   RECORDS,
   REVIEWS,
@@ -530,18 +531,11 @@ describe("pull request detail face (static SSR)", () => {
     // The head says this PR has must-fix rows while the loaded page holds only
     // nits (page 2, or a severity filter) — the family dot must survive.
     const built = scene();
-    const filtered = {
-      ...recordsOf(built.pages),
-      findings: {
-        offset: 10,
-        severity: "nit",
-        status: "ok" as const,
-        page: page(FINDINGS.filter((f) => f.severity === "nit")),
-        // The aside still describes the PR's newest window, which is the first
-        // page this face captured before the operator filtered/paged it.
-        newest: built.pages.findings,
-      },
-    };
+    const filtered = recordsOf(
+      { ...built.pages, findings: page(FINDINGS.filter((finding) => finding.severity === "nit")) },
+      10,
+      "nit",
+    );
     const read = await withMarkup(render(built.detail, filtered), (container) => ({
       dots: familyDots(container),
       // The count beside the dot still describes the PR.
@@ -1172,6 +1166,81 @@ describe("pull request detail face (static SSR)", () => {
     });
     // No findings to filter: the control is noise, so it is absent.
     expect((await filter(face({ findings: page([]) }))).present).toBe(false);
+  });
+
+  test("a failed section read renders its retry and claims nothing about an empty list", async () => {
+    // Each family owns its read; a failed one must show the failure face with
+    // its retry, not the empty-list copy — an empty window and an unread window
+    // mean different things to the operator. The head still counts the rows, so
+    // the tab keeps its count while its panel carries the failure.
+    const cases: Array<{
+      section: "findings" | "reviews" | "failures";
+      pages: Partial<RecordPages>;
+      emptyCopy: DictionaryKey;
+      rows: string;
+    }> = [
+      {
+        section: "findings",
+        pages: {},
+        emptyCopy: "pullRequests.noFindings",
+        rows: "Use a parameterized query",
+      },
+      {
+        section: "reviews",
+        pages: { findings: page([]), reviews: page(REVIEWS), failures: page([]) },
+        emptyCopy: "pullRequests.noReviews",
+        rows: "The refresh race is still reachable.",
+      },
+      {
+        section: "failures",
+        pages: { findings: page([]), reviews: page([]), failures: page(FAILURES) },
+        emptyCopy: "pullRequests.noFailures",
+        rows: "<script>alert(1)</script>",
+      },
+    ];
+
+    for (const { section, pages, emptyCopy, rows } of cases) {
+      const built = scene(pages);
+      const markup = render(built.detail, {
+        ...recordsOf(built.pages),
+        [section]: { offset: 0, severity: "", status: "error" as const, page: null, newest: null },
+      });
+      const read = await withMarkup(markup, (container) => {
+        const alert = container.querySelector('[data-slot="error-state"]');
+        return {
+          retry: [...(alert?.querySelectorAll("button") ?? [])].map((button) => button.textContent),
+          text: container.textContent ?? "",
+        };
+      });
+      // The retry control is the whole point: a failed read is recoverable.
+      expect(read.retry).toEqual([t("en", "common.retry")]);
+      // No empty-list claim about a window that was never read, and no rows
+      // from a failed page either.
+      expect(read.text).not.toContain(t("en", emptyCopy));
+      expect(read.text).not.toContain(rows);
+    }
+  });
+
+  test("a filtered findings window with no match names the filter, not the PR", async () => {
+    // The head counts three findings while the nit filter matches none: the
+    // empty copy must describe the FILTER, or it contradicts the tab count.
+    const built = scene({ findings: page([], 3) });
+    const copy = (severity: string) =>
+      withMarkup(render(built.detail, recordsOf({ ...built.pages, findings: page([]) }, 0, severity)), (container) =>
+        container.querySelector('[role="tabpanel"] p')?.textContent ?? "",
+      );
+    expect(await copy("nit")).toBe(
+      t("en", "pullRequests.noFindingsForSeverity", { severity: t("en", "pullRequests.severityNit") }),
+    );
+    expect(await copy("must-fix")).toBe(
+      t("en", "pullRequests.noFindingsForSeverity", { severity: t("en", "pullRequests.severityMustFix") }),
+    );
+    // An out-of-set severity names itself, as the buckets already do.
+    expect(await copy("blocker")).toBe(
+      t("en", "pullRequests.noFindingsForSeverity", { severity: "blocker" }),
+    );
+    // The unfiltered empty window keeps the PR-level copy.
+    expect(await copy("")).toBe(t("en", "pullRequests.noFindings"));
   });
 
   test("the loading face keeps the back control outside the busy region", async () => {

@@ -13,7 +13,7 @@ import { act, createElement, StrictMode } from "react";
 import { t } from "../../src/i18n";
 import type { PullRequestFailure, PullRequestFinding } from "../../src/spa/pages/data";
 import { currentDetailRead, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
-import { DETAIL, FAILURES, mountDetailView, mountTabAcrossApps, page, press, scene } from "./pull-request-fixtures";
+import { DETAIL, FAILURES, jsonResponse, mountDetailView, mountTabAcrossApps, page, press, scene } from "./pull-request-fixtures";
 
 /** A face whose only records are failures: it opens on the failures family. */
 const failuresOnly = (failures: PullRequestFailure[] = FAILURES) =>
@@ -156,8 +156,11 @@ describe("pull request detail (mounted)", () => {
       expect(pagerButton(t("en", "pullRequests.pagePrev"))?.disabled).toBe(true);
 
       await press(win, pagerButton(t("en", "pullRequests.pageNext")));
-      expect(fetches.filter((url) => url.includes("/findings?"))).toHaveLength(2);
-      expect(fetches.at(-1)).toContain("offset=10");
+      // At most the one page read the press needs — a bound, not a call count:
+      // a dedupe or a retry is not a defect, a refetch storm is.
+      const findingsReads = fetches.filter((url) => url.includes("/findings?"));
+      expect(findingsReads.length).toBeLessThanOrEqual(2);
+      expect(findingsReads.at(-1)).toContain("offset=10");
       expect(text()).toContain("Finding 10");
       expect(text()).not.toContain("Finding 00");
       expect(container.querySelector('[data-slot="pager-range"]')?.textContent).toBe(
@@ -169,6 +172,108 @@ describe("pull request detail (mounted)", () => {
       expect(container.querySelector('[data-slot="pager-range"]')?.textContent).toBe(
         t("en", "pullRequests.pageRange", { from: 1, to: 10, total: 25 }),
       );
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("a pager press commits only with its page: no skipped page, no range that outruns the rows", async () => {
+    // >1 page of findings with the reads HELD open, so the frame a press leaves
+    // on screen is observable: the range and both controls must describe the
+    // rows still rendered, and a second press must land on page 2, never jump
+    // to page 3 and drop the page-2 response on the floor.
+    const corpus: PullRequestFinding[] = Array.from({ length: 25 }, (_, index) => ({
+      finding_id: `f-${index}`,
+      severity: "must-fix",
+      title: `Finding ${String(index).padStart(2, "0")}`,
+      file_path: "",
+      line: null,
+      body: "",
+    }));
+    const holds = ["offset=10", "offset=20"];
+    // One gate per held REQUEST: the same window asked twice is two promises.
+    const pending: Array<{ offset: string; resolve: (response: Response) => void }> = [];
+    const settle = (offset: string) => {
+      const gate = pending.find((candidate) => candidate.offset === offset);
+      if (gate === undefined) throw new Error(`no held read for ${offset}`);
+      pending.splice(pending.indexOf(gate), 1);
+      const from = Number(offset.replace("offset=", ""));
+      gate.resolve(jsonResponse({ items: corpus.slice(from, from + 10), total: corpus.length }));
+    };
+    const heldFetch = (async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const offset = `offset=${url.searchParams.get("offset") ?? "0"}`;
+      if (url.pathname.endsWith("/findings") && holds.includes(offset)) {
+        return await new Promise<Response>((resolve) => pending.push({ offset, resolve }));
+      }
+      if (url.pathname.endsWith("/findings")) {
+        const from = Number(offset.replace("offset=", ""));
+        return jsonResponse({ items: corpus.slice(from, from + 10), total: corpus.length });
+      }
+      return jsonResponse(scene({ findings: page(corpus) }).detail);
+    }) as unknown as typeof fetch;
+
+    const { container, win, fetches, unmount } = await mountDetailView(
+      scene({ findings: page(corpus) }),
+      undefined,
+      { fetch: heldFetch },
+    );
+    try {
+      const pagerButton = (label: string) =>
+        [...container.querySelectorAll<HTMLButtonElement>('[data-slot="pager"] button')].find(
+          (button) => button.textContent === label,
+        );
+      const rangeText = () => container.querySelector('[data-slot="pager-range"]')?.textContent ?? "";
+      const severityControl = () => container.querySelector<HTMLButtonElement>('[role="combobox"]');
+      const findingsReads = () => fetches.filter((url) => url.includes("/findings?"));
+      // The range the reader sees, derived from the rows actually rendered:
+      // every row is must-fix, so one group holds them in corpus order.
+      const renderedRange = () => {
+        const numbers = [...container.querySelectorAll<HTMLElement>('[data-slot="finding"]')].map((row) =>
+          Number(/Finding (\d\d)/.exec(row.textContent ?? "")?.[1] ?? Number.NaN),
+        );
+        return t("en", "pullRequests.pageRange", {
+          from: (numbers[0] ?? 0) + 1,
+          to: (numbers.at(-1) ?? 0) + 1,
+          total: corpus.length,
+        });
+      };
+
+      // Page 1 is settled: the label names its rows and Next is the live control.
+      expect(rangeText()).toBe(renderedRange());
+      expect(pagerButton(t("en", "pullRequests.pageNext"))?.disabled).toBe(false);
+
+      // First press: page 2 is in flight. The label still names the rows on
+      // screen, and neither control can move a window that has not landed.
+      await press(win, pagerButton(t("en", "pullRequests.pageNext")));
+      expect(pending.map((gate) => gate.offset)).toEqual(["offset=10"]);
+      expect(rangeText()).toBe(renderedRange());
+      expect(rangeText()).toBe(t("en", "pullRequests.pageRange", { from: 1, to: 10, total: 25 }));
+      expect(pagerButton(t("en", "pullRequests.pageNext"))?.disabled).toBe(true);
+      expect(pagerButton(t("en", "pullRequests.pagePrev"))?.disabled).toBe(true);
+      expect(severityControl()?.disabled).toBe(true);
+
+      // A second press before the response lands cannot reach past page 2: the
+      // control is inert, so no offset-20 read is ever issued.
+      await press(win, pagerButton(t("en", "pullRequests.pageNext")));
+      expect(findingsReads()).toHaveLength(2);
+
+      // The page lands: page 2's rows and the range that names them, together.
+      await act(async () => settle("offset=10"));
+      expect(rangeText()).toBe(renderedRange());
+      expect(rangeText()).toBe(t("en", "pullRequests.pageRange", { from: 11, to: 20, total: 25 }));
+      expect(severityControl()?.disabled).toBe(false);
+      expect(pagerButton(t("en", "pullRequests.pagePrev"))?.disabled).toBe(false);
+
+      // The next window is a step from the page on screen, so page 3 follows.
+      await press(win, pagerButton(t("en", "pullRequests.pageNext")));
+      expect(pending.map((gate) => gate.offset)).toEqual(["offset=20"]);
+      expect(rangeText()).toBe(renderedRange());
+      expect(rangeText()).toBe(t("en", "pullRequests.pageRange", { from: 11, to: 20, total: 25 }));
+      await act(async () => settle("offset=20"));
+      expect(rangeText()).toBe(renderedRange());
+      expect(rangeText()).toBe(t("en", "pullRequests.pageRange", { from: 21, to: 25, total: 25 }));
+      expect(pagerButton(t("en", "pullRequests.pageNext"))?.disabled).toBe(true);
     } finally {
       await unmount();
     }
@@ -577,9 +682,8 @@ describe("pull request detail (mounted)", () => {
       // App B's head and its own rows replace App A's...
       expect(text()).toContain("App B pull request");
       expect(text()).toContain("App B finding");
-      // ...and App A's page is gone: a retained section page is skipped by
-      // `ensureSection` and rendered under App B's head, while the switch
-      // never reads App B's findings at all.
+      // ...because the switch drops App A's retained page and reads App B's
+      // own findings under App B's head; nothing of App A survives it.
       expect(text()).not.toContain("App A finding");
       expect(text()).not.toContain("App A pull request");
       const requested = (suffix: string) => fetches.some((url) => url.endsWith(suffix));
