@@ -15,15 +15,19 @@
  * object shape and closed enums; at most 25 results; unique row IDs
  * contained in the input; no remote IDs in output. Addressed requires
  * `verified-fix` plus an eligible complete catalog slice with an integer
- * ordered range inside the appropriate old/new hunk, exact quote match
- * (1–4096 chars) and a nonblank explanation ≤1200 chars. Dismissed requires
- * the `non-fix-dismissal` reason and never resolves; its rationale basis is
- * the carried `evidence.explanation` when the output cites evidence (that
- * explanation is shape-validated) or, with no evidence cited, the original
- * discussion in the input — so an evidence-free dismissal is legal here and
- * still evidence-grounded by construction. Unverifiable may have no
- * evidence. Duplicate/foreign/stale/malformed documents fail closed as a
- * whole. The validator proves location/content only — the semantic
+ * ordered range inside the appropriate old/new hunk, quote equality after
+ * whitespace normalization (CRLF/CR→LF, per-line trailing blanks stripped,
+ * one trailing newline dropped; 1–4096 chars) and a nonblank explanation
+ * ≤1200 chars. Dismissed requires the `non-fix-dismissal` reason and never
+ * resolves; its rationale basis is the carried `evidence.explanation` when
+ * the output cites evidence (that explanation is shape-validated) or, with
+ * no evidence cited, the original discussion in the input — so an
+ * evidence-free dismissal is legal here and still evidence-grounded by
+ * construction. Unverifiable may have no evidence. Document-level distrust
+ * (wrong schema, stale HEAD, non-array/oversized results, duplicate or
+ * foreign row IDs) fails closed as a whole; a row-level content error
+ * instead drops that row into `rejected` and the rest of the document
+ * stands. The validator proves location/content only — the semantic
  * correctness of the explanation and the trusted capture itself belong to
  * the evidence catalog (spec §7.3 "Trusted evidence catalog") and the
  * consumer.
@@ -138,7 +142,17 @@ function isInt(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value);
 }
 
-/** Byte-equal line-segment quote: `lines[start..end]` joined with '\n'. */
+/**
+ * Normalize a quoted multi-line block for comparison: CRLF/CR→LF, per-line
+ * trailing whitespace stripped, one trailing newline dropped. Indentation and
+ * interior blanks are significant; only formatting noise is forgiven.
+ */
+export function normalizeQuoteText(text: string): string {
+  const unified = text.replace(/\r\n?/g, '\n').split('\n').map((line) => line.trimEnd()).join('\n');
+  return unified.endsWith('\n') ? unified.slice(0, -1) : unified;
+}
+
+/** Line-segment quote: `lines[start..end]` joined with '\n'. */
 function segmentQuote(lines: string[], startLine: number, start: number, endLine: number): string | null {
   const from = startLine - start;
   const to = endLine - start;
@@ -150,10 +164,10 @@ function segmentQuote(lines: string[], startLine: number, start: number, endLine
  * Structural eligibility of an Addressed evidence citation against the
  * trusted catalog slice (spec §7.3 "Validation"): the slice must exist and
  * be complete; the cited range must be integer/ordered and fall entirely
- * inside the appropriate old/new side; the quote must byte-equal those
- * lines; removed/replaced proof must intersect the original concern's old
- * range and demonstrate the relevant structural change. Returns null when
- * eligible, else the failure reason.
+ * inside the appropriate old/new side; the quote must equal those lines
+ * after `normalizeQuoteText`; removed/replaced proof must intersect the
+ * original concern's old range and demonstrate the relevant structural
+ * change. Returns null when eligible, else the failure reason.
  */
 function addressedProofError(
   evidence: { kind: string; sliceId: string; startLine: number; endLine: number; quote: string },
@@ -183,7 +197,9 @@ function addressedProofError(
     if (expected === null) {
       return `current-code range ${evidence.startLine}-${evidence.endLine} is not inside the hunk new side (${slice.newStart}-${newEnd})`;
     }
-    if (expected !== evidence.quote) return 'current-code quote does not byte-equal the cited new-side lines';
+    if (normalizeQuoteText(expected) !== normalizeQuoteText(evidence.quote)) {
+      return 'current-code quote does not match the cited new-side lines';
+    }
     return null;
   }
 
@@ -193,7 +209,9 @@ function addressedProofError(
   if (expected === null) {
     return `${evidence.kind} range ${evidence.startLine}-${evidence.endLine} is not inside the slice old side (${slice.oldStart}-${oldEnd})`;
   }
-  if (expected !== evidence.quote) return `${evidence.kind} quote does not byte-equal the cited old-side lines`;
+  if (normalizeQuoteText(expected) !== normalizeQuoteText(evidence.quote)) {
+    return `${evidence.kind} quote does not match the cited old-side lines`;
+  }
 
   if (original.filePath !== null && slice.path !== original.filePath && slice.oldPath !== original.filePath) {
     return `${evidence.kind} slice path ${JSON.stringify(slice.path)} does not match the original concern file ${JSON.stringify(original.filePath)}`;
@@ -254,14 +272,93 @@ function evidenceShapeError(
   return null;
 }
 
+/** A row dropped for its own content: the document stands without it. */
+export type RecheckRowRejection = { rowId: string | null; index: number; error: string };
+
 /**
- * Fail-closed recheck document validation (spec §7.3): returns the typed
- * doc on success, or a specific error string. Duplicate/foreign/stale/
- * malformed documents fail closed as a whole — no partial acceptance.
+ * Row-level content rules (shape, closed enums, disposition/reason pairing,
+ * evidence, index list, addressed proof). Returns the failure reason, or null
+ * when the row is assessable. Row identity (duplicate/foreign) is NOT here —
+ * that distrust is document-level.
+ */
+function rowContentError(
+  result: Record<string, unknown>,
+  rowId: string,
+  where: string,
+  slices: ReadonlyMap<string, EvidenceSlice>,
+  targets: RecheckTarget[],
+): string | null {
+  if (typeof result.disposition !== 'string' || !DISPOSITIONS.has(result.disposition)) {
+    return `${where}.disposition is outside the closed enum`;
+  }
+  if (typeof result.reason !== 'string' || !REASONS.has(result.reason)) {
+    return `${where}.reason is outside the closed enum`;
+  }
+
+  if (result.disposition === 'addressed') {
+    if (result.reason !== ADDRESSED_REASON) {
+      return `${where}: addressed requires reason "${ADDRESSED_REASON}"`;
+    }
+  } else if (result.disposition === 'dismissed') {
+    if (result.reason !== DISMISSED_REASON) {
+      return `${where}: dismissed requires reason "${DISMISSED_REASON}"`;
+    }
+  } else if (!UNVERIFIABLE_REASONS.has(result.reason as string)) {
+    return `${where}: unverifiable requires an unverifiable reason, got ${JSON.stringify(result.reason)}`;
+  }
+
+  let evidence: Record<string, unknown> | null = null;
+  if (result.evidence !== null) {
+    evidence = exactObject(result.evidence, ['kind', 'sliceId', 'startLine', 'endLine', 'quote', 'explanation']);
+    if (evidence === null) {
+      return `${where}.evidence must be an object with exactly {kind, sliceId, startLine, endLine, quote, explanation} or null`;
+    }
+    const shapeError = evidenceShapeError(evidence, slices, where);
+    if (shapeError !== null) return shapeError;
+  } else if (result.disposition === 'addressed') {
+    return `${where}: addressed requires eligible evidence (got null)`;
+  }
+
+  if (!Array.isArray(result.relatedCurrentFindingIndexes)) {
+    return `${where}.relatedCurrentFindingIndexes must be an array`;
+  }
+  for (const index of result.relatedCurrentFindingIndexes) {
+    if (!isInt(index) || index < 0) {
+      return `${where}.relatedCurrentFindingIndexes must contain non-negative integers`;
+    }
+  }
+
+  if (result.disposition === 'addressed' && evidence !== null) {
+    const target = targets.find((t) => t.rowId === rowId);
+    const proofError = addressedProofError(
+      {
+        kind: evidence.kind as string,
+        sliceId: evidence.sliceId as string,
+        startLine: evidence.startLine as number,
+        endLine: evidence.endLine as number,
+        quote: evidence.quote as string,
+      },
+      slices,
+      target!.original,
+    );
+    if (proofError !== null) return `${where}: ${proofError}`;
+  }
+  return null;
+}
+
+/**
+ * Recheck document validation (spec §7.3). Document-level distrust — wrong
+ * schema, stale HEAD, non-array or oversized results, a duplicate or foreign
+ * row ID — fails closed as a whole. A row-level content error instead drops
+ * that one row into `rejected` and the surviving rows form `doc.results`, so
+ * one imprecise citation cannot discard the rest of the report.
  * Omitted selected rows becoming unverifiable is the consumer's
  * reconciliation job, not this validator's.
  */
-export function validateRecheckDoc(value: unknown, input: RecheckInput): { ok: true; doc: RecheckDoc } | Err {
+export function validateRecheckDoc(
+  value: unknown,
+  input: RecheckInput,
+): { ok: true; doc: RecheckDoc; rejected: RecheckRowRejection[] } | Err {
   const doc = exactObject(value, ['schema', 'headSha', 'results']);
   if (doc === null) return fail('document must be an object with exactly {schema, headSha, results}');
   if (doc.schema !== 'mstar.recheck/v1') {
@@ -279,76 +376,34 @@ export function validateRecheckDoc(value: unknown, input: RecheckInput): { ok: t
   const slices = new Map(input.evidence.map((slice) => [slice.id, slice]));
   const inputRowIds = new Set(input.targets.map((target) => target.rowId));
   const seenRowIds = new Set<string>();
+  const results: Assessment[] = [];
+  const rejected: RecheckRowRejection[] = [];
 
   for (let i = 0; i < doc.results.length; i++) {
     const where = `results[${i}]`;
     const raw = doc.results[i];
     const result = exactObject(raw, ['rowId', 'disposition', 'reason', 'evidence', 'relatedCurrentFindingIndexes']);
     if (result === null) {
-      return fail(`${where} must be an object with exactly {rowId, disposition, reason, evidence, relatedCurrentFindingIndexes}`);
+      rejected.push({ rowId: null, index: i, error: `${where} must be an object with exactly {rowId, disposition, reason, evidence, relatedCurrentFindingIndexes}` });
+      continue;
     }
-    if (!isNonemptyString(result.rowId)) return fail(`${where}.rowId must be a nonempty string`);
+    if (!isNonemptyString(result.rowId)) {
+      rejected.push({ rowId: null, index: i, error: `${where}.rowId must be a nonempty string` });
+      continue;
+    }
     if (seenRowIds.has(result.rowId)) return fail(`${where}.rowId ${JSON.stringify(result.rowId)} is a duplicate row ID`);
     seenRowIds.add(result.rowId);
     if (!inputRowIds.has(result.rowId)) {
       return fail(`${where}.rowId ${JSON.stringify(result.rowId)} is not in the input targets (foreign row)`);
     }
-    if (typeof result.disposition !== 'string' || !DISPOSITIONS.has(result.disposition)) {
-      return fail(`${where}.disposition is outside the closed enum`);
-    }
-    if (typeof result.reason !== 'string' || !REASONS.has(result.reason)) {
-      return fail(`${where}.reason is outside the closed enum`);
-    }
 
-    if (result.disposition === 'addressed') {
-      if (result.reason !== ADDRESSED_REASON) {
-        return fail(`${where}: addressed requires reason "${ADDRESSED_REASON}"`);
-      }
-    } else if (result.disposition === 'dismissed') {
-      if (result.reason !== DISMISSED_REASON) {
-        return fail(`${where}: dismissed requires reason "${DISMISSED_REASON}"`);
-      }
-    } else if (!UNVERIFIABLE_REASONS.has(result.reason as string)) {
-      return fail(`${where}: unverifiable requires an unverifiable reason, got ${JSON.stringify(result.reason)}`);
+    const contentError = rowContentError(result, result.rowId, where, slices, input.targets);
+    if (contentError !== null) {
+      rejected.push({ rowId: result.rowId, index: i, error: contentError });
+      continue;
     }
-
-    let evidence: Record<string, unknown> | null = null;
-    if (result.evidence !== null) {
-      evidence = exactObject(result.evidence, ['kind', 'sliceId', 'startLine', 'endLine', 'quote', 'explanation']);
-      if (evidence === null) {
-        return fail(`${where}.evidence must be an object with exactly {kind, sliceId, startLine, endLine, quote, explanation} or null`);
-      }
-      const shapeError = evidenceShapeError(evidence, slices, where);
-      if (shapeError !== null) return fail(shapeError);
-    } else if (result.disposition === 'addressed') {
-      return fail(`${where}: addressed requires eligible evidence (got null)`);
-    }
-
-    if (!Array.isArray(result.relatedCurrentFindingIndexes)) {
-      return fail(`${where}.relatedCurrentFindingIndexes must be an array`);
-    }
-    for (const index of result.relatedCurrentFindingIndexes) {
-      if (!isInt(index) || index < 0) {
-        return fail(`${where}.relatedCurrentFindingIndexes must contain non-negative integers`);
-      }
-    }
-
-    if (result.disposition === 'addressed' && evidence !== null) {
-      const target = input.targets.find((t) => t.rowId === result.rowId);
-      const proofError = addressedProofError(
-        {
-          kind: evidence.kind as string,
-          sliceId: evidence.sliceId as string,
-          startLine: evidence.startLine as number,
-          endLine: evidence.endLine as number,
-          quote: evidence.quote as string,
-        },
-        slices,
-        target!.original,
-      );
-      if (proofError !== null) return fail(`${where}: ${proofError}`);
-    }
+    results.push(result as unknown as Assessment);
   }
 
-  return { ok: true, doc: value as RecheckDoc };
+  return { ok: true, doc: { schema: 'mstar.recheck/v1', headSha: doc.headSha, results }, rejected };
 }
