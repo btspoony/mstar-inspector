@@ -7,6 +7,10 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: the runner stopped requiring a seat summary — the review body is the
+# engine's own layout now instead of a consumer rebuild of it, so the two halves
+# of that change (the 4.1.6 pin above and the no-longer-required output field)
+# must ship together.
 # rebuild: the runner hands the SDK a callable extension-roots accessor — the
 # pinned SDK reads a getter and calls it as a method, which killed every seat
 # before its first model turn.

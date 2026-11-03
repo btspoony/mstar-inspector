@@ -166,7 +166,17 @@ export function buildReviewBody(
   if (repeats !== "") sections.push(repeats);
   if (closure) sections.push(closure);
   const body = sections.join("\n\n");
-  return body.length <= REVIEW_BODY_LIMIT ? body : `${body.slice(0, REVIEW_BODY_LIMIT - 1)}…`;
+  if (body.length <= REVIEW_BODY_LIMIT) return body;
+  // A cut that lands inside a fold drops its close tag, and GitHub then routes
+  // the rest of the comment into the collapsed block — the same swallow a stray
+  // `<` causes in `wire`. Close the fold the cut left open, paying its length
+  // out of the budget rather than overshooting it.
+  const close = "\n\n</details>";
+  const head = body.slice(0, REVIEW_BODY_LIMIT - 1);
+  const folds =
+    (head.match(/<details>/g) ?? []).length - (head.match(/<\/details>/g) ?? []).length;
+  const cut = folds > 0 ? head.slice(0, REVIEW_BODY_LIMIT - 1 - close.length) + close : head;
+  return `${cut}…`;
 }
 
 // ---------------------------------------------------------------------------

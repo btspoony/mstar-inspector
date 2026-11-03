@@ -505,6 +505,30 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body).toContain("…");
   });
 
+  test("a cut that lands inside a fold closes it, so the collapse cannot swallow the trailer", () => {
+    const coverage: ClosureCoverage = {
+      totalOpen: 25,
+      selected: 25,
+      assessed: 25,
+      omitted: 0,
+      capped: 0,
+      contextCoverage: "full",
+    };
+    const rows: ClosureRow[] = Array.from({ length: 25 }, (_, index) => ({
+      title: `prior finding ${index}`,
+      disposition: "still-open",
+      reason: "not-addressed",
+      evidenceKind: null,
+      thread: "-",
+    }));
+    // Sized so the closure fold opens before the cut and would end after it.
+    const clogged: ReviewOutput = { ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT - 400) };
+    const body = buildReviewBody(clogged, 0, undefined, buildClosureSection(coverage, rows));
+    expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
+    expect(body).toContain("<details>");
+    expect((body.match(/<details>/g) ?? []).length).toBe((body.match(/<\/details>/g) ?? []).length);
+  });
+
   test("within-limit bodies pass through verbatim", () => {
     const publicationMarker = buildPublicationMarker({
       publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
