@@ -1,10 +1,16 @@
 /**
  * Ops failure sweep (architect verdict AL-6) — the cron
  * handler's read-only scan: count `review_failures` rows over the trailing
- * 24h across ALL stages (parse + runner/sandbox/pipeline — the
+ * 24h across the infra-failure stages (parse + runner/sandbox/pipeline — the
  * infra-failure rows make this table the sufficient failure signal, closing
  * the "DLQ-bound failure leaves zero D1 trace" blind spot) and alert when
  * the count breaches the threshold.
+ *
+ * `stage = 'recheck'` is EXCLUDED from that count. Those rows are per-round
+ * attribution written for rounds that published normally (a budget skip, a
+ * dead seat, one invalid document), so counting them would page ops for
+ * degraded-but-successful reviews. They stay in `review_failures` — only the
+ * paging signal ignores them.
  *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
  * - DLQ depth is NOT read: there is no CF API token surface,
@@ -255,9 +261,13 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
   // the single source) so the SQL cannot drift from the pinned threshold
   // table. The composed text is byte-identical to the pre-constant form
   // (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
+  // `stage <> 'recheck'` is the paging exclusion: those rows are per-round
+  // attribution for rounds that published normally (see the header).
   const row = await db
     .prepare(
-      `SELECT COUNT(*) AS n FROM review_failures WHERE created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')`,
+      `SELECT COUNT(*) AS n FROM review_failures
+       WHERE created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')
+         AND stage <> 'recheck'`,
     )
     .first<{ n: number }>();
   const failures24h = row?.n ?? 0;

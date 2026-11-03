@@ -36,6 +36,11 @@
 # `Bun.stdin.text()` read: the worker sends a complete document and no longer
 # relies on the write side closing, so that read never returned, the run emitted
 # nothing on either stream, and the outer exec bound killed it at exit 124.
+# rebuild: the recheck seat now writes a status document beside its findings
+# document, and a single failed row is dropped in place instead of failing the
+# whole round. A stale runner writes no status at all, so the worker reads
+# `absent` and every recheck round lands in `review_failures` as a degraded
+# attribution row it did not have to write.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

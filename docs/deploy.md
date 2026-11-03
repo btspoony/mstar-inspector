@@ -2381,9 +2381,13 @@ row expires.
   Check recovery reconciler ([§ Check recovery](#check-recovery-7112)),
   each stage in its own try/catch so none can break another. The sweep counts
   `review_failures` rows over the
-  trailing 24h across ALL stages (parse + runner/sandbox/pipeline; the
+  trailing 24h across the infra-failure stages only (parse +
+  runner/sandbox/pipeline; the
   per-attempt rows written by migration 0010 make this table the sufficient failure
-  signal).
+  signal). `stage = 'recheck'` rows are per-round attribution written for
+  rounds that published normally (budget skip, dead seat, one invalid
+  document), so the count excludes them — they stay in the table as
+  attribution and never page ops.
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
   Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,

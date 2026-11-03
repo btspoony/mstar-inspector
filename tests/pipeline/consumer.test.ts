@@ -3449,7 +3449,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(commenterCalls.some((c) => c.op === "resolve")).toBe(true);
   });
 
-  test("a missing status file keeps the conservative path: invalid-output, no throw, no failure row", async () => {
+  test("a missing status file keeps the conservative path: invalid-output, no throw, exactly one `recheck` attribution row", async () => {
     reset();
     diffStdout = VALID_DIFF;
     runnerStdout = JSON.stringify(VALID_OUTPUT);

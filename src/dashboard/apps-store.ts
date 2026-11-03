@@ -1071,6 +1071,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * (a constraint) would refuse a legitimate re-install shape, and a
      * cross-App duplicate is a config mistake visible in the delivery health
      * panel, not a silent data problem.
+     *
+     * `stage = 'recheck'` rows are NOT failures of the review: they are
+     * per-round attribution written for rounds that published normally, so a
+     * clean PR would otherwise read a non-zero failure count and a
+     * `recheck / skipped: budget: null` history entry.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -1099,7 +1104,8 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE (f.owner, f.repo, f.pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
+             WHERE f.stage <> 'recheck'
+               AND (f.owner, f.repo, f.pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
              GROUP BY f.owner, f.repo, f.pr_number`,
           )
           .bind(appId, appId, PULL_REQUEST_LIST_LIMIT),
@@ -1152,7 +1158,8 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?
+             WHERE f.stage <> 'recheck'
+               AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC`,
           )
           .bind(appId, row.owner, row.repo, prNumber),
