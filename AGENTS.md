@@ -56,8 +56,12 @@ commit whenever you change any of:
 - `packages/runner/verify-synthesis.sh` (copied into the image at /opt/verify-synthesis.sh)
 - `sandbox-image/**` — the CLI shims and their lockfiles
 - `.dockerignore` — it decides which of these sources reach the build context
-- `wrangler.jsonc` — its build context decides which tree the Dockerfile sees
-  and its dockerfile path decides which file is hashed
+
+Also touch it when the container block in `wrangler.jsonc` changes — the
+container's `name`, its `images` entry, or that entry's `dockerfile` /
+`build_context` — because that block decides which tree the Dockerfile sees and
+which file is hashed. Every other `wrangler.jsonc` edit (vars, queues, routes,
+observability) leaves the image untouched and needs no marker.
 
 Check before merging anything that touches those paths:
 

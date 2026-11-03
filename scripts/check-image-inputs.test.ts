@@ -16,6 +16,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  containerSignature,
   evaluateImageGate,
   familyPattern,
   IMAGE_INPUT_FAMILIES,
@@ -115,36 +116,84 @@ describe("image input vocabulary parity", () => {
 
 describe("image gate", () => {
   test("a runner source change without a marker change fails", () =>
-    expect(evaluateImageGate(["packages/runner/src/index.ts"], "")).toEqual({
+    expect(evaluateImageGate(["packages/runner/src/index.ts"], "", false)).toEqual({
       ok: false,
       reason: "image-input-without-marker",
     }));
 
   test("the same change with a rebuild marker diff passes", () =>
     expect(
-      evaluateImageGate(["packages/runner/src/index.ts"], "+# rebuild: runner source change"),
+      evaluateImageGate(["packages/runner/src/index.ts"], "+# rebuild: runner source change", false),
     ).toEqual({ ok: true }));
 
   test("a docs-only change passes", () =>
-    expect(evaluateImageGate(["docs/deploy.md"], "")).toEqual({ ok: true }));
+    expect(evaluateImageGate(["docs/deploy.md"], "", false)).toEqual({ ok: true }));
 
   test("a sandbox-image shim change fails without the marker", () =>
-    expect(evaluateImageGate(["sandbox-image/entry.sh"], "")).toEqual({
+    expect(evaluateImageGate(["sandbox-image/entry.sh"], "", false)).toEqual({
       ok: false,
       reason: "image-input-without-marker",
     }));
 
   test("a verify-synthesis.sh change alone fails without the marker", () =>
-    expect(evaluateImageGate(["packages/runner/verify-synthesis.sh"], "")).toEqual({
+    expect(evaluateImageGate(["packages/runner/verify-synthesis.sh"], "", false)).toEqual({
       ok: false,
       reason: "image-input-without-marker",
     }));
 
   test("a Dockerfile change that does not touch the marker fails", () =>
-    expect(evaluateImageGate(["sandbox-image/Dockerfile"], "-FROM old\n+FROM new")).toEqual({
+    expect(evaluateImageGate(["sandbox-image/Dockerfile"], "-FROM old\n+FROM new", false)).toEqual({
       ok: false,
       reason: "image-input-without-marker",
     }));
+
+  test("a container-block change alone fails without the marker", () =>
+    // No copied path changed, but the image a deploy builds did.
+    expect(evaluateImageGate([], "", true)).toEqual({
+      ok: false,
+      reason: "image-input-without-marker",
+    }));
+
+  test("a container-block change with the marker passes", () =>
+    expect(evaluateImageGate([], "+# rebuild: build context repointed", true)).toEqual({ ok: true }));
+
+  test("an unrelated wrangler.jsonc edit needs no marker", () =>
+    // `wrangler.jsonc` is not a family: a vars-only change cannot move the image.
+    expect(evaluateImageGate(["wrangler.jsonc"], "", false)).toEqual({ ok: true }));
+});
+
+describe("containerSignature", () => {
+  const BLOCK =
+    '{ "name": "c", "scheduling_policy": "durable_object", "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile", "build_context": "." } } }';
+  const config = (container: string, extra = "") => `{\n${extra}  "containers": [${container}]\n}\n`;
+
+  test("an edit outside the container block leaves the signature unchanged", () => {
+    const base = config(BLOCK, '  "vars": { "DEPLOYMENT_MODE": "saas" },\n');
+    const head = config(BLOCK, '  // deploy shape\n  "vars": { "DEPLOYMENT_MODE": "self-hosted" },\n  "keep_vars": true,\n');
+    const baseSignature = containerSignature(base);
+    expect(baseSignature).toBeDefined();
+    // A JSONC comment is not a value either.
+    expect(containerSignature(head)).toBe(baseSignature);
+  });
+
+  test("a dockerfile, build_context, image entry or container name change is a change", () => {
+    const baseSignature = containerSignature(config(BLOCK));
+    expect(baseSignature).toBeDefined();
+    for (const changed of [
+      BLOCK.replace('"./sandbox-image/Dockerfile"', '"./sandbox-image/Other.Dockerfile"'),
+      BLOCK.replace('"build_context": "."', '"build_context": "./sandbox-image"'),
+      BLOCK.replace('"sandbox":', '"sandbox-v2":'),
+      BLOCK.replace('"name": "c"', '"name": "c2"'),
+    ]) {
+      expect(containerSignature(config(changed)), changed).not.toBe(baseSignature);
+    }
+  });
+
+  test("a config without containers is an empty block; an unreadable one is undefined", () => {
+    expect(containerSignature('{ "vars": {} }')).toBe(containerSignature("{}"));
+    expect(containerSignature("not json")).toBeUndefined();
+    expect(containerSignature('{"containers": "no"}')).toBeUndefined();
+  });
 });
 
 describe("touchesImageInput", () => {
@@ -156,7 +205,6 @@ describe("touchesImageInput", () => {
     "packages/runner/verify-synthesis.sh",
     "sandbox-image/cli-global/package.json",
     ".dockerignore",
-    "wrangler.jsonc",
   ];
 
   test("matches each declared path family", () => {
@@ -299,6 +347,56 @@ describe("image gate CLI", () => {
       git("commit", "-qm", "non-ASCII runner source");
 
       expect(runGate(dir, base, script)).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a wrangler.jsonc edit outside the container block needs no marker", () => {
+    const { dir, git } = tempRepo();
+    try {
+      git("add", "-A");
+      git("commit", "-qm", "config");
+      const base = git("rev-parse", "HEAD");
+
+      // The container block is byte-for-byte the same; only deploy settings moved.
+      write(
+        dir,
+        "wrangler.jsonc",
+        '{\n  "vars": { "DEPLOYMENT_MODE": "saas" },\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile" } } }]\n}\n',
+      );
+      git("add", "-A");
+      git("commit", "-qm", "vars only");
+
+      expect(runGate(dir, base, script)).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a build_context repoint fails without the marker, and passes with it", () => {
+    const { dir, git } = tempRepo();
+    try {
+      write(dir, "sandbox-image/Dockerfile", "# rebuild: initial\nFROM scratch\n");
+      git("add", "-A");
+      git("commit", "-qm", "config + image");
+      const base = git("rev-parse", "HEAD");
+
+      const repointed =
+        '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile", "build_context": "." } } }]\n}\n';
+      write(dir, "wrangler.jsonc", repointed);
+      git("add", "-A");
+      git("commit", "-qm", "repoint the build context");
+      expect(runGate(dir, base, script)).toBe(1);
+
+      write(
+        dir,
+        "sandbox-image/Dockerfile",
+        "# rebuild: initial\n# rebuild: build context repointed\nFROM scratch\n",
+      );
+      git("add", "-A");
+      git("commit", "-qm", "marker");
+      expect(runGate(dir, base, script)).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

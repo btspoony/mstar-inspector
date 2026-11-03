@@ -242,10 +242,10 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     seed(db, "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
       "review.concurrency.system", "not-a-number", new Date().toISOString());
     expect(await (await getConcurrency(db, "ws-acme", "dana")).json()).toEqual({
-      // The workspace column is NULL (a real absence → its 16 default); only the
-      // system level was untrusted, so that level answers the conservative 1 and
-      // the flag is set. Each level degrades on its own value, never on its peer.
-      concurrency: 16,
+      // One statement answers both levels, so an untrusted system value
+      // degrades the pair together: the face never reports a mixed or torn
+      // pair as if the workspace had stored 16 alongside a serial system cap.
+      concurrency: 1,
       system: 1,
       min: 1,
       max: 250,

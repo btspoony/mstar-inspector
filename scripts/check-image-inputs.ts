@@ -19,16 +19,17 @@
 import { readFileSync } from "node:fs";
 
 /**
- * Path families the image copies in — the gate's whole input vocabulary, as
- * globs. `AGENTS.md` § Sandbox image rebuild and `docs/deploy.md` § Image
- * rebuild gate state the same list; the parity test reads all three surfaces,
- * so editing one alone fails. The root `.dockerignore` belongs here because it
- * decides which of those sources reach the build context at all: excluding one
- * changes the image without touching anything the Dockerfile names.
- * `wrangler.jsonc` belongs here because it is the container's build config: its
- * `build_context` decides which tree the Dockerfile sees, and its `dockerfile`
- * path decides which file is hashed, so editing either changes the image a
- * deploy produces — while the gate would still be diffing the old path.
+ * Path families the image copies in — the gate's path vocabulary, as globs.
+ * `AGENTS.md` § Sandbox image rebuild and `docs/deploy.md` § Image rebuild gate
+ * state the same list; the parity test reads all three surfaces, so editing one
+ * alone fails. The root `.dockerignore` belongs here because it decides which
+ * of those sources reach the build context at all: excluding one changes the
+ * image without touching anything the Dockerfile names.
+ *
+ * `wrangler.jsonc` is deliberately NOT a family: most of that file (vars,
+ * queues, routes, observability) cannot change the image, and a whole-file
+ * match would force a multi-minute image rebuild for every config edit. The
+ * container block is compared by value instead — see `containerSignature`.
  */
 export const IMAGE_INPUT_FAMILIES: readonly string[] = [
   "packages/runner/src/**",
@@ -38,7 +39,6 @@ export const IMAGE_INPUT_FAMILIES: readonly string[] = [
   "packages/runner/verify-synthesis.sh",
   "sandbox-image/**",
   ".dockerignore",
-  "wrangler.jsonc",
 ];
 
 /**
@@ -70,6 +70,11 @@ export const IMAGE_REBUILD_INSTRUCTION = [
   "whenever you change any of:",
   "",
   ...IMAGE_INPUT_FAMILIES.map((family) => `- \`${family}\``),
+  "",
+  "…or when the container block in `wrangler.jsonc` changes: the container's",
+  "`name`, its `images` entry, or that entry's `dockerfile`/`build_context`. A",
+  "config edit outside that block (vars, queues, routes, observability) needs no",
+  "rebuild.",
 ].join("\n");
 
 /**
@@ -144,6 +149,40 @@ export function stripJsonComments(text: string): string {
   return out;
 }
 
+/**
+ * The container block a deploy builds the image from, serialized so two
+ * revisions compare by value instead of by file bytes: each container's `name`
+ * and its whole `images` map (whose entries carry `dockerfile` and
+ * `build_context`). Everything else in the config — vars, queues, routes,
+ * observability — cannot change the image, so it must not force a rebuild.
+ * `undefined` when the config cannot be read: the caller fails instead of
+ * passing unverified.
+ *
+ * shortcut: key order inside the block counts as a change; sort keys if a
+ * reorder-only edit ever shows up in practice.
+ */
+export function containerSignature(configText: string): string | undefined {
+  let config: unknown;
+  try {
+    config = JSON.parse(stripJsonComments(configText));
+  } catch {
+    return undefined;
+  }
+  if (typeof config !== "object" || config === null) return undefined;
+  if (!("containers" in config)) return JSON.stringify([]);
+  const containers = config.containers;
+  if (!Array.isArray(containers)) return undefined;
+  return JSON.stringify(
+    containers.map((container) => {
+      if (typeof container !== "object" || container === null) return null;
+      return {
+        name: "name" in container ? container.name : undefined,
+        images: "images" in container ? container.images : undefined,
+      };
+    }),
+  );
+}
+
 export type ImageGateVerdict = { ok: true } | { ok: false; reason: "image-input-without-marker" };
 
 export function touchesImageInput(paths: string[]): boolean {
@@ -164,8 +203,17 @@ export function touchesRebuildMarker(dockerfileDiff: string): boolean {
   );
 }
 
-export function evaluateImageGate(paths: string[], dockerfileDiff: string): ImageGateVerdict {
-  if (!touchesImageInput(paths)) return { ok: true };
+/**
+ * `containersChanged` is the config half of the vocabulary: the parsed
+ * container block differs between base and head, so the image a deploy builds
+ * changed even when no copied path did.
+ */
+export function evaluateImageGate(
+  paths: string[],
+  dockerfileDiff: string,
+  containersChanged: boolean,
+): ImageGateVerdict {
+  if (!touchesImageInput(paths) && !containersChanged) return { ok: true };
   if (touchesRebuildMarker(dockerfileDiff)) return { ok: true };
   return { ok: false, reason: "image-input-without-marker" };
 }
@@ -211,15 +259,32 @@ if (import.meta.main) {
 
   // The path comes from the config `wrangler` itself reads, so a hand-copied
   // Dockerfile path here can never drift from the file a deploy hashes.
-  let dockerfilePath: string | undefined;
+  let headConfig: string;
   try {
-    dockerfilePath = readDockerfilePath(readFileSync(configPath, "utf8"));
+    headConfig = readFileSync(configPath, "utf8");
   } catch {
-    dockerfilePath = undefined;
+    console.error(
+      `::error::check-image-inputs: ${configPath} could not be read — treat as unverified, not a pass`,
+    );
+    process.exit(1);
   }
+  const dockerfilePath = readDockerfilePath(headConfig);
   if (dockerfilePath === undefined) {
     console.error(
       `::error::check-image-inputs: ${configPath} declares no \`containers[].images.sandbox.dockerfile\` — treat as unverified, not a pass`,
+    );
+    process.exit(1);
+  }
+
+  // The container block is read at BOTH revisions: a `build_context` or
+  // Dockerfile repoint changes the image even though no copied path did. The
+  // file itself is not a path family — every other config edit is image-neutral.
+  const baseConfig = git(["show", `${base}:${configPath}`]);
+  const baseSignature = baseConfig === undefined ? undefined : containerSignature(baseConfig);
+  const headSignature = containerSignature(headConfig);
+  if (baseSignature === undefined || headSignature === undefined) {
+    console.error(
+      `::error::check-image-inputs: could not read the container block of ${configPath} at ${base} and HEAD (the path must be repo-relative) — treat as unverified, not a pass`,
     );
     process.exit(1);
   }
@@ -235,7 +300,7 @@ if (import.meta.main) {
   }
 
   const paths = parseNameOnly(nameOnly);
-  const verdict = evaluateImageGate(paths, dockerfileDiff);
+  const verdict = evaluateImageGate(paths, dockerfileDiff, baseSignature !== headSignature);
   if (!verdict.ok) {
     console.error(
       `::error::${verdict.reason}: this diff changes image inputs but not the rebuild marker in ${dockerfilePath}.`,

@@ -185,8 +185,7 @@ import {
   CONCURRENCY_MAX,
   CONCURRENCY_MIN,
   RuntimeConfigError,
-  getSystemConcurrency,
-  getWorkspaceConcurrency,
+  getEffectiveConcurrency,
   isConcurrencyValue,
   setWorkspaceConcurrency,
 } from "./runtime-config-store";
@@ -2317,17 +2316,15 @@ const workspaceConcurrencyGate = async (c: DashboardContext) => {
 const workspaceConcurrencyReadRoute = async (c: DashboardContext) => {
   const gate = await workspaceConcurrencyGate(c);
   if (!gate.ok) return gate.response;
-  const workspaceId = gate.member.scope.workspaceId;
-  const [workspace, system] = await Promise.all([
-    getWorkspaceConcurrency(gate.member.db, workspaceId),
-    getSystemConcurrency(gate.member.db),
-  ]);
+  // ONE statement answers both levels, so the pair can never be torn by a
+  // concurrent system-cap change — and the store stays the only parse path.
+  const caps = await getEffectiveConcurrency(gate.member.db, gate.member.scope.workspaceId);
   return c.json({
-    concurrency: workspace.concurrency,
-    system: system.concurrency,
+    concurrency: caps.workspace,
+    system: caps.system,
     min: CONCURRENCY_MIN,
     max: CONCURRENCY_MAX,
-    degraded: workspace.degraded || system.degraded,
+    degraded: caps.degraded,
   });
 };
 
