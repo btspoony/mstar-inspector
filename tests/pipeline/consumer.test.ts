@@ -38,7 +38,7 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -103,6 +103,16 @@ const VALID_OUTPUT: ReviewOutput = {
 };
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+/**
+ * The migrations after the 0036 identity rewrite, in wrangler's apply order.
+ * Derived from the directory so a future migration cannot leave the
+ * equivalence fixture on a stale schema; the 0036 boundary stays explicit
+ * because that fixture reconstructs a specific historical shape.
+ */
+const MIGRATIONS_AFTER_0036 = readdirSync(join(import.meta.dir, "../../migrations"))
+  .filter((name) => name.endsWith(".sql") && name > "0036_app_identity.sql")
+  .sort();
 
 // --- default App row (every message is per-App) -------------
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
@@ -1885,10 +1895,10 @@ describe("createReviewConsumer", () => {
       "0031_plans_usage.sql",
       // 0036 renames the seeded route-key column, as the deploy does.
       "0036_app_identity.sql",
-      // 0040/0041: the consumer's admission reads the runtime caps and writes
+      // Every migration after 0036, derived from the directory (0039–0041
+      // included): the consumer's admission reads the runtime caps and writes
       // the `review_inflight` row on every admitted message.
-      "0040_runtime_config.sql",
-      "0041_review_inflight.sql",
+      ...MIGRATIONS_AFTER_0036,
     ]) {
       db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
     }
@@ -2126,7 +2136,11 @@ describe("createReviewConsumer", () => {
 
     expect(messageAckCalls).toEqual([{ attempts: 4 }]);
     expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).toContain("error");
+    const dropped = String(failureRows(db)[0]!.error);
+    expect(dropped).toContain("error");
+    // The drop row names the FAULT, not just the refusal code: without the
+    // cause it is indistinguishable from a released-between-statements race.
+    expect(dropped).toContain("fault: D1 unavailable");
   });
 
   test("a reached system cap refuses admission → guard-held, no sandbox (spec §1.3)", async () => {
@@ -2249,6 +2263,9 @@ describe("createReviewConsumer", () => {
     const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("admission failed"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.msg).toContain("treating as held");
+    // The warn names the cause, so a storage fault is never read as the
+    // benign released-between-statements race.
+    expect(warnLine!.fields.error_cause).toBe("fault: D1 unavailable");
     expect(failureRows(db)).toHaveLength(0);
   });
 

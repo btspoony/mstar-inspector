@@ -155,7 +155,13 @@ import { createCheckBeginLatch, createCheckLifecycle, type CheckBeginLatch } fro
 // Review admission (review-concurrency §1.2): one `review_inflight` row is the
 // per-PR lock and the capacity reservation; the cap comes from the pipeline's
 // single runtime-config reader (never a dashboard route import).
-import { acquireInflight, releaseInflight, type InflightKey, type InflightRefusal } from "../store/inflight-store";
+import {
+  acquireInflight,
+  describeInflightError,
+  releaseInflight,
+  type InflightKey,
+  type InflightRefusal,
+} from "../store/inflight-store";
 import { readReviewConcurrency } from "./concurrency-reader";
 
 export type PipelineEnv = {
@@ -302,6 +308,13 @@ export type ConsumerLogFields = {
   /** The workspace's own cap at that same decision — both ride the line so an
    * operator can tell a busy tenant from a full deployment. */
   workspace_cap?: number;
+  /**
+   * Only on an `error` refusal: the storage cause. A dead D1 binding and a
+   * capacity released between the two admission statements share the refusal
+   * code, and this string is what tells them apart on the log line and in the
+   * terminal drop's `review_failures` row.
+   */
+  error_cause?: string;
   /** Whether a failed usage insert landed: true, false (verified absent), or unreadable. */
   usage_applied?: boolean | "unknown";
   /** Review tier resolved from REVIEW_LEVEL. */
@@ -435,11 +448,14 @@ export type ProcessOutcome =
 /**
  * Why the guard held a message plus the caps it was measured against
  * (spec §1.3: the refusal is otherwise invisible — a held line without the
- * reason cannot tell a busy PR from a full deployment).
+ * reason cannot tell a busy PR from a full deployment). `error` additionally
+ * carries the storage cause, so a D1 fault is never read as the benign
+ * released-between-statements race.
  */
 export type AdmissionRefusalFields = Required<
   Pick<ConsumerLogFields, "reason" | "system_cap" | "workspace_cap">
->;
+> &
+  Pick<ConsumerLogFields, "error_cause">;
 
 /**
  * Handle a guard-held message (bugbot BB-3). The guard is not an error
@@ -461,8 +477,11 @@ function handleGuardHeld(
 ): void | Promise<void> {
   const fields = { ...toBaseFields(message.body), ...admission };
   // Why this message was held, appended to both lines: the delay schedule alone
-  // never says whether the PR, the tenant, or the deployment is full.
-  const heldBecause = `held by ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap})`;
+  // never says whether the PR, the tenant, or the deployment is full. A storage
+  // refusal adds its own cause — "error" alone cannot tell a dead D1 binding
+  // from a capacity released between the admission's two statements.
+  const cause = admission.error_cause === undefined ? "" : `; cause ${admission.error_cause}`;
+  const heldBecause = `held by ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap}${cause})`;
   // Only a `pr-held` refusal means a review for THIS PR is running; a cap or
   // storage refusal means none exists at all — saying "still in flight" there
   // would send an operator looking for a review that was never started.
@@ -501,7 +520,7 @@ function handleGuardHeld(
       pr_number: message.body.pr_number,
       head_sha: message.body.head_sha ?? "",
       stage: "pipeline",
-      error: `review dropped after ${delays.length} refused retries: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap})`,
+      error: `review dropped after ${delays.length} refused retries: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap}${cause})`,
     })
     .catch((err: unknown) => {
       const detail = err instanceof Error ? err.message : String(err);
@@ -2155,18 +2174,22 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     });
     if (!admission.ok) {
       // §1.3 observability: one admission decision, one refusal record — the
-      // caps are the ones this decision was measured against.
+      // caps are the ones this decision was measured against. An `error` also
+      // carries its cause: the store answers the same code for a dead D1
+      // binding and for a capacity released between its two statements.
+      const errorCause = admission.reason === "error" ? describeInflightError(admission.cause) : undefined;
       const refusal: AdmissionRefusalFields = {
         reason: admission.reason,
         system_cap: concurrency.system,
         workspace_cap: concurrency.workspace,
+        error_cause: errorCause,
       };
-      if (admission.reason === "error") {
+      if (errorCause !== undefined) {
         // Fail closed (spec §1.3): a storage failure never admits, and the
         // store has no log channel — the operator line is this one.
         deps.log.warn(
           { ...baseFields, ...refusal },
-          "review admission failed (storage error) — treating as held; no review admitted",
+          `review admission failed (storage error: ${errorCause}) — treating as held; no review admitted`,
         );
       }
       // A cap/error refusal that never recovers is recorded when the job is

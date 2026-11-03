@@ -13,7 +13,8 @@
  *     a live row in the workspace → `workspace-cap`
  *   - an EXPIRED row does not hold the PR and does not count toward the caps
  *   - release deletes only the row its own `attempt_id` wrote
- *   - a storage failure → `error`, never `ok`
+ *   - a storage failure → `error` with a `fault` cause naming the exception,
+ *     never `ok`; a raced refusal names `released-between-statements`
  *   - a malformed `now` or non-finite TTL → `error`, never a throw
  */
 import { describe, expect, test } from "bun:test";
@@ -23,7 +24,7 @@ import {
   type AcquireInflightOptions,
   type InflightKey,
 } from "./inflight-store";
-import type { D1Like } from "./types";
+import type { D1Like, D1StatementLike } from "./types";
 import { createMigratedTestD1, type TestD1 } from "../../tests/store/helpers";
 
 const KEY: InflightKey = {
@@ -167,20 +168,44 @@ describe("inflight-store", () => {
     });
   });
 
-  test("a D1 error returns reason error and never ok", async () => {
-    expect(await acquireInflight(failingDb, KEY, OPTS)).toEqual({ ok: false, reason: "error" });
+  test("a raced zero-row acquire is distinguishable from a fault", async () => {
+    // The insert reports zero rows while the follow-up read still shows room:
+    // the capacity was released between the two statements. That is a benign
+    // race, not a dead binding, and the result must say so.
+    const db = freshDb();
+    const zeroRow: D1StatementLike = {
+      bind: () => zeroRow,
+      first: async () => null,
+      all: async () => ({ results: [] }),
+      run: async () => ({ results: [], meta: { changes: 0, last_row_id: 0 } }),
+    };
+    const racingDb: D1Like = {
+      prepare: (sql: string) =>
+        sql.includes("INSERT INTO review_inflight") ? zeroRow : db.prepare(sql),
+      batch: (statements) => db.batch(statements),
+    };
+    expect(await acquireInflight(racingDb, KEY, OPTS)).toEqual({
+      ok: false,
+      reason: "error",
+      cause: { kind: "released-between-statements" },
+    });
+  });
+
+  test("a D1 error returns reason error with the fault cause and never ok", async () => {
+    expect(await acquireInflight(failingDb, KEY, OPTS)).toEqual({
+      ok: false,
+      reason: "error",
+      cause: { kind: "fault", detail: "D1 unavailable" },
+    });
   });
 
   test("a malformed `now` or non-finite TTL answers error instead of throwing", async () => {
     const db = freshDb();
-    expect(await acquireInflight(db, KEY, { ...OPTS, now: "not-a-date" })).toEqual({
-      ok: false,
-      reason: "error",
-    });
-    expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: Number.NaN })).toEqual({
-      ok: false,
-      reason: "error",
-    });
+    const malformed = await acquireInflight(db, KEY, { ...OPTS, now: "not-a-date" });
+    expect(malformed.ok).toBe(false);
+    expect(malformed).toMatchObject({ reason: "error", cause: { kind: "fault" } });
+    const badTtl = await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: Number.NaN });
+    expect(badTtl).toMatchObject({ reason: "error", cause: { kind: "fault" } });
     // Neither refusal wrote a row — fail-closed never admits.
     expect(db.raw.query("SELECT * FROM review_inflight").all()).toHaveLength(0);
   });

@@ -381,6 +381,9 @@ export const en = {
     concurrencyFailed: "Could not change the review concurrency — try again.",
     /** {system} = the platform's system cap this workspace cannot exceed. */
     concurrencySystemCap: "System cap: {system}.",
+    /** {stored} > {system}: an operator lowered the system cap after this workspace's value was stored. */
+    concurrencyStoredAboveSystem:
+      "Stored value: {stored} — above the current system cap of {system}, so {system} applies until you save a lower value.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the
