@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { createFailureStore } from "../../src/store/failure-store";
+import { createFailureStore, FAILURE_STAGES, type FailureStage } from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "./helpers";
 
 const BASE = {
@@ -61,6 +61,19 @@ describe("createFailureStore", () => {
       /not on the producer vocabulary/,
     );
     expect((await store.listRecent()).length).toBe(0);
+  });
+
+  test("every stage the store DECLARES is accepted by its own record path", async () => {
+    // The vocabulary derives from the paging list, so a stage added there must
+    // reach the writer too: a declared stage the gate refuses would be an
+    // unwritable producer stage, and a caller would lose the row at runtime.
+    const db = createMigratedTestD1();
+    const store = createFailureStore(db);
+    for (const stage of FAILURE_STAGES) {
+      await store.record({ ...BASE, stage: stage as FailureStage, error: `boom-${stage}` });
+    }
+    const written: string[] = (await store.listRecent()).map((row) => row.stage).sort();
+    expect(written).toEqual([...FAILURE_STAGES].sort());
   });
 
   test("listRecent returns newest-first with a rowid tiebreak, bounded by limit", async () => {

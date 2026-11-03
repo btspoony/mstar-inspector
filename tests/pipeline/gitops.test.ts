@@ -118,6 +118,7 @@ describe("gitops command builders", () => {
             outcome: "ok",
             rejected: 0,
             rejected_row_ids: [],
+            rejected_unnamed: 0,
             reason: null,
             error: null,
           }),

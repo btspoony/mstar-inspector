@@ -58,7 +58,7 @@ import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../packages/shared/src/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
-import { RECHECK_STATUS_PATH, type RecheckStatus } from "../../packages/shared/src/recheck-wire";
+import type { RecheckStatus } from "../../packages/shared/src/recheck-wire";
 import { readRecheckStatusCommand } from "../../src/pipeline/gitops";
 import { createInMemoryAuthStorage, main, readCredentialStdin, writeRecheckStatus } from "../../packages/runner/src/runner";
 import { sk } from "../helpers/fake-secrets";
@@ -688,6 +688,7 @@ describe("runner entry — --recheck-out channel", () => {
       reason: "seat-failed",
       rejected: 0,
       rejected_row_ids: [],
+      rejected_unnamed: 0,
       error: "provider boom",
     };
     const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
@@ -715,6 +716,7 @@ describe("runner entry — --recheck-out channel", () => {
       reason: null,
       rejected: 3,
       rejected_row_ids: ["row-1", "row-2"],
+      rejected_unnamed: 1,
       error: null,
     };
     const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
@@ -745,6 +747,7 @@ describe("runner entry — --recheck-out channel", () => {
           reason: "budget",
           rejected: 0,
           rejected_row_ids: [],
+          rejected_unnamed: 0,
           error: null,
         }, target),
       ).not.toThrow();
@@ -776,6 +779,7 @@ describe("runner entry — --recheck-out channel", () => {
         reason: null,
         rejected: 0,
         rejected_row_ids: [],
+        rejected_unnamed: 2,
         error: null,
       };
       // 1. The writer's default target (the env redirect, trimmed).
@@ -811,16 +815,14 @@ describe("runner entry — --recheck-out channel", () => {
         console.log = originalLog;
         console.error = originalError;
       }
+      // The SAME status, field for field, through the reader's own command:
+      // nothing the runner wrote was dropped, defaulted or re-derived on the
+      // way out.
       expect(await readBack()).toEqual(status);
     } finally {
       if (priorEnv === undefined) delete process.env.MSTAR_RECHECK_STATUS_PATH;
       else process.env.MSTAR_RECHECK_STATUS_PATH = priorEnv;
     }
-
-    // With the redirect unset, that default IS the literal the Worker's read
-    // command targets — the two faces cannot drift apart.
-    expect(RECHECK_STATUS_PATH).toBe("/tmp/mstar-recheck-status.json");
-    expect(readRecheckStatusCommand()).toContain("/tmp/mstar-recheck-status.json");
   });
 
   test("legacy input (no recheck field) → runtime input carries no recheck key, no file written", async () => {

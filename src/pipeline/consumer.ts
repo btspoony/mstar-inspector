@@ -1118,6 +1118,10 @@ type OriginalFindingProjection = RecheckTarget["original"];
  * field report; `assessments.length` is the lifecycle clock, which also
  * carries the gate-rejected rows (attempted and answered badly). Reporting the
  * clock as "assessed" would claim reassessments the seat never delivered.
+ * `unansweredCount` is the complement (`selected - assessments.length`): it
+ * covers BOTH the never-sent rows above AND the rows that were sent into a
+ * round whose document was absent or invalid, which the coverage line reports
+ * as `omitted`.
  */
 function reconcileRecheckRound(input: {
   targets: RecheckTarget[];
@@ -1147,8 +1151,13 @@ function reconcileRecheckRound(input: {
   resolutions: { associationId: string; verified: VerifiedResolution }[];
   /** Rows carrying a real seat answer — the published coverage/tally count. */
   assessedCount: number;
-  /** Never-sent rows (`assessments.length` is the lifecycle clock instead). */
-  omittedCount: number;
+  /**
+   * Rows that ended the round with no answer at all: neither a surviving
+   * document row nor a gate rejection. That covers the never-sent rows (size or
+   * catalog budget, seat skip) AND the rows sent into a round whose document
+   * was absent or invalid. It is the coverage line's `omitted` figure.
+   */
+  unansweredCount: number;
 } {
   const {
     targets,
@@ -1316,7 +1325,10 @@ function reconcileRecheckRound(input: {
     // Coverage counts REAL seat answers, not the lifecycle clock: a
     // gate-rejected row advances `last_assessed_ms` but was never assessed.
     assessedCount: targets.filter((target) => answeredRowIds.has(target.rowId)).length,
-    omittedCount: targets.length - assessments.length,
+    // No surviving answer and no gate rejection: never sent, or sent into a
+    // round whose document never arrived. `assessments.length` is the lifecycle
+    // clock (attempted rows), so it cannot stand in for this count.
+    unansweredCount: targets.length - assessments.length,
   };
 }
 
@@ -1387,16 +1399,23 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
     if (outcome !== "ok" && outcome !== "skipped" && outcome !== "failed") return null;
     // `rejected` is DERIVED from the row-id list, never read from the document:
     // one source survives, so the two faces of the count cannot disagree in a
-    // foreign or hand-rolled status.
+    // foreign or hand-rolled status. `rejected_unnamed` has no list to derive
+    // from — it is the count of drops the gate could not name, and it is the
+    // only record of them once the seat has filtered its own document.
     const rejectedRowIds = Array.isArray(value["rejected_row_ids"])
       ? value["rejected_row_ids"].filter((id): id is string => typeof id === "string")
       : [];
+    const rejectedUnnamed = value["rejected_unnamed"];
     return {
       schema: "mstar.recheck-status/v1",
       headSha,
       outcome,
       rejected: rejectedRowIds.length,
       rejected_row_ids: rejectedRowIds,
+      rejected_unnamed:
+        typeof rejectedUnnamed === "number" && Number.isInteger(rejectedUnnamed) && rejectedUnnamed >= 0
+          ? rejectedUnnamed
+          : 0,
       // `reason`/`error` are redacted and bounded HERE so the D1 failure text
       // and the log field carry one capped value — the runner already does the
       // same for its own copy, but a foreign or hand-rolled status must not be
@@ -1430,8 +1449,11 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
  * pass sees no drops; the status's `rejected_row_ids` is the only surviving
  * record of them and is therefore the primary source. It is trusted only for
  * the row IDs this round actually sent. A drop that carried no usable rowId
- * cannot be named, so it is counted and the reconciliation attributes it by
- * position (see `reconcileRecheckRound`).
+ * cannot be named: the status's `rejected_unnamed` count is the record of it,
+ * and the reconciliation attributes those drops by position among the
+ * sent-but-unanswered rows (see `reconcileRecheckRound`). The two sources are
+ * unioned by taking the larger count, since the seat filters its document
+ * before writing it.
  */
 async function readRecheckDoc(
   sandbox: ReviewSandbox,
@@ -1467,7 +1489,12 @@ async function readRecheckDoc(
   const sent = new Set(recheckInput.targets.map((target) => target.rowId));
   const rejected = new Set(droppedRowIds);
   for (const rowId of status?.rejected_row_ids ?? []) if (sent.has(rowId)) rejected.add(rowId);
-  return { doc, rejected, anonymousRejectedRows, status };
+  // The seat writes an ALREADY-FILTERED document, so the local pass above
+  // normally sees no drops at all; the status is the surviving record. Taking
+  // the larger of the two unions them without double-counting a round whose
+  // unfiltered document also reached this pass.
+  const unnamedRejectedRows = Math.max(anonymousRejectedRows, status?.rejected_unnamed ?? 0);
+  return { doc, rejected, anonymousRejectedRows: unnamedRejectedRows, status };
 }
 
 /**
@@ -3263,7 +3290,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       totalOpen,
       selected: targets.length,
       assessed: reconciled.assessedCount,
-      omitted: reconciled.omittedCount,
+      omitted: reconciled.unansweredCount,
       capped: Math.max(0, totalOpen - targets.length),
       contextCoverage,
     };

@@ -2294,6 +2294,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       reason: "invalid-document",
       rejected: 0,
       rejected_row_ids: [],
+      rejected_unnamed: 0,
       error: expect.stringContaining("stale document"),
     });
     const logged = errorCalls.map((args) => args.join(" ")).join("\n");
@@ -2318,6 +2319,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       reason: "budget",
       rejected: 0,
       rejected_row_ids: [],
+      rejected_unnamed: 0,
       error: null,
     });
     // Only the review seat ran — no recheck child was dispatched.
@@ -2423,6 +2425,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       outcome: "failed",
       rejected: 2,
       rejected_row_ids: ["row-1", "row-2"],
+      rejected_unnamed: 0,
       reason: "all-rows-rejected",
       error: null,
     });
@@ -2460,6 +2463,45 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
       reason: null,
       rejected: 1,
       rejected_row_ids: ["row-2"],
+      rejected_unnamed: 0,
+    });
+  });
+
+  test("a nameless row drop is counted in `rejected_unnamed`, and `rejected` stays the named count", async () => {
+    const twoTargets = recheckInput({
+      targets: [
+        ...recheckInput().targets,
+        {
+          ...recheckInput().targets[0]!,
+          rowId: "row-2",
+          findingId: "f-2",
+          associationIds: [],
+        },
+      ],
+    });
+    // One row survives; the other carries an empty rowId, so the gate drops it
+    // without a name. The Worker can only attribute that drop if the status
+    // CARRIES the count — the named list cannot express it.
+    const docWithNamelessDrop = {
+      schema: "mstar.recheck/v1",
+      headSha: RECHECK_SHA,
+      results: [
+        { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+        { rowId: "", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+      ],
+    };
+    seatResults = [{ data: docWithNamelessDrop }, { data: seatPayload() }];
+    const { recheckStatus } = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      recheck: twoTargets,
+    });
+
+    expect(recheckStatus).toMatchObject({
+      outcome: "ok",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 1,
     });
   });
 

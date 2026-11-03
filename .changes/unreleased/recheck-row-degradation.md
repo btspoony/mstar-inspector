@@ -68,7 +68,10 @@ category: Fixed
   result, so a round can no longer claim reassessments the seat never
   delivered. The lifecycle clock keeps the attempted rows, so fair rotation is
   unchanged. A gate drop that carried no usable row ID is attributed to the
-  sent-but-unanswered row at its position instead of being reported `omitted`.
+  sent-but-unanswered row at its position instead of being reported `omitted`;
+  the status now carries `rejected_unnamed` (a count, since such a drop cannot
+  be named), so that attribution also works for a document the runner already
+  filtered.
 - **A finding inside an oversized hunk keeps local evidence.** A hunk larger
   than the 80-line slice bound is no longer excluded whole (which left every
   finding inside it permanently `no-evidence`): it is split into consecutive
@@ -135,7 +138,8 @@ category: Fixed
   （`last_assessed_ms`）照常前进，但它从未被真正评估：覆盖行与该轮的账目日志字段
   现在只统计携带文档结果的行，一轮再也无法声称席位从未交付的重审数量。生命周期时钟
   仍然包含已尝试的行，因此公平轮转不变。校验丢弃且没有可用行 ID 的行，按其位置归到
-  已发送但无回答的那一行，而不是报成 `omitted`。
+  已发送但无回答的那一行，而不是报成 `omitted`；状态现在携带 `rejected_unnamed`
+  （一个计数——这种丢弃无法被命名），因此即使文档已被 runner 过滤，归因依然成立。
 - **超大 hunk 内的 finding 仍保有局部证据。** 超过 80 行切片上限的 hunk 不再被整体
   排除（那会让它内部的每个 finding 永久成为 `no-evidence`）：它按连续 ≤80 行切成
   多个窗口，离原始关注行最近的优先，每个窗口的起始行号直接来自 hunk 头的行号算术。

@@ -892,6 +892,71 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 1, assessed: 0 });
   });
 
+  test("the status's `rejected_unnamed` attributes a runner-written nameless drop by position", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    // Two sent rows, ordered by their rotation clock: `anonymous-0` first.
+    for (let i = 0; i < 2; i += 1) {
+      db.raw
+        .prepare(
+          `INSERT INTO review_findings
+             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+              first_seen_round, last_seen_round, state, created_ms, updated_ms)
+           VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
+        )
+        .run(
+          `anonymous-${i}`,
+          TEST_APP_ID,
+          `finding-anon-${i}`,
+          JSON.stringify({ ...TARGET_ORIGINAL, fingerprintHint: `anon-fp-${i}` }),
+          PRIOR_PUB_ID,
+          PRIOR_PUB_ID,
+          PRIOR_SHA,
+          PRIOR_SHA,
+          2_000 + i,
+          2_000 + i,
+        );
+    }
+    // The seat wrote its ALREADY-FILTERED document, so the second validation
+    // pass sees no drops at all: the status is the only record. Its unnamed
+    // count is what tells the round that ONE sent row was answered badly.
+    sandbox.recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "ok",
+      reason: null,
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 1,
+      error: null,
+    });
+    // No association rows: this test is about attribution, not resolution.
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    // Exactly ONE row is the attempted-and-bad one — the first among the
+    // sent-and-unanswered — and the other is honestly never-answered.
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
+    expect(prepared.body).toContain("unverifiable (omitted)");
+    const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 1, assessed: 0 });
+    // The blamed row advanced its rotation clock; the omitted one did not.
+    const clocks = db.raw
+      .query(`SELECT id, last_assessed_ms FROM review_findings WHERE id IN ('anonymous-0', 'anonymous-1') ORDER BY id`)
+      .all() as Array<{ id: string; last_assessed_ms: number | null }>;
+    expect(clocks.map((row) => [row.id, row.last_assessed_ms !== null])).toEqual([
+      ["anonymous-0", true],
+      ["anonymous-1", false],
+    ]);
+  });
+
   test("an oversized status error or reason is bounded at parse time, so the log field and the D1 text share one value", async () => {
     // `z` matches no secret shape, so what comes back is the bound alone.
     const oversized = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS + 200);

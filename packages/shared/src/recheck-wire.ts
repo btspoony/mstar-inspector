@@ -106,15 +106,17 @@ export const RECHECK_OUTPUT_PATH = '/tmp/mstar-recheck.json';
  * Why a recheck round ended — written by the runner beside the document so a
  * round that produced no document is still attributable in D1.
  * `rejected_row_ids` names the rows validateRecheckDoc dropped (sorted) and
- * `rejected` is its length, so both faces of the count agree; a row with no
- * readable rowId cannot be named and is not counted. `reason`/`error` are null
- * unless the round degraded.
+ * `rejected` is its length, so both faces of the count agree. A row with no
+ * readable rowId cannot be named: `rejected_unnamed` counts those, which is
+ * what lets the Worker attribute them by position among the sent-and-unanswered
+ * rows instead of losing them. `reason`/`error` are null unless the round
+ * degraded.
  */
 export const RECHECK_STATUS_PATH = '/tmp/mstar-recheck-status.json';
 export type RecheckStatus = {
   schema: 'mstar.recheck-status/v1'; headSha: string;
   outcome: 'ok' | 'skipped' | 'failed';
-  rejected: number; rejected_row_ids: string[];
+  rejected: number; rejected_row_ids: string[]; rejected_unnamed: number;
   reason: string | null; error: string | null;
 };
 
@@ -308,11 +310,17 @@ function addressedProofError(
 }
 
 /**
- * Validate one result's evidence structurally (slice membership + bounds).
- * The non-blank quote requirement belongs to the `addressed` proof path only:
+ * Validate one result's evidence structurally, WITHOUT any range ordering or
+ * window check: kind enum, slice membership in the input catalog, integer
+ * start/end types, quote stringness/visibility, and explanation shape. The
+ * ordered-range test belongs to the `addressed` proof path
+ * (`addressedProofError`) — a `dismissed`/`unverifiable` row may cite evidence
+ * that never gets there.
+ *
+ * The non-blank quote requirement also belongs to the `addressed` path only:
  * a `dismissed`/`unverifiable` row may cite evidence without a usable quote
  * (its rationale basis is the explanation or the input discussion), so only
- * the bound applies there.
+ * the upper bound applies there.
  */
 function evidenceShapeError(
   evidence: Record<string, unknown>,

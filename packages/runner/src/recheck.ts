@@ -332,7 +332,7 @@ export async function runRecheckSeat(input: {
   const maxRuntimeMs = currentRecheckBudget(Date.now());
   if (maxRuntimeMs === 0) {
     console.error(JSON.stringify({ event: "recheck_skipped", reason: "budget" }));
-    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], error: null } };
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };
   }
   let gate: RecheckGateResult;
   try {
@@ -356,18 +356,20 @@ export async function runRecheckSeat(input: {
     // contract instead of throwing out of this catch.
     const message = redactedStatusError(error instanceof Error ? error.message : String(error));
     console.error(JSON.stringify({ event: "recheck_seat_failed", error: message }));
-    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, rejected_row_ids: [], error: message } };
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: message } };
   }
   if (!gate.ok) {
     const error = redactedStatusError(gate.error);
     console.error(JSON.stringify({ event: "recheck_seat_failed", error: `recheck document failed validation: ${error}` }));
-    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "invalid-document", rejected: 0, rejected_row_ids: [], error } };
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "invalid-document", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };
   }
-  // Rows without an identity (non-object / no usable rowId) cannot be named, so
-  // the counted figure is exactly the named set — both faces say the same thing.
+  // A row without an identity (non-object / no usable rowId) cannot be named;
+  // it is counted in `rejected_unnamed` so the Worker can still attribute it by
+  // position among the rows it sent — the drop is never silently lost.
   const rejectedRowIds = gate.rejected
     .flatMap((row) => (row.rowId === null ? [] : [row.rowId]))
     .sort();
+  const rejectedUnnamed = gate.rejected.length - rejectedRowIds.length;
   // The gate accepted the document, yet not one submitted row survived it: the
   // round produced nothing usable, so it is a FAILED round (the consumer writes
   // a `review_failures` row for it). Reporting `ok` here would make a round
@@ -382,6 +384,7 @@ export async function runRecheckSeat(input: {
       reason: allRowsRejected ? "all-rows-rejected" : null,
       rejected: rejectedRowIds.length,
       rejected_row_ids: rejectedRowIds,
+      rejected_unnamed: rejectedUnnamed,
       error: null,
     },
   };

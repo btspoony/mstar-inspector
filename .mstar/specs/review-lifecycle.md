@@ -242,7 +242,7 @@ export const RECHECK_STATUS_PATH = '/tmp/mstar-recheck-status.json';
 export type RecheckStatus = {
   schema: 'mstar.recheck-status/v1'; headSha: string;
   outcome: 'ok' | 'skipped' | 'failed';
-  rejected: number; rejected_row_ids: string[];
+  rejected: number; rejected_row_ids: string[]; rejected_unnamed: number;
   reason: string | null; error: string | null;
 };
 export const RECHECK_MAX_TARGETS = 25;
@@ -431,7 +431,7 @@ export function recheckBudget(outerDeadlineMs: number, nowMs: number): number; /
 
 Runner stdout remains envelope JSON only, exit codes unchanged. Optional `--recheck-out` emits the separate validated JSON file; no targets/invalid output emits no file. Worker reads it through an audited fixed-path bounded read (262144 bytes plus overflow detection), not arbitrary model file paths. Existing callers/runtime doubles unwrap `envelope`; no envelope field/category/hint overloading.
 
-**Status document:** the seat writes `mstar.recheck-status/v1` (same 262144-byte bounded read) on every exit path — `ok` with the dropped rows (`rejected_row_ids`, sorted, and `rejected` derived from its length), `skipped` when the budget left no room to start, or `failed` carrying the bounded `reason`/`error` (redacted first, then 500 chars). A round whose document the gate accepted but with **no** surviving row reports `failed` with reason `all-rows-rejected`: it delivered nothing usable, so it must not read as clean. The Worker consumes it next to the document: an absent or foreign-schema/HEAD status attributes nothing, a missing or failed document records a `review_failures` row with `stage: recheck`, and the status's `rejected_row_ids` is what keeps the seat's already-filtered drops `unverifiable/invalid-output` instead of `omitted`.
+**Status document:** the seat writes `mstar.recheck-status/v1` (same 262144-byte bounded read) on every exit path — `ok` with the dropped rows (`rejected_row_ids`, sorted, and `rejected` derived from its length, so the named count and the list always agree), `skipped` when the budget left no room to start, or `failed` carrying the bounded `reason`/`error` (redacted first, then 500 chars). A row the gate dropped without a usable rowId cannot be named: `rejected_unnamed` counts those, and it is the only record of them once the seat has filtered its own document. A round whose document the gate accepted but with **no** surviving row reports `failed` with reason `all-rows-rejected`: it delivered nothing usable, so it must not read as clean. The Worker consumes it next to the document: an absent or foreign-schema/HEAD status attributes nothing, a missing or failed document records a `review_failures` row with `stage: recheck`, and the status's `rejected_row_ids` is what keeps the seat's already-filtered named drops `unverifiable/invalid-output` instead of `omitted`. Nameless drops are attributed by POSITION: the first `rejected_unnamed` rows among the sent-and-unanswered ones (in rotation order, never a catalog- or budget-excluded row) become `invalid-output`, so a runner-written drop is never mistaken for a row the seat never received.
 
 ### 7.9 App-owned Check attempt fencing and conclusions
 
