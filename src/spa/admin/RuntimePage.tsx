@@ -27,7 +27,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     event.preventDefault();
     if (busy) return; // in-flight guard — no double submit
     // `Number("")` is 0 and `Number("8abc")` is NaN — both fail the server's
-    // 1..250 gate, so the browser's own parsing needs no second validator.
+    // 1..64 gate, so the browser's own parsing needs no second validator.
     const next = Number((draft ?? String(stored)).trim());
     setBusy(true);
     setNotice(null);

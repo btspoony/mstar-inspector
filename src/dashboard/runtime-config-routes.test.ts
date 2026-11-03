@@ -8,7 +8,7 @@
  *     exactly like `/api/flags`.
  *
  * Both routes write through the Task-1 store, so these tests also prove the
- * route-level mapping of every store refusal: a value outside 1..250 is a keyed
+ * route-level mapping of every store refusal: a value outside 1..64 is a keyed
  * 400, and a workspace value above the current system cap is a keyed 400 —
  * never a silent clamp. Accepted writes land with their `platform_audit_events`
  * row; refused writes change no row and append no audit row.
@@ -248,13 +248,13 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       concurrency: 1,
       system: 1,
       min: 1,
-      max: 250,
+      max: 64,
       degraded: true,
     });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
       concurrency: 1,
       min: 1,
-      max: 250,
+      max: 64,
       degraded: true,
     });
   });
@@ -279,7 +279,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     const { db } = fixture();
     for (const body of [
       { concurrency: 0 },
-      { concurrency: 251 },
+      { concurrency: 65 },
       { concurrency: 2.5 },
       { concurrency: "8" },
       { concurrency: null },
@@ -306,7 +306,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
         concurrency: 8,
         system: 20,
         min: 1,
-        max: 250,
+        max: 64,
         degraded: false,
       });
     }
@@ -318,7 +318,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       concurrency: 16,
       system: 32,
       min: 1,
-      max: 250,
+      max: 64,
       degraded: false,
     });
     expect((await getConcurrency(db, "ws-acme", "frank")).status).toBe(404);
@@ -347,14 +347,14 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
       concurrency: 32,
       min: 1,
-      max: 250,
+      max: 64,
       degraded: false,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
       concurrency: 5,
       min: 1,
-      max: 250,
+      max: 64,
       degraded: false,
     });
   });
