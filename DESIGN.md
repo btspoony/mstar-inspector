@@ -1106,8 +1106,9 @@ their own beyond what the component layer already declares:
   the embedded segmented pill over the three record families (counts as text,
   one danger dot per actionable family), severity-ruled finding cards grouped
   must-fix → should-fix → nit → other, review and failure records with folded
-  bodies, and a `w-64` aside carrying the PR facts plus one merged activity
-  timeline. A **proposal reference, not a shipped component**:
+  bodies, and an aside carrying the PR facts plus one merged activity timeline.
+  The aside is full-width below `xl` and `w-64` at `xl` and up. A **proposal
+  reference, not a shipped component**:
   [`src/design-system/prototypes/record-detail.html`](src/design-system/prototypes/record-detail.html)
   is the approved static prototype (it reads this document's tokens), while the
   shipped face is `src/spa/pages/AppPullRequestsTab.tsx`.

@@ -76,7 +76,7 @@
   .tab .dot { width: 6px; height: 6px; border-radius: var(--radius-pill); background: var(--tone-danger-fg); }
 
   /* ---------- layout ---------- */
-  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 272px; gap: 32px; margin-top: 20px; align-items: start; }
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 256px; gap: 32px; margin-top: 20px; align-items: start; }
   @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
   [role="tabpanel"][hidden] { display: none; }
 
@@ -92,18 +92,18 @@
   .finding {
     border: 1px solid var(--border-default); background: var(--surface-card); border-radius: var(--radius-container);
     padding: 12px 14px; display: flex; flex-direction: column; gap: 6px;
-    border-left-width: 3px;
+    border-left-width: 2px;
   }
   .finding + .finding { margin-top: 8px; }
   .finding.must { border-left-color: var(--tone-danger-fg); }
   .finding.should { border-left-color: var(--tone-warn-fg); }
-  .finding.nit { border-left-color: var(--border-subtle); }
+  .finding.nit { border-left-color: var(--border-strong); }
   .finding .row1 { display: flex; align-items: baseline; gap: 10px; }
   .finding .title { font-weight: 500; flex: 1; min-width: 0; }
   .finding .loc {
     font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
     background: var(--surface-inset); border: 1px solid var(--border-subtle); border-radius: var(--radius-control); padding: 1px 6px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 230px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 224px;
   }
   .finding .body { font-size: 14px; color: var(--text-secondary); }
   .finding .body[hidden] { display: none; }
@@ -190,7 +190,7 @@
       <span class="repo">acme / web</span>
       <span class="num">#133</span>
       <span class="pill ok">已合并</span>
-      <button class="sha" title="点击复制完整 SHA">aaa111b</button>
+      <span class="sha" title="Head SHA">aaa111b</span>
     </div>
     <h1>Fix the login flow</h1>
     <div class="sub">

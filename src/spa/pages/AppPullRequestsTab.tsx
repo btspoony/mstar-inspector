@@ -177,6 +177,10 @@ function PullRequestDetail({
   prRef: PullRequestRef;
   onBack: () => void;
 }) {
+  // The ref's fields, not the ref: `pullRequestRefOf` builds a fresh object on
+  // every parent render, so an object dependency would re-run the read and
+  // flash the loading face for a PR that never changed.
+  const { owner, repo, number } = prRef;
   const [read, setRead] = useState<DetailRead | null>(null);
   const [nonce, setNonce] = useState(0);
   const current = currentDetailRead(read, prKey);
@@ -184,7 +188,7 @@ function PullRequestDetail({
   useEffect(() => {
     let cancelled = false;
     setRead({ pr: prKey, kind: "loading" });
-    fetchJson(appPullRequestDetailUrl(apiBase(), appId, prRef))
+    fetchJson(appPullRequestDetailUrl(apiBase(), appId, { owner, repo, number }))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parsePullRequestDetail(raw);
@@ -196,7 +200,7 @@ function PullRequestDetail({
     return () => {
       cancelled = true;
     };
-  }, [appId, prKey, prRef, nonce]);
+  }, [appId, prKey, owner, repo, number, nonce]);
 
   // Retry resets the read in the click itself, so the loading face paints
   // first; bumping the nonce alone would leave the failed face up until the
@@ -689,8 +693,10 @@ export function PullRequestDetailView({
               ) : (
                 <ul className="flex flex-col gap-2">
                   {detail.reviews.map((review, index) => {
-                    // The store's own identity for a review, so a refetched
-                    // list keeps each row's fold state instead of its position.
+                    // Position in the key keeps it unique; the identity claim
+                    // is the remount — this tree is keyed on the PR, so a
+                    // refetch's positional drift cannot survive into another
+                    // mount and the fold state never crosses PRs.
                     const reviewKey = `${review.reviewed_at}-${review.head_sha}-${index}`;
                     const open = openReviews[reviewKey] ?? index === 0;
                     const id = bodyId(reviewKey);
@@ -833,7 +839,7 @@ export function PullRequestDetailView({
               </h2>
               <ol className="flex flex-col gap-(--spacing-3)">
                 {activity.map((entry) => (
-                  <li key={entry.key} className="flex gap-2">
+                  <li key={entry.key} data-slot="activity-entry" className="flex gap-2">
                     <span
                       aria-hidden="true"
                       className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", TIMELINE_DOT[entry.tone])}

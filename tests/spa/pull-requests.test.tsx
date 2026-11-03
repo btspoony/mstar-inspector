@@ -310,6 +310,34 @@ describe("pull request detail face (static SSR)", () => {
     expect(markup).not.toContain(":null");
   });
 
+  test("an out-of-set severity lands in the `other` bucket, last, with its count", () => {
+    const markup = render({
+      ...DETAIL,
+      findings: [
+        ...DETAIL.findings,
+        {
+          finding_id: "f-4",
+          severity: "blocker",
+          title: "Drop the unsafe default",
+          file_path: "",
+          line: null,
+          body: "The payload's severity is a free string; this one is outside the set.",
+        },
+      ],
+    });
+    const order = positions(markup, [
+      t("en", "pullRequests.severityMustFix"),
+      t("en", "pullRequests.severityShouldFix"),
+      t("en", "pullRequests.severityNit"),
+      t("en", "pullRequests.severityOther"),
+    ]);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    // The bucket carries its own count, and its finding renders under it.
+    const other = markup.slice(order[3] as number);
+    expect(other).toMatch(new RegExp(`${t("en", "pullRequests.severityOther")}</span><span[^>]*>1</span>`));
+    expect(other).toContain("Drop the unsafe default");
+  });
+
   /**
    * Fold pairs read off the serialized markup: each control's `aria-expanded`,
    * the body its `aria-controls` names, and whether that body carries `hidden`.
@@ -445,7 +473,7 @@ describe("pull request detail face (static SSR)", () => {
       expect(markup, marker(index)).not.toContain(marker(index));
     }
     // Additional evidence: eight rows — seven activity entries plus the anchor.
-    expect(markup.match(/<li class="flex gap-2">/g) ?? []).toHaveLength(8);
+    expect(markup.match(/data-slot="activity-entry"/g) ?? []).toHaveLength(8);
   });
 
   test("a failure's first line renders as escaped text and its full output stays in details", () => {
@@ -826,6 +854,47 @@ describe("pull requests tab (mounted)", () => {
       await act(async () => {});
       expect(text()).toContain("Bump the dependencies");
       expect(container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("a parent re-render for the same PR neither refetches nor re-flashes loading (S3)", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const realFetch = globalThis.fetch;
+    let reads = 0;
+    globalThis.fetch = (async (input: unknown) => {
+      if (String(input).endsWith("/pull-requests/acme/web/1")) reads += 1;
+      return jsonResponse(DETAIL);
+    }) as unknown as typeof fetch;
+    const tabElementFor = () =>
+      createElement(AppPullRequestsTab, {
+        locale: "en",
+        appId: "1",
+        // A fresh search object each render, as the shell hands it over; the
+        // pr VALUE is what stays put.
+        search: { tab: "pull-requests", window: "30", repo: "", pr: "acme/web/1" },
+        onSearch: noSearch,
+      });
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const text = () => container.textContent ?? "";
+    try {
+      await act(async () => root.render(tabElementFor()));
+      await act(async () => {});
+      expect(reads).toBe(1);
+      expect(text()).toContain("Fix the login flow");
+
+      // The parent re-renders: `pullRequestRefOf` hands over a fresh ref object,
+      // which must not count as a dependency change.
+      await act(async () => root.render(tabElementFor()));
+      await act(async () => {});
+      expect(reads).toBe(1);
+      expect(text()).toContain("Fix the login flow");
+      expect(text()).not.toContain(t("en", "common.loading"));
     } finally {
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;

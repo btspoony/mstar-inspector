@@ -28,12 +28,11 @@ import { describe, expect, test } from "bun:test";
 
 import { survivorSteps } from "../../src/design-system/tokens";
 import {
-  CONSUMER_ROOTS,
   documentSync,
   danglingReferences,
   parseFixture,
+  rootsWithoutConsumers,
   stylesheetConsumers,
-  walkConsumers,
 } from "../../scripts/design-system-check";
 
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
@@ -550,13 +549,8 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const consumers = stylesheetConsumers();
     expect(consumers.length).toBeGreaterThan(0);
     // Per root, not just in aggregate: a root that contributes nothing (moved,
-    // renamed, emptied) would pass a global count while checking nothing.
-    for (const root of CONSUMER_ROOTS) {
-      expect(walkConsumers(root).length, root).toBeGreaterThan(0);
-    }
-    // The design-system prototypes are one of those roots, and a reference page
-    // that reads a retired token fails here like any stylesheet does.
-    expect(consumers).toContain("src/design-system/prototypes/record-detail.html");
+    // renamed, emptied) fails the gate, so the test holds the same predicate.
+    expect(rootsWithoutConsumers()).toEqual([]);
     for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
       expect(danglingReferences(file, css), file).toEqual([]);

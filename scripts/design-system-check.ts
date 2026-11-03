@@ -8,8 +8,10 @@
  *   fixture → DESIGN.md   `documentSync()` below
  *   source → preview      `scripts/build-design-preview.tsx --check`
  *   consumers → source    `danglingReferences()` below — every `var(--x)` a
- *                         hand-written stylesheet or HTML shell under `src/spa`
- *                         consumes names a token
+ *                         hand-written stylesheet or HTML shell under a
+ *                         declared consumer root (`src/spa`, the design-system
+ *                         prototypes) names a token, and each root contributes
+ *                         at least one consumer
  *   fills → surfaces      `chartFillContrast()` below — every chart fill clears
  *                         WCAG 1.4.11's 3:1 on the surfaces it paints on
  *                         (`I-000254`)
@@ -78,13 +80,12 @@ const GENERATORS = [
 ] as const;
 
 /**
- * The trees whose hand-written CSS/HTML answers to the token source. Exported
- * with `walkConsumers` so a test can hold each root to having contributed: a
- * global "some consumer exists" passes while one root silently contributes
- * nothing (a moved or renamed directory), which is the failure mode this link
- * exists to catch.
+ * The trees whose hand-written CSS/HTML answers to the token source. A root
+ * that contributes no consumer (moved, renamed, emptied) breaks the link: a
+ * global "some consumer exists" passes while one root silently checks nothing,
+ * which is the failure mode this link exists to catch.
  */
-export const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
+const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
 
 /**
  * Every hand-written stylesheet and HTML shell the token source does not
@@ -103,7 +104,7 @@ export function stylesheetConsumers(dirs: readonly string[] = CONSUMER_ROOTS): s
 }
 
 /** The consumers under one root, repo-relative. */
-export function walkConsumers(dir: string): string[] {
+function walkConsumers(dir: string): string[] {
   if (!existsSync(dir)) return [];
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -116,6 +117,15 @@ export function walkConsumers(dir: string): string[] {
     }
   }
   return out;
+}
+
+/**
+ * The declared roots that contributed no consumer, repo-relative. One predicate
+ * for both callers: the gate fails a link per declared root, and the test holds
+ * the same roots to the same rule.
+ */
+export function rootsWithoutConsumers(dirs: readonly string[] = CONSUMER_ROOTS): string[] {
+  return dirs.filter((dir) => walkConsumers(dir).length === 0).map((dir) => path.relative(ROOT, dir));
 }
 
 /**
@@ -602,21 +612,21 @@ if (import.meta.main) {
   }
 
   const consumers = stylesheetConsumers();
+  const emptyRoots = rootsWithoutConsumers();
   const dangling = consumers.flatMap((file) =>
     danglingReferences(file, readFileSync(path.join(ROOT, file), "utf8")),
   );
-  // A walk that found no stylesheet proves nothing (wrong root, moved tree):
-  // that is a failure, not an empty pass.
-  console.log(`${consumers.length > 0 && dangling.length === 0 ? "ok  " : "fail"}  consumers → source`);
-  if (consumers.length === 0) {
-    console.log(
-      `        no stylesheet found under ${CONSUMER_ROOTS.map((dir) => path.relative(ROOT, dir)).join(" or ")}`,
-    );
+  // A root that contributed nothing proves nothing (wrong root, moved tree):
+  // that is a failure per root, not an empty pass.
+  const consumersOk = emptyRoots.length === 0 && dangling.length === 0;
+  console.log(`${consumersOk ? "ok  " : "fail"}  consumers → source`);
+  for (const root of emptyRoots) {
+    console.log(`        no stylesheet or HTML shell found under ${root}`);
   }
   for (const { file, name, theme } of dangling) {
     console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
   }
-  if (consumers.length === 0 || dangling.length > 0) brokenLinks.push("consumers → source");
+  if (!consumersOk) brokenLinks.push("consumers → source");
 
   // A chart fill is a large graphic face: WCAG 1.4.11's 3:1, not 4.5:1. Every
   // pair prints its measured ratio, so a token change that erodes a margin is
