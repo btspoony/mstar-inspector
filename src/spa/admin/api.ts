@@ -110,7 +110,13 @@ export async function readFlags(): Promise<FlagRow[]> {
 }
 
 /** The system review-concurrency parameters (iteration spec §1.1). */
-export type RuntimeConfig = { concurrency: number; min: number; max: number };
+export type RuntimeConfig = {
+  concurrency: number;
+  min: number;
+  max: number;
+  /** The stored cap could not be read: `concurrency` is the conservative fallback. */
+  degraded: boolean;
+};
 
 export async function readRuntime(): Promise<RuntimeConfig> {
   const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
@@ -118,6 +124,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     concurrency: num(body, "concurrency"),
     min: num(body, "min"),
     max: num(body, "max"),
+    degraded: bool(body, "degraded"),
   };
 }
 

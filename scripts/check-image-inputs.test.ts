@@ -27,9 +27,11 @@ import {
 const REPO_ROOT = join(import.meta.dir, "..");
 
 /**
- * Backticked repo paths on the BULLET lines of one prose slice — the documented
- * family list. Restricting to `- ` lines keeps a later prose sentence (which
- * names a concrete Dockerfile) out of the comparison.
+ * Backticked tokens on the BULLET lines of one prose slice — the documented
+ * family list. Any backticked token counts, not a fixed prefix set: a new
+ * family outside `packages/`, `sandbox-image/` or a root dotfile must not drift
+ * in prose while the gate stays silent. Restricting to `- ` lines keeps a later
+ * prose sentence (which names a concrete Dockerfile) out of the comparison.
  */
 function documentedFamilies(text: string, startMarker: string, endMarker: string): string[] {
   const start = text.indexOf(startMarker);
@@ -40,7 +42,7 @@ function documentedFamilies(text: string, startMarker: string, endMarker: string
     .slice(start, end)
     .split("\n")
     .filter((line) => line.startsWith("- "))
-    .flatMap((line) => [...line.matchAll(/`(packages\/[^`]+|sandbox-image\/[^`]+|\.dockerignore)`/g)].map((m) => m[1]!));
+    .flatMap((line) => [...line.matchAll(/`([^`]+)`/g)].map((m) => m[1]!));
 }
 
 /**
@@ -153,6 +155,7 @@ describe("touchesImageInput", () => {
     "packages/runner/verify-synthesis.sh",
     "sandbox-image/cli-global/package.json",
     ".dockerignore",
+    "wrangler.jsonc",
   ];
 
   test("matches each declared path family", () => {

@@ -25,6 +25,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  AboveSystemError,
   CONCURRENCY_MAX,
   CONCURRENCY_MIN,
   SYSTEM_CONCURRENCY_DEFAULT,
@@ -112,10 +113,16 @@ function dbWithValues(setting: { system: unknown; workspace: unknown }): Dashboa
 
 describe("runtime-config-store", () => {
   test("absent system row falls back to 32", async () =>
-    expect(await getSystemConcurrency(fixture())).toBe(SYSTEM_CONCURRENCY_DEFAULT));
+    expect(await getSystemConcurrency(fixture())).toEqual({
+      concurrency: SYSTEM_CONCURRENCY_DEFAULT,
+      degraded: false,
+    }));
 
   test("workspace NULL falls back to 16", async () =>
-    expect(await getWorkspaceConcurrency(fixture(), WS)).toBe(WORKSPACE_CONCURRENCY_DEFAULT));
+    expect(await getWorkspaceConcurrency(fixture(), WS)).toEqual({
+      concurrency: WORKSPACE_CONCURRENCY_DEFAULT,
+      degraded: false,
+    }));
 
   test("effective is the smaller of the two caps", async () => {
     const db = fixture();
@@ -148,7 +155,7 @@ describe("runtime-config-store", () => {
       effective: CONCURRENCY_MIN,
       degraded: true,
     });
-    expect(await getSystemConcurrency(db)).toBe(CONCURRENCY_MIN);
+    expect(await getSystemConcurrency(db)).toEqual({ concurrency: CONCURRENCY_MIN, degraded: true });
   });
 
   test("a present but unparseable workspace value degrades to the conservative cap", async () => {
@@ -160,7 +167,10 @@ describe("runtime-config-store", () => {
       effective: CONCURRENCY_MIN,
       degraded: true,
     });
-    expect(await getWorkspaceConcurrency(db, WS)).toBe(CONCURRENCY_MIN);
+    expect(await getWorkspaceConcurrency(db, WS)).toEqual({
+      concurrency: CONCURRENCY_MIN,
+      degraded: true,
+    });
   });
 
   test("an out-of-range stored value is untrusted, not a default", async () => {
@@ -207,8 +217,11 @@ describe("runtime-config-store", () => {
     };
     for (const row of [{}, { workspace_value: 16 }, { system_value: "8" }]) {
       const db = dbWithRow(row);
-      expect(await getSystemConcurrency(db)).toBe(CONCURRENCY_MIN);
-      expect(await getWorkspaceConcurrency(db, WS)).toBe(CONCURRENCY_MIN);
+      expect(await getSystemConcurrency(db)).toEqual({ concurrency: CONCURRENCY_MIN, degraded: true });
+      expect(await getWorkspaceConcurrency(db, WS)).toEqual({
+        concurrency: CONCURRENCY_MIN,
+        degraded: true,
+      });
       expect(await getEffectiveConcurrency(db, WS)).toEqual(degraded);
     }
   });
@@ -226,8 +239,11 @@ describe("runtime-config-store", () => {
         effective: CONCURRENCY_MIN,
         degraded: true,
       };
-      expect(await getSystemConcurrency(db)).toBe(CONCURRENCY_MIN);
-      expect(await getWorkspaceConcurrency(db, WS)).toBe(CONCURRENCY_MIN);
+      expect(await getSystemConcurrency(db)).toEqual({ concurrency: CONCURRENCY_MIN, degraded: true });
+      expect(await getWorkspaceConcurrency(db, WS)).toEqual({
+        concurrency: CONCURRENCY_MIN,
+        degraded: true,
+      });
       expect(await getEffectiveConcurrency(db, WS)).toEqual(degraded);
     }
     // One untrusted field is enough: the trusted sibling never rescues the read.
@@ -253,8 +269,8 @@ describe("runtime-config-store", () => {
       )
       .run(SYSTEM_CONCURRENCY_KEY);
     db.raw.prepare("UPDATE workspaces SET max_concurrent_reviews = '12' WHERE id = ?").run(WS);
-    expect(await getSystemConcurrency(db)).toBe(8);
-    expect(await getWorkspaceConcurrency(db, WS)).toBe(12);
+    expect(await getSystemConcurrency(db)).toEqual({ concurrency: 8, degraded: false });
+    expect(await getWorkspaceConcurrency(db, WS)).toEqual({ concurrency: 12, degraded: false });
     expect(await getEffectiveConcurrency(db, WS)).toEqual({
       system: 8,
       workspace: 12,
@@ -300,7 +316,10 @@ describe("runtime-config-store", () => {
     const db = fixture();
     await setWorkspaceConcurrency(db, WS, 12, ACTOR);
     db.raw.prepare("UPDATE workspaces SET deleted_at = '2026-11-04T00:00:00.000Z' WHERE id = ?").run(WS);
-    expect(await getWorkspaceConcurrency(db, WS)).toBe(WORKSPACE_CONCURRENCY_DEFAULT);
+    expect(await getWorkspaceConcurrency(db, WS)).toEqual({
+      concurrency: WORKSPACE_CONCURRENCY_DEFAULT,
+      degraded: false,
+    });
     // Absence (not untrusted data), so the effective read is NOT degraded.
     expect(await getEffectiveConcurrency(db, WS)).toEqual({
       system: SYSTEM_CONCURRENCY_DEFAULT,
@@ -333,6 +352,27 @@ describe("runtime-config-store", () => {
     expect(auditRows(db)).toEqual([]);
   });
 
+  test("the above_system refusal quotes the cap the write predicate enforced", async () => {
+    // A hand-edited `" 8"` (leading space) is a value the write predicate does
+    // NOT accept as a cap: `systemCapSql` answers the conservative 1, so every
+    // workspace write above 1 is refused. A second parser reading the row would
+    // report 8, i.e. a ceiling no write was ever compared against.
+    const db = fixture();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, ' 8', '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(SYSTEM_CONCURRENCY_KEY);
+    const refusal = await setWorkspaceConcurrency(db, WS, 4, ACTOR).catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(AboveSystemError);
+    expect((refusal as AboveSystemError).system).toBe(CONCURRENCY_MIN);
+    expect((refusal as AboveSystemError).message).toBe(
+      `workspace concurrency 4 exceeds the system cap ${CONCURRENCY_MIN}`,
+    );
+    expect(storedWorkspace(db)).toBeNull();
+  });
+
   test("a system cap lowered during the write refuses it instead of racing the check", async () => {
     const db = fixture();
     await setSystemConcurrency(db, 32, ACTOR);
@@ -357,8 +397,8 @@ describe("runtime-config-store", () => {
     const db = fixture();
     expect(await setWorkspaceConcurrency(db, WS, 12, ACTOR)).toBe(12);
     expect(await setSystemConcurrency(db, 20, ACTOR)).toBe(20);
-    expect(await getWorkspaceConcurrency(db, WS)).toBe(12);
-    expect(await getSystemConcurrency(db)).toBe(20);
+    expect(await getWorkspaceConcurrency(db, WS)).toEqual({ concurrency: 12, degraded: false });
+    expect(await getSystemConcurrency(db)).toEqual({ concurrency: 20, degraded: false });
     const rows = db.raw
       .prepare(`SELECT actor_login, action, target_id FROM platform_audit_events ORDER BY action`)
       .all() as Array<{ actor_login: string; action: string; target_id: string }>;

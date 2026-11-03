@@ -53,9 +53,11 @@ commit whenever you change any of:
 - `packages/shared/src/**`
 - `packages/runner/package.json` or `packages/runner/bun.lock` (the image
   installs from them, so an omp SDK bump is an image change)
-- `packages/runner/verify-synthesis.sh` (copied to `/opt/verify-synthesis.sh`)
+- `packages/runner/verify-synthesis.sh` (copied into the image at /opt/verify-synthesis.sh)
 - `sandbox-image/**` — the CLI shims and their lockfiles
 - `.dockerignore` — it decides which of these sources reach the build context
+- `wrangler.jsonc` — its build context decides which tree the Dockerfile sees
+  and its dockerfile path decides which file is hashed
 
 Check before merging anything that touches those paths:
 
