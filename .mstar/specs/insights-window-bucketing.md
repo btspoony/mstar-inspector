@@ -22,7 +22,7 @@
 | wire 键 | 粒度 | 填充 | 计数语义 | 状态 |
 |---|---|---|---|---|
 | `weekly_trend` | 恒周桶（任意窗） | 原样 SQL 输出（不零填充；空周不出桶） | reviews = COUNT(DISTINCT r.id)（LEFT JOIN，零 findings 的 review 计 1）；findings = COUNT(f.id) | 冻结（既有键） |
-| `findings_distribution` | 按窗派生 day\|week | JS 网格零填充（`dayGrid`/`weekGrid`，∪ 观测桶起点，首末桶 partial，网格定序） | by_severity / by_category 零填充网格 | 冻结（020 / AD-652） |
+| `findings_distribution` | 按窗派生 day\|week | JS 网格零填充（`dayGrid`/`weekGrid`，∪ 观测桶起点，首末桶 partial，网格定序） | by_severity 零填充网格（`by_category` 于 2026-11-03 移除：category 为模型输出命名的开放集自由 slug，跨 provider 不稳定，桶并集不构成可比较的指标） | 冻结（020 / AD-652；2026-11-03 收窄为 by_severity 单系列） |
 | `daily_trend` | 仅天窗（clamped ≤30）产出；周窗返回 `[]`（不运行查询） | `dayGrid` 零填充（∪ 观测 day start，网格定序） | 镜像 `weekly_trend` 计数语义，桶为日 | 024 新增（additive；本迭代裁决） |
 
 - `daily_trend` 行形 `{ day_start: string; reviews: number; findings: number }`（形对齐 `weekly_trend` 的 `week_start`）。

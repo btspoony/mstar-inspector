@@ -63,32 +63,6 @@ export type FindingRow = {
 };
 
 /**
- * Input for the cross-PR recurrence aggregation (AC-21c).
- * Both filters are optional: omitted `window_days` = all-time; omitted
- * `repo` = all repos. `window_days` is used as-is (the API layer
- * owns validation/clamping per AL-22-1).
- */
-export type RecurrenceQuery = {
-  /** Only reviews with `reviewed_at` within the last N days count. */
-  window_days?: number;
-  /** Restrict the aggregation to one owner/repo pair. */
-  repo?: { owner: string; repo: string };
-};
-
-/**
- * One recurrence group: a fingerprint seen in >= 2
- * distinct reviews. `count` = distinct reviews; `repos` = distinct
- * owner/repo pairs among them (sorted); `title_sample` = any one title
- * for the fingerprint (MIN, deterministic).
- */
-export type RecurrenceGroup = {
-  fingerprint: string;
-  title_sample: string;
-  count: number;
-  repos: string[];
-};
-
-/**
  * Raw rows of the finding-lifecycle tables (migration
  * `0020_finding_lifecycle.sql` — DDL single source; spec review-lifecycle
  * §7.1 owns the normative shapes). Snake_case D1 column names, same

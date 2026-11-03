@@ -13,7 +13,6 @@ import {
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { apiBase } from "../workspace-base";
-import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import {
@@ -50,14 +49,13 @@ import { TrendChart } from "@/components/charts/TrendChart";
  * component therefore owns only the fetch + presentation; the window/repo
  * segments reuse the 7/30/90 semantics and the repo filter is scoped to
  * this App's repos.
- * Toolbar first, then the four stat sections: severity / category as
- * stacked bar time series from `findings_distribution` (AD-652/653 faces
- * carried over verbatim), the trend card as the grouped bucket chart at
- * the window's granularity (window-bucketing contract 2026-09-20 —
- * `insightsTrendPoints`: day buckets via `daily_trend` on 7/30-day
- * windows, week buckets via `weekly_trend` zero-filled over the
- * distribution grid on 90 days), recurring findings as a list. QC fix-1
- * legend filter and the QC F-004 ""→uncategorized merge are unchanged. No
+ * Toolbar first, then the summary, the severity stacked bar time series
+ * from `findings_distribution` (AD-652 face carried over verbatim) and the
+ * trend card as the grouped bucket chart at the window's granularity
+ * (window-bucketing contract 2026-09-20 — `insightsTrendPoints`: day
+ * buckets via `daily_trend` on 7/30-day windows, week buckets via
+ * `weekly_trend` zero-filled over the distribution grid on 90 days).
+ * QC fix-1 legend filter is unchanged. No
  * h1: the tab rides the shell's identity header (the shell mounts this
  * only for managers — 403s cannot occur for an authorized viewer).
  */
@@ -195,8 +193,7 @@ export function AppInsightsTab({
  * data-series tone the old gray-700 filled (gray is not in the palette). The
  * API zero-fills exactly these three merge-class keys per bucket, so unknown
  * severity keys never enter the series. Labels stay the raw engine slugs — the
- * aggregate card's visible face carried them unlocalized already (same product
- * ruling as the category slugs below).
+ * aggregate card's visible face carried them unlocalized already.
  */
 export const SEVERITY_SLOTS: Record<string, ChartSlot> = {
   "must-fix": 4,
@@ -212,79 +209,6 @@ const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_SLOTS).map(([ke
 }));
 
 /**
- * AD-653 category palette on the same six slots: the known engine slugs keep a
- * Δhue-distinct family each (DEBT=1 cyan, the teal successor; DOCS=6 purple;
- * SEC=4 red, the pink successor). Slugs outside this map (long-tail
- * vocabulary) ride the neutral blue slot (5) — deliberately NOT assigned to a
- * single known category — and the "uncategorized" fallback (NULL/unknown)
- * takes the remaining amber slot (3), stacked last. No two categories in one
- * chart share a slot.
- */
-export const CATEGORY_SLOTS: Record<string, ChartSlot> = {
-  DEBT: 1,
-  DOCS: 6,
-  SEC: 4,
-};
-/** Neutral data-series default (the retired BarChart's fallback tone). */
-const CATEGORY_TAIL_SLOT: ChartSlot = 5;
-/** Store-merged fallback key for NULL/unknown categories. */
-export const UNCATEGORIZED_KEY = "uncategorized";
-const UNCATEGORIZED_SLOT: ChartSlot = 3;
-
-/**
- * Category series from the window-level union key set of the
- * `findings_distribution` grids — the legend lists exactly the categories
- * present somewhere in the window, in stack order: known slugs (palette
- * order), remaining slugs (payload ASC order) on the neutral slot, the
- * fallback last (topmost segment). Key presence is the derivation
- * face; seriesWithFindings applies the zero-count legend filter on top.
- */
-function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: SpaBoot["locale"]): StackedSeries[] {
-  const observed = new Set<string>();
-  for (const bucket of buckets) {
-    for (const key of Object.keys(bucket.by_category)) observed.add(key);
-  }
-  const series: StackedSeries[] = [];
-  for (const [key, slot] of Object.entries(CATEGORY_SLOTS)) {
-    if (observed.has(key)) series.push({ key, label: key, slot });
-  }
-  for (const key of observed) {
-    // "" never labels a series (schema-permitted, QC F-004) — it
-    // merges into the fallback key below.
-    if (key === "" || key === UNCATEGORIZED_KEY || key in CATEGORY_SLOTS) continue;
-    series.push({ key, label: key, slot: CATEGORY_TAIL_SLOT });
-  }
-  if (observed.has(UNCATEGORIZED_KEY) || observed.has("")) {
-    series.push({
-      key: UNCATEGORIZED_KEY,
-      label: t(locale, "insights.uncategorized"),
-      slot: UNCATEGORIZED_SLOT,
-    });
-  }
-  return series;
-}
-
-/**
- * The chart buckets: the payload grid with the schema-permitted ""
- * category key merged into "uncategorized" per bucket (counts summed) so
- * the gray fallback series reads the honest total — the same
- * QC F-004 merge the aggregate card performed, one layer down.
- */
-function chartBuckets(buckets: readonly FindingsDistributionBucket[]): FindingsDistributionBucket[] {
-  return buckets.map((bucket) => {
-    if (bucket.by_category[""] === undefined) return bucket;
-    const { "": emptyCount, ...rest } = bucket.by_category;
-    return {
-      ...bucket,
-      by_category: {
-        ...rest,
-        [UNCATEGORIZED_KEY]: (bucket.by_category[UNCATEGORIZED_KEY] ?? 0) + (emptyCount ?? 0),
-      },
-    };
-  });
-}
-
-/**
  * QC fix-1 (QC F-004 ×3 seats): legend entries only for series
  * with findings in the window — a series whose window total is 0 drops
  * from the legend instead of rendering a zero-count swatch. Legend-only
@@ -295,19 +219,15 @@ function seriesWithFindings(
   series: readonly StackedSeries[],
   buckets: readonly FindingsDistributionBucket[],
 ): StackedSeries[] {
-  return series.filter((s) =>
-    buckets.some((bucket) => (bucket.by_severity[s.key] ?? bucket.by_category[s.key] ?? 0) > 0),
-  );
+  return series.filter((s) => buckets.some((bucket) => (bucket.by_severity[s.key] ?? 0) > 0));
 }
 
 /**
  * The insights body — pure `t()` + data rendering, no window/router access,
  * so tests can static-render it (the AppInfoSection idiom). One content plane
- * divided by hairlines: the window's review health, the two findings charts,
- * the trend and the recurring-findings table. The chart series stay the
- * closed six-slot vocabulary (fill = `--chart-{n}`, legend swatch =
- * `--chart-{n}-mark`); the recurring findings are a data table whose columns
- * are the row's own facts — title, review count, repos.
+ * divided by hairlines: the window's review health, the severity chart and
+ * the trend. The chart series stay the closed six-slot vocabulary (fill =
+ * `--chart-{n}`, legend swatch = `--chart-{n}-mark`).
  */
 export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data: InsightsSummary }) {
   const windowLabel = t(locale, data.window_days === 1 ? "insights.lastDay" : "insights.lastDays", {
@@ -333,25 +253,9 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
       count: trendTotals.findings,
     }),
   });
-  // The merged distribution grid both charts consume ("" merged into the
-  // uncategorized key); the zero-count legend filter reads the same grid
-  // the charts render.
-  const distribution = chartBuckets(data.findings_distribution);
-  const findingColumns: DataTableColumn<InsightsSummary["recurring_top"][number]>[] = [
-    {
-      header: t(locale, "insights.columnFinding"),
-      cell: (row) => <span className="font-medium">{row.title_sample}</span>,
-    },
-    {
-      header: t(locale, "insights.columnReviews"),
-      align: "right",
-      cell: (row) => <span className="tabular-nums">{row.count}</span>,
-    },
-    {
-      header: t(locale, "insights.columnRepos"),
-      cell: (row) => <span className="text-muted-foreground">{row.repos.join(", ")}</span>,
-    },
-  ];
+  // The distribution grid the severity chart consumes; the zero-count
+  // legend filter reads the same grid the chart renders.
+  const distribution = data.findings_distribution;
 
   if (empty) {
     // The composed zero-review empty state — no-action variant (reviews
@@ -386,17 +290,6 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
           />
         )}
       </FlowSection>
-      <FlowSection title={t(locale, "insights.findingsByCategory")}>
-        {data.findings_by_category.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
-        ) : (
-          <StackedBarChart
-            ariaLabel={t(locale, "insights.findingsByCategory")}
-            buckets={distribution}
-            series={seriesWithFindings(categorySeries(data.findings_distribution, locale), distribution)}
-          />
-        )}
-      </FlowSection>
       <FlowSection title={t(locale, "insights.trend")}>
         {/* Defensive: reviews_total > 0 implies a non-empty grid on both
             windows (zero-filled), so this face is reachable only on a
@@ -420,14 +313,6 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
             />
           </div>
         )}
-      </FlowSection>
-      <FlowSection title={t(locale, "insights.recurringFindings")}>
-        <DataTable
-          columns={findingColumns}
-          rows={data.recurring_top}
-          rowKey={(row) => row.fingerprint}
-          empty={<p className="text-sm text-muted-foreground">{t(locale, "insights.noRecurring")}</p>}
-        />
       </FlowSection>
     </div>
   );

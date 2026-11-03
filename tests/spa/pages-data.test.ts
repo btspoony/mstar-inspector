@@ -81,7 +81,6 @@ describe("insights search wiring", () => {
       window_days: 30,
       reviews_total: 0,
       findings_by_severity: [],
-      findings_by_category: [],
       verdict_distribution: [],
       weekly_trend: [],
       // (window-bucketing contract 2026-09-20): the day-bucket trend grid
@@ -89,17 +88,15 @@ describe("insights search wiring", () => {
       // carry exactly [] (this fixture's shape, window 30 = day window).
       daily_trend: [],
       // (AD-652): the distribution grid is REQUIRED like the other
-      // aggregations — one realistic day bucket (the task-1 store shape:
-      // fixed severity key set + window-union category keys + fallback).
+      // aggregations — one realistic day bucket (the store shape: the fixed
+      // severity key set zero-filled per bucket).
       findings_distribution: [
         {
           bucket_start: "2026-08-17",
           granularity: "day",
           by_severity: { "must-fix": 2, "should-fix": 1, nit: 0 },
-          by_category: { logic: 2, style: 0, uncategorized: 1 },
         },
       ],
-      recurring_top: [],
       repos: [],
     };
     expect(parseInsights(body)?.reviews_total).toBe(0);
@@ -110,7 +107,6 @@ describe("insights search wiring", () => {
         bucket_start: "2026-08-17",
         granularity: "day",
         by_severity: { "must-fix": 2, "should-fix": 1, nit: 0 },
-        by_category: { logic: 2, style: 0, uncategorized: 1 },
       },
     ]);
     expect(parseInsights({ ...body, repos: ["acme/web"] })?.repos).toEqual(["acme/web"]);
@@ -129,14 +125,14 @@ describe("insights search wiring", () => {
     expect(
       parseInsights({
         ...body,
-        findings_distribution: [{ bucket_start: "2026-08-17", granularity: "month", by_severity: {}, by_category: {} }],
+        findings_distribution: [{ bucket_start: "2026-08-17", granularity: "month", by_severity: {} }],
       }),
     ).toBeNull();
     expect(
       parseInsights({
         ...body,
         findings_distribution: [
-          { bucket_start: "2026-08-17", granularity: "day", by_severity: { "must-fix": "2" }, by_category: {} },
+          { bucket_start: "2026-08-17", granularity: "day", by_severity: { "must-fix": "2" } },
         ],
       }),
     ).toBeNull();

@@ -17,9 +17,7 @@
  *   - Non-integer / negative values are the ROUTE's 400 —
  *     the store never sees them in production and does not re-validate.
  *   - The window predicate is `reviews.reviewed_at >= datetime('now', '-' ||
- *     ? || ' days')` — the same expression the store-layer query
- *     uses (src/store/artifact-store.ts recurrenceByFingerprint), same
- *     format as the column default.
+ *     ? || ' days')` — same format as the `reviewed_at` column default.
  *
  * Weekly trend (AL-22-1): Monday-anchored UTC week buckets via the portable
  *   `date(reviewed_at, '-' || ((strftime('%w', reviewed_at)+6)%7) || ' days')`
@@ -31,8 +29,8 @@
  *   the distribution week buckets — two week definitions here would
  *   be a STOP face.
  *
- * Findings distribution (AD-652 — additive only): two more GROUP BY
- *   queries (bucket × severity, bucket × category) reusing the shared
+ * Findings distribution (AD-652 — additive only): one more GROUP BY
+ *   query (bucket × severity) reusing the shared
  *   whereSql and the findings×reviews JOIN. Bucket = UTC day
  *   (`date(r.reviewed_at)`, same UTC domain as the window predicate) or the
  *   weekly_trend week expression, selected by the CLAMPED window
@@ -40,9 +38,7 @@
  *   week). The zero-filled grid is generated in JS by insights-dates.ts
  *   (dayGrid / weekGrid): every bucket the window predicate can return,
  *   first/last partial. `by_severity` carries the fixed v1 merge-class key
- *   set per bucket; `by_category` carries the window-level union of observed
- *   categories plus the single "uncategorized" fallback for NULL categories
- *   — series keys are stable across buckets, so the SPA never re-unions.
+ *   set per bucket.
  *
  * Daily trend (`daily_trend` — additive, window-bucketing contract
  *   2026-09-20): the weekly_trend query mirrored at day granularity —
@@ -54,12 +50,6 @@
  *   distribution grid idiom: dayGrid ∪ observed day starts, zero-filled,
  *   grid-ordered.
  *
- * Bounded top (QC W-E): the insights face adds `LIMIT 10` — "top" is a
- * bounded list by product definition, and the bound caps the JSON payload
- * and the panel's rendered rows. `recurrenceByFingerprint` stays unbounded
- * (its consumer slices as needed); the parity test uses a shared fixture
- * with one group, so the LIMIT does not break the lock.
- *
  * Era gate (Bugbot wave-1): every aggregation filters
  * `reviews.envelope IS NOT NULL` — the migration-0002 lock
  * (`envelope IS NOT NULL` ⇔ v1 row). M1-era rows (critical|warning|
@@ -67,10 +57,8 @@
  * never mix into the v1 merge-class vocab; the gate is applied once in the
  * shared WHERE and therefore covers every aggregation.
  *
- * Determinism: every aggregation orders by count DESC then key ASC (NULL
- * keys sort first in SQLite ASC — findingsByCategory surfaces NULL
- * categories as `category: null`), weeklyTrend by week_start ASC,
- * recurringTop by count DESC then fingerprint ASC. The distribution and
+ * Determinism: every aggregation orders by count DESC then key ASC,
+ * weeklyTrend by week_start ASC. The distribution and
  * dailyTrend buckets ascend by bucket/day start (the JS-generated grid
  * defines the order).
  *
@@ -104,8 +92,6 @@ export type InsightsWindow = {
 
 /** One severity bucket of findingsBySeverity. */
 export type SeverityCount = { severity: string; count: number };
-/** One category bucket of findingsByCategory (NULL = uncategorized finding). */
-export type CategoryCount = { category: string | null; count: number };
 /** One verdict bucket of verdictDistribution. */
 export type VerdictCount = { verdict: string; count: number };
 /** One Monday-anchored UTC week bucket of weeklyTrend. */
@@ -131,26 +117,12 @@ export type FindingsDistributionBucket = {
    * ({must-fix, should-fix, nit}) — page-level series vocabulary.
    */
   by_severity: Record<string, number>;
-  /**
-   * Zero-filled per bucket over the window-level union of observed category
-   * values (ASC) plus the single "uncategorized" fallback for NULL — stable
-   * series keys across every bucket of the response.
-   */
-  by_category: Record<string, number>;
-};
-/** One recurrence group of recurringTop (recurrence semantics, count >= 2). */
-export type RecurringGroup = {
-  fingerprint: string;
-  title_sample: string;
-  count: number;
-  repos: string[];
 };
 
 /** The full insights aggregation shape. */
 export type Insights = {
   reviewsTotal: number;
   findingsBySeverity: SeverityCount[];
-  findingsByCategory: CategoryCount[];
   verdictDistribution: VerdictCount[];
   weeklyTrend: WeekBucket[];
   /**
@@ -161,7 +133,6 @@ export type Insights = {
    * reads the frozen weeklyTrend key instead.
    */
   dailyTrend: DayBucket[];
-  recurringTop: RecurringGroup[];
   /**
    * Window-scoped distinct `owner/repo` values with at least one v1 review
    * Sorted ascending. Independent of `opts.repo` — the Select
@@ -310,7 +281,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
           .all<DayTrendRow>()
       : Promise.resolve({ results: [] as DayTrendRow[] });
 
-  const [total, severities, categories, verdicts, trend, recurring, distributionSeverities, distributionCategories, repoRows, dailyTrendRows] =
+  const [total, severities, verdicts, trend, distributionSeverities, repoRows, dailyTrendRows] =
     await Promise.all([
     db
       .prepare(`SELECT COUNT(*) AS total FROM reviews r WHERE ${whereSql}`)
@@ -326,16 +297,6 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       )
       .bind(...binds)
       .all<{ severity: string; count: number }>(),
-    db
-      .prepare(
-        `SELECT f.category AS category, COUNT(*) AS count
-         FROM findings f JOIN reviews r ON r.id = f.review_id
-         WHERE ${whereSql}
-         GROUP BY f.category
-         ORDER BY count DESC, f.category ASC`,
-      )
-      .bind(...binds)
-      .all<{ category: string | null; count: number }>(),
     db
       .prepare(
         `SELECT r.verdict AS verdict, COUNT(*) AS count
@@ -360,29 +321,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       )
       .bind(...binds)
       .all<{ week_start: string; reviews: number; findings: number }>(),
-    // BIDIRECTIONAL ANCHOR ↔ src/store/artifact-store.ts recurrenceByFingerprint:
-    // inline duplicate of the store recurrence semantics (count >= 2
-    // distinct reviews, NULL fingerprints excluded, repos = distinct
-    // owner/repo pairs, title_sample = MIN). Mirror any change in BOTH
-    // places; the parity test locks them.
-    db
-      .prepare(
-        `SELECT
-          f.fingerprint AS fingerprint,
-          MIN(f.title) AS title_sample,
-          COUNT(DISTINCT f.review_id) AS count,
-          GROUP_CONCAT(DISTINCT r.owner || '/' || r.repo) AS repos_csv
-        FROM findings f
-        JOIN reviews r ON r.id = f.review_id
-        WHERE f.fingerprint IS NOT NULL AND ${whereSql}
-        GROUP BY f.fingerprint
-        HAVING COUNT(DISTINCT f.review_id) >= 2
-        ORDER BY count DESC, f.fingerprint ASC
-        LIMIT 10`,
-      )
-      .bind(...binds)
-      .all<{ fingerprint: string; title_sample: string; count: number; repos_csv: string | null }>(),
-    // (AD-652): the two additive distribution GROUP BYs — same
+    // (AD-652): the additive distribution GROUP BY — same
     // whereSql + findings×reviews JOIN as the page-level aggregates (same
     // cost class), bucketed by day or week. No ORDER BY: the JS grid
     // assembles and orders the buckets deterministically below.
@@ -395,15 +334,6 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       )
       .bind(...binds)
       .all<{ bucket_start: string; severity: string; count: number }>(),
-    db
-      .prepare(
-        `SELECT ${bucketSql} AS bucket_start, f.category AS category, COUNT(*) AS count
-         FROM findings f JOIN reviews r ON r.id = f.review_id
-         WHERE ${whereSql}
-         GROUP BY bucket_start, f.category`,
-      )
-      .bind(...binds)
-      .all<{ bucket_start: string; category: string | null; count: number }>(),
     repoQuery,
     dailyTrendQuery,
   ]);
@@ -412,23 +342,10 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   // (dayGrid/weekGrid) is every bucket the window predicate can return;
   // observed bucket starts are unioned in so that a SQL/JS calendar drift
   // could only ever surface as an extra honest bucket, never silently
-  // dropped counts. Severity keys are the fixed merge-class set; category
-  // keys are the window-level union (ASC) + "uncategorized" — identical on
-  // every bucket, so series keys are stable for the SPA.
+  // dropped counts. Severity keys are the fixed merge-class set.
   const grid = granularity === "week" ? weekGrid(windowDays) : dayGrid(windowDays);
   const starts = [
-    ...new Set([
-      ...grid,
-      ...distributionSeverities.results.map((row) => row.bucket_start),
-      ...distributionCategories.results.map((row) => row.bucket_start),
-    ]),
-  ].sort();
-  const categoryKeys = [
-    ...new Set(
-      distributionCategories.results
-        .map((row) => row.category)
-        .filter((category): category is string => category !== null),
-    ),
+    ...new Set([...grid, ...distributionSeverities.results.map((row) => row.bucket_start)]),
   ].sort();
   const distributionBuckets = new Map<string, FindingsDistributionBucket>(
     starts.map((bucket_start) => [
@@ -437,7 +354,6 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
         bucket_start,
         granularity,
         by_severity: Object.fromEntries(DISTRIBUTION_SEVERITY_KEYS.map((key) => [key, 0])),
-        by_category: Object.fromEntries([...categoryKeys, "uncategorized"].map((key) => [key, 0])),
       },
     ]),
   );
@@ -453,11 +369,6 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
     // today: mergeClass is z.enum-locked at ingest (review/schema.ts) and
     // the era gate excludes non-v1 rows.
     bucket.by_severity[row.severity] = (bucket.by_severity[row.severity] ?? 0) + row.count;
-  }
-  for (const row of distributionCategories.results) {
-    const bucket = distributionBuckets.get(row.bucket_start)!;
-    const key = row.category ?? "uncategorized";
-    bucket.by_category[key] = (bucket.by_category[key] ?? 0) + row.count;
   }
 
   // (additive `daily_trend`): assemble the zero-filled day grid — the same
@@ -483,16 +394,9 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   return {
     reviewsTotal: total?.total ?? 0,
     findingsBySeverity: severities.results,
-    findingsByCategory: categories.results,
     verdictDistribution: verdicts.results,
     weeklyTrend: trend.results,
     dailyTrend,
-    recurringTop: recurring.results.map((row) => ({
-      fingerprint: row.fingerprint,
-      title_sample: row.title_sample,
-      count: row.count,
-      repos: (row.repos_csv ?? "").split(",").filter((repoName) => repoName.length > 0).sort(),
-    })),
     repos: repoRows.results.map((row) => row.repo).filter((name) => name.length > 0),
     findingsDistribution: starts.map((bucket_start) => distributionBuckets.get(bucket_start)!),
   };

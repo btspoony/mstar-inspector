@@ -4184,7 +4184,6 @@ const appInsightsRoute = async (c: DashboardContext) => {
     ...(params.repoFilter !== undefined ? { repo: params.rawRepo } : {}),
     reviews_total: insights.reviewsTotal,
     findings_by_severity: insights.findingsBySeverity,
-    findings_by_category: insights.findingsByCategory,
     verdict_distribution: insights.verdictDistribution,
     weekly_trend: insights.weeklyTrend,
     // Additive day-bucketed trend (window-bucketing contract, 2026-09-20):
@@ -4194,7 +4193,6 @@ const appInsightsRoute = async (c: DashboardContext) => {
     // stacked charts. Existing fields are untouched — the only change on
     // this face is the new key.
     findings_distribution: insights.findingsDistribution,
-    recurring_top: insights.recurringTop,
     repos: insights.repos,
   });
 };
