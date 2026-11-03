@@ -420,6 +420,29 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("a successful save on a degraded read clears the warning and shows the stored answer", async () => {
+    // The flag is this page's own level: the save just rewrote the row it
+    // reports, so the row is readable again — no reload needed. The answer, not
+    // the typed draft, is what the repaired screen shows.
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ concurrency: 41 })
+        : json({ concurrency: 1, min: 1, max: 250, degraded: true }),
+    );
+    expect(surface.text()).toContain("could not be read");
+
+    await surface.type("#system-concurrency", "40");
+    await surface.click(surface.container.querySelector('button[type="submit"]'));
+
+    expect(surface.text()).toContain("Saved.");
+    expect(surface.text()).not.toContain("could not be read");
+    expect(surface.text()).toContain("Effective on the next review: 41.");
+    expect((surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement).value).toBe(
+      "41",
+    );
+    await surface.close();
+  });
+
   test("a zh_CN render shows the page's dictionary copy", async () => {
     const surface = await runtimeScreen(() => json(RUNTIME), "zh_CN");
     expect(surface.text()).toContain("运行时参数");

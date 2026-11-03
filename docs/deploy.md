@@ -2063,7 +2063,7 @@ turns that mismatch into a failing check: it diffs the pull request against its
 base commit and fails when the diff touches an image input without also changing
 the `# rebuild:` marker block in `sandbox-image/Dockerfile`.
 
-The input path families it covers — the gate's whole input vocabulary:
+The input path families it covers — the gate's path vocabulary:
 
 - `packages/runner/src/**`
 - `packages/shared/src/**`
@@ -2072,8 +2072,12 @@ The input path families it covers — the gate's whole input vocabulary:
 - `packages/runner/verify-synthesis.sh`
 - `sandbox-image/**`
 - `.dockerignore` — it decides which of these sources reach the build context
-- `wrangler.jsonc` — its build context decides which tree the Dockerfile sees
-  and its dockerfile path decides which file is hashed
+
+`wrangler.jsonc` is deliberately not a family: the gate compares its container
+block by value instead — each container's `name` and its `images` entry, with
+that entry's `dockerfile` and `build_context` — between the base and head
+revisions, so a repointed build context or Dockerfile fails without a marker
+while a vars, queue, route or observability edit does not force a rebuild.
 
 `scripts/check-image-inputs.test.ts` proves the list is complete against the
 image itself: every `COPY <src>` source in `sandbox-image/Dockerfile` must be
@@ -2087,9 +2091,9 @@ input. A diff that touches no image input passes without any Dockerfile change.
 The Dockerfile path is not written into the script: the gate reads
 `containers[].images.sandbox.dockerfile` from `wrangler.jsonc` (`--config`
 overrides the file), so it diffs exactly the file a deploy hashes. The gate
-reads git output only — it never
-builds the image and never inspects file contents beyond that Dockerfile diff —
-and an unreadable diff or config fails the run rather than passing unverified.
+reads git output plus the two revisions of that config — it never builds the
+image — and an unreadable diff, config or container block fails the run rather
+than passing unverified.
 
 **Pull requests and pushes.** The `Image rebuild gate` step in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) diffs a pull request

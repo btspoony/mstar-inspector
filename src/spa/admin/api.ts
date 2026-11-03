@@ -6,11 +6,13 @@
  * `pages/data.ts` precedent): a renamed server field must fail the read
  * visibly, never render a blank cell in an operator's table.
  *
- * Writes return no body. A 2xx means the server accepted the change the caller
- * asked for, and the caller applies that value itself — parsing the echo would
- * turn a malformed (but successful) response into a false failure report.
- * Refusals keep the server's own `{ error }` text, so the console never invents
- * a second wording for a rule it does not own.
+ * Writes answer the server's JSON body when it has one, `undefined`
+ * otherwise. A 2xx means the server accepted the change the caller asked for:
+ * the caller may adopt the echoed value (the runtime cap) or ignore it, and a
+ * body that is not JSON is not a failed write — `JSON.parse` must never turn a
+ * landed save into a false failure report. Refusals keep the server's own
+ * `{ error }` text, so the console never invents a second wording for a rule it
+ * does not own.
  */
 import { useEffect, useState } from "react";
 import { fetchJson } from "../api";
@@ -128,8 +130,19 @@ export async function readRuntime(): Promise<RuntimeConfig> {
   };
 }
 
-export function setSystemConcurrency(concurrency: number): Promise<void> {
-  return write("PATCH", "/runtime", { concurrency });
+/** The server's `{ concurrency }` answer; `null` when the body is not that shape. */
+function storedConcurrency(answer: unknown): number | null {
+  if (typeof answer !== "object" || answer === null || !("concurrency" in answer)) return null;
+  return typeof answer.concurrency === "number" ? answer.concurrency : null;
+}
+
+/**
+ * Save the system cap, answering the value the server stored. A 2xx whose body
+ * is unreadable still landed the write, so the accepted request value stands in
+ * for the missing echo instead of reporting the save as a failure.
+ */
+export async function setSystemConcurrency(concurrency: number): Promise<number> {
+  return storedConcurrency(await write("PATCH", "/runtime", { concurrency })) ?? concurrency;
 }
 
 export async function readWorkspaces(): Promise<WorkspaceRow[]> {
@@ -201,11 +214,12 @@ function refusal(raw: string): string {
 }
 
 /**
- * One write. `redirect: "manual"` keeps a login redirect from reading as
+ * One write, answering the server's JSON body (or `undefined` when there is
+ * none). `redirect: "manual"` keeps a login redirect from reading as
  * success: the console renders a failure instead of confirming a write that
  * went to an HTML login page.
  */
-async function write(method: "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<void> {
+async function write(method: "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<unknown> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     credentials: "same-origin",
@@ -217,18 +231,25 @@ async function write(method: "POST" | "PATCH" | "DELETE", path: string, body?: u
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) throw new AdminWriteError(res.status, refusal(await res.text()));
+  // The write already landed: an unreadable body answers `undefined` rather
+  // than reporting a failure the server never had.
+  try {
+    return await res.json();
+  } catch {
+    return undefined;
+  }
 }
 
-export function setFlag(key: string, enabled: boolean): Promise<void> {
-  return write("PATCH", "/flags", { key, enabled });
+export async function setFlag(key: string, enabled: boolean): Promise<void> {
+  await write("PATCH", "/flags", { key, enabled });
 }
 
-export function setPlan(workspaceId: string, planId: string): Promise<void> {
-  return write("PATCH", `/workspaces/${encodeURIComponent(workspaceId)}/plan`, { planId });
+export async function setPlan(workspaceId: string, planId: string): Promise<void> {
+  await write("PATCH", `/workspaces/${encodeURIComponent(workspaceId)}/plan`, { planId });
 }
 
-export function setWorkspaceSlug(workspaceId: string, slug: string): Promise<void> {
-  return write("PATCH", `/workspaces/${encodeURIComponent(workspaceId)}/slug`, { slug });
+export async function setWorkspaceSlug(workspaceId: string, slug: string): Promise<void> {
+  await write("PATCH", `/workspaces/${encodeURIComponent(workspaceId)}/slug`, { slug });
 }
 
 export type GrantInput = {
@@ -238,12 +259,12 @@ export type GrantInput = {
   ttlHours: number;
 };
 
-export function createGrant(input: GrantInput): Promise<void> {
-  return write("POST", "/support-grants", input);
+export async function createGrant(input: GrantInput): Promise<void> {
+  await write("POST", "/support-grants", input);
 }
 
-export function revokeGrant(id: string): Promise<void> {
-  return write("DELETE", `/support-grants/${encodeURIComponent(id)}`);
+export async function revokeGrant(id: string): Promise<void> {
+  await write("DELETE", `/support-grants/${encodeURIComponent(id)}`);
 }
 
 /**
