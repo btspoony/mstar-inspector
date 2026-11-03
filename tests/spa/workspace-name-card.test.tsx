@@ -259,6 +259,129 @@ describe("workspace name card", () => {
     }
   });
 
+  test("a system cap below the stored workspace value seeds a valid form and Save still works", async () => {
+    // An operator lowered the platform cap to 4 after this workspace stored 8.
+    // Seeding the draft from 8 would put it above `max`, so the browser would
+    // block the submit and Save would silently do nothing.
+    const { win, cleanup } = installDom(`http://localhost${PATH}`);
+    const calls: Call[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      const url = String(input);
+      calls.push({ method, url, body: String(init?.body ?? "") });
+      if (method === "PUT") {
+        return new Response(JSON.stringify({ concurrency: 3 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/settings/concurrency")) {
+        return new Response(JSON.stringify({ concurrency: 8, system: 4, min: 1, max: 250 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ grants: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
+
+      const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
+      // Seeded from the EFFECTIVE value (min(stored, system)), so it is inside
+      // the input's own range and the form is valid on mount.
+      expect(input.value).toBe("4");
+      expect(input.validity.valid).toBe(true);
+      // The stored value is still visible, and the copy says why they differ.
+      expect(container.textContent).toContain(
+        t("en", "workspace.concurrencyStoredAboveSystem", { stored: 8, system: 4 }),
+      );
+
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(input, "3");
+        input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      await act(async () => {
+        input
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+      expect(calls.filter((call) => call.method === "PUT")).toEqual([
+        {
+          method: "PUT",
+          url: "/dashboard/ws_acme/api/settings/concurrency",
+          body: JSON.stringify({ concurrency: 3 }),
+        },
+      ]);
+      expect(container.textContent).toContain(t("en", "workspace.concurrencySaved"));
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("a non-JSON 2xx is a successful save with a cleared draft", async () => {
+    // The write landed; only its body is unreadable. Reporting it as a failure
+    // would leave the stale draft in the form after a save that stored a value.
+    const { win, cleanup } = installDom(`http://localhost${PATH}`);
+    const calls: Call[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      const url = String(input);
+      calls.push({ method, url, body: String(init?.body ?? "") });
+      if (method === "PUT") {
+        return new Response("<html>ok</html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        });
+      }
+      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
+
+      const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(input, "5");
+        input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      await act(async () => {
+        input
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+
+      expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
+      expect(container.textContent).toContain(t("en", "workspace.concurrencySaved"));
+      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyFailed"));
+      // The draft is cleared: the input shows the submitted value, not a
+      // lingering unsubmitted edit.
+      expect(input.value).toBe("5");
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
   test("switching the workspace reloads the card, and the save lands on the new workspace's URL", async () => {
     // The switcher only rewrites the path segment, so the card stays the same
     // mount: its loaded cap, ceiling and draft must follow the URL instead.

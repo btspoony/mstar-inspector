@@ -2073,12 +2073,15 @@ The six input path families it covers — the gate's whole input vocabulary:
 - `sandbox-image/**`
 
 A diff that touches an image input passes only with one added or removed
-`sandbox-image/Dockerfile` line containing `rebuild:` in the same diff; a
+Dockerfile line containing `rebuild:` in the same diff; a
 Dockerfile change that does not touch the marker fails like any other image
 input. A diff that touches no image input passes without any Dockerfile change.
-The gate reads git output only — it never
+The Dockerfile path is not written into the script: the gate reads
+`containers[].images.sandbox.dockerfile` from `wrangler.jsonc` (`--config`
+overrides the file), so it diffs exactly the file a deploy hashes. The gate
+reads git output only — it never
 builds the image and never inspects file contents beyond that Dockerfile diff —
-and an unreadable diff fails the run rather than passing unverified.
+and an unreadable diff or config fails the run rather than passing unverified.
 
 **Pull requests only.** The `Image rebuild gate` step in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is gated on

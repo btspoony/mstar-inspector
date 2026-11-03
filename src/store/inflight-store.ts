@@ -22,8 +22,10 @@
  * refusal answers `error` (defer), never `ok`.
  *
  * Any storage failure answers `error` (spec §1.3: a storage failure is `error`
- * and never admits) — the exception is swallowed here because the caller has
- * the log channel and the retry schedule.
+ * and never admits). The exception itself is not dropped: it rides the result
+ * as an `InflightErrorCause` so the caller's warn line and its terminal drop row
+ * name the fault, which is otherwise indistinguishable from the benign
+ * released-between-statements race (the same refusal code, a different problem).
  *
  * Module boundary (the artifact-store precedent): `db` is the narrow D1 face
  * (`D1Like`); no worker/pipeline import, so this store can be unit-tested over
@@ -43,7 +45,27 @@ export type InflightKey = {
 /** Why an acquire refused (spec §1.3). `error` = storage failure, always refused. */
 export type InflightRefusal = "pr-held" | "system-cap" | "workspace-cap" | "error";
 
-export type InflightAcquireResult = { ok: true } | { ok: false; reason: InflightRefusal };
+/**
+ * Why an `error` refusal happened. Both answers stay fail-closed; the
+ * distinction is what the operator needs, because a dead D1 binding and a
+ * capacity released between the two statements are the same refusal code but
+ * not the same problem.
+ */
+export type InflightErrorCause =
+  | { kind: "fault"; detail: string }
+  | { kind: "released-between-statements" };
+
+export type InflightAcquireResult =
+  | { ok: true }
+  | { ok: false; reason: "pr-held" | "system-cap" | "workspace-cap" }
+  | { ok: false; reason: "error"; cause: InflightErrorCause };
+
+/** The operator-facing text of an `error` refusal (log field, drop row). */
+export function describeInflightError(cause: InflightErrorCause): string {
+  return cause.kind === "fault"
+    ? `fault: ${cause.detail}`
+    : "capacity released between statements — no listed refusal reason applies";
+}
 
 export type AcquireInflightOptions = {
   /** System-wide live-row ceiling (the per-message system cap the caller read). */
@@ -111,7 +133,9 @@ export async function acquireInflight(
     // refusal, never escape as a throw.
     const nowMs = Date.parse(opts.now);
     const ttlMs = opts.ttlSeconds * 1000;
-    if (!Number.isFinite(nowMs) || !Number.isFinite(ttlMs)) return { ok: false, reason: "error" };
+    if (!Number.isFinite(nowMs) || !Number.isFinite(ttlMs)) {
+      return { ok: false, reason: "error", cause: { kind: "fault", detail: "malformed now or non-finite TTL" } };
+    }
     const now = isoInstant(nowMs);
     const expiresAt = isoInstant(nowMs + ttlMs);
     const written = await db
@@ -142,16 +166,24 @@ export async function acquireInflight(
       .prepare(REFUSAL_SQL)
       .bind(key.installation_id, key.owner, key.repo, key.pr_number, now, now, key.workspace_id, now)
       .first<{ held: number; total: number; workspace_total: number }>();
-    if (row === null) return { ok: false, reason: "error" };
+    if (row === null) {
+      return { ok: false, reason: "error", cause: { kind: "fault", detail: "refusal read returned no row" } };
+    }
     if (row.held > 0) return { ok: false, reason: "pr-held" };
     if (row.total >= opts.systemCap) return { ok: false, reason: "system-cap" };
     if (row.workspace_total >= opts.workspaceCap) return { ok: false, reason: "workspace-cap" };
     // The capacity this attempt was refused on was released between the two
     // statements. No listed reason explains it, and guessing would admit a
     // message the insert already refused.
-    return { ok: false, reason: "error" };
-  } catch {
-    return { ok: false, reason: "error" };
+    return { ok: false, reason: "error", cause: { kind: "released-between-statements" } };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "error",
+      // Threaded, never swallowed: a dead binding and a raced release are the
+      // same refusal code, and only this string tells them apart downstream.
+      cause: { kind: "fault", detail: err instanceof Error ? err.message : String(err) },
+    };
   }
 }
 

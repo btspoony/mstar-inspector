@@ -1378,9 +1378,19 @@ export function parseConcurrencySettings(data: unknown): ConcurrencySettings | n
   return { concurrency, system, min, max };
 }
 
-/** A write's answer: the value the server actually stored, or null on a bad body. */
-export function parseStoredConcurrency(data: unknown): number | null {
-  return isRecord(data) && typeof data.concurrency === "number" ? data.concurrency : null;
+/**
+ * A write's answer: the value the server actually stored, or null on a body
+ * that is not JSON or carries no number. The parse is guarded here — a 2xx
+ * whose body is not JSON is still a landed write (the status said so), and
+ * letting `JSON.parse` throw would report that save as a failure.
+ */
+export function parseStoredConcurrency(body: string): number | null {
+  try {
+    const data: unknown = JSON.parse(body);
+    return isRecord(data) && typeof data.concurrency === "number" ? data.concurrency : null;
+  } catch {
+    return null;
+  }
 }
 
 export function splitModelChain(raw: string | null | undefined): string[] {

@@ -1090,6 +1090,14 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
   // Section-local channel, like the name card's: an op outcome never rides the page-level notice.
   const [concurrencyNotice, setConcurrencyNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  // The value this workspace ACTUALLY gets: the server refuses a workspace cap
+  // above the system cap, but an operator can lower the system cap below an
+  // already-stored workspace value. The form then seeds from the effective
+  // value — a draft seeded from the stale stored number would sit above `max`
+  // on mount and the browser would refuse the submit, while the server (the
+  // authority) would have accepted the lowered value. The stored value stays
+  // visible in the card's copy.
+  const effective = loaded === null ? 0 : Math.min(loaded.concurrency, loaded.system);
 
   useEffect(() => {
     let live = true;
@@ -1113,15 +1121,19 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
     event.preventDefault();
     if (busy || loaded === null) return; // in-flight guard — no double submit
     setBusy(true);
+    const submitted = Number((draft ?? String(effective)).trim());
     try {
       const { status, body } = await putJson(`${apiBase()}/api/settings/concurrency`, {
-        concurrency: Number((draft ?? String(loaded.concurrency)).trim()),
+        concurrency: submitted,
       });
       const outcome = settingsOpOutcome(locale, status, body, t(locale, "workspace.concurrencySaved"));
       if (outcome.kind === "success") {
-        // The stored value is the server's answer, never the typed draft.
-        const stored = parseStoredConcurrency(JSON.parse(body));
-        if (stored !== null) setLoaded((previous) => previous && { ...previous, concurrency: stored });
+        // The stored value is the server's answer, never the typed draft. A
+        // landed 2xx whose body is not JSON still stored a value — the write
+        // succeeded, so the submitted number stands in for the unreadable one
+        // instead of reporting the save as a failure.
+        const stored = parseStoredConcurrency(body) ?? submitted;
+        setLoaded((previous) => previous && { ...previous, concurrency: stored });
         setDraft(null);
       }
       setConcurrencyNotice(outcome);
@@ -1154,12 +1166,23 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
               max={loaded.system}
               className="w-32"
               autoComplete="off"
-              value={draft ?? String(loaded.concurrency)}
+              value={draft ?? String(effective)}
               onChange={(event) => setDraft(event.target.value)}
             />
             <span className="text-xs text-muted-foreground">
               {t(locale, "workspace.concurrencySystemCap", { system: loaded.system })}
             </span>
+            {loaded.concurrency > loaded.system ? (
+              // The stored value is above the system cap (an operator lowered
+              // it afterwards). The input shows what actually applies; this
+              // line keeps the stored number visible and says why they differ.
+              <span className="text-xs text-muted-foreground">
+                {t(locale, "workspace.concurrencyStoredAboveSystem", {
+                  stored: loaded.concurrency,
+                  system: loaded.system,
+                })}
+              </span>
+            ) : null}
           </div>
           <Button type="submit" disabled={busy}>
             {t(locale, "workspace.concurrencySave")}

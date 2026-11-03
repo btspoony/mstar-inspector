@@ -24,7 +24,7 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -38,6 +38,15 @@ import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput 
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
+/**
+ * Every migration after the 0036 identity rewrite, in wrangler's apply order.
+ * Derived from the directory so a future migration cannot leave this fixture on
+ * a stale schema; the 0036 boundary itself stays explicit below because that
+ * loop exists to reconstruct a specific historical shape.
+ */
+const MIGRATIONS_AFTER_0036 = readdirSync(MIGRATIONS_DIR)
+  .filter((name) => name.endsWith(".sql") && name > "0036_app_identity.sql")
+  .sort();
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 /** Distinct fake App PEMs — isolation asserts the factory receives the right one. */
@@ -100,14 +109,10 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
     "0036_app_identity.sql",
-    // 0038 rebuilds github_apps, so the fixture must carry every column the
-    // rebuild copies.
-    "0037_github_metadata_attempt.sql",
-    "0038_webhook_path_drop.sql",
-    // 0040/0041: the consumer's per-message admission reads the runtime caps
-    // and writes the `review_inflight` row on EVERY admitted message.
-    "0040_runtime_config.sql",
-    "0041_review_inflight.sql",
+    // Every later migration, derived from the directory (0040/0041 included):
+    // the consumer's per-message admission reads the runtime caps and writes
+    // the `review_inflight` row on EVERY admitted message.
+    ...MIGRATIONS_AFTER_0036,
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

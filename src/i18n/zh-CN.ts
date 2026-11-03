@@ -324,6 +324,8 @@ export const zhCN: Dictionary = {
     concurrencyFailed: "修改审查并发数失败，请重试。",
     /** {system} = 该工作区不能超过的平台系统上限。 */
     concurrencySystemCap: "系统上限：{system}。",
+    concurrencyStoredAboveSystem:
+      "已存储值：{stored} — 高于当前系统上限 {system}，因此在保存更低的值之前按 {system} 生效。",
   },
   /**
    * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
