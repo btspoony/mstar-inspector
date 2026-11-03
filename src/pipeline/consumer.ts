@@ -986,11 +986,12 @@ function buildEvidenceCatalog(
    * One catalog entry, or WHY it could not be added: `size` is a slice that
    * cannot be trusted within the per-slice bound (no eligible slice exists
    * for this draft), `catalog` is a well-formed slice the catalog byte budget
-   * no longer fits (a budget exclusion, not a missing proof).
+   * no longer fits (a budget exclusion, not a missing proof). The caller's id
+   * arrives FIRST: it is part of the serialized slice, so the bound must see it.
    */
-  const addSlice = (draft: Draft): EvidenceSlice | "size" | "catalog" => {
+  const addSlice = (draft: Draft, id: string): EvidenceSlice | "size" | "catalog" => {
     const slice: EvidenceSlice = {
-      id: "",
+      id,
       headSha: captureSha,
       baseSha: captureSha,
       path: draft.file.path,
@@ -1041,13 +1042,12 @@ function buildEvidenceCatalog(
         included += 1; // the hunk is already in the catalog — targets share slices
         continue;
       }
-      const built = addSlice(draft);
+      const built = addSlice(draft, `ev-${slices.length + 1}`);
       if (built === "size") continue;
       if (built === "catalog") {
         catalogDenied = true;
         continue;
       }
-      built.id = `ev-${slices.length + 1}`;
       slices.push(built);
       budget -= sizeOf(built);
       sliceIdByKey.set(key, built.id);
@@ -1102,8 +1102,9 @@ type OriginalFindingProjection = RecheckTarget["original"];
  * sent), then catalog budget exhaustion (`budget` — its slices exist but the
  * catalog byte budget dropped them, so it was never sent), then gate
  * rejection (`invalid-output` — it WAS sent and answered badly), then the
- * input size budget / seat skip (`budget`), then `invalid-output` for an
- * absent document, then `omitted`.
+ * input size budget (`budget`), then a seat skip (`budget`), then a round the
+ * runner CANCELLED by design (`omitted` — stopped, not answered), then
+ * `invalid-output` for an absent document, then `omitted`.
  *
  * ATTEMPTED vs never-sent is the accounting split (§7.2 fair rotation): a row
  * the seat was given — whether the gate kept its answer or dropped it — is
@@ -1254,7 +1255,9 @@ function reconcileRecheckRound(input: {
       const reason: Assessment["reason"] = budgetExcluded.has(target.rowId)
         ? "budget"
         : status?.outcome === "skipped"
-          ? "budget"
+          ? status.reason === "aborted"
+            ? "omitted"
+            : "budget"
           : doc === null
             ? "invalid-output"
             : "omitted";
@@ -3242,11 +3245,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     if (targets.length > 0) {
       const status = recheck?.status ?? null;
       const recheckOutcome = status?.outcome ?? "absent";
+      // The runner cancels an unfinished seat when the main review settles
+      // (spec §7.8): the round answered nothing because it was STOPPED, not
+      // because it ran and lost. That is neither a failure row nor an
+      // `invalid-output` for a row the seat never answered.
+      const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
       const recheckDetail = redactExactSecrets(
         redactSecrets(`${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`),
         secretValues,
       ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
-      deps.log[recheckDoc === null ? "warn" : "info"](
+      deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
         {
           ...fields,
           recheck_outcome: recheckOutcome,
@@ -3268,14 +3276,21 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         },
         recheckInput !== undefined
           ? recheckDoc === null
-            ? "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
+            ? roundCancelled
+              ? "recheck round cancelled by the runner — no row was answered, no failure recorded"
+              : "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
             : "recheck round accounted"
           : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
       );
       // A failure row names a round that RAN and produced nothing usable. A
-      // round that sent nothing has no failure to record — its rows are
-      // already accounted as `budget`/`no-evidence` in the closure section.
-      if (recheckInput !== undefined && (recheckDoc === null || recheckOutcome === "failed")) {
+      // round that sent nothing — or that the runner cancelled by design —
+      // has no failure to record: its rows are already accounted as
+      // `budget`/`no-evidence`/`omitted` in the closure section.
+      if (
+        recheckInput !== undefined &&
+        !roundCancelled &&
+        (recheckDoc === null || recheckOutcome === "failed")
+      ) {
         // Best-effort: the insert must never mask the round (AL-6 pattern).
         try {
           await deps.failureStore.record({

@@ -110,7 +110,9 @@ export const RECHECK_OUTPUT_PATH = '/tmp/mstar-recheck.json';
  * readable rowId cannot be named: `rejected_unnamed` counts those, which is
  * what lets the Worker attribute them by position among the sent-and-unanswered
  * rows instead of losing them. `reason`/`error` are null unless the round
- * degraded.
+ * degraded — except a `skipped` round, whose `reason` says WHY it never ran:
+ * `budget` (no room to start) or `aborted` (the runner cancelled the seat when
+ * the main review settled).
  */
 export const RECHECK_STATUS_PATH = '/tmp/mstar-recheck-status.json';
 export type RecheckStatus = {

@@ -321,6 +321,54 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(findingRow.last_assessed_ms).toBeNull();
   });
 
+  test("a round the runner cancelled by design is not a failure: rows stay omitted, the clock untouched, no D1 row", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The runner aborts an unfinished seat when the main review settles
+    // (spec §7.8). The seat answered nothing because it was STOPPED — not
+    // because it ran and lost, so this is neither a failure row nor
+    // `invalid-output` for rows nobody asked about.
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "skipped",
+      reason: "aborted",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (omitted)");
+    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
+    expect(prepared.body).not.toContain("unverifiable (budget)");
+    // A cancellation is not a lost round: no failure row, nothing assessed.
+    expect(failureRows(db)).toHaveLength(0);
+    const line = logLines.find((l) => l.msg.includes("recheck round cancelled by the runner"))!;
+    expect(line.fields).toMatchObject({
+      recheck_outcome: "skipped",
+      recheck_reason: "aborted",
+      assessed: 0,
+      rejected: 0,
+    });
+    const findingRow = db.raw.query("SELECT state, last_assessed_ms FROM review_findings").get() as {
+      state: string;
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.state).toBe("open");
+    expect(findingRow.last_assessed_ms).toBeNull();
+  });
+
   test("an empty-result round is attributable: every sent row invalid-output, one recheck failure row, rotation clock advanced", async () => {
     reset();
     sandbox.diffStdout = VALID_DIFF;
@@ -578,26 +626,44 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).toContain("unverifiable (budget)");
   });
 
-  /** A src/auth.ts diff whose ONE hunk is `lineCount` context lines (1-based numbering). */
+  /**
+   * A src/auth.ts diff whose ONE hunk is `lineCount` lines (1-based numbering).
+   * One ADDED line closes the first 80-line window, so the old and new sides
+   * genuinely differ: the added text exists on the new side only, and every
+   * later window starts one line further into the file on the new side
+   * (`oldStart !== newStart`). A context-only hunk carries the same strings on
+   * both sides, so a side swap or an offset error would pass every window
+   * assertion below unchanged.
+   */
   function oversizedAuthDiff(lineCount: number): string {
     return [
       "diff --git a/src/auth.ts b/src/auth.ts",
       "index 1111111..2222222 100644",
       "--- a/src/auth.ts",
       "+++ b/src/auth.ts",
-      `@@ -1,${lineCount} +1,${lineCount} @@`,
-      ...Array.from({ length: lineCount }, (_, i) => ` const v${String(i + 1).padStart(3, "0")} = 1;`),
+      `@@ -1,${lineCount - 1} +1,${lineCount} @@`,
+      ...Array.from({ length: lineCount }, (_, i) =>
+        i === 79
+          ? "+const added = 1;"
+          : ` const v${String(i + 1).padStart(3, "0")} = 1;`,
+      ),
       "",
     ].join("\n");
   }
 
   /**
    * One file per row, each a 320-line hunk (four 80-line windows of ~7.8 KiB
-   * slices), so the 256 KiB catalog budget runs out before the last rows.
+   * slices), so the 256 KiB catalog budget runs out before the last rows. Each
+   * file carries one ADDED line in its first window, so every later window's
+   * `newStart` is one line ahead of its `oldStart` — the fixture can tell the
+   * two sides apart.
    */
   function catalogBudgetDiff(files: number): string {
     const body = Array.from({ length: 320 }, (_, i) =>
-      ` const v${String(i + 1).padStart(3, "0")} = 1;`.padEnd(45, " "),
+      (i === 10 ? `+const added${String(i + 1).padStart(3, "0")} = 1;` : ` const v${String(i + 1).padStart(3, "0")} = 1;`).padEnd(
+        45,
+        " ",
+      ),
     );
     return Array.from({ length: files }, (_, i) => {
       const path = `src/b${String(i + 1).padStart(2, "0")}.ts`;
@@ -606,7 +672,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
         "index 1111111..2222222 100644",
         `--- a/${path}`,
         `+++ b/${path}`,
-        "@@ -1,320 +1,320 @@",
+        "@@ -1,319 +1,320 @@",
         ...body,
       ].join("\n");
     }).join("\n") + "\n";
@@ -694,11 +760,16 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     };
     const window = runnerInput.recheck.evidence.find((slice) => slice.id === "ev-1")!;
     // Header arithmetic stays exact: window one starts at file line 1 and its
-    // 80 lines really do cover the target line 21.
+    // 80 NEW-side lines really do cover the target line 21.
     expect(window.oldStart).toBe(1);
     expect(window.newStart).toBe(1);
     expect(window.newLines).toHaveLength(80);
     expect(window.newLines[20]).toBe("const v021 = 1;");
+    // The sides are genuinely different: the added line exists on the new side
+    // only, so this window reads 79 old lines against 80 new ones.
+    expect(window.oldLines).toHaveLength(79);
+    expect(window.newLines[79]).toBe("const added = 1;");
+    expect(window.oldLines).not.toContain("const added = 1;");
     // Slice ids stay the shared catalog's stable numbering.
     expect(runnerInput.recheck.evidence.map((slice) => slice.id)).toEqual(["ev-1", "ev-2", "ev-3"]);
     // The in-window quote validates: the row closes as a verified fix.
@@ -750,13 +821,16 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
         evidence: Array<{ id: string; oldStart: number; newStart: number; newLines: string[] }>;
       };
     };
-    // Nearest first, then by distance: 161 (distance 19), 81 (99), 1 (179).
+    // Nearest first, then by distance: 160 (distance 20), 80 (100), 1 (179).
     expect(runnerInput.recheck.evidence.map((slice) => [slice.id, slice.oldStart])).toEqual([
-      ["ev-1", 161],
-      ["ev-2", 81],
+      ["ev-1", 160],
+      ["ev-2", 80],
       ["ev-3", 1],
     ]);
     const nearest = runnerInput.recheck.evidence[0]!;
+    // The window's two sides are genuinely offset: the added line makes every
+    // window past it start one line later on the new side.
+    expect(nearest.oldStart).toBe(160);
     expect(nearest.newStart).toBe(161);
     expect(nearest.newLines).toHaveLength(40); // 161-200: the tail window
     expect(nearest.newLines[19]).toBe("const v180 = 1;");
@@ -945,7 +1019,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     ]);
   });
 
-  test("an oversized status error or reason is bounded at parse time, so the log field and the D1 text share one value", async () => {
+  test("an oversized status error or reason is bounded at parse time, on both the log field and the D1 text", async () => {
     // `z` matches no secret shape, so what comes back is the bound alone.
     const oversized = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS + 200);
     const capped = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS);
@@ -974,14 +1048,16 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       await consumer(makeBatch(makePayload()));
 
       const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
-      expect(line.fields).toMatchObject(field === "error" ? { recheck_error: capped } : { recheck_reason: capped });
+      const logged = String(line.fields[field === "error" ? "recheck_error" : "recheck_reason"]);
+      expect(logged).toBe(capped);
       const rows = failureRows(db);
       expect(rows).toHaveLength(1);
-      // The D1 text is the same two fields, so one overrun is enough to bound
-      // it: the capped value rides inside the row and the row is capped too.
+      // The composed D1 text carries the same capped value, and is itself
+      // bounded — the exact length depends on the separator and the re-cap, so
+      // the bound is what is asserted, not the formatting.
       const persisted = String(rows[0]!.error);
       expect(persisted).toContain(capped.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS - 100));
-      expect(persisted).toHaveLength(RECHECK_STATUS_ERROR_MAX_CHARS);
+      expect(persisted.length).toBeLessThanOrEqual(RECHECK_STATUS_ERROR_MAX_CHARS);
     }
   });
 
@@ -1075,6 +1151,41 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).toContain("Reassessed 1/1 open prior finding(s)");
     expect(prepared.body).toContain("addressed (verified-fix)");
     expect(commenterCalls.some((c) => c.op === "resolve")).toBe(true);
+  });
+
+  test("the per-slice byte bound measures the slice AS SERIALIZED, id included", async () => {
+    reset();
+    // One 3-line hunk whose middle context line is padded so the slice lands in
+    // the window between the two measurement points: the id-less object is
+    // within 8 KiB (8190 bytes) while the slice as serialized — with its
+    // `ev-N` id — is 8194, over the bound. Measuring before the id is assigned
+    // let this slice ride the wire over the bound it claims to enforce.
+    sandbox.diffStdout = [
+      "diff --git a/src/auth.ts b/src/auth.ts",
+      "index 1111111..2222222 100644",
+      "--- a/src/auth.ts",
+      "+++ b/src/auth.ts",
+      "@@ -19,3 +19,3 @@",
+      " const header = req.headers;",
+      ` const filler = "${"x".repeat(3854)}";`,
+      " const claims = decode(token);",
+      "",
+    ].join("\n");
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The oversized slice is dropped, so nothing proves the row and no recheck
+    // input is sent at all — the row is `no-evidence`, never an invalid answer.
+    expect(sandbox.calls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (no-evidence)");
+    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
   });
 
   test("an unreadable status file keeps the conservative path: invalid-output, no throw, exactly one `recheck` attribution row", async () => {

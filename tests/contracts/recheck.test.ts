@@ -31,8 +31,10 @@ import {
   type RecheckInput,
   type RecheckTarget,
 } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_HUNK, RECHECK_SHA } from "../helpers/recheck-wire-fixtures";
 
-const SHA = "0123456789abcdef0123456789abcdef01234567";
+const SHA = RECHECK_SHA;
+const HUNK: EvidenceSlice = RECHECK_HUNK;
 
 const ORIGINAL = {
   title: "Null deref risk",
@@ -43,15 +45,6 @@ const ORIGINAL = {
   mergeClass: "should-fix" as const,
   category: "logic",
   fingerprintHint: "fp-1",
-};
-
-const HUNK: EvidenceSlice = {
-  id: "slice-1", headSha: SHA, baseSha: "b" + "0".repeat(39), path: "src/a.ts", oldPath: null,
-  kind: "hunk",
-  oldStart: 8, oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
-  newStart: 8, newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
-  oldBlobOid: "oid-old", headBlobOid: "oid-head",
-  absentAtHead: false, complete: true,
 };
 
 const DELETED_FILE: EvidenceSlice = {

@@ -47,6 +47,13 @@ category: Fixed
   round still emits its accounting line, naming the exclusion, instead of
   silently accounting every row as an unanswered `invalid-output`. A status from
   another HEAD — or one naming a row this round never sent — attributes nothing.
+- **A round the runner cancels by design is no longer recorded as a failure.**
+  The runner aborts an unfinished recheck seat as soon as the main review
+  settles, so the round answers nothing because it was stopped, not because it
+  ran and lost. That abort now reports `skipped` with reason `aborted` instead of
+  `failed`/`seat-failed`: the worker writes no `review_failures` row, leaves
+  every row `unverifiable/omitted` and leaves the rotation clock untouched, while
+  a genuine seat error or non-`Error` rejection keeps `failed`/`seat-failed`.
 - **A recheck document-write failure is recorded, not hidden.** The runner
   writes the round status only after the document lands; a failed document
   write exits 1 with no stdout (the worker's runner-failure path), so no status
@@ -128,6 +135,11 @@ category: Fixed
   自己的账目行，点名这次排除，而不是把每一行都静默记成无人应答的
   `invalid-output`。别的 HEAD 写下的状态、或点名了本轮从未发送的行的状态，都不产生
   任何归因。
+- **runner 主动取销的一轮不再被记成失败。** 主评审一结束，runner 就会中止尚未完成的
+  重审席位，因此该轮之所以什么都没回答，是因为它被停止，而不是因为它运行后失败了。
+  这次中止现在报 `skipped`、reason 为 `aborted`，而不再是 `failed`/`seat-failed`：
+  worker 不写 `review_failures` 行，所有行保持 `unverifiable/omitted`，轮转时钟不动；
+  而真正的席位错误或非 `Error` 拒绝仍然报 `failed`/`seat-failed`。
 - **重审文档写失败会被记录，而不是被掩盖。** runner 只有在文档写成功之后才写轮次
   状态；文档写失败时以退出码 1 结束且不输出 stdout（走 worker 的 runner 失败路径），
   因此不会有任何状态把从未送达 worker 的文档报成 `ok`，D1 也不会再把「什么都没发布」

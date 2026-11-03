@@ -388,6 +388,15 @@ export async function runRecheckSeat(input: {
     });
     gate = validateRecheckDoc(recheckStructuredData(result), input.input);
   } catch (error) {
+    // A by-design abort is a CONTRACT exit, not a lost round: the caller
+    // cancels this seat when the main review settles (spec §7.8), so the
+    // round answered nothing because it was stopped — never because the
+    // model failed. `skipped`/`aborted` keeps the worker from writing a
+    // failure row or blaming the rows it never answered.
+    if (input.signal.aborted) {
+      console.error(JSON.stringify({ event: "recheck_seat_aborted", reason: "aborted" }));
+      return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "aborted", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };
+    }
     // A non-Error rejection (`throw "x"`, a rejected plain value) has no
     // `.message`; coercing keeps the REAL failure inside the never-throws
     // contract instead of throwing out of this catch.

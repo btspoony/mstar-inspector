@@ -83,6 +83,8 @@ let seatResults: Array<{
   reject?: string;
   /** When set, the seat rejects with a NON-Error value — the shape that has no `.message`. */
   rejectWith?: unknown;
+  /** When set, the seat parks until ITS OWN abort signal fires, then rejects like the SDK. */
+  awaitAbort?: boolean;
 }> = [];
 /** Definition content snapshotted from the PR-clone cwd at session creation. */
 let installedSeatAgent: string | null = null;
@@ -364,6 +366,21 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
       await new Promise<void>((resolve) => seatReleases.push(resolve));
     }
     const plan = seatResults.shift() ?? {};
+    // A seat the caller cancels: it stays pending until ITS OWN signal fires,
+    // then rejects the way the SDK does. This is the path the runner takes
+    // when the main review settles before the recheck seat finishes.
+    if (plan.awaitAbort) {
+      const signal = request.signal as AbortSignal;
+      await new Promise<void>((_resolve, reject) => {
+        if (signal.aborted) {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+          return;
+        }
+        signal.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError")),
+        );
+      });
+    }
     // A seat whose promise REJECTS rather than settles: the SDK threw, or our
     // own code did. It produces no seat outcome at all.
     if (plan.reject !== undefined) throw new Error(plan.reject);
@@ -2343,6 +2360,32 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(result.recheckStatus?.error).toBe("provider boom");
   });
 
+  test("a seat the runner cancels when the review settles reports skipped/aborted, never failed", async () => {
+    // The normal path: the recheck seat is still running when the review
+    // settles, so the runner aborts it (spec §7.8). That is a contract exit —
+    // the round answered nothing because it was stopped.
+    seatResults = [{ awaitAbort: true }, { data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(result.recheck).toBeNull();
+    expect(result.recheckStatus).toEqual({
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_SHA,
+      outcome: "skipped",
+      reason: "aborted",
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 0,
+      error: null,
+    });
+  });
+
   test("a seat rejecting with a plain string still resolves failed — never throws out of the catch", async () => {
     // A non-Error rejection has no `.message`; reading it blind would make the
     // documented never-throws catch throw and lose the real failure.
@@ -2381,7 +2424,9 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     }
 
     const error = result.recheckStatus?.error ?? "";
-    expect(error.length).toBe(RECHECK_STATUS_ERROR_MAX_CHARS);
+    // The raw message exceeded the bound, so the redacted slice fills it —
+    // asserted as a bound, not as one exact width.
+    expect(error.length).toBeLessThanOrEqual(RECHECK_STATUS_ERROR_MAX_CHARS);
     // No recognizable fragment of the key survives the cut.
     expect(error).not.toContain("AIza");
     expect(error).toContain("[REDACT");

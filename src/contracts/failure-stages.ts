@@ -23,10 +23,11 @@
 export const PAGING_EXCLUDED_STAGES = Object.freeze(["recheck", "usage"] as const);
 
 /**
- * Render a stage list as a SQL `IN (…)` literal body (each stage
- * single-quoted and comma-joined). Callers own their operator, so
- * `NOT IN (${…})` and `< >`-style comparisons both read off this one
- * rendering.
+ * Render a stage list as the literal body of a SQL `IN (…)` / `NOT IN (…)`
+ * comparison (each stage single-quoted and comma-joined, e.g.
+ * `'recheck', 'usage'`). Callers supply the operator and parentheses; this
+ * helper only renders the list, so it is never valid as an operand sequence
+ * of its own.
  */
 export function sqlStageList(stages: readonly string[]): string {
   return stages.map((stage) => `'${stage}'`).join(", ");
