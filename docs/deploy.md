@@ -2190,6 +2190,12 @@ alongside the pause switch:
   auto-trigger.
 - `manual` — never auto-reviews.
 
+A PR opened by a bot account is **never** reviewed, on either face
+(auto trigger and bot mention). GitHub marks bot logins with a `[bot]`
+suffix, so `dependabot[bot]`, `github-actions[bot]` and another App's own
+`<slug>[bot]` all qualify (case-insensitive suffix match); `renovate`
+without the suffix is an ordinary login and still triggers.
+
 In every mode, a PR comment that @mentions the App's bot — `@<slug>` or
 the canonical `@<slug>[bot]`, matched as a standalone token —
 (re-)starts a review when the commenter is the PR author or the

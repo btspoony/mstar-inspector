@@ -188,6 +188,18 @@ function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
   return mode === "open" ? action === "opened" : true;
 }
 
+/**
+ * GitHub gives every bot account a login ending in `[bot]` (dependabot[bot],
+ * github-actions[bot], an App's own `<slug>[bot]`). A PR opened by one of
+ * them is machine-generated — release prep, dependency bumps, self-authored
+ * PRs from another automation — and is never reviewed, on either trigger
+ * face. Case-insensitive because GitHub logins are; the suffix is the whole
+ * rule, so `renovate` (a human-accounted bot) still triggers.
+ */
+const BOT_LOGIN = /\[bot\]$/i;
+
+const BOT_PR_REASON = "pull request was opened by a bot account";
+
 /** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
 export const WEBHOOK_BODY_LIMIT = 1_000_000;
 
@@ -370,6 +382,8 @@ const pullRequestSchema = z.object({
   pull_request: z
     .object({
       number: z.number().optional(),
+      // PR author — a bot-authored PR is never reviewed (either face).
+      user: z.object({ login: z.string().optional() }).nullable().optional(),
       // Display fields for the per-App PR ledger (`pullRequestRecord`). All
       // optional *and* nullable: a delivery may omit them and every existing
       // classifier guard stays decided by `number` / `head.sha` alone.
@@ -562,6 +576,9 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
   }
+  if (BOT_LOGIN.test(pull_request?.user?.login ?? "")) {
+    return { kind: "ignore", reason: BOT_PR_REASON };
+  }
   // The install's own account wins: the payload states it, whereas the owner
   // is only the inference a delivery without `installation.account` allows.
   // Whichever source supplied it, a review delivery is INFERRED for the store.
@@ -610,6 +627,9 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   }
   if (issue?.pull_request == null) {
     return { kind: "ignore", reason: "comment is not on a pull request thread" };
+  }
+  if (BOT_LOGIN.test(issue?.user?.login ?? "")) {
+    return { kind: "ignore", reason: BOT_PR_REASON };
   }
   if (sender?.type === "Bot") {
     return { kind: "ignore", reason: "comment sent by a bot (self-comment loop guard)" };

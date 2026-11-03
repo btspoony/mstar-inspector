@@ -34,8 +34,9 @@ The comment trigger is a **bare mention**: no slash command, no magic wording. `
 | `pull_request.synchronize` | ignore | enqueue | ignore |
 | `pull_request.reopened` | ignore | enqueue | ignore |
 | other `pull_request` actions | ignore | ignore | ignore |
+| any `pull_request` action whose PR author login ends in `[bot]` (case-insensitive; `dependabot[bot]`, `github-actions[bot]`, another App's `<slug>[bot]`) | ignore | ignore | ignore |
 | `issue_comment.created` (allowed actor, bot mention, on a PR) | enqueue | enqueue | enqueue |
-| `issue_comment.created` (disallowed actor / no mention / not a PR / bot sender) | ignore | ignore | ignore |
+| `issue_comment.created` (disallowed actor / no mention / not a PR / bot sender / PR opened by a `[bot]` account) | ignore | ignore | ignore |
 
 Ignored paths keep today's structured-log discipline; classification never rejects (4xx) an event for policy reasons — reject is reserved for malformed payloads, exactly as today.
 

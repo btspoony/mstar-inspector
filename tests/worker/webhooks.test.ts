@@ -250,6 +250,28 @@ describe("classifyEvent — pull_request whitelist", () => {
     expect(outcome.kind).toBe("ignore");
   });
 
+  test("pull_request opened by a non-bot login ending in 'bot' still yields a job", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("opened", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "renovate" } },
+      }),
+    );
+    expect(outcome.kind).toBe("job");
+  });
+
+  test("pull_request authored by a [bot] account is ignored, case-insensitively", () => {
+    for (const login of ["dependabot[bot]", "GitHub-Actions[BOT]", "test-app[bot]"]) {
+      const outcome = classifyEvent(
+        "pull_request",
+        pullRequestBody("synchronize", {
+          pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login } },
+        }),
+      );
+      expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
+    }
+  });
+
   test("pull_request with missing required fields is rejected with 400", () => {
     const outcome = classifyEvent("pull_request", pullRequestBody("opened", { installation: null }));
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
@@ -397,6 +419,22 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       EVERY_PUSH,
     );
     expect(outcome).toEqual({ kind: "ignore", reason: "comment is not on a pull request thread" });
+  });
+
+  test("comment on a PR opened by a [bot] account is ignored", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        issue: {
+          number: 42,
+          user: { login: "release-prep[bot]" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+      }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
   });
 
   test("comment sent by a bot is ignored (self-comment loop guard)", () => {
