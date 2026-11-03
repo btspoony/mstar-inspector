@@ -21,9 +21,32 @@ export const SEVERITY_KEYS = {
 } as const;
 
 /**
+ * The one actionability rule: every severity but a nit asks the operator to
+ * act. The payload's severity is a free string, so a spelling this face does
+ * not name (the `other` bucket, which the UI keeps visible rather than
+ * dropping) is a requested change too — only the one word `nit` reads as no
+ * action. The family the face opens on, the trigger's dot and every severity
+ * bucket all read this predicate, so no two of them can disagree.
+ */
+export function isActionable(severity: string): boolean {
+  return severity !== SEVERITY_KEYS.nit;
+}
+
+/**
  * Severity buckets in the order an operator asks about them. `severity` is a
- * free string in the payload, so the last bucket catches every spelling these
- * three do not name.
+ * free string in the payload; the table names three spellings and the catch-all
+ * bucket (`OTHER_BUCKET`) collects every other one.
+ *
+ * | bucket     | membership                                  | actionable |
+ * |------------|---------------------------------------------|------------|
+ * | must-fix   | `severity === "must-fix"`                   | yes        |
+ * | should-fix | `severity === "should-fix"`                 | yes        |
+ * | nit        | `severity === "nit"`                        | no         |
+ * | other      | every spelling the three above do not name  | yes        |
+ *
+ * Every `actionable` cell is `isActionable` applied to that bucket's findings:
+ * a bucket is actionable when any finding in it is, so the table is a reading
+ * of the rule, not a second one.
  */
 export const SEVERITY_GROUPS = [
   { severity: SEVERITY_KEYS.mustFix, labelKey: "pullRequests.severityMustFix", tone: "danger" },
@@ -31,24 +54,27 @@ export const SEVERITY_GROUPS = [
   { severity: SEVERITY_KEYS.nit, labelKey: "pullRequests.severityNit", tone: "neutral" },
 ] as const;
 
+/** The bucket every spelling outside the table lands in, rendered last. */
+const OTHER_BUCKET = {
+  key: "other",
+  labelKey: "pullRequests.severityOther",
+  tone: "neutral",
+} as const;
+
 export type SeverityTone = (typeof SEVERITY_GROUPS)[number]["tone"];
 
 export type SeverityGroup = {
   key: string;
   label: string;
   tone: SeverityTone;
+  /** Whether the bucket asks for action — the same `isActionable` the dot reads. */
+  actionable: boolean;
   items: { finding: PullRequestFinding; index: number }[];
 };
 
-/**
- * True when a finding asks the operator to act: everything but a nit. The
- * payload's severity is a free string, so a severity this face does not know
- * (the `other` bucket, which the UI keeps visible rather than dropping) is a
- * requested change too — only the one word `nit` reads as no action. That one
- * predicate drives both the family the face opens on and the trigger's dot.
- */
+/** True when the payload holds a finding to act on — the predicate behind the dot. */
 export function hasActionableFinding(detail: PullRequestDetail): boolean {
-  return detail.findings.some((finding) => finding.severity !== SEVERITY_KEYS.nit);
+  return detail.findings.some((finding) => isActionable(finding.severity));
 }
 
 /** The family the face opens on: the actionable record first, history last. */
@@ -64,19 +90,28 @@ export function severityGroups(
   findings: readonly PullRequestFinding[],
 ): SeverityGroup[] {
   const indexed = findings.map((finding, index) => ({ finding, index }));
-  const known = new Set(SEVERITY_GROUPS.map((group) => group.severity as string));
-  const groups: SeverityGroup[] = SEVERITY_GROUPS.map((group) => ({
-    key: group.severity as string,
-    label: t(locale, group.labelKey),
-    tone: group.tone,
-    items: indexed.filter(({ finding }) => finding.severity === group.severity),
-  }));
+  // One actionability derivation for every bucket, the catch-all included: a
+  // bucket is actionable when one of its findings is, by `isActionable`.
+  const actionable = (items: SeverityGroup["items"]) =>
+    items.some(({ finding }) => isActionable(finding.severity));
+  const known = new Set<string>(SEVERITY_GROUPS.map((group) => group.severity));
+  const groups: SeverityGroup[] = SEVERITY_GROUPS.map((group) => {
+    const items = indexed.filter(({ finding }) => finding.severity === group.severity);
+    return {
+      key: group.severity,
+      label: t(locale, group.labelKey),
+      tone: group.tone,
+      actionable: actionable(items),
+      items,
+    };
+  });
   const other = indexed.filter(({ finding }) => !known.has(finding.severity));
   if (other.length > 0) {
     groups.push({
-      key: "other",
-      label: t(locale, "pullRequests.severityOther"),
-      tone: "neutral",
+      key: OTHER_BUCKET.key,
+      label: t(locale, OTHER_BUCKET.labelKey),
+      tone: OTHER_BUCKET.tone,
+      actionable: actionable(other),
       items: other,
     });
   }
@@ -117,12 +152,32 @@ export function reviewAttribution(locale: Locale, review: PullRequestReview): st
   return t(locale, "pullRequests.reviewMeta", { model: review.model, provider: review.provider });
 }
 
+/** Characters an id may carry literally; anything else is escaped. */
+const ID_LITERAL = /^[A-Za-z0-9-]$/;
+
+/**
+ * A record body's element id. The key is ENCODED rather than sanitized:
+ * folding every run of other characters to one dash maps distinct keys
+ * (`2026-11-01 08:00:00` and `2026-11-01-08:00:00`) onto one id, which
+ * duplicates the DOM id and points `aria-controls` at another record's body.
+ * An escape starts with `_`, which is never literal, so the encoding is
+ * injective.
+ */
+export function recordId(baseId: string, key: string): string {
+  let encoded = "";
+  for (const char of key) {
+    encoded += ID_LITERAL.test(char) ? char : `_${(char.codePointAt(0) ?? 0).toString(16)}_`;
+  }
+  return `${baseId}-${encoded}`;
+}
+
 /**
  * A fold control's accessible name: the action, the record it folds, and the
  * record's position. The position is the one identity every record has — the
  * same one its fold state is keyed by — so two records that share a title (or
  * a verdict and sha) still read as two controls, and a record with no identity
  * text (a coerced-empty title or verdict) is named by its position alone.
+ * The sentence's punctuation belongs to the locale keys, not to this function.
  */
 export function foldLabel(
   locale: Locale,
@@ -131,7 +186,9 @@ export function foldLabel(
   position: number,
 ): string {
   const action = t(locale, open ? "pullRequests.collapse" : "pullRequests.expand");
-  return `${action} — ${record === "" ? "" : `${record} · `}#${position}`;
+  return record === ""
+    ? t(locale, "pullRequests.foldLabelBare", { action, position })
+    : t(locale, "pullRequests.foldLabel", { action, record, position });
 }
 
 /** The copy action's label: its action while idle, its transient outcome after a press. */

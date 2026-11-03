@@ -17,9 +17,20 @@ import {
   parsePullRequestDetail,
   type PullRequestDetail,
 } from "../../src/spa/pages/data";
-import { PullRequestDetailView } from "../../src/spa/pages/PullRequestDetail";
+import {
+  PullRequestDetail as PullRequestDetailFace,
+  PullRequestDetailView,
+} from "../../src/spa/pages/PullRequestDetail";
+import { recordId } from "../../src/spa/pages/pullRequestDetailModel";
 import { withMarkup } from "./dom";
 import { DETAIL, ROW_OPEN } from "./pull-request-fixtures";
+
+// The read callback is synchronous by type: `withMarkup` closes its window as
+// soon as the read returns, so an async read would resolve against a closed
+// document. A promise-returning read is a compile error, pinned here.
+// @ts-expect-error — an async read is rejected by the helper's signature.
+const asyncReadIsRejected = () => withMarkup("<p></p>", async () => "late");
+void asyncReadIsRejected;
 
 describe("pull request detail data plane (pure helpers)", () => {
   test("the detail URL builder encodes owner/repo so a value cannot break out of the path family", () => {
@@ -208,9 +219,9 @@ describe("pull request detail face (static SSR)", () => {
             },
           ],
         }),
-        (container) => container.querySelector('[data-slot="pr-meta"]'),
+        (container) => container.querySelector('[data-slot="pr-meta"]') !== null,
       ),
-    ).toBeNull();
+    ).toBe(false);
     expect(read.metrics[0]).toEqual([t("en", "pullRequests.columnVerdict"), "needs fixes"]);
     expect(read.metrics[1]).toEqual([t("en", "pullRequests.reviews"), "2"]);
     expect(read.metrics[2]).toEqual([t("en", "pullRequests.failures"), "1"]);
@@ -283,30 +294,28 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("a must-fix finding opens the findings family, grouped by severity", async () => {
+    // One render, one parse: the triggers, their counts and the severity
+    // groups all describe the same tree.
     const markup = render(DETAIL);
-    const tabs = await withMarkup(render(DETAIL), familyTabs);
-    expect(tabs.map((tab) => tab.selected)).toEqual([true, false, false]);
+    const read = await withMarkup(markup, (container) => ({
+      tabs: familyTabs(container),
+      // Counts stay text inside the trigger, so size never depends on colour.
+      counts: [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) =>
+        [...tab.querySelectorAll("span")].map((span) => span.textContent ?? "").join(""),
+      ),
+      groups: severityGroups(container).map(({ severity, header }) => ({ severity, header })),
+    }));
+    expect(read.tabs.map((tab) => tab.selected)).toEqual([true, false, false]);
     // The announced name is the label and the count with a separator between
     // them; the visible spans alone would read "Findings3".
-    expect(tabs.map((tab) => tab.name)).toEqual([
+    expect(read.tabs.map((tab) => tab.name)).toEqual([
       `${t("en", "pullRequests.findings")} (3)`,
       `${t("en", "pullRequests.reviews")} (2)`,
       `${t("en", "pullRequests.failures")} (1)`,
     ]);
-    // Counts stay text inside the trigger, so size never depends on colour.
-    expect(
-      await withMarkup(render(DETAIL), (container) =>
-        [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map(
-          (tab) => [...tab.querySelectorAll("span")].map((span) => span.textContent ?? "").join(""),
-        ),
-      ),
-    ).toEqual(["3", "2", "1"]);
+    expect(read.counts).toEqual(["3", "2", "1"]);
     // Group headers in severity order, each carrying its own count.
-    expect(
-      await withMarkup(render(DETAIL), (container) =>
-        severityGroups(container).map(({ severity, header }) => ({ severity, header })),
-      ),
-    ).toEqual([
+    expect(read.groups).toEqual([
       { severity: "must-fix", header: `${t("en", "pullRequests.severityMustFix")}1` },
       { severity: "should-fix", header: `${t("en", "pullRequests.severityShouldFix")}1` },
       { severity: "nit", header: `${t("en", "pullRequests.severityNit")}1` },
@@ -410,10 +419,12 @@ describe("pull request detail face (static SSR)", () => {
       `${t("en", "pullRequests.expand")} — #5`,
     ]);
 
-    // A drifted severity alone still opens the findings family and earns the
-    // dot — the bucket it lands in is `other`, not a reason to stay hidden.
-    const driftedOnly: PullRequestDetail = { ...DETAIL, findings: detail.findings.slice(3) };
-    const face = await withMarkup(render(driftedOnly), (container) => ({
+    // One legacy severity, three surfaces, one rule: `blocker` is not a nit, so
+    // the face opens on the findings, the trigger earns the danger dot (the
+    // dot reads the bucket flags), and the finding still renders — in `other`,
+    // the bucket it lands in rather than a reason to stay hidden.
+    const legacyOnly: PullRequestDetail = { ...DETAIL, findings: detail.findings.slice(3) };
+    const face = await withMarkup(render(legacyOnly), (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
       dots: familyDots(container),
       buckets: severityGroups(container).map((group) => group.severity),
@@ -441,7 +452,7 @@ describe("pull request detail face (static SSR)", () => {
   test("only the must-fix body opens; every other group starts folded", async () => {
     const markup = render(DETAIL);
     // Fold order follows the group order: must-fix, should-fix, nit.
-    const { pairs, labels } = await withMarkup(render(DETAIL), (container) => ({
+    const { pairs, labels } = await withMarkup(markup, (container) => ({
       pairs: foldPairs(container),
       labels: [...container.querySelectorAll("button[aria-expanded][aria-label]")].map(
         (control) => control.getAttribute("aria-label") ?? "",
@@ -552,17 +563,18 @@ describe("pull request detail face (static SSR)", () => {
         },
       ],
     };
-    expect((await withMarkup(render(shouldOnly), familyTabs)).map((tab) => tab.selected)).toEqual([
+    const markup = render(shouldOnly);
+    expect((await withMarkup(markup, familyTabs)).map((tab) => tab.selected)).toEqual([
       true,
       false,
       false,
     ]);
-    expect(render(shouldOnly)).toContain("The refresh cookie is set with secure only.");
+    expect(markup).toContain("The refresh cookie is set with secure only.");
     // The findings figure counts the row but names no must-fix: the note is a
     // must-fix count, so a should-fix-only detail must not wear it.
     expect(
       await withMarkup(
-        render(shouldOnly),
+        markup,
         (container) =>
           [...container.querySelectorAll('[data-slot="metric"]')].at(-1)?.querySelector(
             '[data-slot="metric-value"]',
@@ -662,7 +674,7 @@ describe("pull request detail face (static SSR)", () => {
       findings: [],
     };
     const markup = render(clean);
-    const read = await withMarkup(render(clean), (container) => ({
+    const read = await withMarkup(markup, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
       // The latest summary opens; older history is mounted but folded.
       pairs: foldPairs(container),
@@ -706,7 +718,7 @@ describe("pull request detail face (static SSR)", () => {
     // The PR-level chip disappears rather than rendering an empty one; its
     // tooltip and the aside's Head row go with it.
     expect(
-      await withMarkup(render(emptySha), (container) =>
+      await withMarkup(markup, (container) =>
         [...container.querySelectorAll<HTMLElement>('[data-slot="head-sha"]')].map((chip) => chip.textContent ?? ""),
       ),
     ).toEqual([]);
@@ -760,7 +772,7 @@ describe("pull request detail face (static SSR)", () => {
     // and the PR's own anchor. The truncation row itself carries the count and
     // closes the shown history.
     expect(
-      await withMarkup(render(detail), (container) => {
+      await withMarkup(markup, (container) => {
         const rows = [...container.querySelectorAll('[data-slot="activity-entry"], [data-slot="timeline-truncated"]')].map(
           (row) => row.getAttribute("data-slot"),
         );
@@ -790,14 +802,15 @@ describe("pull request detail face (static SSR)", () => {
     expect(
       await withMarkup(render(fitting), (container) => ({
         entries: container.querySelectorAll('[data-slot="activity-entry"]').length,
-        truncated: container.querySelector('[data-slot="timeline-truncated"]'),
+        // A boolean, not the node: the window is gone once the read returns.
+        truncated: container.querySelector('[data-slot="timeline-truncated"]') !== null,
       })),
-    ).toEqual({ entries: 7, truncated: null });
+    ).toEqual({ entries: 7, truncated: false });
   });
 
   test("a failure's first line renders as escaped text and the remaining output stays in details", async () => {
     const markup = render(FAILING);
-    expect((await withMarkup(render(FAILING), familyTabs)).map((tab) => tab.selected)).toEqual([
+    expect((await withMarkup(markup, familyTabs)).map((tab) => tab.selected)).toEqual([
       false,
       false,
       true,
@@ -808,7 +821,7 @@ describe("pull request detail face (static SSR)", () => {
     // The failure block carries its danger ruling as a semantic hook, so the
     // alarm is read from the DOM rather than from a generated class literal.
     expect(
-      await withMarkup(render(FAILING), (container) => {
+      await withMarkup(markup, (container) => {
         const block = container.querySelector('[role="tabpanel"] li[data-tone="danger"]');
         return block === null ? null : (block.textContent ?? "");
       }),
@@ -832,8 +845,8 @@ describe("pull request detail face (static SSR)", () => {
     expect(folded.evidence.startsWith(folded.diagnosis)).toBe(false);
     // A single-line error has nothing to fold.
     expect(
-      await withMarkup(render(FAILING), (container) => container.querySelector('[role="tabpanel"] details')),
-    ).toBeNull();
+      await withMarkup(markup, (container) => container.querySelector('[role="tabpanel"] details') !== null),
+    ).toBe(false);
     // A trailing newline is not a second line: `"boom\n"` is one line of
     // output, so it renders no disclosure either.
     const trailing = await withMarkup(render(failureText("boom\n")), (container) => ({
@@ -860,15 +873,91 @@ describe("pull request detail face (static SSR)", () => {
       );
       return {
         entryFound: entry !== undefined,
-        stageChip: container.querySelector('[role="tabpanel"] [data-slot="failure-stage"]'),
+        stageChip: container.querySelector('[role="tabpanel"] [data-slot="failure-stage"]') !== null,
         labels: [...(entry?.querySelectorAll("span") ?? [])].map((span) => span.textContent ?? ""),
       };
     });
     expect(read.entryFound).toBe(true);
-    expect(read.stageChip).toBeNull();
+    expect(read.stageChip).toBe(false);
     expect(read.labels).toContain(t("en", "pullRequests.timelineFailureNoStage"));
     // No span of the row paints a leading or trailing separator.
     expect(read.labels.filter((label) => /^\s*·|·\s*$/.test(label))).toEqual([]);
+  });
+
+  test("two records whose raw ids differ only by punctuation get distinct body ids", async () => {
+    // The record keys differ only in punctuation (space vs `T` in the
+    // timestamp), and the old fold-to-dash sanitisation mapped both onto one
+    // id: a duplicate DOM id whose `aria-controls` pointed at one body.
+    const punctuated = (reviewed_at: string, summary: string): PullRequestDetail["reviews"][number] => ({
+      verdict: "ship it",
+      summary_md: summary,
+      model: "kimi-for-coding",
+      provider: "",
+      reviewed_at,
+      head_sha: "aaa111b",
+    });
+    const detail: PullRequestDetail = {
+      ...DETAIL,
+      findings: [],
+      failures: [],
+      reviews: [punctuated("2026-11-01 08:00:00", "First record."), punctuated("2026-11-01T08:00:00", "Second record.")],
+    };
+    // The encoding is the contract: distinct keys, distinct ids — never one
+    // sanitised text two records can share.
+    expect(recordId("base", "2026-11-01 08:00:00")).not.toBe(recordId("base", "2026-11-01-08:00:00"));
+    const read = await withMarkup(render(detail), (container) => {
+      const bodyOf = (id: string) =>
+        [...container.querySelectorAll<HTMLElement>("p[id]")].find((body) => body.id === id) ?? null;
+      return [...container.querySelectorAll<HTMLElement>('[role="tabpanel"] button[aria-controls]')].map((control) => {
+        const id = control.getAttribute("aria-controls") ?? "";
+        return { id, body: bodyOf(id)?.textContent ?? null };
+      });
+    });
+    expect(read).toHaveLength(2);
+    expect(new Set(read.map(({ id }) => id)).size).toBe(2);
+    // Each control points at its own record's body, not the other one's.
+    expect(read.map(({ body }) => body)).toEqual(["First record.", "Second record."]);
+  });
+
+  test("the loading face keeps the back control outside the busy region", async () => {
+    // The loading face before any read lands: `aria-busy` must scope the
+    // content, leaving the only escape control reachable to assistive tech.
+    const read = await withMarkup(
+      renderToStaticMarkup(
+        createElement(PullRequestDetailFace, {
+          locale: "en",
+          appId: "1",
+          prKey: "acme/web/133",
+          prRef: { owner: "acme", repo: "web", number: 133 },
+          onBack: () => {},
+        }),
+      ),
+      (container) => {
+        const back = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+          (button) => button.textContent === t("en", "pullRequests.backToList"),
+        );
+        const busy = container.querySelector('[aria-busy="true"]');
+        return {
+          backRendered: back !== undefined,
+          backDisabled: back?.disabled ?? true,
+          // `aria-busy` and `aria-hidden` inherit down the tree, so a busy or
+          // hidden ancestor would take the control out of the accessibility
+          // tree with the content it sits in.
+          backBusy: back !== undefined && back.closest('[aria-busy="true"]') !== null,
+          backHidden: back !== undefined && back.closest('[aria-hidden="true"]') !== null,
+          contentBusy: busy !== null,
+          status: busy?.querySelector('[role="status"]')?.textContent ?? null,
+        };
+      },
+    );
+    expect(read).toEqual({
+      backRendered: true,
+      backDisabled: false,
+      backBusy: false,
+      backHidden: false,
+      contentBusy: true,
+      status: t("en", "common.loading"),
+    });
   });
 
   test("the aside carries the PR facts and one merged timeline, newest first", () => {

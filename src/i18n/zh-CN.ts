@@ -156,6 +156,10 @@ export const zhCN: Dictionary = {
     /** 每条发现正文与审查摘要各有一个折叠控件。 */
     expand: "展开",
     collapse: "收起",
+    /** 折叠控件的无障碍名称：动作、记录与位置。 */
+    foldLabel: "{action} — {record} · #{position}",
+    /** 无标识文本的记录只用位置命名。 */
+    foldLabelBare: "{action} — #{position}",
     /** 失败块其余输出的折叠（首行已作为诊断显示）与复制动作。 */
     failureRemainingOutput: "其余输出",
     copyError: "复制错误",

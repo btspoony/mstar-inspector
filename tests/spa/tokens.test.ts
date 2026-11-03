@@ -560,6 +560,10 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const walk = consumerWalk();
     const consumers = walk.files;
     expect(consumers.length).toBeGreaterThan(0);
+    // A readable-but-partly-unreadable tree would silently pass the link below
+    // (every file it did read is fine), so the walk's own read failures are
+    // part of the live-tree claim.
+    expect(walk.failures).toEqual([]);
     // The predicate itself, on a root it must reject: an empty or missing root
     // is the drift (moved, renamed, emptied) the link exists to catch. Stated
     // explicitly, so the rule is proven even while the live tree is healthy.

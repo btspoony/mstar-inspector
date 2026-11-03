@@ -357,18 +357,23 @@ describe("pull request detail (mounted)", () => {
     try {
       const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
       await press(win, button);
-      const labelAtUnmount = button?.textContent;
-      // The face goes away while the write is still in flight.
+      // The write is still in flight: the idle label is what the reader saw.
+      const labelAtPress = button?.textContent;
+      expect(labelAtPress).toBe(t("en", "pullRequests.copyError"));
+      // The face goes away while the write is still in flight. The harness
+      // already holds one timer of its own, so the count is a baseline, not 0.
       await unmount();
+      const timersAfterUnmount = jest.getTimerCount();
       await act(async () => {
         settleWrite();
       });
-      // The late outcome cannot reach the gone face: the write's resolution
-      // throws nothing, React never warns about an update after unmount, and
-      // the button the reader saw keeps the label it had. Nothing at all is
-      // logged — a filtered claim would let an unrelated warning through.
-      expect(labelAtUnmount).toBe(t("en", "pullRequests.copyError"));
-      expect(button?.textContent).toBe(labelAtUnmount);
+      await act(async () => {});
+      // Both halves of the claim are observable: a late outcome would arm the
+      // REST timer against the gone face (one more timer than the baseline),
+      // and the button the reader saw keeps the label it had. Nothing at all
+      // is logged — a filtered claim would let an unrelated warning through.
+      expect(jest.getTimerCount()).toBe(timersAfterUnmount);
+      expect(button?.textContent).toBe(labelAtPress);
       expect(problems).toEqual([]);
     } finally {
       jest.useRealTimers();

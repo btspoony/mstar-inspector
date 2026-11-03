@@ -180,6 +180,10 @@ export const en = {
     /** One fold control per finding body and per review summary. */
     expand: "Expand",
     collapse: "Collapse",
+    /** A fold control's accessible name: the action, the record and its position. */
+    foldLabel: "{action} — {record} · #{position}",
+    /** The same name for a record with no identity text: its position alone. */
+    foldLabelBare: "{action} — #{position}",
     /** The failure block's remaining-output fold (the diagnosis above is the first line) and copy action. */
     failureRemainingOutput: "Remaining output",
     copyError: "Copy error",

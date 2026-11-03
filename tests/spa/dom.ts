@@ -97,11 +97,17 @@ export function installDom(url: string): { win: Window; cleanup: () => void } {
  * because the document is gone once `read` returns. The close settles
  * asynchronously, so it is awaited: a failed teardown fails the test instead
  * of vanishing behind a discarded promise.
+ *
+ * `read` must be synchronous: the window closes before any `await` inside it
+ * could run, so an async read is a compile error rather than a parse that
+ * resolves against a closed document.
  */
 export async function withMarkup<T>(
   markup: string,
   read: (container: HTMLElement) => T,
+  ...sync: T extends PromiseLike<unknown> ? [error: "read must be synchronous"] : []
 ): Promise<T> {
+  void sync;
   const win = new Window();
   try {
     win.document.body.innerHTML = markup;

@@ -20,7 +20,7 @@ import {
   copyOutcomeLabel,
   defaultFamily,
   foldLabel,
-  hasActionableFinding,
+  recordId,
   reviewAttribution,
   SEVERITY_KEYS,
   severityGroups,
@@ -106,20 +106,24 @@ export function PullRequestDetail({
   };
 
   return (
-    <div className="flex flex-col gap-6" aria-busy={current === null || current.kind === "loading"}>
+    <div className="flex flex-col gap-6">
+      {/* Outside the busy region: a face that is still loading must leave its
+          only escape control reachable. */}
       <Button type="button" variant="ghost" size="sm" className="self-start" onClick={onBack}>
         <ArrowLeft aria-hidden="true" />
         {t(locale, "pullRequests.backToList")}
       </Button>
-      {current !== null && current.kind === "ok" ? (
-        <PullRequestDetailView locale={locale} detail={current.data} />
-      ) : current !== null && current.kind === "error" ? (
-        <ErrorState locale={locale} onRetry={retry} />
-      ) : (
-        <p role="status" className="text-sm text-muted-foreground">
-          {t(locale, "common.loading")}
-        </p>
-      )}
+      <div aria-busy={current === null || current.kind === "loading"}>
+        {current !== null && current.kind === "ok" ? (
+          <PullRequestDetailView locale={locale} detail={current.data} />
+        ) : current !== null && current.kind === "error" ? (
+          <ErrorState locale={locale} onRetry={retry} />
+        ) : (
+          <p role="status" className="text-sm text-muted-foreground">
+            {t(locale, "common.loading")}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -164,12 +168,12 @@ export function PullRequestDetailView({
   const [openFindings, setOpenFindings] = useState<Readonly<Record<string, boolean>>>({});
   const [openReviews, setOpenReviews] = useState<Readonly<Record<string, boolean>>>({});
   const baseId = useId();
-  // Element ids are derived from payload keys, so any character an id cannot
-  // carry (the spaces and colons in a review timestamp) is folded to a dash.
-  const bodyId = (key: string): string => `${baseId}-${key.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
 
   const mustFix = detail.findings.filter((finding) => finding.severity === SEVERITY_KEYS.mustFix).length;
   const groups = severityGroups(locale, detail.findings);
+  // The dot reads the buckets the list below renders — one rule, so a legacy
+  // spelling that lands in `other` cannot be actionable here and quiet there.
+  const findingsActionable = groups.some((group) => group.actionable);
   // The detail's own review list is the record for "latest": its first row is
   // the newest review and carries the attribution. The PR row's summary is the
   // fallback for a detail read that carried no review rows — the band, the
@@ -351,7 +355,7 @@ export function PullRequestDetailView({
           >
             {t(locale, "pullRequests.findings")}
             <span className="text-xs tabular-nums text-(--text-faint)">{detail.findings.length}</span>
-            {hasActionableFinding(detail) ? (
+            {findingsActionable ? (
               <span
                 data-slot="family-dot"
                 data-tone="danger"
@@ -421,7 +425,7 @@ export function PullRequestDetailView({
                             finding.file_path === ""
                               ? ""
                               : `${finding.file_path}${finding.line === null ? "" : `:${finding.line}`}`;
-                          const id = bodyId(findingKey);
+                          const id = recordId(baseId, findingKey);
                           return (
                             <li
                               key={findingKey}
@@ -493,7 +497,7 @@ export function PullRequestDetailView({
                     // mount and the fold state never crosses PRs.
                     const reviewKey = `${review.reviewed_at}-${review.head_sha}-${index}`;
                     const open = openReviews[reviewKey] ?? index === 0;
-                    const id = bodyId(reviewKey);
+                    const id = recordId(baseId, reviewKey);
                     const attribution = reviewAttribution(locale, review);
                     return (
                       <li
