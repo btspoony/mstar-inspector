@@ -235,6 +235,31 @@ describe("buildReviewBody", () => {
     expect(line).toContain("more)");
   });
 
+  test("an empty unscanned scope stays empty through the bound", () => {
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: [] },
+    });
+    expect(body).toContain("unscanned: none");
+    expect(body.match(/^unscanned: /gm)).toHaveLength(1);
+  });
+
+  test("a single scope too long to fit is still named, cut to the budget", () => {
+    const one = `src/${"n".repeat(1200)}.ts`;
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: [one] },
+    });
+    const line = body.split("\n").find((l) => l.startsWith("unscanned: "))!;
+    expect(line).toContain("src/");
+    expect(line.endsWith("…")).toBe(true);
+    expect((line.match(/<details>/g) ?? []).length).toBe(0);
+  });
+
   test("the fact-line cut never leaves a lone surrogate", () => {
     // A run of astral-plane characters (each two UTF-16 units) sized so the
     // budget cut lands between a pair unless the slice backs off.
@@ -322,6 +347,20 @@ describe("buildReviewBody", () => {
     const narrative = `<details><summary>deep</summary>\n\n${"w".repeat(SUMMARY_MD_LIMIT * 2)}`;
     const body = buildReviewBody({ ...output, summary_md: narrative });
     expect((body.match(/<details>/g) ?? []).length).toBe((body.match(/<\/details>/g) ?? []).length);
+  });
+
+  test("bounding the fact never touches the stored document", () => {
+    const raw = "r".repeat(900);
+    const stored: ReviewOutput = {
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: raw, unscanned: ["a.ts", "b.ts"] },
+    };
+    const snapshot = JSON.stringify(stored);
+    buildReviewBody(stored);
+    expect(JSON.stringify(stored)).toBe(snapshot);
+    expect(stored.incomplete!.reason).toBe(raw);
   });
 
   test("the closure section is appended last", () => {

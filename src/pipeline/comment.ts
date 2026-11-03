@@ -155,7 +155,10 @@ function boundIncomplete(fact: { reason: string; unscanned: readonly string[] })
   unscanned: string[];
 } {
   const reason = boundFactLine(fact.reason);
-  const full = fact.unscanned.length === 0 ? "none" : fact.unscanned.join(", ");
+  // An empty scope stays empty: the engine renders `unscanned: none` itself, and
+  // a synthetic "none" entry would leak back into the envelope's tally mirror.
+  if (fact.unscanned.length === 0) return { reason, unscanned: [] };
+  const full = fact.unscanned.join(", ");
   if (full.length <= FACT_LINE_BUDGET) return { reason, unscanned: [full] };
   // Drop whole scopes rather than cutting mid-entry, and say how many went:
   // a silent cut reads as "these were the only unscanned files".
