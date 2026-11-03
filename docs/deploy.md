@@ -1340,7 +1340,11 @@ grant (`contents: read`, `metadata: read`, `pull_requests: read` — the last
 one because the diff step runs `gh pr diff` with exactly that token); the
 Worker asserts the returned capabilities (`assertSandboxGrant`) and fails
 closed on anything broader or unscoped. Webhook events stay `pull_request`
-and `issue_comment`.
+and `issue_comment`, plus `installation`: without that subscription GitHub
+never delivers the `installation` event, so the install-bookkeeping path never
+fires and an install row never gains its account login. An App created before
+this subscription existed must have the event ticked under **Event
+subscriptions** at `https://github.com/settings/apps/<app-name>/permissions`.
 
 > **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
 > the recovery lanes are covered by the implementation's scoped behavioral

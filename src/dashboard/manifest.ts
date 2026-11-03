@@ -78,7 +78,7 @@ export type ManifestPayload = {
   hook_attributes: { url: string };
   redirect_url: string;
   public: false;
-  default_events: ["pull_request", "issue_comment"];
+  default_events: ["pull_request", "issue_comment", "installation"];
   default_permissions: {
     contents: "write";
     metadata: "read";
@@ -124,7 +124,7 @@ export function buildManifest(
     hook_attributes: { url: `${origin}/webhook/${workspaceId}/${appId}` },
     redirect_url: `${origin}/dashboard/manifest/callback`,
     public: false,
-    default_events: ["pull_request", "issue_comment"],
+    default_events: ["pull_request", "issue_comment", "installation"],
     default_permissions: {
       contents: "write",
       metadata: "read",
