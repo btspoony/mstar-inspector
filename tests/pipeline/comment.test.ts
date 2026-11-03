@@ -723,7 +723,7 @@ describe("review comment upsert (T5)", () => {
 
   describe("parseReviewRound", () => {
     test("parses a well-formed marker", () => {
-      expect(parseReviewRound("<!-- mstar-inspector:review:v1 round=3 -->\n第 3 次 review · commit abc1234")).toBe(3);
+      expect(parseReviewRound("<!-- mstar-inspector:review:v1 round=3 -->\nReview 3 · commit abc1234")).toBe(3);
     });
 
     test("returns null for a body without the marker", () => {
@@ -744,7 +744,7 @@ describe("review comment upsert (T5)", () => {
   // targets; excluded ids model the 403/404 recovery replan.
   const botMarker = (id: number, round: number) => ({
     id,
-    body: `<!-- mstar-inspector:review:v1 round=${round} -->\n第 ${round} 次 review`,
+    body: `<!-- mstar-inspector:review:v1 round=${round} -->\nReview ${round}`,
     user: { type: "Bot" },
   });
 
@@ -826,7 +826,7 @@ describe("review comment upsert (T5)", () => {
       });
       const lines = body.split("\n");
       expect(lines[0]).toBe("<!-- mstar-inspector:review:v1 round=2 -->");
-      expect(lines[1]).toBe("第 2 次 review · commit 0123456");
+      expect(lines[1]).toBe("Review 2 · commit 0123456");
       expect(lines[lines.length - 1]).toBe(publicationMarker);
       expect(body).toContain("**Verdict: blocked**");
       expect(body).toContain("One must-fix blocks the merge.");
@@ -872,7 +872,7 @@ describe("review comment upsert (T5)", () => {
       });
       const lines = body.split("\n");
       expect(lines[0]).toBe("<!-- mstar-inspector:review:v1 round=3 -->");
-      expect(lines[1]).toBe("第 3 次 review · commit 0123456");
+      expect(lines[1]).toBe("Review 3 · commit 0123456");
       expect(parseReviewRound(body)).toBe(3);
     });
 
@@ -1015,7 +1015,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
     const miss = await planReviewUpsertWithOctokit(mockOctok([{ id: 1, body: "a human comment" }]).octokit, target);
     expect(miss).toEqual({ action: "create", round: 1 });
     const hit = await planReviewUpsertWithOctokit(
-      mockOctok([{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } }]).octokit,
+      mockOctok([{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nReview 2", user: { type: "Bot" } }]).octokit,
       target,
     );
     expect(hit).toEqual({ action: "update", commentId: 7, round: 3 });
@@ -1098,7 +1098,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
 
   test("non-403/404 updateComment errors rethrow (no fallback)", async () => {
     const { octokit } = mockOctok(
-      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } }],
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nReview 2", user: { type: "Bot" } }],
       new Error("rate limited"),
     );
     await expect(postPreparedReviewWithOctokit(octokit, sendInput)).rejects.toThrow("rate limited");
@@ -1159,7 +1159,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
 
 const botReviewMarker = (id: number, round: number) => ({
   id,
-  body: `<!-- mstar-inspector:review:v1 round=${round} -->\n第 ${round} 次 review`,
+  body: `<!-- mstar-inspector:review:v1 round=${round} -->\nReview ${round}`,
   user: { type: "Bot" },
 });
 
