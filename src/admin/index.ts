@@ -13,6 +13,13 @@
 import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
+import {
+  CONCURRENCY_MAX,
+  CONCURRENCY_MIN,
+  getSystemConcurrency,
+  isConcurrencyValue,
+  setSystemConcurrency,
+} from "../dashboard/runtime-config-store";
 import { resolveLocale, t, type Locale } from "../i18n";
 import { injectSpaBoot } from "../spa/boot";
 import { ADMIN_PAGES } from "../spa/admin/pages";
@@ -107,6 +114,47 @@ async function setFlag(c: AdminContext): Promise<Response> {
       .bind(key, enabled ? 1 : 0, now, login),
   ]);
   return c.json({ key, enabled });
+}
+
+/**
+ * The system review-concurrency cap — the operator half of the runtime
+ * configuration (iteration spec §1.1). One row in `review_runtime_settings`,
+ * absent = the documented default; the leaf store owns the parse, the 1..64
+ * range and the audit row, so this handler only gates, shapes and maps.
+ */
+async function readRuntime(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const system = await getSystemConcurrency(db);
+  return c.json({
+    concurrency: system.concurrency,
+    min: CONCURRENCY_MIN,
+    max: CONCURRENCY_MAX,
+    degraded: system.degraded,
+  });
+}
+
+async function setRuntime(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  let value: unknown;
+  try {
+    const body = (await c.req.json()) as { concurrency?: unknown };
+    value = body.concurrency;
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (!isConcurrencyValue(value)) {
+    return c.json(
+      { error: `body must be { concurrency: <integer in ${CONCURRENCY_MIN}..${CONCURRENCY_MAX}> }` },
+      400,
+    );
+  }
+  return c.json({ concurrency: await setSystemConcurrency(db, value, login) });
 }
 
 /**
@@ -384,6 +432,8 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/me", handler: readMe },
   { method: "get", path: "/api/flags", handler: readFlags },
   { method: "patch", path: "/api/flags", handler: setFlag },
+  { method: "get", path: "/api/runtime", handler: readRuntime },
+  { method: "patch", path: "/api/runtime", handler: setRuntime },
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
   { method: "get", path: "/api/users", handler: readUsers },
   { method: "patch", path: "/api/workspaces/:id/plan", handler: assignPlan },

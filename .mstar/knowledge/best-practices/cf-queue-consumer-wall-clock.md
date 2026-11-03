@@ -1,7 +1,7 @@
 ---
 module: pipeline-consumer
 date: 2026-08-29
-last_updated: 2026-10-14
+last_updated: 2026-11-03
 problem_type: best_practice
 category: best-practices
 severity: high
@@ -28,11 +28,16 @@ Size the in-consumer runner **under 15 minutes with headroom**. v0.4 pin: deep `
 
 Do not advertise a runner budget the consumer cannot finish.
 
-### Concurrency: UNSET max_concurrency auto-scales by backlog (v0.7, AL-5)
+### Concurrency: a deploy-time ceiling plus a per-message runtime cap (2026-11)
 
-Wrangler's config schema states it plainly: an unset consumer `max_concurrency` means the platform **scales concurrency up by backlog** — "serial by accident" is not a safety property. The fix is explicit: `max_concurrency: 1` (`wrangler.jsonc`; deliberately NOT env-configurable).
+Wrangler's config schema states it plainly: an unset consumer `max_concurrency` means the platform **scales concurrency up by backlog** — "serial by accident" is not a safety property, so `wrangler.jsonc` always sets it explicitly. Since the review-concurrency cutover it is **not** the admission control:
 
-The 1.0 cutover changed the *why*, not the pin. Under `scheduling_policy: "durable_object"` each attempt's unique sandbox id (`SandboxV1` DO, `getSandbox(...)`) starts its **own** container, and the 0.12 `image` / `instance_type` / `max_instances` / `image_build_context` fields have no durable-object equivalent (`wrangler.jsonc` containers comment). So the old per-attempt acquisition-blocking / `instanceGetTimeoutMS` back-pressure no longer exists: >1 concurrency simply runs containers concurrently against the account's container limits. The pin stays the cheap protection — and deep (14 min in-flight) against the 15-min consumer cap leaves no headroom for contention retries.
+- **`max_concurrency: 64` is the deploy-time CEILING only.** It sits above this repo's runtime defaults of 32 (system) and 16 (workspace) — the values `wrangler.jsonc`'s comment and `src/dashboard/runtime-config-store.ts` both name — and bounds how many queue messages may be delivered at once; it is deliberately NOT env-configurable.
+- **The effective admission is per-message, read from D1.** `min(system, workspace)` comes from `src/pipeline/concurrency-reader.ts` → `review_inflight` admission on EVERY message, so per-PR serial and cross-PR parallel are runtime decisions, not config. A degraded read fails closed to the conservative cap of 1.
+- **`max_batch_size: 1` keeps the wall-clock model honest.** One review per batch means one runner budget owns the invocation, so the 15-minute consumer cap above still binds.
+- **The ceiling is bounded, not a concurrency licence.** Under `scheduling_policy: "durable_object"` each attempt's unique sandbox id (`SandboxV1` DO, `getSandbox(...)`) starts its **own** container, and the 0.12 `image` / `instance_type` / `max_instances` / `image_build_context` fields have no durable-object equivalent (`wrangler.jsonc` containers comment). The old per-attempt acquisition-blocking / `instanceGetTimeoutMS` back-pressure no longer exists, so a higher ceiling simply runs that many containers concurrently against the account's container limits — which is why the runtime caps, not the ceiling, carry the protection.
+
+This is why the parity contract pins the ceiling VALUE (64) in both blocks rather than trusting set-equality: an equal-but-wrong value would otherwise pass.
 
 ## Why This Matters
 

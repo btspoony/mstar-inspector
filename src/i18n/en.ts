@@ -397,8 +397,8 @@ export const en = {
     inviteExpired: "This invitation has expired.",
     inviteGone: "This invitation is no longer pending — it may have been revoked.",
     inviteAcceptFailed: "Could not accept the invitation — try again.",
-    /** The owner-only gate on `/dashboard/<ref>/settings`. */
-    settingsOwnerOnly: "Only the workspace owner can change these settings.",
+    /** The manager gate on `/dashboard/<ref>/settings` — a plain member sees it. */
+    settingsOwnerOnly: "Only workspace owners and admins can change these settings.",
     /** The owner's name card — the label the top-bar switcher shows. */
     nameHeading: "Workspace name",
     nameDescription:
@@ -406,6 +406,22 @@ export const en = {
     nameSave: "Save name",
     nameSaved: "Workspace name updated.",
     nameFailed: "Could not change the workspace name — try again.",
+    /** The owner/admin concurrency card (iteration spec §1.1). */
+    concurrencyHeading: "Review concurrency",
+    concurrencyDescription:
+      "How many reviews this workspace runs at once. The platform's system cap always applies on top.",
+    concurrencyLabel: "Concurrent reviews",
+    concurrencySave: "Save concurrency",
+    concurrencySaved: "Review concurrency updated.",
+    concurrencyFailed: "Could not change the review concurrency — try again.",
+    /** {system} = the platform's system cap this workspace cannot exceed. */
+    concurrencySystemCap: "System cap: {system}.",
+    /** {stored} > {system}: an operator lowered the system cap after this workspace's value was stored. */
+    concurrencyStoredAboveSystem:
+      "Stored value: {stored} — above the current system cap of {system}. Enter a value of {system} or less to save; until then the system cap applies.",
+    /** The stored cap could not be read — the numbers are a fallback, not this workspace's setting. */
+    concurrencyUnreadable:
+      "The stored review concurrency could not be read, so reviews are running one at a time. Nothing was changed and saving is disabled — retry the read.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the
@@ -571,6 +587,9 @@ export const en = {
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
+      concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",
+      concurrencyAboveSystem:
+        "That concurrency is above this platform's system cap ({system}). Lower it to {system} or less — nothing was stored.",
     },
     ops: "Operations",
     opsCopy: "These actions change how this App answers incoming deliveries.",
@@ -813,9 +832,10 @@ export const en = {
       /** Link back to the operator's own workspace shell. */
       dashboardLink: "Workspace dashboard",
     },
-    /** The four console nav labels — `pages.ts` routes by `labelKey`. */
+    /** The console nav labels — `pages.ts` routes by `labelKey`. */
     nav: {
       flags: "Server flags",
+      runtime: "Runtime parameters",
       workspaces: "Workspaces",
       users: "Users",
       supportGrants: "Support access",
@@ -858,6 +878,25 @@ export const en = {
       toggleFailed: "Could not change {flag}.",
       /** Toggle accessible name: "{flag} {state}" with the ON/OFF state. */
       stateAria: "{flag} {state}",
+    },
+    /** Runtime parameters page (iteration spec §1.1). */
+    runtime: {
+      description:
+        "Non-secret runtime parameters. A change applies to the next review and appends one audit row.",
+      loadFailed: "Could not load the runtime parameters.",
+      concurrencyTitle: "System review concurrency",
+      concurrencyDescription:
+        "How many reviews the whole platform runs at once. No workspace cap can exceed this value.",
+      concurrencyLabel: "Concurrent reviews",
+      concurrencySave: "Save",
+      concurrencySaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      concurrencyFailed: "Could not change the system concurrency.",
+      /** {value} = the cap currently stored (or the documented default). */
+      concurrencyCurrent: "Effective on the next review: {value}.",
+      /** The stored cap could not be read — the numbers are a fallback, not the stored setting. */
+      concurrencyUnreadable:
+        "The stored system concurrency could not be read, so every workspace is running one review at a time. Nothing was changed — retry the read.",
     },
     /** Workspaces page. */
     workspaces: {

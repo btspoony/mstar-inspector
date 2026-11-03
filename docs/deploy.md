@@ -2101,10 +2101,70 @@ controls are installed (the Dockerfile carries the documentation block only).
   `api.github.com` via Octokit (token mint, comment posting) and the optional
   `ALERT_WEBHOOK_URL` host (cron sweep alert POST).
 
+## Image rebuild gate (CI)
+
+`wrangler` hashes `sandbox-image/Dockerfile` alone — not the sources the
+Dockerfile copies in — so a change to those sources can deploy the Worker while
+the container keeps the previous build, silently. `scripts/check-image-inputs.ts`
+turns that mismatch into a failing check: it diffs the pull request against its
+base commit and fails when the diff touches an image input without also changing
+the `# rebuild:` marker block in `sandbox-image/Dockerfile`.
+
+The input path families it covers — the gate's path vocabulary:
+
+- `packages/runner/src/**`
+- `packages/shared/src/**`
+- `packages/runner/package.json`
+- `packages/runner/bun.lock`
+- `packages/runner/verify-synthesis.sh`
+- `sandbox-image/**`
+- `.dockerignore` — it decides which of these sources reach the build context
+
+`wrangler.jsonc` is deliberately not a family: the gate compares its container
+block by value instead — each container's `name` and its `images` entry, with
+that entry's `dockerfile` and `build_context` — between the base and head
+revisions, so a repointed build context or Dockerfile fails without a marker
+while a vars, queue, route or observability edit does not force a rebuild.
+
+`scripts/check-image-inputs.test.ts` proves the list is complete against the
+image itself: every `COPY <src>` source in `sandbox-image/Dockerfile` must be
+matched by one of the patterns, so a new copied path that is not declared fails
+the test rather than silently escaping the gate.
+
+A diff that touches an image input passes only with one added or removed
+Dockerfile line containing `rebuild:` in the same diff; a
+Dockerfile change that does not touch the marker fails like any other image
+input. A diff that touches no image input passes without any Dockerfile change.
+The Dockerfile path is not written into the script: the gate reads
+`containers[].images.sandbox.dockerfile` from `wrangler.jsonc` (`--config`
+overrides the file), so it diffs exactly the file a deploy hashes. The gate
+reads git output plus the two revisions of that config — it never builds the
+image — and an unreadable diff, config or container block fails the run rather
+than passing unverified.
+
+**Pull requests and pushes.** The `Image rebuild gate` step in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) diffs a pull request
+against `github.event.pull_request.base.sha` and a push (CI runs on `main`)
+against `github.event.before`, the ref's previous tip; the job checkout
+therefore carries `fetch-depth: 0`. A branch's first push reports the all-zeros
+sha, which has nothing to diff against — the step skips that case and exits
+successfully rather than failing on a diff it cannot compute. `deploy.yml` does
+not run the gate itself yet; wiring it into the deploy job is tracked as
+`I-000342`, so until then a push straight to `main` that lands between the CI
+run and the deploy still relies on the manual check in
+[`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild, which also carries the
+marker instruction the gate prints on failure.
+
+The same gate runs locally against any base rev:
+
+```bash
+bun scripts/check-image-inputs.ts --base origin/main
+```
+
 ## Image pins and digest record
 
-The image's versioned build inputs — base digest, sandbox-shim tag, Bun, gh,
-mstar-harness tag/ref, and the CLI pin — are declared once in
+The image's versioned build inputs — base digest, sandbox-shim tag plus digest,
+Bun, gh, mstar-harness tag/ref, and the CLI pin — are declared once in
 `OMP_SANDBOX_IMAGE_PINS` (`src/contracts/sandbox-images.ts`). That declaration
 is the single live copy; `tests/review/pin.test.ts` locks the Dockerfile's
 unavoidable literals to it (the image builds with no build args and no env, so
@@ -2131,7 +2191,9 @@ review-session model cannot invoke the CLI today — a sanctioned session
 toolcall path is a tracked follow-up, not a shipped mechanism. Bun / gh pins
 carried forward unchanged; the base image moved with the Sandbox SDK 1.0
 migration (the SDK no longer ships a runtime base — controlled Debian base +
-the 1.0.0 `sandbox-shim`).
+the 1.0.0 `sandbox-shim`, digest-pinned to
+`sha256:5bc187…ac06` — the digest moves only together with the
+`@cloudflare/sandbox` version, never on its own).
 
 Finding carry at the 4.0.4 pin (the omp 18.12.3 / harness 4.0.4 cohort
 above): the harness can hold exactly one review artifact unchanged — the
@@ -2209,14 +2271,89 @@ Contract:
 [`.mstar/specs/review-trigger-policy.md`](../.mstar/specs/review-trigger-policy.md)
 (§2.1 classification matrix, §3 mention grammar).
 
-### Queue consumer concurrency (architect verdict AL-5)
+### Queue consumer concurrency — deploy-time ceiling and runtime caps
 
-- `wrangler.jsonc → queues.consumers[review-queue].max_concurrency: 1` —
-  protective fix: UNSET means the platform auto-scales consumer concurrency
-  by backlog. With a unique sandbox id per attempt (each attempt gets its own
-  Durable-Object-managed container — `scheduling_policy: "durable_object"`
-  has no `max_instances` cap), >1 concurrency would run containers
-  concurrently. Pinned, NOT env-configurable.
+Two different numbers bound the consumer, and they are owned in two different
+places. Keep them apart when reasoning about throughput:
+
+| Bound | Where it lives | Value | What it means |
+|---|---|---|---|
+| Deploy-time **ceiling** | `wrangler.jsonc → queues.consumers[…].max_concurrency` (top level **and** `env.production`) | `64` | The most queue messages the platform may run at once. Ships with the Worker; changing it is a deploy. |
+| Runtime **caps** | D1 — `review_runtime_settings` + `workspaces.max_concurrent_reviews` | system `32`, workspace `16` | The business quota: `min(system, workspace)`. Read per message; changing it needs no deploy (see § Review concurrency caps). |
+| Per-PR **lock** | `review_inflight` primary key | 1 | One review per PR, always. |
+
+The contract the deployment ships is therefore **per-PR serial, cross-PR
+parallel**: two different PRs may review in two different containers at the
+same time, while two messages for the same PR never enter a sandbox
+concurrently — the second is refused at admission and retried on the
+guard-held delay schedule.
+
+Why the ceiling is explicit rather than unset: an UNSET `max_concurrency`
+makes the platform scale consumer concurrency by backlog with no bound at
+all (wrangler's config schema). Each attempt's unique sandbox id starts its
+**own** container under `scheduling_policy: "durable_object"` (the 0.12
+`max_instances` cap no longer exists — see the `containers` comment in
+`wrangler.jsonc`), so `64` is the widest blast radius the account should ever
+accept. It is also the accepted maximum for the runtime caps
+(`CONCURRENCY_MAX` in `src/dashboard/runtime-config-store.ts`, via
+`QUEUE_CONCURRENCY_CEILING`): a cap the platform cannot deliver is refused
+rather than stored, and `tests/contracts/wrangler-env-parity.test.ts` locks the
+two numbers together — raise the ceiling only together with that constant and
+the runtime defaults. Remember the platform's 15 min queue-consumer wall-clock
+cap still bounds any single deep review — concurrency changes overlap reviews,
+it does not lengthen them.
+
+Observation checklist after a concurrency change:
+
+- [ ] Both blocks carry the same ceiling — the `max_concurrency` constant and
+      `max_batch_size: 1` at the top level and inside `env.production`
+      (`bun test tests/contracts/wrangler-env-parity.test.ts` locks the pair
+      and the runtime cap range).
+- [ ] Throughput moved the way the runtime caps predict: raising the D1 caps
+      changes the admitted rate on the **next** message; raising only the
+      ceiling changes nothing while the caps stay at 32/16.
+- [ ] No `pr-held` burst in the logs for a single busy PR — a repeat there
+      means retries are outrunning the lock, not that the ceiling is low.
+- [ ] Container count stays under the account's container limit; the ceiling
+      is a hard upper bound on simultaneously live sandboxes.
+
+### Review concurrency caps (runtime configuration)
+
+The queue consumer holds at most `min(system cap, workspace cap)` reviews at
+once, and never two attempts for the same PR (the per-PR `review_inflight`
+row). Both caps are read from D1 on **every** queue message — no KV, no
+request cache — so a change applies to the **next** message without a
+redeploy; reviews already running keep their slot until their `review_inflight`
+row expires.
+
+| Cap | Default | Stored in | Changed by |
+|---|---|---|---|
+| System | 32 | `review_runtime_settings`, key `review.concurrency.system` (migration `0040`; absent row = default) | platform operator — admin console `PATCH /_internal_admin/api/runtime` with `{"concurrency": <1..64>}` |
+| Workspace | 16 | `workspaces.max_concurrent_reviews` (migration `0040`; NULL = default) | workspace owner/admin — dashboard Settings, `PUT /<workspaceRef>/api/settings/concurrency` |
+| Per PR | 1 | `review_inflight` primary key | never configurable |
+
+- Both caps share one accepted range: integers in `1..64`. Its upper bound is
+  the deploy-time queue ceiling (§ Queue consumer concurrency), never a larger
+  round number — a system cap above `64` would be accepted and still never take
+  effect, because the platform admits at most `64` consumer invocations. The
+  two are one constant (`QUEUE_CONCURRENCY_CEILING`, which `CONCURRENCY_MAX`
+  mirrors) and `tests/contracts/wrangler-env-parity.test.ts` fails if either
+  drifts.
+- A workspace value above the **current** system cap is refused with a keyed
+  400, never clamped; lowering the system cap below an existing workspace value
+  needs no workspace write — `min` applies the system value from the next
+  message on.
+- Every accepted write lands with its `platform_audit_events` row (actor
+  included) in one D1 batch; a refused write changes no row and audits
+  nothing.
+- Each Worker reads **its own** D1, so a cap is set per environment; these
+  caps are business quotas, and neither can exceed the deploy-time queue
+  ceiling (§ Queue consumer concurrency).
+- A read failure, or a stored value the reader cannot trust, answers the
+  conservative cap **1** (serial) and logs ONE `review_concurrency_degraded`
+  warn carrying `workspace_id` and `effective` — the gate degrades to serial,
+  never to unlimited. Absent settings are silent: they take the defaults
+  above.
 
 ### Cron failure sweep (architect verdict AL-6)
 

@@ -1,5 +1,5 @@
 /**
- * The console's four screens: each screen's loading, error,
+ * The console's five screens: each screen's loading, error,
  * empty and populated states, plus the writes they own — the flag toggle, the
  * per-row plan picker (exactly ONE PATCH) and the support-grant create/revoke.
  *
@@ -11,6 +11,7 @@ import { act, createElement, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { type Element as DomElement, type Window } from "happy-dom";
 import { FlagsPage } from "../../src/spa/admin/FlagsPage";
+import { RuntimePage } from "../../src/spa/admin/RuntimePage";
 import { SupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
 import { UsersPage } from "../../src/spa/admin/UsersPage";
 import { WorkspacesPage } from "../../src/spa/admin/WorkspacesPage";
@@ -113,6 +114,10 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
 
 async function flagsScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
   return mount(createElement(FlagsPage, { locale }), respond);
+}
+
+async function runtimeScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
+  return mount(createElement(RuntimePage, { locale }), respond);
 }
 
 async function workspacesScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
@@ -324,6 +329,125 @@ describe("Flags screen", () => {
     const dialog = surface.win.document.querySelector('[role="alertdialog"]');
     expect(dialog?.textContent).toContain("将 review_global 从 ON 切换为 OFF？");
     expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("ON");
+    await surface.close();
+  });
+});
+
+describe("Runtime screen", () => {
+  const RUNTIME = { concurrency: 24, min: 1, max: 64, degraded: false };
+
+  test("a failed read renders the error with a retry that reloads", async () => {
+    let failing = true;
+    const surface = await runtimeScreen(() => (failing ? failed() : json(RUNTIME)));
+    expect(surface.container.querySelector('[data-slot="error-state"]')?.textContent).toContain(
+      "Could not load the runtime parameters.",
+    );
+
+    failing = false;
+    await surface.click(surface.container.querySelector('[data-slot="error-state"] button'));
+    expect(surface.text()).toContain("Effective on the next review: 24.");
+    await surface.close();
+  });
+
+  test("the field shows the stored cap and one save fires exactly one PATCH", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH" ? json({ concurrency: 40 }) : json(RUNTIME),
+    );
+    const input = surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement;
+    expect(input.value).toBe("24");
+
+    await surface.type("#system-concurrency", "40");
+    await surface.click(surface.container.querySelector('button[type="submit"]'));
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      { url: "/_internal_admin/api/runtime", method: "PATCH", body: { concurrency: 40 } },
+    ]);
+    // The accepted value replaces the stored one without a second read.
+    expect((surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement).value).toBe(
+      "40",
+    );
+    expect(surface.sent.filter((request) => request.method === "GET")).toHaveLength(1);
+    expect(surface.text()).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("a refusal reports the generic failure plus the server's detail", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? new Response(JSON.stringify({ error: "body must be { concurrency: <integer in 1..64> }" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          })
+        : json(RUNTIME),
+    );
+    await surface.type("#system-concurrency", "20");
+    await surface.click(surface.container.querySelector('button[type="submit"]'));
+
+    expect(surface.text()).toContain("Could not change the system concurrency.");
+    expect(surface.text()).toContain("body must be { concurrency: <integer in 1..64> }");
+    // The rejected write leaves the stored value as it was.
+    expect(surface.text()).toContain("Effective on the next review: 24.");
+    await surface.close();
+  });
+
+  test("a degraded read warns instead of presenting the fallback as the stored cap", async () => {
+    // The store answered the conservative 1 because the row could not be read.
+    // Showing 1 as a normal value would invite saving a number nobody stored.
+    let degraded = true;
+    const surface = await runtimeScreen(() =>
+      json({ concurrency: 1, min: 1, max: 64, degraded }),
+    );
+    expect(surface.text()).toContain(
+      "The stored system concurrency could not be read, so every workspace is running one review at a time. Nothing was changed — retry the read.",
+    );
+    // The form stays — a save is the only way to repair an unreadable row — but
+    // its field starts EMPTY and the "effective" line is withheld, so neither
+    // presents the fallback as the stored cap.
+    const input = surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.value).toBe("");
+    expect(surface.text()).not.toContain("Effective on the next review: 1.");
+
+    // The offered recovery is the read, and it clears the warning once it works.
+    degraded = false;
+    const retry = [...surface.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Retry",
+    );
+    expect(retry).toBeDefined();
+    await surface.click(retry!);
+    expect(surface.text()).toContain("Effective on the next review: 1.");
+    expect(surface.text()).not.toContain("could not be read");
+    await surface.close();
+  });
+
+  test("a submit on a degraded read is refused — retry is the only action", async () => {
+    // `data.concurrency` is the conservative fallback, not a stored value: an
+    // empty draft would otherwise submit it as if the operator had typed it.
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ concurrency: 41 })
+        : json({ concurrency: 1, min: 1, max: 64, degraded: true }),
+    );
+    expect(surface.text()).toContain("could not be read");
+
+    const save = surface.container.querySelector('button[type="submit"]');
+    expect((save as unknown as HTMLButtonElement | null)?.disabled).toBe(true);
+    await surface.click(save);
+    // The handler refuses even a submit event the disabled button never sends,
+    // so re-enabling the button cannot turn the fallback into a write.
+    const form = surface.container.querySelector("form")!;
+    await act(async () => {
+      form.dispatchEvent(new surface.win.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([]);
+    expect(surface.text()).not.toContain("Saved.");
+    await surface.close();
+  });
+
+  test("a zh_CN render shows the page's dictionary copy", async () => {
+    const surface = await runtimeScreen(() => json(RUNTIME), "zh_CN");
+    expect(surface.text()).toContain("运行时参数");
+    expect(surface.text()).toContain("下一次审查生效值：24。");
     await surface.close();
   });
 });

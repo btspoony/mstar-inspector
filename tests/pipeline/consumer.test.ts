@@ -38,13 +38,14 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
 import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
+import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
@@ -102,6 +103,16 @@ const VALID_OUTPUT: ReviewOutput = {
 };
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+/**
+ * The migrations after the 0036 identity rewrite, in wrangler's apply order.
+ * Derived from the directory so a future migration cannot leave the
+ * equivalence fixture on a stale schema; the 0036 boundary stays explicit
+ * because that fixture reconstructs a specific historical shape.
+ */
+const MIGRATIONS_AFTER_0036 = readdirSync(join(import.meta.dir, "../../migrations"))
+  .filter((name) => name.endsWith(".sql") && name > "0036_app_identity.sql")
+  .sort();
 
 // --- default App row (every message is per-App) -------------
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
@@ -212,9 +223,30 @@ let diffStdout = "";
 let recheckFileContent = "";
 let recheckFileOverflow = "0";
 
+/**
+ * Optional gate on the FIRST runner exec: a test parks a review inside the
+ * runner (its admission row live) while it dispatches another message.
+ */
+let runnerGate:
+  | { released: Promise<void>; release: () => void; markReached: () => void }
+  | undefined;
+
+/** Hold the next runner exec; `reached` resolves once it is parked. */
+function holdFirstRunner(): { reached: Promise<void>; release: () => void } {
+  const released = Promise.withResolvers<void>();
+  const reached = Promise.withResolvers<void>();
+  runnerGate = { released: released.promise, release: released.resolve, markReached: reached.resolve };
+  return { reached: reached.promise, release: released.resolve };
+}
+
+/** Optional ordering probe: runs at the FIRST sandbox command of a test. */
+let sandboxProbe: (() => void) | undefined;
+
 const fakeSandbox = {
   runCommand: mock(async (cmd: string, opts?: unknown) => {
+    const first = sandboxCalls.length === 0;
     sandboxCalls.push({ cmd, opts });
+    if (first && sandboxProbe !== undefined) sandboxProbe();
     if (sandboxError) throw sandboxError;
     if (cmd.includes("rev-parse")) {
       return { stdout: `${resolvedSha}\n`, stderr: "", exitCode: revParseExitCode };
@@ -234,6 +266,12 @@ const fakeSandbox = {
       return { stdout: `${recheckFileContent}\n${recheckFileOverflow}\n`, stderr: "", exitCode: 0 };
     }
     if (cmd.includes("--input")) {
+      if (runnerGate !== undefined) {
+        const gate = runnerGate;
+        runnerGate = undefined; // only the first runner exec is held
+        gate.markReached();
+        await gate.released;
+      }
       return { stdout: runnerStdout, stderr: runnerStderr, exitCode: runnerExitCode };
     }
     return { stdout: "", stderr: "", exitCode: 0 };
@@ -328,33 +366,18 @@ const testLog: ConsumerLog = {
 };
 // --- helpers ----------------------------------------------------------------
 const kvPuts: Array<{ key: string; value: string; options?: unknown }> = [];
-const kvGuardPuts: Array<{ key: string; value: string; options?: unknown }> = [];
-const kvGuardDeletes: string[] = [];
 const messageRetryCalls: Array<{ attempts: number; delaySeconds?: number }> = [];
 const messageAckCalls: Array<{ attempts: number }> = [];
 let messageAttempts = 1;
 let kvPutError: Error | undefined;
 let kvGetValue: string | null = null;
-let kvGuardValue: string | null = null;
 const kv = {
-  // The in-flight guard (WF-002) uses the `inflight:` key family on the SAME
-  // KV binding — route by prefix so the idem-done assertions on kvPuts stay
-  // unambiguous.
-  get: mock(async (key: string) => {
-    if (key.startsWith("inflight:")) return kvGuardValue;
-    return kvGetValue;
-  }),
+  get: mock(async (_key: string) => kvGetValue),
   put: mock(async (key: string, value: string, options?: unknown) => {
-    if (key.startsWith("inflight:")) {
-      kvGuardPuts.push({ key, value, options });
-    } else {
-      kvPuts.push({ key, value, options });
-    }
+    kvPuts.push({ key, value, options });
     if (kvPutError) throw kvPutError;
   }),
-  delete: mock(async (key: string) => {
-    kvGuardDeletes.push(key);
-  }),
+  delete: mock(async (_key: string) => {}),
 };
 
 async function makeEnv(overrides: Partial<PipelineEnv> = {}): Promise<PipelineEnv> {
@@ -411,8 +434,6 @@ function reset(): void {
   commenterCalls.length = 0;
   Object.assign(commenterState, initialFakeCommenterState());
   kvPuts.length = 0;
-  kvGuardPuts.length = 0;
-  kvGuardDeletes.length = 0;
   messageRetryCalls.length = 0;
   messageAckCalls.length = 0;
   messageAttempts = 1;
@@ -420,6 +441,8 @@ function reset(): void {
   runnerStdout = "";
   runnerStderr = "";
   runnerExitCode = 0;
+  runnerGate = undefined;
+  sandboxProbe = undefined;
   cloneExitCode = 0;
   diffExitCode = 0;
   numstatStdout = "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n";
@@ -436,7 +459,6 @@ function reset(): void {
   recheckFileOverflow = "0";
   kvPutError = undefined;
   kvGetValue = null;
-  kvGuardValue = null;
   checkRequests.length = 0;
   checkRuns.clear();
   checkRequestOverrides = {};
@@ -460,6 +482,56 @@ function usageRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<st
   return db.raw.query("SELECT * FROM usage_events ORDER BY review_id, seq").all() as Array<
     Record<string, unknown>
   >;
+}
+
+/** Live admission rows — the per-PR lock plus the capacity reservation. */
+function inflightRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
+  return db.raw.query("SELECT * FROM review_inflight ORDER BY rowid").all() as Array<Record<string, unknown>>;
+}
+
+/** Seed one live admission row through the REAL store: the state a running review leaves behind. */
+async function seedInflight(
+  db: TestD1,
+  overrides: {
+    pr_number?: number;
+    owner?: string;
+    repo?: string;
+    workspace_id?: string;
+    headSha?: string | null;
+  } = {},
+): Promise<void> {
+  const { headSha = SHA, ...key } = overrides;
+  const result = await acquireInflight(
+    db,
+    {
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      workspace_id: "default",
+      ...key,
+    },
+    {
+      systemCap: 32,
+      workspaceCap: 16,
+      attemptId: "seed-attempt",
+      ttlSeconds: 1320,
+      headSha,
+      now: new Date().toISOString(),
+    },
+  );
+  expect(result).toEqual({ ok: true });
+}
+
+/** The real D1 double with one statement family throwing (fail-closed probes). */
+function dbFailingOn(db: TestD1, match: string) {
+  return {
+    prepare: (sql: string) => {
+      if (sql.includes(match)) throw new Error("D1 unavailable");
+      return db.prepare(sql);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+  };
 }
 
 describe("createReviewConsumer", () => {
@@ -1089,10 +1161,15 @@ describe("createReviewConsumer", () => {
     expect(runnerCall.cmd).toContain("--level 'deep'");
     expect(reviewCount(db)).toBe(1);
   });
-  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + guard TTL 1560; quick/default stay 600_000 (AC-S10-clock)", async () => {
+  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + admission TTL 1692; quick/default stay 600_000 (AC-S10-clock)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    let admissionTtlMs = -1;
+    sandboxProbe = () => {
+      const row = inflightRows(db)[0]!;
+      admissionTtlMs = Date.parse(String(row.expires_at)) - Date.parse(String(row.acquired_at));
+    };
     const consumer = createReviewConsumer(
       await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
       undefined,
@@ -1107,14 +1184,8 @@ describe("createReviewConsumer", () => {
     // false-timeout a deep three-phase run into the DLQ (spec d5-budget
     // Problem Statement).
     expect(runnerExecTimeout()).toBe(840_000);
-    // The in-flight guard TTL follows the same level table (AC-S10-guard).
-    expect(kvGuardPuts).toEqual([
-      {
-        key: "inflight:123:acme/widgets:42",
-        value: "inflight",
-        options: { expirationTtl: 1560 },
-      },
-    ]);
+    // The admission row's TTL follows the same level table (AC-S10-guard).
+    expect(admissionTtlMs).toBe(1692_000);
     // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
     expect(runnerTimeoutMs("quick")).toBe(600_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);
@@ -1203,7 +1274,7 @@ describe("createReviewConsumer", () => {
       expect(sandboxCalls).toHaveLength(0);
       expect(commenterCalls).toHaveLength(0);
       expect(reviewCount(db)).toBe(0);
-      expect(kvGuardPuts).toHaveLength(0); // the in-flight guard is never touched
+      expect(inflightRows(db)).toHaveLength(0); // no admission row is ever written
       const errLine = logLines.find((l) => l.level === "error");
       expect(errLine).toBeDefined();
       expect(errLine!.msg).toContain("invalid REVIEW_LEVEL");
@@ -1838,6 +1909,10 @@ describe("createReviewConsumer", () => {
       "0031_plans_usage.sql",
       // 0036 renames the seeded route-key column, as the deploy does.
       "0036_app_identity.sql",
+      // Every migration after 0036, derived from the directory (0039–0041
+      // included): the consumer's admission reads the runtime caps and writes
+      // the `review_inflight` row on every admitted message.
+      ...MIGRATIONS_AFTER_0036,
     ]) {
       db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
     }
@@ -1930,11 +2005,11 @@ describe("createReviewConsumer", () => {
     expect(JSON.stringify(runnerCredentialPools())).not.toContain("must-not-leak");
   });
 
-  test("guard held on attempt 1 → per-message delayed retry (60s), no throw, no post/insert (BB-3)", async () => {
+  test("a live admission row for the PR → guard-held delayed retry (60s), no throw, no post/insert (BB-3)", async () => {
     reset();
-    kvGuardValue = "inflight";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     // BB-3: the consumer RESOLVES — guard-held is a typed outcome, not a
@@ -1943,12 +2018,11 @@ describe("createReviewConsumer", () => {
     // first review is still running.
     await consumer(makeBatch(makePayload()));
 
-    // Fail fast: no sandbox, no token, no post, no insert, no guard mutation.
+    // Fail fast: no sandbox, no token, no post, no insert, no extra row.
     expect(sandboxCalls).toHaveLength(0);
     expect(commenterCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    expect(kvGuardPuts).toHaveLength(0);
-    expect(kvGuardDeletes).toHaveLength(0);
+    expect(inflightRows(db)).toHaveLength(1); // the live row, untouched
     expect(destroyCalls).toBe(0);
     // A DELAYED per-message retry is scheduled — 60s on the first attempt.
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
@@ -1956,12 +2030,17 @@ describe("createReviewConsumer", () => {
     const infoLine = logLines.find((l) => l.level === "info" && l.msg.includes("already in flight"));
     expect(infoLine).toBeDefined();
     expect(infoLine!.msg).toContain("60s");
+    // Review-concurrency §1.3: the refusal is observable — which bound held the
+    // message, against which caps. The live row is this PR's own.
+    expect(infoLine!.fields.reason).toBe("pr-held");
+    expect(infoLine!.fields.system_cap).toBe(32);
+    expect(infoLine!.fields.workspace_cap).toBe(16);
   });
 
   test("guard-held backoff escalates 60s → 120s → 240s across attempts (BB-3)", async () => {
     reset();
-    kvGuardValue = "inflight";
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
     for (const [attempts, delaySeconds] of [
       [1, 60],
@@ -1981,8 +2060,8 @@ describe("createReviewConsumer", () => {
   });
   test("REVIEW_LEVEL=deep guard-held → delayed retries use the deep backoff 180s → 360s → 720s (AC-S10-guard)", async () => {
     reset();
-    kvGuardValue = "inflight";
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const consumer = createReviewConsumer(
       await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
       testLog,
@@ -2007,9 +2086,9 @@ describe("createReviewConsumer", () => {
 
   test("guard still held after the 3 delayed retries → ack with a warning, no DLQ (BB-3)", async () => {
     reset();
-    kvGuardValue = "inflight";
     messageAttempts = 4; // final delivery before the queue would DLQ
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves — acked, never DLQed
@@ -2022,6 +2101,309 @@ describe("createReviewConsumer", () => {
     expect(warnLine!.msg).toContain("no DLQ");
     expect(warnLine!.fields.pr_number).toBe(42);
     expect(warnLine!.fields.installation_id).toBe(123);
+    // `pr-held` at the terminal ack: a live review for this PR is doing the
+    // work, so the drop is normal traffic — no failure row (W-1).
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a distinct sha held through the whole backoff records ONE drop row (W-1 / round-8)", async () => {
+    // The live review covers the sha it acquired for. A push for a NEW commit
+    // that exhausts the 420s backoff against a longer review is never reviewed
+    // by it, so the drop must reach the failure sweep — a warn line alone
+    // leaves the commit with no trace at all.
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    await seedInflight(db); // holds SHA
+    const newer = "1111111111111111111111111111111111111111";
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: newer })));
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(sandboxCalls).toHaveLength(0);
+    expect(inflightRows(db)).toHaveLength(1); // the live row, untouched
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ pr_number: 42, stage: "pipeline", head_sha: newer });
+    const dropped = String(failureRows(db)[0]!.error);
+    expect(dropped).toContain("pr-held");
+    // Both shas are named: the skipped commit and the one the review holds.
+    expect(dropped).toContain(newer);
+    expect(dropped).toContain(SHA);
+  });
+
+  test("the terminal drop row needs two non-empty, different shas (round-11)", async () => {
+    // A held row's `""` is the same "no commit identity recorded" convention as
+    // a null payload sha (comment trigger) — never evidence of a DIFFERENT
+    // commit, so it must not manufacture a "commit never reviewed" row.
+    const newer = "2222222222222222222222222222222222222222";
+    for (const { held, payload, rows } of [
+      { held: "", payload: newer, rows: 0 },
+      { held: SHA, payload: SHA, rows: 0 },
+      { held: SHA, payload: newer, rows: 1 },
+      { held: SHA, payload: null, rows: 0 },
+    ] as const) {
+      reset();
+      messageAttempts = 4; // final delivery: the job is dropped here
+      const db = await createSeededTestD1();
+      await seedInflight(db, { headSha: held });
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(makePayload({ head_sha: payload })));
+
+      expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+      expect(failureRows(db)).toHaveLength(rows);
+      if (rows === 1) expect(failureRows(db)[0]).toMatchObject({ head_sha: newer });
+    }
+  });
+
+  test("a comment-triggered delivery held by a live review stays silent (no sha to compare)", async () => {
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    await seedInflight(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(
+      makeBatch(makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment" })),
+    );
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a cap refusal that survives the whole backoff records ONE failure row (W-1)", async () => {
+    reset();
+    messageAttempts = 4; // final delivery: the job is dropped here
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
+      )
+      .run();
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    // The sweep counts `review_failures`; a dropped review must be visible
+    // there, with the reason it was dropped.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ pr_number: 42, stage: "pipeline" });
+    expect(String(failureRows(db)[0]!.head_sha)).toBe(makePayload().head_sha!);
+    expect(String(failureRows(db)[0]!.error)).toContain("system-cap");
+    // Wording is reason-specific: a cap refusal never claims a review is live.
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("acking"));
+    expect(warnLine!.msg).toContain("review not admitted");
+    expect(warnLine!.msg).not.toContain("still in flight");
+  });
+
+  test("a storage error refusal that survives the whole backoff records one failure row (W-1)", async () => {
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: dbFailingOn(db, "review_inflight") as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(failureRows(db)).toHaveLength(1);
+    const dropped = String(failureRows(db)[0]!.error);
+    expect(dropped).toContain("error");
+    // The drop row names the FAULT, not just the refusal code: without the
+    // cause it is indistinguishable from a released-between-statements race.
+    expect(dropped).toContain("fault: D1 unavailable");
+  });
+
+  test("a comment-triggered drop row keeps its PR identity despite an empty sha (W-1)", async () => {
+    // A comment-mention job carries no payload sha, so the row's head_sha is
+    // "" by convention (migration 0010 allows it) — but the PR identity must
+    // still be readable from the row, or the drop cannot be joined back to a
+    // PR at all.
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
+      )
+      .run();
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(
+      makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })),
+    );
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = failureRows(db)[0]!;
+    expect(row.head_sha).toBe("");
+    expect(row.owner).toBe("acme");
+    expect(row.repo).toBe("widgets");
+    expect(row.pr_number).toBe(42);
+    const dropped = String(row.error);
+    expect(dropped).toContain("PR acme/widgets#42");
+    expect(dropped).toContain("head_sha unresolved (comment trigger, no sha in payload)");
+  });
+
+  test("a reached system cap refuses admission → guard-held, no sandbox (spec §1.3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
+      )
+      .run();
+    // Another workspace's review holds the single global slot; the untrusted
+    // bit here is the MESSAGE's workspace, whose effective cap becomes 1.
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    // The foreign row is neither deleted nor duplicated by the refusal.
+    expect(inflightRows(db)).toHaveLength(1);
+    // §1.3 observability: the global bound is the one that held the message,
+    // and the line carries the caps it was measured against. W-1: a cap
+    // refusal is NOT "in flight" — no review for this PR exists.
+    const heldLine = logLines.find((l) => l.msg.includes("review not admitted"));
+    expect(heldLine!.fields.reason).toBe("system-cap");
+    expect(heldLine!.fields.system_cap).toBe(1);
+    expect(heldLine!.fields.workspace_cap).toBe(16);
+    // W-1: a retried refusal is NOT yet a failure — the attempt may still be
+    // admitted later, so no failure row is owed.
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a reached WORKSPACE cap refuses admission while the global count has headroom (spec §1.3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The system cap stays at its default 32; this workspace may hold ONE review.
+    db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
+    // A DIFFERENT PR of the SAME workspace holds that one slot.
+    await seedInflight(db, { pr_number: 7 });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(inflightRows(db)).toHaveLength(1);
+    // §1.3 observability: the tenant's own bound held it, with both caps shown
+    // so the operator can tell a busy workspace from a full deployment.
+    const heldLine = logLines.find((l) => l.msg.includes("review not admitted"));
+    expect(heldLine!.fields.reason).toBe("workspace-cap");
+    expect(heldLine!.fields.system_cap).toBe(32);
+    expect(heldLine!.fields.workspace_cap).toBe(1);
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a workspace cap below the system cap bounds only its own workspace — a foreign live review admits", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
+    // The live row belongs to ANOTHER workspace, so `default` still has its slot.
+    // Collapsing both caps into `effective` (1) would refuse this message.
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls.length).toBeGreaterThan(0);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(inflightRows(db)).toHaveLength(1); // the foreign row, untouched
+  });
+
+  test("the global count is bounded by the system cap even when every workspace is under its own cap", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '2', datetime('now'), 'tester')`,
+      )
+      .run();
+    // Two live reviews spread over two OTHER workspaces: each well under its
+    // workspace cap (default 16), and the message's own workspace holds none.
+    await seedInflight(db, { owner: "a", repo: "app", pr_number: 1, workspace_id: "a" });
+    await seedInflight(db, { owner: "b", repo: "app", pr_number: 2, workspace_id: "b" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(inflightRows(db)).toHaveLength(2);
+  });
+
+  test("a D1 error at admission fails closed → guard-held, never admitted (spec §1.3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: dbFailingOn(db, "review_inflight") as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(commenterCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("admission failed"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.msg).toContain("treating as held");
+    // The warn names the cause, so a storage fault is never read as the
+    // benign released-between-statements race.
+    expect(warnLine!.fields.error_cause).toBe("fault: D1 unavailable");
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a degraded caps read warns once and admits at the conservative cap (never unlimited)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: dbFailingOn(db, "review_runtime_settings") as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    const warnLine = logLines.find(
+      (l) => l.level === "warn" && l.fields.event === "review_concurrency_degraded",
+    );
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.fields.workspace_id).toBe("default");
+    expect(warnLine!.fields.effective).toBe(1);
+    // The conservative cap still admits an idle deployment, and the row is
+    // released normally.
+    expect(reviewCount(db)).toBe(1);
+    expect(inflightRows(db)).toHaveLength(0);
   });
 
   test("real failures keep the throw → queue retry → DLQ behavior (BB-3 unchanged)", async () => {
@@ -2040,39 +2422,143 @@ describe("createReviewConsumer", () => {
     expect(messageRetryCalls).toHaveLength(0);
     expect(messageAckCalls).toHaveLength(0);
     expect(destroyCalls).toBe(1);
+    // The admission row is released on the failure path too.
+    expect(inflightRows(db)).toHaveLength(0);
   });
 
-  test("in-flight guard acquired before the pipeline and released after the post settles (WF-002)", async () => {
+  test("admission row is written before the first sandbox step and released after the post settles (WF-002)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    let atFirstSandbox: Array<Record<string, unknown>> = [];
+    sandboxProbe = () => {
+      atFirstSandbox = inflightRows(db);
+    };
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
-    // Guard keyed per PR (no head_sha), written BEFORE the pipeline runs and
-    // deleted in the finally once the post settled.
-    expect(kvGuardPuts).toEqual([
-      {
-        key: "inflight:123:acme/widgets:42",
-        value: "inflight",
-        options: { expirationTtl: reviewGuardTtlSeconds("default") },
-      },
-    ]);
-    expect(kvGuardDeletes).toEqual(["inflight:123:acme/widgets:42"]);
+    // The row is the per-PR lock AND the capacity reservation: it exists when
+    // the FIRST sandbox command runs, keyed by the PR (no head_sha), with the
+    // level's TTL, and is gone once the post settled.
+    expect(atFirstSandbox).toHaveLength(1);
+    expect(atFirstSandbox[0]).toMatchObject({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      workspace_id: "default",
+    });
+    expect(String(atFirstSandbox[0]!.attempt_id)).not.toBe("");
+    expect(
+      Date.parse(String(atFirstSandbox[0]!.expires_at)) - Date.parse(String(atFirstSandbox[0]!.acquired_at)),
+    ).toBe(reviewGuardTtlSeconds("default") * 1000);
+    expect(inflightRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
   });
+
+  test("the admission row is released AFTER the sandbox is destroyed (S-3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // A release that ran before destroy would let the next attempt admit a
+    // second live container while this one still runs.
+    let rowsAtDestroy = -1;
+    const original = fakeSandbox.destroy;
+    fakeSandbox.destroy = mock(async () => {
+      rowsAtDestroy = inflightRows(db).length;
+      destroyCalls += 1;
+      if (destroyError) throw destroyError;
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    try {
+      await consumer(makeBatch(makePayload()));
+    } finally {
+      fakeSandbox.destroy = original;
+    }
+
+    expect(rowsAtDestroy).toBe(1); // this attempt's row is still the lock
+    expect(inflightRows(db)).toHaveLength(0);
+  });
+
+  test("two messages for one PR never run concurrently — the second is guard-held while the first is in flight", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const gate = holdFirstRunner();
+
+    const first = consumer(makeBatch(makePayload()));
+    await gate.reached; // the first review is inside the runner; its row is live
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(sandboxCalls.filter((c) => c.cmd.includes("--input"))).toHaveLength(1);
+    expect(reviewCount(db)).toBe(0); // the second message never ran a pipeline
+
+    gate.release();
+    await first;
+    expect(inflightRows(db)).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("two different PRs both admit a review while the first is still in flight", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const gate = holdFirstRunner();
+
+    const first = consumer(makeBatch(makePayload()));
+    await gate.reached;
+
+    await consumer(makeBatch(makePayload({ pr_number: 43 })));
+
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1); // the second review completed end to end
+    expect(inflightRows(db)).toHaveLength(1); // only the first row is still held
+
+    gate.release();
+    await first;
+    expect(reviewCount(db)).toBe(2);
+    expect(inflightRows(db)).toHaveLength(0);
+  });
+
+  test("a release failure only warns — the review outcome and the TTL backstop stand", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: dbFailingOn(db, "DELETE FROM review_inflight") as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    // The delete could not run; the row expires by TTL instead of failing a
+    // message whose review already posted (a throw would retry it).
+    expect(inflightRows(db)).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(messageAckCalls).toHaveLength(0);
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("release failed"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.msg).toContain("expires by TTL");
+  });
   test("reviewGuardTtlSeconds covers the full step-budget arithmetic per level (qc3 F-301 pin / AC-S10-guard)", () => {
-    // Exact pin: FIVE git-timed steps (clone, rev-parse, diff, numstat,
-    // runner-input write) × 120s + the LEVEL's runner budget + 120s slack
-    // for the untimed steps (token mint, sandbox create, comment post,
-    // KV/D1 puts) = 1320s quick/default, 1560s deep (spec d5-budget L4).
-    // numstat + the input write were added without recomputing
-    // the old 3-step formula (1020s) — any future step or ceiling change
-    // must recompute this helper ON PURPOSE.
-    expect(reviewGuardTtlSeconds("quick")).toBe(1320);
-    expect(reviewGuardTtlSeconds("default")).toBe(1320);
-    expect(reviewGuardTtlSeconds("deep")).toBe(1560);
+    // Exact pin: SIX timed sandbox commands (clone, rev-parse, diff, numstat,
+    // runner-input write, recheck-doc read) × 120s + the LEVEL's runner budget
+    // + the 12s inline-resolution budget + 120s slack for the untimed steps
+    // (token mint, sandbox create, comment post, KV/D1 puts) = 1452s
+    // quick/default, 1692s deep (spec d5-budget L4). Each earlier step
+    // addition (numstat, the input write, the recheck read) went uncounted —
+    // any future step or ceiling change must recompute this helper ON PURPOSE.
+    expect(reviewGuardTtlSeconds("quick")).toBe(1452);
+    expect(reviewGuardTtlSeconds("default")).toBe(1452);
+    expect(reviewGuardTtlSeconds("deep")).toBe(1692);
   });
 
   test("guardRetryDelaysSeconds per level — every delay below that level's guard TTL (AC-S10-guard)", () => {
@@ -3881,9 +4367,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a guard-held delivery claims no attempt and runs no Check", async () => {
     reset();
-    kvGuardValue = "inflight";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
@@ -4865,10 +5351,10 @@ describe("workspace attribution gate (one read face)", () => {
     );
 
     // Structural: nothing ran — no sandbox step, no commenter instance (so no
-    // token mint), no guard, no GitHub call, no review row.
+    // token mint), no admission row, no GitHub call, no review row.
     expect(sandboxCalls).toHaveLength(0);
     expect(commenterCalls).toHaveLength(0);
-    expect(kvGuardPuts).toHaveLength(0);
+    expect(inflightRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     // The existing failure path is untouched: the throw IS the queue's
     // retry→DLQ signal (no ack, no message-level retry), with the AL-6 row.

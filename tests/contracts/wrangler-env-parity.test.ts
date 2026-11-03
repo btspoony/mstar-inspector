@@ -22,6 +22,12 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { stripJsonComments } from "../../scripts/check-image-inputs";
+import {
+  QUEUE_CONCURRENCY_CEILING,
+  isConcurrencyValue,
+} from "../../src/dashboard/runtime-config-store";
+
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const CONFIG_PATH = join(REPO_ROOT, "wrangler.jsonc");
 
@@ -41,46 +47,6 @@ const NOT_RESTATED: Record<string, true> = {
 };
 
 type Json = Record<string, unknown>;
-
-/**
- * Strip JSONC comments before JSON.parse — no dependency. A scanner (not a
- * regex) so a `//` inside a string value is never mistaken for a comment.
- */
-function stripJsonComments(text: string): string {
-  let out = "";
-  let inString = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text.charAt(i);
-    if (inString) {
-      out += ch;
-      if (ch === "\\") {
-        out += text.charAt(i + 1);
-        i++;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-      out += ch;
-      continue;
-    }
-    if (ch === "/" && text.charAt(i + 1) === "/") {
-      while (i < text.length && text.charAt(i) !== "\n") i++;
-      out += "\n";
-      continue;
-    }
-    if (ch === "/" && text.charAt(i + 1) === "*") {
-      i += 2;
-      while (i < text.length && !(text.charAt(i) === "*" && text.charAt(i + 1) === "/")) i++;
-      i++;
-      continue;
-    }
-    out += ch;
-  }
-  return out;
-}
 
 function asObject(value: unknown): Json {
   return typeof value === "object" && value !== null ? (value as Json) : {};
@@ -196,8 +162,9 @@ function containerFingerprints(block: Json): string[] {
  * and production each point at their OWN DLQ (`review-dlq` vs
  * `review-dlq-prod` — their distinctness is asserted above), but a consumer
  * that declares no DLQ at all, or drops its retry batch bounds, is exactly the
- * drift this lock catches. Both consumers are pinned at max_batch_size 1,
- * max_concurrency 1 and max_retries 3 (see the wrangler.jsonc rationale).
+ * drift this lock catches. Both consumers pin max_batch_size 1, the
+ * deploy-time max_concurrency ceiling and max_retries 3 (see the
+ * wrangler.jsonc rationale); the ceiling VALUE is pinned separately below.
  */
 function consumerTuningFingerprints(block: Json): string[] {
   return asArray(asObject(block.queues).consumers).map((entry) =>
@@ -289,11 +256,47 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     expectSameSet("migrations", migrationFingerprints);
   });
 
-  /** The consumer tuning is the protective fix (max_concurrency 1 against
-   * `max_instances: 1`): a staging-only loosening would silently open a retry
-   * storm → DLQ path in production. */
+  /** The consumer tuning is the protective shape: a staging-only loosening of
+   * the batch bound or the retry count would silently open a retry-storm → DLQ
+   * path in production, and a staging-only ceiling change would make the two
+   * blocks admit different numbers of reviews. */
   test("queues.consumers[] tuning (batch size, concurrency, retries, DLQ presence) matches between the top level and env.production", () => {
     expectSameSet("queues.consumers[] tuning", consumerTuningFingerprints);
+  });
+
+  /** `max_concurrency` is the deploy-time CEILING only — the effective
+   * admission is min(system, workspace) read from D1 per message — so parity
+   * alone would pass with any equal value. Both blocks therefore pin the same
+   * constant, `QUEUE_CONCURRENCY_CEILING`, which the runtime cap range reads as
+   * its own maximum (asserted immediately below): above the platform's 32/16
+   * defaults and bounded because each attempt's own sandbox id starts its own
+   * container. The other tuning values (`max_batch_size`, retries, DLQ) stay
+   * config decisions: set-equality above already keeps the two blocks from
+   * drifting apart, and re-stating their literals here would only duplicate
+   * the config (round-8 review). See the wrangler.jsonc rationale. */
+  test("both consumer blocks pin the deploy-time ceiling to QUEUE_CONCURRENCY_CEILING", () => {
+    for (const [block, consumer] of [
+      ["top level (staging)", asArray(asObject(staging.queues).consumers)[0]],
+      ["env.production", asArray(asObject(production.queues).consumers)[0]],
+    ] as [string, Json | undefined][]) {
+      if (!consumer) throw new Error(`wrangler.jsonc: ${block} consumer entry is missing`);
+      expect(
+        consumer.max_concurrency,
+        `wrangler.jsonc: ${block} max_concurrency ceiling`,
+      ).toBe(QUEUE_CONCURRENCY_CEILING);
+    }
+  });
+
+  /** The invariant the two numbers above exist for: a cap the deployed ceiling
+   * cannot deliver is a setting that silently never applies. A cap raised to 250
+   * against a ceiling of 64 was exactly that — accepted by every write and
+   * unreachable at admission. Asserted through the predicate the writes and
+   * reads actually run, so the bound is behaviour rather than a re-statement of
+   * the constant that defines it. */
+  test("the accepted cap range ends at the deployed ceiling", () => {
+    expect(isConcurrencyValue(QUEUE_CONCURRENCY_CEILING)).toBe(true);
+    expect(isConcurrencyValue(QUEUE_CONCURRENCY_CEILING + 1)).toBe(false);
+    expect(isConcurrencyValue(0)).toBe(false);
   });
 
   /** A second/unregistered container entry must fail the lock, not hide behind

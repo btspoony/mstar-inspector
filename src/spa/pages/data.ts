@@ -1364,6 +1364,40 @@ export function parseModels(data: unknown): ModelsPayload | null {
   return { groups };
 }
 
+/** The workspace concurrency face: the stored cap plus the ceiling and range it must respect. */
+export type ConcurrencySettings = {
+  concurrency: number;
+  system: number;
+  min: number;
+  max: number;
+  /** The stored cap could not be read: both numbers above are the conservative fallback. */
+  degraded: boolean;
+};
+
+export function parseConcurrencySettings(data: unknown): ConcurrencySettings | null {
+  if (!isRecord(data)) return null;
+  const { concurrency, system, min, max, degraded } = data;
+  if (typeof concurrency !== "number" || typeof system !== "number") return null;
+  if (typeof min !== "number" || typeof max !== "number") return null;
+  if (typeof degraded !== "boolean") return null;
+  return { concurrency, system, min, max, degraded };
+}
+
+/**
+ * A write's answer: the value the server actually stored, or null on a body
+ * that is not JSON or carries no number. The parse is guarded here — a 2xx
+ * whose body is not JSON is still a landed write (the status said so), and
+ * letting `JSON.parse` throw would report that save as a failure.
+ */
+export function parseStoredConcurrency(body: string): number | null {
+  try {
+    const data: unknown = JSON.parse(body);
+    return isRecord(data) && typeof data.concurrency === "number" ? data.concurrency : null;
+  } catch {
+    return null;
+  }
+}
+
 export function splitModelChain(raw: string | null | undefined): string[] {
   if (!raw) return [];
   return raw

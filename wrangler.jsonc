@@ -36,20 +36,19 @@
       {
         "queue": "review-queue",
         "max_batch_size": 1,
-        // 19 T1 (architect verdict AL-5 — protective fix, NOT explicitizing
-        // current behavior): UNSET max_concurrency = the platform
-        // auto-scales consumer concurrency by backlog (wrangler 4.125.0
-        // schema); today's serial processing is a low-traffic accident.
-        // Under scheduling_policy: "durable_object" each attempt's unique
-        // sandbox id (src/pipeline/consumer.ts) starts its OWN container —
-        // the 0.12 max_instances cap is gone (see the containers comment
-        // below), so >1 concurrency runs that many containers at once
-        // against the account's container limits, and deep reviews (14 min
-        // in-flight) flirt with the 15-min consumer wall-clock cap. Pinned
-        // at 1; deliberately NOT env-configurable — raising concurrency is
-        // a future explicit decision to be re-validated against the
-        // durable-object container model first.
-        "max_concurrency": 1,
+        // Deploy-time CEILING only (the review-concurrency cutover, 2026-11).
+        // The effective admission is per-PR serial and cross-PR parallel,
+        // capped by min(system, workspace) read from D1 on EVERY message
+        // (src/pipeline/concurrency-reader.ts → review_inflight admission) —
+        // so raising or lowering this number never changes the business
+        // quota, only the platform's hard upper bound. 64 sits above the
+        // 32/16 runtime defaults and stays bounded because each attempt's
+        // unique sandbox id (src/pipeline/consumer.ts) starts its OWN
+        // container under scheduling_policy: "durable_object" (the 0.12
+        // max_instances cap is gone — see the containers comment below).
+        // UNSET would let the platform auto-scale by backlog with no bound
+        // at all (wrangler config schema), which is why this is explicit.
+        "max_concurrency": 64,
         "max_retries": 3,
         "dead_letter_queue": "review-dlq"
       }
@@ -89,7 +88,8 @@
   // the switch). `image`, `instance_type`, `max_instances` and
   // `image_build_context` have no equivalent under this policy — the instance
   // size moves into `container.start()` (lite) and concurrency is bounded by
-  // the queue consumer's max_concurrency: 1 above. `build_context` "." lets
+  // the consumer's runtime caps plus its deploy-time ceiling
+  // (max_concurrency: 64 above). `build_context` "." lets
   // the Dockerfile COPY the runner package manifest, its lockfile and the
   // packages/{shared,runner}/src trees into the image (T2 finding). The binding
   // name stays `SANDBOX` so `PipelineEnv` and every
@@ -192,12 +192,14 @@
         ],
         // Same protective consumer shape as staging (see the top-level
         // rationale), against the prod queue pair; the 15 min consumer
-        // wall-clock cap applies here identically.
+        // wall-clock cap applies here identically. max_concurrency is the
+        // same deploy-time ceiling (64) — the effective admission stays
+        // min(system, workspace), read per message.
         "consumers": [
           {
             "queue": "review-queue-prod",
             "max_batch_size": 1,
-            "max_concurrency": 1,
+            "max_concurrency": 64,
             "max_retries": 3,
             "dead_letter_queue": "review-dlq-prod"
           }

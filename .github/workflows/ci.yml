@@ -17,6 +17,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # The image gate diffs against a pull request's base commit or a
+          # push's previous tip, so the full history is needed.
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -45,6 +49,26 @@ jobs:
           cp packages/runner/package.json packages/runner/bun.lock "$TMP"
           (cd "$TMP" && bun install --frozen-lockfile)
           rm -rf "$TMP"
+
+      # `wrangler` hashes `sandbox-image/Dockerfile` alone, so an image input
+      # change that skips the `# rebuild:` marker would deploy the Worker while
+      # the container keeps the previous build. `deploy.yml` ships on push, so
+      # this gate must cover push as well: a pull request diffs against its base
+      # commit, a push against `github.event.before` (the ref's previous tip).
+      # A branch's first push reports the all-zeros sha, which has nothing to
+      # diff against — that is a skip, never a failure.
+      - name: Image rebuild gate
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+            if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+              echo "no previous commit on ${{ github.ref_name }} — gate skipped"
+              exit 0
+            fi
+          fi
+          bun scripts/check-image-inputs.ts --base "$base"
 
       - name: Typecheck
         run: bun run typecheck

@@ -7,6 +7,7 @@ import { t, type Locale } from "../../i18n";
 import { otherLocale } from "../shell";
 import { readBoot } from "../boot";
 import { FlagsPage } from "./FlagsPage";
+import { RuntimePage } from "./RuntimePage";
 import { SupportGrantsPage } from "./SupportGrantsPage";
 import { UsersPage } from "./UsersPage";
 import { WorkspacesPage } from "./WorkspacesPage";
@@ -41,6 +42,7 @@ import { ADMIN_PAGES, type AdminPageId } from "./pages";
  */
 const SCREENS: Record<AdminPageId, ComponentType<{ locale: Locale }>> = {
   flags: FlagsPage,
+  runtime: RuntimePage,
   workspaces: WorkspacesPage,
   users: UsersPage,
   "support-grants": SupportGrantsPage,
