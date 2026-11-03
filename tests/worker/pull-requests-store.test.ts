@@ -36,8 +36,15 @@ describe("upsertPullRequest", () => {
   test("insert then re-delivery keeps ONE row on the (app, owner, repo, number) key", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    await createAppsStore(db).upsertPullRequest(PR);
-    await createAppsStore(db).upsertPullRequest({ ...PR, headSha: "sha-2" });
+    // Stamped deliveries order themselves; the point of this test is the
+    // UNIQUE key and the advance. A stamp-less re-delivery cannot be ordered,
+    // so it deliberately keeps the stored sha (migration 0044).
+    await createAppsStore(db).upsertPullRequest({ ...PR, updatedAt: "2026-01-01T00:00:00.000Z" });
+    await createAppsStore(db).upsertPullRequest({
+      ...PR,
+      headSha: "sha-2",
+      updatedAt: "2026-01-01T00:05:00.000Z",
+    });
     const rows = db.raw.prepare("SELECT * FROM pull_requests WHERE app_id = ?").all(APP_ID) as Array<{
       head_sha: string;
       title: string;

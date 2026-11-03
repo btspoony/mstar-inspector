@@ -47,7 +47,7 @@ import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
-import { idemKey } from "../../src/contracts/idem";
+import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
 import type { InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
@@ -540,7 +540,7 @@ async function seedInflight(
  */
 async function seedPrHead(
   db: TestD1,
-  head: { headSha: string; headAt: string },
+  head: { headSha: string; headAt: string | null },
 ): Promise<void> {
   await createAppsStore(db).upsertPullRequest({
     appId: TEST_APP_ID,
@@ -2140,9 +2140,10 @@ describe("createReviewConsumer", () => {
   const OLD_AT = "2026-01-01T00:00:00.000Z";
   const NEW_AT = "2026-01-01T00:05:00.000Z";
   const NEW_SHA = "1111111111111111111111111111111111111111";
-  // The worker's enqueue claim for one commit (value "1" = queued, not done).
+  // The worker's enqueue claim for one commit (value "1" = queued, not done),
+  // built through the contract helper so the key can never drift from it.
   const ENQUEUED_KEY = (sha: string): string =>
-    `idem:123:acme/widgets:42:${sha}`;
+    idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: sha });
 
   test("a delivery the ledger has overtaken is acked as superseded with zero containers (AC-1)", async () => {
     reset();
@@ -2194,6 +2195,39 @@ describe("createReviewConsumer", () => {
 
     expect(reviewCount(db)).toBe(1);
     expect(sandboxCalls.length).toBeGreaterThan(0);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("an unknown ledger stamp fails open even with a queued job for another sha", async () => {
+    // A pre-0044 row holds a sha but no stamp, and two readable stamps are
+    // what order deliveries — the missing one must review, never skip.
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: null });
+    kvEntries.set(ENQUEUED_KEY(NEW_SHA), "1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(sandboxCalls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  test("a newer commit whose job the guard dropped for good is reviewed, not skipped", async () => {
+    // The guard's terminal ack stamps the abandoned job "dropped": the key is
+    // still there, but it no longer proves a review will ever happen.
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvEntries.set(ENQUEUED_KEY(NEW_SHA), "dropped");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(reviewCount(db)).toBe(1);
     expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
   });
 
@@ -2344,6 +2378,12 @@ describe("createReviewConsumer", () => {
     // Both shas are named: the skipped commit and the one the review holds.
     expect(dropped).toContain(newer);
     expect(dropped).toContain(SHA);
+    // The abandoned job stops being the supersede skip's proof for that commit.
+    expect(kvPuts).toContainEqual({
+      key: ENQUEUED_KEY(newer),
+      value: "dropped",
+      options: { expirationTtl: IDEMPOTENCY_SECONDS },
+    });
   });
 
   test("the terminal drop row needs two non-empty, different shas (round-11)", async () => {

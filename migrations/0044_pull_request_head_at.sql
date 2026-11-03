@@ -1,19 +1,26 @@
--- 0044_pull_request_head_at.sql — the stamp of the delivery that last moved
--- `head_sha`.
+-- 0044_pull_request_head_at.sql — the ledger's delivery watermark.
 --
 -- `pull_requests` (0039) stores the newest known `head_sha` per PR, but not
--- WHEN that sha arrived. A queued `synchronize` delivery could therefore be
--- compared with the ledger only by sha: a delivery whose sha already differs
--- is indistinguishable from one that is merely older, so the consumer either
--- reviews an already-superseded commit or never reviews the newest one.
+-- WHEN the PR last heard from GitHub. A queued `synchronize` delivery could
+-- therefore be compared with the ledger only by sha: a delivery whose sha
+-- already differs is indistinguishable from one that is merely older, so the
+-- consumer either reviews an already-superseded commit or never reviews the
+-- newest one.
 --
--- `head_at` stores the RFC 3339 `pull_request.updated_at` of the delivery that
--- last advanced `head_sha`, rewritten to the canonical UTC ISO-8601 spelling
+-- `head_at` is the `pull_request.updated_at` of the most recent STAMPED
+-- delivery for this PR, rewritten to the canonical UTC ISO-8601 spelling
 -- (`new Date(v).toISOString()`) on BOTH the job payload and this ledger — a
 -- numeric-offset stamp does not sort correctly as text against `Z`, so the
 -- one spelling is what makes text order equal time order and the pair
--- comparable as text. It is written ONLY together with a new `head_sha`, so
--- the column never names a stamp the stored sha did not arrive with.
+-- comparable as text. It is NOT the arrival time of the stored `head_sha`: a
+-- delivery naming the same sha still moves it, and only a delivery that
+-- carries a usable stamp AND names a sha writes it (a stamp with no sha dates
+-- no commit).
+--
+-- `head_sha` never rewinds: a stamped delivery writes it only when its stamp
+-- is at least as new as the stored one, and a delivery with no usable stamp
+-- only fills a still-unknown sha. Such a stamp-less delivery never touches
+-- `head_at`, so an out-of-order arrival cannot rewind the watermark either.
 --
 -- NULL = unknown (a row written before this migration, or a delivery that
 -- carried no usable `updated_at`). An unknown stamp is never a reason to

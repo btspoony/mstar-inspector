@@ -321,10 +321,13 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const row = db.raw
       .query("SELECT head_at FROM pull_requests WHERE app_id = ?")
       .get(appRow.id) as { head_at: string | null };
-    // The route owns ONE thing here: the row carries exactly the bytes the
-    // queue carries (an absent payload stamp is a NULL row). With the literal
-    // pin gone, this is the only assertion either value can fail.
-    expect(row.head_at).toBe(head_at ?? null);
+    // Both sides must carry the SAME non-empty stamp — equality alone would
+    // also pass if the route dropped the stamp everywhere — and the fixture's
+    // +02:00 stamp pins the normalization the payload and the row share.
+    expect({ queued: head_at, ledger: row.head_at }).toEqual({
+      queued: "2026-03-01T10:00:00.000Z",
+      ledger: "2026-03-01T10:00:00.000Z",
+    });
   });
 
   test("wrong-App secret signature → 401, zero enqueue (sibling-App isolation, AC-B5-isolation)", async () => {

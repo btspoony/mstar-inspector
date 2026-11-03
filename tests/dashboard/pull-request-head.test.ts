@@ -1,9 +1,11 @@
 /**
  * PR head watermark (migration 0044):
- *   - `upsertPullRequest` writes `head_sha` + `head_at` as ONE pair, ordered by
- *     the payload stamp, so an out-of-order delivery cannot rewind the ledger;
- *   - `selectPrHead` reads that pair as one point read on the ledger's own
- *     UNIQUE key, `null` when the row is absent.
+ *   - `upsertPullRequest` keeps `head_at` as the DELIVERY watermark (the most
+ *     recent stamped delivery's `pull_request.updated_at`, not the sha's
+ *     arrival time) while `head_sha` never rewinds — a stamped delivery is
+ *     ordered by its stamp, a stamp-less one may only fill an unknown sha;
+ *   - `selectPrHead` reads `head_sha` + `head_at` as one point read on the
+ *     ledger's own UNIQUE key, scoped to the App, `null` when the row is absent.
  *
  * The fixture is the real migration DDL (`createMigratedTestD1` walks
  * `migrations/`), so 0044's ALTER TABLE is what these assertions run against.
@@ -17,7 +19,7 @@ import { createAppsStore, type UpsertPullRequestInput } from "../../src/dashboar
 
 const APP_ID = "app-pr-head";
 
-function seedApp(db: TestD1): void {
+function seedApp(db: TestD1, id = APP_ID, githubAppId = 3001): void {
   const now = "2026-01-01T00:00:00.000Z";
   db.raw
     .prepare(
@@ -27,7 +29,7 @@ function seedApp(db: TestD1): void {
        VALUES (?, NULL, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
                'octocat', 'active', ?, ?)`,
     )
-    .run(APP_ID, 3001, APP_ID, now, now);
+    .run(id, githubAppId, id, now, now);
 }
 
 const ADDRESS = { appId: APP_ID, owner: "acme", repo: "widgets", prNumber: 132 };
@@ -142,6 +144,42 @@ describe("upsertPullRequest head watermark (0044)", () => {
       headSha: "sha-1",
       headAt: "2026-03-01T10:00:00.000Z",
     });
+  });
+
+  test("a stamp-less delivery cannot rewind a known sha", async () => {
+    // A pre-deploy or replayed message carries no stamp, so it cannot be
+    // ordered: it may only fill an unknown sha. The 0039 rule (the arriving
+    // sha wins) would rewrite the row back to an older commit here.
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest(
+      delivery({ headSha: "sha-new", updatedAt: "2026-03-01T10:05:00.000Z" }),
+    );
+    await createAppsStore(db).upsertPullRequest(delivery({ headSha: "sha-old", updatedAt: null }));
+    expect(await createAppsStore(db).selectPrHead(ADDRESS)).toEqual({
+      headSha: "sha-new",
+      headAt: "2026-03-01T10:05:00.000Z",
+    });
+  });
+
+  test("selectPrHead is scoped to one App's rows", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    const otherId = "app-pr-head-other";
+    seedApp(db, otherId, 3002);
+    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
+    await createAppsStore(db).upsertPullRequest({
+      ...delivery({ headSha: "sha-other", updatedAt: "2026-03-01T10:05:00.000Z" }),
+      appId: otherId,
+    });
+
+    const store = createAppsStore(db);
+    expect(await store.selectPrHead(ADDRESS)).toEqual({
+      headSha: "sha-1",
+      headAt: "2026-03-01T10:00:00.000Z",
+    });
+    // An App with no ledger row is "unknown" — never another App's watermark.
+    expect(await store.selectPrHead({ ...ADDRESS, appId: "app-with-no-rows" })).toBeNull();
   });
 
   test("selectPrHead answers null for a row that does not exist", async () => {

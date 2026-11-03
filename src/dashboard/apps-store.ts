@@ -400,8 +400,10 @@ export type UpsertPullRequestInput = {
   /**
    * The payload's `pull_request.updated_at` (ISO 8601), so ordering follows
    * GitHub's clock rather than our arrival clock. Omitted/null → now.
-   * It is ALSO the `head_at` watermark: the stamp recorded for `headSha` when
-   * this delivery supplies one (migration 0044).
+   * It is ALSO the `head_at` delivery watermark (migration 0044): the stamp
+   * the ledger keeps for the most recent stamped delivery of this PR — NOT
+   * the arrival time of `headSha`, which a delivery naming the same sha still
+   * moves.
    *
    * Callers MUST pass the canonical UTC ISO-8601 spelling
    * (`new Date(v).toISOString()`): it is bound verbatim and compared as text,
@@ -1016,15 +1018,17 @@ export function createAppsStore(db: AppsStoreD1) {
      * and would break a legitimate in-order close→reopen, so this layer accepts
      * the tie; any later delivery for the PR rewrites the row with a new stamp.
      *
-     * `head_sha` / `head_at` (migration 0044) move as ONE pair, ordered by
-     * `head_at` — the payload stamp the sha arrived with — so a delivery that
-     * overtakes another in the queue cannot rewind the ledger to an older
-     * commit. `head_at` is bound only when the delivery names a sha (the pair
-     * invariant), so:
-     *   - no usable stamp (`excluded.head_at IS NULL`) → the 0039 rule for the
-     *     sha alone (`COALESCE`) and `head_at` untouched;
-     *   - a stamp at least as new as the stored one (or an UNKNOWN stored one,
-     *     `head_at IS NULL`) → both advance;
+     * `head_sha` / `head_at` (migration 0044). `head_at` is the ledger's
+     * DELIVERY watermark — the `pull_request.updated_at` of the most recent
+     * stamped delivery for this PR — not the arrival time of the stored sha,
+     * so a delivery naming the same sha still moves it. `head_sha` itself
+     * never rewinds:
+     *   - a delivery that names a sha with no usable stamp
+     *     (`excluded.head_at IS NULL`) only fills a still-unknown sha
+     *     (`COALESCE(head_sha, excluded.head_sha)`) and leaves `head_at`
+     *     untouched — an out-of-order arrival cannot rewind either column;
+     *   - a stamped delivery at least as new as the stored one (or an UNKNOWN
+     *     stored one, `head_at IS NULL`) advances both;
      *   - an older stamp → both untouched.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
@@ -1034,8 +1038,9 @@ export function createAppsStore(db: AppsStoreD1) {
       const seenAt = input.updatedAt === undefined || input.updatedAt === null
         ? null
         : input.updatedAt;
-      // The pair invariant holds at the write: no sha, no stamp — otherwise a
-      // delivery that carries a stamp but no sha would date a sha it never had.
+      // The pair below holds at the write: no sha, no stamp — otherwise a
+      // delivery that carries a stamp but no sha would move the PR's delivery
+      // watermark on behalf of a commit it never named.
       const headAt = input.headSha === undefined || input.headSha === null ? null : seenAt;
       await db
         .prepare(
@@ -1050,7 +1055,7 @@ export function createAppsStore(db: AppsStoreD1) {
                ELSE pull_requests.state
              END,
              head_sha = CASE
-               WHEN excluded.head_at IS NULL THEN COALESCE(excluded.head_sha, head_sha)
+               WHEN excluded.head_at IS NULL THEN COALESCE(head_sha, excluded.head_sha)
                WHEN head_at IS NULL OR excluded.head_at >= head_at THEN excluded.head_sha
                ELSE head_sha
              END,
@@ -1077,10 +1082,12 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The PR's head watermark — `head_sha` + the stamp it arrived with
-     * (migration 0044) — as ONE strongly consistent point read on the
-     * ledger's own UNIQUE key. The queue consumer reads it to decide whether a
-     * delivery it just dequeued has already been overtaken by a newer commit.
+     * The PR's head watermark — `head_sha` plus the ledger's DELIVERY stamp
+     * (migration 0044: the `pull_request.updated_at` of the most recent
+     * stamped delivery, not the sha's arrival time) — as ONE strongly
+     * consistent point read on the ledger's own UNIQUE key. The queue consumer
+     * reads it to decide whether a delivery it just dequeued has already been
+     * overtaken by a newer commit.
      *
      * Missing row → `null` (an unknown PR is never a reason to skip), and the
      * two fields are reported as the row holds them — a `null` stamp is

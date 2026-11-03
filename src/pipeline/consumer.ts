@@ -524,14 +524,15 @@ export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_ca
  * and review the new commit. A drop that still happens — a cap/storage
  * refusal, or a row that outlived the schedule — must leave a trace, so the
  * terminal ack records the drop row for a commit the live review never
- * covers.
+ * covers, and stamps that commit's idempotency claim `dropped` so the
+ * supersede skip stops treating the abandoned job as proof.
  */
-function handleGuardHeld(
+async function handleGuardHeld(
   message: Message<ReviewJobPayload>,
   deps: ProcessDeps,
   admission: AdmissionRefusalFields,
   heldHeadSha: string | null,
-): void | Promise<void> {
+): Promise<void> {
   const fields = { ...toBaseFields(message.body), ...admission };
   // Why this message was held, appended to both lines: the delay schedule alone
   // never says whether the PR, the tenant, or the deployment is full. A storage
@@ -589,6 +590,29 @@ function handleGuardHeld(
   // stays in the error text so the row is joinable back to the PR — a bare
   // `""` row tells an operator nothing about which PR was dropped.
   const headSha = payloadSha ?? "";
+  // The newer commit's enqueue claim is the supersede skip's ONLY proof, so a
+  // job dropped here for good must stop being proof: overwrite its key with
+  // "dropped" (the same TTL the worker claim used). Best-effort — a KV fault
+  // only leaves a stale "1", which the skip then accepts and `review_failures`
+  // traces (the drop row below).
+  if (headSha !== "") {
+    try {
+      await deps.env.IDEMPOTENCY_KV.put(
+        idemKey({
+          installation_id: message.body.installation_id,
+          owner: message.body.owner,
+          repo: message.body.repo,
+          pr_number: message.body.pr_number,
+          head_sha: headSha,
+        }),
+        "dropped",
+        { expirationTtl: IDEMPOTENCY_SECONDS },
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `dropped-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
+    }
+  }
   const identity = `${message.body.owner}/${message.body.repo}#${message.body.pr_number}`;
   // A shifted-sha drop names the sha the live review holds, so an operator can
   // see which commit was skipped rather than guessing from the refusal code.
@@ -1363,6 +1387,18 @@ type ProcessDeps = {
    * proof.
    */
   checks?: CheckLifecycleHooks;
+  /**
+   * The PR head watermark read (migration 0044) — `createAppsStore(env.DB)
+   * .selectPrHead` in production, built ONCE per consumer (and injectable in
+   * tests), never per message. The supersede decision needs one point read per
+   * stamped delivery, so rebuilding the store for it would be pure overhead.
+   */
+  selectPrHead: (input: {
+    appId: string;
+    owner: string;
+    repo: string;
+    prNumber: number;
+  }) => Promise<{ headSha: string | null; headAt: string | null } | null>;
 };
 
 /**
@@ -1502,7 +1538,7 @@ async function readPrHead(
   payload: ReviewJobPayload,
 ): Promise<{ headSha: string | null; headAt: string | null } | null> {
   try {
-    return await createAppsStore(deps.env.DB).selectPrHead({
+    return await deps.selectPrHead({
       appId: payload.appRef.appId,
       owner: payload.owner,
       repo: payload.repo,
@@ -2033,12 +2069,18 @@ async function kvDoneHit(
 }
 
 /**
- * Does the ledger's newer commit own a QUEUED job? The worker claims the
- * idempotency key only AFTER a successful `REVIEW_QUEUE.send`, so a present
- * key proves that commit was enqueued. The ledger alone proves nothing: every
- * verified non-reject delivery advances it, including ones that enqueue
+ * Does the ledger's newer commit own a job that will still run? The worker
+ * claims the idempotency key only AFTER a successful `REVIEW_QUEUE.send`, so
+ * the key proves that commit was enqueued. The ledger alone proves nothing:
+ * every verified non-reject delivery advances it, including ones that enqueue
  * nothing (a `synchronize` in `open` mode, a paused App, a failed send), so a
  * skip backed by the ledger alone would drop a PR's only review.
+ *
+ * `"1"` (queued) and `"done"` (reviewed by this consumer) are that proof;
+ * `"dropped"` is the guard's terminal ack stamping the job it gave up on
+ * (handleGuardHeld), so it is NO proof — that commit will never review. DLQ
+ * paths leave `"1"` behind, which this accepts; `review_failures` is what
+ * traces those.
  *
  * Fail-open: an absent ledger sha, an absent key or a KV fault all mean "no
  * proof" → review normally (a fault logs one warn line).
@@ -2060,7 +2102,8 @@ async function newerCommitHasJob(
       pr_number: payload.pr_number,
       head_sha: headSha,
     });
-    return (await deps.env.IDEMPOTENCY_KV.get(key)) !== null;
+    const claim = await deps.env.IDEMPOTENCY_KV.get(key);
+    return claim !== null && claim !== "dropped";
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(fields, `supersede KV read failed — reviewing normally: ${detail}`);
@@ -2074,7 +2117,10 @@ async function newerCommitHasJob(
  * — every field defaults to the production implementation when omitted.
  */
 type ConsumerOverrides = Partial<
-  Pick<ProcessDeps, "store" | "failureStore" | "createAppCommenter" | "getSandbox" | "checks">
+  Pick<
+    ProcessDeps,
+    "store" | "failureStore" | "createAppCommenter" | "getSandbox" | "checks" | "selectPrHead"
+  >
 >;
 
 /**
@@ -2099,6 +2145,9 @@ export function createReviewConsumer(
   // credential route: the lifecycle resolves THIS message's App adapter from
   // it, so a Check never mints a token, client or permission set of its own.
   const appCommenters = new Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>();
+  // One App-ledger store per consumer: `selectPrHead` is the supersede
+  // decision's point read and must not rebuild the store per message.
+  const appsStore = createAppsStore(env.DB);
   const deps: ProcessDeps = {
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
@@ -2110,6 +2159,7 @@ export function createReviewConsumer(
     // step — the single construction point stays src/pipeline/comment.ts.
     createAppCommenter: overrides.createAppCommenter ?? ((cred) => createReviewCommenter(cred, { db: env.DB })),
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
+    selectPrHead: overrides.selectPrHead ?? appsStore.selectPrHead,
     log,
   };
   // §7.10 Check seam: production always supplies the
@@ -2271,11 +2321,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // The ledger advances on EVERY verified non-reject delivery, including the
     // ones that enqueue nothing (a `synchronize` in `open` mode, a paused App,
     // a failed enqueue), so the ledger alone cannot stand as the skip's proof:
-    // the newer commit must also own a queued job, proven by its idempotency
-    // key (claimed only after a successful send).
+    // the newer commit must also own a job that will still run — its
+    // idempotency key is claimed only after a successful send and is stamped
+    // "dropped" when the guard gives that job up for good.
     //
     // `issue_comment` jobs and pre-migration messages carry no stamp and take
     // today's path untouched — not even these reads.
+    //
+    // The ledger stamp is a DELIVERY watermark, so a later delivery naming the
+    // SAME sha moves it too (migration 0044): expected and harmless here, since
+    // the skip also requires the ledger's sha to differ from this payload's.
     const payloadHeadSha = payload.head_sha;
     const payloadHeadAt = payload.head_at;
     if (payloadHeadSha && payloadHeadAt) {
