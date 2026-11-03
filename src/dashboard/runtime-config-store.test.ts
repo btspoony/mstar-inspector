@@ -11,8 +11,9 @@
  * Locked surface:
  *   - absent system row → 32; NULL workspace column → 16
  *   - effective = min(system, workspace)
- *   - values are integers in 1..250; a workspace value above the system cap is
- *     REFUSED by the write itself, never clamped
+ *   - values are integers in 1..64 (the max is the deployed queue ceiling); a
+ *     workspace value above the system cap is REFUSED by the write itself,
+ *     never clamped
  *   - a PRESENT but unparseable value degrades to the conservative cap
  *   - a PRESENT value that is not a string or number is untrusted, never
  *     coerced (`["16"]`, `true` and `{}` all degrade)

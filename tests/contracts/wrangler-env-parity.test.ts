@@ -23,6 +23,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { stripJsonComments } from "../../scripts/check-image-inputs";
+import {
+  CONCURRENCY_MAX,
+  QUEUE_CONCURRENCY_CEILING,
+  SYSTEM_CONCURRENCY_DEFAULT,
+  WORKSPACE_CONCURRENCY_DEFAULT,
+} from "../../src/dashboard/runtime-config-store";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const CONFIG_PATH = join(REPO_ROOT, "wrangler.jsonc");
@@ -263,19 +269,42 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
   /** `max_concurrency` is the deploy-time CEILING only — the effective
    * admission is min(system, workspace) read from D1 per message — so parity
    * alone would pass with any equal value. Both blocks therefore pin the same
-   * literal: 64, above the platform's 32/16 defaults and bounded because each
-   * attempt's own sandbox id starts its own container. `max_batch_size: 1`
-   * keeps one review per batch so the runner budget owns the whole wall clock.
-   * See the wrangler.jsonc rationale. */
-  test("both consumer blocks pin the deploy-time ceiling (max_concurrency 64, max_batch_size 1)", () => {
+   * constant, `QUEUE_CONCURRENCY_CEILING`, which the runtime cap range reads as
+   * its own maximum (asserted immediately below): 64, above the platform's
+   * 32/16 defaults and bounded because each attempt's own sandbox id starts
+   * its own container. `max_batch_size: 1` keeps one review per batch so the
+   * runner budget owns the whole wall clock. See the wrangler.jsonc rationale. */
+  test("both consumer blocks pin the deploy-time ceiling (max_concurrency QUEUE_CONCURRENCY_CEILING, max_batch_size 1)", () => {
     for (const [block, consumer] of [
       ["top level (staging)", asArray(asObject(staging.queues).consumers)[0]],
       ["env.production", asArray(asObject(production.queues).consumers)[0]],
     ] as [string, Json | undefined][]) {
       if (!consumer) throw new Error(`wrangler.jsonc: ${block} consumer entry is missing`);
-      expect(consumer.max_concurrency, `wrangler.jsonc: ${block} max_concurrency ceiling`).toBe(64);
+      expect(
+        consumer.max_concurrency,
+        `wrangler.jsonc: ${block} max_concurrency ceiling`,
+      ).toBe(QUEUE_CONCURRENCY_CEILING);
       expect(consumer.max_batch_size, `wrangler.jsonc: ${block} max_batch_size`).toBe(1);
     }
+  });
+
+  /** The invariant the two numbers above exist for: an accepted cap that the
+   * deployed ceiling cannot deliver is a setting that silently never applies.
+   * A cap raised to 250 against a ceiling of 64 was exactly that — accepted by
+   * every write and unreachable at admission. */
+  test("the accepted cap range stays inside the deployed ceiling", () => {
+    expect(
+      CONCURRENCY_MAX,
+      "src/dashboard/runtime-config-store.ts: CONCURRENCY_MAX must equal the deployed ceiling",
+    ).toBe(QUEUE_CONCURRENCY_CEILING);
+    expect(
+      SYSTEM_CONCURRENCY_DEFAULT,
+      "src/dashboard/runtime-config-store.ts: the system default must fit the accepted range",
+    ).toBeLessThanOrEqual(QUEUE_CONCURRENCY_CEILING);
+    expect(
+      WORKSPACE_CONCURRENCY_DEFAULT,
+      "src/dashboard/runtime-config-store.ts: the workspace default must fit the accepted range",
+    ).toBeLessThanOrEqual(QUEUE_CONCURRENCY_CEILING);
   });
 
   /** A second/unregistered container entry must fail the lock, not hide behind

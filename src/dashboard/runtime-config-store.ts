@@ -31,13 +31,14 @@
  * value invites a save of a number nobody stored. The structured warn belongs
  * to the consumer that has a logger (the pipeline reader), not here.
  *
- * Write discipline: values are integers in 1..250; a workspace value above the
- * CURRENT system value is refused, never clamped. The cap is part of the
- * UPDATE's own predicate, so the refusal is decided by the write against the
- * cap as it stands at that moment — a concurrent lowering cannot slip between
- * a check and the write. Both writes land with their `platform_audit_events`
- * row in ONE `db.batch`, the `flag.set` pattern in src/admin/index.ts — a
- * failed write appends no audit row.
+ * Write discipline: values are integers in 1..64 (`CONCURRENCY_MAX` is the
+ * deploy-time queue ceiling — a cap above it could never take effect). A
+ * workspace value above the CURRENT system value is refused, never clamped.
+ * The cap is part of the UPDATE's own predicate, so the refusal is decided by
+ * the write against the cap as it stands at that moment — a concurrent
+ * lowering cannot slip between a check and the write. Both writes land with
+ * their `platform_audit_events` row in ONE `db.batch`, the `flag.set` pattern
+ * in src/admin/index.ts — a failed write appends no audit row.
  *
  * Module boundary: a dashboard leaf whose only import is the `DashboardD1`
  * type from ./users — no store/pipeline/review code, no runtime dependency.
@@ -52,10 +53,19 @@ export const SYSTEM_CONCURRENCY_DEFAULT = 32;
 export const WORKSPACE_CONCURRENCY_DEFAULT = 16;
 /** Lower bound of a stored value; also the degraded read fallback. */
 export const CONCURRENCY_MIN = 1;
-/** Upper bound of a stored value. */
-export const CONCURRENCY_MAX = 250;
+/**
+ * The deploy-time queue ceiling: `queues.consumers[].max_concurrency` in
+ * `wrangler.jsonc` (top level and `env.production`). A cap above it is
+ * accepted by D1 yet can never take effect, so it is also the accepted
+ * maximum — `tests/contracts/wrangler-env-parity.test.ts` locks the two
+ * together (change one, change the other, or a deploy admits fewer reviews
+ * than the settings allow).
+ */
+export const QUEUE_CONCURRENCY_CEILING = 64;
+/** Upper bound of a stored value: the ceiling the platform can deliver. */
+export const CONCURRENCY_MAX = QUEUE_CONCURRENCY_CEILING;
 
-/** Integer 1..250 — the one predicate every write and every read re-parses with. */
+/** Integer 1..64 — the one predicate every write and every read re-parses with. */
 export function isConcurrencyValue(value: unknown): value is number {
   return (
     typeof value === "number" &&
@@ -68,7 +78,7 @@ export function isConcurrencyValue(value: unknown): value is number {
 /**
  * Parse one stored value. `undefined` = the row/column is ABSENT, so the
  * caller's default applies; `NaN` = the value is present but not a trusted
- * 1..250 integer, which no reader may treat as a default. Only a number or a
+ * 1..64 integer, which no reader may treat as a default. Only a number or a
  * string counts: D1's declared column types do not constrain what a row
  * actually carries, so any other runtime value is untrusted, never something
  * `Number()` may coerce into a cap (`["16"]` → 16, `true` → 1).
@@ -98,7 +108,7 @@ function resolveRow(row: { value?: unknown } | null, fallback: number): Concurre
     : { concurrency: parsed, degraded: false };
 }
 
-/** Why a write was refused. `invalid_value` is the 1..250 range; `above_system`
+/** Why a write was refused. `invalid_value` is the 1..64 range; `above_system`
  * is a workspace value over the system cap, refused so the route can answer a
  * keyed 400 instead of storing a number that would never apply;
  * `unknown_workspace` is a target that does not exist, so nothing was written.
@@ -226,7 +236,7 @@ export async function getEffectiveConcurrency(
 /**
  * The system cap as SQL, so a write statement can read the cap inside its own
  * predicate instead of trusting an earlier read. An absent row is the default;
- * anything not a plain 1..250 integer is the conservative bound, matching what
+ * anything not a plain 1..64 integer is the conservative bound, matching what
  * a degraded read answers. (Stricter than `parseStored` on stray whitespace:
  * `shortcut: a hand-edited " 8" is read as 8 but refuses writes, upgrade if a
  * non-canonical writer ever exists`.)

@@ -2241,15 +2241,21 @@ all (wrangler's config schema). Each attempt's unique sandbox id starts its
 **own** container under `scheduling_policy: "durable_object"` (the 0.12
 `max_instances` cap no longer exists — see the `containers` comment in
 `wrangler.jsonc`), so `64` is the widest blast radius the account should ever
-accept. Raise it only together with the runtime defaults, and remember the
-platform's 15 min queue-consumer wall-clock cap still bounds any single deep
-review — concurrency changes overlap reviews, it does not lengthen them.
+accept. It is also the accepted maximum for the runtime caps
+(`CONCURRENCY_MAX` in `src/dashboard/runtime-config-store.ts`, via
+`QUEUE_CONCURRENCY_CEILING`): a cap the platform cannot deliver is refused
+rather than stored, and `tests/contracts/wrangler-env-parity.test.ts` locks the
+two numbers together — raise the ceiling only together with that constant and
+the runtime defaults. Remember the platform's 15 min queue-consumer wall-clock
+cap still bounds any single deep review — concurrency changes overlap reviews,
+it does not lengthen them.
 
 Observation checklist after a concurrency change:
 
-- [ ] Both blocks carry the same ceiling — `max_concurrency: 64` and
+- [ ] Both blocks carry the same ceiling — the `max_concurrency` constant and
       `max_batch_size: 1` at the top level and inside `env.production`
-      (`bun test tests/contracts/wrangler-env-parity.test.ts` locks the pair).
+      (`bun test tests/contracts/wrangler-env-parity.test.ts` locks the pair
+      and the runtime cap range).
 - [ ] Throughput moved the way the runtime caps predict: raising the D1 caps
       changes the admitted rate on the **next** message; raising only the
       ceiling changes nothing while the caps stay at 32/16.
@@ -2269,20 +2275,27 @@ row expires.
 
 | Cap | Default | Stored in | Changed by |
 |---|---|---|---|
-| System | 32 | `review_runtime_settings`, key `review.concurrency.system` (migration `0040`; absent row = default) | platform operator — admin console `PATCH /_internal_admin/api/runtime` with `{"concurrency": <1..250>}` |
+| System | 32 | `review_runtime_settings`, key `review.concurrency.system` (migration `0040`; absent row = default) | platform operator — admin console `PATCH /_internal_admin/api/runtime` with `{"concurrency": <1..64>}` |
 | Workspace | 16 | `workspaces.max_concurrent_reviews` (migration `0040`; NULL = default) | workspace owner/admin — dashboard Settings, `PUT /<workspaceRef>/api/settings/concurrency` |
 | Per PR | 1 | `review_inflight` primary key | never configurable |
 
-- Values are integers in `1..250`. A workspace value above the **current**
-  system cap is refused with a keyed 400, never clamped; lowering the system
-  cap below an existing workspace value needs no workspace write — `min`
-  applies the system value from the next message on.
+- Both caps share one accepted range: integers in `1..64`. Its upper bound is
+  the deploy-time queue ceiling (§ Queue consumer concurrency), never a larger
+  round number — a system cap above `64` would be accepted and still never take
+  effect, because the platform admits at most `64` consumer invocations. The
+  two are one constant (`QUEUE_CONCURRENCY_CEILING`, which `CONCURRENCY_MAX`
+  mirrors) and `tests/contracts/wrangler-env-parity.test.ts` fails if either
+  drifts.
+- A workspace value above the **current** system cap is refused with a keyed
+  400, never clamped; lowering the system cap below an existing workspace value
+  needs no workspace write — `min` applies the system value from the next
+  message on.
 - Every accepted write lands with its `platform_audit_events` row (actor
   included) in one D1 batch; a refused write changes no row and audits
   nothing.
 - Each Worker reads **its own** D1, so a cap is set per environment; these
-  caps are business quotas and sit **below** the deploy-time queue ceiling
-  (§ Queue consumer concurrency).
+  caps are business quotas, and neither can exceed the deploy-time queue
+  ceiling (§ Queue consumer concurrency).
 - A read failure, or a stored value the reader cannot trust, answers the
   conservative cap **1** (serial) and logs ONE `review_concurrency_degraded`
   warn carrying `workspace_id` and `effective` — the gate degrades to serial,
