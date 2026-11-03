@@ -56,10 +56,14 @@ export function isConcurrencyValue(value: unknown): value is number {
 /**
  * Parse one stored value. `undefined` = the row/column is ABSENT, so the
  * caller's default applies; `NaN` = the value is present but not a trusted
- * 1..250 integer, which no reader may treat as a default.
+ * 1..250 integer, which no reader may treat as a default. Only a number or a
+ * string counts: D1's declared column types do not constrain what a row
+ * actually carries, so any other runtime value is untrusted, never something
+ * `Number()` may coerce into a cap (`["16"]` → 16, `true` → 1).
  */
-function parseStored(value: string | number | null | undefined): number | undefined {
+function parseStored(value: unknown): number | undefined {
   if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string" && typeof value !== "number") return Number.NaN;
   const parsed = typeof value === "number" ? value : Number(value);
   return isConcurrencyValue(parsed) ? parsed : Number.NaN;
 }
@@ -68,7 +72,7 @@ function parseStored(value: string | number | null | undefined): number | undefi
  * One cap from its stored value: absent → `fallback`, present-but-untrusted →
  * the conservative bound. Same answer `getEffectiveConcurrency` degrades to.
  */
-function resolveStored(value: string | number | null | undefined, fallback: number): number {
+function resolveStored(value: unknown, fallback: number): number {
   const parsed = parseStored(value);
   if (parsed === undefined) return fallback;
   return Number.isNaN(parsed) ? CONCURRENCY_MIN : parsed;
@@ -79,7 +83,7 @@ function resolveStored(value: string | number | null | undefined, fallback: numb
  * caller's default applies; a present row whose selected field is missing is a
  * malformed result — untrusted, never absent.
  */
-function resolveRow(row: { value?: string | number | null } | null, fallback: number): number {
+function resolveRow(row: { value?: unknown } | null, fallback: number): number {
   if (row === null) return fallback;
   if (row.value === undefined) return CONCURRENCY_MIN;
   return resolveStored(row.value, fallback);
@@ -111,8 +115,8 @@ export type EffectiveConcurrency = {
   degraded: boolean;
 };
 
-/** One `review_runtime_settings` row. */
-type RuntimeSettingRow = { value: string };
+/** One `review_runtime_settings` row. The declared `value` type constrains nothing a row actually carries. */
+type RuntimeSettingRow = { value?: unknown };
 
 /** The system cap; an absent row reads as the default, anything untrusted as 1. */
 export async function getSystemConcurrency(db: DashboardD1): Promise<number> {
@@ -131,7 +135,7 @@ export async function getWorkspaceConcurrency(
   const row = await db
     .prepare("SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = ?")
     .bind(workspaceId)
-    .first<{ value: number | null }>();
+    .first<{ value?: unknown }>();
   return resolveRow(row, WORKSPACE_CONCURRENCY_DEFAULT);
 }
 
@@ -162,7 +166,7 @@ export async function getEffectiveConcurrency(
                 (SELECT max_concurrent_reviews FROM workspaces WHERE id = ?2) AS workspace_value`,
       )
       .bind(SYSTEM_CONCURRENCY_KEY, workspaceId)
-      .first<{ system_value?: string | null; workspace_value?: number | null }>();
+      .first<{ system_value?: unknown; workspace_value?: unknown }>();
     // This query always yields exactly one row; no row means the answer itself
     // is untrustworthy, not that both settings are absent. A present row whose
     // selected fields are missing is untrusted for the same reason — only a NULL
@@ -299,7 +303,7 @@ export async function setWorkspaceConcurrency(
               (SELECT value FROM review_runtime_settings WHERE key = ?2) AS system_value`,
     )
     .bind(workspaceId, SYSTEM_CONCURRENCY_KEY)
-    .first<{ target: number | null; system_value: string | null }>();
+    .first<{ target: unknown; system_value?: unknown }>();
   if (post === null || post.target === null) throw new UnknownWorkspaceError(workspaceId);
   const system = resolveStored(post.system_value, SYSTEM_CONCURRENCY_DEFAULT);
   throw new RuntimeConfigError(

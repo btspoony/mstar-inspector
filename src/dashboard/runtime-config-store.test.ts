@@ -14,6 +14,8 @@
  *   - values are integers in 1..250; a workspace value above the system cap is
  *     REFUSED by the write itself, never clamped
  *   - a PRESENT but unparseable value degrades to the conservative cap
+ *   - a PRESENT value that is not a string or number is untrusted, never
+ *     coerced (`["16"]`, `true` and `{}` all degrade)
  *   - a read failure answers the conservative cap with `degraded: true` and
  *     never throws
  *   - a refused write changes no row and appends no audit row
@@ -80,6 +82,31 @@ const failingDb: DashboardD1 = {
     throw new Error("D1 unavailable");
   },
 };
+
+/** A D1 face whose every `first()` yields this row verbatim — the row-shape path. */
+function dbWithRow(row: Record<string, unknown>): DashboardD1 {
+  return {
+    prepare() {
+      const statement: DashboardD1Statement = {
+        bind: () => statement,
+        first: async () => row as never,
+        all: async () => ({ results: [] }),
+        run: async () => ({ results: [], meta: { changes: 0, last_row_id: 0 } }),
+      };
+      return statement;
+    },
+    batch: async () => [],
+  };
+}
+
+/** A row double carrying both settings, so either reader shape resolves it. */
+function dbWithValues(setting: { system: unknown; workspace: unknown }): DashboardD1 {
+  return dbWithRow({
+    value: setting.system,
+    system_value: setting.system,
+    workspace_value: setting.workspace,
+  });
+}
 
 describe("runtime-config-store", () => {
   test("absent system row falls back to 32", async () =>
@@ -170,18 +197,6 @@ describe("runtime-config-store", () => {
   test("a present row with a missing field degrades instead of defaulting", async () => {
     // A row that exists but does not carry the selected column: absent is
     // `first() === null`, so a missing field must be untrusted, not a default.
-    const dbWithRow = (row: Record<string, unknown>): DashboardD1 => ({
-      prepare() {
-        const statement: DashboardD1Statement = {
-          bind: () => statement,
-          first: async () => row as never,
-          all: async () => ({ results: [] }),
-          run: async () => ({ results: [], meta: { changes: 0, last_row_id: 0 } }),
-        };
-        return statement;
-      },
-      batch: async () => [],
-    });
     const degraded = {
       system: CONCURRENCY_MIN,
       workspace: CONCURRENCY_MIN,
@@ -194,6 +209,56 @@ describe("runtime-config-store", () => {
       expect(await getWorkspaceConcurrency(db, WS)).toBe(CONCURRENCY_MIN);
       expect(await getEffectiveConcurrency(db, WS)).toEqual(degraded);
     }
+  });
+
+  test("a present array, boolean or object value degrades instead of being coerced", async () => {
+    // D1's declared column types constrain nothing a row actually carries, so a
+    // stored non-string must never reach `Number()`: `["16"]` would read as 16
+    // and `true` as 1, admitting concurrency the setting never granted.
+    const untrusted = [["16"], true, { nested: "16" }, new Uint8Array([8])];
+    for (const bad of untrusted) {
+      const db = dbWithValues({ system: bad, workspace: bad });
+      const degraded = {
+        system: CONCURRENCY_MIN,
+        workspace: CONCURRENCY_MIN,
+        effective: CONCURRENCY_MIN,
+        degraded: true,
+      };
+      expect(await getSystemConcurrency(db)).toBe(CONCURRENCY_MIN);
+      expect(await getWorkspaceConcurrency(db, WS)).toBe(CONCURRENCY_MIN);
+      expect(await getEffectiveConcurrency(db, WS)).toEqual(degraded);
+    }
+    // One untrusted field is enough: the trusted sibling never rescues the read.
+    expect(
+      await getEffectiveConcurrency(
+        dbWithValues({ system: ["8"], workspace: WORKSPACE_CONCURRENCY_DEFAULT }),
+        WS,
+      ),
+    ).toEqual({
+      system: CONCURRENCY_MIN,
+      workspace: CONCURRENCY_MIN,
+      effective: CONCURRENCY_MIN,
+      degraded: true,
+    });
+  });
+
+  test("a stored numeric string in range still reads as its value", async () => {
+    const db = fixture();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at)
+         VALUES (?1, '8', '2026-11-03T00:00:00.000Z')`,
+      )
+      .run(SYSTEM_CONCURRENCY_KEY);
+    db.raw.prepare("UPDATE workspaces SET max_concurrent_reviews = '12' WHERE id = ?").run(WS);
+    expect(await getSystemConcurrency(db)).toBe(8);
+    expect(await getWorkspaceConcurrency(db, WS)).toBe(12);
+    expect(await getEffectiveConcurrency(db, WS)).toEqual({
+      system: 8,
+      workspace: 12,
+      effective: 8,
+      degraded: false,
+    });
   });
 
   test("a D1 read failure returns the conservative cap and degraded:true", async () =>
