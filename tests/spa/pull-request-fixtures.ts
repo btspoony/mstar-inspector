@@ -109,9 +109,11 @@ export const RECORDS: RecordPages = {
   failures: { items: FAILURES, total: FAILURES.length },
 };
 
-/** The PR's own must-fix tally, as the head counts it — unfiltered, unpaged. */
-const mustFixOf = (findings: RecordPages["findings"]) =>
-  findings.items.filter((finding) => finding.severity === "must-fix").length;
+/**
+ * The fixture PR's own must-fix tally, as its head counts it: read off the
+ * untouched full first page (`FINDINGS`), never off a page a test overrode.
+ */
+const MUST_FIX = FINDINGS.filter((finding) => finding.severity === "must-fix").length;
 
 /** The detail head for `RECORDS`: the same PR, its totals derived from the pages. */
 export const DETAIL: PullRequestDetailPayload = {
@@ -127,7 +129,7 @@ export const DETAIL: PullRequestDetailPayload = {
     findings: FINDINGS.length,
     reviews: REVIEWS.length,
     failures: FAILURES.length,
-    must_fix: mustFixOf(RECORDS.findings),
+    must_fix: MUST_FIX,
   },
   // The head's authoritative newest review — what the headline reads, whatever
   // page the reviews section has loaded.
@@ -142,11 +144,19 @@ export type DetailScene = { detail: PullRequestDetailPayload; pages: RecordPages
  * supplied totals — so a scene's head can never claim more records than the
  * stub will serve. `latest` overrides the head's newest review (the headline's
  * only source), leaving the section pages untouched.
+ *
+ * `mustFix` is the head's own must-fix tally and is NEVER derived from the
+ * page under test: the page a caller overrides is a window (a later offset, a
+ * severity filter), while the head describes the PR. It defaults to the
+ * untouched first page's tally; a scene whose PR really has other must-fix
+ * rows states its own. It is only bounded by the scene's own findings total —
+ * a PR with no finding cannot claim a must-fix one.
  */
 export function scene(
   over: Partial<RecordPages> = {},
   row: Partial<PullRequestRow> = {},
   latest: Partial<PullRequestReview> | null = DETAIL.latest_review,
+  mustFix: number = MUST_FIX,
 ): DetailScene {
   const pages: RecordPages = { ...RECORDS, ...over };
   const base = DETAIL.latest_review;
@@ -157,7 +167,7 @@ export function scene(
         findings: pages.findings.total,
         reviews: pages.reviews.total,
         failures: pages.failures.total,
-        must_fix: mustFixOf(pages.findings),
+        must_fix: Math.min(mustFix, pages.findings.total),
       },
       latest_review: latest === null || base === null ? null : { ...base, ...latest },
     },
@@ -172,6 +182,9 @@ export function recordsOf(pages: RecordPages = RECORDS, offset = 0): RecordSecti
     severity: "",
     status: "ok",
     page,
+    // A first-page render IS the newest window; a paged one describes a
+    // window the caller never supplied to the aside, so it stays unknown.
+    newest: offset === 0 ? page : null,
   });
   return {
     findings: section(pages.findings),

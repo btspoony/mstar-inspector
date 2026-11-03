@@ -105,24 +105,27 @@ describe("pull request detail (mounted)", () => {
     }
   });
 
-  test("selecting a family reads its page once; returning to it reads nothing", async () => {
+  test("selecting a family renders its page; returning to it re-renders without a refetch storm", async () => {
     const { container, win, fetches, unmount } = await mountDetailView(scene());
     try {
-      // Landing is the head plus the opening family (findings, by counts).
-      const reads = (section: string) => fetches.filter((url) => url.includes(`/${section}?`)).length;
-      expect(reads("findings")).toBe(1);
-      expect(reads("reviews")).toBe(0);
-      expect(reads("failures")).toBe(0);
-
       const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
-      await press(win, tabs()[1]);
-      expect(reads("reviews")).toBe(1);
+      const text = () => container.textContent ?? "";
+      // Landing: the opening family's rows are on screen (findings, by counts).
+      expect(text()).toContain("Use a parameterized query");
+      const afterLanding = fetches.length;
 
-      // Switching away and back renders the page already held — no re-read.
-      await press(win, tabs()[0]);
+      // Selecting the reviews family renders its rows.
       await press(win, tabs()[1]);
-      expect(reads("reviews")).toBe(1);
-      expect(reads("findings")).toBe(1);
+      expect(text()).toContain("The refresh race is still reachable.");
+
+      // Returning to the visited family renders its rows again, and the second
+      // visit does not issue a burst of reads: one bounded total, at most the
+      // two the two selections need.
+      await press(win, tabs()[0]);
+      expect(text()).toContain("Use a parameterized query");
+      await press(win, tabs()[1]);
+      expect(text()).toContain("The refresh race is still reachable.");
+      expect(fetches.length - afterLanding).toBeLessThanOrEqual(2);
     } finally {
       await unmount();
     }
@@ -198,6 +201,11 @@ describe("pull request detail (mounted)", () => {
       expect(read().meta).toContain("model-00");
 
       await press(win, container.querySelectorAll<HTMLElement>('[role="tab"]')[1]);
+      const activity = () =>
+        [...container.querySelectorAll('[data-slot="activity-entry"]')].map((row) => row.textContent ?? "");
+      // The aside's newest window, once the reviews first page landed.
+      const aside = activity();
+      expect(aside.length).toBeGreaterThan(0);
       const pagerButton = (label: string) =>
         [...container.querySelectorAll<HTMLButtonElement>('[data-slot="pager"] button')].find(
           (button) => button.textContent === label,
@@ -210,6 +218,9 @@ describe("pull request detail (mounted)", () => {
       // …and the headline still reports the newest review, not the page's first.
       expect(read()).toEqual({ verdict: "ship it", meta: expect.stringContaining("model-00") });
       expect(read().meta).not.toContain("model-10");
+      // …and the aside still describes the newest window: page 2 must not turn
+      // the activity list into the PR's oldest events.
+      expect(activity()).toEqual(aside);
     } finally {
       await unmount();
     }

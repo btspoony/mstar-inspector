@@ -96,6 +96,10 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0006_app_provider_config.sql",
     "0008_github_apps_ops.sql",
     "0009_app_model_roles.sql",
+    // 0011: the delivery table — 0043 adds a column to it, so the fixture must
+    // carry it before the derived tail runs. Listed here at its wrangler
+    // position (after 0009/0010), not appended where the need was noticed.
+    "0011_webhook_deliveries.sql",
     "0012_custom_providers_and_key_updated_at.sql",
     "0015_provider_verification.sql",
     "0017_app_model_chains.sql",
@@ -107,9 +111,6 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0024_provider_multi_key.sql",
     // 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
-    // 0011: the delivery table — 0043 adds a column to it, so the fixture
-    // must carry it before the derived tail runs.
-    "0011_webhook_deliveries.sql",
     "0036_app_identity.sql",
     // Every later migration, derived from the directory (0040–… included):
     // the consumer's per-message admission reads the runtime caps and writes

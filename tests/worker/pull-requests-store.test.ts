@@ -443,6 +443,40 @@ describe("pull request detail reads", () => {
     expect(page.total).toBe(1);
   });
 
+  test("an addressed or dismissed finding is excluded from the page and from both tallies", async () => {
+    const db = await detailFixture();
+    // Two more must-fix rows: one the pipeline already assessed as addressed,
+    // one dismissed. They are history — the PR has no open work in them.
+    const addressed = { findingId: "F-2", mergeClass: "must-fix", title: "a", filePath: "src/a.ts", lineStart: 2, body: "b" };
+    const dismissed = { findingId: "F-3", mergeClass: "must-fix", title: "d", filePath: "src/a.ts", lineStart: 3, body: "b" };
+    seedFinding(db, addressed, "row-2", "addressed");
+    seedFinding(db, dismissed, "row-3", "dismissed");
+    const store = createAppsStore(db);
+
+    // Only the one OPEN finding is counted — neither the tab count nor the dot
+    // may be kept alive by a finding the pipeline already closed out.
+    expect(await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131)).toEqual({
+      findings: 1,
+      reviews: 0,
+      failures: 1,
+      must_fix: 1,
+    });
+
+    // …and the page agrees with the tallies: the same single row, same total.
+    const page = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
+    expect(page.total).toBe(1);
+    expect(page.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
+
+    // The severity filter narrows the open set, never re-admits a closed row.
+    const filtered = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
+      offset: 0,
+      limit: 10,
+      severity: "must-fix",
+    });
+    expect(filtered.total).toBe(1);
+    expect(filtered.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
+  });
+
   test("the head, the counts and each record page read the same PR", async () => {
     const db = await detailFixture();
     seedReview(db, "r1", "2026-01-02 00:00:00");
@@ -531,6 +565,27 @@ describe("pull request detail reads", () => {
     expect(await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "widgets", 999)).toBeNull();
   });
 
+  test("hasPullRequest answers the same key the head does (the section routes' 404)", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest(PR);
+    await createAppsStore(db).upsertPullRequest({ ...PR, repo: "gadgets", title: "Other repo's #131" });
+    const store = createAppsStore(db);
+    // Present on the ledger's own key…
+    expect(await store.hasPullRequest(APP_ID, "acme", "widgets", 131)).toBe(true);
+    expect(await store.hasPullRequest(APP_ID, "acme", "gadgets", 131)).toBe(true);
+    // …and absent for the same number in a repo, App or PR it never received.
+    expect(await store.hasPullRequest(APP_ID, "acme", "sprockets", 131)).toBe(false);
+    expect(await store.hasPullRequest("other-app", "acme", "widgets", 131)).toBe(false);
+    expect(await store.hasPullRequest(APP_ID, "acme", "widgets", 999)).toBe(false);
+    // The probe agrees with the head read it replaced on every case.
+    for (const [repo, number] of [["widgets", 131], ["gadgets", 131], ["sprockets", 131], ["widgets", 999]] as const) {
+      expect(await store.hasPullRequest(APP_ID, "acme", repo, number)).toBe(
+        (await store.getPullRequestHead(APP_ID, "acme", repo, number)) !== null,
+      );
+    }
+  });
+
   test("the same number in another repo of the SAME App → null, never a fallback", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
@@ -558,6 +613,7 @@ function seedFinding(
   db: TestD1,
   finding: { findingId: string; mergeClass: string; title: string; filePath: string; lineStart: number; body: string },
   rowId = "row-1",
+  state: "open" | "addressed" | "dismissed" = "open",
 ): void {
   // Two findings can share one publication: the first call creates it.
   db.raw
@@ -573,7 +629,7 @@ function seedFinding(
          (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms)
-       VALUES (?, ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', 1, 1, 'open', 1, 1)`,
+       VALUES (?, ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', 1, 1, ?, 1, 1)`,
     )
     .run(
       rowId,
@@ -589,5 +645,6 @@ function seedFinding(
         category: null,
         fingerprintHint: null,
       }),
+      state,
     );
 }

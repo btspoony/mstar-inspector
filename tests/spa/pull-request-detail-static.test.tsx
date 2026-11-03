@@ -58,8 +58,11 @@ const face = (
   over: Partial<RecordPages> = {},
   row: Partial<PullRequestRow> = {},
   latest: Partial<PullRequestReview> | null = DETAIL.latest_review,
+  // The head's own must-fix tally — stated, never read off the page under
+  // test; defaults to the fixture PR's.
+  mustFix?: number,
 ) => {
-  const built = scene(over, row, latest);
+  const built = scene(over, row, latest, mustFix);
   return render(built.detail, recordsOf(built.pages));
 };
 
@@ -491,7 +494,10 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("the danger dot marks a PR with must-fix rows and a recorded failure, nothing else", async () => {
-    const dots = async (over: Partial<RecordPages> = {}) => withMarkup(face(over), familyDots);
+    // The dot reads the HEAD's tally, so each scene states its own: a PR whose
+    // findings are all should-fix/nit has none, whatever page is loaded.
+    const dots = async (over: Partial<RecordPages> = {}, mustFix?: number) =>
+      withMarkup(face(over, {}, DETAIL.latest_review, mustFix), familyDots);
     const findingsLabel = t("en", "pullRequests.findings");
     const failuresLabel = t("en", "pullRequests.failures");
     const reviewsLabel = t("en", "pullRequests.reviews");
@@ -502,12 +508,12 @@ describe("pull request detail face (static SSR)", () => {
     // A PR whose findings are all should-fix/nit has no must-fix row, so the
     // trigger stays quiet even though its findings count is not zero.
     expect(
-      (await dots({ findings: page(FINDINGS.filter((finding) => finding.severity !== "must-fix")) }))[
+      (await dots({ findings: page(FINDINGS.filter((finding) => finding.severity !== "must-fix")) }, 0))[
         findingsLabel
       ],
     ).toBe(false);
     // No finding at all: the findings trigger goes quiet.
-    expect(await dots({ findings: page([]) })).toEqual({
+    expect(await dots({ findings: page([]) }, 0)).toEqual({
       [findingsLabel]: false,
       [reviewsLabel]: false,
       [failuresLabel]: true,
@@ -526,7 +532,15 @@ describe("pull request detail face (static SSR)", () => {
     const built = scene();
     const filtered = {
       ...recordsOf(built.pages),
-      findings: { offset: 10, severity: "nit", status: "ok" as const, page: page(FINDINGS.filter((f) => f.severity === "nit")) },
+      findings: {
+        offset: 10,
+        severity: "nit",
+        status: "ok" as const,
+        page: page(FINDINGS.filter((f) => f.severity === "nit")),
+        // The aside still describes the PR's newest window, which is the first
+        // page this face captured before the operator filtered/paged it.
+        newest: built.pages.findings,
+      },
     };
     const read = await withMarkup(render(built.detail, filtered), (container) => ({
       dots: familyDots(container),
@@ -595,7 +609,7 @@ describe("pull request detail face (static SSR)", () => {
     // A legacy severity still renders, still opens the findings family (a
     // findings count outranks history) — it lands in `other`, and it is not a
     // must-fix row, so the PR's danger dot stays off.
-    const legacyOnly = face({ findings: page(withOther.items.slice(3)) });
+    const legacyOnly = face({ findings: page(withOther.items.slice(3)) }, {}, DETAIL.latest_review, 0);
     const legacyRead = await withMarkup(legacyOnly, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
       dots: familyDots(container),
@@ -704,18 +718,25 @@ describe("pull request detail face (static SSR)", () => {
   test("a should-fix finding alone opens the findings family", async () => {
     // No must-fix anywhere: a findings count still outranks history, so the
     // face must open on the findings rather than the reviews.
-    const markup = face({
-      findings: page([
-        {
-          finding_id: "f-2",
-          severity: "should-fix",
-          title: "Session cookie lacks HttpOnly",
-          file_path: "src/auth/session.ts",
-          line: 88,
-          body: "The refresh cookie is set with secure only.",
-        },
-      ]),
-    });
+    // The head carries no must-fix row for this PR, so the scene states 0 —
+    // the tally is the head's fact, not something read off the page.
+    const markup = face(
+      {
+        findings: page([
+          {
+            finding_id: "f-2",
+            severity: "should-fix",
+            title: "Session cookie lacks HttpOnly",
+            file_path: "src/auth/session.ts",
+            line: 88,
+            body: "The refresh cookie is set with secure only.",
+          },
+        ]),
+      },
+      {},
+      DETAIL.latest_review,
+      0,
+    );
     expect((await withMarkup(markup, familyTabs)).map((tab) => tab.selected)).toEqual([true, false, false]);
     expect(markup).toContain("The refresh cookie is set with secure only.");
     // The findings figure is the head's count: one row, no must-fix note.

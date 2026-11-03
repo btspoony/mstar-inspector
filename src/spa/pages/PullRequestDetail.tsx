@@ -82,6 +82,13 @@ export type SectionState<K extends RecordSection> = {
   severity: string;
   status: SectionStatus;
   page: RecordPage<RecordPageItems[K]> | null;
+  /**
+   * The NEWEST window this face captured: the section's unfiltered first page,
+   * kept from the first read and never overwritten by a later offset or a
+   * severity filter. The aside timeline reads this rather than `page`, so
+   * paging a family never rewrites the PR's activity into its oldest rows.
+   */
+  newest: RecordPage<RecordPageItems[K]> | null;
 };
 
 /** Every section's state, keyed by family. */
@@ -104,6 +111,7 @@ function useRecordSection<K extends RecordSection>(
     severity: "",
     status: "idle",
     page: null,
+    newest: null,
   });
   const ticket = useRef(0);
   // The same read can be asked for twice before a re-render sees it (a tab's
@@ -124,6 +132,13 @@ function useRecordSection<K extends RecordSection>(
           ...previous,
           status: page === null ? "error" : "ok",
           page: page ?? previous.page,
+          // The aside describes the PR's newest events, so only the FIRST
+          // unfiltered first page is ever captured: a later offset or filter
+          // must not move it.
+          newest:
+            previous.newest !== null || page === null || request.offset !== 0 || request.severity !== ""
+              ? previous.newest
+              : page,
         }));
       })
       .catch(() => {
@@ -521,13 +536,24 @@ export function PullRequestDetailView({
 
   // The aside's one list: capped history, the truncation note (when the cap
   // dropped anything) directly above the PR's own first sighting, which always
-  // closes it.
+  // closes it. The rows come from each family's FIRST unfiltered page, not the
+  // window the operator has paged to — the aside describes the newest events of
+  // the PR, never the oldest page of whichever family is open. A family the
+  // aside has not read contributes neither rows nor a hidden count: a note
+  // claiming "earlier events not shown" with no row above it would describe
+  // events it has no window into.
+  const reviewsNewest = records.reviews.newest;
+  const failuresNewest = records.failures.newest;
   const timeline = timelineRows(
     locale,
     pr,
-    reviewsPage?.items ?? [],
-    failuresPage?.items ?? [],
-    counts,
+    reviewsNewest?.items ?? [],
+    failuresNewest?.items ?? [],
+    {
+      ...counts,
+      reviews: reviewsNewest === null ? 0 : counts.reviews,
+      failures: failuresNewest === null ? 0 : counts.failures,
+    },
   );
 
   return (

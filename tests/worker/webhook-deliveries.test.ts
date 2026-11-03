@@ -222,46 +222,51 @@ describe("migrations/0043_webhook_delivery_repository.sql", () => {
 });
 
 describe("webhookRepositoryFullName (delivery source repo, migration 0043)", () => {
-  test("full_name wins, owner/name is the fallback, and a body with no source is null — never throws", () => {
+  /** The classifier passes its OWN parse; these cases exercise that document. */
+  const parse = JSON.parse as (text: string) => unknown;
+
+  test("full_name wins, owner/name is the fallback, and a document with no source is null — never throws", () => {
     expect(
       webhookRepositoryFullName(
-        JSON.stringify({ repository: { name: "widgets", owner: { login: "acme" }, full_name: "acme/widgets" } }),
+        parse(JSON.stringify({ repository: { name: "widgets", owner: { login: "acme" }, full_name: "acme/widgets" } })),
       ),
     ).toBe("acme/widgets");
     expect(
-      webhookRepositoryFullName(JSON.stringify({ repository: { name: "widgets", owner: { login: "acme" } } })),
+      webhookRepositoryFullName(parse(JSON.stringify({ repository: { name: "widgets", owner: { login: "acme" } } }))),
     ).toBe("acme/widgets");
     // An empty name is not a repository; an absent repository block is not one either.
     expect(
-      webhookRepositoryFullName(JSON.stringify({ repository: { name: "", owner: { login: "acme" } } })),
+      webhookRepositoryFullName(parse(JSON.stringify({ repository: { name: "", owner: { login: "acme" } } }))),
     ).toBeNull();
-    expect(webhookRepositoryFullName(JSON.stringify({ zen: "Keep it logically awesome." }))).toBeNull();
-    expect(webhookRepositoryFullName(JSON.stringify({ repository: null }))).toBeNull();
-    // Malformed / non-object bodies degrade to "unknown source", never throw.
-    expect(webhookRepositoryFullName("{not json")).toBeNull();
-    expect(webhookRepositoryFullName("null")).toBeNull();
+    expect(webhookRepositoryFullName(parse(JSON.stringify({ zen: "Keep it logically awesome." })))).toBeNull();
+    expect(webhookRepositoryFullName(parse(JSON.stringify({ repository: null })))).toBeNull();
+    // A document the parse could not produce (an unparsable / JSON `null` body).
+    expect(webhookRepositoryFullName(null)).toBeNull();
+    expect(webhookRepositoryFullName(parse("null"))).toBeNull();
   });
 
   test("the preferred source is read on its own, without a valid owner/name pair", () => {
     // The authoritative form alone — no `name`, no `owner` — still names the repo.
-    expect(webhookRepositoryFullName(JSON.stringify({ repository: { full_name: "acme/widgets" } }))).toBe(
+    expect(webhookRepositoryFullName(parse(JSON.stringify({ repository: { full_name: "acme/widgets" } })))).toBe(
       "acme/widgets",
     );
     // A malformed fallback pair does not discard a valid preferred source.
     expect(
       webhookRepositoryFullName(
-        JSON.stringify({ repository: { full_name: "acme/widgets", name: 42, owner: { login: "" } } }),
+        parse(JSON.stringify({ repository: { full_name: "acme/widgets", name: 42, owner: { login: "" } } })),
       ),
     ).toBe("acme/widgets");
     // A conflicting pair loses to full_name.
     expect(
       webhookRepositoryFullName(
-        JSON.stringify({ repository: { full_name: "acme/widgets", name: "other", owner: { login: "elsewhere" } } }),
+        parse(JSON.stringify({ repository: { full_name: "acme/widgets", name: "other", owner: { login: "elsewhere" } } })),
       ),
     ).toBe("acme/widgets");
     // An unusable full_name falls through to the pair; an empty one is not a name.
     expect(
-      webhookRepositoryFullName(JSON.stringify({ repository: { full_name: "", name: "widgets", owner: { login: "acme" } } })),
+      webhookRepositoryFullName(
+        parse(JSON.stringify({ repository: { full_name: "", name: "widgets", owner: { login: "acme" } } })),
+      ),
     ).toBe("acme/widgets");
   });
 });
@@ -632,6 +637,83 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), makeEnv(db));
 
     expect(res.status).toBe(200);
+    const rows = db.raw
+      .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ repository_full_name: string | null }>;
+    expect(rows).toEqual([{ repository_full_name: "test-owner/test-repo" }]);
+  });
+
+  test("the delivery row's source repository rides the classifier's parse, with no second JSON.parse", async () => {
+    // Recording the delivery used to re-parse up to 1 MB of body with a second
+    // JSON.parse. The document the classifier read is the one the source
+    // repository is read from, so the delivery face parses the body once.
+    // (A `pull_request` delivery parses twice by design: the PR ledger read is
+    // its own document — `pullRequestRecord` — and is out of this scope.)
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const body = JSON.stringify({
+      zen: "Keep it logically awesome.",
+      repository: { name: "test-repo", owner: { login: "test-owner" }, full_name: "test-owner/test-repo" },
+    });
+
+    const realParse = JSON.parse;
+    let bodyParses = 0;
+    JSON.parse = ((text: string, reviver?: (key: string, value: unknown) => unknown) => {
+      if (text === body) bodyParses += 1;
+      return realParse(text, reviver);
+    }) as typeof JSON.parse;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        await sigHeaders("secret-x", body, "ping"),
+        makeEnv(db),
+      );
+    } finally {
+      JSON.parse = realParse;
+    }
+
+    expect(res.status).toBe(200);
+    expect(bodyParses).toBe(1);
+    const rows = db.raw
+      .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ repository_full_name: string | null }>;
+    expect(rows).toEqual([{ repository_full_name: "test-owner/test-repo" }]);
+  });
+
+  test("an ignored delivery also parses once and still records its source", async () => {
+    // The ignore paths are the unauthenticated junk traffic the second parse
+    // cost most on; they take the same single parse.
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // A `ping` delivery: no PR ledger read (that is its own document and its
+    // own concern), so the delivery face's parse is all that is measured.
+    const body = JSON.stringify({
+      zen: "Keep it logically awesome.",
+      repository: { name: "test-repo", owner: { login: "test-owner" } },
+    });
+
+    const realParse = JSON.parse;
+    let bodyParses = 0;
+    JSON.parse = ((text: string, reviver?: (key: string, value: unknown) => unknown) => {
+      if (text === body) bodyParses += 1;
+      return realParse(text, reviver);
+    }) as typeof JSON.parse;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        await sigHeaders("secret-x", body, "ping"),
+        makeEnv(db),
+      );
+    } finally {
+      JSON.parse = realParse;
+    }
+
+    expect(await res.text()).toBe("ignored");
+    expect(bodyParses).toBe(1);
     const rows = db.raw
       .query("SELECT repository_full_name FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ repository_full_name: string | null }>;

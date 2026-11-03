@@ -1210,11 +1210,34 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
+     * Does this App's ledger hold this PR at all? The record-section routes
+     * answer 404 for an unknown PR before reading a page, and they need
+     * nothing but that yes/no — the head row plus its latest review is a
+     * two-statement batch, twice the round trips of the page it gates. One
+     * `SELECT 1 … LIMIT 1` on the ledger's own key answers it.
+     */
+    async hasPullRequest(appId: string, owner: string, repo: string, prNumber: number): Promise<boolean> {
+      const row = await db
+        .prepare(
+          `SELECT 1 AS found FROM pull_requests
+           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? LIMIT 1`,
+        )
+        .bind(appId, owner, repo, prNumber)
+        .first<{ found: number }>();
+      return row !== null;
+    },
+
+    /**
      * The record totals — the head payload's `counts`. The failure count rides
      * the same join the failures section pages, so the tab count and the list
      * length always agree. `must_fix` is the PR's own count of must-fix
      * findings, unfiltered and unpaged: the family dot answers "does this PR
      * have one", never "does the loaded page show one".
+     *
+     * Findings are counted by LIFECYCLE STATE, exactly as the findings page is
+     * read: `review_findings.state` is `open | addressed | dismissed`, and a
+     * finding the pipeline already assessed as addressed or dismissed is not
+     * work left on the PR — it must not keep the tab count or the dot alive.
      */
     async countPullRequestRecords(
       appId: string,
@@ -1226,7 +1249,7 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'`,
           )
           .bind(appId, owner, repo, prNumber),
         db
@@ -1245,7 +1268,7 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'
                AND json_extract(original_json, '$.mergeClass') = 'must-fix'`,
           )
           .bind(appId, owner, repo, prNumber),
@@ -1268,6 +1291,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * `mergeClass` (the vocab-switch mapping `findings.severity` already
      * uses), and `title` / `file_path` / `line` / `body` are read out of
      * `original_json`.
+     *
+     * Only `state = 'open'` rows are listed and counted, the same lifecycle
+     * predicate `countPullRequestRecords` applies: an addressed or dismissed
+     * finding is history, not a record the operator still acts on, and the tab
+     * count, the dot and the pager must agree with the list.
      */
     async listPullRequestFindings(
       appId: string,
@@ -1285,7 +1313,7 @@ export function createAppsStore(db: AppsStoreD1) {
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?${filter}`,
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'${filter}`,
           )
           .bind(appId, owner, repo, prNumber, ...filterBinds),
         db
@@ -1297,7 +1325,7 @@ export function createAppsStore(db: AppsStoreD1) {
                     json_extract(original_json, '$.lineStart') AS line,
                     json_extract(original_json, '$.body') AS body
              FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?${filter}
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'${filter}
              ORDER BY updated_ms DESC, finding_id
              LIMIT ? OFFSET ?`,
           )

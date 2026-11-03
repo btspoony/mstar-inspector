@@ -496,6 +496,7 @@ export async function classifyWebhook(
   log?: HandlerLog,
   cacheKey?: string,
   trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
+  onParsed?: (parsed: unknown) => void,
 ): Promise<WebhookOutcome> {
   if (!secret || secret === "development") {
     log?.warn(
@@ -525,7 +526,7 @@ export async function classifyWebhook(
     );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
-  return classifyEvent(eventName, rawBody, log, trigger);
+  return classifyEvent(eventName, rawBody, log, trigger, onParsed);
 }
 
 /**
@@ -546,18 +547,24 @@ export function classifyEvent(
   rawBody: string,
   log?: HandlerLog,
   trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
+  onParsed?: (parsed: unknown) => void,
 ): WebhookOutcome {
+  // ONE parse per delivery: the classifiers read this document, and `onParsed`
+  // hands the same one to the caller (the route records its source repository
+  // from it), so no delivery is JSON.parse'd a second time.
+  const parsed = parseBody(rawBody);
+  onParsed?.(parsed);
   if (!eventName) {
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }
   if (eventName === "pull_request") {
-    return classifyPullRequest(rawBody, trigger.mode, log);
+    return classifyPullRequest(parsed, trigger.mode, log);
   }
   if (eventName === "issue_comment") {
-    return classifyIssueComment(rawBody, log, trigger.appSlug);
+    return classifyIssueComment(parsed, log, trigger.appSlug);
   }
   if (eventName === "installation") {
-    return classifyInstallation(rawBody);
+    return classifyInstallation(parsed);
   }
   return { kind: "ignore", reason: `event ${eventName} is not whitelisted` };
 }
@@ -572,8 +579,7 @@ export function classifyEvent(
  * GitHub retries non-2xx, but a payload that cannot name an installation is
  * not something a retry fixes.
  */
-function classifyInstallation(rawBody: string): WebhookOutcome {
-  const parsed = parseBody(rawBody);
+function classifyInstallation(parsed: unknown): WebhookOutcome {
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
   }
@@ -596,8 +602,7 @@ function classifyInstallation(rawBody: string): WebhookOutcome {
   };
 }
 
-function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode, log?: HandlerLog): WebhookOutcome {
-  const parsed = parseBody(rawBody);
+function classifyPullRequest(parsed: unknown, mode: ReviewTriggerMode, log?: HandlerLog): WebhookOutcome {
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
   }
@@ -648,8 +653,7 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode, log?: Han
   };
 }
 
-function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appSlug: string): WebhookOutcome {
-  const parsed = parseBody(rawBody);
+function classifyIssueComment(parsed: unknown, log: HandlerLog | undefined, appSlug: string): WebhookOutcome {
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
   }
@@ -789,8 +793,12 @@ export function pullRequestRecord(rawBody: string): {
  * "which repo did this delivery come from?" answer, which the delivery row
  * could not give before migration 0043. `repository.full_name` wins when
  * GitHub states it; the same block's `owner.login` + `name` pair is the
- * fallback. `null` when the body is not JSON, carries no `repository`, or
- * states neither form.
+ * fallback. `null` when the document carries no `repository`, or states
+ * neither form.
+ *
+ * Takes the ALREADY PARSED body (the one `classifyEvent` read), never the raw
+ * text: a delivery record must not re-parse the payload the classifier just
+ * parsed.
  *
  * The preferred source is read on its own: a delivery that states only
  * `full_name`, or states it beside a malformed `owner`/`name`, still has the
@@ -800,8 +808,7 @@ export function pullRequestRecord(rawBody: string): {
  * Never throws: this rides the best-effort delivery-recording path, so a
  * malformed body degrades to "unknown source" rather than costing the row.
  */
-export function webhookRepositoryFullName(rawBody: string): string | null {
-  const parsed = parseBody(rawBody);
+export function webhookRepositoryFullName(parsed: unknown): string | null {
   if (parsed === null) return null;
   const result = z
     .object({

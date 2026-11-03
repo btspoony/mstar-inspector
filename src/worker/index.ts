@@ -352,6 +352,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // can trigger a review. NULL (never synced) collapses to "" and matches
   // nothing — the existing fail-safe.
   const appSlug = row.github_slug ?? "";
+  // The classifier's ONE parse, kept for the delivery row's source repository
+  // below — recording a delivery must not re-parse up-to-1 MB of body.
+  let classified: unknown = null;
   const outcome = await classifyWebhook(
     appSecret,
     rawBody,
@@ -360,6 +363,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     defaultLog,
     row.id,
     { mode: row.review_trigger_mode, appSlug },
+    (parsed) => {
+      classified = parsed;
+    },
   );
 
   // ...which is also why an unsynced row must not fail SILENTLY: with no slug
@@ -436,10 +442,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       eventName,
       outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled, reviewGlobal),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
-      // The diagnostics face's "which repo did this come from?" answer — the
-      // same best-effort parse as the PR ledger below, null when the payload
-      // carries no repository.
-      repositoryFullName: webhookRepositoryFullName(rawBody),
+      // The diagnostics face's "which repo did this come from?" answer, read
+      // off the classifier's own single parse of the body — null when the
+      // payload carries no repository.
+      repositoryFullName: webhookRepositoryFullName(classified),
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

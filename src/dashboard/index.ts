@@ -4447,9 +4447,10 @@ const appPullRequestRecordsRoute = async (
   const owner = c.req.param("owner") ?? "";
   const repo = c.req.param("repo") ?? "";
   // The section readers see rows, not PRs: "empty" and "unknown PR" are the
-  // same answer, so existence is checked once here.
-  const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
-  if (head === null) return c.json({ error: "unknown pull request" }, 404);
+  // same answer, so existence is checked once here — a one-column probe, not
+  // the head read, since that payload is otherwise unused.
+  const exists = await gate.store.hasPullRequest(gate.app.id, owner, repo, number);
+  if (!exists) return c.json({ error: "unknown pull request" }, 404);
   const { offset, limit } = paging;
   if (section === "findings") {
     const rawSeverity = c.req.query("severity") ?? "";
