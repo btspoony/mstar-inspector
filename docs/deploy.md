@@ -2054,6 +2054,44 @@ controls are installed (the Dockerfile carries the documentation block only).
   `api.github.com` via Octokit (token mint, comment posting) and the optional
   `ALERT_WEBHOOK_URL` host (cron sweep alert POST).
 
+## Image rebuild gate (CI)
+
+`wrangler` hashes `sandbox-image/Dockerfile` alone — not the sources the
+Dockerfile copies in — so a change to those sources can deploy the Worker while
+the container keeps the previous build, silently. `scripts/check-image-inputs.ts`
+turns that mismatch into a failing check: it diffs the pull request against its
+base commit and fails when the diff touches an image input without also changing
+the `# rebuild:` marker block in `sandbox-image/Dockerfile`.
+
+The five input path families it covers — the gate's whole input vocabulary:
+
+- `packages/runner/src/**`
+- `packages/shared/src/**`
+- `packages/runner/package.json`
+- `packages/runner/bun.lock`
+- `sandbox-image/**`
+
+Passing requires one added or removed `sandbox-image/Dockerfile` line containing
+`rebuild:` in the same diff; a Dockerfile change that does not touch the marker
+fails like any other image input. The gate reads git output only — it never
+builds the image and never inspects file contents beyond that Dockerfile diff —
+and an unreadable diff fails the run rather than passing unverified.
+
+**Pull requests only.** The `Image rebuild gate` step in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is gated on
+`github.event_name == 'pull_request'` and diffs against
+`github.event.pull_request.base.sha`; the job checkout therefore carries
+`fetch-depth: 0`. A push has no base commit to diff against, so a direct push to
+`main` is not covered — there the manual check in
+[`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild stays the rule, and that
+section also carries the marker instruction the gate prints on failure.
+
+The same gate runs locally against any base rev:
+
+```bash
+bun scripts/check-image-inputs.ts --base origin/main
+```
+
 ## Image pins and digest record
 
 The image's versioned build inputs — base digest, sandbox-shim tag, Bun, gh,
