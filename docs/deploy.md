@@ -2063,7 +2063,7 @@ turns that mismatch into a failing check: it diffs the pull request against its
 base commit and fails when the diff touches an image input without also changing
 the `# rebuild:` marker block in `sandbox-image/Dockerfile`.
 
-The six input path families it covers — the gate's whole input vocabulary:
+The input path families it covers — the gate's whole input vocabulary:
 
 - `packages/runner/src/**`
 - `packages/shared/src/**`
@@ -2071,6 +2071,12 @@ The six input path families it covers — the gate's whole input vocabulary:
 - `packages/runner/bun.lock`
 - `packages/runner/verify-synthesis.sh`
 - `sandbox-image/**`
+- `.dockerignore` — it decides which of these sources reach the build context
+
+`scripts/check-image-inputs.test.ts` proves the list is complete against the
+image itself: every `COPY <src>` source in `sandbox-image/Dockerfile` must be
+matched by one of the patterns, so a new copied path that is not declared fails
+the test rather than silently escaping the gate.
 
 A diff that touches an image input passes only with one added or removed
 Dockerfile line containing `rebuild:` in the same diff; a

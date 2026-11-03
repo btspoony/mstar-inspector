@@ -10,6 +10,15 @@
  *   - Effective = min(system, workspace). The per-PR lock (1) is not
  *     configurable and is not this store's business.
  *
+ * Live-workspace policy: both workspace reads filter `deleted_at IS NULL`, the
+ * same predicate the settings WRITE uses (`WORKSPACE_AUDIT_SQL` /
+ * `WORKSPACE_UPDATE_SQL`). A retired workspace is therefore absent to the read
+ * exactly as it is unavailable to the write: it falls back to
+ * WORKSPACE_CONCURRENCY_DEFAULT (16, a real bound) rather than continuing to
+ * govern its queued jobs with a pinned value nobody can change any more.
+ * `deleted_at IS NULL` never degrades a read — it is absence, not untrusted
+ * data — so `degraded` stays false on that path.
+ *
  * Read discipline: ONE prepared statement per decision point, no KV and no
  * request cache — `getEffectiveConcurrency` reads both levels in a single
  * statement for exactly that reason. Only an ABSENT row/column is the default:
@@ -127,13 +136,15 @@ export async function getSystemConcurrency(db: DashboardD1): Promise<number> {
   return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT);
 }
 
-/** The workspace cap; an absent row/NULL column reads as the default, anything untrusted as 1. */
+/** The workspace cap; an absent or RETIRED workspace reads as the default, anything untrusted as 1. */
 export async function getWorkspaceConcurrency(
   db: DashboardD1,
   workspaceId: string,
 ): Promise<number> {
   const row = await db
-    .prepare("SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = ?")
+    .prepare(
+      "SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = ? AND deleted_at IS NULL",
+    )
     .bind(workspaceId)
     .first<{ value?: unknown }>();
   return resolveRow(row, WORKSPACE_CONCURRENCY_DEFAULT);
@@ -154,6 +165,8 @@ function degradedConcurrency(): EffectiveConcurrency {
  * effective value. Any read failure — thrown, no result row, or a present
  * value the parse cannot trust — answers the conservative cap with
  * `degraded: true`; it never throws and never fails open to unlimited.
+ * A retired workspace (`deleted_at IS NOT NULL`) is absent, not untrusted: its
+ * subquery yields NULL and the workspace cap takes the default.
  */
 export async function getEffectiveConcurrency(
   db: DashboardD1,
@@ -163,7 +176,7 @@ export async function getEffectiveConcurrency(
     const row = await db
       .prepare(
         `SELECT (SELECT value FROM review_runtime_settings WHERE key = ?1) AS system_value,
-                (SELECT max_concurrent_reviews FROM workspaces WHERE id = ?2) AS workspace_value`,
+                (SELECT max_concurrent_reviews FROM workspaces WHERE id = ?2 AND deleted_at IS NULL) AS workspace_value`,
       )
       .bind(SYSTEM_CONCURRENCY_KEY, workspaceId)
       .first<{ system_value?: unknown; workspace_value?: unknown }>();

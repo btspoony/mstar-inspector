@@ -27,13 +27,25 @@
  * name the fault, which is otherwise indistinguishable from the benign
  * released-between-statements race (the same refusal code, a different problem).
  *
+ * Key normalization: GitHub treats `owner`/`repo` case-insensitively, while
+ * SQLite compares the PRIMARY KEY's TEXT columns case-SENSITIVELY. Both
+ * functions therefore fold `owner` and `repo` to lower case at this one
+ * boundary (`normalizeKey`) before binding them, so `Acme/Repo` and
+ * `acme/repo` are the same lock row for the insert, the refusal read and the
+ * release — the three statements that must agree for the lock to hold. No
+ * caller normalizes; a second normalization site would be a second truth.
+ *
  * Module boundary (the artifact-store precedent): `db` is the narrow D1 face
  * (`D1Like`); no worker/pipeline import, so this store can be unit-tested over
  * the real migration DDL.
  */
 import type { D1Like } from "./types";
 
-/** The per-PR identity plus the tenant the caps are counted against. */
+/**
+ * The per-PR identity plus the tenant the caps are counted against. `owner` /
+ * `repo` are accepted in any case: the store folds them to lower case before
+ * binding (GitHub is case-insensitive, the row's PRIMARY KEY is not).
+ */
 export type InflightKey = {
   installation_id: number;
   owner: string;
@@ -74,7 +86,7 @@ export type AcquireInflightOptions = {
   workspaceCap: number;
   /** This attempt's release fence; release only deletes the row it wrote. */
   attemptId: string;
-  /** Row lifetime (seconds) — callers pass `reviewGuardTtlSeconds(level)`. */
+  /** Row lifetime (seconds, must be > 0) — callers pass `reviewGuardTtlSeconds(level)`. */
   ttlSeconds: number;
   /** ISO-8601 instant the acquisition is evaluated at. */
   now: string;
@@ -122,19 +134,36 @@ function isoInstant(ms: number): string {
   return new Date(ms).toISOString();
 }
 
+/**
+ * The key as it is written and compared. GitHub's owner/repo are
+ * case-insensitive; the row's PRIMARY KEY is not. Folding here — the one
+ * key-building boundary — keeps insert, refusal read and release on the same
+ * row for `Acme/Repo` and `acme/repo`.
+ */
+function normalizeKey(key: InflightKey): InflightKey {
+  return { ...key, owner: key.owner.toLowerCase(), repo: key.repo.toLowerCase() };
+}
+
 export async function acquireInflight(
   db: D1Like,
-  key: InflightKey,
+  rawKey: InflightKey,
   opts: AcquireInflightOptions,
 ): Promise<InflightAcquireResult> {
+  const key = normalizeKey(rawKey);
   try {
     // Conversions live inside the try: a malformed `now` (RangeError) or a
-    // non-finite TTL (NaN) must answer `error` like any other storage-layer
-    // refusal, never escape as a throw.
+    // non-positive/non-finite TTL must answer `error` like any other
+    // storage-layer refusal, never escape as a throw. A TTL of zero or less
+    // would write an ALREADY-EXPIRED row: it holds no PR and reserves no
+    // slot, yet `meta.changes === 1` would report `ok` — a lock that admits.
     const nowMs = Date.parse(opts.now);
     const ttlMs = opts.ttlSeconds * 1000;
-    if (!Number.isFinite(nowMs) || !Number.isFinite(ttlMs)) {
-      return { ok: false, reason: "error", cause: { kind: "fault", detail: "malformed now or non-finite TTL" } };
+    if (!Number.isFinite(nowMs) || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+      return {
+        ok: false,
+        reason: "error",
+        cause: { kind: "fault", detail: "malformed now or non-positive/non-finite TTL" },
+      };
     }
     const now = isoInstant(nowMs);
     const expiresAt = isoInstant(nowMs + ttlMs);
@@ -195,9 +224,10 @@ export async function acquireInflight(
  */
 export async function releaseInflight(
   db: D1Like,
-  key: InflightKey,
+  rawKey: InflightKey,
   attemptId: string,
 ): Promise<void> {
+  const key = normalizeKey(rawKey);
   await db
     .prepare(RELEASE_SQL)
     .bind(key.installation_id, key.owner, key.repo, key.pr_number, attemptId)

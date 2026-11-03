@@ -2143,6 +2143,39 @@ describe("createReviewConsumer", () => {
     expect(dropped).toContain("fault: D1 unavailable");
   });
 
+  test("a comment-triggered drop row keeps its PR identity despite an empty sha (W-1)", async () => {
+    // A comment-mention job carries no payload sha, so the row's head_sha is
+    // "" by convention (migration 0010 allows it) — but the PR identity must
+    // still be readable from the row, or the drop cannot be joined back to a
+    // PR at all.
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
+      )
+      .run();
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(
+      makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })),
+    );
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(failureRows(db)).toHaveLength(1);
+    const row = failureRows(db)[0]!;
+    expect(row.head_sha).toBe("");
+    expect(row.owner).toBe("acme");
+    expect(row.repo).toBe("widgets");
+    expect(row.pr_number).toBe(42);
+    const dropped = String(row.error);
+    expect(dropped).toContain("PR acme/widgets#42");
+    expect(dropped).toContain("head_sha unresolved (comment trigger, no sha in payload)");
+  });
+
   test("a reached system cap refuses admission → guard-held, no sandbox (spec §1.3)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
