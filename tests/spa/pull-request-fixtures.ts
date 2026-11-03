@@ -271,6 +271,9 @@ export async function mountView(
   };
 }
 
+/** The route's `severity` vocabulary (`FINDING_SEVERITIES`); anything else is a 400. */
+const FINDING_SEVERITIES = ["must-fix", "should-fix", "nit"] as const;
+
 /**
  * A fetch stub for the detail host: the head read answers that App's `detail`,
  * and each record read pages that App's family — `offset`/`limit` slice its
@@ -278,6 +281,12 @@ export async function mountView(
  * swap. `sceneFor` receives the App the URL names, so one stub can serve
  * different Apps. Every request is recorded for the "one read per switch"
  * assertions.
+ *
+ * The `severity` semantics are the route's own (`FINDING_SEVERITIES` in
+ * `src/dashboard/index.ts`): empty or absent is no filter, a spelling outside
+ * the merge-class vocabulary is the documented 400 — a stub that answered an
+ * unknown spelling with an empty 200 would let a mounted test believe in a
+ * contract the API does not have.
  */
 export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
   const fetches: string[] = [];
@@ -286,13 +295,16 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
     fetches.push(url.pathname + url.search);
     // `/api/apps/<appId>/pull-requests/...`: the App the read answers for.
     const sceneValue = sceneFor(/\/apps\/([^/]+)\//.exec(url.pathname)?.[1] ?? "");
-    const severity = url.searchParams.get("severity");
+    const severity = url.searchParams.get("severity") ?? "";
     for (const section of ["findings", "reviews", "failures"] as const) {
       if (!url.pathname.endsWith(`/${section}`)) continue;
+      if (section === "findings" && severity !== "" && !(FINDING_SEVERITIES as readonly string[]).includes(severity)) {
+        return jsonResponse({ error: "invalid severity" }, 400);
+      }
       const rows =
         section === "findings"
           ? sceneValue.pages.findings.items.filter(
-              (finding) => severity === null || finding.severity === severity,
+              (finding) => severity === "" || finding.severity === severity,
             )
           : section === "reviews"
             ? sceneValue.pages.reviews.items
@@ -303,7 +315,7 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
       // it, so a scene can state a total its served window never reaches. A
       // severity filter has no declared total of its own — like the route, it
       // reports the rows it filtered.
-      const filtered = section === "findings" && severity !== null;
+      const filtered = section === "findings" && severity !== "";
       return jsonResponse({
         items: rows.slice(offset, offset + limit),
         total: filtered ? rows.length : sceneValue.pages[section].total,

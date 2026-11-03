@@ -447,17 +447,29 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
       statusCode: null,
       repositoryFullName: "y".repeat(2000),
     });
+    // A non-BMP character STRADDLING the bound must not leave half a surrogate
+    // pair in D1 (a lone surrogate cannot round-trip as valid UTF-8): the cut
+    // backs off one unit and drops the whole code point.
+    await store.recordDelivery({
+      appId: "app-1",
+      eventName: `${"x".repeat(63)}😀`,
+      outcome: "ok",
+      statusCode: null,
+      repositoryFullName: `${"y".repeat(159)}😀`,
+    });
     await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "ignored", statusCode: null, repositoryFullName: null });
 
     const rows = db.raw
       .query("SELECT event_name, repository_full_name FROM webhook_deliveries ORDER BY rowid")
       .all() as Array<{ event_name: string | null; repository_full_name: string | null }>;
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
     expect(rows[0]!.event_name).toBe("x".repeat(64));
     expect(rows[0]!.repository_full_name).toBe("y".repeat(160));
+    expect(rows[1]!.event_name).toBe("x".repeat(63));
+    expect(rows[1]!.repository_full_name).toBe("y".repeat(159));
     // NULL (absent header / no repository) passes through untouched.
-    expect(rows[1]!.event_name).toBeNull();
-    expect(rows[1]!.repository_full_name).toBeNull();
+    expect(rows[2]!.event_name).toBeNull();
+    expect(rows[2]!.repository_full_name).toBeNull();
   });
 });
 

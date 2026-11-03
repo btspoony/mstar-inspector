@@ -4459,7 +4459,8 @@ type PullRequestRecordSection = "findings" | "reviews" | "failures";
  * `mergeClass` spelling from `FINDING_SEVERITIES`, where empty or absent is no
  * filter and the returned `total` is filtered. A spelling outside that set is a
  * 400: it has no predicate, so an empty page would claim a filter that never ran.
- * A miss is the detail's 404 on every family; malformed paging is a 400, and
+ * A miss is the detail's 404 on every family (decided inside the family's own
+ * batch, so a section read stays one roundtrip); malformed paging is a 400, and
  * an out-of-bounds `limit` is clamped into `[1, 50]`.
  */
 const appPullRequestRecordsRoute = async (
@@ -4475,22 +4476,24 @@ const appPullRequestRecordsRoute = async (
   if (!paging.ok) return c.json({ error: "invalid paging" }, 400);
   const owner = c.req.param("owner") ?? "";
   const repo = c.req.param("repo") ?? "";
-  // The section readers see rows, not PRs: "empty" and "unknown PR" are the
-  // same answer, so existence is checked once here — a one-column probe, not
-  // the head read, since that payload is otherwise unused.
-  const exists = await gate.store.hasPullRequest(gate.app.id, owner, repo, number);
-  if (!exists) return c.json({ error: "unknown pull request" }, 404);
+  // Each reader decides "PR missing" in the SAME batch that pages the
+  // section (statement 0), so one section read is one roundtrip and `null` is
+  // this route's 404 — a section reader cannot tell an empty section from an
+  // unknown PR on its own.
   const { offset, limit } = paging;
   if (section === "findings") {
     const rawSeverity = c.req.query("severity") ?? "";
-    if (rawSeverity !== "" && !(FINDING_SEVERITIES as readonly string[]).includes(rawSeverity)) {
-      return c.json({ error: "invalid severity" }, 400);
-    }
     const page = await gate.store.listPullRequestFindings(gate.app.id, owner, repo, number, {
       offset,
       limit,
       severity: rawSeverity === "" ? null : rawSeverity,
     });
+    // 404 before 400: a PR this App never received outranks a malformed
+    // filter on it, exactly as the pre-read probe ordered the two answers.
+    if (page === null) return c.json({ error: "unknown pull request" }, 404);
+    if (rawSeverity !== "" && !(FINDING_SEVERITIES as readonly string[]).includes(rawSeverity)) {
+      return c.json({ error: "invalid severity" }, 400);
+    }
     return c.json({
       items: page.items.map((finding) => ({
         finding_id: finding.finding_id,
@@ -4505,6 +4508,7 @@ const appPullRequestRecordsRoute = async (
   }
   if (section === "reviews") {
     const page = await gate.store.listPullRequestReviews(gate.app.id, owner, repo, number, { offset, limit });
+    if (page === null) return c.json({ error: "unknown pull request" }, 404);
     return c.json({
       items: page.items.map((review) => ({
         verdict: review.verdict,
@@ -4518,6 +4522,7 @@ const appPullRequestRecordsRoute = async (
     });
   }
   const page = await gate.store.listPullRequestFailures(gate.app.id, owner, repo, number, { offset, limit });
+  if (page === null) return c.json({ error: "unknown pull request" }, 404);
   return c.json({ items: page.items, total: page.total });
 };
 

@@ -18,7 +18,6 @@ import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
-import { migrationsAfter } from "../store/helpers";
 import { APP_VERSION } from "../../src/version";
 import { exchangeCodeForToken, fetchGitHubUser } from "../../src/dashboard/oauth";
 import type { Env } from "../../src/worker/env";
@@ -2554,15 +2553,15 @@ function applyMigrationFile(db: Database, name: string): void {
 }
 
 /**
- * The delivery log at its current shape: 0011 plus the directory-derived tail
- * after the 0038 rebuild (0043 adds the source column the health face's
- * summary selects), so a new migration joins automatically. The dashboard
- * fixture stops at 0038, so the tail starts there rather than at 0011 — the
- * files in between expect tables this fixture deliberately omits.
+ * The delivery log as THIS fixture builds it: 0011 plus 0043's source column.
+ * Listed explicitly, not derived from the migrations directory — the dashboard
+ * fixture stops at 0038 for `github_apps`, so it is not the production schema,
+ * and a migration that assumes a shape this world never built must be a
+ * deliberate choice here rather than a silently joined tail.
  */
 function applyDeliveries(db: Database): void {
   applyMigrationFile(db, "0011_webhook_deliveries.sql");
-  for (const name of migrationsAfter("0038_webhook_path_drop.sql")) applyMigrationFile(db, name);
+  applyMigrationFile(db, "0043_webhook_delivery_repository.sql");
 }
 
 const DASHBOARD_MIGRATION_SEQUENCE = [

@@ -366,6 +366,26 @@ const PULL_REQUEST_LEDGER_ORDER = "last_seen_at DESC, pr_number DESC";
 const PULL_REQUEST_WINDOW_SQL = `SELECT owner, repo, pr_number FROM pull_requests
   WHERE app_id = ? ORDER BY ${PULL_REQUEST_LEDGER_ORDER} LIMIT ?`;
 
+/**
+ * Statement 0 of every record-section batch: is this PR on the ledger at all?
+ * A section reader answers pages, not PR existence — `total: 0` covers both an
+ * empty section and an unknown PR — so existence must be decided in the same
+ * batch, and `null` (the route's 404) means "this App never received it".
+ */
+const PULL_REQUEST_EXISTS_SQL = `SELECT 1 AS found FROM pull_requests
+  WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? LIMIT 1`;
+
+/**
+ * Slice to `max` UTF-16 units without leaving half a surrogate pair behind
+ * (a lone surrogate cannot round-trip through D1's TEXT as valid UTF-8).
+ */
+function truncateBounded(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const last = value.charCodeAt(max - 1);
+  // A high surrogate at the cut means its low half is the next unit: drop both.
+  return value.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+}
+
 /** Input for recordDelivery — one VERIFIED per-App webhook delivery. */
 export type RecordDeliveryInput = {
   appId: string;
@@ -958,11 +978,11 @@ export function createAppsStore(db: AppsStoreD1) {
           `apps-store: outcome ${JSON.stringify(input.outcome)} is not on the producer vocabulary (${DELIVERY_OUTCOMES.join(" | ")}) — zero rows written`,
         );
       }
-      const eventName = input.eventName === null ? null : input.eventName.slice(0, EVENT_NAME_MAX_LENGTH);
+      const eventName = input.eventName === null ? null : truncateBounded(input.eventName, EVENT_NAME_MAX_LENGTH);
       const repositoryFullName =
         input.repositoryFullName === null
           ? null
-          : input.repositoryFullName.slice(0, REPOSITORY_FULL_NAME_MAX_LENGTH);
+          : truncateBounded(input.repositoryFullName, REPOSITORY_FULL_NAME_MAX_LENGTH);
       await db
         .prepare(
           `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name)
@@ -1211,24 +1231,6 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Does this App's ledger hold this PR at all? The record-section routes
-     * answer 404 for an unknown PR before reading a page, and they need
-     * nothing but that yes/no — the head row plus its latest review is a
-     * two-statement batch, twice the round trips of the page it gates. One
-     * `SELECT 1 … LIMIT 1` on the ledger's own key answers it.
-     */
-    async hasPullRequest(appId: string, owner: string, repo: string, prNumber: number): Promise<boolean> {
-      const row = await db
-        .prepare(
-          `SELECT 1 AS found FROM pull_requests
-           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? LIMIT 1`,
-        )
-        .bind(appId, owner, repo, prNumber)
-        .first<{ found: number }>();
-      return row !== null;
-    },
-
-    /**
      * The record totals — the head payload's `counts`. The failure count rides
      * the same join the failures section pages, so the tab count and the list
      * length always agree. `must_fix` is the PR's own count of must-fix
@@ -1283,9 +1285,11 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * One page of a PR's findings, newest lifecycle row first, optionally
+     * One page of a PR's findings, newest LIFECYCLE ROW first, optionally
      * filtered by an exact `mergeClass` (the wire's `severity`). The `total` is
-     * the FILTERED count — the pager's denominator.
+     * the FILTERED count — the pager's denominator. `null` means the App's
+     * ledger does not hold this PR (the route's 404), decided in the same
+     * batch as the page.
      *
      * Findings come from `review_findings` (the lifecycle table): it carries
      * `finding_id` and the immutable original as JSON, so `severity` is its
@@ -1297,6 +1301,12 @@ export function createAppsStore(db: AppsStoreD1) {
      * predicate `countPullRequestRecords` applies: an addressed or dismissed
      * finding is history, not a record the operator still acts on, and the tab
      * count, the dot and the pager must agree with the list.
+     *
+     * The page is ordered by `rowid`, the immutable insert order — `updated_ms`
+     * advances every time a review round re-reports an open finding, so
+     * ordering by it would move a row between an offset page read and the next
+     * (duplicating or skipping it). Reviews and failures sort by their own
+     * immutable insert key for the same reason.
      */
     async listPullRequestFindings(
       appId: string,
@@ -1304,13 +1314,14 @@ export function createAppsStore(db: AppsStoreD1) {
       repo: string,
       prNumber: number,
       page: PullRequestPageRequest,
-    ): Promise<PullRequestRecordPage<PullRequestFindingRow>> {
+    ): Promise<PullRequestRecordPage<PullRequestFindingRow> | null> {
       const filter =
         page.severity === undefined || page.severity === null
           ? ""
           : " AND json_extract(original_json, '$.mergeClass') = ?";
       const filterBinds = filter === "" ? [] : [page.severity];
       const results = await db.batch([
+        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM review_findings
@@ -1327,26 +1338,31 @@ export function createAppsStore(db: AppsStoreD1) {
                     json_extract(original_json, '$.body') AS body
              FROM review_findings
              WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND state = 'open'${filter}
-             ORDER BY updated_ms DESC, finding_id
+             ORDER BY rowid DESC
              LIMIT ? OFFSET ?`,
           )
           .bind(appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
       ]);
+      if (results[0]!.results.length === 0) return null;
       return {
-        items: results[1]!.results as PullRequestFindingRow[],
-        total: countOf(results[0]!),
+        items: results[2]!.results as PullRequestFindingRow[],
+        total: countOf(results[1]!),
       };
     },
 
-    /** One page of a PR's reviews, newest first — the history's first page is its latest verdict. */
+    /**
+     * One page of a PR's reviews, newest first — the history's first page is
+     * its latest verdict. `null` = the App's ledger does not hold this PR.
+     */
     async listPullRequestReviews(
       appId: string,
       owner: string,
       repo: string,
       prNumber: number,
       page: PullRequestPageRequest,
-    ): Promise<PullRequestRecordPage<PullRequestReviewDetailRow>> {
+    ): Promise<PullRequestRecordPage<PullRequestReviewDetailRow> | null> {
       const results = await db.batch([
+        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM reviews
@@ -1362,25 +1378,31 @@ export function createAppsStore(db: AppsStoreD1) {
           )
           .bind(appId, owner, repo, prNumber, page.limit, page.offset),
       ]);
+      if (results[0]!.results.length === 0) return null;
       return {
         // Nullable columns pass through AS THEY ARE: the store reports what
         // the tables hold, and the route's wire mapping decides what the
         // client may receive (a NULL `provider` is a real, common row — the
         // v1 pipeline never records one).
-        items: results[1]!.results as PullRequestReviewDetailRow[],
-        total: countOf(results[0]!),
+        items: results[2]!.results as PullRequestReviewDetailRow[],
+        total: countOf(results[1]!),
       };
     },
 
-    /** One page of a PR's review failures, newest first — the diagnostic payload this face exists for. */
+    /**
+     * One page of a PR's review failures, newest first — the diagnostic
+     * payload this face exists for. `null` = the App's ledger does not hold
+     * this PR.
+     */
     async listPullRequestFailures(
       appId: string,
       owner: string,
       repo: string,
       prNumber: number,
       page: PullRequestPageRequest,
-    ): Promise<PullRequestRecordPage<PullRequestFailureDetailRow>> {
+    ): Promise<PullRequestRecordPage<PullRequestFailureDetailRow> | null> {
       const results = await db.batch([
+        db.prepare(PULL_REQUEST_EXISTS_SQL).bind(appId, owner, repo, prNumber),
         db
           .prepare(
             `SELECT COUNT(*) AS n
@@ -1400,9 +1422,10 @@ export function createAppsStore(db: AppsStoreD1) {
           )
           .bind(appId, owner, repo, prNumber, page.limit, page.offset),
       ]);
+      if (results[0]!.results.length === 0) return null;
       return {
-        items: results[1]!.results as PullRequestFailureDetailRow[],
-        total: countOf(results[0]!),
+        items: results[2]!.results as PullRequestFailureDetailRow[],
+        total: countOf(results[1]!),
       };
     },
   };

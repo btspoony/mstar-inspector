@@ -440,7 +440,7 @@ describe("pull request detail reads", () => {
       limit: 10,
       severity: "nit",
     });
-    expect(page.total).toBe(1);
+    expect(page!.total).toBe(1);
   });
 
   test("an addressed or dismissed finding is excluded from the page and from both tallies", async () => {
@@ -464,8 +464,8 @@ describe("pull request detail reads", () => {
 
     // …and the page agrees with the tallies: the same single row, same total.
     const page = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
-    expect(page.total).toBe(1);
-    expect(page.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
+    expect(page!.total).toBe(1);
+    expect(page!.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
 
     // The severity filter narrows the open set, never re-admits a closed row.
     const filtered = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
@@ -473,8 +473,8 @@ describe("pull request detail reads", () => {
       limit: 10,
       severity: "must-fix",
     });
-    expect(filtered.total).toBe(1);
-    expect(filtered.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
+    expect(filtered!.total).toBe(1);
+    expect(filtered!.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
   });
 
   test("the head, the counts and each record page read the same PR", async () => {
@@ -504,18 +504,18 @@ describe("pull request detail reads", () => {
 
     const page = { offset: 0, limit: 10 };
     const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, page);
-    expect(findings.total).toBe(1);
-    expect(findings.items).toEqual([
+    expect(findings!.total).toBe(1);
+    expect(findings!.items).toEqual([
       { finding_id: "F-1", severity: "must-fix", title: "Null deref", file_path: "src/a.ts", line: 12, body: "guard it" },
     ]);
 
     const reviews = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, page);
-    expect(reviews.total).toBe(1);
-    expect(reviews.items[0]!.summary_md).toBe("looks good");
+    expect(reviews!.total).toBe(1);
+    expect(reviews!.items[0]!.summary_md).toBe("looks good");
 
     const failures = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, page);
-    expect(failures.total).toBe(1);
-    expect(failures.items).toEqual([
+    expect(failures!.total).toBe(1);
+    expect(failures!.items).toEqual([
       { stage: "sandbox", error: "timeout", created_at: expect.any(String) },
     ]);
   });
@@ -529,19 +529,48 @@ describe("pull request detail reads", () => {
     );
     const store = createAppsStore(db);
     const page = { offset: 0, limit: 10 };
-    expect((await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, page)).total).toBe(2);
+    expect((await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, page))!.total).toBe(2);
     const filtered = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
       ...page,
       severity: "must-fix",
     });
-    expect(filtered.total).toBe(1);
-    expect(filtered.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
+    expect(filtered!.total).toBe(1);
+    expect(filtered!.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
     // An exact match: a spelling the PR does not carry is an empty page.
     const missing = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
       ...page,
       severity: "blocker",
     });
     expect(missing).toEqual({ items: [], total: 0 });
+  });
+
+  test("findings keep their insert order when a re-report advances updated_ms", async () => {
+    const db = await detailFixture();
+    seedFinding(
+      db,
+      { findingId: "F-2", mergeClass: "nit", title: "t2", filePath: "src/a.ts", lineStart: 2, body: "b" },
+      "row-2",
+    );
+    seedFinding(
+      db,
+      { findingId: "F-3", mergeClass: "nit", title: "t3", filePath: "src/a.ts", lineStart: 3, body: "b" },
+      "row-3",
+    );
+    const store = createAppsStore(db);
+    const ids = async (offset: number) =>
+      (await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, { offset, limit: 2 }))!.items.map(
+        (finding) => finding.finding_id,
+      );
+    // Newest INSERT first: the page order neither reads nor ties on the
+    // re-report clock.
+    expect(await ids(0)).toEqual(["F-3", "F-2"]);
+
+    // A review round re-sees F-1 (the oldest row) and advances its
+    // `updated_ms`. The row's page position is unchanged, so an offset page
+    // read before and after the re-report cannot duplicate or skip it.
+    db.raw.prepare("UPDATE review_findings SET updated_ms = 99 WHERE finding_id = 'F-1'").run();
+    expect(await ids(0)).toEqual(["F-3", "F-2"]);
+    expect(await ids(2)).toEqual(["F-1"]);
   });
 
   test("limit/offset step through a section without moving its total", async () => {
@@ -552,11 +581,11 @@ describe("pull request detail reads", () => {
     const store = createAppsStore(db);
     // Newest first: the first page holds the two newest reviews.
     const first = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 2 });
-    expect(first.total).toBe(3);
-    expect(first.items.map((review) => review.reviewed_at)).toEqual(["2026-01-04 00:00:00", "2026-01-03 00:00:00"]);
+    expect(first!.total).toBe(3);
+    expect(first!.items.map((review) => review.reviewed_at)).toEqual(["2026-01-04 00:00:00", "2026-01-03 00:00:00"]);
     const second = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 2, limit: 2 });
-    expect(second.total).toBe(3);
-    expect(second.items.map((review) => review.reviewed_at)).toEqual(["2026-01-02 00:00:00"]);
+    expect(second!.total).toBe(3);
+    expect(second!.items.map((review) => review.reviewed_at)).toEqual(["2026-01-02 00:00:00"]);
   });
 
   test("unknown PR number → null head (the route's 404)", async () => {
@@ -565,23 +594,24 @@ describe("pull request detail reads", () => {
     expect(await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "widgets", 999)).toBeNull();
   });
 
-  test("hasPullRequest answers the same key the head does (the section routes' 404)", async () => {
+  test("a section read answers 'no such PR' inside its own batch (the routes' 404)", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createAppsStore(db).upsertPullRequest(PR);
     await createAppsStore(db).upsertPullRequest({ ...PR, repo: "gadgets", title: "Other repo's #131" });
     const store = createAppsStore(db);
+    const page = { offset: 0, limit: 10 };
     // Present on the ledger's own key…
-    expect(await store.hasPullRequest(APP_ID, "acme", "widgets", 131)).toBe(true);
-    expect(await store.hasPullRequest(APP_ID, "acme", "gadgets", 131)).toBe(true);
-    // …and absent for the same number in a repo, App or PR it never received.
-    expect(await store.hasPullRequest(APP_ID, "acme", "sprockets", 131)).toBe(false);
-    expect(await store.hasPullRequest("other-app", "acme", "widgets", 131)).toBe(false);
-    expect(await store.hasPullRequest(APP_ID, "acme", "widgets", 999)).toBe(false);
-    // The probe agrees with the head read it replaced on every case.
+    expect(await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, page)).not.toBeNull();
+    expect(await store.listPullRequestReviews(APP_ID, "acme", "gadgets", 131, page)).not.toBeNull();
+    // …and a miss for the same number in a repo, App or PR it never received.
+    expect(await store.listPullRequestFindings(APP_ID, "acme", "sprockets", 131, page)).toBeNull();
+    expect(await store.listPullRequestReviews("other-app", "acme", "widgets", 131, page)).toBeNull();
+    expect(await store.listPullRequestFailures(APP_ID, "acme", "widgets", 999, page)).toBeNull();
+    // The miss agrees with the head read on every case.
     for (const [repo, number] of [["widgets", 131], ["gadgets", 131], ["sprockets", 131], ["widgets", 999]] as const) {
-      expect(await store.hasPullRequest(APP_ID, "acme", repo, number)).toBe(
-        (await store.getPullRequestHead(APP_ID, "acme", repo, number)) !== null,
+      expect((await store.listPullRequestFailures(APP_ID, "acme", repo, number, page)) === null).toBe(
+        (await store.getPullRequestHead(APP_ID, "acme", repo, number)) === null,
       );
     }
   });
