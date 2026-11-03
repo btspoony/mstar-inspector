@@ -10,9 +10,7 @@
  * back with checkedOutShaCommand, so clone/diff/commit_id always agree.
  */
 
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFile, rm } from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import {
   buildGitOpsCommands,
@@ -26,7 +24,7 @@ import {
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
 import { shellCommand } from "../../src/pipeline/shell-command";
-import { RECHECK_FILE_MAX_BYTES, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_FILE_MAX_BYTES, RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 
 describe("gitops command builders", () => {
   test("valid inputs produce single-quoted, allowlisted commands", () => {
@@ -91,73 +89,62 @@ describe("gitops command builders", () => {
     }
   });
 
-  test("readRecheckStatusCommand's REAL stdout is content + newline + newline-terminated flag", async () => {
-    // Same oracle as the document read above, over the ONLY path the status
-    // command is bound to. Prior bytes are restored afterwards, so running the
-    // fixed production path leaves nothing behind.
-    const prior = await readFile(RECHECK_STATUS_PATH).catch(() => null);
-    try {
-      const fitText = JSON.stringify({
-        schema: "mstar.recheck-status/v1",
-        headSha: "x",
-        outcome: "ok",
-        rejected: 0,
-        rejected_row_ids: [],
-        reason: null,
-        error: null,
-      });
-      const overflowText = "b".repeat(RECHECK_FILE_MAX_BYTES + 1);
-      for (const [text, flag, content] of [
-        [fitText, "0", fitText],
-        [overflowText, "1", overflowText.slice(0, RECHECK_FILE_MAX_BYTES)],
-      ] as const) {
-        await Bun.write(RECHECK_STATUS_PATH, text);
-        const proc = Bun.spawn(["sh", "-c", readRecheckStatusCommand()]);
-        const stdout = await new Response(proc.stdout).text();
-        expect(await proc.exited).toBe(0);
-        // Newline-terminated, flag last, content cut at the byte bound.
-        expect(stdout.endsWith("\n")).toBe(true);
-        const trimmed = stdout.trimEnd();
-        expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
-        expect(trimmed.slice(0, trimmed.lastIndexOf("\n"))).toBe(content);
-      }
-    } finally {
-      if (prior === null) await rm(RECHECK_STATUS_PATH, { force: true });
-      else await Bun.write(RECHECK_STATUS_PATH, prior);
+  test("the shipped recheck reads emit content + newline + newline-terminated flag (P67-QC-006)", async () => {
+    // ONE oracle over both commands the consumer reads, each at its own path:
+    // the document read and the status read. The parser and the Worker's test
+    // double both assume a NEWLINE-TERMINATED overflow flag (`wc -c` writes its
+    // own trailing newline). Running the built strings through a local POSIX
+    // shell against real files turns that assumption into evidence — no
+    // network, no GitHub.
+    const priors = new Map<string, Uint8Array | null>();
+    for (const path of [RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH]) {
+      priors.set(path, await readFile(path).catch(() => null));
     }
-  });
-
-  test("readRecheckCommand's REAL stdout is content + newline + newline-terminated flag (P67-QC-006)", async () => {
-    // The parser and the Worker's test double both assume the shipped command
-    // emits a NEWLINE-TERMINATED overflow flag (`wc -c` writes its own trailing
-    // newline). Running the built string through a local POSIX shell against
-    // real files turns that assumption into evidence — no network, no GitHub.
-    const dir = await mkdtemp(join(tmpdir(), "mstar-recheck-read-"));
     try {
-      const fit = join(dir, "fit.json");
-      const overflow = join(dir, "overflow.json");
-      const fitText = JSON.stringify({ schema: "mstar.recheck/v1", headSha: "x", results: [] });
-      await Bun.write(fit, fitText);
-      await Bun.write(overflow, "b".repeat(262_145));
-
-      for (const [file, flag, content] of [
-        [fit, "0", fitText],
-        [overflow, "1", "b".repeat(262_144)],
+      for (const read of [
+        {
+          command: () => readRecheckCommand(RECHECK_OUTPUT_PATH),
+          path: RECHECK_OUTPUT_PATH,
+          fit: JSON.stringify({ schema: "mstar.recheck/v1", headSha: "x", results: [] }),
+        },
+        {
+          command: readRecheckStatusCommand,
+          path: RECHECK_STATUS_PATH,
+          fit: JSON.stringify({
+            schema: "mstar.recheck-status/v1",
+            headSha: "x",
+            outcome: "ok",
+            rejected: 0,
+            rejected_row_ids: [],
+            reason: null,
+            error: null,
+          }),
+        },
       ] as const) {
-        const proc = Bun.spawn(["sh", "-c", readRecheckCommand(file)]);
-        const stdout = await new Response(proc.stdout).text();
-        expect(await proc.exited).toBe(0);
-        // The stream is newline-terminated and the flag is its LAST LINE;
-        // `wc -c` may left-pad the count (BSD) or not (GNU), so the parser
-        // trims. A parser that required the flag as the final BYTE — the
-        // reviewed defect — fails on every platform and on neither fixture.
-        expect(stdout.endsWith("\n")).toBe(true);
-        const trimmed = stdout.trimEnd();
-        expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
-        expect(trimmed.slice(0, trimmed.lastIndexOf("\n"))).toBe(content);
+        const overflowText = "b".repeat(RECHECK_FILE_MAX_BYTES + 1);
+        for (const [text, flag, content] of [
+          [read.fit, "0", read.fit],
+          [overflowText, "1", overflowText.slice(0, RECHECK_FILE_MAX_BYTES)],
+        ] as const) {
+          await Bun.write(read.path, text);
+          const proc = Bun.spawn(["sh", "-c", read.command()]);
+          const stdout = await new Response(proc.stdout).text();
+          expect(await proc.exited).toBe(0);
+          // The stream is newline-terminated and the flag is its LAST LINE;
+          // `wc -c` may left-pad the count (BSD) or not (GNU), so the parser
+          // trims. A parser that required the flag as the final BYTE — the
+          // reviewed defect — fails on every platform and on neither fixture.
+          expect(stdout.endsWith("\n")).toBe(true);
+          const trimmed = stdout.trimEnd();
+          expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
+          expect(trimmed.slice(0, trimmed.lastIndexOf("\n"))).toBe(content);
+        }
       }
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      for (const [path, prior] of priors) {
+        if (prior === null) await rm(path, { force: true });
+        else await Bun.write(path, prior);
+      }
     }
   });
 

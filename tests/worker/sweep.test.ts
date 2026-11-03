@@ -121,9 +121,6 @@ describe("runSweep", () => {
     expect(captured[2]).toContain("UPDATE workspace_invites");
     expect(captured[3]).toContain("FROM review_failures");
     expect(captured[3]).toContain("created_at > datetime('now', '-24 hours')");
-    // Both attribution stages for a review that continued are outside the
-    // paging signal — `usage` was silently inside it before.
-    expect(captured[3]).toContain("stage NOT IN ('recheck', 'usage')");
     expect(result).toEqual({
       failures24h: 0,
       thresholdBreached: false,

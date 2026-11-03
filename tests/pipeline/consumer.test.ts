@@ -229,6 +229,9 @@ let recheckFileOverflow = "0";
  * the `head` chain for that path exactly like a missing file.
  */
 let recheckStatusContent: string | null = null;
+/** The status read's transport knobs: overflow flag, or a failed shell chain. */
+let recheckStatusOverflow = "0";
+let recheckStatusExitCode = 0;
 
 /**
  * Optional gate on the FIRST runner exec: a test parks a review inside the
@@ -269,9 +272,10 @@ const fakeSandbox = {
       return { stdout: "", stderr: "", exitCode: writeInputExitCode };
     }
     if (cmd.includes("head -c") && cmd.includes("/tmp/mstar-recheck-status.json")) {
+      if (recheckStatusExitCode !== 0) return { stdout: "", stderr: "read failed", exitCode: recheckStatusExitCode };
       // A missing status file fails the head chain, exactly like the real one.
       if (recheckStatusContent === null) return { stdout: "", stderr: "no such file", exitCode: 1 };
-      return { stdout: `${recheckStatusContent}\n0\n`, stderr: "", exitCode: 0 };
+      return { stdout: `${recheckStatusContent}\n${recheckStatusOverflow}\n`, stderr: "", exitCode: 0 };
     }
     if (cmd.includes("head -c") && cmd.includes("/tmp/mstar-recheck.json")) {
       // Byte-for-byte the audited fixed-path recheck read's stdout.
@@ -470,6 +474,8 @@ function reset(): void {
   recheckFileContent = "";
   recheckFileOverflow = "0";
   recheckStatusContent = null;
+  recheckStatusOverflow = "0";
+  recheckStatusExitCode = 0;
   kvPutError = undefined;
   kvGetValue = null;
   checkRequests.length = 0;
@@ -3514,37 +3520,42 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 1, assessed: 0 });
   });
 
-  test("an oversized status error is bounded at parse time, so the log field and the D1 text share one value", async () => {
-    reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    recheckFileContent = "";
+  test("an oversized status error or reason is bounded at parse time, so the log field and the D1 text share one value", async () => {
     // `z` matches no secret shape, so what comes back is the bound alone.
-    const longError = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS + 200);
+    const oversized = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS + 200);
     const capped = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS);
-    recheckStatusContent = JSON.stringify({
-      schema: "mstar.recheck-status/v1",
-      headSha: SHA,
-      outcome: "failed",
-      reason: "seat-failed",
-      rejected: 0,
-      rejected_row_ids: [],
-      error: longError,
-    });
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    for (const field of ["error", "reason"] as const) {
+      reset();
+      diffStdout = VALID_DIFF;
+      runnerStdout = JSON.stringify(VALID_OUTPUT);
+      recheckFileContent = "";
+      const reason = field === "reason" ? oversized : "seat-failed";
+      const error = field === "error" ? oversized : null;
+      recheckStatusContent = JSON.stringify({
+        schema: "mstar.recheck-status/v1",
+        headSha: SHA,
+        outcome: "failed",
+        reason,
+        rejected: 0,
+        rejected_row_ids: [],
+        error,
+      });
+      const db = await createSeededTestD1();
+      await seedPriorPublication(db);
+      await seedOpenTarget(db);
+      await seedAssociation(db, "PRRT_thread1");
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload()));
+      await consumer(makeBatch(makePayload()));
 
-    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
-    expect(line.fields).toMatchObject({ recheck_error: capped });
-    const rows = failureRows(db);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.error).toBe(`failed: seat-failed: ${capped}`.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS));
-    expect(String(rows[0]!.error)).toHaveLength(RECHECK_STATUS_ERROR_MAX_CHARS);
+      const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+      expect(line.fields).toMatchObject(field === "error" ? { recheck_error: capped } : { recheck_reason: capped });
+      const rows = failureRows(db);
+      expect(rows).toHaveLength(1);
+      // The D1 text is the same two fields, so one overrun is enough to bound it.
+      expect(rows[0]!.error).toBe(`failed: ${reason}: ${error}`.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS));
+      expect(String(rows[0]!.error)).toHaveLength(RECHECK_STATUS_ERROR_MAX_CHARS);
+    }
   });
 
   test("an ok seat status with a valid document records no failure and keeps the accounting unchanged", async () => {
@@ -3595,28 +3606,38 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(commenterCalls.some((c) => c.op === "resolve")).toBe(true);
   });
 
-  test("a missing status file keeps the conservative path: invalid-output, no throw, exactly one `recheck` attribution row", async () => {
-    reset();
-    diffStdout = VALID_DIFF;
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // Neither file exists (recheckStatusContent stays null from reset()).
-    recheckFileContent = "";
-    const db = await createSeededTestD1();
-    await seedPriorPublication(db);
-    await seedOpenTarget(db);
-    await seedAssociation(db, "PRRT_thread1");
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+  test("an unreadable status file keeps the conservative path: invalid-output, no throw, exactly one `recheck` attribution row", async () => {
+    // Three ways the status read can yield nothing: no file, a stream past the
+    // byte bound (flag 1), and a failed shell chain. All are `absent`.
+    for (const [why, arm] of [
+      ["missing", () => {}],
+      ["overflow", () => { recheckStatusOverflow = "1"; }],
+      ["exit", () => { recheckStatusExitCode = 1; }],
+    ] as const) {
+      reset();
+      diffStdout = VALID_DIFF;
+      runnerStdout = JSON.stringify(VALID_OUTPUT);
+      // The document is absent in every case; only the status transport varies.
+      recheckFileContent = "";
+      if (why !== "missing") recheckStatusContent = "{}";
+      arm();
+      const db = await createSeededTestD1();
+      await seedPriorPublication(db);
+      await seedOpenTarget(db);
+      await seedAssociation(db, "PRRT_thread1");
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload())); // resolves — never throws
+      await consumer(makeBatch(makePayload())); // resolves — never throws
 
-    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
-    expect(prepared.body).toContain("unverifiable (invalid-output)");
-    expect(failureRows(db)).toHaveLength(1);
-    expect(failureRows(db)[0]).toMatchObject({ stage: "recheck" });
-    // `absent` is the honest outcome when the seat wrote no status at all.
-    expect(failureRows(db)[0]!.error).toBe("absent: null: null");
-    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
-    expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
+      const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+      expect(prepared.body).toContain("unverifiable (invalid-output)");
+      expect(failureRows(db)).toHaveLength(1);
+      expect(failureRows(db)[0]).toMatchObject({ stage: "recheck" });
+      // `absent` is the honest outcome whenever the read yields no status.
+      expect(failureRows(db)[0]!.error).toBe("absent: null: null");
+      const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+      expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
+    }
   });
 
   test("same-SHA issue-comment-triggered review with a pending journal row → hands off to recovery and acks (no recheck, no resolve, rows untouched)", async () => {

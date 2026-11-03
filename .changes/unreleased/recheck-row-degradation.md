@@ -46,10 +46,16 @@ category: Fixed
   longer keep a round that published nothing as clean. The status error is
   redacted with the worker's own credential-pattern list
   (`packages/shared/src/secret-shapes.ts` — one canonical list for both halves).
-- **`usage` failures stop paging ops.** The cron failure sweep excluded only
-  `stage = 'recheck'`, so `usage` rows — a review that continued after its usage
-  event failed to record — counted toward the alert threshold. Both attribution
-  stages are now outside the paging signal.
+- **`recheck` and `usage` failures stop paging ops.** The cron failure sweep
+  counted every `review_failures` row in the window: its query had no stage
+  predicate, and `recheck` was not even an accepted stage yet, so both
+  attribution stages — a recheck round that budget-skipped, lost its seat or
+  produced an invalid document, and a review that continued after its usage
+  event failed to record — could page the on-call for reviews that published
+  normally. Both stages are now outside the paging signal, and both are out of
+  the per-PR failure count. The per-PR failure history still lists `usage`
+  rows, so a lost metered-usage record keeps a surface; `recheck` rows stay out
+  of it, their accounting already rides the published coverage line.
 
 <!-- CN -->
 - **单行不合格不再丢弃整轮重审。** 重审文档校验现在区分两级不信任。文档级故障
@@ -83,6 +89,10 @@ category: Fixed
   状态；文档写失败时记录 `failed/write-failed`，而不是席位的 `ok`，因此 D1 不会
   再把「什么都没发布」的轮次留成干净记录。状态错误的脱敏使用 worker 同一份凭据
   模式表（`packages/shared/src/secret-shapes.ts`——两侧共用唯一一份列表）。
-- **`usage` 失败不再触发告警。** 定时失败扫描此前只排除 `stage = 'recheck'`，
-  于是 `usage` 行——用量事件写入失败但评审继续——也计入告警阈值。现在两个归因
-  阶段都在告警统计之外。
+- **`recheck` 与 `usage` 失败不再触发告警。** 定时失败扫描此前统计窗口内所有
+  `review_failures` 行——查询没有任何 stage 条件，且 `recheck` 当时还不是可选
+  stage——因此两类归因行都可能为正常发布的评审唤来 on-call：预算跳过 / 席位失联 /
+  文档无效的重审轮，以及用量事件写入失败但评审继续的轮次。现在两个阶段都在告警
+  统计之外，也都不计入单个 PR 的失败数量。单个 PR 的失败历史仍会列出 `usage` 行，
+  让丢失的计量记录有可见面；`recheck` 行仍不进该列表，它的账目已经随发布覆盖行
+  呈现。

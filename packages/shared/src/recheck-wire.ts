@@ -11,9 +11,8 @@
  * to the engine's existing envelope/finding types (never replacement
  * schemas) and do not appear on this wire.
  *
- * Validation contract (spec §7.3 "Validation"): exact schema/HEAD, strict
- * object shape and closed enums; at most 25 results; unique row IDs
- * contained in the input; no remote IDs in output. Addressed requires
+ * Validation contract (spec §7.3 "Validation"): exact schema/HEAD; at most
+ * 25 results; unique row IDs contained in the input. Addressed requires
  * `verified-fix` plus an eligible complete catalog slice with an integer
  * ordered range inside the appropriate old/new hunk, quote equality after
  * whitespace normalization (CRLF/CR→LF, per-line trailing blanks stripped,
@@ -25,12 +24,15 @@
  * evidence-free dismissal is legal here and still evidence-grounded by
  * construction. Unverifiable may have no evidence. Document-level distrust
  * (wrong schema, stale HEAD, non-array/oversized results, duplicate or
- * foreign row IDs) fails closed as a whole; a row-level content error
- * instead drops that row into `rejected` and the rest of the document
- * stands. The validator proves location/content only — the semantic
- * correctness of the explanation and the trusted capture itself belong to
- * the evidence catalog (spec §7.3 "Trusted evidence catalog") and the
- * consumer.
+ * foreign row IDs) fails closed as a whole; a row-level content error — a
+ * non-exact object (so an extra key, in particular a remote ID such as a
+ * thread/review/comment ID, which no output may carry), a closed enum,
+ * disposition/reason pairing, evidence shape, the related-index or the
+ * Addressed proof — instead drops that row into `rejected` and the rest of
+ * the document stands. The validator proves location/content only — the
+ * semantic correctness of the explanation and the trusted capture itself
+ * belong to the evidence catalog (spec §7.3 "Trusted evidence catalog") and
+ * the consumer.
  */
 
 /** Authenticated routing scope (spec §7.0): appId is github_apps.id. */

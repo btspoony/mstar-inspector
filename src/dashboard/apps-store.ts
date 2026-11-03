@@ -1076,8 +1076,11 @@ export function createAppsStore(db: AppsStoreD1) {
      * both are per-round attribution written for rounds that continued
      * (`recheck` a budget skip / dead seat / invalid document, `usage` a
      * failed `usage_events` insert), so a clean PR would otherwise read a
-     * non-zero failure count and a `recheck / skipped: budget: null` history
-     * entry. The sweep excludes the same two stages from paging.
+     * non-zero failure count. The count excludes both; the sweep excludes the
+     * same two stages from paging. The detail face keeps `usage` rows in its
+     * failure history (a lost metered-usage record needs a surface) while
+     * still excluding `recheck`, whose accounting already rides the published
+     * coverage line.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -1160,7 +1163,7 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage NOT IN ('recheck', 'usage')
+             WHERE f.stage <> 'recheck'
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC`,
           )
@@ -1180,7 +1183,9 @@ export function createAppsStore(db: AppsStoreD1) {
           .bind(appId, row.owner, row.repo, prNumber),
       ]);
       // The histories ARE the aggregates: reviews come newest first, so the
-      // first one is the latest verdict, and the failure rows count themselves.
+      // first one is the latest verdict; the failure COUNT excludes `usage`
+      // attribution (the review continued), while the history list keeps it
+      // so a lost metered-usage record still has a surface.
       const reviews = results[0]!.results as PullRequestReviewDetailRow[];
       const failures = results[1]!.results as PullRequestFailureDetailRow[];
       return {
@@ -1195,7 +1200,7 @@ export function createAppsStore(db: AppsStoreD1) {
           last_seen_at: row.last_seen_at,
           latest_review:
             reviews[0] === undefined ? null : { verdict: reviews[0].verdict, reviewed_at: reviews[0].reviewed_at },
-          failure_count: failures.length,
+          failure_count: failures.filter((failure) => failure.stage !== "usage").length,
         },
         reviews,
         failures,

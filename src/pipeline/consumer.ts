@@ -2961,7 +2961,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         {
           ...fields,
           recheck_outcome: recheckOutcome,
-          recheck_reason: status?.reason ?? null,
+          // Same wrapper as `error`: a seat-authored `reason` can echo a
+          // credential exactly like `error` can.
+          recheck_reason: status?.reason === null || status?.reason === undefined
+            ? null
+            : redactExactSecrets(redactSecrets(status.reason), secretValues),
           recheck_error: status?.error === null || status?.error === undefined
             ? null
             : redactExactSecrets(redactSecrets(status.error), secretValues),

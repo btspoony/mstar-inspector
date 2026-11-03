@@ -161,7 +161,7 @@ describe("listPullRequests", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
   });
 
-  test("usage attribution rows are not review failures either: count 0, no history, row kept", async () => {
+  test("usage attribution rows are not review failures: count 0, but the detail history keeps the row", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createAppsStore(db).upsertPullRequest(PR);
@@ -179,8 +179,12 @@ describe("listPullRequests", () => {
     const rows = await createAppsStore(db).listPullRequests(APP_ID);
     expect(rows[0]!.failure_count).toBe(0);
     const detail = await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131);
+    // Still not a REVIEW failure — but the dropped metered-usage record has a
+    // surface in the detail history, and the detail count stays 0.
     expect(detail!.pull_request.failure_count).toBe(0);
-    expect(detail!.failures).toEqual([]);
+    expect(detail!.failures).toEqual([
+      { stage: "usage", error: "D1_ERROR: no such table", created_at: expect.any(String) },
+    ]);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
   });
 
