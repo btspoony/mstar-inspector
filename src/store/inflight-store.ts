@@ -19,7 +19,10 @@
  * A zero-row result carries no cause, so a refusal costs exactly one follow-up
  * read (spec §1.3 lists the four reasons). The read is diagnostic only — it
  * never decides admission; a raced read whose numbers no longer explain the
- * refusal answers `error` (defer), never `ok`.
+ * refusal answers `error` (defer), never `ok`. That read also returns the
+ * `heldHeadSha` of the row holding the PR: a `pr-held` refusal is only benign
+ * while the live review covers the same commit, and the caller cannot tell
+ * without it.
  *
  * Any storage failure answers `error` (spec §1.3: a storage failure is `error`
  * and never admits). The exception itself is not dropped: it rides the result
@@ -69,7 +72,13 @@ export type InflightErrorCause =
 
 export type InflightAcquireResult =
   | { ok: true }
-  | { ok: false; reason: "pr-held" | "system-cap" | "workspace-cap" }
+  | { ok: false; reason: "system-cap" | "workspace-cap" }
+  /**
+   * `heldHeadSha` is the sha the live row was taken for (`""` = a
+   * comment-triggered review carried none): the terminal drop record needs it
+   * to tell a duplicate of that review from a commit it never covers.
+   */
+  | { ok: false; reason: "pr-held"; heldHeadSha: string }
   | { ok: false; reason: "error"; cause: InflightErrorCause };
 
 /** The operator-facing text of an `error` refusal (log field, drop row). */
@@ -88,6 +97,12 @@ export type AcquireInflightOptions = {
   attemptId: string;
   /** Row lifetime (seconds, must be > 0) — callers pass `reviewGuardTtlSeconds(level)`. */
   ttlSeconds: number;
+  /**
+   * The commit this attempt reviews; `null` for a comment trigger, which
+   * resolves the head in-sandbox and carries none. Stored as `""` (the
+   * `review_failures` convention) so the column stays single-valued.
+   */
+  headSha: string | null;
   /** ISO-8601 instant the acquisition is evaluated at. */
   now: string;
 };
@@ -101,13 +116,14 @@ export type AcquireInflightOptions = {
  */
 const ACQUIRE_SQL = `
 INSERT INTO review_inflight
-  (installation_id, owner, repo, pr_number, workspace_id, attempt_id, acquired_at, expires_at)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?
+  (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE (SELECT COUNT(*) FROM review_inflight WHERE expires_at > ?) < ?
   AND (SELECT COUNT(*) FROM review_inflight WHERE workspace_id = ? AND expires_at > ?) < ?
 ON CONFLICT (installation_id, owner, repo, pr_number) DO UPDATE SET
   workspace_id = excluded.workspace_id,
   attempt_id   = excluded.attempt_id,
+  head_sha     = excluded.head_sha,
   acquired_at  = excluded.acquired_at,
   expires_at   = excluded.expires_at
 WHERE review_inflight.expires_at <= ?
@@ -119,6 +135,9 @@ SELECT
   (SELECT COUNT(*) FROM review_inflight
     WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
       AND expires_at > ?) AS held,
+  (SELECT head_sha FROM review_inflight
+    WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+      AND expires_at > ?) AS held_head_sha,
   (SELECT COUNT(*) FROM review_inflight WHERE expires_at > ?) AS total,
   (SELECT COUNT(*) FROM review_inflight
     WHERE workspace_id = ? AND expires_at > ?) AS workspace_total
@@ -176,6 +195,7 @@ export async function acquireInflight(
         key.pr_number,
         key.workspace_id,
         opts.attemptId,
+        opts.headSha ?? "",
         now,
         expiresAt,
         // System cap: live rows overall.
@@ -193,12 +213,26 @@ export async function acquireInflight(
 
     const row = await db
       .prepare(REFUSAL_SQL)
-      .bind(key.installation_id, key.owner, key.repo, key.pr_number, now, now, key.workspace_id, now)
-      .first<{ held: number; total: number; workspace_total: number }>();
+      .bind(
+        key.installation_id,
+        key.owner,
+        key.repo,
+        key.pr_number,
+        now,
+        key.installation_id,
+        key.owner,
+        key.repo,
+        key.pr_number,
+        now,
+        now,
+        key.workspace_id,
+        now,
+      )
+      .first<{ held: number; held_head_sha: string; total: number; workspace_total: number }>();
     if (row === null) {
       return { ok: false, reason: "error", cause: { kind: "fault", detail: "refusal read returned no row" } };
     }
-    if (row.held > 0) return { ok: false, reason: "pr-held" };
+    if (row.held > 0) return { ok: false, reason: "pr-held", heldHeadSha: row.held_head_sha };
     if (row.total >= opts.systemCap) return { ok: false, reason: "system-cap" };
     if (row.workspace_total >= opts.workspaceCap) return { ok: false, reason: "workspace-cap" };
     // The capacity this attempt was refused on was released between the two
