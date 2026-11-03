@@ -116,23 +116,41 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
 
 
 /**
- * Assemble the overall review body: the engine's `renderReviewMarkdown`
- * output (verdict head, incomplete fact pair, tally table, `## 📋 Review`,
- * findings in envelope order — the engine is the only layout owner), then the
- * Inspector-only tail, which the engine has no vocabulary for: the
- * omitted-findings footer (it counts the findings above it), the repeat
- * callout, and the assembled §7.10 closure section. Finally clamped to
- * REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API never sees an
- * over-limit body). `omittedFindings` is the count of findings dropped by the
- * consumer's merge-class cap (B4) — the footer tells readers the review is a
- * Top-N subset.
+ * The engine renders the `cause:`/`unscanned:` pair from the envelope and
+ * publishes the seat narrative verbatim, so a narrative that restates the pair
+ * shows it twice. Strip only the exact lines the pair renders: a line that
+ * merely opens with the label (an indented snippet, capitalised prose, a
+ * mid-sentence mention) is the model's own content and stays.
+ */
+function stripFactEcho(
+  narrative: string,
+  fact: { reason: string; unscanned: readonly string[] },
+): string {
+  const echo = [
+    `cause: ${fact.reason}`,
+    fact.unscanned.length === 0 ? "unscanned: none" : `unscanned: ${fact.unscanned.join(", ")}`,
+  ];
+  return narrative.split("\n").filter((line) => !echo.includes(line)).join("\n");
+}
+
+/**
+ * Assemble the overall review body: the engine's own layout, then the two
+ * facts it has no vocabulary for — the omitted-findings footer (merge-class
+ * cap) and the assembled §7.10 closure section — clamped to REVIEW_BODY_LIMIT
+ * (qc2 F-003 / qc3 F-304 — the API never sees an over-limit body).
+ * `omittedFindings` is the count dropped by the consumer's merge-class cap
+ * (B4): the footer tells readers the review is a Top-N subset.
  */
 export function buildReviewBody(
   output: ReviewOutput,
   omittedFindings = 0,
   closure?: string,
 ): string {
-  const sections = [renderReviewMarkdown(output)];
+  const rendered =
+    output.incomplete === undefined || output.summary_md === undefined
+      ? output
+      : { ...output, summary_md: stripFactEcho(output.summary_md, output.incomplete) };
+  const sections = [renderReviewMarkdown(rendered)];
   if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
   if (closure) sections.push(closure);
   const body = sections.join("\n\n");

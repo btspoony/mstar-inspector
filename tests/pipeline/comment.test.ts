@@ -192,6 +192,34 @@ describe("buildReviewBody", () => {
     expect(body).not.toContain("more findings omitted");
   });
 
+  test("a summary that restates the fact pair is stripped, so the pair renders once", () => {
+    const incomplete = { reason: "runner timed out", unscanned: ["tests/a.ts"] };
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete,
+      summary_md: "The runner died.\n\ncause: runner timed out\nunscanned: tests/a.ts",
+    });
+    expect(body.match(/^cause:/gm)).toHaveLength(1);
+    expect(body.match(/^unscanned:/gm)).toHaveLength(1);
+    expect(body).toContain("The runner died.");
+  });
+
+  test("a summary line that only opens with the label is the model's own content", () => {
+    const incomplete = { reason: "runner timed out", unscanned: [] };
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete,
+      summary_md: "  cause: runner timed out (indented snippet)\nCause: capitalised prose",
+    });
+    expect(body).toContain("  cause: runner timed out (indented snippet)");
+    expect(body).toContain("Cause: capitalised prose");
+    expect(body.match(/^cause:/gm)).toHaveLength(1);
+  });
+
   test("the closure section is appended last", () => {
     const body = buildReviewBody(output, 10, "## Prior findings recheck\n\nReassessed 1/1");
     expect(body.endsWith("\n\n## Prior findings recheck\n\nReassessed 1/1")).toBe(true);
