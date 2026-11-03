@@ -318,6 +318,12 @@ describe("buildReviewBody", () => {
     expect(body.match(/^cause: /gm)).toHaveLength(1);
   });
 
+  test("a narrative carrying its own fold is closed when the body truncates it", () => {
+    const narrative = `<details><summary>deep</summary>\n\n${"w".repeat(SUMMARY_MD_LIMIT * 2)}`;
+    const body = buildReviewBody({ ...output, summary_md: narrative });
+    expect((body.match(/<details>/g) ?? []).length).toBe((body.match(/<\/details>/g) ?? []).length);
+  });
+
   test("the closure section is appended last", () => {
     const body = buildReviewBody(output, 10, "## Prior findings recheck\n\nReassessed 1/1");
     expect(body.endsWith("\n\n## Prior findings recheck\n\nReassessed 1/1")).toBe(true);

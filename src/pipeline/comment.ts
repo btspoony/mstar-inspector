@@ -109,9 +109,19 @@ export const SUMMARY_MD_LIMIT = 8000;
  */
 export const REVIEW_BODY_LIMIT = 65000;
 
+/** Close every fold `text` leaves open — a lone `</details>` closes only one. */
+function closeOpenFolds(text: string): string {
+  const open = (text.match(/<details>/g) ?? []).length - (text.match(/<\/details>/g) ?? []).length;
+  if (open <= 0) return text;
+  return `${text}${Array.from({ length: open }, () => "\n\n</details>").join("")}`;
+}
+
 /** Truncate summary_md to the body budget (char-based; GitHub counts chars). */
 export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): string {
-  return md.length <= limit ? md : `${md.slice(0, limit - 1)}…`;
+  const cut = md.length <= limit ? md : `${md.slice(0, limit - 1)}…`;
+  // A narrative may carry its own `<details>`; a cut inside one would swallow
+  // the rest of the body.
+  return closeOpenFolds(cut);
 }
 
 
@@ -177,14 +187,15 @@ function boundIncomplete(fact: { reason: string; unscanned: readonly string[] })
  */
 function clampKeepingHead(text: string, budget: number): string {
   if (text.length <= budget) return text;
-  const close = "\n\n</details>";
   const head = text.slice(0, Math.max(0, budget - 1));
-  const folds = (head.match(/<details>/g) ?? []).length - (head.match(/<\/details>/g) ?? []).length;
-  const cut =
-    folds > 0 && budget - 1 - close.length > 0
-      ? head.slice(0, budget - 1 - close.length) + close
-      : head;
-  return `${cut}…`;
+  const open =
+    (head.match(/<details>/g) ?? []).length - (head.match(/<\/details>/g) ?? []).length;
+  if (open <= 0) return `${head}…`;
+  // Close EVERY fold the cut left open, paying their length out of the budget.
+  const closers = Array.from({ length: open }, () => "\n\n</details>").join("");
+  const room = budget - 1 - closers.length;
+  if (room <= 0) return `${head}…`;
+  return `${head.slice(0, room)}${closers}…`;
 }
 
 /**
