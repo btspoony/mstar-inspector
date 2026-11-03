@@ -482,46 +482,35 @@ describe("runSweep", () => {
     expect(result.thresholdBreached).toBe(false);
   });
 
-  test("recheck attribution rows never trip the alert; a runner row still counts", async () => {
-    const db = createMigratedTestD1();
-    const store = createFailureStore(db);
-    // Six degraded-but-successful rounds is a normal day: each writes one
-    // `recheck` row and nothing else. None of them is a review failure.
-    for (let i = 0; i < 6; i++) {
-      await store.record({ ...BASE, stage: "recheck", error: `skipped: budget: null` });
-    }
-    const { log, calls } = captureLog();
-    const quiet = await runSweep(db, { log });
-    expect(quiet.failures24h).toBe(0);
-    expect(quiet.thresholdBreached).toBe(false);
-    expect(calls).toHaveLength(0);
-    // The rows stay in D1 as attribution — only the paging count ignores them.
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 6 });
+  // `recheck` marks a budget skip, a dead seat or one invalid document; `usage`
+  // marks a usage_events insert that failed while the review kept going. Both
+  // are attribution, not review failures, and the paging count must ignore
+  // them identically — one parameterized case, one set of assertions.
+  for (const stage of ["recheck", "usage"] as const) {
+    test(`${stage} rows never page ops; a runner row still counts`, async () => {
+      const db = createMigratedTestD1();
+      const store = createFailureStore(db);
+      // Six degraded-but-successful rounds is a normal day: each writes one
+      // excluded row and nothing else. None of them is a review failure.
+      for (let i = 0; i < 6; i++) {
+        await store.record({ ...BASE, stage, error: `degraded-${i}` });
+      }
+      const { log, calls } = captureLog();
+      const quiet = await runSweep(db, { log });
+      expect(quiet.failures24h).toBe(0);
+      expect(quiet.thresholdBreached).toBe(false);
+      expect(calls).toHaveLength(0);
+      // The rows stay in D1 as attribution — only the paging count ignores them.
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 6 });
 
-    await store.record({ ...BASE, stage: "runner", error: "boom" });
-    const counted = await runSweep(db, { log: captureLog().log });
-    expect(counted.failures24h).toBe(1);
-    expect(counted.thresholdBreached).toBe(false);
-  });
-
-  test("usage-failure rows never page ops; a runner row still does", async () => {
-    const db = createMigratedTestD1();
-    const store = createFailureStore(db);
-    // Six `usage` rows are reviews that KEPT GOING after a usage_events insert
-    // failed — degraded accounting, not a review failure. They must not page.
-    for (let i = 0; i < 6; i++) {
-      await store.record({ ...BASE, stage: "usage", error: `usage_events insert failed: boom-${i}` });
-    }
-    const quiet = await runSweep(db, { log: captureLog().log });
-    expect(quiet.failures24h).toBe(0);
-    expect(quiet.thresholdBreached).toBe(false);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 6 });
-
-    await store.record({ ...BASE, stage: "runner", error: "boom" });
-    const counted = await runSweep(db, { log: captureLog().log });
-    expect(counted.failures24h).toBe(1);
-    expect(counted.thresholdBreached).toBe(false);
-  });
+      // A review failure beside them still counts, so the exclusion is by stage
+      // and not a blanket silence.
+      await store.record({ ...BASE, stage: "runner", error: "boom" });
+      const counted = await runSweep(db, { log: captureLog().log });
+      expect(counted.failures24h).toBe(1);
+      expect(counted.thresholdBreached).toBe(false);
+    });
+  }
 
   test("threshold boundary: exactly 5 in-window rows does not alert", async () => {
     const db = createMigratedTestD1();

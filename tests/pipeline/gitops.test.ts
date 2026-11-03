@@ -10,7 +10,9 @@
  * back with checkedOutShaCommand, so clone/diff/commit_id always agree.
  */
 
-import { readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
   buildGitOpsCommands,
@@ -24,7 +26,7 @@ import {
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
 import { shellCommand } from "../../src/pipeline/shell-command";
-import { RECHECK_FILE_MAX_BYTES, RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_FILE_MAX_BYTES, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 
 describe("gitops command builders", () => {
   test("valid inputs produce single-quoted, allowlisted commands", () => {
@@ -90,26 +92,23 @@ describe("gitops command builders", () => {
   });
 
   test("the shipped recheck reads emit content + newline + newline-terminated flag (P67-QC-006)", async () => {
-    // ONE oracle over both commands the consumer reads, each at its own path:
-    // the document read and the status read. The parser and the Worker's test
-    // double both assume a NEWLINE-TERMINATED overflow flag (`wc -c` writes its
-    // own trailing newline). Running the built strings through a local POSIX
-    // shell against real files turns that assumption into evidence — no
-    // network, no GitHub.
-    const priors = new Map<string, Uint8Array | null>();
-    for (const path of [RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH]) {
-      priors.set(path, await readFile(path).catch(() => null));
-    }
+    // ONE oracle over both commands the consumer reads: the document read and
+    // the status read. The parser and the Worker's test double both assume a
+    // NEWLINE-TERMINATED overflow flag (`wc -c` writes its own trailing
+    // newline). Running the built strings through a local POSIX shell against
+    // real files turns that assumption into evidence — no network, no GitHub.
+    // Every fixture lives under a private mkdtemp: no test writes a production
+    // path, so a crashed run can never clobber a real /tmp document.
+    const dir = await mkdtemp(join(tmpdir(), "mstar-recheck-read-"));
     try {
+      const overflowText = "b".repeat(RECHECK_FILE_MAX_BYTES + 1);
       for (const read of [
         {
-          command: () => readRecheckCommand(RECHECK_OUTPUT_PATH),
-          path: RECHECK_OUTPUT_PATH,
+          command: (path: string) => readRecheckCommand(path),
           fit: JSON.stringify({ schema: "mstar.recheck/v1", headSha: "x", results: [] }),
         },
         {
-          command: readRecheckStatusCommand,
-          path: RECHECK_STATUS_PATH,
+          command: (path: string) => readRecheckStatusCommand(path),
           fit: JSON.stringify({
             schema: "mstar.recheck-status/v1",
             headSha: "x",
@@ -120,14 +119,14 @@ describe("gitops command builders", () => {
             error: null,
           }),
         },
-      ] as const) {
-        const overflowText = "b".repeat(RECHECK_FILE_MAX_BYTES + 1);
+      ]) {
         for (const [text, flag, content] of [
           [read.fit, "0", read.fit],
           [overflowText, "1", overflowText.slice(0, RECHECK_FILE_MAX_BYTES)],
         ] as const) {
-          await Bun.write(read.path, text);
-          const proc = Bun.spawn(["sh", "-c", read.command()]);
+          const path = join(dir, `read-${flag}.json`);
+          await Bun.write(path, text);
+          const proc = Bun.spawn(["sh", "-c", read.command(path)]);
           const stdout = await new Response(proc.stdout).text();
           expect(await proc.exited).toBe(0);
           // The stream is newline-terminated and the flag is its LAST LINE;
@@ -141,11 +140,15 @@ describe("gitops command builders", () => {
         }
       }
     } finally {
-      for (const [path, prior] of priors) {
-        if (prior === null) await rm(path, { force: true });
-        else await Bun.write(path, prior);
-      }
+      await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test("production status reads still target RECHECK_STATUS_PATH (the constant the runner wrote)", () => {
+    // The optional path exists for the oracle above; the production call site
+    // passes nothing and must keep reading the exact constant. Pure string
+    // check — this test writes no file and touches no /tmp path.
+    expect(readRecheckStatusCommand()).toContain("'/tmp/mstar-recheck-status.json'");
   });
 
   test("runnerCommand appends the optional --recheck-out flag quoted", () => {

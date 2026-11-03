@@ -3453,6 +3453,59 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(findingRow.last_assessed_ms).toBeNull();
   });
 
+  test("a size-budget-excluded round sends nothing: rows are budget, and the round is still attributed", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // One open row whose own JSON exceeds the whole §7.3 input budget, so the
+    // builder excludes every target and no recheck input exists at all. The
+    // row was never sent — `invalid-output` would blame a seat that never ran.
+    const oversizedBody = "x".repeat(600 * 1024);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    db.raw
+      .prepare(
+        `INSERT INTO review_findings
+           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+            first_seen_round, last_seen_round, state, created_ms, updated_ms)
+         VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
+      )
+      .run(
+        TARGET_ROW_ID,
+        TEST_APP_ID,
+        TARGET_ORIGINAL.fingerprintHint,
+        JSON.stringify({ ...TARGET_ORIGINAL, body: oversizedBody }),
+        PRIOR_PUB_ID,
+        PRIOR_PUB_ID,
+        PRIOR_SHA,
+        PRIOR_SHA,
+        2_000,
+        2_000,
+      );
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // No seat ran: the runner exec must not carry --recheck-out.
+    expect(sandboxCalls.some((c) => c.cmd.includes("--recheck-out"))).toBe(false);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (budget)");
+    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
+    // Nothing was attempted, so there is no failure to record.
+    expect(failureRows(db)).toHaveLength(0);
+    // …but the silence is attributable: the round still logs its accounting.
+    const line = logLines.find((l) => l.msg.startsWith("recheck round accounted — no input sent"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
+    const findingRow = db.raw.query("SELECT state, last_assessed_ms FROM review_findings").get() as {
+      state: string;
+      last_assessed_ms: number | null;
+    };
+    expect(findingRow.state).toBe("open");
+    expect(findingRow.last_assessed_ms).toBeNull();
+  });
+
   test("a status from another HEAD attributes nothing: the row stays omitted, never invalid-output", async () => {
     reset();
     diffStdout = VALID_DIFF;
@@ -3556,6 +3609,50 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       expect(rows[0]!.error).toBe(`failed: ${reason}: ${error}`.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS));
       expect(String(rows[0]!.error)).toHaveLength(RECHECK_STATUS_ERROR_MAX_CHARS);
     }
+  });
+
+  test("a secret straddling the status cap is redacted at parse time, so no fragment reaches D1 or the log", async () => {
+    // `AIza` needs 30 trailing chars to match, so a slice-first parser would cut
+    // this token at the cap and persist the leading fragment that no longer
+    // matches any shape. Redaction at parse time removes the whole token first.
+    // Sized so exactly 30 chars of the token land inside the parse-time cap:
+    // `AIza` needs 30 trailing chars, so the fragment no longer matches and
+    // would survive a slice-first parser as a bare, unrecognizable prefix.
+    const head = "y".repeat(RECHECK_STATUS_ERROR_MAX_CHARS - 30);
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    recheckFileContent = "";
+    recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "seat-failed",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: `${head} AIza${"C".repeat(40)} tail`,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    const persisted = String(rows[0]!.error);
+    // The raw token crossed the cap; no recognizable fragment of it survives.
+    expect(persisted).not.toContain("AIza");
+    expect(persisted.length).toBeLessThanOrEqual(RECHECK_STATUS_ERROR_MAX_CHARS);
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    const logged = String(line.fields.recheck_error);
+    expect(logged).not.toContain("AIza");
+    expect(logged).toContain("[REDACTED]");
+    // The composed D1 text is capped again, so only the marker's prefix survives
+    // there — enough to prove the redaction replaced the token.
+    expect(persisted).toContain("[REDACT");
   });
 
   test("an ok seat status with a valid document records no failure and keeps the accounting unchanged", async () => {

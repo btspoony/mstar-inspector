@@ -139,7 +139,6 @@ const DISPOSITIONS: ReadonlySet<string> = new Set(['addressed', 'dismissed', 'un
 const REASONS: ReadonlySet<string> = new Set([ADDRESSED_REASON, DISMISSED_REASON, ...UNVERIFIABLE_REASONS]);
 const EVIDENCE_KINDS: ReadonlySet<string> = new Set(['current-code', 'removed-code', 'replaced-code']);
 
-const QUOTE_MIN_CHARS = 1;
 const QUOTE_MAX_CHARS = 4096;
 const EXPLANATION_MAX_CHARS = 1200;
 
@@ -186,6 +185,18 @@ export function normalizeQuoteText(text: string): string {
   return unified.endsWith('\n') ? unified.slice(0, -1) : unified;
 }
 
+/**
+ * The quote a proof may cite: normalized, and never blank. A whitespace-only
+ * quote (`" "`, `"\t"`, `"\n"`) normalizes to `""`, which byte-equals a BLANK
+ * cited line — without this guard such a quote proves closure against any
+ * empty line. Null when no visible character survives; the length bound below
+ * counts THIS text, so padding cannot smuggle a citation past the cap either.
+ */
+function visibleQuote(quote: string): string | null {
+  const normalized = normalizeQuoteText(quote);
+  return normalized.trim() === '' ? null : normalized;
+}
+
 /** Line-segment quote: `lines[start..end]` joined with '\n'. */
 function segmentQuote(lines: string[], startLine: number, start: number, endLine: number): string | null {
   const from = startLine - start;
@@ -215,9 +226,10 @@ function addressedProofError(
   if (evidence.endLine < evidence.startLine) return 'evidence range is not ordered (endLine < startLine)';
   if (evidence.startLine < 1) return 'evidence range is not positive';
 
-  const quoteLen = evidence.quote.length;
-  if (quoteLen < QUOTE_MIN_CHARS || quoteLen > QUOTE_MAX_CHARS) {
-    return `evidence.quote must be ${QUOTE_MIN_CHARS}–${QUOTE_MAX_CHARS} chars, got ${quoteLen}`;
+  const quote = visibleQuote(evidence.quote);
+  if (quote === null) return 'evidence.quote must be nonblank (visible characters)';
+  if (quote.length > QUOTE_MAX_CHARS) {
+    return `evidence.quote must be 1–${QUOTE_MAX_CHARS} visible chars, got ${quote.length}`;
   }
 
   const oldEnd = slice.oldStart + slice.oldLines.length - 1;
@@ -231,7 +243,7 @@ function addressedProofError(
     if (expected === null) {
       return `current-code range ${evidence.startLine}-${evidence.endLine} is not inside the hunk new side (${slice.newStart}-${newEnd})`;
     }
-    if (normalizeQuoteText(expected) !== normalizeQuoteText(evidence.quote)) {
+    if (normalizeQuoteText(expected) !== quote) {
       return 'current-code quote does not match the cited new-side lines';
     }
     return null;
@@ -243,7 +255,7 @@ function addressedProofError(
   if (expected === null) {
     return `${evidence.kind} range ${evidence.startLine}-${evidence.endLine} is not inside the slice old side (${slice.oldStart}-${oldEnd})`;
   }
-  if (normalizeQuoteText(expected) !== normalizeQuoteText(evidence.quote)) {
+  if (normalizeQuoteText(expected) !== quote) {
     return `${evidence.kind} quote does not match the cited old-side lines`;
   }
 
@@ -266,7 +278,7 @@ function addressedProofError(
     // new side — otherwise the code was not removed by this change. Both
     // sides are normalized, so a trailing blank cannot disguise present code.
     const newSide = normalizeQuoteText(slice.newLines.join('\n'));
-    if (slice.newLines.length > 0 && newSide.includes(normalizeQuoteText(evidence.quote))) {
+    if (slice.newLines.length > 0 && newSide.includes(quote)) {
       return 'removed-code cites old lines still present on the hunk new side';
     }
     return null;
@@ -293,8 +305,10 @@ function evidenceShapeError(
     return `${where}.evidence range must be integers`;
   }
   if (typeof evidence.quote !== 'string') return `${where}.evidence.quote must be a string`;
-  if (evidence.quote.length < QUOTE_MIN_CHARS || evidence.quote.length > QUOTE_MAX_CHARS) {
-    return `${where}.evidence.quote must be ${QUOTE_MIN_CHARS}–${QUOTE_MAX_CHARS} chars`;
+  const quote = visibleQuote(evidence.quote);
+  if (quote === null) return `${where}.evidence.quote must be nonblank (visible characters)`;
+  if (quote.length > QUOTE_MAX_CHARS) {
+    return `${where}.evidence.quote must be 1–${QUOTE_MAX_CHARS} visible chars`;
   }
   if (
     typeof evidence.explanation !== 'string' || evidence.explanation.trim().length === 0 ||

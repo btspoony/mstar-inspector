@@ -120,6 +120,39 @@ describe("validateRecheckDoc — per-row degradation", () => {
     expect(outcome.doc.results[0]!.disposition).toBe("addressed");
     expect(outcome.rejected).toHaveLength(0);
   });
+
+  test("a whitespace-only quote cannot cite a blank line and close the row", () => {
+    // `" "` normalizes to `""`, which byte-equals this slice's BLANK new-side
+    // line 9 — so normalization alone would let an empty citation prove a fix.
+    const blankLine: EvidenceSlice = {
+      ...HUNK,
+      oldLines: ["const a = 1;", "// spacer", "const c = 3;"],
+      newLines: ["const a = 1;", "", "const c = 3;"],
+    };
+    const survivor = blankLine.newLines.join("\n");
+    for (const quote of [" ", "\t", "\n"]) {
+      const blankCitation = {
+        ...addressed("row-1", quote),
+        evidence: { ...addressed("row-1", quote).evidence!, startLine: 9, endLine: 9 },
+      };
+      const outcome = validateRecheckDoc(
+        {
+          schema: "mstar.recheck/v1",
+          headSha: SHA,
+          results: [blankCitation, addressed("row-2", survivor)],
+        },
+        input({ targets: [target(1), target(2)], evidence: [blankLine] }),
+      );
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      // The blank citation is dropped; the document and the honest row stand.
+      expect(outcome.rejected).toHaveLength(1);
+      expect(outcome.rejected[0]!.rowId).toBe("row-1");
+      expect(outcome.rejected[0]!.error).toContain("nonblank");
+      expect(outcome.doc.results.map((row) => row.rowId)).toEqual(["row-2"]);
+    }
+  });
 });
 
 describe("normalizeQuoteText", () => {

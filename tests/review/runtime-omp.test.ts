@@ -55,7 +55,7 @@ import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, vali
 import type { AgentRuntime, ReviewLevel } from "../../packages/shared/src/runtime";
 import type { SupervisedSeat } from "../../packages/runner/src/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
-import type { RecheckDoc, RecheckInput } from "../../packages/shared/src/recheck-wire";
+import { RECHECK_STATUS_ERROR_MAX_CHARS, type RecheckDoc, type RecheckInput } from "../../packages/shared/src/recheck-wire";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
 /**
@@ -2338,10 +2338,14 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 
   test("a long secret-bearing seat error is redacted BEFORE it is truncated", async () => {
-    // The secret straddles the 500-char cut: slicing first would leave
-    // `ghp_…` as a fragment, so the status is redacted first and bounded second.
-    const token = `ghp_${"A".repeat(80)}`;
-    seatResults = [{ reject: `${"x".repeat(480)} ${token} tail` }, { data: seatPayload() }];
+    // The secret straddles the bound. `AIza…` needs 30 trailing chars to match,
+    // so slicing FIRST would leave `AIzaBBBBBB` — too short for the pattern —
+    // surviving in the status; redacting first replaces the whole token and the
+    // slice only ever sees the marker's prefix. Padding is sized off
+    // RECHECK_STATUS_ERROR_MAX_CHARS rather than a literal.
+    const token = `AIza${"B".repeat(40)}`;
+    const padding = "x".repeat(RECHECK_STATUS_ERROR_MAX_CHARS - 10);
+    seatResults = [{ reject: `${padding} ${token} tail` }, { data: seatPayload() }];
     const spy = spyOn(console, "error").mockImplementation(() => {});
     let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
     try {
@@ -2351,9 +2355,10 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     }
 
     const error = result.recheckStatus?.error ?? "";
-    expect(error.length).toBeLessThanOrEqual(500);
-    expect(error).not.toContain("ghp_");
-    expect(error).toContain("[REDACTED]");
+    expect(error.length).toBe(RECHECK_STATUS_ERROR_MAX_CHARS);
+    // No recognizable fragment of the key survives the cut.
+    expect(error).not.toContain("AIza");
+    expect(error).toContain("[REDACT");
   });
 
   test("row-level drops are counted: two rejected rows still yield an ok status with rejected: 2", async () => {

@@ -18,7 +18,10 @@ category: Fixed
   intersection and the structural-change requirement still apply — and
   `removed-code`'s "old lines are gone from the new side" test is normalized the
   same way, so one trailing space on still-present code can no longer forge a
-  closure that was never fixed.
+  closure that was never fixed. Normalization never rescues a BLANK quote: a
+  whitespace-only `quote` normalizes to `""`, which byte-equals a blank cited
+  line, so it is now rejected outright and the 1–4096 bound counts the visible
+  text.
 - **A lost recheck round is now attributable.** The seat writes a bounded
   `mstar.recheck-status/v1` document on every exit path — `ok` with the rejected
   row IDs and their count, `skipped` when the budget left no room, or `failed`
@@ -38,8 +41,12 @@ category: Fixed
   `skipped` status now accounts every selected row as `unverifiable/budget`
   (never sent) instead of `invalid-output` (sent and answered badly), and the
   worker bounds a status `reason`/`error` at parse time so the D1 failure text
-  and the log field carry one capped value. A status from another HEAD — or one
-  naming a row this round never sent — attributes nothing.
+  and the log field carry one capped value. The same honour applies to the
+  worker's own §7.3 size budget: a row the budget excluded from the input was
+  never sent either, so it is `budget` even when no document exists — and the
+  round still emits its accounting line, naming the exclusion, instead of
+  silently accounting every row as an unanswered `invalid-output`. A status from
+  another HEAD — or one naming a row this round never sent — attributes nothing.
 - **A recheck document-write failure is recorded, not hidden.** The runner
   writes the round status only after the document lands; a failed document
   write records `failed/write-failed` instead of the seat's `ok`, so D1 can no
@@ -68,7 +75,9 @@ category: Fixed
   空白不会再让正确引用失效。其他资格规则不变：行号范围、slice 归属与完整性、
   原始范围相交、结构变更要求仍然生效——并且 `removed-code` 的「旧行已从新侧
   消失」判断同样规范化，因此对仍然存在的代码多加一个尾随空格，再也无法伪造
-  一个从未真正修复的结案。
+  一个从未真正修复的结案。规范化永不挽救空白引用：纯空白的 `quote` 会规范化为
+  `""`，与空白的被引用行逐字节相等，因此现在直接拒绝，1–4096 的上限也只统计可见
+  字符。
 - **丢失的重审轮现在可归因。** 席位在每条退出路径上都会写出有界的
   `mstar.recheck-status/v1` 文档——`ok` 携带被拒行 ID 与行数、预算不足时
   `skipped`、失败时带上有界的 reason/error——worker 会在读取文档的同时读取它。
@@ -83,8 +92,11 @@ category: Fixed
 - **预算跳过的轮次不再被记成无效输出。** 席位自己写的 `skipped` 状态现在把每个
   选中行记为 `unverifiable/budget`（根本没发送），而不是 `invalid-output`
   （发送后被答坏）；worker 在解析时就把状态的 `reason`/`error` 截断，因此 D1 的
-  失败文本与日志字段是同一个上限值。别的 HEAD 写下的状态、或点名了本轮从未发送
-  的行的状态，都不产生任何归因。
+  失败文本与日志字段是同一个上限值。worker 自己的 §7.3 尺寸预算同理：被预算排除在
+  输入之外的行同样从未发送，因此即使没有文档也应记为 `budget`——并且该轮仍会输出
+  自己的账目行，点名这次排除，而不是把每一行都静默记成无人应答的
+  `invalid-output`。别的 HEAD 写下的状态、或点名了本轮从未发送的行的状态，都不产生
+  任何归因。
 - **重审文档写失败会被记录，而不是被掩盖。** runner 只有在文档写成功之后才写轮次
   状态；文档写失败时记录 `failed/write-failed`，而不是席位的 `ok`，因此 D1 不会
   再把「什么都没发布」的轮次留成干净记录。状态错误的脱敏使用 worker 同一份凭据

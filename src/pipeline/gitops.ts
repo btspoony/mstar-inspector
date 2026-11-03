@@ -184,13 +184,15 @@ export function readRecheckCommand(path: string): ShellCommand {
 
 /**
  * Bounded read of the seat's recheck STATUS document — the same audited
- * transport (byte bound + overflow flag) over the fixed
- * RECHECK_STATUS_PATH, never a caller-chosen path. A missing file fails the
- * `head` chain exactly like the document read, which the consumer maps to
- * "no status recorded".
+ * transport (byte bound + overflow flag) as the document read. The production
+ * path is the fixed RECHECK_STATUS_PATH (the same constant the runner wrote);
+ * the optional parameter exists only so a shell-level oracle can point at a
+ * temporary file instead of the real one. A missing file fails the `head`
+ * chain exactly like the document read, which the consumer maps to "no status
+ * recorded".
  */
-export function readRecheckStatusCommand(): ShellCommand {
-  return readRecheckCommand(RECHECK_STATUS_PATH);
+export function readRecheckStatusCommand(path: string = RECHECK_STATUS_PATH): ShellCommand {
+  return readRecheckCommand(path);
 }
 
 /** Main-flow commands in execution order (clone → sha → diff → numstat → runner). */

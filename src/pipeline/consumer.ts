@@ -1037,17 +1037,19 @@ function reconcileRecheckRound(input: {
       assessment = forceUnverifiable(target.rowId, "invalid-output");
     } else if (docResult === undefined) {
       // Omitted selected row: no recheck ran for it. Honest conservative
-      // accounting by WHY — the seat's own budget skip, invalid/absent
-      // document, §7.3 size budget, or omitted from an otherwise valid
-      // document. Never "assessed".
-      const reason: Assessment["reason"] =
-        status?.outcome === "skipped"
+      // accounting by WHY — the §7.3 size budget excluded it from the input
+      // (so it was never sent), the seat's own budget skip, invalid/absent
+      // document, or omitted from an otherwise valid document. Never
+      // "assessed". The size budget wins over `doc === null`: when it excluded
+      // every target nothing was sent, so `invalid-output` would blame a seat
+      // that never ran.
+      const reason: Assessment["reason"] = budgetExcluded.has(target.rowId)
+        ? "budget"
+        : status?.outcome === "skipped"
           ? "budget"
           : doc === null
             ? "invalid-output"
-            : budgetExcluded.has(target.rowId)
-              ? "budget"
-              : "omitted";
+            : "omitted";
       assessment = forceUnverifiable(target.rowId, reason);
     } else {
       assessment = { ...docResult };
@@ -1165,6 +1167,17 @@ async function boundedRead(sandbox: ReviewSandbox, command: ReturnType<typeof re
 }
 
 /**
+ * A seat-authored `reason`/`error` bounded for the D1 failure text and the log
+ * field. Redaction runs FIRST: slicing first would cut a secret that straddles
+ * the cap and persist its surviving fragment. `null` for a non-string field.
+ */
+function boundedStatusText(value: unknown): string | null {
+  return typeof value === "string"
+    ? redactSecrets(value).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS)
+    : null;
+}
+
+/**
  * The seat's recheck status document (`RecheckStatus`), or null when the file
  * is absent/unreadable or carries a foreign schema or HEAD. Anything but this
  * round's own status for this HEAD is no attribution at all — never a
@@ -1186,18 +1199,13 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
       rejected_row_ids: Array.isArray(value["rejected_row_ids"])
         ? value["rejected_row_ids"].filter((id): id is string => typeof id === "string")
         : [],
-      // `reason`/`error` are bounded HERE so the D1 failure text and the log
-      // field carry one capped value — the runner already redacts-then-bounds
-      // its own copy, but a foreign or hand-rolled status must not be able to
-      // push an unbounded string into either sink.
-      reason:
-        typeof value["reason"] === "string"
-          ? value["reason"].slice(0, RECHECK_STATUS_ERROR_MAX_CHARS)
-          : null,
-      error:
-        typeof value["error"] === "string"
-          ? value["error"].slice(0, RECHECK_STATUS_ERROR_MAX_CHARS)
-          : null,
+      // `reason`/`error` are redacted and bounded HERE so the D1 failure text
+      // and the log field carry one capped value — the runner already does the
+      // same for its own copy, but a foreign or hand-rolled status must not be
+      // able to push an unbounded string, or a half-redacted secret, into
+      // either sink. The later exact-value pass still applies.
+      reason: boundedStatusText(value["reason"]),
+      error: boundedStatusText(value["error"]),
     };
   } catch {
     return null;
@@ -2950,7 +2958,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // §7.8 attribution: ONE line per recheck round carrying the seat's own
     // status next to this round's accounting. A lost round therefore leaves a
     // D1 failure row and this line even when the container's stderr is gone.
-    if (recheckInput !== undefined) {
+    // Emitted whenever rows were selected: a round the §7.3 size budget emptied
+    // sent nothing, and without this line that silence would be invisible.
+    if (targets.length > 0) {
       const status = recheck?.status ?? null;
       const recheckOutcome = status?.outcome ?? "absent";
       const recheckDetail = redactExactSecrets(
@@ -2972,11 +2982,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           rejected: rejectedRowIds.size,
           assessed: reconciled.assessedCount,
         },
-        recheckDoc === null
-          ? "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
-          : "recheck round accounted",
+        recheckInput !== undefined
+          ? recheckDoc === null
+            ? "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
+            : "recheck round accounted"
+          : "recheck round accounted — no input sent: every selected row exceeded the §7.3 size budget",
       );
-      if (recheckDoc === null || recheckOutcome === "failed") {
+      // A failure row names a round that RAN and produced nothing usable. A
+      // round that sent nothing has no failure to record — its rows are
+      // already accounted as `budget` in the closure section.
+      if (recheckInput !== undefined && (recheckDoc === null || recheckOutcome === "failed")) {
         // Best-effort: the insert must never mask the round (AL-6 pattern).
         try {
           await deps.failureStore.record({
