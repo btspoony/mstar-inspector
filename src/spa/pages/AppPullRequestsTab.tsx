@@ -399,6 +399,16 @@ function reviewAttribution(locale: SpaBoot["locale"], review: PullRequestReview)
 }
 
 /**
+ * A fold control's accessible name: the action plus the record it folds, so
+ * the nine toggles on this face are told apart by what they open rather than
+ * by nine identical "Expand"s.
+ */
+function foldLabel(locale: SpaBoot["locale"], open: boolean, record: string): string {
+  const action = t(locale, open ? "pullRequests.collapse" : "pullRequests.expand");
+  return record === "" ? action : `${action} — ${record}`;
+}
+
+/**
  * The detail face — pure `t()` + data rendering, no window/router access.
  *
  * One bounded first screen instead of one expanding column: the PR's address
@@ -431,6 +441,9 @@ export function PullRequestDetailView({
   const groups = severityGroups(locale, detail.findings);
   // Reviews arrive newest first from the store, so the first row is the latest.
   const latestReview = detail.reviews[0] ?? null;
+  // Both fields can be empty (a v1 payload records neither): the attribution is
+  // then "", and an empty meta item or span would read as a missing value.
+  const latestAttribution = latestReview === null ? "" : reviewAttribution(locale, latestReview);
   const copyAvailable = typeof navigator !== "undefined" && "clipboard" in navigator;
   // Radix hands the trigger's value back as a string; only our three triggers
   // can reach this, but the guard keeps the narrowing honest.
@@ -526,8 +539,11 @@ export function PullRequestDetailView({
       meta: formatRelativeTime(failure.created_at, locale),
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const shownHistory = history.slice(0, TIMELINE_LIMIT - 1);
+  // The cap is silent unless it says so: the row below names what it dropped.
+  const hiddenHistory = history.length - shownHistory.length;
   const activity: ActivityEntry[] = [
-    ...history.slice(0, TIMELINE_LIMIT - 1),
+    ...shownHistory,
     {
       at: pr.first_seen_at,
       key: "first-seen",
@@ -570,10 +586,10 @@ export function PullRequestDetailView({
               {formatRelativeTime(pr.last_seen_at, locale)}
             </span>
           </span>
-          {latestReview === null ? null : (
+          {latestAttribution === "" ? null : (
             <span>
               {t(locale, "pullRequests.latestReview")}{" "}
-              <span className="text-(--text-muted)">{reviewAttribution(locale, latestReview)}</span>
+              <span className="text-(--text-muted)">{latestAttribution}</span>
             </span>
           )}
         </div>
@@ -667,6 +683,7 @@ export function PullRequestDetailView({
                                 className="self-start text-(--text-muted)"
                                 aria-expanded={open}
                                 aria-controls={id}
+                                aria-label={foldLabel(locale, open, finding.title)}
                                 onClick={() =>
                                   setOpenFindings((previous) => ({ ...previous, [finding.finding_id]: !open }))
                                 }
@@ -700,6 +717,7 @@ export function PullRequestDetailView({
                     const reviewKey = `${review.reviewed_at}-${review.head_sha}-${index}`;
                     const open = openReviews[reviewKey] ?? index === 0;
                     const id = bodyId(reviewKey);
+                    const attribution = reviewAttribution(locale, review);
                     return (
                       <li
                         key={reviewKey}
@@ -712,7 +730,11 @@ export function PullRequestDetailView({
                           <StatusBadge tone={review.verdict === "ship it" ? "success" : "danger"}>
                             {review.verdict}
                           </StatusBadge>
-                          <span className="text-(--text-muted)">{reviewAttribution(locale, review)}</span>
+                          {/* An unattributed review (v1 records no model) gets
+                              no empty span — the row starts at its verdict. */}
+                          {attribution === "" ? null : (
+                            <span className="text-(--text-muted)">{attribution}</span>
+                          )}
                           <span className="ml-auto tabular-nums text-(--text-faint)" title={review.reviewed_at}>
                             {formatRelativeTime(review.reviewed_at, locale)}
                           </span>
@@ -739,6 +761,11 @@ export function PullRequestDetailView({
                           className="self-start text-(--text-muted)"
                           aria-expanded={open}
                           aria-controls={id}
+                          aria-label={foldLabel(
+                            locale,
+                            open,
+                            [review.verdict, review.head_sha.slice(0, 7)].filter((part) => part !== "").join(" · "),
+                          )}
                           onClick={() => setOpenReviews((previous) => ({ ...previous, [reviewKey]: !open }))}
                         >
                           <ChevronRight aria-hidden="true" className={cn("transition-transform", open && "rotate-90")} />
@@ -850,6 +877,11 @@ export function PullRequestDetailView({
                     </div>
                   </li>
                 ))}
+                {hiddenHistory > 0 ? (
+                  <li className="pl-3.5 text-(length:--typo-label-12-size) text-(--text-faint)">
+                    {t(locale, "pullRequests.timelineHidden", { count: hiddenHistory })}
+                  </li>
+                ) : null}
               </ol>
             </section>
           </aside>

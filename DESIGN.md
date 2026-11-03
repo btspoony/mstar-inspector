@@ -1107,7 +1107,7 @@ their own beyond what the component layer already declares:
   one danger dot per actionable family), severity-ruled finding cards grouped
   must-fix → should-fix → nit → other, review and failure records with folded
   bodies, and an aside carrying the PR facts plus one merged activity timeline.
-  The aside is full-width below `xl` and `w-64` at `xl` and up. A **proposal
+  The aside is full-width below `xl` and 256px wide at `xl` and up. A **proposal
   reference, not a shipped component**:
   [`src/design-system/prototypes/record-detail.html`](src/design-system/prototypes/record-detail.html)
   is the approved static prototype (it reads this document's tokens), while the

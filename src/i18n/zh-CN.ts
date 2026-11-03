@@ -167,6 +167,8 @@ export const zhCN: Dictionary = {
     timelineReview: "审查 · {verdict}",
     timelineFailure: "审查失败 · {stage}",
     timelineFirstSeen: "PR 出现",
+    /** 上限截断时，末尾说明还有多少条更早的事件未显示。 */
+    timelineHidden: "另有 {count} 条更早事件未显示",
   },
   /** Per-App 洞察标签页。7/30/90 窗口分段与仓库筛选语义保持不变。 */
   insights: {

@@ -103,8 +103,16 @@ export function stylesheetConsumers(dirs: readonly string[] = CONSUMER_ROOTS): s
   return dirs.flatMap((dir) => walkConsumers(dir)).sort();
 }
 
-/** The consumers under one root, repo-relative. */
+/**
+ * The consumers under one root, repo-relative. Roots are absolute paths into
+ * this checkout, outputs are repo-relative: a relative root cannot be walked
+ * (it would resolve against the CWD and match nothing), so it fails loudly
+ * instead of reading as an empty root.
+ */
 function walkConsumers(dir: string): string[] {
+  if (!path.isAbsolute(dir)) {
+    throw new Error(`consumer root must be absolute, got "${dir}"`);
+  }
   if (!existsSync(dir)) return [];
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -122,7 +130,9 @@ function walkConsumers(dir: string): string[] {
 /**
  * The declared roots that contributed no consumer, repo-relative. One predicate
  * for both callers: the gate fails a link per declared root, and the test holds
- * the same roots to the same rule.
+ * the same roots to the same rule. Roots must be absolute paths into this
+ * checkout; a relative one is a caller bug and throws rather than reading as
+ * empty.
  */
 export function rootsWithoutConsumers(dirs: readonly string[] = CONSUMER_ROOTS): string[] {
   return dirs.filter((dir) => walkConsumers(dir).length === 0).map((dir) => path.relative(ROOT, dir));

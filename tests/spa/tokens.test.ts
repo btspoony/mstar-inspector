@@ -548,8 +548,21 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // stylesheet and HTML shell exists — not the two this link first listed.
     const consumers = stylesheetConsumers();
     expect(consumers.length).toBeGreaterThan(0);
-    // Per root, not just in aggregate: a root that contributes nothing (moved,
-    // renamed, emptied) fails the gate, so the test holds the same predicate.
+    // The predicate itself, on a root it must reject: an empty or missing root
+    // is the drift (moved, renamed, emptied) the link exists to catch. Stated
+    // explicitly, so the rule is proven even while the live tree is healthy.
+    const root = fileURLToPath(new URL("../../", import.meta.url));
+    const missing = join(root, "src/does-not-exist");
+    expect(rootsWithoutConsumers([missing])).toEqual(["src/does-not-exist"]);
+    // A root with a consumer contributes nothing to that list.
+    expect(rootsWithoutConsumers([join(root, "src/spa")])).toEqual([]);
+    // A relative root would resolve against the CWD and read as empty: loud
+    // failure instead, so a caller bug cannot masquerade as a moved tree.
+    expect(() => rootsWithoutConsumers(["src/spa"])).toThrow(/must be absolute/);
+    // And per root, not just in aggregate: every DECLARED root contributes.
+    // The prototypes forest is the one a dropped `CONSUMER_ROOTS` entry would
+    // silently stop checking, so its presence is asserted, not assumed.
+    expect(consumers.some((file) => file.startsWith("src/design-system/prototypes/"))).toBe(true);
     expect(rootsWithoutConsumers()).toEqual([]);
     for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");

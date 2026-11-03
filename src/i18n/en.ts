@@ -191,6 +191,8 @@ export const en = {
     timelineReview: "Review · {verdict}",
     timelineFailure: "Review failed · {stage}",
     timelineFirstSeen: "PR first seen",
+    /** The trailing row when the cap dropped older events. */
+    timelineHidden: "{count} earlier events not shown",
   },
   /**
    * Per-App insights tab (the 洞察 face). The records copy returns with

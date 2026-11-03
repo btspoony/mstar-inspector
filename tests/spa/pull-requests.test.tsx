@@ -12,6 +12,7 @@
  * renders the error face with a retry.
  */
 import { describe, expect, test } from "bun:test";
+import { Window } from "happy-dom";
 import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -237,11 +238,23 @@ describe("pull request detail face (static SSR)", () => {
   const render = (detail: PullRequestDetail) =>
     renderToStaticMarkup(createElement(PullRequestDetailView, { locale: "en", detail }));
 
+  /**
+   * The same static markup parsed into a queryable container: the structural
+   * assertions below read roles, attributes and classes off the DOM, so a
+   * prop reorder or an element swap cannot break a behavioural claim. The cast
+   * is happy-dom's own node types crossing into lib.dom's.
+   */
+  const renderDom = (detail: PullRequestDetail): HTMLElement => {
+    const win = new Window();
+    win.document.body.innerHTML = render(detail);
+    return win.document.body as unknown as HTMLElement;
+  };
+
   /** The family triggers in render order: selected state + their text content. */
-  const familyTabs = (markup: string) =>
-    [...markup.matchAll(/<button[^>]*role="tab"[^>]*>([\s\S]*?)<\/button>/g)].map((match) => ({
-      selected: /aria-selected="true"/.test(match[0]),
-      text: (match[1] ?? "").replace(/<[^>]*>/g, ""),
+  const familyTabs = (container: HTMLElement) =>
+    [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) => ({
+      selected: tab.getAttribute("aria-selected") === "true",
+      text: tab.textContent ?? "",
     }));
 
   /** The positions of `needles` in `markup`, asserted to be present first. */
@@ -278,16 +291,15 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("the band wears the danger face for a non-shipping verdict and any failure", () => {
-    const tones = [...render(DETAIL).matchAll(/data-slot="metric-value" class="([^"]*)"/g)].map(
-      (match) => match[1] ?? "",
-    );
+    const values = [...renderDom(DETAIL).querySelectorAll('[data-slot="metric-value"]')];
+    expect(values).toHaveLength(4);
     // Verdict (needs fixes) and failures (1); a review count is never an alert.
-    expect(tones.filter((classes) => classes.includes("--tone-danger-fg"))).toHaveLength(2);
+    expect(values.filter((value) => value.classList.contains("text-(--tone-danger-fg)"))).toHaveLength(2);
   });
 
   test("a must-fix finding opens the findings family, grouped by severity", () => {
     const markup = render(DETAIL);
-    const tabs = familyTabs(markup);
+    const tabs = familyTabs(renderDom(DETAIL));
     expect(tabs.map((tab) => tab.selected)).toEqual([true, false, false]);
     expect(tabs[0]?.text.startsWith(t("en", "pullRequests.findings"))).toBe(true);
     // Counts are text, so the trigger reads "Findings3".
@@ -339,35 +351,25 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   /**
-   * Fold pairs read off the serialized markup: each control's `aria-expanded`,
-   * the body its `aria-controls` names, and whether that body carries `hidden`.
-   * Bodies stay mounted, so the attribute — not presence — is the fold.
+   * Fold pairs read off the rendered container: each fold control's
+   * `aria-expanded`, the body its `aria-controls` names, and whether that body
+   * carries `hidden`. Bodies stay mounted, so the attribute — not presence — is
+   * the fold.
    */
-  const foldPairs = (markup: string) => {
-    const bodies = new Map(
-      [...markup.matchAll(/<p id="([^"]+)"([^>]*)>/g)].map((match) => [
-        match[1] ?? "",
-        /\bhidden=""/.test(match[2] ?? ""),
-      ]),
-    );
-    return [...markup.matchAll(/<button([^>]*)>/g)].flatMap((match) => {
-      const attrs = match[1] ?? "";
-      const expanded = /aria-expanded="(true|false)"/.exec(attrs);
-      const controls = /aria-controls="([^"]+)"/.exec(attrs);
-      if (expanded === null || controls === null) return [];
-      return [
-        {
-          expanded: expanded[1] === "true",
-          hidden: bodies.get(controls[1] as string),
-        },
-      ];
+  const foldPairs = (container: HTMLElement) =>
+    [...container.querySelectorAll<HTMLElement>("button[aria-expanded][aria-controls]")].map((control) => {
+      const id = control.getAttribute("aria-controls") ?? "";
+      return {
+        expanded: control.getAttribute("aria-expanded") === "true",
+        hidden: container.querySelector<HTMLElement>(`#${id}`)?.hidden,
+      };
     });
-  };
 
   test("only the must-fix body opens; every other group starts folded", () => {
     const markup = render(DETAIL);
+    const container = renderDom(DETAIL);
     // Fold order follows the group order: must-fix, should-fix, nit.
-    const pairs = foldPairs(markup);
+    const pairs = foldPairs(container);
     expect(pairs.map((pair) => pair.expanded)).toEqual([true, false, false]);
     // Every body is resolved by its control, and `hidden` is the fold — the
     // folded text stays in the DOM rather than dropping out of the markup.
@@ -376,8 +378,19 @@ describe("pull request detail face (static SSR)", () => {
     expect(markup).toContain("The refresh cookie is set with secure only.");
     expect(markup).toContain("The variable holds the pending redirect target.");
     // One expanded control (the must-fix finding), two folded ones.
-    expect(markup.match(/aria-expanded="true"/g) ?? []).toHaveLength(1);
-    expect(markup.match(/aria-expanded="false"/g) ?? []).toHaveLength(2);
+    expect(pairs.filter((pair) => pair.expanded)).toHaveLength(1);
+    expect(pairs.filter((pair) => !pair.expanded)).toHaveLength(2);
+    // Each toggle names the record it folds, so identical "Expand" labels do
+    // not leave several controls indistinguishable.
+    expect(
+      [...container.querySelectorAll("button[aria-expanded][aria-label]")].map(
+        (control) => control.getAttribute("aria-label") ?? "",
+      ),
+    ).toEqual([
+      `${t("en", "pullRequests.collapse")} — Use a parameterized query`,
+      `${t("en", "pullRequests.expand")} — Session cookie lacks HttpOnly`,
+      `${t("en", "pullRequests.expand")} — Rename tmp to pending`,
+    ]);
   });
 
   test("a clean detail opens on the reviews family with the latest summary readable", () => {
@@ -412,16 +425,26 @@ describe("pull request detail face (static SSR)", () => {
       findings: [],
     };
     const markup = render(clean);
-    expect(familyTabs(markup).map((tab) => tab.selected)).toEqual([false, true, false]);
+    expect(familyTabs(renderDom(clean)).map((tab) => tab.selected)).toEqual([false, true, false]);
     expect(markup).toContain("Everything the last round asked for is in.");
     // The latest summary opens; older history is mounted but folded.
-    expect(foldPairs(markup)).toEqual([
+    expect(foldPairs(renderDom(clean))).toEqual([
       { expanded: true, hidden: false },
       { expanded: false, hidden: true },
     ]);
     // No provider means no dangling separator.
     expect(markup).toContain("kimi-for-coding</span>");
     expect(markup).not.toContain("kimi-for-coding · </span>");
+    // Review toggles name their verdict and short sha, so two "Collapse"s on
+    // this face are distinguishable.
+    expect(
+      [...renderDom(clean).querySelectorAll("button[aria-expanded][aria-label]")].map(
+        (control) => control.getAttribute("aria-label") ?? "",
+      ),
+    ).toEqual([
+      `${t("en", "pullRequests.collapse")} — ship it · aaa111b`,
+      `${t("en", "pullRequests.expand")} — ship it · bbb222c`,
+    ]);
     expect(markup).not.toContain(t("en", "pullRequests.noReviews"));
   });
 
@@ -474,11 +497,31 @@ describe("pull request detail face (static SSR)", () => {
     }
     // Additional evidence: eight rows — seven activity entries plus the anchor.
     expect(markup.match(/data-slot="activity-entry"/g) ?? []).toHaveLength(8);
+    // The dropped six are named, not silently swallowed: 12 reviews plus the
+    // payload's one failure make 13 events, of which the cap shows seven.
+    expect(markup).toContain(t("en", "pullRequests.timelineHidden", { count: 6 }));
+  });
+
+  test("a timeline that fits the cap renders no truncation row", () => {
+    // Seven history entries is the cap: six shown plus the anchor, none dropped.
+    const reviews = Array.from({ length: 6 }, (_, index) => ({
+      verdict: "ship it",
+      summary_md: `Round ${index}`,
+      model: `model-${index}`,
+      provider: "",
+      reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
+      head_sha: `sha${index}`,
+    }));
+    const markup = render({ ...DETAIL, reviews, failures: [] });
+    expect(markup.match(/data-slot="activity-entry"/g) ?? []).toHaveLength(7);
+    // No `{count}` placeholder survives, and the key's own words are absent.
+    expect(markup).not.toContain(t("en", "pullRequests.timelineHidden", { count: 0 }));
+    expect(markup).not.toContain("earlier events not shown");
   });
 
   test("a failure's first line renders as escaped text and its full output stays in details", () => {
     const markup = render(FAILING);
-    expect(familyTabs(markup).map((tab) => tab.selected)).toEqual([false, false, true]);
+    expect(familyTabs(renderDom(FAILING)).map((tab) => tab.selected)).toEqual([false, false, true]);
     expect(markup).toContain("sandbox");
     expect(markup).toContain("exit 1: &lt;script&gt;alert(1)&lt;/script&gt;");
     expect(markup).not.toContain("<script>");
@@ -603,13 +646,18 @@ describe("pull requests data plane (pure helpers)", () => {
       line: 42,
       body: "",
     });
-    // And the view renders the coerced row: the review meta line resolves
-    // the model/provider template with both coerced fields, and the empty
-    // finding path renders no location at all, no bare `:line` (N12).
+    // And the view renders the coerced row: an unattributed review (both fields
+    // coerced empty) renders no attribution span and no "Latest review" meta —
+    // an empty value would read as a missing fact — and the empty finding path
+    // renders no location at all, no bare `:line` (N12).
     const markup = renderToStaticMarkup(
       createElement(PullRequestDetailView, { locale: "en", detail: parsed ?? DETAIL }),
     );
-    expect(markup).toContain(t("en", "pullRequests.reviewMeta", { model: "", provider: "" }));
+    const empty = t("en", "pullRequests.reviewMeta", { model: "", provider: "" });
+    expect(markup).not.toContain(t("en", "pullRequests.latestReview"));
+    // The empty attribution would paint as an empty span in the review head.
+    expect(markup).not.toContain(`<span class="text-(--text-muted)">${empty}</span>`);
+    expect(markup).not.toContain('<span class="text-(--text-muted)"></span>');
     expect(markup).not.toContain(":42");
     expect(markup).not.toContain(">null<");
   });
