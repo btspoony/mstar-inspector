@@ -124,9 +124,19 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
  */
 const FACT_LINE_BUDGET = 500;
 
+/**
+ * Slice that never splits a surrogate pair: when the last unit kept by the cut
+ * is a high surrogate (its low half would be dropped), the cut backs off by one
+ * so the rendered text never carries a lone surrogate.
+ */
+function sliceWithoutSplittingPair(text: string, end: number): string {
+  const lastKept = text.charCodeAt(end - 1);
+  return text.slice(0, lastKept >= 0xd800 && lastKept <= 0xdbff ? end - 1 : end);
+}
+
 /** Bound one rendered fact line, keeping the head and marking the cut. */
 function boundFactLine(text: string): string {
-  return text.length <= FACT_LINE_BUDGET ? text : `${text.slice(0, FACT_LINE_BUDGET - 1)}…`;
+  return text.length <= FACT_LINE_BUDGET ? text : `${sliceWithoutSplittingPair(text, FACT_LINE_BUDGET - 1)}…`;
 }
 
 /** The envelope fact, bounded for rendering only. */
@@ -134,10 +144,23 @@ function boundIncomplete(fact: { reason: string; unscanned: readonly string[] })
   reason: string;
   unscanned: string[];
 } {
-  return {
-    reason: boundFactLine(fact.reason),
-    unscanned: [boundFactLine(fact.unscanned.length === 0 ? "none" : fact.unscanned.join(", "))],
-  };
+  const reason = boundFactLine(fact.reason);
+  const full = fact.unscanned.length === 0 ? "none" : fact.unscanned.join(", ");
+  if (full.length <= FACT_LINE_BUDGET) return { reason, unscanned: [full] };
+  // Drop whole scopes rather than cutting mid-entry, and say how many went:
+  // a silent cut reads as "these were the only unscanned files".
+  const kept: string[] = [];
+  for (const scope of fact.unscanned) {
+    const candidate = [...kept, scope].join(", ");
+    const marker = `, (+${fact.unscanned.length - kept.length - 1} more)`;
+    if (candidate.length + (fact.unscanned.length - kept.length - 1 > 0 ? marker.length : 0) > FACT_LINE_BUDGET) break;
+    kept.push(scope);
+  }
+  const dropped = fact.unscanned.length - kept.length;
+  const shown = kept.length === 0 ? [] : kept;
+  const line = shown.length === 0 ? "" : shown.join(", ");
+  const withCount = dropped === 0 ? line : `${line}${line === "" ? "" : ", "}(+${dropped} more)`;
+  return { reason, unscanned: [boundFactLine(withCount)] };
 }
 
 /**
@@ -168,13 +191,17 @@ function clampKeepingHead(text: string, budget: number): string {
  */
 function stripFactEcho(
   narrative: string,
-  fact: { reason: string; unscanned: readonly string[] },
+  raw: { reason: string; unscanned: readonly string[] },
+  bounded: { reason: string; unscanned: readonly string[] },
 ): string {
-  const echo = [
-    `cause: ${fact.reason}`,
-    fact.unscanned.length === 0 ? "unscanned: none" : `unscanned: ${fact.unscanned.join(", ")}`,
-  ];
-  return narrative.split("\n").filter((line) => !echo.includes(line)).join("\n");
+  // Both spellings: the narrative echoes what the seat knew (the raw fact),
+  // while the engine renders the bounded one.
+  const echo = new Set<string>();
+  for (const fact of [raw, bounded]) {
+    echo.add(`cause: ${fact.reason}`);
+    echo.add(fact.unscanned.length === 0 ? "unscanned: none" : `unscanned: ${fact.unscanned.join(", ")}`);
+  }
+  return narrative.split("\n").filter((line) => !echo.has(line)).join("\n");
 }
 
 /**
@@ -195,7 +222,7 @@ export function buildReviewBody(
     const bounded = boundIncomplete(output.incomplete);
     rendered = { ...rendered, incomplete: bounded };
     if (rendered.summary_md !== undefined) {
-      rendered = { ...rendered, summary_md: stripFactEcho(rendered.summary_md, bounded) };
+      rendered = { ...rendered, summary_md: stripFactEcho(rendered.summary_md, output.incomplete, bounded) };
     }
   }
   // The runner fits its coverage notes to SUMMARY_MD_LIMIT and documents that

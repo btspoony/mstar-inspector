@@ -207,6 +207,35 @@ describe("buildReviewBody", () => {
     expect(body).toContain("The runner died.");
   });
 
+  test("an echo of the UNBOUNDED fact is stripped too, so a long reason cannot duplicate", () => {
+    const longReason = "r".repeat(900);
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: longReason, unscanned: ["tests/a.ts"] },
+      summary_md: `The run died.\n\ncause: ${longReason}\nunscanned: tests/a.ts`,
+    });
+    expect(body).toContain("The run died.");
+    expect(body.match(/^cause: /gm)).toHaveLength(1);
+    expect(body.match(/^unscanned: /gm)).toHaveLength(1);
+  });
+
+  test("an over-budget unchecked scope says how many entries it dropped", () => {
+    const scopes = Array.from({ length: 40 }, (_, index) => `src/very-long-directory-name/file-${index}.ts`);
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: "runner timed out", unscanned: scopes },
+    });
+    const line = body.split("\n").find((l) => l.startsWith("unscanned: "))!;
+    expect(line.length).toBeLessThanOrEqual("unscanned: ".length + 500);
+    expect(line).toContain("more)");
+    // Whole scopes only: the last listed entry is a complete path.
+    expect(line).toMatch(/file-\d+\.ts(, |$)/);
+  });
+
   test("a summary line that only opens with the label is the model's own content", () => {
     const incomplete = { reason: "runner timed out", unscanned: [] };
     const body = buildReviewBody({
