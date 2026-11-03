@@ -16,6 +16,9 @@
  *   thread, sent by a non-bot whose login is the PR author or the repository
  *   owner (Phase 5 B5 actor allowlist — prevents quota abuse by arbitrary
  *   commenters on public installs).
+ * - `installation.{created,new_permissions_accepted}` whose payload carries
+ *   `installation.account.login` — recorded as the install's account; not
+ *   review work, so it never enqueues.
  * Everything else returns 200 quickly — GitHub retries non-2xx, so
  * uninteresting events must not 4xx.
  */
@@ -26,6 +29,16 @@ import type { ReviewTriggerMode } from "../dashboard/apps-store";
 import type { HandlerLog } from "./handlers";
 
 export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as const;
+
+/**
+ * The install actions that carry the installing account's login
+ * (`installation.account.login`). Both mean "this App is installed and
+ * usable right now", which is when the settings table should stop reading
+ * `未知`. Lifecycle-only actions (`deleted`, `suspend`, `unsuspend`, `added`,
+ * `removed`) stay ignored — this whitelist records a login, it does not
+ * track install state.
+ */
+export const INSTALLATION_ACTIONS = ["created", "new_permissions_accepted"] as const;
 
 /**
  * The per-App trigger inputs classification branches on (spec
@@ -254,7 +267,15 @@ export async function verifySignature(
 export type WebhookOutcome =
   | { kind: "reject"; status: 400 | 401 | 500; reason: string }
   | { kind: "ignore"; reason: string }
-  | { kind: "job"; payload: Omit<ReviewJobPayload, "appRef"> };
+  | { kind: "job"; payload: Omit<ReviewJobPayload, "appRef"> }
+  /**
+   * An install delivery is not review work: it names the installation whose
+   * `account_login` the route records, and never carries a queue payload.
+   * `accountLogin` is null only when GitHub omits `installation.account`
+   * (the schema permits it) — the store's COALESCE then keeps whatever is
+   * already stored.
+   */
+  | { kind: "installation"; installationId: number; accountLogin: string | null };
 
 /** Minimal webhook payload shapes — only the fields the gateway consumes. */
 const installationSchema = z.object({ id: z.number() }).nullable().optional();
@@ -262,6 +283,19 @@ const repositorySchema = z
   .object({ name: z.string(), owner: z.object({ login: z.string() }) })
   .nullable()
   .optional();
+
+/**
+ * The `installation` event's own shape (not the bare `installationSchema`,
+ * which only supplies the id inside the review events): the account login is
+ * the whole point, and it sits one level down under `account`.
+ */
+const installationEventSchema = z.object({
+  action: z.string(),
+  installation: z
+    .object({ id: z.number().optional(), account: z.object({ login: z.string() }).nullable().optional() })
+    .nullable()
+    .optional(),
+});
 
 const pullRequestSchema = z.object({
   action: z.string(),
@@ -394,7 +428,43 @@ export function classifyEvent(
   if (eventName === "issue_comment") {
     return classifyIssueComment(rawBody, log, trigger.appSlug);
   }
+  if (eventName === "installation") {
+    return classifyInstallation(rawBody);
+  }
   return { kind: "ignore", reason: `event ${eventName} is not whitelisted` };
+}
+
+/**
+ * `installation.{created,new_permissions_accepted}` → the installing account's
+ * login. This is the one path that observes a fresh install before any review
+ * traffic exists, so it is the reason `app_installations.account_login` can be
+ * filled at all.
+ *
+ * Every malformed case is a 400 reject, exactly like the sibling classifiers:
+ * GitHub retries non-2xx, but a payload that cannot name an installation is
+ * not something a retry fixes.
+ */
+function classifyInstallation(rawBody: string): WebhookOutcome {
+  const parsed = parseBody(rawBody);
+  if (parsed === null) {
+    return { kind: "reject", status: 400, reason: "invalid JSON body" };
+  }
+  const result = installationEventSchema.safeParse(parsed);
+  if (!result.success) {
+    return { kind: "reject", status: 400, reason: "installation payload failed validation" };
+  }
+  const { action, installation } = result.data;
+  if (!(INSTALLATION_ACTIONS as readonly string[]).includes(action)) {
+    return { kind: "ignore", reason: `installation action ${action} is not whitelisted` };
+  }
+  if (installation?.id === undefined) {
+    return { kind: "reject", status: 400, reason: "installation payload missing required fields" };
+  }
+  return {
+    kind: "installation",
+    installationId: installation.id,
+    accountLogin: installation.account?.login ?? null,
+  };
 }
 
 function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookOutcome {

@@ -1026,6 +1026,153 @@ describe("installations upsert wiring", () => {
   });
 });
 
+/**
+ * `installation.*` deliveries: the only path that observes a fresh install
+ * before any review traffic, so it is what fills `account_login` in the
+ * settings table. Not review work — no enqueue, no pause/flag gate.
+ */
+describe("installation event path", () => {
+  function installationRows(
+    db: ReturnType<typeof createTestD1>,
+  ): Array<{ app_id: string; installation_id: number; account_login: string | null }> {
+    return db.raw
+      .query("SELECT app_id, installation_id, account_login FROM app_installations")
+      .all() as Array<{ app_id: string; installation_id: number; account_login: string | null }>;
+  }
+
+  function deliveryRows(
+    db: ReturnType<typeof createTestD1>,
+    appId: string,
+  ): Array<{ event_name: string | null; outcome: string; status_code: number | null }> {
+    return db.raw
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
+      .all(appId) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
+  }
+
+  const INSTALL_PAYLOAD = {
+    action: "created",
+    installation: { id: 555, account: { login: "octo-org" } },
+  };
+
+  test("installation.created with account.login → row written with that login, zero enqueue, delivery ok", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(INSTALL_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0); // an install is never review work
+    expect(installationRows(db)).toEqual([
+      { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+    ]);
+    expect(deliveryRows(db, appRow.id)).toEqual([
+      { event_name: "installation", outcome: "ok", status_code: null },
+    ]);
+  });
+
+  test("installation.new_permissions_accepted records the login too", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ ...INSTALL_PAYLOAD, action: "new_permissions_accepted" });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0);
+    expect(installationRows(db)).toEqual([
+      { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+    ]);
+  });
+
+  test("paused App (review_enabled=0) still records the installation — the pause gate does not apply", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    expect(await createAppsStore(db).setReviewEnabled(appRow.id, false)).toBe(true);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(INSTALL_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0);
+    expect(installationRows(db)).toHaveLength(1);
+    // Recorded as an install, never as a paused review delivery.
+    expect(deliveryRows(db, appRow.id)[0]!.outcome).toBe("ok");
+  });
+
+  test("installation.deleted → 200 ignored, no installation row", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ ...INSTALL_PAYLOAD, action: "deleted" });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(installationRows(db)).toHaveLength(0);
+    expect(deliveryRows(db, appRow.id)[0]).toEqual({
+      event_name: "installation",
+      outcome: "ignored",
+      status_code: null,
+    });
+  });
+
+  test("malformed installation body (no installation.id) → 400, delivery rejected", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ action: "created", installation: { account: { login: "octo-org" } } });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      env,
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe("installation payload missing required fields");
+    expect(sent).toHaveLength(0);
+    expect(installationRows(db)).toHaveLength(0);
+    expect(deliveryRows(db, appRow.id)).toEqual([
+      { event_name: "installation", outcome: "rejected", status_code: 400 },
+    ]);
+  });
+});
+
 describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => {
   /** Read the App row's ops columns back raw. */
   function appOps(

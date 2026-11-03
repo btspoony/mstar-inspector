@@ -60,7 +60,10 @@ app.use("*", spaDispatch());
  * Classifier outcome → delivery-record outcome (QC wave 1, S-2):
  * the pure mapping the per-App route applies immediately after
  * classifyWebhook — reject → rejected / ignore → ignored / job → paused
- * when the App's review switch is off, else ok. Extracted from the inline
+ * when the App's review switch is off, else ok. An `installation` delivery
+ * maps to ok regardless of the switch: it is neither paused nor review work
+ * (it records the install's account login), so the pause gate must never
+ * describe it as paused. Extracted from the inline
  * ternary so a future outcome (e.g. AL-21's `hold`) extends one function
  * instead of every call site; unit-tested in
  * tests/worker/webhook-deliveries.test.ts. `reviewEnabled` is the App
@@ -72,6 +75,7 @@ export function deliveryOutcomeFromWebhook(
 ): DeliveryOutcome {
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
+  if (outcome.kind === "installation") return "ok";
   return reviewEnabled === 0 ? "paused" : "ok";
 }
 
@@ -398,6 +402,26 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
 
   if (outcome.kind === "ignore") {
     return c.text("ignored", 200);
+  }
+
+  // Install event (installation.created / new_permissions_accepted): the one
+  // delivery that observes a brand-new install before any review traffic, so
+  // it records `account_login` here — BEFORE the pause gate and the global
+  // flag gate, because those two gate the ENQUEUE face and this outcome never
+  // enqueues. Best-effort like every sibling bookkeeping write: a store
+  // failure logs and the webhook still answers 200.
+  if (outcome.kind === "installation") {
+    try {
+      await appsStore.upsertInstallation({
+        appId: row.id,
+        installationId: outcome.installationId,
+        accountLogin: outcome.accountLogin,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      webhookWarn("installation_upsert_failed", detail, "installation upsert failed — webhook response unaffected");
+    }
+    return c.text("accepted", 200);
   }
 
   // Pause gate (spec 语义锁 — paused ≠ disabled): review_enabled
