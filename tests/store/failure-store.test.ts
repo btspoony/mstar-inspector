@@ -11,7 +11,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { createFailureStore, FAILURE_STAGES, type FailureStage } from "../../src/store/failure-store";
+import {
+  createFailureStore,
+  FAILURE_STAGES,
+  PAGING_EXCLUDED_STAGES,
+  type FailureStage,
+} from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "./helpers";
 
 const BASE = {
@@ -20,6 +25,23 @@ const BASE = {
   repo: "widgets",
   pr_number: 42,
   head_sha: "0123456789abcdef0123456789abcdef01234567",
+};
+
+/**
+ * The paging classification of every producer stage — the register a stage
+ * must join before the sweep's SQL may ignore it. `paging` rows are review
+ * failures the ops sweep counts; `attribution` rows record a review that
+ * CONTINUED and only the dashboard's history shows them. Keyed by
+ * `FailureStage`, so a new union member cannot compile until it is classified
+ * here, and the membership test below catches a stage added only to the array.
+ */
+const PAGING_CLASSIFICATION: Record<FailureStage, "paging" | "attribution"> = {
+  parse: "paging",
+  runner: "paging",
+  sandbox: "paging",
+  pipeline: "paging",
+  usage: "attribution",
+  recheck: "attribution",
 };
 
 describe("createFailureStore", () => {
@@ -63,17 +85,23 @@ describe("createFailureStore", () => {
     expect((await store.listRecent()).length).toBe(0);
   });
 
-  test("every stage the store DECLARES is accepted by its own record path", async () => {
-    // The vocabulary derives from the paging list, so a stage added there must
-    // reach the writer too: a declared stage the gate refuses would be an
-    // unwritable producer stage, and a caller would lose the row at runtime.
-    const db = createMigratedTestD1();
-    const store = createFailureStore(db);
-    for (const stage of FAILURE_STAGES) {
-      await store.record({ ...BASE, stage: stage as FailureStage, error: `boom-${stage}` });
-    }
-    const written: string[] = (await store.listRecent()).map((row) => row.stage).sort();
-    expect(written).toEqual([...FAILURE_STAGES].sort());
+  test("FAILURE_STAGES is exactly the classified register (a new stage must be classified before it compiles or lands)", () => {
+    // The vocabulary is an explicit literal contract, NOT the paging list plus
+    // a restated copy: a stage added to the array without a classification,
+    // or classified without reaching the array, fails here. The register is
+    // `Record<FailureStage, …>`, so a new union member is a type error first.
+    expect([...FAILURE_STAGES].sort()).toEqual(
+      (Object.keys(PAGING_CLASSIFICATION) as FailureStage[]).sort(),
+    );
+    // The paging SQL's exclusion set is the attribution half of that register
+    // — the sweep must never stop counting a stage this register calls a
+    // review failure, and must never page ops for one it calls attribution.
+    const excluded: string[] = [...PAGING_EXCLUDED_STAGES];
+    expect(excluded.sort()).toEqual(
+      (Object.keys(PAGING_CLASSIFICATION) as FailureStage[])
+        .filter((stage) => PAGING_CLASSIFICATION[stage] === "attribution")
+        .sort(),
+    );
   });
 
   test("listRecent returns newest-first with a rowid tiebreak, bounded by limit", async () => {

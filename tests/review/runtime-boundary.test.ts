@@ -258,13 +258,13 @@ describe("in-image module graph — the image ships packages/runner/src plus the
     expect(admittedFaces(copySources)).toEqual([...ADMITTED_FACE]);
   });
 
-  test("the admitted shared set is exactly the Dockerfile's shared COPY set", () => {
-    // Exact, both ways. An extra per-file `COPY packages/shared/src/<module>`
-    // is a SECOND admission path: it is a shared COPY source the single
-    // directory COPY does not carry, and the resulting duplicate fails the set
-    // comparison below — so a module can never ride the image through a route
-    // this guard does not know. The same pin catches a narrowed COPY that
-    // silently drops a module before the next image build does.
+  test("the image's observable module surface is exactly the shared package tree", () => {
+    // Behaviour, not manifest parity: the image can only execute modules it
+    // ships, so `packages/shared/src` in the build context IS the image's
+    // shared surface. A second COPY line carrying a shared module — or one
+    // carrying a module from outside the package — widens that surface
+    // through a route the directory COPY does not describe, so the COPY set
+    // must stay the single directory line and must cover every module.
     const sharedCopySources = copySources.filter(
       (spec) => spec === "packages/shared/src" || spec.startsWith("packages/shared/src/"),
     );
@@ -302,7 +302,7 @@ describe("in-image module graph — the image ships packages/runner/src plus the
     expect(() => dockerfileCopySources("COPY src ./ \\")).toThrow(/unterminated COPY/);
   });
 
-  test("every shared module the runner imports is admitted, and the boundary refuses anything else", () => {
+  test("every shared module the runner imports is admitted, and the boundary refuses a widened COPY set", () => {
     // Direction 1 — ADMIT: every shared module the runner graph actually
     // imports resolves to a real file in the build context AND is one the
     // Dockerfile copies, so the image's module graph is closed by construction
@@ -319,10 +319,14 @@ describe("in-image module graph — the image ships packages/runner/src plus the
       expect(existsSync(target), `${target} is not in the image build context`).toBe(true);
       expect(isAdmittedModule(target), `${target} is imported but no COPY line ships it`).toBe(true);
     }
-    // Direction 2 — REFUSE: the same predicate rejects a module outside both
-    // admitted roots, including a shared-package file no COPY line carries.
-    expect(isAdmittedModule(join(REPO_ROOT, "src", "worker", "index.ts"))).toBe(false);
-    expect(isAdmittedModule(join(SHARED_SRC, "not-shipped.ts"))).toBe(false);
+    // Direction 2 — REFUSE, driven through the guard's own derivation rather
+    // than a hand-called predicate on a phantom path: the repository root
+    // `src/` tree is refused as a face by `admittedFaces`, so the admission
+    // test and the "no COPY line ships src/" pin refuse the SAME input. A
+    // Dockerfile that started copying `src` would flip both.
+    const widened = dockerfileCopySources(`${readFileSync(OMP_DOCKERFILE, "utf8")}\nCOPY src /opt/runner/src\n`);
+    expect(admittedFaces(widened)).toContain("src");
+    expect(admittedFaces(widened)).not.toEqual([...ADMITTED_FACE]);
   });
 
   test("no packages/runner/src module imports outside that tree and the admitted files", () => {

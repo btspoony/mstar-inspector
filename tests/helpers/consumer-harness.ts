@@ -93,7 +93,10 @@ export const messageAckCalls: Array<{ attempts: number }> = [];
 
 export async function makeEnv(overrides: Partial<PipelineEnv> = {}): Promise<PipelineEnv> {
   return {
-    DB: (await createSeededTestD1()) as never,
+    // `??` short-circuits, so the seeded double is built ONLY when the case
+    // does not bring its own DB — every recheck suite seeds one and the
+    // migrated + App-seeded default was pure cost there.
+    DB: overrides.DB ?? ((await createSeededTestD1()) as never),
     IDEMPOTENCY_KV: kv as never,
     SANDBOX: {} as never,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,

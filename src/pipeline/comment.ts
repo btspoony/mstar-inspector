@@ -79,6 +79,7 @@ import { REVIEW_EMOJI, renderReviewMarkdown } from "@mstar-harness/engine";
 import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../review/schema";
 import { redactSecrets } from "./redact";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
+import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
@@ -269,8 +270,13 @@ export function buildReviewBody(
 // round's closure, never a second closure-only comment.
 // ---------------------------------------------------------------------------
 
-/** §7.10: at most 25 selected prior rows are shown; the rest is a count. */
-export const CLOSURE_MAX_ROWS = 25;
+/**
+ * §7.10: at most this many selected prior rows are shown; the rest is a count.
+ * The third face of the round's one row budget (`recheck-wire.ts`): the table
+ * can only display rows the seat was sent, so the display cap IS the selection
+ * cap rather than a second literal.
+ */
+export const CLOSURE_MAX_ROWS = ASSESSMENT_TARGET_CAP;
 
 /** One closure table row (§7.10 columns: finding, disposition, evidence, thread). */
 export type ClosureRow = {

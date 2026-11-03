@@ -158,8 +158,21 @@ export type RecheckStatus = {
 /** Status `error` bound — the seat redacts then truncates here, the consumer's failure row too. */
 export const RECHECK_STATUS_ERROR_MAX_CHARS = 500;
 
-export const RECHECK_MAX_TARGETS = 25;
-export const ASSESSMENT_TARGET_CAP = 25;
+/**
+ * §7.3/§7.8/§7.10: the ONE row budget of a recheck round. Every 25-row cap is
+ * derived from it, because the three are ordered by construction and a
+ * restated literal let them drift:
+ *   selection (`ASSESSMENT_TARGET_CAP`) — how many rows the seat is sent,
+ *   validation (`RECHECK_MAX_TARGETS`) — how many answers a document may carry,
+ *   display (`CLOSURE_MAX_ROWS`, src/pipeline/comment.ts) — how many rows render.
+ * Selection may never exceed validation (a selected row the gate then rejects
+ * as oversized is a lost answer), and display may never exceed selection (a
+ * row that was never sent cannot be shown).
+ */
+const RECHECK_ROW_BUDGET = 25;
+
+export const RECHECK_MAX_TARGETS = RECHECK_ROW_BUDGET;
+export const ASSESSMENT_TARGET_CAP = RECHECK_ROW_BUDGET;
 export const RECHECK_MAX_RUNTIME_MS = 180_000;
 export const RECHECK_MIN_REMAINING_MS = 30_000;
 export const RECHECK_FILE_MAX_BYTES = 262_144;
