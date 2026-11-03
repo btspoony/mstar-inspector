@@ -119,7 +119,7 @@ async function setFlag(c: AdminContext): Promise<Response> {
 /**
  * The system review-concurrency cap — the operator half of the runtime
  * configuration (iteration spec §1.1). One row in `review_runtime_settings`,
- * absent = the documented default; the leaf store owns the parse, the 1..250
+ * absent = the documented default; the leaf store owns the parse, the 1..64
  * range and the audit row, so this handler only gates, shapes and maps.
  */
 async function readRuntime(c: AdminContext): Promise<Response> {

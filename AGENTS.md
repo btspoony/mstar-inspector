@@ -63,14 +63,17 @@ container's `name`, its `images` entry, or that entry's `dockerfile` /
 which file is hashed. Every other `wrangler.jsonc` edit (vars, queues, routes,
 observability) leaves the image untouched and needs no marker.
 
-Check before merging anything that touches those paths:
+Check before merging anything that touches those paths — the same gate CI runs,
+against the revision the deploy builds on:
 
 ```bash
-IMAGE_AT=$(git log -1 --format=%h -- sandbox-image/Dockerfile)
-git log --oneline "$IMAGE_AT"..HEAD -- packages/runner/src packages/shared/src
+bun scripts/check-image-inputs.ts --base origin/main
 ```
 
-Non-empty output means the deployment would ship mismatched halves.
+Exit 0 means the diff needs no rebuild; exit 1 prints the family list above and
+names the marker line it wanted, and it also covers the container-block rule and
+every other family — a partial `git log` over two paths would miss the rest.
+Pass `--base <rev>` to diff the deployed tip instead of the trunk.
 
 ### The failure this prevents
 

@@ -219,24 +219,37 @@ export async function getEffectiveConcurrency(
 }
 
 /**
+ * The stored system cap as SQL, under the trust rule the write predicate
+ * enforces: a canonical 1..64 digit string is that integer, anything else is
+ * `untrusted`. (Stricter than `parseStored` on stray whitespace: `shortcut: a
+ * hand-edited " 8" is read as 8 but refuses writes, upgrade if a non-canonical
+ * writer ever exists`.)
+ */
+const storedSystemCapSql = (keyParam: string, untrusted: string) => `(SELECT CASE
+      WHEN value NOT GLOB '*[^0-9]*' AND CAST(value AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${CONCURRENCY_MAX}
+      THEN CAST(value AS INTEGER) ELSE ${untrusted} END
+    FROM review_runtime_settings WHERE key = ${keyParam})`;
+
+/**
  * The system cap as SQL, so a write statement can read the cap inside its own
  * predicate instead of trusting an earlier read. An absent row is the default;
- * anything not a plain 1..64 integer is the conservative bound, matching what
- * a degraded read answers. (Stricter than `parseStored` on stray whitespace:
- * `shortcut: a hand-edited " 8" is read as 8 but refuses writes, upgrade if a
- * non-canonical writer ever exists`.)
+ * anything not a trusted 1..64 integer is the conservative bound, matching what
+ * a degraded read answers.
  */
-const systemCapSql = (keyParam: string) => `COALESCE((SELECT CASE
-      WHEN value NOT GLOB '*[^0-9]*' AND CAST(value AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${CONCURRENCY_MAX}
-      THEN CAST(value AS INTEGER) ELSE ${CONCURRENCY_MIN} END
-    FROM review_runtime_settings WHERE key = ${keyParam}), ${SYSTEM_CONCURRENCY_DEFAULT})`;
+const systemCapSql = (keyParam: string) =>
+  `COALESCE(${storedSystemCapSql(keyParam, String(CONCURRENCY_MIN))}, ${SYSTEM_CONCURRENCY_DEFAULT})`;
 
-/** Audit row + `review_runtime_settings` upsert, in that order, in ONE batch. */
+/**
+ * Audit row + `review_runtime_settings` upsert, in that order, in ONE batch.
+ * `before` carries the stored value only under the readers' trust rule, so a
+ * corrupt row is recorded as `null` — a bare `CAST` would report `0` for
+ * `'abc'` and a number no reader or write predicate ever used for `' 8'`.
+ */
 const SYSTEM_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   VALUES (?1, ?2, 'runtime.concurrency.system.set', 'runtime', ?3,
-          json_object('before', (SELECT CAST(value AS INTEGER) FROM review_runtime_settings WHERE key = ?3),
+          json_object('before', ${storedSystemCapSql("?3", "NULL")},
                       'after', ?4),
           ?5)`;
 

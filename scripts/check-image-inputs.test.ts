@@ -448,8 +448,9 @@ describe("image gate CLI", () => {
   test("an env.production-only image edit is gated against the production Dockerfile", () => {
     const { dir, git } = tempRepo();
     try {
-      // Production builds from its own container block and its own Dockerfile;
-      // the staging file is not the one its marker would live in.
+      // Production builds from its own container block and its own Dockerfile.
+      // The CLI diffs every configured Dockerfile together and accepts any
+      // `rebuild:` line in that diff, so a marker in either file passes.
       const config = (buildContext: string) =>
         '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile" } } }],\n' +
         `  "env": { "production": { "containers": [{ "name": "prod", "images": { "sandbox": { "dockerfile": "./sandbox-image/Prod.Dockerfile", "build_context": "${buildContext}" } } }] } }\n}\n`;
@@ -466,7 +467,8 @@ describe("image gate CLI", () => {
       git("commit", "-qm", "repoint only the production build context");
       expect(runGate(dir, base, script)).toBe(1);
 
-      // The marker belongs in the PRODUCTION Dockerfile; staging's is not read.
+      // Marked in the production file: either file's marker line clears the
+      // gate, and this is the file the production deploy hashes.
       write(dir, "sandbox-image/Prod.Dockerfile", "# rebuild: production\n# rebuild: prod context\nFROM scratch\n");
       git("add", "-A");
       git("commit", "-qm", "production marker");

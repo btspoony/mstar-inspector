@@ -23,9 +23,17 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>, stored: number): Promise<void> {
+  async function onSubmit(
+    event: FormEvent<HTMLFormElement>,
+    stored: number,
+    degraded: boolean,
+  ): Promise<void> {
     event.preventDefault();
     if (busy) return; // in-flight guard — no double submit
+    // A degraded read carries the conservative fallback, not a stored value: an
+    // empty draft would submit that fallback as if the operator had typed it.
+    // Retry is the only action until the read succeeds.
+    if (degraded) return;
     // `Number("")` is 0 and `Number("8abc")` is NaN — both fail the server's
     // 1..64 gate, so the browser's own parsing needs no second validator.
     const next = Number((draft ?? String(stored)).trim());
@@ -81,16 +89,16 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 {data.degraded ? (
                   // The stored cap could not be trusted, so `data.concurrency` is
                   // the conservative fallback: showing it as the current value
-                  // would invite saving a number nobody stored. The form stays
-                  // (a save is the only way to repair an unreadable row) but
-                  // starts empty, and the "effective" line is withheld.
+                  // would invite saving a number nobody stored. The form starts
+                  // empty, withholds the "effective" line, and its save is
+                  // refused — Retry is the only action while the read is degraded.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.concurrencyUnreadable")} />
                   </div>
                 ) : null}
                 <form
                   className="mt-4 flex flex-wrap items-end gap-2"
-                  onSubmit={(event) => void onSubmit(event, data.concurrency)}
+                  onSubmit={(event) => void onSubmit(event, data.concurrency, data.degraded)}
                 >
                   <div className="flex flex-col gap-1.5">
                     <label className="text-sm font-medium" htmlFor="system-concurrency">
@@ -108,7 +116,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       onChange={(event) => setDraft(event.target.value)}
                     />
                   </div>
-                  <Button type="submit" disabled={busy}>
+                  <Button type="submit" disabled={busy || data.degraded}>
                     {t(locale, "admin.runtime.concurrencySave")}
                   </Button>
                   {data.degraded ? (
