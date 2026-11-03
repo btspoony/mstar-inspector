@@ -47,6 +47,9 @@
 # Worker's runner-failure path) instead of writing any status: the status is
 # written only once the document has landed. A stale image instead reports the
 # seat's optimistic `ok` for a round whose document never reached the Worker.
+# rebuild: evidence slices now carry `addedNewLines`, so a `current-code` proof
+# must cite a line the hunk added, and the status `reason` is a closed
+# vocabulary with `rejected_unnamed` counting the drops no row id could name.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and
