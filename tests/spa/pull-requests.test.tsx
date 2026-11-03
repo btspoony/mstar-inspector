@@ -286,11 +286,11 @@ describe("pull request detail face (static SSR)", () => {
       expect(markup).toContain(t("en", `pullRequests.${label}`));
     }
     // The latest-review attribution is the header meta line's own item; the
-    // reviews panel renders the same string, so it is read off the meta line
-    // rather than off the whole page.
+    // reviews panel renders the same string, so it is read off that line —
+    // selected by its slot, not by its position among the header's children.
     const headerMeta = withMarkup(
       render(DETAIL),
-      (container) => container.querySelector("header")?.lastElementChild?.textContent ?? "",
+      (container) => container.querySelector('[data-slot="pr-meta"]')?.textContent ?? "",
     );
     expect(headerMeta).toContain(t("en", "pullRequests.latestReview"));
     expect(headerMeta).toContain(
@@ -313,7 +313,7 @@ describe("pull request detail face (static SSR)", () => {
             },
           ],
         }),
-        (container) => container.querySelector("header")?.lastElementChild?.textContent ?? "",
+        (container) => container.querySelector('[data-slot="pr-meta"]')?.textContent ?? "",
       ),
     ).not.toContain(t("en", "pullRequests.latestReview"));
     // Band: the four label/figure pairs, in order — the aggregate the header
@@ -432,6 +432,53 @@ describe("pull request detail face (static SSR)", () => {
       `${t("en", "pullRequests.collapse")} — Use a parameterized query`,
       `${t("en", "pullRequests.expand")} — Session cookie lacks HttpOnly`,
       `${t("en", "pullRequests.expand")} — Rename tmp to pending`,
+    ]);
+  });
+
+  test("a toggle whose record carries no identity text falls back to its position", () => {
+    // A coerced-empty title leaves the finding with nothing to name itself by;
+    // the position keeps the two toggles distinguishable.
+    const untitled: PullRequestDetail = {
+      ...DETAIL,
+      findings: [
+        { finding_id: "f-1", severity: "must-fix", title: "", file_path: "", line: null, body: "" },
+        { finding_id: "f-2", severity: "should-fix", title: "", file_path: "", line: null, body: "" },
+      ],
+    };
+    const findingLabels = withMarkup(render(untitled), (container) =>
+      [...container.querySelectorAll('[data-slot="finding"] button[aria-label]')].map(
+        (control) => control.getAttribute("aria-label") ?? "",
+      ),
+    );
+    expect(findingLabels).toEqual([
+      `${t("en", "pullRequests.collapse")} — #1`,
+      `${t("en", "pullRequests.expand")} — #2`,
+    ]);
+
+    // The same case on the reviews family: no verdict and no head sha.
+    const anonymous = (summary: string, reviewed_at: string): PullRequestDetail["reviews"][number] => ({
+      verdict: "",
+      summary_md: summary,
+      model: "",
+      provider: "",
+      reviewed_at,
+      head_sha: "",
+    });
+    const unattributed: PullRequestDetail = {
+      ...DETAIL,
+      findings: [],
+      failures: [],
+      reviews: [anonymous("", "2026-11-01 08:00:00"), anonymous("An older round.", "2026-10-30 08:00:00")],
+    };
+    expect(
+      withMarkup(render(unattributed), (container) =>
+        [...container.querySelectorAll("button[aria-expanded][aria-label]")].map(
+          (control) => control.getAttribute("aria-label") ?? "",
+        ),
+      ),
+    ).toEqual([
+      `${t("en", "pullRequests.collapse")} — #1`,
+      `${t("en", "pullRequests.expand")} — #2`,
     ]);
   });
 
@@ -599,14 +646,15 @@ describe("pull request detail face (static SSR)", () => {
       reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
       head_sha: `sha${index}`,
     }));
-    const markup = render({
+    const detail = {
       ...DETAIL,
       pull_request: {
         ...DETAIL.pull_request,
         latest_review: { verdict: "needs fixes", reviewed_at: history[0]?.reviewed_at ?? "" },
       },
       reviews: history,
-    });
+    };
+    const markup = render(detail);
     // `· model-NN` is the timeline's meta separator: the header names the model
     // without it, so the marker identifies exactly the rows that rendered.
     const marker = (index: number) => ` · model-${String(index).padStart(2, "0")}`;
@@ -623,8 +671,14 @@ describe("pull request detail face (static SSR)", () => {
     // Additional evidence: eight rows — seven activity entries plus the anchor.
     expect(markup.match(/data-slot="activity-entry"/g) ?? []).toHaveLength(8);
     // The dropped six are named, not silently swallowed: 12 reviews plus the
-    // payload's one failure make 13 events, of which the cap shows seven.
-    expect(markup).toContain(t("en", "pullRequests.timelineHidden", { count: 6 }));
+    // payload's one failure make 13 events, of which the cap shows seven. The
+    // truncation row itself carries the count.
+    expect(
+      withMarkup(
+        render(detail),
+        (container) => container.querySelector('[data-slot="timeline-truncated"]')?.textContent ?? "",
+      ),
+    ).toBe(t("en", "pullRequests.timelineHidden", { count: 6 }));
   });
 
   test("a timeline that fits the cap renders no truncation row", () => {
@@ -639,10 +693,12 @@ describe("pull request detail face (static SSR)", () => {
     }));
     const markup = render({ ...DETAIL, reviews, failures: [] });
     expect(markup.match(/data-slot="activity-entry"/g) ?? []).toHaveLength(7);
-    // No `{count}` placeholder survives, and the activity list holds exactly
-    // those seven rows — a truncation row would be an eighth child.
-    expect(markup).not.toContain(t("en", "pullRequests.timelineHidden", { count: 0 }));
-    expect(withMarkup(render({ ...DETAIL, reviews, failures: [] }), (container) => container.querySelectorAll("ol > li").length)).toBe(7);
+    // Nothing was dropped, so the truncation row is absent rather than empty.
+    expect(
+      withMarkup(render({ ...DETAIL, reviews, failures: [] }), (container) =>
+        container.querySelector('[data-slot="timeline-truncated"]'),
+      ),
+    ).toBeNull();
   });
 
   test("a failure's first line renders as escaped text and its full output stays in details", () => {
@@ -783,11 +839,15 @@ describe("pull requests data plane (pure helpers)", () => {
     // And the view renders the coerced row: an unattributed review (both fields
     // coerced empty) renders no attribution span and no "Latest review" meta —
     // an empty value would read as a missing fact — and the empty finding path
-    // renders no location at all, no bare `:line` (N12).
+    // renders no location at all, no bare `:line` (N12). Each negative is read
+    // off the node that owns the field, so unrelated text cannot satisfy it.
     withMarkup(renderToStaticMarkup(createElement(PullRequestDetailView, { locale: "en", detail: parsed ?? DETAIL })), (container) => {
-      expect(container.textContent ?? "").not.toContain(t("en", "pullRequests.latestReview"));
-      expect(container.textContent ?? "").not.toContain(":42");
-      expect(container.textContent ?? "").not.toContain("null");
+      const meta = container.querySelector('[data-slot="pr-meta"]');
+      expect(meta?.textContent ?? "").not.toContain(t("en", "pullRequests.latestReview"));
+      const finding = container.querySelector('[data-slot="finding"]');
+      expect(finding, "the coerced finding row renders").not.toBeNull();
+      expect(finding?.textContent ?? "").not.toContain(":42");
+      expect(finding?.textContent ?? "").not.toContain("null");
     });
   });
 });
@@ -1070,6 +1130,112 @@ describe("pull requests tab (mounted)", () => {
       expect(status()).toBe(t("en", "pullRequests.copyFailed"));
     } finally {
       jest.useRealTimers();
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
+  test("copying a second error block does not cancel the first block's revert", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const host = win.document.createElement("div");
+    win.document.body.appendChild(host);
+    const container = host as unknown as HTMLElement;
+    const root = createRoot(host as unknown as Element);
+    Object.defineProperty(win.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: () => Promise.resolve() },
+    });
+    const press = async (target: Element | null | undefined) => {
+      const pointer = (type: string) =>
+        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
+      await act(async () => {
+        target?.dispatchEvent(pointer("mousedown"));
+        target?.dispatchEvent(pointer("click"));
+      });
+      await act(async () => {});
+    };
+    const copyButtons = () => [...container.querySelectorAll<HTMLElement>('[data-slot="copy-error"]')];
+    jest.useFakeTimers();
+    try {
+      await act(async () =>
+        root.render(
+          createElement(PullRequestDetailView, {
+            locale: "en",
+            detail: {
+              ...DETAIL,
+              findings: [],
+              failures: [
+                { stage: "sandbox", error: "first block", created_at: "2026-10-31 23:00:00" },
+                { stage: "review", error: "second block", created_at: "2026-10-30 23:00:00" },
+              ],
+            },
+          }),
+        ),
+      );
+      await act(async () => {});
+      expect(copyButtons()).toHaveLength(2);
+
+      // Copy A, then B one second later. B's press must not cancel A's revert.
+      await press(copyButtons()[0]);
+      await act(async () => {
+        jest.advanceTimersByTime(1000);
+      });
+      await press(copyButtons()[1]);
+      expect(copyButtons()[0]?.textContent).toBe(t("en", "pullRequests.copyCopied"));
+      expect(copyButtons()[1]?.textContent).toBe(t("en", "pullRequests.copyCopied"));
+
+      // A's own two seconds are up; B's label is untouched.
+      await act(async () => {
+        jest.advanceTimersByTime(1000);
+      });
+      expect(copyButtons()[0]?.textContent).toBe(t("en", "pullRequests.copyError"));
+      expect(copyButtons()[1]?.textContent).toBe(t("en", "pullRequests.copyCopied"));
+
+      await act(async () => {
+        jest.advanceTimersByTime(1000);
+      });
+      expect(copyButtons()[1]?.textContent).toBe(t("en", "pullRequests.copyError"));
+    } finally {
+      jest.useRealTimers();
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
+  test("without a Clipboard API the copy control stays and reports the failure", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const host = win.document.createElement("div");
+    win.document.body.appendChild(host);
+    const container = host as unknown as HTMLElement;
+    const root = createRoot(host as unknown as Element);
+    // An insecure context offers no Clipboard API at all: the property reads
+    // as absent, not as a rejecting write. happy-dom's own Clipboard lives on
+    // the prototype, so the absent state is shadowed on the instance.
+    Object.defineProperty(win.navigator, "clipboard", { configurable: true, value: undefined });
+    const press = async (target: Element | null | undefined) => {
+      const pointer = (type: string) =>
+        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
+      await act(async () => {
+        target?.dispatchEvent(pointer("mousedown"));
+        target?.dispatchEvent(pointer("click"));
+      });
+      await act(async () => {});
+    };
+    try {
+      await act(async () =>
+        root.render(
+          createElement(PullRequestDetailView, { locale: "en", detail: { ...DETAIL, findings: [] } }),
+        ),
+      );
+      await act(async () => {});
+      const copyButton = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
+      const status = () => container.querySelector('[role="status"]')?.textContent ?? "";
+      // The affordance is not hidden just because the API is missing.
+      expect(copyButton).not.toBeNull();
+      await press(copyButton);
+      expect(copyButton?.textContent).toBe(t("en", "pullRequests.copyFailed"));
+      expect(status()).toBe(t("en", "pullRequests.copyFailed"));
+    } finally {
       await act(async () => root.unmount());
       cleanup();
     }

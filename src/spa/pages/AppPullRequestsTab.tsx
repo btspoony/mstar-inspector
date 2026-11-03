@@ -413,11 +413,13 @@ function reviewAttribution(locale: SpaBoot["locale"], review: PullRequestReview)
 /**
  * A fold control's accessible name: the action plus the record it folds, so
  * the nine toggles on this face are told apart by what they open rather than
- * by nine identical "Expand"s.
+ * by nine identical "Expand"s. A record with no identity text (a coerced-empty
+ * title or verdict) falls back to its position, which still keeps the name
+ * distinct.
  */
-function foldLabel(locale: SpaBoot["locale"], open: boolean, record: string): string {
+function foldLabel(locale: SpaBoot["locale"], open: boolean, record: string, position: number): string {
   const action = t(locale, open ? "pullRequests.collapse" : "pullRequests.expand");
-  return record === "" ? action : `${action} — ${record}`;
+  return `${action} — ${record === "" ? `#${position}` : record}`;
 }
 
 /** The copy action's label: its action while idle, its transient outcome after a press. */
@@ -463,18 +465,28 @@ export function PullRequestDetailView({
   // Both fields can be empty (a v1 payload records neither): the attribution is
   // then "", and an empty meta item or span would read as a missing value.
   const latestAttribution = latestReview === null ? "" : reviewAttribution(locale, latestReview);
-  const copyAvailable = typeof navigator !== "undefined" && "clipboard" in navigator;
   // A copy's outcome is transient and per failure block: the button flips to
-  // the result, then reverts, and the live region below announces it.
+  // the result, then reverts, and the live region below announces it. Each
+  // block owns its timer, so copying block B cannot cancel block A's revert
+  // and leave A's label standing.
   const [copyOutcome, setCopyOutcome] = useState<Readonly<Record<string, "copied" | "failed">>>({});
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => clearTimeout(copyTimer.current), []);
+  const copyTimers = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
+  useEffect(
+    () => () => {
+      for (const timer of Object.values(copyTimers.current)) clearTimeout(timer);
+    },
+    [],
+  );
   const announceCopy = (key: string, outcome: "copied" | "failed"): void => {
     setCopyOutcome((previous) => ({ ...previous, [key]: outcome }));
-    clearTimeout(copyTimer.current);
-    copyTimer.current = setTimeout(() => {
-      copyTimer.current = undefined;
-      setCopyOutcome({});
+    clearTimeout(copyTimers.current[key]);
+    copyTimers.current[key] = setTimeout(() => {
+      delete copyTimers.current[key];
+      setCopyOutcome((previous) => {
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      });
     }, COPY_OUTCOME_MS);
   };
   // Radix hands the trigger's value back as a string; only our three triggers
@@ -621,7 +633,10 @@ export function PullRequestDetailView({
         <h2 className="text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking) font-(weight:--typo-heading-20-weight) text-(--text-primary)">
           {pr.title}
         </h2>
-        <div className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--text-faint)">
+        <div
+          data-slot="pr-meta"
+          className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--text-faint)"
+        >
           <span>
             {t(locale, "pullRequests.firstSeen")}{" "}
             <span className="text-(--text-muted) tabular-nums" title={pr.first_seen_at}>
@@ -697,6 +712,7 @@ export function PullRequestDetailView({
                           return (
                             <li
                               key={id}
+                              data-slot="finding"
                               className={cn(
                                 "flex flex-col gap-1.5 rounded-(--radius-container) border border-(--border-default) border-l-2 bg-(--surface-card) px-3.5 py-3",
                                 SEVERITY_RULE[group.tone],
@@ -731,7 +747,7 @@ export function PullRequestDetailView({
                                 className="self-start text-(--text-muted)"
                                 aria-expanded={open}
                                 aria-controls={id}
-                                aria-label={foldLabel(locale, open, finding.title)}
+                                aria-label={foldLabel(locale, open, finding.title, index + 1)}
                                 onClick={() =>
                                   setOpenFindings((previous) => ({ ...previous, [finding.finding_id]: !open }))
                                 }
@@ -818,6 +834,7 @@ export function PullRequestDetailView({
                             locale,
                             open,
                             [review.verdict, review.head_sha.slice(0, 7)].filter((part) => part !== "").join(" · "),
+                            index + 1,
                           )}
                           onClick={() => setOpenReviews((previous) => ({ ...previous, [reviewKey]: !open }))}
                         >
@@ -874,34 +891,43 @@ export function PullRequestDetailView({
                             </pre>
                           </details>
                         ) : null}
-                        {copyAvailable ? (
-                          <div className="flex items-center gap-2">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="xs"
-                              className="self-start text-(--text-secondary)"
-                              onClick={() => {
-                                // Both branches set the outcome: a rejected write
-                                // (permission, insecure context) leaves the
-                                // previous clipboard content in place, so silence
-                                // would let the operator paste the wrong text.
-                                navigator.clipboard.writeText(failure.error).then(
-                                  () => announceCopy(failureKey, "copied"),
-                                  () => announceCopy(failureKey, "failed"),
-                                );
-                              }}
-                            >
-                              <Copy aria-hidden="true" />
-                              {copyOutcomeLabel(locale, outcome)}
-                            </Button>
-                            {/* Present from mount so the announcement has a live
-                                region to land in; empty while idle. */}
-                            <span role="status" aria-live="polite" className="sr-only">
-                              {outcome === undefined ? "" : copyOutcomeLabel(locale, outcome)}
-                            </span>
-                          </div>
-                        ) : null}
+                        <div className="flex items-center gap-2">
+                          <Button
+                            data-slot="copy-error"
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            className="self-start text-(--text-secondary)"
+                            onClick={() => {
+                              // Feature-detected per press: an insecure context
+                              // or an old browser offers no Clipboard API, and
+                              // that press must report the failure rather than
+                              // leave the previous clipboard content silently in
+                              // place. Both branches set the outcome — a
+                              // rejected write (permission, insecure context)
+                              // leaves the same stale content, so silence would
+                              // let the operator paste the wrong text.
+                              const clipboard: Clipboard | undefined =
+                                typeof navigator === "undefined" ? undefined : navigator.clipboard;
+                              if (clipboard === undefined || typeof clipboard.writeText !== "function") {
+                                announceCopy(failureKey, "failed");
+                                return;
+                              }
+                              clipboard.writeText(failure.error).then(
+                                () => announceCopy(failureKey, "copied"),
+                                () => announceCopy(failureKey, "failed"),
+                              );
+                            }}
+                          >
+                            <Copy aria-hidden="true" />
+                            {copyOutcomeLabel(locale, outcome)}
+                          </Button>
+                          {/* Present from mount so the announcement has a live
+                              region to land in; empty while idle. */}
+                          <span role="status" aria-live="polite" className="sr-only">
+                            {outcome === undefined ? "" : copyOutcomeLabel(locale, outcome)}
+                          </span>
+                        </div>
                       </li>
                     );
                   })}
@@ -946,7 +972,7 @@ export function PullRequestDetailView({
                   </li>
                 ))}
                 {hiddenHistory > 0 ? (
-                  <li className="pl-3.5 text-(length:--typo-label-12-size) text-(--text-faint)">
+                  <li data-slot="timeline-truncated" className="pl-3.5 text-(length:--typo-label-12-size) text-(--text-faint)">
                     {t(locale, "pullRequests.timelineHidden", { count: hiddenHistory })}
                   </li>
                 ) : null}

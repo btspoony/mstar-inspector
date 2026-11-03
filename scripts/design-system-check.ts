@@ -107,9 +107,10 @@ export interface ConsumerRoot {
   /** Consumers this root contributed. */
   readonly consumers: number;
   /**
-   * Why the root could not be read through, or null when it could. A root
-   * reported as unreadable is never reported as empty: that would name the
-   * wrong cause for a tree the walk never saw.
+   * The first unreadable entry under this root, or null when the walk read it
+   * through — reported however many consumers the root also contributed.
+   * `rootsWithoutConsumers` speaks only for roots with `consumers === 0`, so a
+   * partly unreadable root is named here and never as empty.
    */
   readonly failure: string | null;
 }
@@ -125,9 +126,9 @@ export function consumerWalk(dirs: readonly string[] = CONSUMER_ROOTS): Consumer
     return {
       root: path.relative(ROOT, dir),
       consumers: found.length,
-      // Empty AND unreadable proves nothing either way, so the failure speaks
-      // and the emptiness claim stays silent.
-      failure: unreadable && found.length === 0 ? (failures[failureMark] ?? null) : null,
+      // Any unreadability is a fact about this root, even when it also yielded
+      // consumers; the emptiness rule reads `consumers === 0` on its own.
+      failure: unreadable ? (failures[failureMark] ?? null) : null,
     };
   });
   return { files: files.sort(), roots, failures };
