@@ -205,9 +205,9 @@ function SectionPager<K extends RecordSection>({
  * repaint of the previous visit's error. An effect cannot do that job — it
  * runs after paint, and the retained frame IS the frame the operator sees.
  *
- * The tab also keys this node on the pr address, so switching PRs is a
- * remount rather than a stamp comparison and no retained face survives a
- * transition at all.
+ * The tab also keys this node on the App and the pr address, so switching
+ * PRs or Apps is a remount rather than a stamp comparison and no retained
+ * face — head or section page — survives a transition at all.
  */
 export function PullRequestDetail({
   locale,

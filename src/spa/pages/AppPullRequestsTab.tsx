@@ -121,11 +121,13 @@ export function AppPullRequestsTab({
   }
 
   if (ref !== null) {
-    // The key is the pr address: switching PRs remounts instead of reusing a
-    // retained read, and closing the PR unmounts so reopening starts clean.
+    // The key is the App plus the pr address: switching PRs remounts instead of
+    // reusing a retained read, closing the PR unmounts so reopening starts
+    // clean, and an App switch in place discards the previous App's head and
+    // its section pages before the next frame can paint them.
     return (
       <PullRequestDetail
-        key={search.pr}
+        key={`${appId}\u0000${search.pr}`}
         locale={locale}
         appId={appId}
         prKey={search.pr}

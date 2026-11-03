@@ -13,7 +13,7 @@ import { act, createElement, StrictMode } from "react";
 import { t } from "../../src/i18n";
 import type { PullRequestFailure, PullRequestFinding } from "../../src/spa/pages/data";
 import { currentDetailRead, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
-import { DETAIL, FAILURES, mountDetailView, page, press, scene } from "./pull-request-fixtures";
+import { DETAIL, FAILURES, mountDetailView, mountTabAcrossApps, page, press, scene } from "./pull-request-fixtures";
 
 /** A face whose only records are failures: it opens on the failures family. */
 const failuresOnly = (failures: PullRequestFailure[] = FAILURES) =>
@@ -488,6 +488,45 @@ describe("pull request detail (mounted)", () => {
       console.error = realConsole.error;
       console.warn = realConsole.warn;
       console.log = realConsole.log;
+      await unmount();
+    }
+  });
+
+  test("an App switch in place discards the previous App's record pages (F1)", async () => {
+    // The shell keeps the open PR address while the route's App changes
+    // (`mountTabWithGatedFetch` § switchApp). Both Apps hold the same
+    // `owner/repo/number`; only App B's rows belong under App B's head.
+    const finding = (id: string, title: string): PullRequestFinding => ({
+      finding_id: id,
+      severity: "must-fix",
+      title,
+      file_path: "",
+      line: null,
+      body: "",
+    });
+    const appA = scene({ findings: page([finding("a-1", "App A finding")]) }, { title: "App A pull request" });
+    const appB = scene({ findings: page([finding("b-1", "App B finding")]) }, { title: "App B pull request" });
+    const { text, fetches, switchApp, unmount } = await mountTabAcrossApps("acme/web/133", (appId) =>
+      appId === "1" ? appA : appB,
+    );
+    try {
+      expect(text()).toContain("App A pull request");
+      expect(text()).toContain("App A finding");
+
+      await switchApp("2");
+
+      // App B's head and its own rows replace App A's...
+      expect(text()).toContain("App B pull request");
+      expect(text()).toContain("App B finding");
+      // ...and App A's page is gone: a retained section page is skipped by
+      // `ensureSection` and rendered under App B's head, while the switch
+      // never reads App B's findings at all.
+      expect(text()).not.toContain("App A finding");
+      expect(text()).not.toContain("App A pull request");
+      const requested = (suffix: string) => fetches.some((url) => url.endsWith(suffix));
+      expect(requested("/api/apps/2/pull-requests/acme/web/133")).toBe(true);
+      expect(requested("/api/apps/2/pull-requests/acme/web/133/findings?offset=0&limit=10")).toBe(true);
+    } finally {
       await unmount();
     }
   });

@@ -228,16 +228,20 @@ export async function mountView(
 }
 
 /**
- * A fetch stub for the detail host: the head read answers `detail`, and each
- * record read pages the supplied family — `offset`/`limit` slice its rows and
- * `severity` filters findings, so a mounted test sees a real page swap. Every
- * request is recorded for the "one read per switch" assertions.
+ * A fetch stub for the detail host: the head read answers that App's `detail`,
+ * and each record read pages that App's family — `offset`/`limit` slice its
+ * rows and `severity` filters findings, so a mounted test sees a real page
+ * swap. `sceneFor` receives the App the URL names, so one stub can serve
+ * different Apps. Every request is recorded for the "one read per switch"
+ * assertions.
  */
-function detailFetch(sceneValue: DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
+function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
   const fetches: string[] = [];
   const impl = (async (input: unknown) => {
     const url = new URL(String(input), "http://localhost");
     fetches.push(url.pathname + url.search);
+    // `/api/apps/<appId>/pull-requests/...`: the App the read answers for.
+    const sceneValue = sceneFor(/\/apps\/([^/]+)\//.exec(url.pathname)?.[1] ?? "");
     const severity = url.searchParams.get("severity");
     for (const section of ["findings", "reviews", "failures"] as const) {
       if (!url.pathname.endsWith(`/${section}`)) continue;
@@ -264,7 +268,7 @@ function detailFetch(sceneValue: DetailScene): { fetch: typeof globalThis.fetch;
  * stubs hang off, and every request the reads issued.
  */
 export async function mountDetailView(sceneValue: DetailScene, wrap?: (view: ReactElement) => ReactElement) {
-  const stub = detailFetch(sceneValue);
+  const stub = detailFetch(() => sceneValue);
   const pr = sceneValue.detail.pull_request;
   const view = createElement(PullRequestDetail, {
     locale: "en",
@@ -348,6 +352,40 @@ export async function mountTabWithGatedFetch(initialPr: string) {
       await act(async () => {});
     },
     resolve,
+  };
+}
+
+/**
+ * Mount the TAB over per-App detail scenes, then move it to another App in
+ * place — the shell's own appId change with the PR retained. The tab is the
+ * detail host's call site, so what an App switch does to the open PR's head
+ * and section pages is what this mount observes; `sceneFor` is asked for the
+ * App the request names, and every request is recorded.
+ */
+export async function mountTabAcrossApps(initialPr: string, sceneFor: (appId: string) => DetailScene) {
+  const stub = detailFetch(sceneFor);
+  let setApp: (next: string) => void = () => {};
+  function Harness() {
+    const [search, setSearch] = useState<AppDetailSearch>({
+      tab: "pull-requests",
+      window: "30",
+      repo: "",
+      pr: initialPr,
+    });
+    const [appId, set] = useState("1");
+    setApp = set;
+    return createElement(AppPullRequestsTab, { locale: "en", appId, search, onSearch: setSearch });
+  }
+  const mounted = await mountView(createElement(Harness), { fetch: stub.fetch });
+  return {
+    ...mounted,
+    fetches: stub.fetches,
+    text: () => mounted.container.textContent ?? "",
+    /** Move the tab to another App, keeping the same search (and PR). */
+    switchApp: async (appId: string) => {
+      await act(async () => setApp(appId));
+      await act(async () => {});
+    },
   };
 }
 
