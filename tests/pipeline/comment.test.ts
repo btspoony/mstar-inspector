@@ -221,7 +221,7 @@ describe("buildReviewBody", () => {
     expect(body.match(/^unscanned: /gm)).toHaveLength(1);
   });
 
-  test("an over-budget unchecked scope says how many entries it dropped", () => {
+  test("an over-budget unchecked scope still names entries and counts the rest", () => {
     const scopes = Array.from({ length: 40 }, (_, index) => `src/very-long-directory-name/file-${index}.ts`);
     const body = buildReviewBody({
       ...output,
@@ -231,11 +231,29 @@ describe("buildReviewBody", () => {
     });
     const line = body.split("\n").find((l) => l.startsWith("unscanned: "))!;
     expect(line.length).toBeLessThanOrEqual("unscanned: ".length + 500);
+    expect(line).toMatch(/file-\d+\.ts/);
     expect(line).toContain("more)");
-    // Whole scopes only: the last listed entry is a complete path.
-    expect(line).toMatch(/file-\d+\.ts(, |$)/);
   });
 
+  test("bounding the fact keeps the envelope's tally mirror in step", () => {
+    const raw = "r".repeat(900);
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason: raw, unscanned: ["a.ts"] },
+      tally: {
+        verdict: "incomplete",
+        scorePct: 50,
+        band: "fail",
+        tally: { mustFix: 0, shouldFix: 0, nit: 0, unverified: 1 },
+        chatHeader: "incomplete · 50% (fail)",
+        incomplete: { reason: raw, unscanned: ["a.ts"] },
+      },
+    });
+    expect(body.match(/^cause: /gm)).toHaveLength(1);
+    expect(body).not.toContain(raw.slice(0, 600));
+  });
   test("a summary line that only opens with the label is the model's own content", () => {
     const incomplete = { reason: "runner timed out", unscanned: [] };
     const body = buildReviewBody({

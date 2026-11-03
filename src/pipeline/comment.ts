@@ -151,15 +151,20 @@ function boundIncomplete(fact: { reason: string; unscanned: readonly string[] })
   // a silent cut reads as "these were the only unscanned files".
   const kept: string[] = [];
   for (const scope of fact.unscanned) {
+    const droppedIfAdded = fact.unscanned.length - kept.length - 1;
     const candidate = [...kept, scope].join(", ");
-    const marker = `, (+${fact.unscanned.length - kept.length - 1} more)`;
-    if (candidate.length + (fact.unscanned.length - kept.length - 1 > 0 ? marker.length : 0) > FACT_LINE_BUDGET) break;
+    const marker = droppedIfAdded > 0 ? `, (+${droppedIfAdded} more)` : "";
+    if (candidate.length + marker.length > FACT_LINE_BUDGET) break;
     kept.push(scope);
   }
+  // A list that fits no whole entry still names one: "+40 more" with nothing
+  // listed tells the reader the scope was never checked.
+  if (kept.length === 0) {
+    kept.push(`${sliceWithoutSplittingPair(fact.unscanned[0]!, FACT_LINE_BUDGET - 12)}…`);
+  }
   const dropped = fact.unscanned.length - kept.length;
-  const shown = kept.length === 0 ? [] : kept;
-  const line = shown.length === 0 ? "" : shown.join(", ");
-  const withCount = dropped === 0 ? line : `${line}${line === "" ? "" : ", "}(+${dropped} more)`;
+  const line = kept.join(", ");
+  const withCount = dropped === 0 ? line : `${line}, (+${dropped} more)`;
   return { reason, unscanned: [boundFactLine(withCount)] };
 }
 
@@ -221,6 +226,11 @@ export function buildReviewBody(
   if (output.incomplete !== undefined) {
     const bounded = boundIncomplete(output.incomplete);
     rendered = { ...rendered, incomplete: bounded };
+    // The envelope's own invariant: `tally.incomplete` mirrors `incomplete`,
+    // so bounding one without the other leaves an unvalidatable document.
+    if (rendered.tally !== undefined) {
+      rendered = { ...rendered, tally: { ...rendered.tally, incomplete: bounded } };
+    }
     if (rendered.summary_md !== undefined) {
       rendered = { ...rendered, summary_md: stripFactEcho(rendered.summary_md, output.incomplete, bounded) };
     }
