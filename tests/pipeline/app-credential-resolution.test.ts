@@ -28,6 +28,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
+import { idemKey } from "../../src/contracts/idem";
 import type { ReviewOutput } from "../../src/review/schema";
 import { createTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
@@ -649,13 +650,20 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     // pause is intentional; a throw would be the wrong semantics).
     expect(ackIds).toEqual(["m0"]);
     expect(retryIds).toEqual([]);
-    // Zero side effects: no per-App instance built, no token mint, no post,
-    // no sandbox step, no guard acquisition, no idempotency claim.
+    // No review side effects: no per-App instance built, no token mint, no
+    // post, no sandbox step, no guard acquisition, no done-state. The single
+    // KV write is the claim stamp — `paused` proves no review happened, so a
+    // redelivery must enqueue again.
     expect(factoryCreds).toHaveLength(0);
     expect(appCalls).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0);
     expect(kvGuardPuts).toHaveLength(0);
-    expect(kvPuts).toEqual([]);
+    expect(kvPuts).toEqual([
+      {
+        key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+        value: "paused",
+      },
+    ]);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(0);
     // The structured log rides the existing channel: event "review_paused"
     // (union widened additively) + app_id + the baseFields PR identity.

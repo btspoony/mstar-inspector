@@ -790,11 +790,18 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload())); // resolves — acked, never DLQed
 
-    // No real-review side effects: no overall post, no reviews row, NO KV
-    // done-state (a later webhook for the same sha legitimately re-runs).
+    // No real-review side effects: no overall post, no reviews row, no KV
+    // done-state. The worker's "1" claim is stamped `degraded` instead — a
+    // degraded notice is not a review, so a redelivery must enqueue again.
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    expect(kvPuts).toHaveLength(0);
+    expect(kvPuts).toEqual([
+      {
+        key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+        value: "degraded",
+        options: { expirationTtl: IDEMPOTENCY_SECONDS },
+      },
+    ]);
     // Degraded comment posted with the parse error + the RAW stdout (the
     // commenter side is the redaction/truncation choke point).
     const degrades = commenterCalls.filter((c) => c.op === "post-prepared-degraded");
@@ -1086,8 +1093,12 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
+    // The throw IS the retry signal: processMessage rethrows and the handler
+    // never acks, so the queue redelivers this message — and the "1" claim
+    // keeps proving the job is still in flight.
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
 
+    expect(messageAckCalls).toHaveLength(0);
     expect(kvPuts.some((p) => p.value === "failed")).toBe(false);
   });
 
@@ -2186,9 +2197,13 @@ describe("createReviewConsumer", () => {
   const NEW_AT = "2026-01-01T00:05:00.000Z";
   const NEW_SHA = "1111111111111111111111111111111111111111";
   // The worker's enqueue claim for one commit (value "1" = queued, not done),
-  // built through the contract helper so the key can never drift from it.
-  const ENQUEUED_KEY = (sha: string): string =>
-    idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: sha });
+  // built through the contract helper from the SAME payload fixture the
+  // deliveries use: a fixture drift can then never unmatch the claim and make
+  // the "must review" cases vacuous.
+  const ENQUEUED_KEY = (sha: string): string => {
+    const { installation_id, owner, repo, pr_number } = makePayload();
+    return idemKey({ installation_id, owner, repo, pr_number, head_sha: sha });
+  };
 
   test("a delivery the ledger has overtaken is acked as superseded with zero containers (AC-1)", async () => {
     reset();
@@ -2260,11 +2275,13 @@ describe("createReviewConsumer", () => {
     expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
   });
 
-  test("a newer commit whose job was dropped or failed is reviewed, not skipped", async () => {
-    // `dropped` (the guard's terminal ack) and `failed` (the final delivery is
-    // heading to the DLQ) both name a commit that was never reviewed: the key
-    // is still there, but it no longer proves a review will ever happen.
-    for (const claim of ["dropped", "failed"] as const) {
+  test("a newer commit whose job was dropped, failed, paused or degraded is reviewed, not skipped", async () => {
+    // `dropped` (the guard's terminal ack), `failed` (the final delivery is
+    // heading to the DLQ), `paused` (the App is paused) and `degraded` (the
+    // run ended in a degraded notice) all name a commit that was never
+    // reviewed: the key is still there, but it no longer proves a review will
+    // ever happen.
+    for (const claim of ["dropped", "failed", "paused", "degraded"] as const) {
       reset();
       runnerStdout = JSON.stringify(VALID_OUTPUT);
       const db = await createSeededTestD1();
@@ -2450,6 +2467,45 @@ describe("createReviewConsumer", () => {
       value: "dropped",
       options: { expirationTtl: IDEMPOTENCY_SECONDS },
     });
+  });
+
+  test("a terminal guard-held drop never downgrades an already-reviewed sha's done claim", async () => {
+    // `done` proves this consumer already reviewed that commit. The guard's
+    // terminal ack for a DIFFERENT sha must leave it alone — overwriting it
+    // with `dropped` would let a redelivery re-review a reviewed commit.
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    await seedInflight(db); // holds SHA
+    const newer = "3333333333333333333333333333333333333333";
+    kvEntries.set(ENQUEUED_KEY(newer), "done");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: newer })));
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    // The drop is still traced — only the claim is left untouched.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(kvPuts).toHaveLength(0);
+    expect(kvEntries.get(ENQUEUED_KEY(newer))).toBe("done");
+  });
+
+  test("an unreadable claim skips the drop write and keeps the enqueue claim", async () => {
+    // A read fault must not turn into a blind overwrite: the claim stays as it
+    // was ("1", today's behavior), which the skip then accepts and the drop
+    // row above traces.
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    await seedInflight(db); // holds SHA
+    kvGetError = new Error("kv down");
+    const newer = "4444444444444444444444444444444444444444";
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: newer })));
+
+    expect(kvPuts.some((p) => p.value === "dropped")).toBe(false);
+    expect(logLines.some((l) => l.level === "warn" && l.msg.includes("dropped-claim KV update failed"))).toBe(true);
   });
 
   test("the terminal drop row needs two non-empty, different shas (round-11)", async () => {

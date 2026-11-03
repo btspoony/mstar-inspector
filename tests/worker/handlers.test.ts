@@ -139,12 +139,13 @@ describe("handleReviewJob — enqueue once", () => {
 });
 
 describe("handleReviewJob — a key that proves no review happened", () => {
-  test("dropped / failed values re-enqueue the commit and refresh the claim", async () => {
+  test("dropped / failed / paused / degraded values re-enqueue the commit and refresh the claim", async () => {
     // `dropped` = the guard gave the job up for good; `failed` = the final
-    // delivery is heading to the DLQ. Neither is "already enqueued", so the
+    // delivery is heading to the DLQ; `paused` = the App is paused; `degraded`
+    // = the run ended in a degraded notice. None is "already enqueued", so the
     // redelivery must enqueue again rather than be KV-skipped.
     const key = idemKey({ installation_id: 12345, owner: "acme", repo: "inspector", pr_number: 42, head_sha: HEAD_SHA });
-    for (const value of ["dropped", "failed"] as const) {
+    for (const value of ["dropped", "failed", "paused", "degraded"] as const) {
       const { kv, store } = makeKvStub();
       store.set(key, { value });
       const { queue, sent } = makeQueueStub();
