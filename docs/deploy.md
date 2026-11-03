@@ -2199,6 +2199,11 @@ A PR opened by a bot account is **never** reviewed, on either face
 `<slug>[bot]` all qualify (case-insensitive match). Only that suffix is
 matched — a login without it, whatever the account type, still triggers.
 
+A delivery whose payload carries no PR author login is also skipped (fail
+closed: the author cannot be proven human). Both skips are visible as one
+info-level log line with `reason: bot_author` or `reason: missing_author`;
+grep those labels when a review does not start.
+
 In every mode, a PR comment that @mentions the App's bot — `@<slug>` or
 the canonical `@<slug>[bot]`, matched as a standalone token —
 (re-)starts a review when the commenter is the PR author or the

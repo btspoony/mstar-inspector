@@ -299,7 +299,7 @@ describe("classifyEvent — pull_request whitelist", () => {
       expect(outcome).toEqual({ kind: "ignore", reason: "payload carried no PR author login" });
       expect(log.info).toHaveBeenCalledWith(
         { event: "pull_request", reason: "missing_author", detail: "author=null pr=42" },
-        "review skipped — PR author is not reviewable",
+        expect.any(String),
       );
     }
   });
@@ -530,7 +530,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       expect(outcome).toEqual({ kind: "ignore", reason: "payload carried no PR author login" });
       expect(log.info).toHaveBeenCalledWith(
         { event: "issue_comment", reason: "missing_author", detail: "author=null pr=42" },
-        "review skipped — PR author is not reviewable",
+        expect.any(String),
       );
     }
   });
@@ -590,7 +590,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     expect(log.warn).not.toHaveBeenCalled();
     expect(log.info).toHaveBeenCalledWith(
       { event: "issue_comment", reason: "bot_author", detail: "author=dependabot[bot] pr=42" },
-      "review skipped — PR author is not reviewable",
+      expect.any(String),
     );
   });
 
