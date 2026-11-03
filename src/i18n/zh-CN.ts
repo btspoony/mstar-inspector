@@ -165,10 +165,12 @@ export const zhCN: Dictionary = {
     factState: "状态",
     factHead: "Head",
     timelineReview: "审查 · {verdict}",
+    /** 载荷未记录结论的审查：整行仍渲染，不留下悬空的分隔符。 */
+    timelineReviewNoVerdict: "审查 · 暂无结论",
     timelineFailure: "审查失败 · {stage}",
     timelineFirstSeen: "PR 出现",
-    /** 上限截断时，末尾说明还有多少条更早的事件未显示。 */
-    timelineHidden: "另有 {count} 条更早事件未显示",
+    /** 上限截断时，末尾说明还有多少条更早的事件未显示（count 为 1 时同样通顺）。 */
+    timelineHidden: "更早事件未显示：{count} 条",
   },
   /** Per-App 洞察标签页。7/30/90 窗口分段与仓库筛选语义保持不变。 */
   insights: {

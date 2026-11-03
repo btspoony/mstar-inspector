@@ -210,15 +210,15 @@
   </div>
 
   <div class="tabs" role="tablist" aria-label="PR 记录">
-    <button class="tab" role="tab" aria-selected="true" data-panel="p-findings">发现<span class="n">6</span><span class="dot"></span></button>
-    <button class="tab" role="tab" aria-selected="false" data-panel="p-reviews">审查<span class="n">3</span></button>
-    <button class="tab" role="tab" aria-selected="false" data-panel="p-failures">失败<span class="n">1</span></button>
+    <button class="tab" id="t-findings" role="tab" aria-selected="true" aria-controls="p-findings" data-panel="p-findings">发现<span class="n">6</span><span class="dot"></span></button>
+    <button class="tab" id="t-reviews" role="tab" aria-selected="false" aria-controls="p-reviews" data-panel="p-reviews">审查<span class="n">3</span></button>
+    <button class="tab" id="t-failures" role="tab" aria-selected="false" aria-controls="p-failures" data-panel="p-failures">失败<span class="n">1</span></button>
   </div>
 
   <div class="cols">
     <div>
       <!-- findings -->
-      <div id="p-findings" role="tabpanel">
+      <div id="p-findings" role="tabpanel" aria-labelledby="t-findings">
         <div class="group">
           <div class="group-h"><span>必须修复</span><span class="count">1</span><span class="rule"></span></div>
 
@@ -301,7 +301,7 @@
       </div>
 
       <!-- reviews -->
-      <div id="p-reviews" role="tabpanel" hidden>
+      <div id="p-reviews" role="tabpanel" aria-labelledby="t-reviews" hidden>
         <div class="review latest">
           <div class="head">
             <span class="pill ok">ship it</span>
@@ -340,7 +340,7 @@
       </div>
 
       <!-- failures -->
-      <div id="p-failures" role="tabpanel" hidden>
+      <div id="p-failures" role="tabpanel" aria-labelledby="t-failures" hidden>
         <div class="failure">
           <div class="head">
             <span class="stage">sandbox</span>
@@ -395,6 +395,10 @@ runner failed: exit 124, stdout 0B, stderr empty</pre>
 </div>
 
 <script>
+  // Pointer-only demo of the tab contract: the roles, `aria-selected` and
+  // `aria-controls` above are what the prototype has to show. The shipped face
+  // uses the Radix tabs primitive, which owns the roving tabindex, arrow/Home/
+  // End keys and panel focus — this file does not reimplement them.
   const tabs = [...document.querySelectorAll('.tab')];
   const panels = [...document.querySelectorAll('[role="tabpanel"]')];
   for (const tab of tabs) {

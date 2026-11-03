@@ -189,10 +189,12 @@ export const en = {
     factState: "State",
     factHead: "Head",
     timelineReview: "Review · {verdict}",
+    /** A review whose verdict the payload did not record: the row still renders, without a dangling separator. */
+    timelineReviewNoVerdict: "Review · no verdict",
     timelineFailure: "Review failed · {stage}",
     timelineFirstSeen: "PR first seen",
-    /** The trailing row when the cap dropped older events. */
-    timelineHidden: "{count} earlier events not shown",
+    /** The trailing row when the cap dropped older events (count reads correctly at 1). */
+    timelineHidden: "Earlier events not shown: {count}",
   },
   /**
    * Per-App insights tab (the 洞察 face). The records copy returns with

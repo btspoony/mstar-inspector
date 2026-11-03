@@ -21,7 +21,17 @@
  * Version pins are structural (dotted numeric + matching `v<version>`
  * change-note in the description), never literals.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
@@ -588,6 +598,24 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       "dark:retired-900",
       "light:retired-900",
     ]);
+  });
+
+  test("an unreadable consumer is a reported failure, never a thrown run", () => {
+    // The link's header promises every file is checked even when one is
+    // broken: a broken symlink (a stat failure independent of the runner's
+    // uid) is named in `failures` and the readable sibling is still returned.
+    const dir = mkdtempSync(join(tmpdir(), "consumer-root-"));
+    try {
+      writeFileSync(join(dir, "ok.css"), ":root { color: var(--surface-page); }");
+      symlinkSync(join(dir, "gone"), join(dir, "broken.css"));
+      const failures: string[] = [];
+      const files = stylesheetConsumers([dir], failures);
+      expect(files.some((file) => file.endsWith("ok.css"))).toBe(true);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]).toContain("broken.css");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("a declaration no longer excuses its own dangling reference (I-000248)", () => {

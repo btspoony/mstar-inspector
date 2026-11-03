@@ -273,8 +273,10 @@ export function PullRequestsListView({
     },
     {
       header: t(locale, "pullRequests.columnVerdict"),
+      // The parser coerces a nullable verdict to "": an empty one is no
+      // verdict, so the cell takes the same dash the null case does.
       cell: (row) =>
-        row.latest_review ? (
+        row.latest_review !== null && row.latest_review.verdict !== "" ? (
           <span className="text-muted-foreground">{row.latest_review.verdict}</span>
         ) : (
           <span aria-hidden="true" className="text-muted-foreground">
@@ -361,7 +363,10 @@ const TIMELINE_LIMIT = 8;
 
 /** The family the face opens on: the actionable record first, history last. */
 function defaultFamily(detail: PullRequestDetail): RecordFamily {
-  if (detail.findings.some((finding) => finding.severity === "must-fix")) return "findings";
+  // A should-fix is a requested change, not a nit: it opens the findings too.
+  if (detail.findings.some((finding) => finding.severity === "must-fix" || finding.severity === "should-fix")) {
+    return "findings";
+  }
   if (detail.failures.length > 0) return "failures";
   return "reviews";
 }
@@ -454,10 +459,11 @@ export function PullRequestDetailView({
   const metrics: Metric[] = [
     {
       key: t(locale, "pullRequests.columnVerdict"),
-      // A PR with no review yet is not an alarm: the dash is announced, so the
-      // figure never reads as a blank cell.
+      // A PR with no review yet — or a review whose verdict the payload
+      // coerced to "" — is not an alarm: the dash is announced, so the
+      // figure never reads as a blank cell or as a verdict.
       value:
-        pr.latest_review === null ? (
+        pr.latest_review === null || pr.latest_review.verdict === "" ? (
           <>
             <span aria-hidden="true">—</span>
             <span className="sr-only">{t(locale, "pullRequests.noVerdict")}</span>
@@ -465,7 +471,10 @@ export function PullRequestDetailView({
         ) : (
           pr.latest_review.verdict
         ),
-      tone: pr.latest_review !== null && pr.latest_review.verdict !== "ship it" ? "danger" : undefined,
+      tone:
+        pr.latest_review !== null && pr.latest_review.verdict !== "" && pr.latest_review.verdict !== "ship it"
+          ? "danger"
+          : undefined,
     },
     { key: t(locale, "pullRequests.reviews"), value: detail.reviews.length },
     {
@@ -524,13 +533,25 @@ export function PullRequestDetailView({
   // chronologically. The list is capped: a long history must not fill the
   // aside, and the PR's own first sighting always closes it.
   const history = [
-    ...detail.reviews.map((review, index) => ({
-      at: review.reviewed_at,
-      key: `review-${index}`,
-      tone: (review.verdict === "ship it" ? "success" : "neutral") as StatusTone,
-      label: t(locale, "pullRequests.timelineReview", { verdict: review.verdict }),
-      meta: `${formatRelativeTime(review.reviewed_at, locale)}${review.model === "" ? "" : ` · ${review.model}`}`,
-    })),
+    ...detail.reviews.map((review, index) => {
+      // The payload coerces an absent verdict to ""; a label of "Review · "
+      // would paint a separator with nothing after it.
+      const label =
+        review.verdict === ""
+          ? t(locale, "pullRequests.timelineReviewNoVerdict")
+          : t(locale, "pullRequests.timelineReview", { verdict: review.verdict });
+      // The same attribution the review head wears, so a provider-only review
+      // names its provider here instead of an empty model.
+      const attribution = reviewAttribution(locale, review);
+      const when = formatRelativeTime(review.reviewed_at, locale);
+      return {
+        at: review.reviewed_at,
+        key: `review-${index}`,
+        tone: (review.verdict === "ship it" ? "success" : "neutral") as StatusTone,
+        label,
+        meta: attribution === "" ? when : `${when} · ${attribution}`,
+      };
+    }),
     ...detail.failures.map((failure, index) => ({
       at: failure.created_at,
       key: `failure-${index}`,
@@ -727,11 +748,16 @@ export function PullRequestDetailView({
                         )}
                       >
                         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-(length:--typo-label-12-size) leading-(--typo-label-12-line)">
-                          <StatusBadge tone={review.verdict === "ship it" ? "success" : "danger"}>
-                            {review.verdict}
-                          </StatusBadge>
+                          {/* A coerced-empty verdict is no verdict: no pill,
+                              and the row starts at its attribution. */}
+                          {review.verdict === "" ? null : (
+                            <StatusBadge tone={review.verdict === "ship it" ? "success" : "danger"}>
+                              {review.verdict}
+                            </StatusBadge>
+                          )}
                           {/* An unattributed review (v1 records no model) gets
-                              no empty span — the row starts at its verdict. */}
+                              no empty span — the row starts at whatever it
+                              does carry. */}
                           {attribution === "" ? null : (
                             <span className="text-(--text-muted)">{attribution}</span>
                           )}

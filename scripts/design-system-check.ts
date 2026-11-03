@@ -99,8 +99,11 @@ const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
  * The generated stylesheet is the one exclusion — link 1 already proves it
  * equals the token source.
  */
-export function stylesheetConsumers(dirs: readonly string[] = CONSUMER_ROOTS): string[] {
-  return dirs.flatMap((dir) => walkConsumers(dir)).sort();
+export function stylesheetConsumers(
+  dirs: readonly string[] = CONSUMER_ROOTS,
+  failures: string[] = [],
+): string[] {
+  return dirs.flatMap((dir) => walkConsumers(dir, failures)).sort();
 }
 
 /**
@@ -108,23 +111,49 @@ export function stylesheetConsumers(dirs: readonly string[] = CONSUMER_ROOTS): s
  * this checkout, outputs are repo-relative: a relative root cannot be walked
  * (it would resolve against the CWD and match nothing), so it fails loudly
  * instead of reading as an empty root.
+ *
+ * An unreadable entry is not a relative root's caller bug: it is a fact about
+ * this tree, so it lands in `failures` and the walk carries on to the entries
+ * it can read — one broken directory must not stop the rest of the link.
  */
-function walkConsumers(dir: string): string[] {
+function walkConsumers(dir: string, failures: string[] = []): string[] {
   if (!path.isAbsolute(dir)) {
     throw new Error(`consumer root must be absolute, got "${dir}"`);
   }
   if (!existsSync(dir)) return [];
   const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
+  for (const entry of readdirEntries(dir, failures)) {
     const full = path.join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      out.push(...walkConsumers(full));
+    const isDirectory = statIsDirectory(full, failures);
+    if (isDirectory === null) continue;
+    if (isDirectory) {
+      out.push(...walkConsumers(full, failures));
     } else if (CONSUMER_FILE.test(entry)) {
       const file = path.relative(ROOT, full);
       if (file !== GENERATED_STYLESHEET) out.push(file);
     }
   }
   return out;
+}
+
+/** The entries of one directory, or none if it cannot be listed (reported, not thrown). */
+function readdirEntries(dir: string, failures: string[]): string[] {
+  try {
+    return readdirSync(dir);
+  } catch (error) {
+    failures.push(`${path.relative(ROOT, dir)}: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+}
+
+/** Whether one path is a directory, or null if it cannot be stat'ed (reported, not thrown). */
+function statIsDirectory(full: string, failures: string[]): boolean | null {
+  try {
+    return statSync(full).isDirectory();
+  } catch (error) {
+    failures.push(`${path.relative(ROOT, full)}: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
 }
 
 /**
@@ -621,22 +650,40 @@ if (import.meta.main) {
     if (!sync.ok) brokenLinks.push("fixture → DESIGN.md");
   }
 
-  const consumers = stylesheetConsumers();
-  const emptyRoots = rootsWithoutConsumers();
-  const dangling = consumers.flatMap((file) =>
-    danglingReferences(file, readFileSync(path.join(ROOT, file), "utf8")),
-  );
-  // A root that contributed nothing proves nothing (wrong root, moved tree):
-  // that is a failure per root, not an empty pass.
-  const consumersOk = emptyRoots.length === 0 && dangling.length === 0;
-  console.log(`${consumersOk ? "ok  " : "fail"}  consumers → source`);
-  for (const root of emptyRoots) {
-    console.log(`        no stylesheet or HTML shell found under ${root}`);
+  // One unreadable file or directory is a fact about this tree, not the end of
+  // the run: it is reported by name and the remaining links still run.
+  try {
+    const walkFailures: string[] = [];
+    const consumers = stylesheetConsumers(CONSUMER_ROOTS, walkFailures);
+    const emptyRoots = rootsWithoutConsumers();
+    const readFailures: string[] = [];
+    const dangling = consumers.flatMap((file) => {
+      try {
+        return danglingReferences(file, readFileSync(path.join(ROOT, file), "utf8"));
+      } catch (error) {
+        readFailures.push(`${file}: ${error instanceof Error ? error.message : String(error)}`);
+        return [];
+      }
+    });
+    const failures = [...walkFailures, ...readFailures];
+    // A root that contributed nothing proves nothing (wrong root, moved tree):
+    // that is a failure per root, not an empty pass.
+    const consumersOk = failures.length === 0 && emptyRoots.length === 0 && dangling.length === 0;
+    console.log(`${consumersOk ? "ok  " : "fail"}  consumers → source`);
+    for (const { file, name, theme } of dangling) {
+      console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
+    }
+    for (const root of emptyRoots) {
+      console.log(`        no stylesheet or HTML shell found under ${root}`);
+    }
+    for (const failure of failures) {
+      console.log(`        ${failure}`);
+    }
+    if (!consumersOk) brokenLinks.push("consumers → source");
+  } catch (error) {
+    console.error(`fail  consumers → source: ${error instanceof Error ? error.message : String(error)}`);
+    brokenLinks.push("consumers → source");
   }
-  for (const { file, name, theme } of dangling) {
-    console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
-  }
-  if (!consumersOk) brokenLinks.push("consumers → source");
 
   // A chart fill is a large graphic face: WCAG 1.4.11's 3:1, not 4.5:1. Every
   // pair prints its measured ratio, so a token change that erodes a margin is

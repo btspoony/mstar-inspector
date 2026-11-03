@@ -266,8 +266,23 @@ describe("pull request detail face (static SSR)", () => {
     });
 
   /**
-   * A failure-only detail: no finding carries a must-fix, so the face opens on
-   * the failures family and the diagnostic payload is in the markup.
+   * The head line (verdict, attribution, when, sha) of the review row that owns
+   * `summary` — the row's own text, so a claim about it reads the rendered
+   * content rather than the serialized tag around it. The summary paragraph is
+   * the stable anchor: the head carries no identifying text of its own.
+   */
+  const reviewHead = (container: HTMLElement, summary: string): string => {
+    const body = [...container.querySelectorAll<HTMLElement>('[role="tabpanel"] p')].find(
+      (node) => node.textContent === summary,
+    );
+    expect(body, summary).toBeDefined();
+    return body?.parentElement?.querySelector<HTMLElement>("div")?.textContent ?? "";
+  };
+
+  /**
+   * A failure-only detail: no finding carries a must-fix or a should-fix, so
+   * the face opens on the failures family and the diagnostic payload is in the
+   * markup.
    */
   const FAILING: PullRequestDetail = { ...DETAIL, findings: [] };
 
@@ -393,6 +408,73 @@ describe("pull request detail face (static SSR)", () => {
     ]);
   });
 
+  test("a should-fix finding alone opens the findings family", () => {
+    // No must-fix anywhere: a requested change still outranks history, so the
+    // face must open on the findings rather than the reviews.
+    const shouldOnly: PullRequestDetail = {
+      ...DETAIL,
+      findings: [
+        {
+          finding_id: "f-2",
+          severity: "should-fix",
+          title: "Session cookie lacks HttpOnly",
+          file_path: "src/auth/session.ts",
+          line: 88,
+          body: "The refresh cookie is set with secure only.",
+        },
+      ],
+    };
+    expect(familyTabs(renderDom(shouldOnly)).map((tab) => tab.selected)).toEqual([true, false, false]);
+    expect(render(shouldOnly)).toContain("The refresh cookie is set with secure only.");
+  });
+
+  test("an empty verdict reads as no verdict: announced dash, no pill, no dangling separator", () => {
+    // The parser coerces a nullable verdict to "": that is a review whose
+    // verdict was never recorded, not the verdict "".
+    const empty: PullRequestDetail = {
+      ...DETAIL,
+      pull_request: {
+        ...DETAIL.pull_request,
+        latest_review: { verdict: "", reviewed_at: "2026-11-01 08:00:00" },
+      },
+      reviews: [
+        {
+          verdict: "",
+          summary_md: "The pipeline recorded no verdict.",
+          // Provider-only attribution: the row must name the provider.
+          model: "",
+          provider: "openrouter",
+          reviewed_at: "2026-11-01 08:00:00",
+          head_sha: "aaa111b",
+        },
+      ],
+      // No actionable finding and no failure: the face opens on the reviews,
+      // which is where the coerced verdict renders.
+      findings: [],
+      failures: [],
+    };
+    const container = renderDom(empty);
+    // Band: the same dash + screen-reader text the no-review case paints.
+    const verdict = container.querySelectorAll('[data-slot="metric-value"]')[0];
+    expect(verdict?.textContent).toContain("—");
+    expect(verdict?.textContent).toContain(t("en", "pullRequests.noVerdict"));
+    expect(verdict?.classList.contains("text-(--tone-danger-fg)")).toBe(false);
+    // The review row paints no pill, and none of its head spans is empty.
+    expect(container.querySelectorAll('[role="tabpanel"] [data-slot="status-badge"]')).toHaveLength(0);
+    const head = reviewHead(container, "The pipeline recorded no verdict.");
+    expect(head).toContain("openrouter");
+    expect(head).not.toContain(" · ");
+    // The timeline row still names the review, with no dangling separator and
+    // the provider rather than an empty model.
+    const entry = container.querySelector('[data-slot="activity-entry"]');
+    const label = entry?.querySelector("div > span")?.textContent ?? "";
+    const meta = entry?.querySelector("div > span + span")?.textContent ?? "";
+    expect(label).toBe(t("en", "pullRequests.timelineReviewNoVerdict"));
+    expect(label).not.toMatch(/·\s*$/);
+    expect(meta).toContain("openrouter");
+    expect(meta).not.toContain(" · ·");
+  });
+
   test("a clean detail opens on the reviews family with the latest summary readable", () => {
     const reviews = [
       {
@@ -432,13 +514,19 @@ describe("pull request detail face (static SSR)", () => {
       { expanded: true, hidden: false },
       { expanded: false, hidden: true },
     ]);
-    // No provider means no dangling separator.
-    expect(markup).toContain("kimi-for-coding</span>");
-    expect(markup).not.toContain("kimi-for-coding · </span>");
+    // No provider means no dangling separator: the attributed row reads
+    // `model · provider`, the unattributed one stops at its model.
+    const container = renderDom(clean);
+    expect(reviewHead(container, "Everything the last round asked for is in.")).toContain(
+      t("en", "pullRequests.reviewMeta", { model: "kimi-for-coding", provider: "openrouter" }),
+    );
+    const olderHead = reviewHead(container, "An older round, folded by default.");
+    expect(olderHead).toContain("kimi-for-coding");
+    expect(olderHead).not.toContain(" · ");
     // Review toggles name their verdict and short sha, so two "Collapse"s on
     // this face are distinguishable.
     expect(
-      [...renderDom(clean).querySelectorAll("button[aria-expanded][aria-label]")].map(
+      [...container.querySelectorAll("button[aria-expanded][aria-label]")].map(
         (control) => control.getAttribute("aria-label") ?? "",
       ),
     ).toEqual([
@@ -514,9 +602,10 @@ describe("pull request detail face (static SSR)", () => {
     }));
     const markup = render({ ...DETAIL, reviews, failures: [] });
     expect(markup.match(/data-slot="activity-entry"/g) ?? []).toHaveLength(7);
-    // No `{count}` placeholder survives, and the key's own words are absent.
+    // No `{count}` placeholder survives, and the activity list holds exactly
+    // those seven rows — a truncation row would be an eighth child.
     expect(markup).not.toContain(t("en", "pullRequests.timelineHidden", { count: 0 }));
-    expect(markup).not.toContain("earlier events not shown");
+    expect(renderDom({ ...DETAIL, reviews, failures: [] }).querySelectorAll("ol > li")).toHaveLength(7);
   });
 
   test("a failure's first line renders as escaped text and its full output stays in details", () => {
@@ -650,16 +739,14 @@ describe("pull requests data plane (pure helpers)", () => {
     // coerced empty) renders no attribution span and no "Latest review" meta —
     // an empty value would read as a missing fact — and the empty finding path
     // renders no location at all, no bare `:line` (N12).
-    const markup = renderToStaticMarkup(
+    const win = new Window();
+    win.document.body.innerHTML = renderToStaticMarkup(
       createElement(PullRequestDetailView, { locale: "en", detail: parsed ?? DETAIL }),
     );
-    const empty = t("en", "pullRequests.reviewMeta", { model: "", provider: "" });
-    expect(markup).not.toContain(t("en", "pullRequests.latestReview"));
-    // The empty attribution would paint as an empty span in the review head.
-    expect(markup).not.toContain(`<span class="text-(--text-muted)">${empty}</span>`);
-    expect(markup).not.toContain('<span class="text-(--text-muted)"></span>');
-    expect(markup).not.toContain(":42");
-    expect(markup).not.toContain(">null<");
+    const container = win.document.body as unknown as HTMLElement;
+    expect(container.textContent ?? "").not.toContain(t("en", "pullRequests.latestReview"));
+    expect(container.textContent ?? "").not.toContain(":42");
+    expect(container.textContent ?? "").not.toContain("null");
   });
 });
 
@@ -698,6 +785,58 @@ function DetailHarness() {
     onReload: noReload,
     onSearch: setSearch,
   });
+}
+
+/**
+ * Mount the tab with every fetch gated until the test resolves it by URL
+ * suffix, so a transition frame is observable instead of raced. The mount of
+ * `initialPr` is the helper's own first act; teardown restores `fetch` and the
+ * DOM in one call.
+ */
+async function mountTabWithGatedFetch(initialPr: string) {
+  const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+  const realFetch = globalThis.fetch;
+  type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
+  const gates = new Map<string, Gate>();
+  globalThis.fetch = (async (input: unknown) => {
+    const gate: Gate = Promise.withResolvers<Response>();
+    gates.set(String(input), gate);
+    return gate.promise;
+  }) as unknown as typeof fetch;
+  const resolve = (suffix: string, response: Response) => {
+    const url = [...gates.keys()].reverse().find((key) => key.endsWith(suffix));
+    const gate = url === undefined ? undefined : gates.get(url);
+    if (!gate) throw new Error(`no fetch issued for ${suffix}`);
+    gate.resolve(response);
+  };
+  const tabElementFor = (pr: string) =>
+    createElement(AppPullRequestsTab, {
+      locale: "en",
+      appId: "1",
+      search: { tab: "pull-requests", window: "30", repo: "", pr },
+      onSearch: noSearch,
+    });
+  const container = win.document.createElement("div");
+  win.document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  await act(async () => root.render(tabElementFor(initialPr)));
+  await act(async () => {});
+  return {
+    container,
+    text: () => container.textContent ?? "",
+    win,
+    /** Re-render the tab for another pr — the switch the read stamp follows. */
+    rerender: async (pr: string) => {
+      await act(async () => root.render(tabElementFor(pr)));
+      await act(async () => {});
+    },
+    resolve,
+    unmount: async () => {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    },
+  };
 }
 
 describe("pull requests detail read derivation (pure)", () => {
@@ -747,6 +886,62 @@ describe("pull requests tab (mounted)", () => {
     }
   });
 
+  test("the family switch and a fold toggle act on the live tree", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const host = win.document.createElement("div");
+    win.document.body.appendChild(host);
+    // happy-dom's nodes cross into lib.dom's here: the queries below read the
+    // same roles, attributes and `hidden` the static tests do.
+    const container = host as unknown as HTMLElement;
+    const root = createRoot(host as unknown as Element);
+    const press = async (target: Element | null | undefined) => {
+      const pointer = (type: string) =>
+        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
+      await act(async () => {
+        target?.dispatchEvent(pointer("mousedown"));
+        target?.dispatchEvent(pointer("click"));
+      });
+      await act(async () => {});
+    };
+    const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
+    const panels = () => [...container.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
+    const selected = () => tabs().map((tab) => tab.getAttribute("aria-selected") === "true");
+    const visible = () => panels().map((panel) => panel.hidden === false);
+    try {
+      await act(async () => root.render(createElement(PullRequestDetailView, { locale: "en", detail: DETAIL })));
+      await act(async () => {});
+      // DETAIL carries a must-fix finding: findings first, its panel open.
+      expect(selected()).toEqual([true, false, false]);
+      expect(visible()).toEqual([true, false, false]);
+
+      // The reviews family: the selection and the visible panel both move.
+      await press(tabs()[1]);
+      expect(selected()).toEqual([false, true, false]);
+      expect(visible()).toEqual([false, true, false]);
+
+      // And back — a one-way switch would pass the assertion above.
+      await press(tabs()[0]);
+      expect(selected()).toEqual([true, false, false]);
+      expect(visible()).toEqual([true, false, false]);
+
+      // A fold toggle flips its own `aria-expanded` and its body's `hidden`.
+      // The second finding starts folded; the first starts open.
+      const controls = () => [...container.querySelectorAll<HTMLElement>("button[aria-expanded][aria-controls]")];
+      const bodyOf = (control: HTMLElement | undefined) =>
+        control === undefined
+          ? null
+          : container.querySelector<HTMLElement>(`#${control.getAttribute("aria-controls") ?? ""}`);
+      expect(controls()[1]?.getAttribute("aria-expanded")).toBe("false");
+      expect(bodyOf(controls()[1])?.hidden).toBe(true);
+      await press(controls()[1]);
+      expect(controls()[1]?.getAttribute("aria-expanded")).toBe("true");
+      expect(bodyOf(controls()[1])?.hidden).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
   test("the failures column carries the row's failure count", async () => {
     const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
     const container = win.document.createElement("div");
@@ -774,36 +969,8 @@ describe("pull requests tab (mounted)", () => {
   });
 
   test("switching PRs never shows the previous PR's data; a failed fetch renders the error face with a retry (S2)", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const realFetch = globalThis.fetch;
-    // Gate every fetch: the test resolves each read by its URL suffix.
-    type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
-    const gates = new Map<string, Gate>();
-    globalThis.fetch = (async (input: unknown) => {
-      const gate: Gate = Promise.withResolvers<Response>();
-      gates.set(String(input), gate);
-      return gate.promise;
-    }) as unknown as typeof fetch;
-    const resolve = (suffix: string, response: Response) => {
-      const url = [...gates.keys()].reverse().find((key) => key.endsWith(suffix));
-      const gate = url === undefined ? undefined : gates.get(url);
-      if (!gate) throw new Error(`no fetch issued for ${suffix}`);
-      gate.resolve(response);
-    };
-    const tabElementFor = (pr: string) =>
-      createElement(AppPullRequestsTab, {
-        locale: "en",
-        appId: "1",
-        search: { tab: "pull-requests", window: "30", repo: "", pr },
-        onSearch: noSearch,
-      });
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
-    const text = () => container.textContent ?? "";
+    const { container, text, win, rerender, resolve, unmount } = await mountTabWithGatedFetch("acme/web/1");
     try {
-      await act(async () => root.render(tabElementFor("acme/web/1")));
-      await act(async () => {});
       await act(async () => {
         resolve("/pull-requests/acme/web/1", jsonResponse(DETAIL));
       });
@@ -811,8 +978,7 @@ describe("pull requests tab (mounted)", () => {
       expect(text()).toContain("Fix the login flow");
 
       // Switch to PR B: A's detail is retained in state but must NOT render.
-      await act(async () => root.render(tabElementFor("acme/web/2")));
-      await act(async () => {});
+      await rerender("acme/web/2");
       expect(text()).not.toContain("Fix the login flow");
       expect(text()).toContain(t("en", "common.loading"));
 
@@ -842,42 +1008,13 @@ describe("pull requests tab (mounted)", () => {
       expect(text()).toContain("Bump the dependencies");
       expect(text()).not.toContain("Fix the login flow");
     } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
+      await unmount();
     }
   });
 
   test("a failed read for A leaves no error on B's transition frame (N1)", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const realFetch = globalThis.fetch;
-    type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
-    const gates = new Map<string, Gate>();
-    globalThis.fetch = (async (input: unknown) => {
-      const gate: Gate = Promise.withResolvers<Response>();
-      gates.set(String(input), gate);
-      return gate.promise;
-    }) as unknown as typeof fetch;
-    const resolve = (suffix: string, response: Response) => {
-      const url = [...gates.keys()].reverse().find((key) => key.endsWith(suffix));
-      const gate = url === undefined ? undefined : gates.get(url);
-      if (!gate) throw new Error(`no fetch issued for ${suffix}`);
-      gate.resolve(response);
-    };
-    const tabElementFor = (pr: string) =>
-      createElement(AppPullRequestsTab, {
-        locale: "en",
-        appId: "1",
-        search: { tab: "pull-requests", window: "30", repo: "", pr },
-        onSearch: noSearch,
-      });
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
-    const text = () => container.textContent ?? "";
+    const { container, text, rerender, resolve, unmount } = await mountTabWithGatedFetch("acme/web/1");
     try {
-      await act(async () => root.render(tabElementFor("acme/web/1")));
-      await act(async () => {});
       // A's read fails: the error face is correct FOR A.
       await act(async () => {
         resolve("/pull-requests/acme/web/1", new Response("boom", { status: 500 }));
@@ -889,8 +1026,7 @@ describe("pull requests tab (mounted)", () => {
       // Switch to B: the face is the loading face — never A's error, which
       // would name the wrong PR (and announce assertively) before B's
       // fetch is even issued.
-      await act(async () => root.render(tabElementFor("acme/web/2")));
-      await act(async () => {});
+      await rerender("acme/web/2");
       expect(text()).toContain(t("en", "common.loading"));
       expect(text()).not.toContain(t("en", "common.loadFailed"));
       expect(container.querySelector('[role="alert"]')).toBeNull();
@@ -903,9 +1039,7 @@ describe("pull requests tab (mounted)", () => {
       expect(text()).toContain("Bump the dependencies");
       expect(container.querySelector('[role="alert"]')).toBeNull();
     } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
+      await unmount();
     }
   });
 
