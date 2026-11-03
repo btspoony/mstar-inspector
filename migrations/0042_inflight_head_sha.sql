@@ -1,0 +1,21 @@
+-- 0042_inflight_head_sha.sql — the commit the in-flight review covers.
+--
+-- The row's PRIMARY KEY is the PR (0041), so a `synchronize` for a NEW commit
+-- is refused by `pr-held` like any duplicate. Without the reviewed sha on the
+-- row, the terminal ack cannot tell the two apart: a duplicate of the same
+-- commit is normal traffic (the live review does the work), while a different
+-- commit would never be reviewed at all — yet both were acked with only a warn
+-- line and no `review_failures` row for the failure sweep (round-8 review).
+-- The consumer now compares the payload sha with this column at the terminal
+-- ack and records the drop row when they differ.
+--
+-- `""` is the repo convention for "never resolved a sha" (a comment-triggered
+-- job carries none; migration 0010 allows an empty `review_failures.head_sha`).
+-- `NOT NULL DEFAULT ''` keeps the comparison single-valued: a pre-existing row
+-- (written before this migration) reads as unresolved rather than as a NULL
+-- that would need its own branch.
+--
+-- Append-only on the production DB: one `ALTER TABLE ... ADD COLUMN` on the
+-- table 0041 created, no data rewrite. Forward-only (SQLite has no down).
+
+ALTER TABLE review_inflight ADD COLUMN head_sha TEXT NOT NULL DEFAULT '';

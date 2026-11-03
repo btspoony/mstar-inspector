@@ -391,25 +391,41 @@ export const defaultConsumerLog: ConsumerLog = {
 // ---------------------------------------------------------------------------
 
 /**
- * Admission row TTL (seconds): must exceed the max review wall-clock — ALL
- * FIVE git-timed steps (clone / rev-parse / diff / numstat / runner-input
- * write, 120s each — numstat + the input write were added without
- * recomputing this, qc3 F-301) plus the LEVEL's runner step
- * (runnerTimeoutMs(level) — 600s quick/default, 840s deep) plus slack for
- * the untimed steps (token mint, sandbox create, comment post, D1 puts) —
- * so the row can never expire mid-review and unblock a concurrent duplicate.
- * Pinned exactly by consumer.test.ts ("reviewGuardTtlSeconds covers the full
+ * Sandbox commands that can each consume the full `EXEC_TIMEOUT_GIT_MS`
+ * (120s): clone / rev-parse / diff / numstat / runner-input write, plus the
+ * recheck-doc read `readRecheckDoc` runs AFTER the runner step — the sixth
+ * was missing here, so the row could expire while a legal review was still
+ * posting (round-8 review).
+ */
+const GUARD_TIMED_SANDBOX_STEPS = 6;
+/** Slack for the untimed steps (token mint, sandbox create, comment post, D1 puts). */
+const GUARD_SLACK_MS = 120_000;
+
+/**
+ * Admission row TTL (seconds): must exceed the max review wall-clock — every
+ * timed sandbox command (`GUARD_TIMED_SANDBOX_STEPS` × 120s), the LEVEL's
+ * runner step (runnerTimeoutMs(level) — 600s quick/default, 840s deep), the
+ * whole inline-resolution budget (`INLINE_RESOLVE_BUDGET_MS`, which runs
+ * last), plus `GUARD_SLACK_MS` — so the row can never expire mid-review and
+ * unblock a concurrent duplicate. 1452s quick/default, 1692s deep. Pinned
+ * exactly by consumer.test.ts ("reviewGuardTtlSeconds covers the full
  * step-budget arithmetic per level") so a future step addition re-breaks
  * loudly.
  */
 export function reviewGuardTtlSeconds(level: ReviewLevel): number {
-  return Math.ceil((runnerTimeoutMs(level) + 5 * EXEC_TIMEOUT_GIT_MS + 120_000) / 1000);
+  return Math.ceil(
+    (runnerTimeoutMs(level) +
+      GUARD_TIMED_SANDBOX_STEPS * EXEC_TIMEOUT_GIT_MS +
+      INLINE_RESOLVE_BUDGET_MS +
+      GUARD_SLACK_MS) /
+      1000,
+  );
 }
 
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
  * — the first delivery is attempt 1). quick/default: 60s → 120s → 240s; deep: 180s → 360s → 720s
- * — every entry below the LEVEL's guard TTL (1320s / 1560s) so the held guard
+ * — every entry below the LEVEL's guard TTL (1452s / 1692s) so the held guard
  * can never expire mid-backoff into a duplicate race. Attempts past the
  * schedule's end have consumed the queue's max_retries and must be acked, not
  * retried (a further retry() would land the job on the DLQ).
@@ -441,7 +457,12 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
  */
 export type ProcessOutcome =
   | { kind: "ok" }
-  | { kind: "guard-held"; admission: AdmissionRefusalFields }
+  /**
+   * `heldHeadSha` is the commit the live row was taken for (`null` when the
+   * refusal was a cap/storage one, so no row holds this PR): the terminal ack
+   * records the drop unless the live review covers this message's own sha.
+   */
+  | { kind: "guard-held"; admission: AdmissionRefusalFields; heldHeadSha: string | null }
   | { kind: "paused" }
   | { kind: "degraded" };
 
@@ -469,11 +490,19 @@ export type AdmissionRefusalFields = Required<
  * (`reason` and both caps — spec §1.3: a held line must say which bound held
  * it); the idempotency key is not yet derivable at guard time (it comes from
  * the checked-out sha).
+ *
+ * `heldHeadSha` is the live row's sha: a `pr-held` drop is only benign while
+ * that review covers THIS message's commit. The backoff window (420s
+ * quick/default) is shorter than a legal review (600s+ runner), so a
+ * `synchronize` for a new commit can exhaust it against a review of the
+ * previous one — that commit would then never be reviewed and leave no trace,
+ * so the terminal ack records the drop row for it.
  */
 function handleGuardHeld(
   message: Message<ReviewJobPayload>,
   deps: ProcessDeps,
   admission: AdmissionRefusalFields,
+  heldHeadSha: string | null,
 ): void | Promise<void> {
   const fields = { ...toBaseFields(message.body), ...admission };
   // Why this message was held, appended to both lines: the delay schedule alone
@@ -509,16 +538,29 @@ function handleGuardHeld(
   // DROPPED with no other D1 trace: no attempt for this PR ever reached the
   // runner, so neither `reviews` nor the failure sweep (which counts
   // `review_failures`) would see it. Record one row here — the terminal drop
-  // is the failure event, not each refused attempt. `pr-held` is excluded: a
-  // live review for the same PR does the work. Best-effort: a warn only.
-  if (admission.reason === "pr-held") return;
+  // is the failure event, not each refused attempt. Best-effort: a warn only.
+  //
+  // `pr-held` is silent only while the live review covers THIS commit: a
+  // duplicate of the same sha is normal traffic, and a comment trigger (null
+  // payload sha) cannot prove otherwise. A DIFFERENT sha is a commit the live
+  // review will never cover, so it takes the drop-record branch below.
+  const payloadSha = message.body.head_sha;
+  if (admission.reason === "pr-held" && (payloadSha === null || payloadSha === heldHeadSha)) return;
   // Convention for a job that never resolved a sha (comment trigger —
   // `head_sha` is null in the payload): the row's `head_sha` is `""` (the
   // 0010 column allows it; only `reviews` forbids it), and the PR identity
   // stays in the error text so the row is joinable back to the PR — a bare
   // `""` row tells an operator nothing about which PR was dropped.
-  const headSha = message.body.head_sha ?? "";
+  const headSha = payloadSha ?? "";
   const identity = `${message.body.owner}/${message.body.repo}#${message.body.pr_number}`;
+  // A shifted-sha drop names the sha the live review holds, so an operator can
+  // see which commit was skipped rather than guessing from the refusal code.
+  const heldNote =
+    admission.reason === "pr-held"
+      ? ` — the in-flight review holds head_sha ${
+          heldHeadSha === "" || heldHeadSha === null ? "unresolved (comment trigger)" : heldHeadSha
+        }, so this commit was never reviewed`
+      : "";
   return deps.failureStore
     .record({
       installation_id: message.body.installation_id,
@@ -529,7 +571,7 @@ function handleGuardHeld(
       stage: "pipeline",
       error: `review dropped after ${delays.length} refused retries: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap}${cause}) — PR ${identity}, head_sha ${
         headSha === "" ? "unresolved (comment trigger, no sha in payload)" : headSha
-      }`,
+      }${heldNote}`,
     })
     .catch((err: unknown) => {
       const detail = err instanceof Error ? err.message : String(err);
@@ -1986,7 +2028,7 @@ export function createReviewConsumer(
       // delayed retry (or the final ack-with-warning) instead of throwing
       // into the queue's immediate ×3 retry → DLQ path.
       if (outcome.kind === "guard-held") {
-        await handleGuardHeld(message, deps, outcome.admission);
+        await handleGuardHeld(message, deps, outcome.admission, outcome.heldHeadSha);
       } else if (outcome.kind === "paused") {
         // Architect lock L4: a paused App's in-flight message is
         // acked DIRECTLY — an intentional skip with zero side effects, never
@@ -2179,6 +2221,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       workspaceCap: concurrency.workspace,
       attemptId,
       ttlSeconds,
+      // The commit this attempt reviews (`null` for a comment trigger): the
+      // row carries it so a later conflicting delivery can tell whether the
+      // live review covers its own sha.
+      headSha: payload.head_sha ?? null,
       now: new Date().toISOString(),
     });
     if (!admission.ok) {
@@ -2204,8 +2250,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       // A cap/error refusal that never recovers is recorded when the job is
       // finally dropped (handleGuardHeld's terminal ack): recording every
       // refused attempt would write "failure" rows for reviews that a later
-      // delayed attempt goes on to complete.
-      return { kind: "guard-held", admission: refusal };
+      // delayed attempt goes on to complete. `pr-held` carries the live row's
+      // sha so that ack can tell a duplicate from a commit it never covers.
+      return {
+        kind: "guard-held",
+        admission: refusal,
+        heldHeadSha: admission.reason === "pr-held" ? admission.heldHeadSha : null,
+      };
     }
     inflight = { key: inflightKey, attemptId, ttlSeconds };
     // 1. Sandbox + installation token (created lazily; destroyed in finally).

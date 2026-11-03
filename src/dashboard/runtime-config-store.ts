@@ -25,10 +25,10 @@
  * a PRESENT value the parse cannot trust, or a result that is not a row at
  * all, answers the CONSERVATIVE cap (1, i.e. serial) with `degraded: true` and
  * never throws — a settings read that breaks must not admit unlimited
- * concurrent reviews. The single-level readers (`getSystemConcurrency`,
- * `getWorkspaceConcurrency`) answer `{ concurrency, degraded }` for the same
- * reason: a settings face that renders the conservative fallback as a normal
- * value invites a save of a number nobody stored. The structured warn belongs
+ * concurrent reviews. The single-level reader (`getSystemConcurrency`) answers
+ * `{ concurrency, degraded }` for the same reason: a settings face that renders
+ * the conservative fallback as a normal value invites a save of a number
+ * nobody stored. The structured warn belongs
  * to the consumer that has a logger (the pipeline reader), not here.
  *
  * Write discipline: values are integers in 1..64 (`CONCURRENCY_MAX` is the
@@ -166,23 +166,8 @@ export async function getSystemConcurrency(db: DashboardD1): Promise<Concurrency
 }
 
 /**
- * The workspace cap on its own: an absent or RETIRED workspace reads as the
- * default, anything untrusted as 1 with `degraded: true`.
+ * The untrusted-read answer: serial, flagged.
  */
-export async function getWorkspaceConcurrency(
-  db: DashboardD1,
-  workspaceId: string,
-): Promise<ConcurrencyRead> {
-  const row = await db
-    .prepare(
-      "SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = ? AND deleted_at IS NULL",
-    )
-    .bind(workspaceId)
-    .first<{ value?: unknown }>();
-  return resolveRow(row, WORKSPACE_CONCURRENCY_DEFAULT);
-}
-
-/** The untrusted-read answer: serial, flagged. */
 function degradedConcurrency(): EffectiveConcurrency {
   return {
     system: CONCURRENCY_MIN,

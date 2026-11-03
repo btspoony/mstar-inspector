@@ -38,11 +38,15 @@ const KEY: InflightKey = {
   workspace_id: "ws_1",
 };
 
+/** The commit a live row was acquired for — what a `pr-held` refusal reports. */
+const SHA = "0123456789abcdef0123456789abcdef01234567";
+
 const OPTS: AcquireInflightOptions = {
   systemCap: 32,
   workspaceCap: 16,
   attemptId: "attempt-1",
   ttlSeconds: 600,
+  headSha: SHA,
   now: "2026-11-03T00:00:00Z",
 };
 
@@ -79,7 +83,28 @@ describe("inflight-store", () => {
     expect(await acquireInflight(db, KEY, { ...OPTS, attemptId: "attempt-2" })).toEqual({
       ok: false,
       reason: "pr-held",
+      heldHeadSha: SHA,
     });
+  });
+
+  test("the row carries the reviewed sha; a null sha reads back as ''", async () => {
+    // Round-8 review: a held push can only be judged (duplicate vs a commit
+    // the live review never covers) against the sha the row was taken for.
+    const db = freshDb();
+    expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
+    const rows = db.raw.query("SELECT head_sha FROM review_inflight").all() as Array<{ head_sha: string }>;
+    expect(rows[0]!.head_sha).toBe(SHA);
+
+    // A comment trigger carries no sha; the empty-string convention keeps the
+    // comparison single-valued and tells a later attempt the row holds none.
+    expect(await acquireInflight(db, otherPr(9), { ...OPTS, headSha: null })).toEqual({ ok: true });
+    const commentRow = db.raw
+      .query("SELECT head_sha FROM review_inflight WHERE pr_number = 9")
+      .get() as { head_sha: string };
+    expect(commentRow.head_sha).toBe("");
+    expect(
+      await acquireInflight(db, otherPr(9), { ...OPTS, attemptId: "attempt-2", headSha: "a".repeat(40) }),
+    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: "" });
   });
 
   test("refuses when the system cap is reached", async () => {
@@ -124,17 +149,21 @@ describe("inflight-store", () => {
   test("an expired row is reclaimed by the next acquire", async () => {
     const db = freshDb();
     expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: 60 })).toEqual({ ok: true });
+    const newerSha = "fedcba9876543210fedcba9876543210fedcba98";
     expect(
       await acquireInflight(db, KEY, {
         ...OPTS,
         attemptId: "attempt-2",
+        headSha: newerSha,
         now: "2026-11-03T00:02:00Z",
       }),
     ).toEqual({ ok: true });
-    // The reclaim replaced the row in place — one row, the newer attempt's.
+    // The reclaim replaced the row in place — one row, the newer attempt's,
+    // carrying the newer commit (a stale sha would misjudge the next push).
     const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.attempt_id).toBe("attempt-2");
+    expect(rows[0]!.head_sha).toBe(newerSha);
   });
 
   test("an expired row does not count toward the caps", async () => {
@@ -157,6 +186,7 @@ describe("inflight-store", () => {
     expect(await acquireInflight(db, KEY, { ...OPTS, attemptId: "attempt-2" })).toEqual({
       ok: false,
       reason: "pr-held",
+      heldHeadSha: SHA,
     });
   });
 
@@ -237,7 +267,7 @@ describe("inflight-store", () => {
     });
     expect(
       await acquireInflight(db, { ...KEY, owner: "acme", repo: "widgets" }, { ...OPTS, attemptId: "attempt-2" }),
-    ).toEqual({ ok: false, reason: "pr-held" });
+    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: SHA });
     const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.owner).toBe("acme");

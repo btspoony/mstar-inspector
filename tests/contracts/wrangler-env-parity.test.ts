@@ -270,11 +270,13 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
    * admission is min(system, workspace) read from D1 per message — so parity
    * alone would pass with any equal value. Both blocks therefore pin the same
    * constant, `QUEUE_CONCURRENCY_CEILING`, which the runtime cap range reads as
-   * its own maximum (asserted immediately below): 64, above the platform's
-   * 32/16 defaults and bounded because each attempt's own sandbox id starts
-   * its own container. `max_batch_size: 1` keeps one review per batch so the
-   * runner budget owns the whole wall clock. See the wrangler.jsonc rationale. */
-  test("both consumer blocks pin the deploy-time ceiling (max_concurrency QUEUE_CONCURRENCY_CEILING, max_batch_size 1)", () => {
+   * its own maximum (asserted immediately below): above the platform's 32/16
+   * defaults and bounded because each attempt's own sandbox id starts its own
+   * container. The other tuning values (`max_batch_size`, retries, DLQ) stay
+   * config decisions: set-equality above already keeps the two blocks from
+   * drifting apart, and re-stating their literals here would only duplicate
+   * the config (round-8 review). See the wrangler.jsonc rationale. */
+  test("both consumer blocks pin the deploy-time ceiling to QUEUE_CONCURRENCY_CEILING", () => {
     for (const [block, consumer] of [
       ["top level (staging)", asArray(asObject(staging.queues).consumers)[0]],
       ["env.production", asArray(asObject(production.queues).consumers)[0]],
@@ -284,7 +286,6 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
         consumer.max_concurrency,
         `wrangler.jsonc: ${block} max_concurrency ceiling`,
       ).toBe(QUEUE_CONCURRENCY_CEILING);
-      expect(consumer.max_batch_size, `wrangler.jsonc: ${block} max_batch_size`).toBe(1);
     }
   });
 

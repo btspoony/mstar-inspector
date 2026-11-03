@@ -11,7 +11,9 @@
  * runner/shared change that does not touch that file deploys the Worker while
  * the container keeps running the previous build — silently. The decision is
  * pure; the CLI only feeds it two git outputs, so the rule is unit-testable
- * without Docker.
+ * without Docker. Both container blocks count: a named environment does not
+ * inherit `containers`, so `env.production` declares its own image
+ * (`dockerfile`, `build_context`, `name`) and a prod deploy builds from it.
  *
  * Exit codes: 0 = pass; 1 = image input changed without the marker, or the
  * diff/config could not be read (an unreadable answer is never a pass).
@@ -71,42 +73,71 @@ export const IMAGE_REBUILD_INSTRUCTION = [
   "",
   ...IMAGE_INPUT_FAMILIES.map((family) => `- \`${family}\``),
   "",
-  "…or when the container block in `wrangler.jsonc` changes: the container's",
-  "`name`, its `images` entry, or that entry's `dockerfile`/`build_context`. A",
-  "config edit outside that block (vars, queues, routes, observability) needs no",
-  "rebuild.",
+  "…or when either container block in `wrangler.jsonc` (top level or",
+  "`env.production`) changes: the container's `name`, its `images` entry, or that",
+  "entry's `dockerfile`/`build_context`. A config edit outside those blocks (vars,",
+  "queues, routes, observability) needs no rebuild.",
 ].join("\n");
 
 /**
- * The image's Dockerfile, repo-relative, read from `wrangler.jsonc`'s
- * `containers[].images.sandbox.dockerfile` — the config is the one surface a
- * deploy actually reads, so the gate diffs exactly the file `wrangler` hashes
- * instead of a hand-copied path. `undefined` when the config cannot be read or
- * declares no image: the caller then fails instead of guessing a path.
+ * A JSON object at `value`, or `undefined` for anything else — a config field
+ * carries whatever the file holds, and only an object can be walked.
  */
-export function readDockerfilePath(configText: string): string | undefined {
+function objectAt(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Every `containers` array a deploy builds an image from, in config order: the
+ * TOP LEVEL (staging) and `env.production`. A wrangler named environment does
+ * not inherit resource keys, so production declares its own container block
+ * with its own `dockerfile`/`build_context`/`name` — reading only the top
+ * level let an `env.production`-only repoint ship unguarded. `undefined` when
+ * a declared block is not an array: the caller fails closed instead of
+ * trusting half a config.
+ */
+function containerArrays(config: Record<string, unknown>): unknown[][] | undefined {
+  const production = objectAt(objectAt(config.env)?.production);
+  const arrays: unknown[][] = [];
+  for (const containers of [config.containers, production?.containers]) {
+    if (containers === undefined) continue;
+    if (!Array.isArray(containers)) return undefined;
+    arrays.push(containers);
+  }
+  return arrays;
+}
+
+/**
+ * The image's Dockerfile paths, repo-relative, read from `wrangler.jsonc`'s
+ * `containers[].images.sandbox.dockerfile` in BOTH blocks (top level and
+ * `env.production`) — the config is the one surface a deploy actually reads,
+ * so the gate diffs exactly the files `wrangler` hashes instead of a
+ * hand-copied path. `[]` when the config cannot be read or declares no image:
+ * the caller then fails instead of guessing a path.
+ */
+export function readDockerfilePaths(configText: string): string[] {
   let config: unknown;
   try {
     config = JSON.parse(stripJsonComments(configText));
   } catch {
-    return undefined;
+    return [];
   }
-  if (typeof config !== "object" || config === null || !("containers" in config)) return undefined;
-  const containers = config.containers;
-  if (!Array.isArray(containers)) return undefined;
-  for (const container of containers) {
-    if (typeof container !== "object" || container === null || !("images" in container)) continue;
-    const images = container.images;
-    if (typeof images !== "object" || images === null || !("sandbox" in images)) continue;
-    const sandbox = images.sandbox;
-    if (typeof sandbox !== "object" || sandbox === null || !("dockerfile" in sandbox)) continue;
-    // The first declared image is the one this repo ships; wrangler's `./`
-    // spelling is the repo-relative path git knows.
-    if (typeof sandbox.dockerfile === "string" && sandbox.dockerfile !== "") {
-      return sandbox.dockerfile.replace(/^\.\//, "");
-    }
+  const root = objectAt(config);
+  if (root === undefined) return [];
+  const arrays = containerArrays(root);
+  if (arrays === undefined) return [];
+  const paths: string[] = [];
+  for (const container of arrays.flat()) {
+    const sandbox = objectAt(objectAt(objectAt(container)?.images)?.sandbox);
+    const dockerfile = sandbox?.dockerfile;
+    // Wrangler's `./` spelling is the repo-relative path git knows.
+    if (typeof dockerfile !== "string" || dockerfile === "") continue;
+    const path = dockerfile.replace(/^\.\//, "");
+    if (!paths.includes(path)) paths.push(path);
   }
-  return undefined;
+  return paths;
 }
 
 /**
@@ -150,15 +181,18 @@ export function stripJsonComments(text: string): string {
 }
 
 /**
- * The container block a deploy builds the image from, serialized so two
- * revisions compare by value instead of by file bytes: each container's `name`
- * and its whole `images` map (whose entries carry `dockerfile` and
- * `build_context`). Everything else in the config — vars, queues, routes,
+ * The container blocks a deploy builds images from, serialized so two
+ * revisions compare by value instead of by file bytes: each block's array of
+ * containers, each with its `name` and its whole `images` map (whose entries
+ * carry `dockerfile` and `build_context`). Both blocks count — the top level
+ * (staging) and `env.production` — because a prod deploy builds from the
+ * latter, so an `env.production`-only repoint changes the image too (round-8
+ * review). Everything else in the config — vars, queues, routes,
  * observability — cannot change the image, so it must not force a rebuild.
  * `undefined` when the config cannot be read: the caller fails instead of
  * passing unverified.
  *
- * shortcut: key order inside the block counts as a change; sort keys if a
+ * shortcut: key order inside a block counts as a change; sort keys if a
  * reorder-only edit ever shows up in practice.
  */
 export function containerSignature(configText: string): string | undefined {
@@ -168,18 +202,18 @@ export function containerSignature(configText: string): string | undefined {
   } catch {
     return undefined;
   }
-  if (typeof config !== "object" || config === null) return undefined;
-  if (!("containers" in config)) return JSON.stringify([]);
-  const containers = config.containers;
-  if (!Array.isArray(containers)) return undefined;
+  const root = objectAt(config);
+  if (root === undefined) return undefined;
+  const arrays = containerArrays(root);
+  if (arrays === undefined) return undefined;
   return JSON.stringify(
-    containers.map((container) => {
-      if (typeof container !== "object" || container === null) return null;
-      return {
-        name: "name" in container ? container.name : undefined,
-        images: "images" in container ? container.images : undefined,
-      };
-    }),
+    arrays.map((containers) =>
+      containers.map((container) => {
+        const entry = objectAt(container);
+        if (entry === undefined) return null;
+        return { name: entry.name, images: entry.images };
+      }),
+    ),
   );
 }
 
@@ -257,8 +291,8 @@ if (import.meta.main) {
     process.exit(1);
   }
 
-  // The path comes from the config `wrangler` itself reads, so a hand-copied
-  // Dockerfile path here can never drift from the file a deploy hashes.
+  // The paths come from the config `wrangler` itself reads, so a hand-copied
+  // Dockerfile path here can never drift from the files a deploy hashes.
   let headConfig: string;
   try {
     headConfig = readFileSync(configPath, "utf8");
@@ -268,15 +302,16 @@ if (import.meta.main) {
     );
     process.exit(1);
   }
-  const dockerfilePath = readDockerfilePath(headConfig);
-  if (dockerfilePath === undefined) {
+  const dockerfilePaths = readDockerfilePaths(headConfig);
+  if (dockerfilePaths.length === 0) {
     console.error(
-      `::error::check-image-inputs: ${configPath} declares no \`containers[].images.sandbox.dockerfile\` — treat as unverified, not a pass`,
+      `::error::check-image-inputs: ${configPath} declares no \`containers[].images.sandbox.dockerfile\` (top level or env.production) — treat as unverified, not a pass`,
     );
     process.exit(1);
   }
+  const dockerfileLabel = dockerfilePaths.join(" / ");
 
-  // The container block is read at BOTH revisions: a `build_context` or
+  // The container blocks are read at BOTH revisions: a `build_context` or
   // Dockerfile repoint changes the image even though no copied path did. The
   // file itself is not a path family — every other config edit is image-neutral.
   const baseConfig = git(["show", `${base}:${configPath}`]);
@@ -284,7 +319,7 @@ if (import.meta.main) {
   const headSignature = containerSignature(headConfig);
   if (baseSignature === undefined || headSignature === undefined) {
     console.error(
-      `::error::check-image-inputs: could not read the container block of ${configPath} at ${base} and HEAD (the path must be repo-relative) — treat as unverified, not a pass`,
+      `::error::check-image-inputs: could not read the container blocks of ${configPath} at ${base} and HEAD (the path must be repo-relative) — treat as unverified, not a pass`,
     );
     process.exit(1);
   }
@@ -293,7 +328,8 @@ if (import.meta.main) {
   // `--no-renames` keeps both sides of a move, so leaving an input family is
   // visible as a deletion; `-z` avoids Git's quoting of non-ASCII paths.
   const nameOnly = git(["diff", "--name-only", "--no-renames", "-z", range]);
-  const dockerfileDiff = git(["diff", range, "--", dockerfilePath]);
+  // Both Dockerfile paths: a marker change in EITHER satisfies the gate.
+  const dockerfileDiff = git(["diff", range, "--", ...dockerfilePaths]);
   if (nameOnly === undefined || dockerfileDiff === undefined) {
     console.error("::error::check-image-inputs: could not read the diff — treat as unverified, not a pass");
     process.exit(1);
@@ -303,7 +339,7 @@ if (import.meta.main) {
   const verdict = evaluateImageGate(paths, dockerfileDiff, baseSignature !== headSignature);
   if (!verdict.ok) {
     console.error(
-      `::error::${verdict.reason}: this diff changes image inputs but not the rebuild marker in ${dockerfilePath}.`,
+      `::error::${verdict.reason}: this diff changes image inputs but not the rebuild marker in ${dockerfileLabel}.`,
     );
     console.error(IMAGE_REBUILD_INSTRUCTION);
     process.exit(1);

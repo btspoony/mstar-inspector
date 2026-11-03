@@ -492,8 +492,15 @@ function inflightRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record
 /** Seed one live admission row through the REAL store: the state a running review leaves behind. */
 async function seedInflight(
   db: TestD1,
-  overrides: { pr_number?: number; owner?: string; repo?: string; workspace_id?: string } = {},
+  overrides: {
+    pr_number?: number;
+    owner?: string;
+    repo?: string;
+    workspace_id?: string;
+    headSha?: string | null;
+  } = {},
 ): Promise<void> {
+  const { headSha = SHA, ...key } = overrides;
   const result = await acquireInflight(
     db,
     {
@@ -502,9 +509,16 @@ async function seedInflight(
       repo: "widgets",
       pr_number: 42,
       workspace_id: "default",
-      ...overrides,
+      ...key,
     },
-    { systemCap: 32, workspaceCap: 16, attemptId: "seed-attempt", ttlSeconds: 1320, now: new Date().toISOString() },
+    {
+      systemCap: 32,
+      workspaceCap: 16,
+      attemptId: "seed-attempt",
+      ttlSeconds: 1320,
+      headSha,
+      now: new Date().toISOString(),
+    },
   );
   expect(result).toEqual({ ok: true });
 }
@@ -1147,7 +1161,7 @@ describe("createReviewConsumer", () => {
     expect(runnerCall.cmd).toContain("--level 'deep'");
     expect(reviewCount(db)).toBe(1);
   });
-  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + admission TTL 1560; quick/default stay 600_000 (AC-S10-clock)", async () => {
+  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + admission TTL 1692; quick/default stay 600_000 (AC-S10-clock)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -1171,7 +1185,7 @@ describe("createReviewConsumer", () => {
     // Problem Statement).
     expect(runnerExecTimeout()).toBe(840_000);
     // The admission row's TTL follows the same level table (AC-S10-guard).
-    expect(admissionTtlMs).toBe(1560_000);
+    expect(admissionTtlMs).toBe(1692_000);
     // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
     expect(runnerTimeoutMs("quick")).toBe(600_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);
@@ -2092,6 +2106,47 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(0);
   });
 
+  test("a distinct sha held through the whole backoff records ONE drop row (W-1 / round-8)", async () => {
+    // The live review covers the sha it acquired for. A push for a NEW commit
+    // that exhausts the 420s backoff against a longer review is never reviewed
+    // by it, so the drop must reach the failure sweep — a warn line alone
+    // leaves the commit with no trace at all.
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    await seedInflight(db); // holds SHA
+    const newer = "1111111111111111111111111111111111111111";
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: newer })));
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(sandboxCalls).toHaveLength(0);
+    expect(inflightRows(db)).toHaveLength(1); // the live row, untouched
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ pr_number: 42, stage: "pipeline", head_sha: newer });
+    const dropped = String(failureRows(db)[0]!.error);
+    expect(dropped).toContain("pr-held");
+    // Both shas are named: the skipped commit and the one the review holds.
+    expect(dropped).toContain(newer);
+    expect(dropped).toContain(SHA);
+  });
+
+  test("a comment-triggered delivery held by a live review stays silent (no sha to compare)", async () => {
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    await seedInflight(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(
+      makeBatch(makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment" })),
+    );
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
   test("a cap refusal that survives the whole backoff records ONE failure row (W-1)", async () => {
     reset();
     messageAttempts = 4; // final delivery: the job is dropped here
@@ -2469,16 +2524,16 @@ describe("createReviewConsumer", () => {
     expect(warnLine!.msg).toContain("expires by TTL");
   });
   test("reviewGuardTtlSeconds covers the full step-budget arithmetic per level (qc3 F-301 pin / AC-S10-guard)", () => {
-    // Exact pin: FIVE git-timed steps (clone, rev-parse, diff, numstat,
-    // runner-input write) × 120s + the LEVEL's runner budget + 120s slack
-    // for the untimed steps (token mint, sandbox create, comment post,
-    // KV/D1 puts) = 1320s quick/default, 1560s deep (spec d5-budget L4).
-    // numstat + the input write were added without recomputing
-    // the old 3-step formula (1020s) — any future step or ceiling change
-    // must recompute this helper ON PURPOSE.
-    expect(reviewGuardTtlSeconds("quick")).toBe(1320);
-    expect(reviewGuardTtlSeconds("default")).toBe(1320);
-    expect(reviewGuardTtlSeconds("deep")).toBe(1560);
+    // Exact pin: SIX timed sandbox commands (clone, rev-parse, diff, numstat,
+    // runner-input write, recheck-doc read) × 120s + the LEVEL's runner budget
+    // + the 12s inline-resolution budget + 120s slack for the untimed steps
+    // (token mint, sandbox create, comment post, KV/D1 puts) = 1452s
+    // quick/default, 1692s deep (spec d5-budget L4). Each earlier step
+    // addition (numstat, the input write, the recheck read) went uncounted —
+    // any future step or ceiling change must recompute this helper ON PURPOSE.
+    expect(reviewGuardTtlSeconds("quick")).toBe(1452);
+    expect(reviewGuardTtlSeconds("default")).toBe(1452);
+    expect(reviewGuardTtlSeconds("deep")).toBe(1692);
   });
 
   test("guardRetryDelaysSeconds per level — every delay below that level's guard TTL (AC-S10-guard)", () => {
