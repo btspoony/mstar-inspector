@@ -80,14 +80,27 @@ export function severityGroups(
 export type ActivityTone = "danger" | "success" | "neutral";
 
 /**
- * The one verdict-tone rule, for the band, the review row and the timeline
- * alike: `ship it` is success, any other non-empty verdict is danger — a
- * review that asked for changes is an alarm wherever its verdict is painted.
- * No verdict (`""`, the payload's coercion of a missing one) is neutral.
+ * The one verdict-tone rule — the band, the review badge and the timeline dot
+ * all read this table, so a verdict cannot be an alarm on one surface and
+ * quiet on another. It names the whole known vocabulary: the current schema's
+ * `ship it` / `needs fixes` / `blocked` / `incomplete` and the pre-v1 rows
+ * that kept GitHub's review words. Anything outside the table — including
+ * `""`, the payload's coercion of a missing verdict — is unknown, and an
+ * unknown word is not an alarm.
  */
+const VERDICT_TONES: Record<string, ActivityTone> = {
+  "ship it": "success",
+  approve: "success",
+  "needs fixes": "danger",
+  request_changes: "danger",
+  blocked: "danger",
+  incomplete: "danger",
+  comment: "neutral",
+  info: "neutral",
+};
+
 export function verdictTone(verdict: string): ActivityTone {
-  if (verdict === "") return "neutral";
-  return verdict === "ship it" ? "success" : "danger";
+  return VERDICT_TONES[verdict] ?? "neutral";
 }
 
 /** `model · provider`, the separator dropped when the payload records no provider. */
@@ -98,11 +111,11 @@ export function reviewAttribution(locale: Locale, review: PullRequestReview): st
 }
 
 /**
- * A fold control's accessible name: the action plus the record it folds, so
- * the nine toggles on this face are told apart by what they open rather than
- * by nine identical "Expand"s. A record with no identity text (a coerced-empty
- * title or verdict) falls back to its position, which still keeps the name
- * distinct.
+ * A fold control's accessible name: the action, the record it folds, and the
+ * record's position. The position is the one identity every record has — the
+ * same one its fold state is keyed by — so two records that share a title (or
+ * a verdict and sha) still read as two controls, and a record with no identity
+ * text (a coerced-empty title or verdict) is named by its position alone.
  */
 export function foldLabel(
   locale: Locale,
@@ -111,7 +124,7 @@ export function foldLabel(
   position: number,
 ): string {
   const action = t(locale, open ? "pullRequests.collapse" : "pullRequests.expand");
-  return `${action} — ${record === "" ? `#${position}` : record}`;
+  return `${action} — ${record === "" ? "" : `${record} · `}#${position}`;
 }
 
 /** The copy action's label: its action while idle, its transient outcome after a press. */

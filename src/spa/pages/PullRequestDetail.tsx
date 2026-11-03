@@ -557,7 +557,9 @@ export function PullRequestDetailView({
                 <ul className="flex flex-col gap-2">
                   {detail.failures.map((failure, index) => {
                     // The first line is the diagnosis; the rest is evidence.
-                    const lines = failure.error.split(/\r?\n/);
+                    // Trailing newlines are not another line: `"boom\n"` is
+                    // one line of output, so it gets no disclosure.
+                    const lines = failure.error.replace(/(\r?\n)+$/, "").split(/\r?\n/);
                     const firstLine = lines[0] ?? "";
                     // The row's identity is its key; the copy outcome rides the
                     // same key so the message names the block it belongs to.

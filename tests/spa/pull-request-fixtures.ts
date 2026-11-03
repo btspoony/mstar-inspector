@@ -95,16 +95,23 @@ export const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 /**
- * One press as the browser performs it — the pointer events Radix listens for,
- * then a flush so the state the press caused has settled. Shared by every
- * mounted suite, so none of them spells this sequence again.
+ * One press as the browser performs it: pointerdown, mousedown, pointerup,
+ * mouseup, then click — the sequence a Radix trigger's pointer listeners and a
+ * plain button's click both act on — followed by a flush so the state the
+ * press caused has settled. Shared by every mounted suite, so none of them
+ * spells this sequence again.
  */
 export async function press(win: Window, target: Element | null | undefined): Promise<void> {
   const pointer = (type: string) =>
+    new win.PointerEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
+  const mouse = (type: string) =>
     new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
   await act(async () => {
-    target?.dispatchEvent(pointer("mousedown"));
-    target?.dispatchEvent(pointer("click"));
+    target?.dispatchEvent(pointer("pointerdown"));
+    target?.dispatchEvent(mouse("mousedown"));
+    target?.dispatchEvent(pointer("pointerup"));
+    target?.dispatchEvent(mouse("mouseup"));
+    target?.dispatchEvent(mouse("click"));
   });
   await act(async () => {});
 }
@@ -158,21 +165,24 @@ export async function mountDetailView(
 export async function mountTabWithGatedFetch(initialPr: string) {
   const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
   const realFetch = globalThis.fetch;
-  type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
-  const gates = new Map<string, Gate>();
+  // One gate per REQUEST, not per URL: a retry re-reads a URL that was already
+  // read, and a URL-keyed gate would replace the request still pending.
+  type Gate = { url: string; promise: Promise<Response>; resolve: (response: Response) => void };
+  const gates: Gate[] = [];
   // Every URL the tab asked for, so a test can prove a read was (or was not)
   // issued without keeping its own stub.
   const fetches: string[] = [];
   globalThis.fetch = (async (input: unknown) => {
-    fetches.push(String(input));
-    const gate: Gate = Promise.withResolvers<Response>();
-    gates.set(String(input), gate);
+    const url = String(input);
+    fetches.push(url);
+    const gate: Gate = { url, ...Promise.withResolvers<Response>() };
+    gates.push(gate);
     return gate.promise;
   }) as unknown as typeof fetch;
   const resolve = (suffix: string, response: Response) => {
-    const url = [...gates.keys()].reverse().find((key) => key.endsWith(suffix));
-    const gate = url === undefined ? undefined : gates.get(url);
-    if (!gate) throw new Error(`no fetch issued for ${suffix}`);
+    const gate = [...gates].reverse().find((candidate) => candidate.url.endsWith(suffix));
+    if (gate === undefined) throw new Error(`no fetch issued for ${suffix}`);
+    gates.splice(gates.indexOf(gate), 1);
     gate.resolve(response);
   };
   // The helper owns the shell's search state, so a close (`onSearch`) commits

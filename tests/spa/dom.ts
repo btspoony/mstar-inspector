@@ -94,15 +94,20 @@ export function installDom(url: string): { win: Window; cleanup: () => void } {
  * Parse static markup into a throwaway document and hand the container to
  * `read`. The window is closed on the way out — including when an assertion
  * fails — so a parse never outlives its test; return plain values, not nodes,
- * because the document is gone once `read` returns.
+ * because the document is gone once `read` returns. The close settles
+ * asynchronously, so it is awaited: a failed teardown fails the test instead
+ * of vanishing behind a discarded promise.
  */
-export function withMarkup<T>(markup: string, read: (container: HTMLElement) => T): T {
+export async function withMarkup<T>(
+  markup: string,
+  read: (container: HTMLElement) => T,
+): Promise<T> {
   const win = new Window();
   try {
     win.document.body.innerHTML = markup;
     return read(win.document.body as unknown as HTMLElement);
   } finally {
-    void win.happyDOM.close();
+    await win.happyDOM.close();
   }
 }
 

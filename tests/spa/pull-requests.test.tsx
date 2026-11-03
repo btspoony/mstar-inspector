@@ -142,13 +142,13 @@ function DetailHarness() {
 }
 
 describe("tab shell rendering (static SSR)", () => {
-  test("the Pull requests trigger appears ONLY on the manage face", () => {
-    const tabNames = (payload: SettingsPayload) =>
+  test("the Pull requests trigger appears ONLY on the manage face", async () => {
+    const tabNames = async (payload: SettingsPayload) =>
       withMarkup(renderDetail(payload), (container) =>
         [...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent ?? ""),
       );
-    expect(tabNames(managePayload)).toContain(t("en", "appDetail.tabPullRequests"));
-    expect(tabNames(identityPayload)).not.toContain(t("en", "appDetail.tabPullRequests"));
+    expect(await tabNames(managePayload)).toContain(t("en", "appDetail.tabPullRequests"));
+    expect(await tabNames(identityPayload)).not.toContain(t("en", "appDetail.tabPullRequests"));
     // The ledger itself is absent too, not only its trigger.
     expect(renderDetail(identityPayload)).not.toContain(t("en", "pullRequests.columnPr"));
   });
@@ -246,11 +246,7 @@ describe("pull requests tab (mounted)", () => {
         (button) => button.textContent === t("en", "appDetail.tabPullRequests"),
       );
       expect(trigger).toBeDefined();
-      await act(async () => {
-        trigger?.dispatchEvent(new win.MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
-        trigger?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
-      });
-      await act(async () => {});
+      await press(win, trigger as unknown as Element);
       // The ledger's empty state is the opened tab's face.
       expect(container.textContent ?? "").toContain(t("en", "pullRequests.emptyTitle"));
     } finally {
