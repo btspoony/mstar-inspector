@@ -870,7 +870,9 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
     const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
 
     expect(envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
-    expect(envelope.summary_md).not.toContain("- notes:");
+    // No seat narrative and no gap: the key stays absent rather than becoming
+    // an empty or fabricated summary.
+    expect(envelope).not.toHaveProperty("summary_md");
   });
 
   test("a seat stopped by its cap is uncollected: the review still lands and declares the gap", async () => {
@@ -1182,7 +1184,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     // The retained finding and the coverage note describe the SAME assigned
     // scope: the note must report that coverage is incomplete, never that the
     // scope went unscanned — the contradiction the reviewer called out.
-    const notes = noteLines(envelope.summary_md);
+    const notes = noteLines(envelope.summary_md ?? "");
     expect(envelope.findings.map((finding) => finding.file_path)).toEqual(["src/a.ts"]);
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("its assigned scope is not fully covered");
@@ -1205,7 +1207,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
 
     const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, reconFacts: facts });
 
-    const notes = noteLines(envelope.summary_md);
+    const notes = noteLines(envelope.summary_md ?? "");
     // Every capped seat keeps its coverage line (a note is never dropped by a
     // sibling's length), each line is bounded by CHARACTERS, and the whole body
     // stays inside the budget the publisher truncates at — so nothing that
@@ -1214,7 +1216,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     for (const note of notes) {
       expect(note.length).toBeLessThanOrEqual(SEAT_GAP_MAX_CHARS);
     }
-    expect(envelope.summary_md.length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
+    expect((envelope.summary_md ?? "").length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
     expect(envelope.summary_md).toContain("changeset-1-src");
     expect(envelope.summary_md).toContain("changeset-2-lib");
   });
@@ -1227,7 +1229,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
 
     const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", reconFacts: facts });
 
-    const notes = noteLines(envelope.summary_md);
+    const notes = noteLines(envelope.summary_md ?? "");
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("its assigned scope is not fully covered");
     expect(notes[0]).toMatch(/, and \d+ more$/);
@@ -1248,16 +1250,17 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
 
     const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
 
-    expect(noteLines(envelope.summary_md)).toEqual([
+    expect(noteLines(envelope.summary_md ?? "")).toEqual([
       `- notes: seat full-diff-combined was stopped by ${CAP_REASON}; ` +
         `its assigned scope is not fully covered: lib/c.ts, src/a.ts, src/b.ts`,
     ]);
     expect(envelope.incomplete?.unscanned).toEqual(["full-diff-combined: lib/c.ts, src/a.ts, src/b.ts"]);
   });
 
-  test("a summary at the body budget still cannot erase the capped seats' notes", async () => {
-    // Each capped seat kept what it collected before the cap: enough findings
-    // that the engine's own summary ALONE runs past the whole body budget.
+  test("no seat narrative is fabricated, and the capped seats' notes survive in full", async () => {
+    // Each capped seat kept what it collected before the cap. No seat wrote a
+    // narrative, and the engine no longer invents one — so the published body
+    // is the notes block alone, with nothing crowding it out.
     const findings = (prefix: string, dir: string) =>
       Array.from({ length: 200 }, (_, index) => ({
         mergeClass: "must-fix",
@@ -1273,11 +1276,10 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
 
     const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
 
-    const notesAt = envelope.summary_md.indexOf("\n\n- notes: ");
-    const summaryPart = envelope.summary_md.slice(0, notesAt);
-    const notes = noteLines(envelope.summary_md);
-    // The engine summary was cut to hold the disclosure, and its cut is marked.
-    expect(summaryPart).toContain("summary truncated");
+    const summary = envelope.summary_md ?? "";
+    // No fabricated verdict/tally text precedes the disclosure.
+    expect(summary.startsWith("\n\n- notes: ")).toBe(true);
+    const notes = noteLines(summary);
     // Both capped seats keep their slug, the cause and the coverage statement.
     expect(notes).toHaveLength(2);
     for (const [index, slug] of ["changeset-1-src", "changeset-2-lib"].entries()) {
@@ -1286,7 +1288,7 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
       expect(notes[index]).toContain("its assigned scope is not fully covered");
     }
     // And the body the publisher receives stays inside the budget it truncates at.
-    expect(envelope.summary_md.length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
+    expect(summary.length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
   });
 });
 
@@ -1637,11 +1639,11 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
-    expect(envelope.summary_md.length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
+    expect((envelope.summary_md ?? "").length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
     expect(envelope.summary_md).toContain("summary truncated");
   });
 
-  test("a stop the SDK reported is the declared cause, one line, and keeps the engine summary template", async () => {
+  test("a stop the SDK reported is the declared cause, one line, and no summary is fabricated", async () => {
     // A deadline that fired at the turn boundary: the stop is recorded on the
     // message and there is no assistant prose to publish. Provider/abort text
     // spans lines — the engine's fact rejects that, so it is collapsed.
@@ -1651,11 +1653,11 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.incomplete?.reason).toBe("Deadline exceeded while streaming (the tier cap)");
-    // No text gathered → the engine's own template, never a blank summary and
-    // never a throw over the missing text.
+    // No text gathered → the key stays ABSENT (the engine never fabricates a
+    // summary) and the envelope still validates.
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.summary_md).toContain("## Verdict: incomplete");
-    expect(envelope.summary_md).toContain("cause: Deadline exceeded while streaming (the tier cap)");
+    expect(envelope.summary_md).toBeUndefined();
+    expect(envelope).not.toHaveProperty("summary_md");
   });
 
   test("a reported yield error is the cause of a stopped turn", async () => {
@@ -1712,7 +1714,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(envelope.summary_md).toContain("lib/c.ts needs a null check");
   });
 
-  test("a transcript whose assistant entries all lack text keeps the engine summary template", async () => {
+  test("a transcript whose assistant entries all lack text keeps the summary absent", async () => {
     parentAgentEnd = [toolOnlyTurn()];
 
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
@@ -1722,7 +1724,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
     );
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.summary_md).toContain("## Verdict: incomplete");
+    expect(envelope.summary_md).toBeUndefined();
   });
 
   test("a turn that yielded is unchanged by the end event", async () => {

@@ -648,7 +648,7 @@ describe("createReviewConsumer", () => {
       targetCommentId: null,
     });
     expect(prepared.body).toContain("<!-- mstar-inspector:review:v1 round=1 -->");
-    expect(prepared.body).toContain("**Verdict: needs fixes**");
+    expect(prepared.body).toContain("## ⚠️ Verdict: `needs fixes`");
     expect(prepared.body).toContain("Two issues found in the diff.");
     expect(prepared.body).toContain("## Prior findings recheck"); // §7.10 closure section
     expect(prepared.body).toMatch(
@@ -1514,9 +1514,9 @@ describe("createReviewConsumer", () => {
     expect(posted.body).toContain("*(+10 more findings omitted)*");
     // Merge-class priority: the two must-fix first (stable — F0 before F59),
     // then the should-fix, then the nits — visible in the rendered order.
-    const f0 = posted.body.indexOf("**F0**");
-    const f59 = posted.body.indexOf("**F59**");
-    const f58 = posted.body.indexOf("**F58**");
+    const f0 = posted.body.indexOf("#### 🔴 F0");
+    const f59 = posted.body.indexOf("#### 🔴 F59");
+    const f58 = posted.body.indexOf("#### 🟠 F58");
     expect(f0).toBeGreaterThan(-1);
     expect(f59).toBeGreaterThan(f0);
     expect(f58).toBeGreaterThan(f59);
@@ -2884,11 +2884,14 @@ describe("cross-round repeat dedup (AL-21-2)", () => {
       repo: "widgets",
       prNumber: 42,
     });
-    // The prepared body carries the repeat-dedup rendering: the finding
-    // whose fingerprint appeared last round is marked repeat and excluded
-    // from the recomputed tally (AL-21-2 — display layer only).
+    // The prepared body carries the repeat-dedup rendering: the finding whose
+    // fingerprint appeared last round is named in the folded repeat callout
+    // (AL-21-2 — display layer only; the engine's finding block is untouched).
     const body = (post.args as { body: string }).body;
-    expect(body).toContain("*(repeat)*");
+    expect(body).toContain(
+      "<details>\n<summary>🔁 Repeats from earlier rounds — 1</summary>\n\n" +
+        "### 🔁 Repeat findings\n\n- Fractional expiry comparison — src/auth.ts:21\n\n</details>",
+    );
   });
 
   test("no previous round → first-round rendering with no repeat markers", async () => {
@@ -2900,7 +2903,7 @@ describe("cross-round repeat dedup (AL-21-2)", () => {
     await consumer(makeBatch(makePayload()));
 
     const post = commenterCalls.find((c) => c.op === "post-prepared")!;
-    expect((post.args as { body: string }).body).not.toContain("*(repeat)*");
+    expect((post.args as { body: string }).body).not.toContain("Repeat findings");
     expect(reviewCount(db)).toBe(1);
   });
 

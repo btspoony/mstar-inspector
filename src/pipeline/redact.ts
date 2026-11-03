@@ -106,7 +106,7 @@ const redactIncompleteFact = (
 export function redactReviewOutput(output: ReviewOutput): ReviewOutput {
   return {
     ...output,
-    summary_md: redactSecrets(output.summary_md),
+    ...(output.summary_md === undefined ? {} : { summary_md: redactSecrets(output.summary_md) }),
     ...(output.incomplete === undefined
       ? {}
       : { incomplete: redactIncompleteFact(output.incomplete, redactSecrets) }),
@@ -147,7 +147,7 @@ export function redactReviewOutput(output: ReviewOutput): ReviewOutput {
 export function redactReviewOutputExact(output: ReviewOutput, values: readonly string[]): ReviewOutput {
   return {
     ...output,
-    summary_md: redactExactSecrets(output.summary_md, values),
+    ...(output.summary_md === undefined ? {} : { summary_md: redactExactSecrets(output.summary_md, values) }),
     ...(output.incomplete === undefined
       ? {}
       : { incomplete: redactIncompleteFact(output.incomplete, (text) => redactExactSecrets(text, values)) }),

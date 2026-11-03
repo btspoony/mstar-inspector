@@ -123,7 +123,7 @@ const outputSchema: z.ZodType<ReviewOutput> = z
   .object({
     schema: z.literal("mstar.review/v1"),
     verdict: verdictSchema,
-    summary_md: z.string().refine((s) => s.trim() !== "", "summary_md must be a non-empty string"),
+    summary_md: z.string().refine((s) => s.trim() !== "", "summary_md must be a non-empty string").optional(),
     tally: tallySchema.optional(),
     findings: z.array(findingSchema),
     target: targetSchema.optional(),
