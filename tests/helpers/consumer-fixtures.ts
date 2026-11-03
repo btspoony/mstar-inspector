@@ -10,7 +10,7 @@
 import { mock } from "bun:test";
 import type { ReviewOutput } from "../../src/review/schema";
 import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
-import { readRecheckCommand } from "../../src/pipeline/gitops";
+import { readRecheckCommand, readRecheckStatusCommand } from "../../src/pipeline/gitops";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
@@ -141,7 +141,7 @@ const RUNNER_INPUT_PATH = "/workspace/review-input.json";
 const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
 /** The audited bounded reads, built by production code from the fixed paths. */
 const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
-const RECHECK_STATUS_READ = readRecheckCommand(RECHECK_STATUS_PATH);
+const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
 
 export type FakeSandboxState = {
   calls: Array<{ cmd: string; opts?: unknown }>;

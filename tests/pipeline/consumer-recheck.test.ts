@@ -17,6 +17,7 @@ import type { CommenterCall } from "../helpers/review-commenter";
 import type { TestD1 } from "../store/helpers";
 import { createFakeCommenter, initialFakeCommenterState } from "../helpers/review-commenter";
 import { RECHECK_STATUS_ERROR_MAX_CHARS } from "../../packages/shared/src/recheck-wire";
+import { REDACTED } from "../../src/pipeline/redact";
 import {
   SHA,
   VALID_OUTPUT,
@@ -124,22 +125,6 @@ function failureRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
-/**
- * The attribution triple a recheck failure row carries — `outcome: reason:
- * error`, as the round composed it. Parsed rather than string-matched so an
- * assertion pins the attribution, not the `null`-interpolation spacing; an
- * absent field comes back as `null`, not the literal text "null".
- */
-function failureTriple(row: Record<string, unknown>): {
-  outcome: string | null;
-  reason: string | null;
-  error: string | null;
-} {
-  const field = (text: string): string | null => (text === "null" ? null : text);
-  const [outcome = "", reason = "", ...rest] = String(row.error).split(": ");
-  return { outcome: field(outcome), reason: field(reason), error: field(rest.join(": ")) };
-}
-
 describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
   test("a failed seat status with no document makes the round attributable: every row invalid-output, one recheck failure row", async () => {
     reset();
@@ -170,11 +155,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
-    expect(failureTriple(rows[0]!)).toEqual({
-      outcome: "failed",
-      reason: "seat-failed",
-      error: "session aborted",
-    });
+    expect(String(rows[0]!.error)).toBe("failed: seat-failed: session aborted");
     // The single accounting line carries the structured attribution.
     const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
     expect(line.level).toBe("warn");
@@ -313,7 +294,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
-    expect(failureTriple(rows[0]!)).toEqual({ outcome: "skipped", reason: "budget", error: null });
+    expect(String(rows[0]!.error)).toBe("skipped: budget: null");
     const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
     expect(line.fields).toMatchObject({ recheck_outcome: "skipped", recheck_reason: "budget", assessed: 0 });
     const findingRow = db.raw.query("SELECT state, last_assessed_ms FROM review_findings").get() as {
@@ -404,7 +385,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
-    expect(failureTriple(rows[0]!)).toEqual({ outcome: "failed", reason: "empty-result", error: null });
+    expect(String(rows[0]!.error)).toBe("failed: empty-result: null");
     const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
     expect(line.fields).toMatchObject({ recheck_outcome: "failed", recheck_reason: "empty-result", assessed: 0 });
     // The row WAS sent, so its rotation clock advanced — it is attempted-bad,
@@ -415,6 +396,64 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     };
     expect(findingRow.state).toBe("open");
     expect(findingRow.last_assessed_ms).not.toBeNull();
+  });
+
+  test("an empty-result round blames only the rows it sent: a size-budget row keeps its own never-sent reason", async () => {
+    reset();
+    // Two catalog-provable rows, one per file; the oversized one loses the
+    // §7.3 size budget and never rides the wire, so the empty result says
+    // nothing about it.
+    sandbox.diffStdout = [
+      VALID_DIFF,
+      "diff --git a/src/other.ts b/src/other.ts",
+      "index 3333333..4444444 100644",
+      "--- a/src/other.ts",
+      "+++ b/src/other.ts",
+      "@@ -1,2 +1,3 @@",
+      " export const a = 1;",
+      "+export const b = 2;",
+      " export const c = 3;",
+      "",
+    ].join("\n");
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "empty-result",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    const oversizedRowId = "eeeeeeee-0000-4000-8000-000000000006";
+    await seedOpenTarget(db, {
+      rowId: oversizedRowId,
+      findingId: "finding-oversized",
+      original: {
+        title: "Oversized concern",
+        filePath: "src/other.ts",
+        lineStart: 1,
+        body: "y".repeat(600 * 1024),
+      },
+      nowMs: 2_100,
+    });
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("| Old null deref on the config path | unverifiable (invalid-output) ");
+    expect(prepared.body).toContain("| Oversized concern | unverifiable (budget) ");
+    // Never sent, so the excluded row's rotation clock stays untouched.
+    const excluded = db.raw
+      .prepare("SELECT last_assessed_ms FROM review_findings WHERE id = ?")
+      .get(oversizedRowId) as { last_assessed_ms: number | null };
+    expect(excluded.last_assessed_ms).toBeNull();
   });
 
   test("a captured-but-unprovable round blames the capture, not the catalog budget", async () => {
@@ -544,7 +583,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       expect(prepared.body).toContain("unverifiable (invalid-output)");
       const rows = failureRows(db);
       expect(rows).toHaveLength(1);
-      expect(failureTriple(rows[0]!)).toEqual({ outcome: "absent", reason: null, error: null });
+      expect(String(rows[0]!.error)).toBe("absent: null: null");
     }
   });
 
@@ -567,7 +606,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (invalid-output)");
-    expect(failureTriple(failureRows(db)[0]!)).toEqual({ outcome: "absent", reason: null, error: null });
+    expect(String(failureRows(db)[0]!.error)).toBe("absent: null: null");
   });
 
   test("a row the trusted catalog cannot prove never rides the wire: no-evidence, never budget, never assessed", async () => {
@@ -1150,7 +1189,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(line.fields).toMatchObject({ recheck_outcome: "failed", recheck_reason: null, recheck_error: "seat crashed" });
     // The status itself is still attributable (its outcome and error survive);
     // only the unrecognized reason is dropped.
-    expect(failureTriple(failureRows(db)[0]!)).toEqual({ outcome: "failed", reason: null, error: "seat crashed" });
+    expect(String(failureRows(db)[0]!.error)).toBe("failed: null: seat crashed");
   });
 
   test("a secret straddling the status cap is redacted at parse time, so no fragment reaches D1 or the log", async () => {
@@ -1191,10 +1230,13 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
     const logged = String(line.fields.recheck_error);
     expect(logged).not.toContain("AIza");
-    expect(logged).toContain("[REDACTED]");
-    // The composed D1 text is capped again, so only the marker's prefix survives
-    // there — enough to prove the redaction replaced the token.
-    expect(persisted).toContain("[REDACT");
+    expect(logged).toContain(REDACTED);
+    // The composed D1 text is capped again, so the marker can be cut mid-way:
+    // what survives must still be a PREFIX of the production marker, never an
+    // arbitrary fragment.
+    const markerTail = persisted.slice(persisted.lastIndexOf("["));
+    expect(markerTail.length).toBeGreaterThan(1);
+    expect(REDACTED.startsWith(markerTail)).toBe(true);
   });
 
   test("an ok seat status with a valid document records no failure and keeps the accounting unchanged", async () => {
@@ -1312,7 +1354,7 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       expect(failureRows(db)).toHaveLength(1);
       expect(failureRows(db)[0]).toMatchObject({ stage: "recheck" });
       // No attributable status in any arm, so the triple stays `absent`.
-      expect(failureTriple(failureRows(db)[0]!)).toEqual({ outcome: "absent", reason: null, error: null });
+      expect(String(failureRows(db)[0]!.error)).toBe("absent: null: null");
       const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
       expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
     }

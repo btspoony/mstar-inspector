@@ -1214,7 +1214,7 @@ function reconcileRecheckRound(input: {
 
   // An `empty-result` round is the all-rows-rejected case without a gate drop:
   // the seat returned a valid document with zero results for a non-empty
-  // target list, so every row it sent came back unusable. Those rows were
+  // target list, so every row it SENT came back unusable. Those rows were
   // ATTEMPTED, never "never ran" — the per-target exclusion branches below
   // still win, so a catalog/size-budget row stays `no-evidence`/`budget`.
   const emptyResultRound = status?.reason === "empty-result";
@@ -1224,7 +1224,10 @@ function reconcileRecheckRound(input: {
     const rejected =
       rejectedRowIds.has(target.rowId) ||
       anonymouslyRejected.has(target.rowId) ||
-      (emptyResultRound && docResult === undefined);
+      // Only a row that actually rode the wire can be blamed for the empty
+      // result; the catalog branches above and this size-budget guard keep
+      // every never-sent row on its own reason.
+      (emptyResultRound && docResult === undefined && !budgetExcluded.has(target.rowId));
     let assessment: Assessment;
     if (staleContext) {
       // Stale lifecycle state (pending-journal apply or capture failed):
