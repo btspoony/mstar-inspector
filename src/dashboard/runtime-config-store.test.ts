@@ -23,8 +23,9 @@
  *     default applies, matching the write's live-workspace predicate
  *   - a refused write changes no row and appends no audit row
  *   - accepted writes are audited through `platform_audit_events`, and the
- *     system row's `before` is `null` whenever the stored value is not one the
- *     readers would trust — never a `CAST`ed number nothing ever used
+ *     `before` of both the system row and the workspace column is `null`
+ *     whenever the stored value is not one the readers would trust — never a
+ *     `CAST`ed number nothing ever used
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -78,14 +79,14 @@ function auditRows(db: TestD1): Array<{ action: string; target_id: string }> {
     .all() as Array<{ action: string; target_id: string }>;
 }
 
-/** The system write's ledger detail, parsed, in insert order. */
-function systemAuditDetails(db: TestD1): Array<{ before: unknown; after: unknown }> {
+/** One write action's ledger detail, parsed, in insert order. */
+function auditDetails(db: TestD1, action: string): Array<{ before: unknown; after: unknown }> {
   const rows = db.raw
     .prepare(
       `SELECT detail_json FROM platform_audit_events
-        WHERE action = 'runtime.concurrency.system.set' ORDER BY rowid`,
+        WHERE action = ?1 ORDER BY rowid`,
     )
-    .all() as Array<{ detail_json: string }>;
+    .all(action) as Array<{ detail_json: string }>;
   return rows.map((row) => JSON.parse(row.detail_json) as { before: unknown; after: unknown });
 }
 
@@ -347,7 +348,10 @@ describe("runtime-config-store", () => {
       seed.run(SYSTEM_CONCURRENCY_KEY, corrupt);
       expect(await setSystemConcurrency(db, 20, ACTOR)).toBe(20);
       expect(storedSystemRows(db)).toEqual([{ value: "20" }]);
-      expect(systemAuditDetails(db).at(-1)).toEqual({ before: null, after: 20 });
+      expect(auditDetails(db, "runtime.concurrency.system.set").at(-1)).toEqual({
+        before: null,
+        after: 20,
+      });
     }
   });
 
@@ -355,10 +359,35 @@ describe("runtime-config-store", () => {
     const db = fixture();
     await setSystemConcurrency(db, 20, ACTOR);
     await setSystemConcurrency(db, 24, ACTOR);
-    expect(systemAuditDetails(db)).toEqual([
+    expect(auditDetails(db, "runtime.concurrency.system.set")).toEqual([
       { before: null, after: 20 },
       { before: 20, after: 24 },
     ]);
+  });
+
+  test("a corrupt workspace row audits before: null and the write repairs it", async () => {
+    const db = fixture();
+    const seed = db.raw.prepare(
+      "UPDATE workspaces SET max_concurrent_reviews = ?1 WHERE id = ?2",
+    );
+    // The column is INTEGER, so ' 8' is stored as the readable 8; the untrusted
+    // shapes are text and out-of-range numbers, which a raw read would ledger
+    // as 'abc' and 65 — values no reader and no write predicate ever accepted.
+    for (const corrupt of ["abc", CONCURRENCY_MAX + 1]) {
+      seed.run(corrupt, WS);
+      expect(await setWorkspaceConcurrency(db, WS, 12, ACTOR)).toBe(12);
+      expect(storedWorkspace(db)).toBe(12);
+      expect(auditDetails(db, "workspace.concurrency.set").at(-1)).toEqual({
+        before: null,
+        after: 12,
+      });
+    }
+    // A readable stored value is still recorded as itself.
+    expect(await setWorkspaceConcurrency(db, WS, 8, ACTOR)).toBe(8);
+    expect(auditDetails(db, "workspace.concurrency.set").at(-1)).toEqual({
+      before: 12,
+      after: 8,
+    });
   });
 
   test("a refused workspace value below 1 writes nothing", async () => {

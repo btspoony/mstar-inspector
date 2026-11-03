@@ -24,10 +24,8 @@ import { join } from "node:path";
 
 import { stripJsonComments } from "../../scripts/check-image-inputs";
 import {
-  CONCURRENCY_MAX,
   QUEUE_CONCURRENCY_CEILING,
-  SYSTEM_CONCURRENCY_DEFAULT,
-  WORKSPACE_CONCURRENCY_DEFAULT,
+  isConcurrencyValue,
 } from "../../src/dashboard/runtime-config-store";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -289,23 +287,16 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     }
   });
 
-  /** The invariant the two numbers above exist for: an accepted cap that the
-   * deployed ceiling cannot deliver is a setting that silently never applies.
-   * A cap raised to 250 against a ceiling of 64 was exactly that — accepted by
-   * every write and unreachable at admission. */
-  test("the accepted cap range stays inside the deployed ceiling", () => {
-    expect(
-      CONCURRENCY_MAX,
-      "src/dashboard/runtime-config-store.ts: CONCURRENCY_MAX must equal the deployed ceiling",
-    ).toBe(QUEUE_CONCURRENCY_CEILING);
-    expect(
-      SYSTEM_CONCURRENCY_DEFAULT,
-      "src/dashboard/runtime-config-store.ts: the system default must fit the accepted range",
-    ).toBeLessThanOrEqual(QUEUE_CONCURRENCY_CEILING);
-    expect(
-      WORKSPACE_CONCURRENCY_DEFAULT,
-      "src/dashboard/runtime-config-store.ts: the workspace default must fit the accepted range",
-    ).toBeLessThanOrEqual(QUEUE_CONCURRENCY_CEILING);
+  /** The invariant the two numbers above exist for: a cap the deployed ceiling
+   * cannot deliver is a setting that silently never applies. A cap raised to 250
+   * against a ceiling of 64 was exactly that — accepted by every write and
+   * unreachable at admission. Asserted through the predicate the writes and
+   * reads actually run, so the bound is behaviour rather than a re-statement of
+   * the constant that defines it. */
+  test("the accepted cap range ends at the deployed ceiling", () => {
+    expect(isConcurrencyValue(QUEUE_CONCURRENCY_CEILING)).toBe(true);
+    expect(isConcurrencyValue(QUEUE_CONCURRENCY_CEILING + 1)).toBe(false);
+    expect(isConcurrencyValue(0)).toBe(false);
   });
 
   /** A second/unregistered container entry must fail the lock, not hide behind

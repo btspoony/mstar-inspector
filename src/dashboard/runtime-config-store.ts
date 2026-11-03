@@ -219,16 +219,23 @@ export async function getEffectiveConcurrency(
 }
 
 /**
- * The stored system cap as SQL, under the trust rule the write predicate
- * enforces: a canonical 1..64 digit string is that integer, anything else is
- * `untrusted`. (Stricter than `parseStored` on stray whitespace: `shortcut: a
- * hand-edited " 8" is read as 8 but refuses writes, upgrade if a non-canonical
- * writer ever exists`.)
+ * One stored concurrency value as SQL, under the trust rule every write
+ * predicate and every `before` ledger entry shares: a canonical 1..64 numeric
+ * value is that integer, anything else is `untrusted`. One fragment, so the
+ * system row and the workspace column cannot drift apart on what "trusted"
+ * means.
  */
-const storedSystemCapSql = (keyParam: string, untrusted: string) => `(SELECT CASE
-      WHEN value NOT GLOB '*[^0-9]*' AND CAST(value AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${CONCURRENCY_MAX}
-      THEN CAST(value AS INTEGER) ELSE ${untrusted} END
-    FROM review_runtime_settings WHERE key = ${keyParam})`;
+const trustedConcurrencySql = (value: string, untrusted: string) => `CASE
+      WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${CONCURRENCY_MAX}
+      THEN CAST(${value} AS INTEGER) ELSE ${untrusted} END`;
+
+/**
+ * The stored system cap as SQL. (Stricter than `parseStored` on stray
+ * whitespace: `shortcut: a hand-edited " 8" is read as 8 but refuses writes,
+ * upgrade if a non-canonical writer ever exists`.)
+ */
+const storedSystemCapSql = (keyParam: string, untrusted: string) =>
+  `(SELECT ${trustedConcurrencySql("value", untrusted)} FROM review_runtime_settings WHERE key = ${keyParam})`;
 
 /**
  * The system cap as SQL, so a write statement can read the cap inside its own
@@ -249,7 +256,7 @@ const SYSTEM_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   VALUES (?1, ?2, 'runtime.concurrency.system.set', 'runtime', ?3,
-          json_object('before', ${storedSystemCapSql("?3", "NULL")},
+          json_object('before', ${storedSystemCapSql("?6", "NULL")},
                       'after', ?4),
           ?5)`;
 
@@ -265,13 +272,16 @@ const SYSTEM_UPSERT_SQL = `
  * The ledger row carries the same two guards as the UPDATE below — the target
  * exists and the value does not exceed the system cap — so a refused write
  * appends nothing. It computes `before` with a subquery against the
- * not-yet-updated row: a bind cannot read the old value after the write.
+ * not-yet-updated row: a bind cannot read the old value after the write. That
+ * subquery goes through the same trust fragment as the system audit, so a
+ * corrupt stored value is recorded as `null` rather than the raw column.
  */
 const WORKSPACE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   SELECT ?1, ?2, 'workspace.concurrency.set', 'workspace', ?3,
-         json_object('before', (SELECT max_concurrent_reviews FROM workspaces WHERE id = ?3),
+         json_object('before', (SELECT ${trustedConcurrencySql("max_concurrent_reviews", "NULL")}
+                                  FROM workspaces WHERE id = ?3),
                      'after', ?4),
          ?5
    WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)
@@ -304,7 +314,7 @@ export async function setSystemConcurrency(
   await db.batch([
     db
       .prepare(SYSTEM_AUDIT_SQL)
-      .bind(crypto.randomUUID(), actor, SYSTEM_CONCURRENCY_KEY, value, now),
+      .bind(crypto.randomUUID(), actor, SYSTEM_CONCURRENCY_KEY, value, now, SYSTEM_CONCURRENCY_KEY),
     db.prepare(SYSTEM_UPSERT_SQL).bind(SYSTEM_CONCURRENCY_KEY, String(value), now, actor),
   ]);
   return value;
