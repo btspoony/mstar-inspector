@@ -235,6 +235,24 @@ describe("buildReviewBody", () => {
     expect(line).toContain("more)");
   });
 
+  test("the fact-line cut never leaves a lone surrogate", () => {
+    // A run of astral-plane characters (each two UTF-16 units) sized so the
+    // budget cut lands between a pair unless the slice backs off.
+    const reason = "\u{1F600}".repeat(400);
+    const body = buildReviewBody({
+      ...output,
+      verdict: "incomplete",
+      findings: [],
+      incomplete: { reason, unscanned: ["a.ts"] },
+    });
+    const line = body.split("\n").find((l) => l.startsWith("cause: "))!;
+    // A lone surrogate is a high half with no low half after it, or a low half
+    // with no high half before it. slice() produces one; the guard does not.
+    expect(line).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(line).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(line.endsWith("…")).toBe(true);
+  });
+
   test("bounding the fact keeps the envelope's tally mirror in step", () => {
     const raw = "r".repeat(900);
     const body = buildReviewBody({
