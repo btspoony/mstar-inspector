@@ -1,25 +1,25 @@
 /**
- * Pull requests tab (App detail IA): the per-App PR ledger.
+ * Pull requests tab (App detail IA): the per-App PR ledger, its list face and
+ * the routing/deep-link contract.
  *
- * Static-SSR pins over the pure faces (the InsightsRecordsView idiom):
- * the manage-gated tab trigger, the list table (title / state / verdict /
- * last seen / failure count), the empty state, and the detail face
- * (reviews, failures — stage + error as TEXT — findings). Mounted
- * (happy-dom) pins cover what only real effects and events prove: the
- * manage-gated click-through to the ledger, the failures-column cell
- * content, and the S2 switching contract — a retained detail from PR A
- * must never render while PR B loads, and a failed fetch for the new PR
- * renders the error face with a retry.
+ * Static-SSR pins over the pure faces (the InsightsRecordsView idiom): the
+ * manage-gated tab trigger, the list table (title / state / verdict / last
+ * seen / failure count) and the empty state. Mounted (happy-dom) pins cover
+ * what only real effects and events prove: the manage-gated click-through to
+ * the ledger, the failures-column cell content, and the S2 switching contract
+ * — a retained detail from PR A must never render while PR B loads, a failed
+ * fetch for the new PR renders the error face with a retry, and a switch to
+ * another App never paints the previous App's rows. The detail face
+ * itself lives in `pull-request-detail-static.test.tsx` and
+ * `pull-request-detail-interaction.test.tsx`; payloads every suite reads live
+ * in `pull-request-fixtures.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import { act, createElement, useState } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import {
-  appPullRequestDetailUrl,
   appPullRequestsUrl,
-  parsePullRequestDetail,
   parsePullRequestList,
   pullRequestRefOf,
   type AppDetailSearch,
@@ -30,12 +30,19 @@ import {
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import {
   AppPullRequestsTab,
-  currentDetailRead,
-  PullRequestDetailView,
   PullRequestsListView,
-  type DetailRead,
+  currentListRead,
+  type ListRead,
 } from "../../src/spa/pages/AppPullRequestsTab";
-import { installDom } from "./dom";
+import { withMarkup } from "./dom";
+import {
+  DETAIL,
+  ROW_OPEN,
+  jsonResponse,
+  mountTabWithGatedFetch,
+  mountView,
+  press,
+} from "./pull-request-fixtures";
 
 const IDENTITY_APP = {
   github_slug: "demo",
@@ -100,19 +107,6 @@ function renderDetail(payload: SettingsPayload) {
   );
 }
 
-const ROW_OPEN: PullRequestRow = {
-  number: 42,
-  owner: "acme",
-  repo: "web",
-  title: "Add the export button",
-  state: "open",
-  head_sha: "aaa111bbb222",
-  first_seen_at: "2026-10-28 08:00:00",
-  last_seen_at: "2026-11-01 10:00:00",
-  latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
-  failure_count: 0,
-};
-
 const ROW_CLOSED: PullRequestRow = {
   number: 7,
   owner: "acme",
@@ -126,52 +120,50 @@ const ROW_CLOSED: PullRequestRow = {
   failure_count: 2,
 };
 
-const DETAIL: PullRequestDetail = {
+/** A second PR's detail payload — the switch target in the S2 test. */
+const DETAIL_B: PullRequestDetail = {
   pull_request: {
     ...ROW_OPEN,
-    number: 133,
-    title: "Fix the login flow",
-    state: "merged",
-    latest_review: { verdict: "needs fixes", reviewed_at: "2026-11-01 08:00:00" },
-    failure_count: 1,
+    number: 9,
+    title: "Bump the dependencies",
+    latest_review: null,
+    failure_count: 0,
   },
-  reviews: [
-    {
-      verdict: "ship it",
-      summary_md: "Looks good overall.",
-      model: "kimi-for-coding",
-      provider: "openrouter",
-      reviewed_at: "2026-11-01 08:00:00",
-      head_sha: "aaa111bbb222",
-    },
-  ],
-  failures: [
-    {
-      stage: "sandbox",
-      // Model/runtime output — must render escaped, never as HTML.
-      error: "exit 1: <script>alert(1)</script>",
-      created_at: "2026-10-31 23:00:00",
-    },
-  ],
-  findings: [
-    {
-      finding_id: "f-1",
-      severity: "must-fix",
-      title: "Use a parameterized query",
-      file_path: "src/db.ts",
-      line: 42,
-      body: "String interpolation reaches the SQL engine.",
-    },
-  ],
+  reviews: [],
+  failures: [],
+  findings: [],
 };
 
+/** The stateful wrapper AppDetailView expects: the harness owns the search. */
+function DetailHarness() {
+  const [search, setSearch] = useState<AppDetailSearch>({
+    tab: "settings",
+    window: "30",
+    repo: "",
+    pr: "",
+  });
+  return createElement(AppDetailView, {
+    locale: "en",
+    appId: "1",
+    payload: managePayload,
+    groups: [],
+    notice: null,
+    search,
+    onReload: noReload,
+    onSearch: setSearch,
+  });
+}
+
 describe("tab shell rendering (static SSR)", () => {
-  test("the Pull requests trigger appears ONLY on the manage face", () => {
-    const manage = renderDetail(managePayload);
-    expect(manage).toContain(">Pull requests</button>");
-    const identity = renderDetail(identityPayload);
-    expect(identity).not.toContain(">Pull requests</button>");
-    expect(identity).not.toContain(t("en", "pullRequests.columnPr"));
+  test("the Pull requests trigger appears ONLY on the manage face", async () => {
+    const tabNames = async (payload: SettingsPayload) =>
+      withMarkup(renderDetail(payload), (container) =>
+        [...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent ?? ""),
+      );
+    expect(await tabNames(managePayload)).toContain(t("en", "appDetail.tabPullRequests"));
+    expect(await tabNames(identityPayload)).not.toContain(t("en", "appDetail.tabPullRequests"));
+    // The ledger itself is absent too, not only its trigger.
+    expect(renderDetail(identityPayload)).not.toContain(t("en", "pullRequests.columnPr"));
   });
 });
 
@@ -206,40 +198,6 @@ describe("pull requests list face (static SSR)", () => {
   });
 });
 
-describe("pull request detail face (static SSR)", () => {
-  test("the header names title, address, state and head sha", () => {
-    const markup = renderToStaticMarkup(
-      createElement(PullRequestDetailView, { locale: "en", detail: DETAIL }),
-    );
-    expect(markup).toContain("Fix the login flow");
-    expect(markup).toContain("acme/web #133");
-    expect(markup).toContain(t("en", "pullRequests.state.merged"));
-    // The short-sha chip renders the head sha prefix.
-    expect(markup).toContain("aaa111b");
-  });
-
-  test("a failure renders its stage and error — the error as escaped text, never HTML", () => {
-    const markup = renderToStaticMarkup(
-      createElement(PullRequestDetailView, { locale: "en", detail: DETAIL }),
-    );
-    expect(markup).toContain("sandbox");
-    expect(markup).toContain("exit 1: &lt;script&gt;alert(1)&lt;/script&gt;");
-    expect(markup).not.toContain("<script>");
-  });
-
-  test("reviews and findings render their own facts", () => {
-    const markup = renderToStaticMarkup(
-      createElement(PullRequestDetailView, { locale: "en", detail: DETAIL }),
-    );
-    expect(markup).toContain("ship it");
-    expect(markup).toContain("kimi-for-coding · openrouter");
-    expect(markup).toContain("Looks good overall.");
-    expect(markup).toContain("Use a parameterized query");
-    expect(markup).toContain("must-fix");
-    expect(markup).toContain("src/db.ts:42");
-  });
-});
-
 describe("pull requests data plane (pure helpers)", () => {
   test("the list URL is base-prefixed and encodes the appId", () => {
     expect(appPullRequestsUrl("/dashboard", "1")).toBe("/dashboard/api/apps/1/pull-requests");
@@ -248,14 +206,20 @@ describe("pull requests data plane (pure helpers)", () => {
     );
   });
 
-  test("the detail URL builder encodes owner/repo so a value cannot break out of the path family", () => {
-    expect(appPullRequestDetailUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 })).toBe(
-      "/dashboard/api/apps/1/pull-requests/acme/web/42",
-    );
-    // Segment-boundary characters are encoded, not trusted raw.
-    expect(
-      appPullRequestDetailUrl("/dashboard", "1", { owner: "a/b", repo: "settings?x", number: 42 }),
-    ).toBe("/dashboard/api/apps/1/pull-requests/a%2Fb/settings%3Fx/42");
+  test("a ledger read stamped for another App derives to a clean loading face", () => {
+    // App 1's answered read: rows, ok state, App 1's stamp.
+    const appOne: ListRead = { app: "1", rows: [ROW_OPEN], kind: "ok" };
+    // Under App 2 the rows and the ok state are gone — nothing survives the
+    // switch, so the operator's first frame cannot be another App's ledger.
+    expect(currentListRead(appOne, "2")).toEqual({ app: "2", rows: null, kind: "loading" });
+    // The same stamp under its own App passes through untouched.
+    expect(currentListRead(appOne, "1")).toBe(appOne);
+    // An error is App-scoped too: App 1's failure must not announce on App 2.
+    expect(currentListRead({ app: "1", rows: null, kind: "error" }, "2")).toEqual({
+      app: "2",
+      rows: null,
+      kind: "loading",
+    });
   });
 
   test("pullRequestRefOf validates the pr param shape and rejects dot segments", () => {
@@ -293,156 +257,32 @@ describe("pull requests data plane (pure helpers)", () => {
     expect(parsed?.[0]?.title).toBe("");
     expect(parsed?.[1]).toEqual(ROW_CLOSED);
   });
-
-  test("the detail parser keeps the envelope strict but drops drifted entries (QC)", () => {
-    expect(parsePullRequestDetail(DETAIL)).toEqual(DETAIL);
-    // One drifted failure / finding drops that entry, not the whole detail.
-    expect(parsePullRequestDetail({ ...DETAIL, failures: [{ stage: 1 }] })?.failures).toEqual([]);
-    expect(
-      parsePullRequestDetail({ ...DETAIL, findings: [{ ...DETAIL.findings[0], line: "42" }] })?.findings,
-    ).toEqual([]);
-    // A pull_request without its address still fails the envelope.
-    expect(
-      parsePullRequestDetail({ ...DETAIL, pull_request: { ...DETAIL.pull_request, owner: null } }),
-    ).toBeNull();
-    expect(parsePullRequestDetail(null)).toBeNull();
-  });
-
-  test("a review with provider null parses and renders without a null leak (QC)", () => {
-    const withNulls = {
-      ...DETAIL,
-      reviews: [
-        { ...DETAIL.reviews[0], verdict: null, summary_md: null, model: null, provider: null },
-      ],
-      findings: [{ ...DETAIL.findings[0], title: null, file_path: null, body: null }],
-    };
-    const parsed = parsePullRequestDetail(withNulls);
-    // The nullable text fields coerce to "" at the parse boundary; the
-    // address fields pass through untouched.
-    expect(parsed?.reviews[0]).toEqual({
-      verdict: "",
-      summary_md: "",
-      model: "",
-      provider: "",
-      reviewed_at: "2026-11-01 08:00:00",
-      head_sha: "aaa111bbb222",
-    });
-    expect(parsed?.findings[0]).toEqual({
-      finding_id: "f-1",
-      severity: "must-fix",
-      title: "",
-      file_path: "",
-      line: 42,
-      body: "",
-    });
-    // And the view renders the coerced row: the review meta line resolves
-    // the model/provider template with both coerced fields, and the empty
-    // finding path renders no location at all, no bare `:line` (N12).
-    const markup = renderToStaticMarkup(
-      createElement(PullRequestDetailView, { locale: "en", detail: parsed ?? DETAIL }),
-    );
-    expect(markup).toContain(t("en", "pullRequests.reviewMeta", { model: "", provider: "" }));
-    expect(markup).not.toContain(":42");
-    expect(markup).not.toContain(">null<");
-  });
-});
-
-/** A second PR's detail payload — the switch target in the S2 test. */
-const DETAIL_B: PullRequestDetail = {
-  pull_request: {
-    ...ROW_OPEN,
-    number: 9,
-    title: "Bump the dependencies",
-    latest_review: null,
-    failure_count: 0,
-  },
-  reviews: [],
-  failures: [],
-  findings: [],
-};
-
-const jsonResponse = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-
-/** The stateful wrapper AppDetailView expects: the harness owns the search. */
-function DetailHarness() {
-  const [search, setSearch] = useState<AppDetailSearch>({
-    tab: "settings",
-    window: "30",
-    repo: "",
-    pr: "",
-  });
-  return createElement(AppDetailView, {
-    locale: "en",
-    appId: "1",
-    payload: managePayload,
-    groups: [],
-    notice: null,
-    search,
-    onReload: noReload,
-    onSearch: setSearch,
-  });
-}
-
-describe("pull requests detail read derivation (pure)", () => {
-  test("a read stamped for another pr derives to not-yet-loaded, whatever its kind (N1)", () => {
-    const okA: DetailRead = { pr: "acme/web/1", kind: "ok", data: DETAIL };
-    const errorA: DetailRead = { pr: "acme/web/1", kind: "error" };
-    const loadingA: DetailRead = { pr: "acme/web/1", kind: "loading" };
-    // A's view AND A's error must not render for B — the B transition
-    // frame derives to null, which renders the loading face.
-    expect(currentDetailRead(okA, "acme/web/2")).toBeNull();
-    expect(currentDetailRead(errorA, "acme/web/2")).toBeNull();
-    expect(currentDetailRead(loadingA, "acme/web/2")).toBeNull();
-    // The matching stamp passes through — including the error, for retry.
-    expect(currentDetailRead(okA, "acme/web/1")).toEqual(okA);
-    expect(currentDetailRead(errorA, "acme/web/1")).toEqual(errorA);
-    expect(currentDetailRead(null, "acme/web/1")).toBeNull();
-  });
 });
 
 describe("pull requests tab (mounted)", () => {
   test("clicking the Pull requests tab on the manage face opens the ledger", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const realFetch = globalThis.fetch;
     // Every read answers the same empty ledger.
-    globalThis.fetch = (async () => jsonResponse({ pull_requests: [] })) as unknown as typeof fetch;
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
+    const { container, win, unmount } = await mountView(createElement(DetailHarness), {
+      fetch: (async () => jsonResponse({ pull_requests: [] })) as unknown as typeof fetch,
+    });
     try {
-      await act(async () => root.render(createElement(DetailHarness)));
-      await act(async () => {});
       const trigger = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "appDetail.tabPullRequests"),
       );
       expect(trigger).toBeDefined();
-      await act(async () => {
-        trigger?.dispatchEvent(new win.MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
-        trigger?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
-      });
-      await act(async () => {});
+      await press(win, trigger as unknown as Element);
       // The ledger's empty state is the opened tab's face.
       expect(container.textContent ?? "").toContain(t("en", "pullRequests.emptyTitle"));
     } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
+      await unmount();
     }
   });
 
   test("the failures column carries the row's failure count", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
+    const { container, unmount } = await mountView(
+      createElement(PullRequestsListView, { locale: "en", rows: [ROW_OPEN, ROW_CLOSED], onOpen: noSearch }),
+    );
     try {
-      await act(async () =>
-        root.render(
-          createElement(PullRequestsListView, { locale: "en", rows: [ROW_OPEN, ROW_CLOSED], onOpen: noSearch }),
-        ),
-      );
-      await act(async () => {});
       const headers = [...container.querySelectorAll("th")].map((th) => th.textContent ?? "");
       const failuresAt = headers.indexOf(t("en", "pullRequests.columnFailures"));
       expect(failuresAt).toBeGreaterThan(-1);
@@ -452,42 +292,38 @@ describe("pull requests tab (mounted)", () => {
       const cells = [...(row?.querySelectorAll("td") ?? [])];
       expect(cells[failuresAt]?.textContent?.trim()).toBe("2");
     } finally {
-      await act(async () => root.unmount());
-      cleanup();
+      await unmount();
+    }
+  });
+
+  test("a press on a PR's title opens it once; the rest of the row still opens it", async () => {
+    const opened: PullRequestRow[] = [];
+    const { container, win, unmount } = await mountView(
+      createElement(PullRequestsListView, {
+        locale: "en",
+        rows: [ROW_OPEN],
+        onOpen: (row) => opened.push(row),
+      }),
+    );
+    try {
+      const title = [...container.querySelectorAll("tbody button")].find(
+        (button) => button.textContent === ROW_OPEN.title,
+      );
+      await press(win, title);
+      // The button's click must not bubble into the row handler: one press,
+      // one open — two would open the same PR twice.
+      expect(opened).toEqual([ROW_OPEN]);
+      // The rest of the row is still the row's own click target.
+      await press(win, container.querySelector("tbody td:last-child"));
+      expect(opened).toEqual([ROW_OPEN, ROW_OPEN]);
+    } finally {
+      await unmount();
     }
   });
 
   test("switching PRs never shows the previous PR's data; a failed fetch renders the error face with a retry (S2)", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const realFetch = globalThis.fetch;
-    // Gate every fetch: the test resolves each read by its URL suffix.
-    type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
-    const gates = new Map<string, Gate>();
-    globalThis.fetch = (async (input: unknown) => {
-      const gate: Gate = Promise.withResolvers<Response>();
-      gates.set(String(input), gate);
-      return gate.promise;
-    }) as unknown as typeof fetch;
-    const resolve = (suffix: string, response: Response) => {
-      const url = [...gates.keys()].reverse().find((key) => key.endsWith(suffix));
-      const gate = url === undefined ? undefined : gates.get(url);
-      if (!gate) throw new Error(`no fetch issued for ${suffix}`);
-      gate.resolve(response);
-    };
-    const tabElementFor = (pr: string) =>
-      createElement(AppPullRequestsTab, {
-        locale: "en",
-        appId: "1",
-        search: { tab: "pull-requests", window: "30", repo: "", pr },
-        onSearch: noSearch,
-      });
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
-    const text = () => container.textContent ?? "";
+    const { container, text, win, rerender, resolve, unmount } = await mountTabWithGatedFetch("acme/web/1");
     try {
-      await act(async () => root.render(tabElementFor("acme/web/1")));
-      await act(async () => {});
       await act(async () => {
         resolve("/pull-requests/acme/web/1", jsonResponse(DETAIL));
       });
@@ -495,8 +331,7 @@ describe("pull requests tab (mounted)", () => {
       expect(text()).toContain("Fix the login flow");
 
       // Switch to PR B: A's detail is retained in state but must NOT render.
-      await act(async () => root.render(tabElementFor("acme/web/2")));
-      await act(async () => {});
+      await rerender("acme/web/2");
       expect(text()).not.toContain("Fix the login flow");
       expect(text()).toContain(t("en", "common.loading"));
 
@@ -515,10 +350,7 @@ describe("pull requests tab (mounted)", () => {
       expect(retry).toBeDefined();
 
       // Retry re-issues the read; B's payload lands.
-      await act(async () => {
-        retry?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
-      });
-      await act(async () => {});
+      await press(win, retry);
       await act(async () => {
         resolve("/pull-requests/acme/web/2", jsonResponse(DETAIL_B));
       });
@@ -526,42 +358,13 @@ describe("pull requests tab (mounted)", () => {
       expect(text()).toContain("Bump the dependencies");
       expect(text()).not.toContain("Fix the login flow");
     } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
+      await unmount();
     }
   });
 
   test("a failed read for A leaves no error on B's transition frame (N1)", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const realFetch = globalThis.fetch;
-    type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
-    const gates = new Map<string, Gate>();
-    globalThis.fetch = (async (input: unknown) => {
-      const gate: Gate = Promise.withResolvers<Response>();
-      gates.set(String(input), gate);
-      return gate.promise;
-    }) as unknown as typeof fetch;
-    const resolve = (suffix: string, response: Response) => {
-      const url = [...gates.keys()].reverse().find((key) => key.endsWith(suffix));
-      const gate = url === undefined ? undefined : gates.get(url);
-      if (!gate) throw new Error(`no fetch issued for ${suffix}`);
-      gate.resolve(response);
-    };
-    const tabElementFor = (pr: string) =>
-      createElement(AppPullRequestsTab, {
-        locale: "en",
-        appId: "1",
-        search: { tab: "pull-requests", window: "30", repo: "", pr },
-        onSearch: noSearch,
-      });
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
-    const text = () => container.textContent ?? "";
+    const { container, text, rerender, resolve, unmount } = await mountTabWithGatedFetch("acme/web/1");
     try {
-      await act(async () => root.render(tabElementFor("acme/web/1")));
-      await act(async () => {});
       // A's read fails: the error face is correct FOR A.
       await act(async () => {
         resolve("/pull-requests/acme/web/1", new Response("boom", { status: 500 }));
@@ -573,8 +376,7 @@ describe("pull requests tab (mounted)", () => {
       // Switch to B: the face is the loading face — never A's error, which
       // would name the wrong PR (and announce assertively) before B's
       // fetch is even issued.
-      await act(async () => root.render(tabElementFor("acme/web/2")));
-      await act(async () => {});
+      await rerender("acme/web/2");
       expect(text()).toContain(t("en", "common.loading"));
       expect(text()).not.toContain(t("en", "common.loadFailed"));
       expect(container.querySelector('[role="alert"]')).toBeNull();
@@ -587,9 +389,128 @@ describe("pull requests tab (mounted)", () => {
       expect(text()).toContain("Bump the dependencies");
       expect(container.querySelector('[role="alert"]')).toBeNull();
     } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
+      await unmount();
+    }
+  });
+
+  test("a parent re-render for the same PR neither refetches nor re-flashes loading (S3)", async () => {
+    const { fetches, text, rerender, resolve, unmount } = await mountTabWithGatedFetch("acme/web/1");
+    try {
+      await act(async () => resolve("/pull-requests/acme/web/1", jsonResponse(DETAIL)));
+      await act(async () => {});
+      expect(fetches).toHaveLength(1);
+      expect(text()).toContain("Fix the login flow");
+
+      // The parent re-renders: `pullRequestRefOf` hands over a fresh ref object,
+      // which must not count as a dependency change.
+      await rerender("acme/web/1");
+      expect(fetches).toHaveLength(1);
+      expect(text()).toContain("Fix the login flow");
+      expect(text()).not.toContain(t("en", "common.loading"));
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("a deep link reads only the detail; closing it issues the list read once (S4)", async () => {
+    const { container, fetches, text, win, resolve, unmount } = await mountTabWithGatedFetch("acme/web/133");
+    const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
+    try {
+      await act(async () => resolve("/pull-requests/acme/web/133", jsonResponse(DETAIL)));
+      await act(async () => {});
+      // The detail is the whole face the deep link asked for: no list read.
+      expect(text()).toContain("Fix the login flow");
+      expect(listReads()).toHaveLength(0);
+
+      // Closing the detail is the list's cue — exactly one read, whose rows
+      // replace the unmounted detail.
+      await press(
+        win,
+        [...container.querySelectorAll("button")].find(
+          (button) => button.textContent === t("en", "pullRequests.backToList"),
+        ),
+      );
+      expect(listReads()).toHaveLength(1);
+      await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
+      await act(async () => {});
+      expect(text()).toContain("Add the export button");
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("switching Apps never paints the previous App's ledger while the new read is pending", async () => {
+    // The tab instance survives an App switch (the shell keeps it mounted for
+    // `/dashboard/apps/:appId`), so the ledger is stamped with its App: App 1's
+    // row must be gone the instant the tab belongs to App 2.
+    const { container, fetches, text, switchApp, resolve, unmount } = await mountTabWithGatedFetch("");
+    try {
+      await act(async () => resolve("/apps/1/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
+      await act(async () => {});
+      expect(text()).toContain("Add the export button");
+
+      // App 2's read is issued but not answered: the loading face stands in,
+      // with neither App 1's row nor App 1's empty/error state.
+      await switchApp("2");
+      const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
+      expect(listReads()).toHaveLength(2);
+      expect(listReads()[1]).toContain("/apps/2/");
+      expect(text()).not.toContain("Add the export button");
+      expect(text()).toContain(t("en", "common.loading"));
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(container.querySelector("table")).toBeNull();
+
+      // App 2's own ledger replaces the loading face.
+      await act(async () => resolve("/apps/2/pull-requests", jsonResponse({ pull_requests: [ROW_CLOSED] })));
+      await act(async () => {});
+      expect(text()).toContain("Revert the cache change");
+      expect(text()).not.toContain("Add the export button");
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("a list read that fails after closing the detail shows the error face, and retry re-reads", async () => {
+    const { container, fetches, text, win, rerender, resolve, unmount } = await mountTabWithGatedFetch("");
+    const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
+    try {
+      // The ledger loads, so a later failure has stale rows to hide.
+      await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
+      await act(async () => {});
+      expect(text()).toContain("Add the export button");
+
+      // Open a PR, then close it: the close re-reads the list, and that read
+      // fails. The stale row must not stand in for the current ledger.
+      await rerender("acme/web/133");
+      await act(async () => resolve("/pull-requests/acme/web/133", jsonResponse(DETAIL)));
+      await act(async () => {});
+      expect(text()).toContain("Fix the login flow");
+      await press(
+        win,
+        [...container.querySelectorAll("button")].find(
+          (button) => button.textContent === t("en", "pullRequests.backToList"),
+        ),
+      );
+      expect(listReads()).toHaveLength(2);
+      await act(async () => resolve("/pull-requests", new Response("boom", { status: 500 })));
+      await act(async () => {});
+      expect(container.querySelector('[role="alert"]')).not.toBeNull();
+      expect(text()).toContain(t("en", "common.loadFailed"));
+      expect(text()).not.toContain("Add the export button");
+
+      // Retry re-reads; the ledger it returns replaces the error face.
+      const retry = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "common.retry"),
+      );
+      expect(retry).toBeDefined();
+      await press(win, retry);
+      expect(listReads()).toHaveLength(3);
+      await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_CLOSED] })));
+      await act(async () => {});
+      expect(text()).toContain("Revert the cache change");
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      await unmount();
     }
   });
 });

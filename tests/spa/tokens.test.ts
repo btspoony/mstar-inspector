@@ -21,13 +21,30 @@
  * Version pins are structural (dotted numeric + matching `v<version>`
  * change-note in the description), never literals.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
 import { survivorSteps } from "../../src/design-system/tokens";
-import { documentSync, danglingReferences, parseFixture, stylesheetConsumers } from "../../scripts/design-system-check";
+import {
+  SPA_ROOT,
+  consumerWalk,
+  documentSync,
+  danglingReferences,
+  parseFixture,
+  rootsWithoutConsumers,
+} from "../../scripts/design-system-check";
 
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
 const TOKENS_CSS = new URL("../../src/spa/styles/tokens.css", import.meta.url);
@@ -540,8 +557,24 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("every var() the hand-written stylesheets and shells consume still names a token", () => {
     // The set is derived from the tree, so the assertion below covers whatever
     // stylesheet and HTML shell exists — not the two this link first listed.
-    const consumers = stylesheetConsumers();
+    const walk = consumerWalk();
+    const consumers = walk.files;
     expect(consumers.length).toBeGreaterThan(0);
+    // A readable-but-partly-unreadable tree would silently pass the link below
+    // (every file it did read is fine), so the walk's own read failures are
+    // part of the live-tree claim.
+    expect(walk.failures).toEqual([]);
+    // The predicate itself, on a root it must reject: an empty or missing root
+    // is the drift (moved, renamed, emptied) the link exists to catch. Stated
+    // explicitly, so the rule is proven even while the live tree is healthy.
+    const root = fileURLToPath(new URL("../../", import.meta.url));
+    const missing = join(root, "src/does-not-exist");
+    expect(rootsWithoutConsumers(consumerWalk([missing]).roots)).toEqual(["src/does-not-exist"]);
+    // A root with a consumer contributes nothing to that list.
+    expect(rootsWithoutConsumers(consumerWalk([SPA_ROOT]).roots)).toEqual([]);
+    // A relative root would resolve against the CWD and read as empty: loud
+    // failure instead, so a caller bug cannot masquerade as a moved tree.
+    expect(() => consumerWalk(["src/spa"])).toThrow(/must be absolute/);
     for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
       expect(danglingReferences(file, css), file).toEqual([]);
@@ -566,6 +599,59 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       "dark:retired-900",
       "light:retired-900",
     ]);
+    // The HTML shells are the other grammar: a retired name quoted in an HTML
+    // comment is prose, while the same name in the shell's body is live. A
+    // `<style>` block inside the shell is CSS again, comments included.
+    const htmlNames = (html: string) => [
+      ...new Set(danglingReferences("probe.html", html).map(({ name }) => name)),
+    ];
+    expect(
+      htmlNames('<!-- legacy: var(--retired-900) --><div style="color: var(--surface-page)"></div>'),
+    ).toEqual([]);
+    expect(htmlNames('<div style="color: var(--retired-900)"></div>')).toEqual(["retired-900"]);
+    expect(
+      htmlNames("<style>/* var(--retired-900) */ .a { color: var(--surface-page); }</style>"),
+    ).toEqual([]);
+  });
+
+  test("an unreadable consumer is a reported failure, never a thrown run", () => {
+    // The link's header promises every file is checked even when one is
+    // broken: a broken symlink (a stat failure independent of the runner's
+    // uid) is named in `failures` and the readable sibling is still returned.
+    const dir = mkdtempSync(join(tmpdir(), "consumer-root-"));
+    try {
+      writeFileSync(join(dir, "ok.css"), ":root { color: var(--surface-page); }");
+      symlinkSync(join(dir, "gone"), join(dir, "broken.css"));
+      const walk = consumerWalk([dir]);
+      expect(walk.files.some((file) => file.endsWith("ok.css"))).toBe(true);
+      expect(walk.failures).toHaveLength(1);
+      expect(walk.failures[0]).toContain("broken.css");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreadable root reports unreadability, never emptiness", () => {
+    // A declared root that exists but cannot be listed must not read as a
+    // moved/emptied tree: that names the wrong cause and would green-light a
+    // link that never saw the tree. A file stands in for the unreadable root
+    // because it fails to list with ENOTDIR whatever the runner's uid.
+    const dir = mkdtempSync(join(tmpdir(), "consumer-root-"));
+    try {
+      const file = join(dir, "not-a-directory.css");
+      writeFileSync(file, ":root { color: var(--surface-page); }");
+      const walk = consumerWalk([file]);
+      expect(walk.files).toEqual([]);
+      expect(walk.roots).toHaveLength(1);
+      expect(walk.roots[0]?.consumers).toBe(0);
+      expect(walk.roots[0]?.failure).toContain("unreadable");
+      expect(walk.failures).toHaveLength(1);
+      expect(walk.failures[0]).toContain("unreadable");
+      // The emptiness predicate leaves it out; the failure names it instead.
+      expect(rootsWithoutConsumers(walk.roots)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("a declaration no longer excuses its own dangling reference (I-000248)", () => {
@@ -911,7 +997,8 @@ describe("SSR STYLE token parity", () => {
   }
 
   test("every declared token carries the value tokens.css resolves to, in its own theme", async () => {
-    const { dark: ssrDark, light: ssrLight } = ssrBlocks(await ssrStyle());
+    const style = await ssrStyle();
+    const { dark: ssrDark, light: ssrLight } = ssrBlocks(style);
     const css = await Bun.file(TOKENS_CSS).text();
     const cssRoot = cssCustomProperties(extractBlock(css, ":root {"));
     const cssLight = cssCustomProperties(extractBlock(css, ':root[data-theme="light"] {'));
@@ -919,7 +1006,19 @@ describe("SSR STYLE token parity", () => {
 
     // `--focus-halo` is the face's own composed shadow, not a token.
     const names = Object.keys(ssrDark).filter((name) => name !== "focus-halo");
-    expect(names.length, "the face rendered no token").toBeGreaterThan(40);
+    // The property a bare count stood in for: the face declares a value for
+    // every token its own stylesheet paints with — no paint left unthemed —
+    // and every name it declares really is a token the fixture carries in that
+    // theme, so a typo cannot pass by resolving to nothing.
+    const painted = [...new Set([...style.matchAll(/var\(--([a-z0-9-]+)\)/g)].map((m) => m[1] as string))];
+    expect(painted.filter((name) => !names.includes(name))).toEqual(["focus-halo"]);
+    for (const theme of THEMES) {
+      const declared = new Set(Object.values(FIXTURE[theme]).flatMap((layer) => Object.keys(layer)));
+      expect(
+        names.filter((name) => !declared.has(name)),
+        `${theme} declares no such token`,
+      ).toEqual([]);
+    }
     for (const name of names) {
       const dark = ssrDark[name] as string;
       const light = ssrLight[name];

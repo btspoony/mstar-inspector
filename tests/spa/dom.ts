@@ -90,6 +90,33 @@ export function installDom(url: string): { win: Window; cleanup: () => void } {
   };
 }
 
+/**
+ * Parse static markup into a throwaway document and hand the container to
+ * `read`. The window is closed on the way out — including when an assertion
+ * fails — so a parse never outlives its test; return plain values, not nodes,
+ * because the document is gone once `read` returns. The close settles
+ * asynchronously, so it is awaited: a failed teardown fails the test instead
+ * of vanishing behind a discarded promise.
+ *
+ * `read` must be synchronous: the window closes before any `await` inside it
+ * could run, so an async read is a compile error rather than a parse that
+ * resolves against a closed document.
+ */
+export async function withMarkup<T>(
+  markup: string,
+  read: (container: HTMLElement) => T,
+  ...sync: T extends PromiseLike<unknown> ? [error: "read must be synchronous"] : []
+): Promise<T> {
+  void sync;
+  const win = new Window();
+  try {
+    win.document.body.innerHTML = markup;
+    return read(win.document.body as unknown as HTMLElement);
+  } finally {
+    await win.happyDOM.close();
+  }
+}
+
 /** Evaluate the DOM-latching modules once, with a throwaway window in place. */
 export async function warmDom(): Promise<void> {
   const { cleanup } = installDom("http://localhost/");

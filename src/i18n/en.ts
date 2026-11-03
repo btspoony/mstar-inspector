@@ -154,15 +154,58 @@ export const en = {
     /** The short-sha chip's tooltip. */
     headSha: "Head SHA",
     reviews: "Reviews",
-    reviewsCount: "Reviews: {count}",
     noReviews: "No reviews for this pull request.",
     reviewMeta: "{model} · {provider}",
     failures: "Failures",
-    failuresCount: "Failures: {count}",
     noFailures: "No failures for this pull request.",
     findings: "Findings",
-    findingsCount: "Findings: {count}",
     noFindings: "No findings for this pull request.",
+    /** The detail header's meta line. */
+    firstSeen: "First seen",
+    lastSeen: "Last seen",
+    latestReview: "Latest review",
+    /** The verdict metric's screen-reader text when no review exists yet. */
+    noVerdict: "no verdict yet",
+    /** The segmented pill over the three record families. */
+    recordsLabel: "Pull request records",
+    /** A family trigger's accessible name: its label and the count it paints. */
+    familyTabName: "{label} ({count})",
+    /** The findings metric's note, rendered beside the count. */
+    mustFixNote: "{count} must-fix",
+    /** Severity group headers, in the order the groups render. */
+    severityMustFix: "Must fix",
+    severityShouldFix: "Should fix",
+    severityNit: "Nit",
+    severityOther: "Other",
+    /** One fold control per finding body and per review summary. */
+    expand: "Expand",
+    collapse: "Collapse",
+    /** A fold control's accessible name: the action, the record and its position. */
+    foldLabel: "{action} — {record} · #{position}",
+    /** The same name for a record with no identity text: its position alone. */
+    foldLabelBare: "{action} — #{position}",
+    /** The failure block's remaining-output fold (the diagnosis above is the first line) and copy action. */
+    failureRemainingOutput: "Remaining output",
+    copyError: "Copy error",
+    /** The copy action's transient outcome, shown on the button for a couple of seconds. */
+    copyCopied: "Copied",
+    copyFailed: "Copy failed",
+    /** The aside: PR facts and the merged activity timeline. */
+    asideFacts: "Pull request",
+    asideActivity: "Activity",
+    factRepo: "Repo",
+    factNumber: "Number",
+    factState: "State",
+    factHead: "Head",
+    timelineReview: "Review · {verdict}",
+    /** A review whose verdict the payload did not record: the row still renders, without a dangling separator. */
+    timelineReviewNoVerdict: "Review · no verdict",
+    timelineFailure: "Review failed · {stage}",
+    /** A failure whose payload recorded no stage: the row still renders, without a dangling separator. */
+    timelineFailureNoStage: "Review failed",
+    timelineFirstSeen: "PR first seen",
+    /** The trailing row when the cap dropped older events (count reads correctly at 1). */
+    timelineHidden: "Earlier events not shown: {count}",
   },
   /**
    * Per-App insights tab (the 洞察 face). The records copy returns with

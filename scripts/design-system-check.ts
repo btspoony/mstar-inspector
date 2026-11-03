@@ -8,8 +8,10 @@
  *   fixture → DESIGN.md   `documentSync()` below
  *   source → preview      `scripts/build-design-preview.tsx --check`
  *   consumers → source    `danglingReferences()` below — every `var(--x)` a
- *                         hand-written stylesheet or HTML shell under `src/spa`
- *                         consumes names a token
+ *                         hand-written stylesheet or HTML shell under a
+ *                         declared consumer root (`src/spa`, the design-system
+ *                         prototypes) names a token, and each root contributes
+ *                         at least one consumer
  *   fills → surfaces      `chartFillContrast()` below — every chart fill clears
  *                         WCAG 1.4.11's 3:1 on the surfaces it paints on
  *                         (`I-000254`)
@@ -60,7 +62,9 @@ import { THEMES, resolveTheme } from "../src/design-system/tokens";
 const ROOT = path.resolve(import.meta.dir, "..");
 const FIXTURE_PATH = path.join(ROOT, "src/design-system/fixture.json");
 const DESIGN_PATH = path.join(ROOT, "DESIGN.md");
-const SPA_ROOT = path.join(ROOT, "src/spa");
+export const SPA_ROOT = path.join(ROOT, "src/spa");
+/** Hand-written reference pages under the design system: static, never built. */
+export const PROTOTYPES_ROOT = path.join(ROOT, "src/design-system/prototypes");
 /** The one stylesheet under `src/spa` the token source derives — link 1 owns it. */
 const GENERATED_STYLESHEET = "src/spa/styles/tokens.css";
 const CONSUMER_FILE = /\.(?:css|html)$/;
@@ -76,28 +80,125 @@ const GENERATORS = [
 ] as const;
 
 /**
- * Every hand-written stylesheet and HTML shell under `src/spa` — the consumers
- * no generator link sees: nothing derives them, so nothing notices when a name
- * they reference stops existing.
+ * The trees whose hand-written CSS/HTML answers to the token source. A root
+ * that contributes no consumer (moved, renamed, emptied) breaks the link: a
+ * global "some consumer exists" passes while one root silently checks nothing,
+ * which is the failure mode this link exists to catch.
+ */
+const CONSUMER_ROOTS = [SPA_ROOT, PROTOTYPES_ROOT] as const;
+
+/**
+ * The consumers under `dirs` and the per-root record the link needs: one walk
+ * answers both "what does the token source have to keep alive" and "did every
+ * declared root contribute" — a second pass would traverse the same trees and,
+ * worse, could disagree with the first.
  *
- * Derived from the tree, not listed: a list is a guard whose coverage is its
- * own contents, and the first cut of this link named two of the four consumers
- * that already existed. A new stylesheet joins the link by existing.
+ * Two forests, derived from the trees rather than listed: the SPA's
+ * stylesheets/shells, and the design-system prototypes, which are hand-written
+ * HTML reference pages that read the same tokens. A list would be a guard whose
+ * coverage is its own contents; a new stylesheet joins the link by existing.
  * The generated stylesheet is the one exclusion — link 1 already proves it
  * equals the token source.
  */
-export function stylesheetConsumers(dir: string = SPA_ROOT): string[] {
+export interface ConsumerWalk {
+  /** Every consumer found, repo-relative, sorted. */
+  readonly files: readonly string[];
+  /** One row per declared root, in the order given, with its repo-relative path. */
+  readonly roots: readonly ConsumerRoot[];
+  /** Every unreadable entry, each naming its path and cause. */
+  readonly failures: readonly string[];
+}
+
+export interface ConsumerRoot {
+  readonly root: string;
+  /** Consumers this root contributed. */
+  readonly consumers: number;
+  /**
+   * The first unreadable entry under this root, or null when the walk read it
+   * through — reported however many consumers the root also contributed.
+   * `rootsWithoutConsumers` speaks only for roots with `consumers === 0`, so a
+   * partly unreadable root is named here and never as empty.
+   */
+  readonly failure: string | null;
+}
+
+export function consumerWalk(dirs: readonly string[] = CONSUMER_ROOTS): ConsumerWalk {
+  const files: string[] = [];
+  const failures: string[] = [];
+  const roots = dirs.map((dir) => {
+    const failureMark = failures.length;
+    const found = walkConsumers(dir, failures);
+    files.push(...found);
+    const unreadable = failures.length > failureMark;
+    return {
+      root: path.relative(ROOT, dir),
+      consumers: found.length,
+      // Any unreadability is a fact about this root, even when it also yielded
+      // consumers; the emptiness rule reads `consumers === 0` on its own.
+      failure: unreadable ? (failures[failureMark] ?? null) : null,
+    };
+  });
+  return { files: files.sort(), roots, failures };
+}
+
+/**
+ * The consumers under one root, repo-relative. Roots are absolute paths into
+ * this checkout, outputs are repo-relative: a relative root cannot be walked
+ * (it would resolve against the CWD and match nothing), so it fails loudly
+ * instead of reading as an empty root.
+ *
+ * An unreadable entry is not a relative root's caller bug: it is a fact about
+ * this tree, so it lands in `failures` and the walk carries on to the entries
+ * it can read — one broken directory must not stop the rest of the link.
+ */
+function walkConsumers(dir: string, failures: string[] = []): string[] {
+  if (!path.isAbsolute(dir)) {
+    throw new Error(`consumer root must be absolute, got "${dir}"`);
+  }
+  if (!existsSync(dir)) return [];
   const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
+  for (const entry of readdirEntries(dir, failures)) {
     const full = path.join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      out.push(...stylesheetConsumers(full));
+    const isDirectory = statIsDirectory(full, failures);
+    if (isDirectory === null) continue;
+    if (isDirectory) {
+      out.push(...walkConsumers(full, failures));
     } else if (CONSUMER_FILE.test(entry)) {
       const file = path.relative(ROOT, full);
       if (file !== GENERATED_STYLESHEET) out.push(file);
     }
   }
-  return out.sort();
+  return out;
+}
+
+/** The entries of one directory, or none if it cannot be listed (reported, not thrown). */
+function readdirEntries(dir: string, failures: string[]): string[] {
+  try {
+    return readdirSync(dir);
+  } catch (error) {
+    failures.push(`${path.relative(ROOT, dir)}: unreadable (${error instanceof Error ? error.message : String(error)})`);
+    return [];
+  }
+}
+
+/** Whether one path is a directory, or null if it cannot be stat'ed (reported, not thrown). */
+function statIsDirectory(full: string, failures: string[]): boolean | null {
+  try {
+    return statSync(full).isDirectory();
+  } catch (error) {
+    failures.push(`${path.relative(ROOT, full)}: unreadable (${error instanceof Error ? error.message : String(error)})`);
+    return null;
+  }
+}
+
+/**
+ * The declared roots that contributed no consumer, repo-relative — the one
+ * emptiness rule, reading a `consumerWalk` result so the gate and the test
+ * cannot restate it differently. A root whose walk failed is not "empty": it
+ * is named through `ConsumerWalk.failures`, which carries the real cause.
+ */
+export function rootsWithoutConsumers(roots: readonly ConsumerRoot[]): string[] {
+  return roots.filter((root) => root.consumers === 0 && root.failure === null).map((root) => root.root);
 }
 
 /**
@@ -115,7 +216,32 @@ const REFERENCE = /var\s*\(\s*--([a-z0-9-]+)[\s,)]/g;
  */
 const DECLARATION = /(?:^|[;{\s}])(--[a-z0-9-]+)\s*:\s*([^;{}]*)/g;
 /** A block comment declares nothing: a commented-out `--legacy-x:` is not a declaration. */
-const COMMENT = /\/\*[\s\S]*?\*\//g;
+const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
+/** The other consumer grammar: an HTML shell's own comment. */
+const HTML_COMMENT = /<!--[\s\S]*?-->/g;
+/** A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
+const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
+/** The consumers written as HTML shells rather than as stylesheets. */
+const HTML_FILE = /\.html$/i;
+
+/**
+ * `text` without its comments, read in the grammar the file is written in: a
+ * stylesheet's block comments, an HTML shell's `<!-- … -->` ones, and — in the
+ * shell's `<style>` blocks — the stylesheet's again.
+ *
+ * One CSS-only stripper read an HTML comment as live markup: a token name
+ * quoted in prose became a reference and failed the link, while inside a
+ * `<style>` block the same stripper happened to be right only because it ran
+ * over the whole file.
+ */
+function withoutComments(file: string, text: string): string {
+  if (!HTML_FILE.test(file)) return text.replace(CSS_COMMENT, "");
+  return text
+    .replace(HTML_COMMENT, "")
+    .replace(STYLE_BLOCK, (_block, open: string, css: string, close: string) =>
+      `${open}${css.replace(CSS_COMMENT, "")}${close}`,
+    );
+}
 
 export interface DanglingReference {
   readonly file: string;
@@ -124,7 +250,7 @@ export interface DanglingReference {
 }
 
 /**
- * Every `var(--x)` in `css` that names neither a token of `theme` nor a property
+ * Every `var(--x)` in `text` that names neither a token of `theme` nor a property
  * the file declares itself. Checked per theme rather than over the union: a name
  * one theme declares and the other does not is dangling in the other one, and
  * the union would hide exactly that.
@@ -135,11 +261,13 @@ export interface DanglingReference {
  * (`I-000248`). Only that spelling loses its vote; a name declared genuinely
  * elsewhere in the file still excuses its references.
  *
- * Comments are stripped before either match, so a retired name quoted in prose
- * neither becomes a reference nor a self-declaration that suppresses the check.
+ * Comments are stripped in the file's own grammar before either match, so a
+ * retired name quoted in prose — a CSS comment or an HTML shell's `<!-- -->`
+ * — neither becomes a reference nor a self-declaration that suppresses the
+ * check.
  */
-export function danglingReferences(file: string, css: string): DanglingReference[] {
-  const live = css.replace(COMMENT, "");
+export function danglingReferences(file: string, text: string): DanglingReference[] {
+  const live = withoutComments(file, text);
   const local = new Set(
     [...live.matchAll(DECLARATION)]
       .filter((match) => !new RegExp(`var\\s*\\(\\s*${match[1]}(?=[\\s,)])`).test(match[2] as string))
@@ -583,30 +711,62 @@ if (import.meta.main) {
     if (!sync.ok) brokenLinks.push("fixture → DESIGN.md");
   }
 
-  const consumers = stylesheetConsumers();
-  const dangling = consumers.flatMap((file) =>
-    danglingReferences(file, readFileSync(path.join(ROOT, file), "utf8")),
-  );
-  // A walk that found no stylesheet proves nothing (wrong root, moved tree):
-  // that is a failure, not an empty pass.
-  console.log(`${consumers.length > 0 && dangling.length === 0 ? "ok  " : "fail"}  consumers → source`);
-  if (consumers.length === 0) console.log(`        no stylesheet found under ${path.relative(ROOT, SPA_ROOT)}`);
-  for (const { file, name, theme } of dangling) {
-    console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
+  // One unreadable file or directory is a fact about this tree, not the end of
+  // the run: it is reported by name and the remaining links still run.
+  try {
+    // One traversal of both roots: the consumers to read and the per-root facts
+    // the emptiness rule needs come from the same walk, so the gate never
+    // reaches one tree twice or reports two answers for it.
+    const walk = consumerWalk(CONSUMER_ROOTS);
+    const emptyRoots = rootsWithoutConsumers(walk.roots);
+    const readFailures: string[] = [];
+    const dangling = walk.files.flatMap((file) => {
+      try {
+        return danglingReferences(file, readFileSync(path.join(ROOT, file), "utf8"));
+      } catch (error) {
+        readFailures.push(`${file}: ${error instanceof Error ? error.message : String(error)}`);
+        return [];
+      }
+    });
+    const failures = [...walk.failures, ...readFailures];
+    // A root that contributed nothing proves nothing (wrong root, moved tree):
+    // that is a failure per root, not an empty pass. A root that could not be
+    // read is already named by its failure, so it is never reported as empty.
+    const consumersOk = failures.length === 0 && emptyRoots.length === 0 && dangling.length === 0;
+    console.log(`${consumersOk ? "ok  " : "fail"}  consumers → source`);
+    for (const { file, name, theme } of dangling) {
+      console.log(`        ${file}: --${name} is not a token in the ${theme} theme`);
+    }
+    for (const failure of failures) {
+      console.log(`        ${failure}`);
+    }
+    for (const root of emptyRoots) {
+      console.log(`        no stylesheet or HTML shell found under ${root}`);
+    }
+    if (!consumersOk) brokenLinks.push("consumers → source");
+  } catch (error) {
+    console.error(`fail  consumers → source: ${error instanceof Error ? error.message : String(error)}`);
+    brokenLinks.push("consumers → source");
   }
-  if (consumers.length === 0 || dangling.length > 0) brokenLinks.push("consumers → source");
 
   // A chart fill is a large graphic face: WCAG 1.4.11's 3:1, not 4.5:1. Every
   // pair prints its measured ratio, so a token change that erodes a margin is
-  // a visible diff rather than a silent pass.
-  const contrast = chartFillContrast((theme) => resolveTheme(theme).semantic);
-  const below = chartContrastFailures(contrast);
-  console.log(`${below.length === 0 ? "ok  " : "fail"}  chart fill contrast`);
-  for (const { theme, fill, backdrop, ratio } of contrast) {
-    const mark = ratio < CHART_CONTRAST_MIN ? `  BELOW ${CHART_CONTRAST_MIN}:1` : "";
-    console.log(`        ${theme} ${fill} on ${backdrop}: ${ratio.toFixed(3)}:1${mark}`);
+  // a visible diff rather than a silent pass. A token that throws on read is a
+  // broken link of its own, named like the others, so the report below still
+  // runs.
+  try {
+    const contrast = chartFillContrast((theme) => resolveTheme(theme).semantic);
+    const below = chartContrastFailures(contrast);
+    console.log(`${below.length === 0 ? "ok  " : "fail"}  chart fill contrast`);
+    for (const { theme, fill, backdrop, ratio } of contrast) {
+      const mark = ratio < CHART_CONTRAST_MIN ? `  BELOW ${CHART_CONTRAST_MIN}:1` : "";
+      console.log(`        ${theme} ${fill} on ${backdrop}: ${ratio.toFixed(3)}:1${mark}`);
+    }
+    if (below.length > 0) brokenLinks.push("chart fill contrast");
+  } catch (error) {
+    console.error(`fail  chart fill contrast: ${error instanceof Error ? error.message : String(error)}`);
+    brokenLinks.push("chart fill contrast");
   }
-  if (below.length > 0) brokenLinks.push("chart fill contrast");
 
   if (brokenLinks.length > 0) {
     console.error(`\ndesign-system-check: ${brokenLinks.length} broken link(s): ${brokenLinks.join(", ")}`);
