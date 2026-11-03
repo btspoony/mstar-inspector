@@ -557,6 +557,10 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
   const repo = repository?.name;
   const prNumber = pull_request?.number ?? result.data.number;
   const headSha = pull_request?.head?.sha ?? null;
+  // The commit's ordering stamp (`ReviewJobPayload.head_at`): the same
+  // normalized spelling the ledger stores, so the consumer compares queue
+  // message and D1 row as plain strings. Junk/absent → the field is omitted.
+  const headAt = normalizeRfc3339(pull_request?.updated_at);
   // Malformed-payload reject BEFORE the mode gate: reject stays reserved for
   // malformed payloads in EVERY mode (spec §2.1 — exactly as today).
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
@@ -579,6 +583,7 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
       repo,
       pr_number: prNumber,
       head_sha: headSha,
+      ...(headAt === undefined ? {} : { head_at: headAt }),
       action,
       triggered_by: "pull_request",
     },
@@ -661,12 +666,26 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
 }
 
 /**
- * RFC 3339 (what GitHub stamps) — the ledger's `last_seen_at` input. A value
- * that fails this is treated as ABSENT by the caller rather than handed to
- * SQLite's `datetime()`, which silently returns NULL for junk and would let
- * the store's "no timestamp" fallback masquerade as a real clock.
+ * RFC 3339 (what GitHub stamps) — the input gate for the ledger's
+ * `last_seen_at` and for the `head_at` watermark carried on the job payload.
+ * A value that fails this is treated as ABSENT by the caller rather than
+ * handed to SQLite's `datetime()`, which silently returns NULL for junk and
+ * would let the store's "no timestamp" fallback masquerade as a real clock.
  */
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * The one spelling every stored stamp uses. `RFC3339` admits numeric offsets
+ * (`+02:00`), which do NOT sort correctly as text against `Z`; rewriting to
+ * UTC ISO-8601 (`new Date(v).toISOString()`) makes the payload's `head_at`
+ * and the ledger's `head_at` comparable byte-for-byte. Junk → `undefined`,
+ * never `now`.
+ */
+function normalizeRfc3339(value: string | null | undefined): string | undefined {
+  if (!RFC3339.test(value ?? "")) return undefined;
+  const time = new Date(value as string);
+  return Number.isNaN(time.getTime()) ? undefined : time.toISOString();
+}
 
 /**
  * The per-App PR ledger record for one `pull_request` delivery (migration
@@ -707,9 +726,11 @@ export function pullRequestRecord(rawBody: string): {
     title: pull_request?.title ?? null,
     state,
     headSha: pull_request?.head?.sha ?? null,
-    // Only a well-formed stamp rides through; junk degrades to "no stamp",
-    // which the store resolves to now EXPLICITLY.
-    updatedAt: RFC3339.test(pull_request?.updated_at ?? "") ? (pull_request?.updated_at ?? null) : null,
+    // Only a well-formed stamp rides through, rewritten to the SAME UTC
+    // spelling the payload's `head_at` carries (the consumer compares the two
+    // as text); junk degrades to "no stamp", which the store resolves to now
+    // EXPLICITLY.
+    updatedAt: normalizeRfc3339(pull_request?.updated_at) ?? null,
   };
 }
 

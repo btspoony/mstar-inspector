@@ -81,6 +81,8 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0038_webhook_path_drop.sql",
     // 0039 references github_apps, so it runs after the 0038 rebuild.
     "0039_pull_requests.sql",
+    // 0044: head_at — upsertPullRequest writes it on every ledger write.
+    "0044_pull_request_head_at.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -294,6 +296,33 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(ledger).toEqual([
       { owner: "test-owner", repo: "test-repo", pr_number: 42, state: "open", head_sha: "abc123" },
     ]);
+  });
+
+  test("the queued head_at is byte-identical to the ledger's head_at (offset normalized)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      ...PR_PAYLOAD,
+      action: "synchronize",
+      pull_request: { ...PR_PAYLOAD.pull_request, updated_at: "2026-03-01T12:00:00+02:00" },
+    });
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    const { head_at } = sent[0] as ReviewJobPayload;
+    const row = db.raw
+      .query("SELECT head_at FROM pull_requests WHERE app_id = ?")
+      .get(appRow.id) as { head_at: string | null };
+    expect(head_at).toBe("2026-03-01T10:00:00.000Z");
+    expect(row.head_at).toBe(head_at ?? null);
   });
 
   test("wrong-App secret signature → 401, zero enqueue (sibling-App isolation, AC-B5-isolation)", async () => {

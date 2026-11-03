@@ -40,6 +40,8 @@ function createMigratedD1(): TestD1 {
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
     "0039_pull_requests.sql",
+    // 0044: head_at — upsertPullRequest writes it on every ledger write.
+    "0044_pull_request_head_at.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
