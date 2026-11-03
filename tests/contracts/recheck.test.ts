@@ -619,8 +619,9 @@ describe("validateRecheckDoc — disposition/reason pairing and shapes", () => {
       },
       pairedInput(),
     );
-    // The strict shape fails before rowId is read, so the row is unidentified.
-    expectDroppedRow(result, { index: 0, rowId: null, error: "exactly" });
+    // The strict shape fails, but the row already proved its rowId, so the
+    // rejection stays attributable to row-1 instead of going unidentified.
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "exactly" });
   });
 
   test("non-object documents fail closed", () => {

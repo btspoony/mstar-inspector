@@ -138,6 +138,29 @@ describe("validateRecheckDoc — per-row degradation", () => {
     expect(outcome.rejected).toHaveLength(1);
     expect(outcome.rejected[0]!.rowId).toBe("row-1");
   });
+
+  test("a row rejected for an extra key keeps the rowId it already proved", () => {
+    const targets = [target(1), target(2)];
+    const outcome = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: SHA,
+        results: [
+          { ...addressed("row-1"), extra: true },
+          addressed("row-2"),
+        ],
+      },
+      input({ targets }),
+    );
+
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.doc.results).toHaveLength(1);
+    expect(outcome.doc.results[0]!.rowId).toBe("row-2");
+    expect(outcome.rejected).toHaveLength(1);
+    expect(outcome.rejected[0]!.rowId).toBe("row-1");
+    expect(outcome.rejected[0]!.index).toBe(0);
+  });
 });
 
 describe("validateRecheckDoc — document-level distrust still fails closed", () => {

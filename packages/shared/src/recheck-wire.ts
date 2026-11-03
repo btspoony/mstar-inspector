@@ -436,7 +436,7 @@ export function validateRecheckDoc(
     }
     const result = exactObject(raw, ['rowId', 'disposition', 'reason', 'evidence', 'relatedCurrentFindingIndexes']);
     if (result === null) {
-      rejected.push({ rowId: null, index: i, error: `${where} must be an object with exactly {rowId, disposition, reason, evidence, relatedCurrentFindingIndexes}` });
+      rejected.push({ rowId: rawRowId, index: i, error: `${where} must be an object with exactly {rowId, disposition, reason, evidence, relatedCurrentFindingIndexes}` });
       continue;
     }
     if (!isNonemptyString(result.rowId)) {
