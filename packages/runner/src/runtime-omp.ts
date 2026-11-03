@@ -1409,7 +1409,13 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             unverifiedCount: 0,
             target: parseTarget(input.reconFacts),
             incomplete: { reason: cause, unscanned: [DEEP_STOP_UNSCANNED] },
-            ...(gathered.summary === undefined ? {} : { summary_md: gathered.summary }),
+            // Without a narrative, the engine's fallback is not a summary: it is
+            // a COPY of the verdict line, the tally and one bullet per finding —
+            // the same facts the publishing body renders from the envelope, so a
+            // real review printed each one twice (findings three times). Say the
+            // absence instead. Why the turn stopped is `incomplete`'s fact; this
+            // string is prose that a surface renders verbatim.
+            summary_md: gathered.summary ?? "No narrative summary was produced by the deep parent session.",
           });
           // The engine vocabulary is the SSOT for the synthesized envelope
           // too: an `agent_end` transcript is no more trusted than a yielded
@@ -1738,6 +1744,12 @@ export const ompAgentRuntime: AgentRuntime = {
         findings,
         unverifiedCount,
         target: parseTarget(input.reconFacts),
+        // Same rule as the deep path: no seat narrative means the engine's
+        // header copy must not stand in for one. Every fact that copy restates
+        // (verdict, tally, finding titles) is published from the envelope by the
+        // body, which is what made a real review print each of them twice. This
+        // layer has no narrative to offer, so it says exactly that.
+        summary_md: "No narrative summary was produced by the review seats.",
         ...(stoppedSeats === 0
           ? {}
           : {

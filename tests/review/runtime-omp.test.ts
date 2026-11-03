@@ -1145,6 +1145,9 @@ describe("ompAgentRuntime.runReview — a stopped wave yields an incomplete enve
         ],
         unverifiedCount: 1,
         target: { owner: "acme", repo: "widgets", pr: 7, head_sha: "abc1234567890abcdef1234567890abcdef12" },
+        // The runner states the absence; the engine fallback would restate the
+        // verdict header the body already renders.
+        summary_md: "No narrative summary was produced by the review seats.",
       }),
     );
   });
@@ -1255,29 +1258,21 @@ describe("ompAgentRuntime.runReview — coverage note honesty and budget", () =>
     expect(envelope.incomplete?.unscanned).toEqual(["full-diff-combined: lib/c.ts, src/a.ts, src/b.ts"]);
   });
 
-  test("a summary at the body budget still cannot erase the capped seats' notes", async () => {
-    // Each capped seat kept what it collected before the cap: enough findings
-    // that the engine's own summary ALONE runs past the whole body budget.
-    const findings = (prefix: string, dir: string) =>
-      Array.from({ length: 200 }, (_, index) => ({
-        mergeClass: "must-fix",
-        title: `${prefix} ${String(index).padStart(3, "0")}`,
-        body: "The handler assumes the payload is always present.",
-        file_path: `${dir}/file-${index}.ts`,
-        line_start: index + 1,
-      }));
+  test("both capped seats' notes reach the summary beside the absence sentence", async () => {
+    // The summary is a fixed sentence now, so nothing competes with the
+    // disclosure for the budget: this pins that the notes still fit and still
+    // name every stopped seat.
     seatResults = [
-      { aborted: true, abortReason: CAP_REASON, data: { findings: findings("alpha", "src") } },
-      { aborted: true, abortReason: CAP_REASON, data: { findings: findings("beta", "lib") } },
+      { aborted: true, abortReason: CAP_REASON, data: seatPayload() },
+      { aborted: true, abortReason: CAP_REASON, data: seatPayload() },
     ];
 
     const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
 
-    const notesAt = envelope.summary_md.indexOf("\n\n- notes: ");
-    const summaryPart = envelope.summary_md.slice(0, notesAt);
     const notes = noteLines(envelope.summary_md);
-    // The engine summary was cut to hold the disclosure, and its cut is marked.
-    expect(summaryPart).toContain("summary truncated");
+    // The summary never restates the verdict, so no engine template is cut here.
+    expect(envelope.summary_md).not.toContain("summary truncated");
+    expect(envelope.summary_md).toContain("No narrative summary was produced by the review seats.");
     // Both capped seats keep their slug, the cause and the coverage statement.
     expect(notes).toHaveLength(2);
     for (const [index, slug] of ["changeset-1-src", "changeset-2-lib"].entries()) {
@@ -1641,7 +1636,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(envelope.summary_md).toContain("summary truncated");
   });
 
-  test("a stop the SDK reported is the declared cause, one line, and keeps the engine summary template", async () => {
+  test("a stop the SDK reported is the declared cause, one line, and an honest summary", async () => {
     // A deadline that fired at the turn boundary: the stop is recorded on the
     // message and there is no assistant prose to publish. Provider/abort text
     // spans lines — the engine's fact rejects that, so it is collapsed.
@@ -1651,11 +1646,11 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
 
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.incomplete?.reason).toBe("Deadline exceeded while streaming (the tier cap)");
-    // No text gathered → the engine's own template, never a blank summary and
-    // never a throw over the missing text.
+    // No text gathered → the absence is stated, never the engine's header copy
+    // and never a throw over the missing text. The cause is the declared fact.
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.summary_md).toContain("## Verdict: incomplete");
-    expect(envelope.summary_md).toContain("cause: Deadline exceeded while streaming (the tier cap)");
+    expect(envelope.summary_md).toBe("No narrative summary was produced by the deep parent session.");
+    expect(envelope.summary_md).not.toContain("cause:");
   });
 
   test("a reported yield error is the cause of a stopped turn", async () => {
@@ -1712,7 +1707,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(envelope.summary_md).toContain("lib/c.ts needs a null check");
   });
 
-  test("a transcript whose assistant entries all lack text keeps the engine summary template", async () => {
+  test("a transcript whose assistant entries all lack text still declares the cause", async () => {
     parentAgentEnd = [toolOnlyTurn()];
 
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
@@ -1722,7 +1717,7 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
     );
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.summary_md).toContain("## Verdict: incomplete");
+    expect(envelope.summary_md).toBe("No narrative summary was produced by the deep parent session.");
   });
 
   test("a turn that yielded is unchanged by the end event", async () => {
