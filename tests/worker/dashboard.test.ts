@@ -1287,7 +1287,7 @@ describe("/dashboard manifest routes", () => {
     expect(appIdOf(manifest)).not.toContain("octocat");
     expect(manifest.redirect_url).toBe("https://worker.local/dashboard/manifest/callback");
     expect(manifest.public).toBe(false);
-    expect(manifest.default_events).toEqual(["pull_request", "issue_comment", "installation"]);
+    expect(manifest.default_events).toEqual(["pull_request", "issue_comment"]);
     expect(manifest.default_permissions).toEqual({
       // contents:write is authorized for Worker-side thread
       // resolution (adds checks:write for advisory Check runs).

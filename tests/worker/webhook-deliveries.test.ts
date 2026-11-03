@@ -13,7 +13,8 @@
  *   - The per-App webhook face records ONE row per VERIFIED delivery,
  *     immediately after classifyWebhook returns (before the reject return):
  *     reject → rejected (status_code = the classifier's status), ignore →
- *     ignored, job + review_enabled=0 → paused, job → ok. Pre-classify
+ *     ignored, job + review_enabled=0 → paused, job → ok,
+ *     installation → ignored (verified but not a reviewable event). Pre-classify
  *     failures (413 / db-guard / 404 / decrypt 500) record
  *     nothing (the retired legacy face recorded nothing — AL-20-1: legacy
  *     不落行).
@@ -728,9 +729,10 @@ describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, Q
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1)).toBe("ok");
   });
 
-  // An install delivery is neither review work nor paused: it records the
-  // account login, so the review switch must not colour its outcome.
-  test.each([0, 1])("maps installation → ok regardless of the review switch (reviewEnabled=%i)", (reviewEnabled) => {
-    expect(deliveryOutcomeFromWebhook({ kind: "installation" }, reviewEnabled)).toBe("ok");
+  // An install delivery is neither review work nor paused: it is verified but
+  // enqueues nothing, so it reads `ignored` — never `ok` ("job enqueued") and
+  // never `paused`, regardless of the review switch.
+  test.each([0, 1])("maps installation → ignored regardless of the review switch (reviewEnabled=%i)", (reviewEnabled) => {
+    expect(deliveryOutcomeFromWebhook({ kind: "installation" }, reviewEnabled)).toBe("ignored");
   });
 });

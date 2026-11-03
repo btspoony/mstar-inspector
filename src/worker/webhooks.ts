@@ -284,8 +284,19 @@ export type WebhookOutcome =
    */
   | { kind: "installation"; installationId: number; accountLogin: string | null };
 
-/** Minimal webhook payload shapes — only the fields the gateway consumes. */
-const installationSchema = z.object({ id: z.number() }).nullable().optional();
+/**
+ * Minimal webhook payload shapes — only the fields the gateway consumes.
+ *
+ * `account.login` is the installation's own account — the authority for
+ * `app_installations.account_login`. `repository.owner.login` is only a
+ * fallback: an install covers repositories owned by the installing account,
+ * but the payload's own `installation.account` is the value GitHub states,
+ * and it must win so it is never overwritten by an inferred owner.
+ */
+const installationSchema = z
+  .object({ id: z.number(), account: z.object({ login: z.string() }).nullable().optional() })
+  .nullable()
+  .optional();
 const repositorySchema = z
   .object({ name: z.string(), owner: z.object({ login: z.string() }) })
   .nullable()
@@ -497,6 +508,9 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
   }
+  // The install's own account wins: the payload states it, whereas the owner
+  // is only the inference a delivery without `installation.account` allows.
+  const installationAccount = installation?.account?.login ?? owner;
   // §2.1 matrix: the mode gates the auto face (manual never auto-triggers;
   // open is opened-only). The bot-mention comment face is orthogonal.
   if (!autoTriggerAllows(mode, action)) {
@@ -513,7 +527,7 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
       action,
       triggered_by: "pull_request",
     },
-    installationAccount: owner,
+    installationAccount,
   };
 }
 
@@ -570,6 +584,9 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "issue_comment payload missing required fields" };
   }
+  // Same authority as the pull_request face: the payload's own
+  // `installation.account.login`, with the repository owner as the fallback.
+  const installationAccount = installation?.account?.login ?? owner;
   return {
     kind: "job",
     payload: {
@@ -581,7 +598,7 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
       action: "created",
       triggered_by: "issue_comment",
     },
-    installationAccount: owner,
+    installationAccount,
   };
 }
 

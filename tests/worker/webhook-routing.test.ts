@@ -1085,7 +1085,7 @@ describe("installation event path", () => {
     installation: { id: 555, account: { login: "octo-org" } },
   };
 
-  test("installation.created with account.login → row written with that login, zero enqueue, delivery ok", async () => {
+  test("installation.created with account.login → row written with that login, zero enqueue, delivery ignored", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -1106,7 +1106,7 @@ describe("installation event path", () => {
       { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
     ]);
     expect(deliveryRows(db, appRow.id)).toEqual([
-      { event_name: "installation", outcome: "ok", status_code: null },
+      { event_name: "installation", outcome: "ignored", status_code: null },
     ]);
   });
 
@@ -1152,7 +1152,35 @@ describe("installation event path", () => {
     expect(sent).toHaveLength(0);
     expect(installationRows(db)).toHaveLength(1);
     // Recorded as an install, never as a paused review delivery.
-    expect(deliveryRows(db, appRow.id)[0]!.outcome).toBe("ok");
+    expect(deliveryRows(db, appRow.id)[0]!.outcome).toBe("ignored");
+  });
+
+  test("global review_global flag OFF still records the installation — the flag gates enqueue only", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // Same D1 table `tests/worker/admin-flags.test.ts` uses: an ABSENT row
+    // reads as enabled, so this row is what closes the global enqueue face.
+    db.raw
+      .prepare("INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES ('review_global', 0, datetime('now'), 'fixture')")
+      .run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(INSTALL_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0);
+    expect(installationRows(db)).toEqual([
+      { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+    ]);
+    expect(deliveryRows(db, appRow.id)[0]!.outcome).toBe("ignored");
   });
 
   test("installation.deleted → 200 ignored, no installation row", async () => {

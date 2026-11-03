@@ -61,9 +61,11 @@ app.use("*", spaDispatch());
  * the pure mapping the per-App route applies immediately after
  * classifyWebhook — reject → rejected / ignore → ignored / job → paused
  * when the App's review switch is off, else ok. An `installation` delivery
- * maps to ok regardless of the switch: it is neither paused nor review work
- * (it records the install's account login), so the pause gate must never
- * describe it as paused. Extracted from the inline
+ * maps to ignored: it is verified but not a reviewable event — it enqueues
+ * nothing, so `ok` ("job enqueued") would overstate it and would also let
+ * `DELIVERY_VERDICT_TIER_SQL` rank an install row above a newer ignored
+ * delivery. The pause gate must never describe it as paused either.
+ * Extracted from the inline
  * ternary so a future outcome (e.g. AL-21's `hold`) extends one function
  * instead of every call site; unit-tested in
  * tests/worker/webhook-deliveries.test.ts. `reviewEnabled` is the App
@@ -75,7 +77,7 @@ export function deliveryOutcomeFromWebhook(
 ): DeliveryOutcome {
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
-  if (outcome.kind === "installation") return "ok";
+  if (outcome.kind === "installation") return "ignored";
   return reviewEnabled === 0 ? "paused" : "ok";
 }
 
@@ -333,7 +335,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately
   // after classification (before the reject return) so EVERY classified
   // outcome lands: reject → rejected (status_code = the classifier's
-  // status), ignore → ignored, job + review_enabled=0 → paused, job → ok.
+  // status), ignore → ignored, job + review_enabled=0 → paused, job → ok,
+  // installation → ignored (verified, but it enqueues nothing — not a
+  // reviewable event).
   // The pre-classify failures (413 / db-guard / 404 /
   // decrypt 500) never reach this line and record nothing (the retired
   // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id

@@ -362,6 +362,9 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody(), undefined, EVERY_PUSH);
     expect(outcome.kind).toBe("job");
     if (outcome.kind === "job") {
+      // The install account is a sibling, not a payload field — and it must be
+      // this fixture's owner login, not merely some string.
+      expect(outcome.installationAccount).toBe("test-owner");
       expect(outcome.payload).toEqual({
         installation_id: 123,
         owner: "test-owner",
@@ -653,6 +656,51 @@ describe("classifyEvent — everything else", () => {
   test("invalid JSON body is rejected with 400", () => {
     const outcome = classifyEvent("pull_request", "{not json");
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "invalid JSON body" });
+  });
+});
+
+describe("classifyEvent — installation event (account authority + rejects)", () => {
+  test("installation payload invalid JSON → 400 invalid JSON body", () => {
+    expect(classifyEvent("installation", "{not json")).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "invalid JSON body",
+    });
+  });
+
+  test("installation payload missing action → 400 failed validation", () => {
+    expect(classifyEvent("installation", JSON.stringify({ installation: { id: 5 } }))).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "installation payload failed validation",
+    });
+  });
+
+  test("installation payload with a non-string account.login → 400 failed validation", () => {
+    const body = JSON.stringify({ action: "created", installation: { id: 5, account: { login: 42 } } });
+    expect(classifyEvent("installation", body)).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "installation payload failed validation",
+    });
+  });
+
+  test("job classifiers take installation.account.login over the repository owner, and fall back to it", () => {
+    const withAccount = classifyEvent(
+      "pull_request",
+      pullRequestBody("opened", { installation: { id: 123, account: { login: "octo-org" } } }),
+    );
+    expect(withAccount).toMatchObject({ kind: "job", installationAccount: "octo-org" });
+    // The existing fixtures omit `installation.account` → repository owner.
+    const withoutAccount = classifyEvent("pull_request", pullRequestBody("opened"));
+    expect(withoutAccount).toMatchObject({ kind: "job", installationAccount: "test-owner" });
+    const comment = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ installation: { id: 123, account: { login: "octo-org" } } }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(comment).toMatchObject({ kind: "job", installationAccount: "octo-org" });
   });
 });
 
