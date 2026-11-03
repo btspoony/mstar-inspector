@@ -13,7 +13,8 @@
  *   - The per-App webhook face records ONE row per VERIFIED delivery,
  *     immediately after classifyWebhook returns (before the reject return):
  *     reject → rejected (status_code = the classifier's status), ignore →
- *     ignored, job + review_enabled=0 → paused, job → ok. Pre-classify
+ *     ignored, job + review_enabled=0 → paused, job → ok,
+ *     installation → ignored (verified but not a reviewable event). Pre-classify
  *     failures (413 / db-guard / 404 / decrypt 500) record
  *     nothing (the retired legacy face recorded nothing — AL-20-1: legacy
  *     不落行).
@@ -345,8 +346,8 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       "0004_github_apps.sql",
       "0005_reviews_app_id.sql",
       "0008_github_apps_ops.sql",
-      // 0026 + 0027: the webhook's slug lookup is the joined tenant read, so
-      // the fixture carries the workspace plane and the App's mapping.
+      // 0026: the webhook's slug lookup is the joined tenant read, so the
+      // fixture carries the workspace plane and the App's mapping.
       "0026_workspaces.sql",
       // 0033: the enqueue decision reads the `review_global` server flag.
       "0033_platform_admin.sql",
@@ -721,10 +722,31 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 });
 
 describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, QC S-2)", () => {
-  test("maps reject → rejected / ignore → ignored / job → paused when the App's review switch is off, else ok", () => {
-    expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 1)).toBe("rejected");
-    expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 1)).toBe("ignored");
-    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0)).toBe("paused");
-    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1)).toBe("ok");
+  test("maps reject → rejected / ignore → ignored / job → paused when either review switch is off, else ok", () => {
+    expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 1, true)).toBe("rejected");
+    expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 0, false)).toBe("rejected");
+    expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 1, true)).toBe("ignored");
+    expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 0, false)).toBe("ignored");
+    // The per-App pause.
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0, true)).toBe("paused");
+    // The global kill switch: `ok` means "job enqueued", and a globally
+    // blocked job never is.
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false)).toBe("paused");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, true)).toBe("ok");
   });
+
+  // An install delivery is neither review work nor paused: it is verified but
+  // enqueues nothing, so it reads `ignored` — never `ok` ("job enqueued") and
+  // never `paused`, regardless of either review switch.
+  test.each([
+    [0, true],
+    [1, true],
+    [0, false],
+    [1, false],
+  ])(
+    "maps installation → ignored regardless of the switches (reviewEnabled=%i, reviewGlobal=%s)",
+    (reviewEnabled, reviewGlobal) => {
+      expect(deliveryOutcomeFromWebhook({ kind: "installation" }, reviewEnabled, reviewGlobal)).toBe("ignored");
+    },
+  );
 });

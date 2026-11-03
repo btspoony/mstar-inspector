@@ -238,6 +238,13 @@ export type UpsertInstallationInput = {
   installationId: number;
   /** Absent/null → preserve the stored login (a bare touch must not wipe it). */
   accountLogin?: string | null;
+  /**
+   * True when `accountLogin` is the installation's OWN account, as stated by an
+   * `installation.*` event; false (default) when it is the review-path
+   * inference from `repository.owner.login`. An authoritative value overwrites
+   * whatever is stored; an inferred one only fills an empty column.
+   */
+  authoritative?: boolean;
 };
 
 /**
@@ -457,6 +464,32 @@ export const APP_READ_SQL = {
   getAppForWebhook: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
   getAppByGithubId: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
   listApps: `SELECT g.*, w.workspace_id FROM github_apps g INNER JOIN app_workspaces w ON w.app_id = g.id WHERE g.deleted_at IS NULL ORDER BY g.created_at DESC, g.id`,
+} as const;
+
+/**
+ * The two `upsertInstallation` statements. Which one runs is chosen BEFORE
+ * `prepare` from `input.authoritative`, so no value ever enters the SQL text.
+ *
+ * A NULL `accountLogin` preserves whatever is stored in both. They differ only
+ * in which side wins a non-null value: an AUTHORITATIVE login (the
+ * installation's own account, from an `installation.*` event) overwrites the
+ * stored one, while an INFERRED login (`repository.owner.login`, because
+ * GitHub omits `installation.account` from `pull_request` / `issue_comment`
+ * payloads) only fills an empty column. Inference must therefore never
+ * overwrite an authoritative value, while a NULL row still fills from ordinary
+ * review traffic.
+ */
+const UPSERT_INSTALLATION_SQL = {
+  authoritative: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT (app_id, installation_id) DO UPDATE SET
+      account_login = COALESCE(excluded.account_login, account_login),
+      seen_at = datetime('now')`,
+  inferred: `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT (app_id, installation_id) DO UPDATE SET
+      account_login = COALESCE(account_login, excluded.account_login),
+      seen_at = datetime('now')`,
 } as const;
 
 /** Create the github_apps / app_installations store over one D1 handle. */
@@ -845,17 +878,14 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * Touch (or create) the (appId, installationId) installation row on any
      * webhook carrying an installation_id. A null/absent accountLogin
-     * preserves the stored login (COALESCE with the existing value).
+     * preserves the stored login; otherwise `authoritative` decides the winner
+     * (see UPSERT_INSTALLATION_SQL): an authoritative value overwrites, an
+     * inferred one only fills an empty column.
      */
     async upsertInstallation(input: UpsertInstallationInput): Promise<void> {
+      const sql = input.authoritative ? UPSERT_INSTALLATION_SQL.authoritative : UPSERT_INSTALLATION_SQL.inferred;
       await db
-        .prepare(
-          `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
-           VALUES (?, ?, ?, ?, datetime('now'))
-           ON CONFLICT (app_id, installation_id) DO UPDATE SET
-             account_login = COALESCE(excluded.account_login, account_login),
-             seen_at = datetime('now')`,
-        )
+        .prepare(sql)
         .bind(crypto.randomUUID(), input.appId, input.installationId, input.accountLogin ?? null)
         .run();
     },

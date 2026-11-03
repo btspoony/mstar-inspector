@@ -14,9 +14,9 @@
  *   entry — the legacy bare `/webhook` face is
  *   retired): our webhook path → github_apps row (active, not deleted) → that App's
  *   decrypted webhook secret verifies the signature → classify → enqueue
- *   with `appRef: { appId }` (spec § Multi-App 契约, locks L3/L4); the
- *   classified payload's installation_id touches `app_installations`
- *   (fire-and-forget relative to the enqueue)
+ *   with `appRef: { appId }` (spec § Multi-App 契约, locks L3/L4); a
+ *   classified review job records its installing account in
+ *   `app_installations` before the pause/flag gates (best-effort)
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
@@ -60,19 +60,31 @@ app.use("*", spaDispatch());
  * Classifier outcome → delivery-record outcome (QC wave 1, S-2):
  * the pure mapping the per-App route applies immediately after
  * classifyWebhook — reject → rejected / ignore → ignored / job → paused
- * when the App's review switch is off, else ok. Extracted from the inline
+ * when the App's review switch is off, else ok. An `installation` delivery
+ * maps to ignored: it is verified but not a reviewable event — it enqueues
+ * nothing, so `ok` ("job enqueued") would overstate it and would also let
+ * `DELIVERY_VERDICT_TIER_SQL` rank an install row above a newer ignored
+ * delivery. The pause gate must never describe it as paused either.
+ * Extracted from the inline
  * ternary so a future outcome (e.g. AL-21's `hold`) extends one function
  * instead of every call site; unit-tested in
  * tests/worker/webhook-deliveries.test.ts. `reviewEnabled` is the App
- * row's review_enabled flag (0 = the producer-side pause gate).
+ * row's review_enabled flag (0 = the producer-side pause gate); `reviewGlobal`
+ * is the `review_global` server flag the route reads once per request (false =
+ * the global kill switch closed the enqueue face for every App). Either switch
+ * off makes a `job` read `paused`: `ok` means "job enqueued", so recording it
+ * for a delivery the global flag blocked would overstate the platform exactly
+ * as the per-App pause would.
  */
 export function deliveryOutcomeFromWebhook(
   outcome: { kind: WebhookOutcome["kind"] },
   reviewEnabled: number,
+  reviewGlobal: boolean,
 ): DeliveryOutcome {
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
-  return reviewEnabled === 0 ? "paused" : "ok";
+  if (outcome.kind === "installation") return "ignored";
+  return reviewEnabled === 0 || !reviewGlobal ? "paused" : "ok";
 }
 
 /**
@@ -96,6 +108,37 @@ function webhookWarn(event: string, detail: string, msg: string): void {
  */
 function webhookInfo(event: string, detail: string, msg: string): void {
   defaultLog.info({ event, reason: event, detail }, msg);
+}
+
+/**
+ * Best-effort install bookkeeping shared by the two delivery paths that learn
+ * an installing account (a review `job` and an `installation.*` event): upsert
+ * the (appId, installationId) row's `account_login` / `seen_at`, and on any
+ * store failure log the one structured warn and carry on. It never throws —
+ * bookkeeping must not change the webhook response or the enqueue.
+ *
+ * `authoritative` says which source the login came from: an install event
+ * states the installation's own account (overwrites any stored login), while
+ * a review delivery only infers it from `repository.owner.login` (fills an
+ * empty column, never replaces a value).
+ */
+async function recordInstallation(
+  appsStore: ReturnType<typeof createAppsStore>,
+  appId: string,
+  installationId: number,
+  accountLogin: string | null,
+  authoritative: boolean,
+): Promise<void> {
+  try {
+    await appsStore.upsertInstallation({ appId, installationId, accountLogin, authoritative });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    webhookWarn(
+      "installation_upsert_failed",
+      detail,
+      "installation upsert failed — webhook response and enqueue unaffected",
+    );
+  }
 }
 
 /**
@@ -177,12 +220,21 @@ app.route("/dashboard", dashboardApp);
  * (consumer lock L4).
  *
  * Install bookkeeping: a classified job payload always
- * carries `installation_id`, so the accepted path touches
- * `app_installations` (seen_at upsert, lock L1 store). The touch runs AFTER
- * the enqueue — fire-and-forget relative to it, so the review path never
- * waits on bookkeeping — and a bookkeeping failure only logs a structured
- * warn: it never blocks the enqueue nor fails the webhook (best-effort
- * install health, B3 roadmap).
+ * carries `installation_id`, so the accepted path runs an `app_installations`
+ * seen_at upsert that also records `account_login` from
+ * `outcome.installationAccount` — the installing account the delivery states,
+ * with `repository.owner.login` only as the payload-missing fallback. A review
+ * delivery's value is INFERRED (`accountAuthoritative: false`), so it only
+ * fills an empty login and never replaces a stored one; an `installation`
+ * delivery (`installation.created` / `new_permissions_accepted`) states the
+ * installation's own account and overwrites (`accountAuthoritative: true`).
+ * The job write runs BEFORE the pause gate, the global flag gate and the
+ * enqueue, because those three decide only the ENQUEUE face: a paused App or a
+ * disabled flag must still learn its installing account. An `installation`
+ * delivery records the same row before answering `accepted` — earlier still,
+ * before both gates (it never enqueues). Both are best-effort: a failure logs
+ * one structured warn and never throws, blocks the enqueue, or fails the
+ * webhook.
  *
  * Delivery recording (AL-20-1): immediately after
  * classification (before the reject return) ONE best-effort row is appended
@@ -191,6 +243,12 @@ app.route("/dashboard", dashboardApp);
  * store failure only logs a structured warn (the response and enqueue are
  * never affected). The retired legacy face recorded nothing (AL-20-1:
  * legacy 不落行 — it was the fallback path with no dashboard consumer).
+ *
+ * Order of the verified, non-reject path: classify → delivery record → PR
+ * ledger (0039) → `last_webhook_at` touch → `ignore` return → install
+ * bookkeeping (the `installation` branch records and returns; the job path
+ * records and proceeds) → pause gate → global flag gate → enqueue. The reject
+ * return sits between the delivery record and the PR ledger.
  */
 app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Body-size cap checked BEFORE buffering the body (B6). Two gates: the
@@ -329,18 +387,53 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately
   // after classification (before the reject return) so EVERY classified
   // outcome lands: reject → rejected (status_code = the classifier's
-  // status), ignore → ignored, job + review_enabled=0 → paused, job → ok.
-  // The pre-classify failures (413 / db-guard / 404 /
+  // status), ignore → ignored, job + review_enabled=0 or review_global=0 →
+  // paused, job → ok, installation → ignored (verified, but it enqueues
+  // nothing — not a reviewable event).
+  // pre-classify failures (413 / db-guard / 404 /
   // decrypt 500) never reach this line and record nothing (the retired
   // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id
   // is NOT NULL FK). Best-effort like the
   // last_webhook_at touch: a store failure logs a structured warn and never
   // changes the response or the enqueue.
+  //
+  // The `review_global` flag is read HERE — once per request — because BOTH
+  // consumers need it: this record (a globally blocked `job` is `paused`, never
+  // `ok`) and the enqueue gate below. One PK point read, per the flag read
+  // contract in src/admin/flags.ts; a second read for the gate is forbidden.
+  // Job-scoped: only a `job` can enqueue, so reject / ignore / installation
+  // deliveries must not gain a flag dependency (a failed read would turn their
+  // 2xx into a 500 and cost them their delivery row). A `job` that the per-App
+  // switch already paused (review_enabled=0 → `paused`, zero enqueue) skips
+  // the read too: that switch decides the outcome before the flag can. For
+  // the SAME reason the read itself is best-effort: it sits before the
+  // delivery row, the PR ledger and the last_webhook_at touch, so a D1
+  // failure here would drop all three diagnostics of an already-verified job.
+  // It logs one structured warn and falls back CLOSED — a failed read counts
+  // as "reviews disabled", never as "enabled", so a broken read can never
+  // silently defeat the kill switch by enqueueing a review while an operator
+  // believes it is on. The delivery row then reads `paused` (nothing
+  // enqueued); the response and every diagnostic write stay exactly as on a
+  // healthy read.
+  let reviewGlobal = true;
+  if (outcome.kind === "job" && row.review_enabled !== 0) {
+    try {
+      reviewGlobal = await isFlagEnabled(db, "review_global");
+    } catch (err) {
+      reviewGlobal = false;
+      const detail = err instanceof Error ? err.message : String(err);
+      webhookWarn(
+        "review_global_read_failed",
+        detail,
+        "review_global flag read failed — treating reviews as disabled (fail-closed); webhook response and bookkeeping unaffected",
+      );
+    }
+  }
   try {
     await appsStore.recordDelivery({
       appId: row.id,
       eventName,
-      outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled),
+      outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled, reviewGlobal),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
     });
   } catch (err) {
@@ -400,6 +493,46 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("ignored", 200);
   }
 
+  // Install bookkeeping: every verified review-type delivery offers
+  // `outcome.installationAccount` — the installing account's login, inferred
+  // from the repository owner when the payload omits `installation.account` —
+  // so installs that predate this column fill in on their next delivery instead
+  // of waiting for another install event. The value is INFERRED, so the store
+  // only fills an EMPTY login: an account already recorded (by an install
+  // event, or an earlier delivery) is never overwritten by an inference. The
+  // login rides beside `payload`, never inside it: the queue message below
+  // stays account-free. Written BEFORE the pause gate, the global flag gate and
+  // the enqueue, because those three decide only the ENQUEUE face: a paused App
+  // or a disabled flag must still learn its installing account. Best-effort
+  // (the review path never fails on bookkeeping): a failure logs a structured
+  // warn and the webhook still returns 200.
+  if (outcome.kind === "job") {
+    await recordInstallation(
+      appsStore,
+      row.id,
+      outcome.payload.installation_id,
+      outcome.installationAccount,
+      outcome.accountAuthoritative,
+    );
+  }
+
+  // Install event (installation.created / new_permissions_accepted): the one
+  // delivery that observes a brand-new install before any review traffic, so
+  // it records `account_login` here — BEFORE the pause gate and the global
+  // flag gate, because those two gate the ENQUEUE face and this outcome never
+  // enqueues. Best-effort like every sibling bookkeeping write: a store
+  // failure logs and the webhook still answers 200.
+  if (outcome.kind === "installation") {
+    await recordInstallation(
+      appsStore,
+      row.id,
+      outcome.installationId,
+      outcome.accountLogin,
+      outcome.accountAuthoritative,
+    );
+    return c.text("accepted", 200);
+  }
+
   // Pause gate (spec 语义锁 — paused ≠ disabled): review_enabled
   // =0 answers 2xx with ZERO enqueue — the webhook stays healthy (and
   // touched, above) while reviews are paused. disabled/deleted already
@@ -419,8 +552,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Global review flag (spec §3.1, compass D21): OFF closes the ENQUEUE face
   // for every App — same contract as the per-App pause above (2xx, zero
   // enqueue) and deliberately NOT a dequeue-side check: work already queued
-  // keeps running. Absent flag row = enabled.
-  if (!(await isFlagEnabled(db, "review_global"))) {
+  // keeps running. Absent flag row = enabled. `reviewGlobal` was read once
+  // before the delivery record — never re-read here.
+  if (!reviewGlobal) {
     webhookInfo(
       "review_global_off",
       webhookRef,
@@ -435,19 +569,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     env: c.env,
     log: defaultLog,
   });
-  // Install bookkeeping: the classified job payload always
-  // carries installation_id, so touch `app_installations` AFTER the enqueue
-  // — fire-and-forget relative to it (the review path never waits on
-  // bookkeeping) and best-effort: a failure logs a structured warn and the
-  // webhook still returns 200 (never blocks or fails the enqueue). The
-  // bare touch passes no account_login — the store's COALESCE preserves the
-  // stored login.
-  try {
-    await appsStore.upsertInstallation({ appId: row.id, installationId: outcome.payload.installation_id });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    webhookWarn("installation_upsert_failed", detail, "installation upsert failed — enqueue unaffected");
-  }
   return c.text("accepted", 200);
 });
 

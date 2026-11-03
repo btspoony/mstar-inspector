@@ -439,10 +439,10 @@ The review tier `REVIEW_LEVEL` (`quick`/`default`/`deep`) is unset and
 configured nowhere, and the same `keep_vars` limitation applies to it: a
 `REVIEW_LEVEL` set on the production Worker from the dashboard is wiped by the
 next `wrangler deploy --env production`, so it cannot be relied on until it is
-declared in `env.production.vars` and redeployed. Review control is not a plain
-var at all — per-App `github_apps.review_enabled` (dashboard Pause/Resume) is
-the only switch and lives in D1, unaffected by that limitation
-(`.env.example`).
+declared in `env.production.vars` and redeployed. Neither review control is a
+plain var: per-App `github_apps.review_enabled` (dashboard Pause/Resume) gates
+one App, and the `review_global` server flag gates the enqueue face for every
+App. Both live in D1, unaffected by that limitation (`.env.example`).
 
 Sign-in itself needs no plain var: it is open to any GitHub login (§ 6).
 
@@ -1269,14 +1269,32 @@ Plain vars — `wrangler.jsonc` `vars` / `env.production.vars`; redeploy to chan
 |---|---|---|
 | `DEPLOYMENT_MODE` | `self-hosted` at top level, `saas` in `env.production` | deployment shape (`self-hosted` \| `saas`); no default — unset/invalid fails loud. Both deploy workflows pass `saas` through `--var`, which also overrides the top-level value on a manual staging deploy |
 
-Review control is per App, not a plain var: `github_apps.review_enabled`
-(dashboard Pause/Resume) is the only switch. An App with `review_enabled=1`
-reviews for real on a live Worker, so pause any App that must not review yet
-(`review_enabled=0`) before deploying; a paused App still answers 2xx with zero
-enqueue.
+Review control is never a plain var, and it is two switches over D1.
+`github_apps.review_enabled` (dashboard Pause/Resume) gates one App, and the
+`review_global` server flag gates the enqueue face for every App (absent row =
+enabled). Both are D1 rows, so neither is subject to `keep_vars`. On a `saas`
+deployment the console's flags page (`/_internal_admin`) sets `review_global`;
+a `self-hosted` deployment mounts no admin console (`/_internal_admin` is a
+404 there), so the operator writes that row directly — the same statement the
+console issues, run through `wrangler d1 execute` against the target database:
+
+```sql
+INSERT INTO server_flags (key, enabled, updated_at, updated_by)
+VALUES ('review_global', 0, datetime('now'), '<your login>')
+ON CONFLICT (key) DO UPDATE SET
+  enabled = excluded.enabled,
+  updated_at = excluded.updated_at,
+  updated_by = excluded.updated_by;
+```
+
+An App with
+`review_enabled=1` reviews for real on a live Worker, so pause any App that must
+not review yet (`review_enabled=0`) before deploying — or turn `review_global`
+off to hold every App at once. Either switch still answers 2xx with zero
+enqueue, and neither deletes work already queued.
 
 **Before deploying, list the Apps whose reviews you expect to stay paused** —
-nothing at the deployment level can stop them for you:
+the per-App switch is per row, and `review_global` only stops new enqueues:
 
 ```bash
 # staging (default environment)
@@ -1339,8 +1357,32 @@ smoke token is the explicitly **repository-scoped, read-only** `sandbox-read`
 grant (`contents: read`, `metadata: read`, `pull_requests: read` — the last
 one because the diff step runs `gh pr diff` with exactly that token); the
 Worker asserts the returned capabilities (`assertSandboxGrant`) and fails
-closed on anything broader or unscoped. Webhook events stay `pull_request`
-and `issue_comment`.
+closed on anything broader or unscoped. The App subscribes only `pull_request`
+and `issue_comment`: `installation` is not a subscribable GitHub App event
+(GitHub's "Subscribe to events" list offers only "Installation target"), it is
+delivered to every App automatically. So a new App receives
+`installation.created` without any subscription, and the install-bookkeeping
+path records two kinds of login on `app_installations.account_login`:
+
+- **Authoritative** — `installation.account.login` from an
+  `installation.created` / `new_permissions_accepted` event. This is the
+  installation's own statement of its account, so it overwrites whatever the row
+  holds (a NULL login on such an event still preserves the stored value).
+- **Inferred** — the login a review delivery (`pull_request` / `issue_comment`)
+  carries: `installation.account.login` when the payload has it, else
+  `repository.owner.login`. An inference only **fills an empty** login; it never
+  replaces one, so historical NULL rows still fill in from ordinary review
+  traffic without an inference ever overwriting an authoritative value.
+
+Both writes happen before the pause and global-flag gates, so they still land
+while the App is paused or the global review flag is off (those gates close only
+the review enqueue, not the bookkeeping). The `installation` branch reaches the
+write on every whitelisted install action and returns without enqueuing; a
+`job` delivery reaches it after the `ignore` return, so **ignored deliveries do
+not reach the write** — a non-whitelisted action, a `manual`-mode App's
+`pull_request`, or a comment that mentions no bot never records a login. A row
+accordingly stays `未知` until the first job delivery or install event for that
+App.
 
 > **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
 > the recovery lanes are covered by the implementation's scoped behavioral
@@ -1593,8 +1635,10 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    ```
    `review_failures` must be present and the count queryable.
 3. **End-to-end review (v0.6 `modelOverrides` pin)** — with the App's
-   `review_enabled` on (the only review control; a paused App ignores every
-   webhook), open or update a test PR on an installed repo and
+   `review_enabled` on and the global `review_global` flag enabled (the
+   per-App pause and the global switch each close the enqueue face — a paused
+   App or a flag-off server ignores every webhook), open or update a test PR
+   on an installed repo and
    confirm the review comment lands (the App's trigger mode must cover the
    event — the default `every_push` auto-triggers on open/update; from any
    mode, a PR comment @mentioning the App's bot forces a run —
@@ -1801,7 +1845,7 @@ or when deliveries look dead):
 
 | Check | Where | Healthy state |
 |---|---|---|
-| Review switch | Dashboard App settings / `github_apps.review_enabled` | On (`1`) for an App that should review. A paused App (`0`) ignores every verified delivery with 2xx and records `paused`/`ignored` rather than `ok` — this is the ONLY review control |
+| Review switch | Dashboard App settings / `github_apps.review_enabled` | On (`1`) for an App that should review. A paused App (`0`) ignores every verified delivery with 2xx and records `paused`/`ignored` rather than `ok`. The per-App switch gates one App; the `review_global` server flag closes the enqueue face for every App (absent row = enabled, records `paused` too) |
 | Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<workspace_id>/<app_id>` — the per-App route (both segments must match the App's settings card) |
 | Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
 | Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
@@ -1841,8 +1885,9 @@ column.
 1. **Configure the chain** — on the App's settings page, set **Model chain**
    to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
    and save. The head (the first selector) is what the column must show.
-2. **Real PR** — with that App's `review_enabled` on (the only review
-   control), open or update a PR on an installed
+2. **Real PR** — with both review controls open (that App's `review_enabled`
+   and the `review_global` flag, § Secrets and vars inventory), open or update
+   a PR on an installed
    repo of that App (default `every_push` mode auto-triggers; from any
    mode, a PR comment @mentioning the App's bot works too —
    § Review triggers (per App)).
@@ -1935,8 +1980,10 @@ Operationally that means:
   is `wrangler deploy --env production`, and `env.production` cannot declare
   `keep_vars` (rejected inside an environment block), so every production
   deploy wipes dashboard-set plain vars — see § `env.production.vars` is the
-  plain-var roster. Review control is not a plain var at all: per-App
-  `review_enabled` lives in D1.
+  plain-var roster. Review control is not a plain var at all: it is two
+  switches, and both live in D1 (hence neither is touched by that wipe) — the
+  per-App `github_apps.review_enabled`, and the `review_global` server flag
+  (absent row = enabled) that closes the enqueue face for every App.
 
 ## Rollback
 
@@ -2147,8 +2194,14 @@ In every mode, a PR comment that @mentions the App's bot — `@<slug>` or
 the canonical `@<slug>[bot]`, matched as a standalone token —
 (re-)starts a review when the commenter is the PR author or the
 repository owner (bot-sender comments are ignored; anyone else gets a
-structured warn). The per-App pause (`review_enabled`) governs every trigger
-path — it is the only review control.
+structured warn). Two review controls gate every trigger path: the per-App
+pause (`review_enabled`) gates one App, and the server flag `review_global`
+closes the enqueue face for every App (absent row = enabled). In `saas` the
+console's flags page (`/_internal_admin`) sets `review_global`; `self-hosted`
+mounts no admin console, so the operator writes the `server_flags` row for
+`review_global` directly (the `INSERT … ON CONFLICT` in § Secrets and vars
+inventory). Neither deletes queued work — a flag turned off stops
+new enqueues, not in-flight ones.
 Operator note: the structured-log `event` label for comment-triggered
 reviews retires `review_command` → `issue_comment`; operator-saved log
 filters keyed on the old label stop matching after deploy.

@@ -16,6 +16,9 @@
  *   thread, sent by a non-bot whose login is the PR author or the repository
  *   owner (Phase 5 B5 actor allowlist — prevents quota abuse by arbitrary
  *   commenters on public installs).
+ * - `installation.{created,new_permissions_accepted}` whose payload carries
+ *   `installation.account.login` — recorded as the install's account; not
+ *   review work, so it never enqueues.
  * Everything else returns 200 quickly — GitHub retries non-2xx, so
  * uninteresting events must not 4xx.
  */
@@ -26,6 +29,16 @@ import type { ReviewTriggerMode } from "../dashboard/apps-store";
 import type { HandlerLog } from "./handlers";
 
 export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as const;
+
+/**
+ * The install actions that carry the installing account's login
+ * (`installation.account.login`). Both mean "this App is installed and
+ * usable right now", which is when the settings table should stop reading
+ * `未知`. Lifecycle-only actions (`deleted`, `suspend`, `unsuspend`, `added`,
+ * `removed`) stay ignored — this whitelist records a login, it does not
+ * track install state.
+ */
+export const INSTALLATION_ACTIONS = ["created", "new_permissions_accepted"] as const;
 
 /**
  * The per-App trigger inputs classification branches on (spec
@@ -254,14 +267,101 @@ export async function verifySignature(
 export type WebhookOutcome =
   | { kind: "reject"; status: 400 | 401 | 500; reason: string }
   | { kind: "ignore"; reason: string }
-  | { kind: "job"; payload: Omit<ReviewJobPayload, "appRef"> };
+  /**
+   * A review job. `installationAccount` is `installation.account.login`
+   * when the payload carries it, falling back to `repository.owner.login` —
+   * the installation's own account is authoritative and the repository
+   * owner covers only payloads that omit it (the review path does NOT always
+   * receive an owner-derived login). It is carried OUTSIDE
+   * `payload` so it never enters the queue message (the consumer contract
+   * `ReviewJobPayload` must not grow an account field) while the route can
+   * still record it on `app_installations`.
+   *
+   * `accountAuthoritative` is always false here: a review payload is not an
+   * install statement, so the store only lets this value FILL an empty login.
+   */
+  | {
+      kind: "job";
+      payload: Omit<ReviewJobPayload, "appRef">;
+      installationAccount: string;
+      accountAuthoritative: false;
+    }
+  /**
+   * An install delivery is not review work: it names the installation whose
+   * `account_login` the route records, and never carries a queue payload.
+   * `accountLogin` is null only when GitHub omits `installation.account`
+   * (the schema permits it) — the store's COALESCE then keeps whatever is
+   * already stored. `accountAuthoritative` is always true: this payload IS
+   * the installation's own statement, so it overwrites a stored login.
+   */
+  | {
+      kind: "installation";
+      installationId: number;
+      accountLogin: string | null;
+      accountAuthoritative: true;
+    };
 
-/** Minimal webhook payload shapes — only the fields the gateway consumes. */
-const installationSchema = z.object({ id: z.number() }).nullable().optional();
+/**
+ * Minimal webhook payload shapes — only the fields the gateway consumes.
+ *
+ * `account.login` is the installation's own account — the authority for
+ * `app_installations.account_login`. `repository.owner.login` is only a
+ * fallback: an install covers repositories owned by the installing account,
+ * but the payload's own `installation.account` is the value GitHub states,
+ * and it must win so it is never overwritten by an inferred owner.
+ *
+ * An empty login is rejected at the boundary (`min(1)`): `""` is not a login,
+ * and treating it as an absent account is what keeps it from reaching the
+ * store as a value.
+ */
+const installationAccountSchema = z.object({ login: z.string().min(1) }).nullable().optional();
+const installationSchema = z
+  .object({ id: z.number(), account: installationAccountSchema })
+  .nullable()
+  .optional();
 const repositorySchema = z
   .object({ name: z.string(), owner: z.object({ login: z.string() }) })
   .nullable()
   .optional();
+
+/**
+ * The install's own account login, with the repository owner as the fallback a
+ * delivery without `installation.account` allows — shared by both review
+ * classifiers so the authority order is stated once.
+ *
+ * Two sources, one rule (`app_installations.account_login` is either
+ * AUTHORITATIVE or INFERRED):
+ * - authoritative = `installation.account.login` on an `installation.*` event
+ *   (the installation's own statement) — overwrites a stored login;
+ * - inferred = the login a review delivery (`pull_request` / `issue_comment`)
+ *   carries, which is `installation.account.login` when the payload has it and
+ *   `repository.owner.login` otherwise — only fills an EMPTY stored login.
+ * The precedence is stated here once. They are never interchangeable: the store
+ * picks its update expression from `accountAuthoritative`, not from which value
+ * looks more specific.
+ *
+ * An empty-string login is treated as absent, so the owner covers it.
+ */
+function installationAccountOf(
+  installation: { account?: { login: string } | null } | null | undefined,
+  owner: string,
+): string {
+  const login = installation?.account?.login;
+  return login ? login : owner;
+}
+
+/**
+ * The `installation` event's own shape (not the bare `installationSchema`,
+ * which only supplies the id inside the review events): the account login is
+ * the whole point, and it sits one level down under `account`.
+ */
+const installationEventSchema = z.object({
+  action: z.string(),
+  installation: z
+    .object({ id: z.number().optional(), account: installationAccountSchema })
+    .nullable()
+    .optional(),
+});
 
 const pullRequestSchema = z.object({
   action: z.string(),
@@ -372,7 +472,12 @@ export async function classifyWebhook(
 }
 
 /**
- * Event whitelist → ReviewJobPayload. Returns `ignore` for everything else.
+ * Event whitelist. Returns `ignore` for everything else.
+ *
+ * Outcomes are not review jobs only: `pull_request` / `issue_comment` map to a
+ * `job` carrying `ReviewJobPayload`, while `installation` maps to the
+ * `installation` outcome — the install-bookkeeping face that records
+ * `account_login` without enqueuing anything.
  *
  * `trigger` is the per-App trigger context (spec review-trigger-policy §2):
  * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` (the
@@ -394,7 +499,44 @@ export function classifyEvent(
   if (eventName === "issue_comment") {
     return classifyIssueComment(rawBody, log, trigger.appSlug);
   }
+  if (eventName === "installation") {
+    return classifyInstallation(rawBody);
+  }
   return { kind: "ignore", reason: `event ${eventName} is not whitelisted` };
+}
+
+/**
+ * `installation.{created,new_permissions_accepted}` → the installing account's
+ * login. This is the one path that observes a fresh install before any review
+ * traffic exists, so it is the reason `app_installations.account_login` can be
+ * filled at all.
+ *
+ * Every malformed case is a 400 reject, exactly like the sibling classifiers:
+ * GitHub retries non-2xx, but a payload that cannot name an installation is
+ * not something a retry fixes.
+ */
+function classifyInstallation(rawBody: string): WebhookOutcome {
+  const parsed = parseBody(rawBody);
+  if (parsed === null) {
+    return { kind: "reject", status: 400, reason: "invalid JSON body" };
+  }
+  const result = installationEventSchema.safeParse(parsed);
+  if (!result.success) {
+    return { kind: "reject", status: 400, reason: "installation payload failed validation" };
+  }
+  const { action, installation } = result.data;
+  if (!(INSTALLATION_ACTIONS as readonly string[]).includes(action)) {
+    return { kind: "ignore", reason: `installation action ${action} is not whitelisted` };
+  }
+  if (installation?.id === undefined) {
+    return { kind: "reject", status: 400, reason: "installation payload missing required fields" };
+  }
+  return {
+    kind: "installation",
+    installationId: installation.id,
+    accountLogin: installation.account?.login ?? null,
+    accountAuthoritative: true,
+  };
 }
 
 function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookOutcome {
@@ -420,6 +562,10 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
   }
+  // The install's own account wins: the payload states it, whereas the owner
+  // is only the inference a delivery without `installation.account` allows.
+  // Whichever source supplied it, a review delivery is INFERRED for the store.
+  const installationAccount = installationAccountOf(installation, owner);
   // §2.1 matrix: the mode gates the auto face (manual never auto-triggers;
   // open is opened-only). The bot-mention comment face is orthogonal.
   if (!autoTriggerAllows(mode, action)) {
@@ -436,6 +582,8 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
       action,
       triggered_by: "pull_request",
     },
+    installationAccount,
+    accountAuthoritative: false,
   };
 }
 
@@ -492,6 +640,10 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "issue_comment payload missing required fields" };
   }
+  // Same authority as the pull_request face: the payload's own
+  // `installation.account.login`, with the repository owner as the fallback —
+  // and inferred either way, since this is not an install statement.
+  const installationAccount = installationAccountOf(installation, owner);
   return {
     kind: "job",
     payload: {
@@ -503,6 +655,8 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
       action: "created",
       triggered_by: "issue_comment",
     },
+    installationAccount,
+    accountAuthoritative: false,
   };
 }
 

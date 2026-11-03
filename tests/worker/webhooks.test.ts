@@ -341,6 +341,10 @@ describe("classifyEvent — every_push default reproduces current classification
       });
       expect(outcome).toEqual({
         kind: "job",
+        // The install account rides beside the payload, never inside it.
+        installationAccount: "test-owner",
+        // A review delivery only infers the login from the repository owner.
+        accountAuthoritative: false,
         payload: {
           installation_id: 123,
           owner: "test-owner",
@@ -360,6 +364,9 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody(), undefined, EVERY_PUSH);
     expect(outcome.kind).toBe("job");
     if (outcome.kind === "job") {
+      // The install account is a sibling, not a payload field — and it must be
+      // this fixture's owner login, not merely some string.
+      expect(outcome.installationAccount).toBe("test-owner");
       expect(outcome.payload).toEqual({
         installation_id: 123,
         owner: "test-owner",
@@ -531,7 +538,15 @@ describe("classifyEvent — bot mention grammar: ASCII-restricted folding (QC F-
   });
 });
 
-describe("payloadMentionsALogin — the unsynced-App diagnostic (grammar parity)", () => {
+/**
+ * `payloadMentionsALogin` is the unsynced-App DIAGNOSTIC, not the trigger: it
+ * deliberately diverges from `bodyMentionsApp` — there is no target slug, so
+ * EVERY standalone login run counts (`@acme-other` / `@acmebot` match), while
+ * the trigger grammar would reject them once a slug exists. That divergence is
+ * the point: with no cached slug the App cannot tell which run was meant, and a
+ * false positive only costs one extra warn.
+ */
+describe("payloadMentionsALogin — the unsynced-App diagnostic (standalone login-run scan, not target-slug-relative)", () => {
   /** Wrap a comment body in the issue_comment delivery shape the scan parses. */
   const commentPayload = (body: string): string => issueCommentBody({ comment: { body } });
 
@@ -541,10 +556,10 @@ describe("payloadMentionsALogin — the unsynced-App diagnostic (grammar parity)
     expect(payloadMentionsALogin(commentPayload("context\n@acme"))).toBe(true);
   });
 
-  test("boundary rules match the trigger grammar exactly", () => {
-    // No target slug exists here, so ANY standalone login run is a mention:
-    // `@acme-other` / `@acmebot` are login runs in their own right (the run
-    // extends, it does not continue past a boundary) and both match.
+  test("any standalone login run matches — no target slug exists to compare against", () => {
+    // The intentional divergence from the trigger grammar: with no target
+    // slug, `@acme-other` / `@acmebot` are login runs in their own right (the
+    // run extends, it does not continue past a boundary) and both match.
     expect(payloadMentionsALogin(commentPayload("ping @acme-other maybe"))).toBe(true);
     expect(payloadMentionsALogin(commentPayload("ping @acmebot maybe"))).toBe(true);
     // The leading boundary: an email-shaped name@host is preceded by a login
@@ -651,6 +666,95 @@ describe("classifyEvent — everything else", () => {
   test("invalid JSON body is rejected with 400", () => {
     const outcome = classifyEvent("pull_request", "{not json");
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "invalid JSON body" });
+  });
+});
+
+describe("classifyEvent — installation event (account authority + rejects)", () => {
+  test("installation payload invalid JSON → 400 invalid JSON body", () => {
+    expect(classifyEvent("installation", "{not json")).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "invalid JSON body",
+    });
+  });
+
+  test("installation payload missing action → 400 failed validation", () => {
+    expect(classifyEvent("installation", JSON.stringify({ installation: { id: 5 } }))).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "installation payload failed validation",
+    });
+  });
+
+  test("installation payload with a non-string account.login → 400 failed validation", () => {
+    const body = JSON.stringify({ action: "created", installation: { id: 5, account: { login: 42 } } });
+    expect(classifyEvent("installation", body)).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "installation payload failed validation",
+    });
+  });
+
+  test("job classifiers take installation.account.login over the repository owner, and fall back to it", () => {
+    const withAccount = classifyEvent(
+      "pull_request",
+      pullRequestBody("opened", { installation: { id: 123, account: { login: "octo-org" } } }),
+    );
+    expect(withAccount).toMatchObject({
+      kind: "job",
+      installationAccount: "octo-org",
+      // Even the payload's own account is INFERRED here: only an
+      // `installation.*` event may overwrite a stored login.
+      accountAuthoritative: false,
+    });
+    // The existing fixtures omit `installation.account` → repository owner.
+    const withoutAccount = classifyEvent("pull_request", pullRequestBody("opened"));
+    expect(withoutAccount).toMatchObject({
+      kind: "job",
+      installationAccount: "test-owner",
+      accountAuthoritative: false,
+    });
+    const comment = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ installation: { id: 123, account: { login: "octo-org" } } }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(comment).toMatchObject({
+      kind: "job",
+      installationAccount: "octo-org",
+      accountAuthoritative: false,
+    });
+  });
+
+  test("an empty-string account.login is rejected at the boundary on both faces", () => {
+    // `login: z.string().min(1)` on the shared installation schema: "" is not
+    // a login, so it can never reach a store as a value.
+    expect(
+      classifyEvent("installation", JSON.stringify({ action: "created", installation: { id: 5, account: { login: "" } } })),
+    ).toEqual({ kind: "reject", status: 400, reason: "installation payload failed validation" });
+    expect(
+      classifyEvent(
+        "pull_request",
+        pullRequestBody("opened", { installation: { id: 123, account: { login: "" } } }),
+      ),
+    ).toEqual({ kind: "reject", status: 400, reason: "pull_request payload failed validation" });
+  });
+
+  test("an installation event is authoritative; a bare one carries a null login", () => {
+    const full = classifyEvent(
+      "installation",
+      JSON.stringify({ action: "created", installation: { id: 5, account: { login: "octo-org" } } }),
+    );
+    expect(full).toEqual({
+      kind: "installation",
+      installationId: 5,
+      accountLogin: "octo-org",
+      accountAuthoritative: true,
+    });
+    expect(
+      classifyEvent("installation", JSON.stringify({ action: "created", installation: { id: 5 } })),
+    ).toEqual({ kind: "installation", installationId: 5, accountLogin: null, accountAuthoritative: true });
   });
 });
 

@@ -487,11 +487,16 @@ describe("apps-store (createAppsStore)", () => {
     expect(rows[0]!.seen_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
     // Simulate time passing, then touch: same pair → still ONE row, seen_at
-    // refreshed, login updated when provided.
+    // refreshed, login replaced because the writer is authoritative.
     db.raw
       .prepare("UPDATE app_installations SET seen_at = '2020-01-01 00:00:00'")
       .run();
-    await s.upsertInstallation({ appId: app.id, installationId: 777, accountLogin: "octocat-2" });
+    await s.upsertInstallation({
+      appId: app.id,
+      installationId: 777,
+      accountLogin: "octocat-2",
+      authoritative: true,
+    });
     rows = db.raw.query("SELECT * FROM app_installations").all() as typeof rows;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.account_login).toBe("octocat-2");
@@ -504,6 +509,45 @@ describe("apps-store (createAppsStore)", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.account_login).toBe("octocat-2");
     expect(rows[0]!.seen_at).not.toBe("2020-01-01 00:00:00");
+  });
+
+  test("upsertInstallation: an authoritative login overwrites, an inferred one never does", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    // The store's own typed read face — no raw-shape assertion needed.
+    const loginOf = async (): Promise<string | null> =>
+      (await s.listInstallations(app.id))[0]?.account_login ?? null;
+
+    // An installation event states the account → it wins.
+    await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "alice", authoritative: true });
+    expect(await loginOf()).toBe("alice");
+    // A review delivery's inference cannot replace it.
+    await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "inferred-owner" });
+    expect(await loginOf()).toBe("alice");
+    // A later installation event overwrites the authoritative value too.
+    await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "octo-org", authoritative: true });
+    expect(await loginOf()).toBe("octo-org");
+  });
+
+  test("upsertInstallation: an inferred login fills an empty column; an authoritative NULL preserves", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    // The store's own typed read face — no raw-shape assertion needed.
+    const loginOf = async (): Promise<string | null> =>
+      (await s.listInstallations(app.id))[0]?.account_login ?? null;
+
+    // A bare touch creates the row with a NULL login.
+    await s.upsertInstallation({ appId: app.id, installationId: 2 });
+    expect(await loginOf()).toBeNull();
+    // The first review delivery fills that gap…
+    await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: "inferred-owner" });
+    expect(await loginOf()).toBe("inferred-owner");
+    // …and an authoritative write with no login preserves it (COALESCE).
+    await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: null, authoritative: true });
+    expect(await loginOf()).toBe("inferred-owner");
+    expect(await s.listInstallations(app.id)).toHaveLength(1);
   });
 
   test("upsertInstallation: distinct installation ids are distinct rows; unknown app fails FK", async () => {
