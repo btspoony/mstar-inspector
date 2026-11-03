@@ -750,8 +750,14 @@ export type PullRequestFinding = {
   body: string;
 };
 
-/** The PR detail payload's record totals — one number per record family. */
-export type PullRequestCounts = { findings: number; reviews: number; failures: number };
+/** The PR detail payload's record totals — one number per record family, plus
+ * the PR's own must-fix tally (the family dot's source, page-independent). */
+export type PullRequestCounts = {
+  findings: number;
+  reviews: number;
+  failures: number;
+  must_fix: number;
+};
 
 /**
  * The PR detail payload (`GET …/pull-requests/:owner/:repo/:number`): the head
@@ -907,8 +913,9 @@ function parsePullRequestCounts(value: unknown): PullRequestCounts | null {
   const findings = finiteCount(value.findings);
   const reviews = finiteCount(value.reviews);
   const failures = finiteCount(value.failures);
-  if (findings === null || reviews === null || failures === null) return null;
-  return { findings, reviews, failures };
+  const must_fix = finiteCount(value.must_fix);
+  if (findings === null || reviews === null || failures === null || must_fix === null) return null;
+  return { findings, reviews, failures, must_fix };
 }
 
 /** One row parser per section — the page parse below is keyed by it. */

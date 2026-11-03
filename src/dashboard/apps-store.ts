@@ -1210,9 +1210,11 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The three record families' totals — the head payload's `counts`. The
-     * failure count rides the same join the failures section pages, so the tab
-     * count and the list length always agree.
+     * The record totals — the head payload's `counts`. The failure count rides
+     * the same join the failures section pages, so the tab count and the list
+     * length always agree. `must_fix` is the PR's own count of must-fix
+     * findings, unfiltered and unpaged: the family dot answers "does this PR
+     * have one", never "does the loaded page show one".
      */
     async countPullRequestRecords(
       appId: string,
@@ -1240,11 +1242,19 @@ export function createAppsStore(db: AppsStoreD1) {
              WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
           .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM review_findings
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+               AND json_extract(original_json, '$.mergeClass') = 'must-fix'`,
+          )
+          .bind(appId, owner, repo, prNumber),
       ]);
       return {
         findings: countOf(results[0]!),
         reviews: countOf(results[1]!),
         failures: countOf(results[2]!),
+        must_fix: countOf(results[3]!),
       };
     },
 
@@ -1412,8 +1422,17 @@ export type PullRequestHeadRow = PullRequestBaseRow & {
   latest_review: PullRequestReviewDetailRow | null;
 };
 
-/** The three record families' totals (the detail payload's `counts`). */
-export type PullRequestRecordCounts = { findings: number; reviews: number; failures: number };
+/**
+ * The record totals (the detail payload's `counts`), plus the PR's own
+ * must-fix tally — the family dot's source, independent of any severity filter
+ * or loaded page.
+ */
+export type PullRequestRecordCounts = {
+  findings: number;
+  reviews: number;
+  failures: number;
+  must_fix: number;
+};
 
 /** One record section's page request — the route validates the bounds before this. */
 export type PullRequestPageRequest = {

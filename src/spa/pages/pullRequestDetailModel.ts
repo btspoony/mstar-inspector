@@ -27,32 +27,9 @@ export const SEVERITY_KEYS = {
 } as const;
 
 /**
- * The one actionability rule: every severity but a nit asks the operator to
- * act. The payload's severity is a free string, so a spelling this face does
- * not name (the `other` bucket, which the UI keeps visible rather than
- * dropping) is a requested change too — only the one word `nit` reads as no
- * action. The family the face opens on, the trigger's dot and every severity
- * bucket all read this predicate, so no two of them can disagree.
- */
-export function isActionable(severity: string): boolean {
-  return severity !== SEVERITY_KEYS.nit;
-}
-
-/**
  * Severity buckets in the order an operator asks about them. `severity` is a
  * free string in the payload; the table names three spellings and the catch-all
  * bucket (`OTHER_BUCKET`) collects every other one.
- *
- * | bucket     | membership                                  | actionable |
- * |------------|---------------------------------------------|------------|
- * | must-fix   | `severity === "must-fix"`                   | yes        |
- * | should-fix | `severity === "should-fix"`                 | yes        |
- * | nit        | `severity === "nit"`                        | no         |
- * | other      | every spelling the three above do not name  | yes        |
- *
- * Every `actionable` cell is `isActionable` applied to that bucket's findings:
- * a bucket is actionable when any finding in it is, so the table is a reading
- * of the rule, not a second one.
  */
 export const SEVERITY_GROUPS = [
   { severity: SEVERITY_KEYS.mustFix, labelKey: "pullRequests.severityMustFix", tone: "danger" },
@@ -73,21 +50,19 @@ export type SeverityGroup = {
   key: string;
   label: string;
   tone: SeverityTone;
-  /** Whether the bucket asks for action — the same `isActionable` the dot reads. */
-  actionable: boolean;
   items: { finding: PullRequestFinding; index: number }[];
 };
 
 /**
  * The family the face opens on. The head carries only totals, so the order is
  * the one the counts can answer: records first, history last. The findings
- * family is ensured first when it has any row, so its dot and its buckets are
- * the face's opening read.
+ * family is ensured first when it has any row, failures next, and reviews —
+ * the history — only when the PR has nothing else.
  */
 export function defaultFamily(counts: PullRequestCounts): RecordFamily {
   if (counts.findings > 0) return "findings";
-  if (counts.reviews > 0) return "reviews";
-  return "failures";
+  if (counts.failures > 0) return "failures";
+  return "reviews";
 }
 
 /** Findings bucketed by severity, empty groups dropped, `other` last. */
@@ -96,28 +71,19 @@ export function severityGroups(
   findings: readonly PullRequestFinding[],
 ): SeverityGroup[] {
   const indexed = findings.map((finding, index) => ({ finding, index }));
-  // One actionability derivation for every bucket, the catch-all included: a
-  // bucket is actionable when one of its findings is, by `isActionable`.
-  const actionable = (items: SeverityGroup["items"]) =>
-    items.some(({ finding }) => isActionable(finding.severity));
   const known = new Set<string>(SEVERITY_GROUPS.map((group) => group.severity));
-  const groups: SeverityGroup[] = SEVERITY_GROUPS.map((group) => {
-    const items = indexed.filter(({ finding }) => finding.severity === group.severity);
-    return {
-      key: group.severity,
-      label: t(locale, group.labelKey),
-      tone: group.tone,
-      actionable: actionable(items),
-      items,
-    };
-  });
+  const groups: SeverityGroup[] = SEVERITY_GROUPS.map((group) => ({
+    key: group.severity,
+    label: t(locale, group.labelKey),
+    tone: group.tone,
+    items: indexed.filter(({ finding }) => finding.severity === group.severity),
+  }));
   const other = indexed.filter(({ finding }) => !known.has(finding.severity));
   if (other.length > 0) {
     groups.push({
       key: OTHER_BUCKET.key,
       label: t(locale, OTHER_BUCKET.labelKey),
       tone: OTHER_BUCKET.tone,
-      actionable: actionable(other),
       items: other,
     });
   }

@@ -151,6 +151,8 @@ export const zhCN: Dictionary = {
     recordsLabel: "拉取请求记录",
     /** 类别触发按钮的可访问名称：标签与它绘制的计数。 */
     familyTabName: "{label}（{count}）",
+    /** 发现指标旁的备注，与计数同行渲染。 */
+    mustFixNote: "{count} 项必须修复",
     /** 发现筛选的标签与“不筛选”选项。 */
     filterSeverity: "严重程度",
     filterAll: "全部",

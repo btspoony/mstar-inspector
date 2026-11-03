@@ -7,7 +7,8 @@
  * Both ride the SAME gate ladder as every other App JSON read: membership →
  * App-id resolution (unknown / soft-deleted / CROSS-WORKSPACE all collapse into
  * the one `unknown app` 404) → the workspace owner/admin role. The head answers
- * `{ pull_request, counts }`; each section answers one page plus its total. A
+ * `{ pull_request, counts, latest_review }`; each section answers one page plus
+ * its total. A
  * tuple this App never received is a 404 on every path — the address is the
  * ledger's own key, so a same-number PR in another repo is a miss, never a
  * fallback. Bad paging is a 400, never a silent default — but a well-formed
@@ -19,6 +20,7 @@ import type { Env } from "../../src/worker/env";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
+import { parsePullRequestDetail } from "../../src/spa/pages/data";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
@@ -288,25 +290,62 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
 
     const res = await getFace(detailPath, db);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { pull_request: Record<string, unknown>; counts: Record<string, number> };
-    expect(Object.keys(body).sort()).toEqual(["counts", "pull_request"]);
+    const body = (await res.json()) as {
+      pull_request: Record<string, unknown>;
+      counts: Record<string, number>;
+      latest_review: Record<string, unknown> | null;
+    };
+    // The newest review rides the ENVELOPE, beside `counts`: the head row's
+    // shape is the list's row shape, and the header's verdict/attribution
+    // source outlives any paged reviews list.
+    expect(Object.keys(body).sort()).toEqual(["counts", "latest_review", "pull_request"]);
     expect(body.pull_request).toMatchObject({
       number: 131,
       owner: "acme",
       repo: "widgets",
       failure_count: 1,
-      // The newest review rides the head whole — the header never reads a
-      // reviews page for its verdict or attribution.
-      latest_review: {
-        verdict: "comment",
-        summary_md: "",
-        model: "",
-        provider: "",
-        reviewed_at: "2026-01-02 00:00:00",
-        head_sha: "sha-1",
-      },
     });
-    expect(body.counts).toEqual({ findings: 2, reviews: 2, failures: 1 });
+    expect(body.pull_request).not.toHaveProperty("latest_review");
+    expect(body.latest_review).toEqual({
+      verdict: "comment",
+      summary_md: "",
+      model: "",
+      provider: "",
+      reviewed_at: "2026-01-02 00:00:00",
+      head_sha: "sha-1",
+    });
+    expect(body.counts).toEqual({ findings: 2, reviews: 2, failures: 1, must_fix: 1 });
+  });
+
+  test("the SPA parser reads this route's own body: the headline keeps its model and provider", async () => {
+    // Cross-boundary: the real route body through the real parser. A field
+    // moved to the other end of the envelope re-drifting fails HERE, not only
+    // in a component test that feeds a hand-built payload.
+    const db = await fixture();
+    seedInstallation(db);
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, app_id)
+         VALUES ('r-attributed', 77, 'acme', 'widgets', 131, 'sha-1', 'needs fixes', 'The race is reachable.', 'kimi-for-coding', 'openrouter', '2026-01-02 00:00:00', 'app-acme')`,
+      )
+      .run();
+
+    const res = await getFace(detailPath, db);
+    expect(res.status).toBe(200);
+    const parsed = parsePullRequestDetail(await res.json());
+    expect(parsed).not.toBeNull();
+    expect(parsed?.latest_review).toEqual({
+      verdict: "needs fixes",
+      summary_md: "The race is reachable.",
+      model: "kimi-for-coding",
+      provider: "openrouter",
+      reviewed_at: "2026-01-02 00:00:00",
+      head_sha: "sha-1",
+    });
+    // The head row's own nullable slot stays empty (the wire no longer fills
+    // it): the review reaches the header only through the envelope, so the two
+    // ends provably agree on WHERE.
+    expect(parsed?.pull_request.latest_review).toBeNull();
   });
 
   test("each section pages with limit and offset, and defaults to 10 rows", async () => {

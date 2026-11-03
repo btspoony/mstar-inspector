@@ -29,7 +29,7 @@ import {
   PullRequestDetail as PullRequestDetailFace,
   PullRequestDetailView,
 } from "../../src/spa/pages/PullRequestDetail";
-import { recordId } from "../../src/spa/pages/pullRequestDetailModel";
+import { defaultFamily, recordId } from "../../src/spa/pages/pullRequestDetailModel";
 import { withMarkup } from "./dom";
 import {
   DETAIL,
@@ -140,6 +140,19 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(parseRecordPage("reviews", { items: [], total: Number.NaN })).toBeNull();
     expect(parseRecordPage("reviews", { total: 1 })).toBeNull();
     expect(parseRecordPage("reviews", null)).toBeNull();
+  });
+
+  test("the envelope's must_fix tally is required, and the opening family is records-first", () => {
+    // Counts are all-or-nothing: a drifted tally fails the envelope like any
+    // other count (the dot would otherwise read a silent zero).
+    expect(parsePullRequestDetail({ ...DETAIL, counts: { ...DETAIL.counts, must_fix: null } })).toBeNull();
+    expect(parsePullRequestDetail({ ...DETAIL, counts: { ...DETAIL.counts, must_fix: Number.NaN } })).toBeNull();
+    // Records first, history last: findings, else failures, else reviews — an
+    // empty PR opens on the reviews, never on an empty failures tab.
+    expect(defaultFamily({ findings: 3, reviews: 2, failures: 1, must_fix: 1 })).toBe("findings");
+    expect(defaultFamily({ findings: 0, reviews: 2, failures: 1, must_fix: 0 })).toBe("failures");
+    expect(defaultFamily({ findings: 0, reviews: 0, failures: 0, must_fix: 0 })).toBe("reviews");
+    expect(defaultFamily({ findings: 0, reviews: 2, failures: 0, must_fix: 0 })).toBe("reviews");
   });
 
   test("a review with provider null parses and renders without a null leak (QC)", async () => {
@@ -371,7 +384,12 @@ describe("pull request detail face (static SSR)", () => {
     // The band reads the head counts, never the loaded page length.
     expect(read.metrics[1]).toEqual([t("en", "pullRequests.reviews"), "2"]);
     expect(read.metrics[2]).toEqual([t("en", "pullRequests.failures"), "1"]);
-    expect(read.metrics[3]).toEqual([t("en", "pullRequests.findings"), "3"]);
+    // The findings figure carries its must-fix note: the head's own tally sits
+    // beside the total, so the operator reads both from the PR, not a page.
+    expect(read.metrics[3]).toEqual([
+      t("en", "pullRequests.findings"),
+      `3${t("en", "pullRequests.mustFixNote", { count: 1 })}`,
+    ]);
   });
 
   test("the band wears the danger face for a non-shipping verdict and any failure", async () => {
@@ -472,40 +490,51 @@ describe("pull request detail face (static SSR)", () => {
     expect(markup).not.toContain(":null");
   });
 
-  test("the danger dot marks an actionable loaded findings page and a recorded failure, nothing else", async () => {
+  test("the danger dot marks a PR with must-fix rows and a recorded failure, nothing else", async () => {
     const dots = async (over: Partial<RecordPages> = {}) => withMarkup(face(over), familyDots);
     const findingsLabel = t("en", "pullRequests.findings");
     const failuresLabel = t("en", "pullRequests.failures");
     const reviewsLabel = t("en", "pullRequests.reviews");
 
-    // A must-fix and a should-fix both make the findings family actionable; a
-    // recorded failure is an alarm of its own; history never earns a dot.
+    // A must-fix row makes the findings family actionable; a recorded failure
+    // is an alarm of its own; history never earns a dot.
     expect(await dots()).toEqual({ [findingsLabel]: true, [reviewsLabel]: false, [failuresLabel]: true });
-    // A should-fix alone is a requested change, not a nit.
+    // A PR whose findings are all should-fix/nit has no must-fix row, so the
+    // trigger stays quiet even though its findings count is not zero.
     expect(
-      (await dots({ findings: page(FINDINGS.filter((f) => f.severity === "should-fix")) }))[findingsLabel],
-    ).toBe(true);
-    // Nits only: nothing to act on, so the findings trigger goes quiet.
-    expect(await dots({ findings: page(FINDINGS.filter((f) => f.severity === "nit")) })).toEqual({
+      (await dots({ findings: page(FINDINGS.filter((finding) => finding.severity !== "must-fix")) }))[
+        findingsLabel
+      ],
+    ).toBe(false);
+    // No finding at all: the findings trigger goes quiet.
+    expect(await dots({ findings: page([]) })).toEqual({
       [findingsLabel]: false,
       [reviewsLabel]: false,
       [failuresLabel]: true,
     });
-    // A severity this face does not name is still a requested change: the
-    // `other` bucket stays visible, so its trigger must not read as quiet.
-    expect(
-      (await dots({
-        findings: page(
-          FINDINGS.filter((f) => f.severity === "nit").map((f) => ({ ...f, severity: "blocker" })),
-        ),
-      }))[findingsLabel],
-    ).toBe(true);
     // No failure: the failures trigger loses its dot too.
     expect(await dots({ failures: page([]) })).toEqual({
       [findingsLabel]: true,
       [reviewsLabel]: false,
       [failuresLabel]: false,
     });
+  });
+
+  test("a filtered or paged findings view keeps the dot: the head's tally drives it", async () => {
+    // The head says this PR has must-fix rows while the loaded page holds only
+    // nits (page 2, or a severity filter) — the family dot must survive.
+    const built = scene();
+    const filtered = {
+      ...recordsOf(built.pages),
+      findings: { offset: 10, severity: "nit", status: "ok" as const, page: page(FINDINGS.filter((f) => f.severity === "nit")) },
+    };
+    const read = await withMarkup(render(built.detail, filtered), (container) => ({
+      dots: familyDots(container),
+      // The count beside the dot still describes the PR.
+      triggerCount: container.querySelectorAll<HTMLElement>('[role="tab"]')[0]?.textContent ?? "",
+    }));
+    expect(read.dots[t("en", "pullRequests.findings")]).toBe(true);
+    expect(read.triggerCount).toContain("3");
   });
 
   test("an out-of-set severity lands in the `other` bucket, last, with its count", async () => {
@@ -563,9 +592,9 @@ describe("pull request detail face (static SSR)", () => {
       `${t("en", "pullRequests.expand")} — #5`,
     ]);
 
-    // One legacy severity, three surfaces, one rule: `blocker` is not a nit, so
-    // the face opens on the findings, the trigger earns the danger dot, and the
-    // finding still renders — in `other`, the bucket it lands in.
+    // A legacy severity still renders, still opens the findings family (a
+    // findings count outranks history) — it lands in `other`, and it is not a
+    // must-fix row, so the PR's danger dot stays off.
     const legacyOnly = face({ findings: page(withOther.items.slice(3)) });
     const legacyRead = await withMarkup(legacyOnly, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
@@ -573,7 +602,7 @@ describe("pull request detail face (static SSR)", () => {
       buckets: severityGroups(container).map((group) => group.severity),
     }));
     expect(legacyRead.selected).toEqual([true, false, false]);
-    expect(legacyRead.dots[t("en", "pullRequests.findings")]).toBe(true);
+    expect(legacyRead.dots[t("en", "pullRequests.findings")]).toBe(false);
     expect(legacyRead.buckets).toEqual(["other"]);
   });
 

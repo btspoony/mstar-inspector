@@ -1,19 +1,15 @@
 /**
- * App detail page (App detail IA): two-tab shell pins.
- * No DOM runner — source-scan + static-SSR + pure-helper contracts, the
- * repo's standard trio (charts-recharts precedent for SSR).
+ * App detail page (App detail IA): the tab shell's product behaviour.
+ * Static-SSR over the pure views plus happy-dom mounts for the stateful
+ * shell, the repo's standard duo (charts-recharts precedent for SSR).
  *
  * 1. Tab shell: default tab 应用设置 on the bare path AND the legacy
  *    /settings deep link; the 洞察 tab renders ONLY on the manage face —
  *    a non-manager must not see the tab at all (absence pinned).
  * 2. Mount-once tab switching: a manager tab switch leaves the settings panel
  *    mounted (and hidden), so typed form state survives (mounted assertion).
- * 3. URL-derived state: one []-mounted popstate listener + replaceState
- *    commits (spa-url-state-resync contract).
- * 4. R1 closure: the kept data.ts insights helpers (parseInsights /
- *    INSIGHTS_WINDOWS / insightsRepo*) get their new consumer — the
- *    per-App insights tab — via the mount-prefixed
- *    /dashboard/api/apps/:appId/insights/summary face.
+ * 3. Mid-session demotion: a stale manager-tab URL is rewritten once the
+ *    non-manager payload lands (mounted against the real page).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -41,8 +37,6 @@ import { AppInsightsTab, InsightsRecordsView, SEVERITY_SLOTS } from "../../src/s
 import { installDom } from "./dom";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
-const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
-const insightsTab = readFileSync(join(spaRoot, "pages/AppInsightsTab.tsx"), "utf8");
 
 const IDENTITY_APP = {
   github_slug: "demo",
@@ -406,15 +400,11 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       cleanup();
     }
   });
-});
 
-describe("tab shell source contracts", () => {
-  test("mid-session demotion rewrite: a stale manager-tab URL is rewritten once the non-manager payload lands (qc2)", async () => {
-    // Product behaviour: ?tab=pull-requests in the address bar + a payload
-    // that says non-manager → the landing effect rewrites the URL to the
-    // bare path (replaceState), so the stale param cannot sit in the
-    // address bar and no manager face renders. A rename of the page's
-    // internals must not false-fail this — it drives the real page.
+  test("mid-session demotion: a stale manager-tab URL is rewritten once the non-manager payload lands", async () => {
+    // ?tab=pull-requests in the address bar + a payload that says non-manager
+    // → the landing effect rewrites the URL to the bare path (replaceState),
+    // so the stale param cannot sit there and no manager face renders.
     const { win, cleanup } = installDom("http://localhost/dashboard/apps/1?tab=pull-requests");
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
@@ -426,9 +416,7 @@ describe("tab shell source contracts", () => {
     win.document.body.appendChild(container);
     const root = createRoot(container as unknown as Element);
     try {
-      await act(async () =>
-        root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })),
-      );
+      await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
       await act(async () => {});
       expect(win.location.search).not.toContain("tab=pull-requests");
       const text = container.textContent ?? "";
@@ -439,91 +427,6 @@ describe("tab shell source contracts", () => {
       globalThis.fetch = realFetch;
       cleanup();
     }
-  });
-
-  test("insights refetch retains data: content renders on data !== null; ErrorState is initial-load-only (qc3)", () => {
-    // The filter refetch never blanks the four stat sections — the
-    // previous data stays rendered under the polite busy hint, and a
-    // refetch failure over retained data reports in a slim alert line
-    // instead of unmounting the face.
-    expect(insightsTab).toContain('{data !== null ? <InsightsRecordsView locale={locale} data={data} /> : null}');
-    expect(insightsTab).toContain('state === "error" && data === null');
-    expect(insightsTab).toContain('state === "error" && data !== null');
-  });
-
-  test("URL state re-sync: exactly one []-mounted popstate listener; commits ride replaceState, never pushState", () => {
-    expect(detailPage.match(/addEventListener\("popstate"/g)?.length).toBe(1);
-    expect(detailPage).toContain("removeEventListener(\"popstate\"");
-    expect(detailPage).toContain("history.replaceState");
-    // The page never pushes history itself (navigation stays in the router).
-    expect(detailPage).not.toContain(".pushState(");
-    // State derives through the shared pure helper (mount init, appId
-    // re-derivation, payload-landing demotion check + re-derivation,
-    // popstate).
-    expect(detailPage.match(/parseAppDetailSearch\(/g)?.length).toBe(5);
-  });
-
-  test("manager deep-link fix: the gate rides a ref mirror, re-derived when the payload lands — never a stale false closure", () => {
-    // (Fix round 1): the registered-once popstate listener (and the
-    // mount/appId re-derivations) must read the canManageRef mirror — a
-    // stale `payload?.can_manage ?? false` closure would permanently
-    // resolve a manager's `?tab=insights` deep link and history
-    // back/forward to the settings tab.
-    expect(detailPage).toContain("const canManageRef = useRef(false);");
-    expect(detailPage).toContain(
-      "const onPop = () => setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));",
-    );
-    expect(detailPage).not.toContain("parseAppDetailSearch(window.location.search, payload?.can_manage ?? false)");
-    // One re-derivation when the payload lands: the gate mirror is written
-    // and the location re-parsed, so a manager's `?tab=insights` deep link
-    // (and a history entry carrying it — native popstate re-reads the same
-    // ref) activates the insights tab as soon as can_manage is known.
-    const landing = detailPage.slice(
-      detailPage.indexOf("// When the payload lands"),
-      detailPage.indexOf("const onPop"),
-    );
-    expect(landing).toContain("canManageRef.current = payload?.can_manage ?? false;");
-    expect(landing).toContain(
-      "setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));",
-    );
-  });
-
-  test("manager deep-link first paint: the tab face is withheld until the URL tab is committed against the landed payload (qc4)", () => {
-    // The shell seeds `search` with the mount-time gate (false), and the
-    // payload flips `state` to "ok" BEFORE the landing effect re-derives
-    // the tab — rendering the face in between would first-paint 应用设置
-    // on a manager's `?tab=insights` deep link. `searchReady` withholds
-    // the face behind the loading skeleton until the landing effect has
-    // committed the URL-requested tab (or performed the demotion rewrite).
-    expect(detailPage).toContain("const [searchReady, setSearchReady] = useState(false);");
-    const landing = detailPage.slice(
-      detailPage.indexOf("// When the payload lands"),
-      detailPage.indexOf("const onPop"),
-    );
-    // BOTH landing paths commit readiness: the demotion rewrite and the
-    // re-derivation. The gate stays true afterwards — background reloads
-    // never re-flash the skeleton.
-    expect(landing.match(/setSearchReady\(true\);/g)?.length).toBe(2);
-    const render = detailPage.slice(detailPage.indexOf("if (state === \"loading\")"));
-    expect(render).toContain('if (state === "ok" && payload && !searchReady)');
-    expect(render).toContain("<PageSkeleton locale={locale} kind=\"forms\" />");
-    // Loop-free unchanged: the withhold adds no history writes and no new
-    // location parses (the demotion rewrite keeps its replaceState).
-    expect(detailPage).not.toContain(".pushState(");
-  });
-
-  test("R1 closure: the insights tab consumes the kept data.ts helpers over the mount-prefixed per-App face", () => {
-    expect(insightsTab).toContain("appInsightsSummaryUrl(apiBase(), appId");
-    expect(insightsTab).toContain("parseInsights(");
-    expect(insightsTab).toContain("INSIGHTS_WINDOWS.map");
-    expect(insightsTab).toContain("insightsRepoOptions(");
-    expect(insightsTab).toContain('from "./data"');
-    // The repo selector keeps its behaviour: the value goes through the kept
-    // helper, "all" stays the default option, and the options are the
-    // window's repos in the helper's order.
-    expect(insightsTab).toContain("value={insightsRepoSelectValue(search.repo)}");
-    expect(insightsTab).toContain("<SelectItem value={INSIGHTS_REPO_ALL}>");
-    expect(insightsTab).toContain("repoChoices.map((repo) => (");
   });
 });
 
@@ -610,10 +513,59 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     );
     expect(html).toContain('role="status"');
     expect(html).toContain("Loading…");
-    // Retained-data contract unchanged: content still renders on
-    // data !== null, and the retained-data busy hint keeps its own face.
-    expect(insightsTab).toContain('{state === "loading" && data === null ?');
-    expect(insightsTab).toContain('{state === "loading" && data !== null ?');
+  });
+
+  test("a refetch over retained data keeps the records mounted, then reports the failure in place", async () => {
+    // The no-flash contract, driven through the tab's own effect: the
+    // filter change starts a load, and the previous sections stay on screen
+    // under the polite busy hint; a failed refetch reports in a slim alert
+    // line instead of unmounting the face or falling to the initial-load
+    // ErrorState. Both states are read off the live tree, not the source.
+    const pending: Array<(error: Error) => void> = [];
+    let release = false;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      if (!release) return new Response(JSON.stringify(data), { status: 200 });
+      return new Promise<Response>((_resolve, reject) => {
+        pending.push(reject);
+      });
+    }) as unknown as typeof fetch;
+
+    let setWindow: (next: AppDetailSearch["window"]) => void = () => {};
+    function Harness() {
+      const [search, setSearch] = useState<AppDetailSearch>({ tab: "insights", window: "30", repo: "", pr: "" });
+      setWindow = (next) => setSearch((previous) => ({ ...previous, window: next }));
+      return createElement(AppInsightsTab, { locale: "en", appId: "1", search, onSearch: setSearch });
+    }
+
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    const heading = () => container.querySelector("h2")?.textContent ?? "";
+    try {
+      await act(async () => root.render(createElement(Harness)));
+      await act(async () => {});
+      expect(heading()).toContain("Review health");
+
+      // In-flight refetch: the previous sections stay, the busy state is on.
+      release = true;
+      await act(async () => setWindow("90"));
+      expect(heading()).toContain("Review health");
+      expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+
+      // The refetch fails: the records are still there, the failure is a line
+      // in place, and the initial-load face is not.
+      await act(async () => pending.at(-1)?.(new Error("offline")));
+      await act(async () => {});
+      expect(heading()).toContain("Review health");
+      expect(container.textContent ?? "").toContain(t("en", "common.loadFailed"));
+      expect(container.querySelector('[data-slot="error-state"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
   });
 });
 

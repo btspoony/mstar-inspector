@@ -40,7 +40,6 @@ import {
   copyOutcomeLabel,
   defaultFamily,
   foldLabel,
-  isActionable,
   recordId,
   reviewAttribution,
   SEVERITY_GROUPS,
@@ -384,10 +383,6 @@ export function PullRequestDetailView({
   const reviewsPage = records.reviews.page;
   const failuresPage = records.failures.page;
   const groups = severityGroups(locale, findingsPage?.items ?? []);
-  // The dot reads the loaded findings page: a family whose rows are not in yet
-  // is not yet actionable — absent is quiet, never assumed.
-  const findingsActionable =
-    findingsPage !== null && findingsPage.items.some((finding) => isActionable(finding.severity));
   // The PR's newest review comes from the head payload, never the loaded page:
   // paging the reviews list must not rewrite the headline verdict, its tone or
   // the model/provider attribution.
@@ -463,7 +458,18 @@ export function PullRequestDetailView({
     },
     {
       key: t(locale, "pullRequests.findings"),
-      value: counts.findings,
+      // The must-fix tally rides the head's counts, so the note describes the
+      // PR rather than the loaded page or the active severity filter.
+      value: (
+        <>
+          {counts.findings}
+          {counts.must_fix > 0 ? (
+            <span className="ml-1 text-(length:--typo-label-12-size) font-normal text-(--text-muted)">
+              {t(locale, "pullRequests.mustFixNote", { count: counts.must_fix })}
+            </span>
+          ) : null}
+        </>
+      ),
     },
   ];
 
@@ -593,7 +599,10 @@ export function PullRequestDetailView({
           >
             {t(locale, "pullRequests.findings")}
             <span className="text-xs tabular-nums text-(--text-faint)">{counts.findings}</span>
-            {findingsActionable ? (
+            {/* The dot answers "does this PR have a must-fix row" from the
+                head's own count, so a severity filter or a page-2 view cannot
+                clear it — the count beside it describes the PR too. */}
+            {counts.must_fix > 0 ? (
               <span
                 data-slot="family-dot"
                 data-tone="danger"

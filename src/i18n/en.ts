@@ -175,6 +175,8 @@ export const en = {
     recordsLabel: "Pull request records",
     /** A family trigger's accessible name: its label and the count it paints. */
     familyTabName: "{label} ({count})",
+    /** The findings metric's note, rendered beside the count. */
+    mustFixNote: "{count} must-fix",
     /** The findings filter's label and its "no filter" choice. */
     filterSeverity: "Severity",
     filterAll: "All",

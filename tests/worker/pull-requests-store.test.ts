@@ -411,6 +411,38 @@ describe("pull request detail reads", () => {
     return db;
   }
 
+  test("the must-fix tally counts every must-fix row, whatever the page or filter", async () => {
+    const db = await detailFixture();
+    // Two more findings behind the first page (limit 10): the tally is the
+    // PR's, not the loaded page's, and a nit never enters it.
+    for (let index = 2; index <= 12; index += 1) {
+      seedFinding(
+        db,
+        { findingId: `F-${index}`, mergeClass: "must-fix", title: `t${index}`, filePath: "src/a.ts", lineStart: index, body: "b" },
+        `row-${index}`,
+      );
+    }
+    seedFinding(
+      db,
+      { findingId: "N-1", mergeClass: "nit", title: "n", filePath: "src/a.ts", lineStart: 1, body: "b" },
+      "row-nit",
+    );
+    const store = createAppsStore(db);
+    expect(await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131)).toEqual({
+      findings: 13,
+      reviews: 0,
+      failures: 1,
+      must_fix: 12,
+    });
+    // The page is paged and filtered; the tally does not move with either.
+    const page = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
+      offset: 0,
+      limit: 10,
+      severity: "nit",
+    });
+    expect(page.total).toBe(1);
+  });
+
   test("the head, the counts and each record page read the same PR", async () => {
     const db = await detailFixture();
     seedReview(db, "r1", "2026-01-02 00:00:00");
@@ -433,6 +465,7 @@ describe("pull request detail reads", () => {
       findings: 1,
       reviews: 1,
       failures: 1,
+      must_fix: 1,
     });
 
     const page = { offset: 0, limit: 10 };

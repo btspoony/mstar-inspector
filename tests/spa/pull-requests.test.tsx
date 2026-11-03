@@ -129,7 +129,7 @@ const DETAIL_B: PullRequestDetail = {
     latest_review: null,
     failure_count: 0,
   },
-  counts: { findings: 0, reviews: 0, failures: 0 },
+  counts: { findings: 0, reviews: 0, failures: 0, must_fix: 0 },
   latest_review: null,
 };
 

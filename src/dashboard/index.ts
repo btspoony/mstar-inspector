@@ -4403,23 +4403,24 @@ const appPullRequestRoute = async (c: DashboardContext) => {
       head_sha: head.head_sha ?? "",
       first_seen_at: head.first_seen_at,
       last_seen_at: head.last_seen_at,
-      // The newest review, same nullable-to-"" rule as the section rows: it is
-      // the header's ONE source for verdict and attribution, so a paged
-      // reviews list cannot change it.
-      latest_review:
-        head.latest_review === null
-          ? null
-          : {
-              verdict: head.latest_review.verdict,
-              summary_md: head.latest_review.summary_md ?? "",
-              model: head.latest_review.model ?? "",
-              provider: head.latest_review.provider ?? "",
-              reviewed_at: head.latest_review.reviewed_at,
-              head_sha: head.latest_review.head_sha,
-            },
       failure_count: counts.failures,
     },
     counts,
+    // The newest review, same nullable-to-"" rule as the section rows: it is
+    // the header's ONE source for verdict and attribution, so a paged
+    // reviews list cannot change it. It rides the ENVELOPE, beside `counts`,
+    // not the head row — the head row's shape is the list's row shape.
+    latest_review:
+      head.latest_review === null
+        ? null
+        : {
+            verdict: head.latest_review.verdict,
+            summary_md: head.latest_review.summary_md ?? "",
+            model: head.latest_review.model ?? "",
+            provider: head.latest_review.provider ?? "",
+            reviewed_at: head.latest_review.reviewed_at,
+            head_sha: head.latest_review.head_sha,
+          },
   });
 };
 

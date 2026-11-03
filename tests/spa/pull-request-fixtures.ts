@@ -109,6 +109,10 @@ export const RECORDS: RecordPages = {
   failures: { items: FAILURES, total: FAILURES.length },
 };
 
+/** The PR's own must-fix tally, as the head counts it — unfiltered, unpaged. */
+const mustFixOf = (findings: RecordPages["findings"]) =>
+  findings.items.filter((finding) => finding.severity === "must-fix").length;
+
 /** The detail head for `RECORDS`: the same PR, its totals derived from the pages. */
 export const DETAIL: PullRequestDetailPayload = {
   pull_request: {
@@ -119,7 +123,12 @@ export const DETAIL: PullRequestDetailPayload = {
     latest_review: { verdict: "needs fixes", reviewed_at: "2026-11-01 08:00:00" },
     failure_count: FAILURES.length,
   },
-  counts: { findings: FINDINGS.length, reviews: REVIEWS.length, failures: FAILURES.length },
+  counts: {
+    findings: FINDINGS.length,
+    reviews: REVIEWS.length,
+    failures: FAILURES.length,
+    must_fix: mustFixOf(RECORDS.findings),
+  },
   // The head's authoritative newest review — what the headline reads, whatever
   // page the reviews section has loaded.
   latest_review: REVIEWS[0] ?? null,
@@ -144,7 +153,12 @@ export function scene(
   return {
     detail: {
       pull_request: { ...DETAIL.pull_request, failure_count: pages.failures.total, ...row },
-      counts: { findings: pages.findings.total, reviews: pages.reviews.total, failures: pages.failures.total },
+      counts: {
+        findings: pages.findings.total,
+        reviews: pages.reviews.total,
+        failures: pages.failures.total,
+        must_fix: mustFixOf(pages.findings),
+      },
       latest_review: latest === null || base === null ? null : { ...base, ...latest },
     },
     pages,
