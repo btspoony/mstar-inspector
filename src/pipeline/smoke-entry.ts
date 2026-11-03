@@ -338,7 +338,7 @@ async function execInImageReview(
     mode: parsed.ok ? "structured" : undefined,
     verdict: parsed.ok ? parsed.output.verdict : undefined,
     findingsCount: parsed.ok ? parsed.output.findings.length : undefined,
-    summaryBytes: parsed.ok ? parsed.output.summary_md.length : undefined,
+    summaryBytes: parsed.ok ? (parsed.output.summary_md?.length ?? 0) : undefined,
     latencyMs: Date.now() - startedAt,
   };
 }

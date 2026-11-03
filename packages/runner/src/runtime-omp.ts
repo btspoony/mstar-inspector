@@ -350,7 +350,7 @@ const SEAT_OUTPUT_SCHEMA = {
 const PARENT_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["schema", "verdict", "summary_md", "findings"],
+  required: ["schema", "verdict", "findings"],
   properties: {
     schema: { enum: ["mstar.review/v1"] },
     verdict: { enum: [...PR_VERDICTS] },
@@ -1759,14 +1759,17 @@ export const ompAgentRuntime: AgentRuntime = {
             }),
       });
       // A capped seat's gap is also declared on the body the user reads (the
-      // GitHub Review is rendered from `summary_md`) — never only in a log, and
-      // never past that body's character budget: its disclosure is reserved
-      // before the engine summary is fitted around it. The envelope schema and
-      // the engine's tally semantics stay untouched: an uncollected seat keeps
+      // narrative under `## 📋 Review`) — never only in a log, and never past
+      // that body's character budget: its disclosure is reserved before the
+      // seat narrative is fitted around it. The envelope schema and the
+      // engine's tally semantics stay untouched: an uncollected seat keeps
       // the count-derived grade of the findings that DID land, and a wave with
-      // no stopped seat is synthesized and fitted exactly as before.
-      const block = coverageBlock(envelope.summary_md, gaps);
-      envelope.summary_md = `${block.summary}${block.notes}`;
+      // no stopped seat is synthesized and fitted exactly as before. With no
+      // narrative and no gap the key stays ABSENT: the engine renders the bare
+      // `## 📋 Review` heading instead of a fabricated summary.
+      const block = coverageBlock(envelope.summary_md ?? "", gaps);
+      const summary = `${block.summary}${block.notes}`;
+      if (summary !== "") envelope.summary_md = summary;
       const gate = validateMstarReviewV1(envelope);
       if (!gate.ok) {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");

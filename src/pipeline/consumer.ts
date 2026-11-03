@@ -83,7 +83,7 @@ import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type Revi
 import { providerEnvName } from "./provider-catalog";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
-import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
+import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { hasUsageEventForExecutionToken, recordUsageEvent } from "../store/usage-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
@@ -362,12 +362,6 @@ export type ConsumerLogFields = {
    */
   degraded_delete_deleted?: number;
   degraded_delete_skipped?: number;
-  /**
-   * S-3 / qc3 F-003: the previous-round fingerprint query
-   * THREW — repeat dedup degraded to first-round semantics (empty set).
-   * Set only on the dedup-failure warn; an empty previous round is silent.
-   */
-  dedup?: "degraded";
 };
 
 export type ConsumerLog = {
@@ -2824,29 +2818,6 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), secretValues)),
     );
     const output = capped.output;
-    // 10a. Cross-round repeat dedup (AL-21-2): read the
-    // previous round's fingerprint set BEFORE the post (the current sha row
-    // does not exist yet at this point; post → put order). A query THROW is
-    // first-round semantics: log a structured warn (dedup: "degraded") and
-    // continue — dedup is display-layer, never a review blocker. An empty
-    // set (no previous round) is a SILENT first round — no warn (S-7).
-    let previousFingerprints: ReadonlySet<string> | undefined;
-    try {
-      const set = await previousRoundFingerprints(deps.env.DB, {
-        installation_id: payload.installation_id,
-        owner: payload.owner,
-        repo: payload.repo,
-        pr_number: payload.pr_number,
-      });
-      previousFingerprints = set.size > 0 ? set : undefined;
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(
-        { ...fields, dedup: "degraded" },
-        `previous-round fingerprint query failed — treating as first round: ${detail}`,
-      );
-    }
-
     // 11. §7.7 step 6 — validation + conservative reconciliation + closure
     // assembly + final body. The recheck document is reconciled against the
     // SAME round's final capped findings (§7.4 conservative precedence:
@@ -2905,7 +2876,6 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       omittedFindings: capped.omitted,
       round,
       headSha,
-      previousFingerprints,
       closure,
       publicationMarker,
     });

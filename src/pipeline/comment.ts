@@ -2,21 +2,18 @@
  * Review comment assembly + posting.
  *
  * Assembly (pure, unit-tested):
- *   - summary_md truncated to 8000 chars (budget cap);
- *   - findings grouped and listed BY merge class, category verbatim
- *     (mapping spec §3: findings 按 merge class 列出 — class原文写入, never
- *     rewritten to M1 severity);
- *   - tally line rendered when the envelope carries one (must-fix /
- *     should-fix / nit / unverified counts, engine REVIEW_EMOJI);
+ *   - the ENGINE owns the review-body layout: `renderReviewMarkdown` renders
+ *     the verdict head, the `cause:`/`unscanned:` pair, the tally table,
+ *     `## 📋 Review` (with the seat narrative when the envelope carries one)
+ *     and the finding blocks in envelope order;
+ *   - this module appends only what the engine has no vocabulary for: the
+ *     omitted-findings footer (merge-class cap) and the assembled §7.10
+ *     closure section;
  *   - the overall body carries NO per-line comment fields — anchored line
  *     comments are a SEPARATE chain (pulls.createReview COMMENT, see
  *     "Line comments" below);
- *   - verdict rendered VERBATIM as text in the body header (`**Verdict:
- *     ship it**` / `needs fixes` / `blocked` / `incomplete` — never M1
- *     vocab, never a GitHub review event); an `incomplete` verdict also
- *     states `cause:` + `unscanned:` right after the header/tally block —
- *     the renderer's single bounded pair (the summary's own byte-identical
- *     echo of those two lines is stripped from the rendered summary).
+ *   - the verdict is never mapped onto a GitHub review event (verdicts are
+ *     model-controlled and prompt-injectable; SEC-01 guarantee, structural).
  *
  * Posting: single-comment UPSERT via the Issues comments API
  * (@octokit/rest + createAppAuth — same deps and pattern as the deleted
@@ -78,10 +75,9 @@
  */
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
-import { MERGE_CLASSES, REVIEW_EMOJI } from "@mstar-harness/engine";
+import { REVIEW_EMOJI, renderReviewMarkdown } from "@mstar-harness/engine";
 import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../review/schema";
 import { redactSecrets } from "./redact";
-import { computeFindingFingerprint } from "../store/fingerprint";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
@@ -113,91 +109,30 @@ export const SUMMARY_MD_LIMIT = 8000;
  */
 export const REVIEW_BODY_LIMIT = 65000;
 
-/**
- * Per-line budget for the rendered `cause:` / `unscanned:` fact lines of an
- * incomplete verdict: long enough for a real cause or scope list, short
- * enough to protect the body budget. The stored envelope keeps the validated
- * values unchanged — the cap bounds the rendered line only.
- */
-export const INCOMPLETE_FACT_LINE_LIMIT = 500;
+/** Close every fold `text` leaves open — a lone `</details>` closes only one. */
+function closeOpenFolds(text: string): string {
+  const open = (text.match(/<details>/g) ?? []).length - (text.match(/<\/details>/g) ?? []).length;
+  if (open <= 0) return text;
+  return `${text}${Array.from({ length: open }, () => "\n\n</details>").join("")}`;
+}
 
 /** Truncate summary_md to the body budget (char-based; GitHub counts chars). */
 export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): string {
-  return md.length <= limit ? md : `${md.slice(0, limit - 1)}…`;
+  const cut = md.length <= limit ? md : `${md.slice(0, limit - 1)}…`;
+  // A narrative may carry its own `<details>`; a cut inside one would swallow
+  // the rest of the body.
+  return closeOpenFolds(cut);
 }
 
-/**
- * Render findings grouped BY merge class (mapping spec §3), fixed engine
- * order (must-fix → should-fix → nit; empty classes omitted). Category is
- * emitted verbatim when present; location is `file_path[:line_start]` or
- * "repo-wide" when the finding is not file-scoped. Empty findings → empty
- * string (no section).
- *
- * AL-21-2: when a previous-round fingerprint set is
- * provided, a finding whose fingerprint appeared in the previous round is
- * marked `*(repeat)*` — still listed, but excluded from the tally's new
- * counts (display-layer semantics; envelope/persist untouched).
- */
-export function renderFindings(findings: ReviewFinding[], previousFingerprints?: ReadonlySet<string>): string {
-  if (findings.length === 0) return "";
-  const sections = MERGE_CLASSES.map((mergeClass) => {
-    const inClass = findings.filter((finding) => finding.mergeClass === mergeClass);
-    if (inClass.length === 0) return null;
-    const items = inClass.map((finding, index) => {
-      const location = finding.file_path
-        ? `${finding.file_path}${finding.line_start != null ? `:${finding.line_start}` : ""}`
-        : "repo-wide";
-      const body = finding.body ? `\n\n${finding.body}` : "";
-      const category = finding.category !== undefined ? ` (${finding.category})` : "";
-      const repeat =
-        previousFingerprints !== undefined && previousFingerprints.has(computeFindingFingerprint(finding))
-          ? " *(repeat)*"
-          : "";
-      return `${index + 1}. **${finding.title}**${category} — ${location}${repeat}${body}`;
-    });
-    return `### ${REVIEW_EMOJI[mergeClass]} ${mergeClass}\n\n${items.join("\n\n")}`;
-  }).filter((section) => section !== null);
-  return `## Findings\n\n${sections.join("\n\n")}`;
-}
 
 /**
- * Tally line from the envelope's PrTallyResult; empty when absent (§3).
- * AL-21-2: with a non-empty previous-round fingerprint
- * set, each class count is recomputed as the number of NON-repeat findings
- * in the rendered (capped) array — repeats are still listed but no longer
- * re-voted. unverified is a fingerprint-less independent list and keeps the
- * envelope value; verdict/scorePct are never rendered here.
- *
- * Invariant (B4): the recomputed counts run over the SAME capped array that
- * renderFindings renders (the consumer's shared capped array feeds both the
- * post and the put) — the tally always describes the visible findings, never
- * the pre-cap envelope counts; a cap that dropped findings is surfaced by
- * the omitted-findings footer, not by the tally.
+ * Per-line bound for the rendered `cause:` / `unscanned:` lines. The engine
+ * renders the pair from the envelope without bounding it, and the body clamp
+ * cuts the END, so an unbounded reason would push the findings and the closure
+ * off the comment. The stored envelope keeps the validated values unchanged —
+ * this bounds the rendered line only.
  */
-function renderTally(
-  tally: ReviewOutput["tally"],
-  findings: ReviewFinding[],
-  previousFingerprints?: ReadonlySet<string>,
-): string {
-  if (tally === undefined) return "";
-  const { mustFix, shouldFix, nit, unverified } = tally.tally;
-  if (previousFingerprints !== undefined && previousFingerprints.size > 0) {
-    const countNew = (mergeClass: string) =>
-      findings.filter(
-        (finding) => finding.mergeClass === mergeClass && !previousFingerprints.has(computeFindingFingerprint(finding)),
-      ).length;
-    return (
-      `**Tally:** ${REVIEW_EMOJI["must-fix"]} must-fix ${countNew("must-fix")} · ` +
-      `${REVIEW_EMOJI["should-fix"]} should-fix ${countNew("should-fix")} · ` +
-      `${REVIEW_EMOJI.nit} nit ${countNew("nit")} · ${REVIEW_EMOJI.unverified} unverified ${unverified}`
-    );
-  }
-  return (
-    `**Tally:** ${REVIEW_EMOJI["must-fix"]} must-fix ${mustFix} · ` +
-    `${REVIEW_EMOJI["should-fix"]} should-fix ${shouldFix} · ` +
-    `${REVIEW_EMOJI.nit} nit ${nit} · ${REVIEW_EMOJI.unverified} unverified ${unverified}`
-  );
-}
+const FACT_LINE_BUDGET = 500;
 
 /**
  * Slice that never splits a surrogate pair: when the last unit kept by the cut
@@ -209,138 +144,122 @@ function sliceWithoutSplittingPair(text: string, end: number): string {
   return text.slice(0, lastKept >= 0xd800 && lastKept <= 0xdbff ? end - 1 : end);
 }
 
-/** Bound one rendered incomplete-fact line (label included); ellipsis on overflow. */
-function clampFactLine(line: string): string {
-  return line.length <= INCOMPLETE_FACT_LINE_LIMIT
-    ? line
-    : `${sliceWithoutSplittingPair(line, INCOMPLETE_FACT_LINE_LIMIT - 1)}…`;
+/** Bound one rendered fact line, keeping the head and marking the cut. */
+function boundFactLine(text: string): string {
+  return text.length <= FACT_LINE_BUDGET ? text : `${sliceWithoutSplittingPair(text, FACT_LINE_BUDGET - 1)}…`;
 }
 
-/**
- * Render the `unscanned:` fact line without materializing the full list
- * join. First measure the full rendered length (prefix + entry lengths +
- * `, ` separators); when it fits INCOMPLETE_FACT_LINE_LIMIT the line is
- * `join(", ")` verbatim — no marker. Only an overflowing list accumulates
- * entries until the budget minus the omission marker, ending the line with
- * `… (+N more)` (N = omitted count, marker budgeted at accept time so the
- * line never exceeds the cap). An empty scope renders `unscanned: none`;
- * the stored envelope is untouched.
- */
-function renderUnscannedLine(entries: readonly string[]): string {
-  const prefix = "unscanned: ";
-  if (entries.length === 0) return `${prefix}none`;
-  const fullLength =
-    prefix.length + entries.reduce((sum, entry) => sum + entry.length, 0) + 2 * (entries.length - 1);
-  if (fullLength <= INCOMPLETE_FACT_LINE_LIMIT) return prefix + entries.join(", ");
-  // Overflow: the list is guaranteed to omit at least one entry (the last
-  // one cannot pass the budgeted-marker check below). Marker as it would
-  // appear if the line stopped right after the entry being considered; the
-  // accepted prefix therefore always fits together with the exact final
-  // marker.
-  const marker = (omitted: number) => `, … (+${omitted} more)`;
-  let line = prefix;
-  let shown = 0;
-  for (const entry of entries) {
-    const piece = shown === 0 ? entry : `, ${entry}`;
-    if (line.length + piece.length + marker(entries.length - shown - 1).length > INCOMPLETE_FACT_LINE_LIMIT) {
-      break;
-    }
-    line += piece;
-    shown += 1;
+/** The envelope fact, bounded for rendering only. */
+function boundIncomplete(fact: { reason: string; unscanned: readonly string[] }): {
+  reason: string;
+  unscanned: string[];
+} {
+  const reason = boundFactLine(fact.reason);
+  // An empty scope stays empty: the engine renders `unscanned: none` itself, and
+  // a synthetic "none" entry would leak back into the envelope's tally mirror.
+  if (fact.unscanned.length === 0) return { reason, unscanned: [] };
+  const full = fact.unscanned.join(", ");
+  if (full.length <= FACT_LINE_BUDGET) return { reason, unscanned: [full] };
+  // Drop whole scopes rather than cutting mid-entry, and say how many went:
+  // a silent cut reads as "these were the only unscanned files".
+  const kept: string[] = [];
+  for (const scope of fact.unscanned) {
+    const droppedIfAdded = fact.unscanned.length - kept.length - 1;
+    const candidate = [...kept, scope].join(", ");
+    const marker = droppedIfAdded > 0 ? `, (+${droppedIfAdded} more)` : "";
+    if (candidate.length + marker.length > FACT_LINE_BUDGET) break;
+    kept.push(scope);
   }
-  const omitted = entries.length - shown;
-  if (shown > 0) return line + marker(omitted);
-  if (omitted === 1) {
-    // Single entry longer than the budget: nothing is fully omitted —
-    // truncate it like the cause line, with no omitted-count marker.
-    return clampFactLine(prefix + entries[0]!);
+  // A list that fits no whole entry still names one: "+40 more" with nothing
+  // listed tells the reader the scope was never checked.
+  if (kept.length === 0) {
+    kept.push(`${sliceWithoutSplittingPair(fact.unscanned[0]!, FACT_LINE_BUDGET - 12)}…`);
   }
-  // Pathological first entry longer than the budget: truncate it (it stays
-  // represented, so the count covers only the fully omitted siblings) and
-  // budget the marker so the line never exceeds the cap.
-  const tail = `… (+${omitted - 1} more)`;
-  const head = sliceWithoutSplittingPair(entries[0]!, INCOMPLETE_FACT_LINE_LIMIT - prefix.length - tail.length - 2);
-  return `${prefix}${head}, ${tail}`;
+  const dropped = fact.unscanned.length - kept.length;
+  const line = kept.join(", ");
+  const withCount = dropped === 0 ? line : `${line}, (+${dropped} more)`;
+  return { reason, unscanned: [boundFactLine(withCount)] };
 }
 
 /**
- * Strip the machine fact lines from the rendered summary: the renderer owns
- * those two lines and renders exactly one bounded pair from the envelope fact,
- * so the summary's own echo of that pair would duplicate it. The echo is
- * matched by exact line equality in BOTH forms — as the engine injected the
- * fact (`cause: <reason>`, `unscanned: <csv | none>`) and as the renderer
- * clamps an over-long fact for the body. A line that merely opens with the
- * label (an indented YAML snippet, capitalised prose, a mid-sentence mention)
- * or carries any other value is the model's own content and stays verbatim.
- * Every other summary line is kept byte-identical; the stored summary_md is
- * never rewritten.
+ * Cut `text` to `budget` chars, keeping the head — and close any fold the cut
+ * left open. An unclosed `<details>` makes GitHub route the rest of the
+ * comment into the collapsed block, so the trailer and the publication marker
+ * would vanish behind a fold nobody opened. Every clamp that can cut inside a
+ * fold goes through here.
  */
-function stripMachineFactLines(md: string, fact: { reason: string; unscanned: readonly string[] }): string {
-  const cause = `cause: ${fact.reason}`;
-  const unscanned = fact.unscanned.length === 0 ? "unscanned: none" : `unscanned: ${fact.unscanned.join(", ")}`;
-  const machineLines = [cause, clampFactLine(cause), unscanned, renderUnscannedLine(fact.unscanned)];
-  return md
-    .split("\n")
-    .filter((line) => !machineLines.includes(line))
-    .join("\n");
+function clampKeepingHead(text: string, budget: number): string {
+  if (text.length <= budget) return text;
+  const head = text.slice(0, Math.max(0, budget - 1));
+  const open =
+    (head.match(/<details>/g) ?? []).length - (head.match(/<\/details>/g) ?? []).length;
+  if (open <= 0) return `${head}…`;
+  // Close EVERY fold the cut left open, paying their length out of the budget.
+  const closers = Array.from({ length: open }, () => "\n\n</details>").join("");
+  const room = budget - 1 - closers.length;
+  if (room <= 0) return `${head}…`;
+  return `${head.slice(0, room)}${closers}…`;
 }
 
 /**
- * Assemble the overall review body: verdict header (verbatim) + tally line
- * (when present) + incomplete fact lines (`cause:` / `unscanned:`,
- * incomplete verdict with a present fact only, each line bounded per
- * INCOMPLETE_FACT_LINE_LIMIT; the renderer owns the pair — under the same
- * condition the summary's own byte-identical echo of those two lines is
- * stripped from the rendered summary, and every other verdict keeps its
- * summary byte-identical) + truncated summary +
- * findings-by-class section + optional
- * omitted-findings footer + optional closure section (§7.10),
- * finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API
- * never sees an over-limit body). `omittedFindings` is the count of findings
- * dropped by the consumer's merge-class cap (B4) — the footer tells readers
- * the review is a Top-N subset.
- *
- * AL-21-2: `previousFingerprints` is the repeat-dedup data
- * channel — assembly INPUT only (the consumer queries the store; this module
- * never does). Publication structure (marker/header/line comments) is
- * untouched.
+ * The engine renders the `cause:`/`unscanned:` pair from the envelope and
+ * publishes the seat narrative verbatim, so a narrative that restates the pair
+ * shows it twice. Strip only the exact lines the pair renders: a line that
+ * merely opens with the label (an indented snippet, capitalised prose, a
+ * mid-sentence mention) is the model's own content and stays.
+ */
+function stripFactEcho(
+  narrative: string,
+  raw: { reason: string; unscanned: readonly string[] },
+  bounded: { reason: string; unscanned: readonly string[] },
+): string {
+  // Both spellings: the narrative echoes what the seat knew (the raw fact),
+  // while the engine renders the bounded one.
+  const echo = new Set<string>();
+  for (const fact of [raw, bounded]) {
+    echo.add(`cause: ${fact.reason}`);
+    echo.add(fact.unscanned.length === 0 ? "unscanned: none" : `unscanned: ${fact.unscanned.join(", ")}`);
+  }
+  return narrative.split("\n").filter((line) => !echo.has(line)).join("\n");
+}
+
+/**
+ * Assemble the overall review body: the engine's own layout, then the two
+ * facts it has no vocabulary for — the omitted-findings footer (merge-class
+ * cap) and the assembled §7.10 closure section — clamped to REVIEW_BODY_LIMIT
+ * (qc2 F-003 / qc3 F-304 — the API never sees an over-limit body).
+ * `omittedFindings` is the count dropped by the consumer's merge-class cap
+ * (B4): the footer tells readers the review is a Top-N subset.
  */
 export function buildReviewBody(
   output: ReviewOutput,
   omittedFindings = 0,
-  previousFingerprints?: ReadonlySet<string>,
   closure?: string,
 ): string {
-  const verdict = `**Verdict: ${output.verdict}**`;
-  const tally = renderTally(output.tally, output.findings, previousFingerprints);
-  // Incomplete verdicts state the declared cause + unscanned scope as part of
-  // the verdict block. The renderer owns the pair: on the same condition that
-  // renders it, the summary's byte-identical echo of those two lines is
-  // stripped (never the stored summary_md, and never a line that merely opens
-  // with the label); every other verdict passes its summary through
-  // byte-identical. The pair is always rendered once from the
-  // envelope, each line bounded; the final body clamp stays last. The strip
-  // runs BEFORE the summary budget applies: the echo the renderer
-  // reproduces must not consume the budget that keeps the summary's tail.
-  const incomplete = output.verdict === "incomplete" ? output.incomplete : undefined;
-  const rendersFact = incomplete !== undefined;
-  const summary = rendersFact
-    ? truncateSummary(stripMachineFactLines(output.summary_md, incomplete))
-    : truncateSummary(output.summary_md);
-  const findings = renderFindings(output.findings, previousFingerprints);
-  const head = tally ? `${verdict}\n\n${tally}` : verdict;
-  const fact =
-    rendersFact
-      ? [
-          clampFactLine(`cause: ${incomplete.reason}`),
-          renderUnscannedLine(incomplete.unscanned),
-        ].join("\n")
-      : "";
-  const withFact = fact === "" ? head : `${head}\n\n${fact}`;
-  const body = findings ? `${withFact}\n\n${summary}\n\n${findings}` : `${withFact}\n\n${summary}`;
-  const withOmitted = omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
-  const withClosure = closure ? `${withOmitted}\n\n${closure}` : withOmitted;
-  return withClosure.length <= REVIEW_BODY_LIMIT ? withClosure : `${withClosure.slice(0, REVIEW_BODY_LIMIT - 1)}…`;
+  let rendered = output;
+  if (output.incomplete !== undefined) {
+    const bounded = boundIncomplete(output.incomplete);
+    rendered = { ...rendered, incomplete: bounded };
+    // The envelope's own invariant: `tally.incomplete` mirrors `incomplete`,
+    // so bounding one without the other leaves an unvalidatable document.
+    if (rendered.tally !== undefined) {
+      rendered = { ...rendered, tally: { ...rendered.tally, incomplete: bounded } };
+    }
+    if (rendered.summary_md !== undefined) {
+      rendered = { ...rendered, summary_md: stripFactEcho(rendered.summary_md, output.incomplete, bounded) };
+    }
+  }
+  // The runner fits its coverage notes to SUMMARY_MD_LIMIT and documents that
+  // this publisher keeps the head from there (runtime-omp.ts). Without the cap
+  // a long narrative inflates the body toward REVIEW_BODY_LIMIT, and that clamp
+  // keeps the head — so the findings and the closure would be what is lost.
+  if (rendered.summary_md !== undefined) {
+    rendered = { ...rendered, summary_md: truncateSummary(rendered.summary_md) };
+  }
+  const sections = [renderReviewMarkdown(rendered)];
+  if (omittedFindings > 0) sections.push(`*(+${omittedFindings} more findings omitted)*`);
+  if (closure) sections.push(closure);
+  return clampKeepingHead(sections.join("\n\n"), REVIEW_BODY_LIMIT);
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +302,12 @@ export type ClosureCoverage = {
  * `CLOSURE_MAX_ROWS` rows (finding / disposition / evidence / thread) plus
  * the overflow count. Deterministic; the caller re-clamps via
  * buildReviewBody's budget.
+ *
+ * Folded into `<details>`: the section grows every round while it is only read
+ * when someone checks whether earlier concerns were fixed. The heading stays
+ * INSIDE the fold — the summary line is a label, not a replacement for it. The
+ * blank lines around the inner Markdown are required: without them GitHub
+ * renders the table as literal text.
  */
 export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
   const shown = rows.slice(0, CLOSURE_MAX_ROWS);
@@ -411,7 +336,8 @@ export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[
   if (overflow > 0) {
     lines.push("", `*(+${overflow} more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
   }
-  return lines.join("\n");
+  const summary = `Prior findings recheck — ${coverage.assessed}/${coverage.selected} reassessed, ${coverage.totalOpen} open`;
+  return `<details>\n<summary>${summary}</summary>\n\n${lines.join("\n")}\n\n</details>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -433,16 +359,17 @@ export function buildPublicationMarker(input: { publicationId: string; headSha: 
 
 /**
  * Assemble the prepared REVIEW publication body (spec §7.7): the round
- * marker line, the round header, the marker-stripped review body (findings +
- * closure — model text can never forge an Inspector marker), clamped so the
- * appended trusted publication marker stays intact under the body limit.
+ * marker line, the marker-stripped review body (model text can never forge an
+ * Inspector marker), then the round header as the trailer directly above the
+ * publication marker. Clamped so both trusted markers and the header survive
+ * the body limit. The round marker stays FIRST: `parseReviewRound` is
+ * `^`-anchored and the comment-identity scan depends on it.
  */
 export function buildPreparedReviewBody(input: {
   output: ReviewOutput;
   omittedFindings: number;
   round: number;
   headSha: string;
-  previousFingerprints?: ReadonlySet<string>;
   closure?: string;
   publicationMarker: string;
 }): string {
@@ -454,12 +381,14 @@ export function buildPreparedReviewBody(input: {
   // it already uses.
   const header = `Review ${input.round} · commit ${input.headSha.slice(0, 7)}`;
   const core = stripInspectorMarkerSyntax(
-    buildReviewBody(input.output, input.omittedFindings, input.previousFingerprints, input.closure),
+    buildReviewBody(input.output, input.omittedFindings, input.closure),
   );
+  // Both markers and the header are reserved before the clamp: two blank-line
+  // separators (after the round marker, before the header), the header↔marker
+  // newline, and the clamp's own ellipsis fit inside the 8.
   const reserve = roundMarker.length + header.length + input.publicationMarker.length + 8;
   const budget = REVIEW_BODY_LIMIT - reserve;
-  const clamped = core.length <= budget ? core : `${core.slice(0, Math.max(0, budget - 1))}…`;
-  return `${roundMarker}\n${header}\n\n${clamped}\n${input.publicationMarker}`;
+  return `${roundMarker}\n\n${clampKeepingHead(core, budget)}\n\n${header}\n${input.publicationMarker}`;
 }
 
 /**
@@ -480,8 +409,7 @@ export function buildPreparedDegradedBody(input: {
   );
   const reserve = roundMarker.length + input.publicationMarker.length + 4;
   const budget = REVIEW_BODY_LIMIT - reserve;
-  const clamped = core.length <= budget ? core : `${core.slice(0, Math.max(0, budget - 1))}…`;
-  return `${roundMarker}\n${clamped}\n${input.publicationMarker}`;
+  return `${roundMarker}\n${clampKeepingHead(core, budget)}\n${input.publicationMarker}`;
 }
 // ---------------------------------------------------------------------------
 // Single-comment upsert
