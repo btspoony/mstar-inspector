@@ -161,6 +161,29 @@ describe("listPullRequests", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
   });
 
+  test("usage attribution rows are not review failures either: count 0, no history, row kept", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest(PR);
+    db.raw
+      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .run(APP_ID);
+    // The review continued; only the usage-event insert failed.
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+         VALUES ('f-usage', 77, 'acme', 'widgets', 131, 'sha-1', 'usage', 'D1_ERROR: no such table')`,
+      )
+      .run();
+
+    const rows = await createAppsStore(db).listPullRequests(APP_ID);
+    expect(rows[0]!.failure_count).toBe(0);
+    const detail = await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131);
+    expect(detail!.pull_request.failure_count).toBe(0);
+    expect(detail!.failures).toEqual([]);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
+  });
+
   test("a sibling App's reviews and failures never leak into the list", async () => {
     const db = createMigratedTestD1();
     seedApp(db);

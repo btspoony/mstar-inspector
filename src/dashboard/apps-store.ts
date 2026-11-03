@@ -1072,10 +1072,12 @@ export function createAppsStore(db: AppsStoreD1) {
      * cross-App duplicate is a config mistake visible in the delivery health
      * panel, not a silent data problem.
      *
-     * `stage = 'recheck'` rows are NOT failures of the review: they are
-     * per-round attribution written for rounds that published normally, so a
-     * clean PR would otherwise read a non-zero failure count and a
-     * `recheck / skipped: budget: null` history entry.
+     * `stage IN ('recheck', 'usage')` rows are NOT failures of the review:
+     * both are per-round attribution written for rounds that continued
+     * (`recheck` a budget skip / dead seat / invalid document, `usage` a
+     * failed `usage_events` insert), so a clean PR would otherwise read a
+     * non-zero failure count and a `recheck / skipped: budget: null` history
+     * entry. The sweep excludes the same two stages from paging.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -1104,7 +1106,7 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.owner, f.repo, f.pr_number, COUNT(*) AS n
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage <> 'recheck'
+             WHERE f.stage NOT IN ('recheck', 'usage')
                AND (f.owner, f.repo, f.pr_number) IN (${PULL_REQUEST_WINDOW_SQL})
              GROUP BY f.owner, f.repo, f.pr_number`,
           )
@@ -1158,7 +1160,7 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.stage <> 'recheck'
+             WHERE f.stage NOT IN ('recheck', 'usage')
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC`,
           )
