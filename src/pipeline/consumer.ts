@@ -458,11 +458,15 @@ function handleGuardHeld(
   message: Message<ReviewJobPayload>,
   deps: ProcessDeps,
   admission: AdmissionRefusalFields,
-): void {
+): void | Promise<void> {
   const fields = { ...toBaseFields(message.body), ...admission };
   // Why this message was held, appended to both lines: the delay schedule alone
   // never says whether the PR, the tenant, or the deployment is full.
   const heldBecause = `held by ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap})`;
+  // Only a `pr-held` refusal means a review for THIS PR is running; a cap or
+  // storage refusal means none exists at all — saying "still in flight" there
+  // would send an operator looking for a review that was never started.
+  const what = admission.reason === "pr-held" ? "review already in flight" : "review not admitted";
   // REVIEW_LEVEL is a Worker-level setting (one deployment = one level), and
   // processMessage already resolved it before touching the guard — re-resolving
   // here cannot throw on the guard-held path.
@@ -472,16 +476,37 @@ function handleGuardHeld(
   if (delaySeconds !== undefined) {
     deps.log.info(
       fields,
-      `review already in flight — scheduling delayed retry in ${delaySeconds}s (attempt ${message.attempts}; ${heldBecause})`,
+      `${what} — scheduling delayed retry in ${delaySeconds}s (attempt ${message.attempts}; ${heldBecause})`,
     );
     message.retry({ delaySeconds });
-  } else {
-    deps.log.warn(
-      fields,
-      `review still in flight after ${delays.length} delayed retries (attempt ${message.attempts}; ${heldBecause}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
-    );
-    message.ack();
+    return;
   }
+  deps.log.warn(
+    fields,
+    `${what} after ${delays.length} delayed retries (attempt ${message.attempts}; ${heldBecause}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
+  );
+  message.ack();
+  // A cap/storage refusal that survived the whole backoff leaves the review
+  // DROPPED with no other D1 trace: no attempt for this PR ever reached the
+  // runner, so neither `reviews` nor the failure sweep (which counts
+  // `review_failures`) would see it. Record one row here — the terminal drop
+  // is the failure event, not each refused attempt. `pr-held` is excluded: a
+  // live review for the same PR does the work. Best-effort: a warn only.
+  if (admission.reason === "pr-held") return;
+  return deps.failureStore
+    .record({
+      installation_id: message.body.installation_id,
+      owner: message.body.owner,
+      repo: message.body.repo,
+      pr_number: message.body.pr_number,
+      head_sha: message.body.head_sha ?? "",
+      stage: "pipeline",
+      error: `review dropped after ${delays.length} refused retries: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap})`,
+    })
+    .catch((err: unknown) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `review_failures insert failed (drop trace lost): ${detail}`);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1933,7 +1958,7 @@ export function createReviewConsumer(
       // delayed retry (or the final ack-with-warning) instead of throwing
       // into the queue's immediate ×3 retry → DLQ path.
       if (outcome.kind === "guard-held") {
-        handleGuardHeld(message, deps, outcome.admission);
+        await handleGuardHeld(message, deps, outcome.admission);
       } else if (outcome.kind === "paused") {
         // Architect lock L4: a paused App's in-flight message is
         // acked DIRECTLY — an intentional skip with zero side effects, never
@@ -2144,6 +2169,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           "review admission failed (storage error) — treating as held; no review admitted",
         );
       }
+      // A cap/error refusal that never recovers is recorded when the job is
+      // finally dropped (handleGuardHeld's terminal ack): recording every
+      // refused attempt would write "failure" rows for reviews that a later
+      // delayed attempt goes on to complete.
       return { kind: "guard-held", admission: refusal };
     }
     inflight = { key: inflightKey, attemptId, ttlSeconds };
@@ -3264,6 +3293,21 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
     throw err;
   } finally {
+    // Destroy FIRST, then release the admission row. Releasing first would let
+    // the next attempt for this PR acquire the slot and start its container
+    // while this one is still alive, so live containers could exceed
+    // min(system, workspace) by the destroy latency. Both blocks warn only.
+    if (sandbox !== null) {
+      try {
+        await sandbox.destroy();
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+          `sandbox destroy failed: ${detail}`,
+        );
+      }
+    }
     // Release the admission row once the review settled (posted, KV done,
     // put attempted) OR failed — either way the next attempt may proceed.
     // Scoped to THIS attempt's id, so an older attempt can never delete a row
@@ -3277,17 +3321,6 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         deps.log.warn(
           { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
           `review admission release failed — the row expires by TTL (${inflight.ttlSeconds}s): ${detail}`,
-        );
-      }
-    }
-    if (sandbox !== null) {
-      try {
-        await sandbox.destroy();
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(
-          { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
-          `sandbox destroy failed: ${detail}`,
         );
       }
     }

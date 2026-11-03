@@ -14,27 +14,17 @@
  *   - an EXPIRED row does not hold the PR and does not count toward the caps
  *   - release deletes only the row its own `attempt_id` wrote
  *   - a storage failure → `error`, never `ok`
- *   - the default TTL is the `default` level's guard budget
+ *   - a malformed `now` or non-finite TTL → `error`, never a throw
  */
-// Side-effect ONLY: the TTL pin below loads the consumer, which transitively
-// loads the sandbox adapter (the one `cloudflare:workers` importer Bun's test
-// runner cannot resolve). Every such file imports the shared registration.
-import "../../tests/helpers/cloudflare-workers-mock";
 import { describe, expect, test } from "bun:test";
 import {
-  INFLIGHT_DEFAULT_TTL_SECONDS,
   acquireInflight,
-  countInflight,
   releaseInflight,
   type AcquireInflightOptions,
   type InflightKey,
 } from "./inflight-store";
 import type { D1Like } from "./types";
 import { createMigratedTestD1, type TestD1 } from "../../tests/store/helpers";
-
-// Dynamic on purpose: `consumer.ts` statically imports the sandbox adapter, and
-// a static import here would be linked before the mock above is registered.
-const { reviewGuardTtlSeconds } = await import("../pipeline/consumer");
 
 const KEY: InflightKey = {
   installation_id: 42,
@@ -75,7 +65,8 @@ describe("inflight-store", () => {
   test("acquires when both caps have room", async () => {
     const db = freshDb();
     expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
-    expect(await countInflight(db, OPTS.now)).toEqual({ total: 1, byWorkspace: 1 });
+    const rows = db.raw.query("SELECT * FROM review_inflight").all();
+    expect(rows).toHaveLength(1);
   });
 
   test("refuses a second attempt for the same PR", async () => {
@@ -137,7 +128,9 @@ describe("inflight-store", () => {
       }),
     ).toEqual({ ok: true });
     // The reclaim replaced the row in place — one row, the newer attempt's.
-    expect(await countInflight(db, "2026-11-03T00:02:00Z")).toEqual({ total: 1, byWorkspace: 1 });
+    const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.attempt_id).toBe("attempt-2");
   });
 
   test("an expired row does not count toward the caps", async () => {
@@ -167,7 +160,8 @@ describe("inflight-store", () => {
     const db = freshDb();
     await acquireInflight(db, KEY, OPTS);
     await releaseInflight(db, KEY, OPTS.attemptId);
-    expect(await countInflight(db, OPTS.now)).toEqual({ total: 0, byWorkspace: 0 });
+    const rows = db.raw.query("SELECT * FROM review_inflight").all();
+    expect(rows).toHaveLength(0);
     expect(await acquireInflight(db, KEY, { ...OPTS, attemptId: "attempt-2" })).toEqual({
       ok: true,
     });
@@ -177,7 +171,17 @@ describe("inflight-store", () => {
     expect(await acquireInflight(failingDb, KEY, OPTS)).toEqual({ ok: false, reason: "error" });
   });
 
-  test("the default TTL tracks the default level's guard budget", () => {
-    expect(INFLIGHT_DEFAULT_TTL_SECONDS).toBe(reviewGuardTtlSeconds("default"));
+  test("a malformed `now` or non-finite TTL answers error instead of throwing", async () => {
+    const db = freshDb();
+    expect(await acquireInflight(db, KEY, { ...OPTS, now: "not-a-date" })).toEqual({
+      ok: false,
+      reason: "error",
+    });
+    expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: Number.NaN })).toEqual({
+      ok: false,
+      reason: "error",
+    });
+    // Neither refusal wrote a row — fail-closed never admits.
+    expect(db.raw.query("SELECT * FROM review_inflight").all()).toHaveLength(0);
   });
 });

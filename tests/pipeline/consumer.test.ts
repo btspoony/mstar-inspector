@@ -2077,6 +2077,56 @@ describe("createReviewConsumer", () => {
     expect(warnLine!.msg).toContain("no DLQ");
     expect(warnLine!.fields.pr_number).toBe(42);
     expect(warnLine!.fields.installation_id).toBe(123);
+    // `pr-held` at the terminal ack: a live review for this PR is doing the
+    // work, so the drop is normal traffic — no failure row (W-1).
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("a cap refusal that survives the whole backoff records ONE failure row (W-1)", async () => {
+    reset();
+    messageAttempts = 4; // final delivery: the job is dropped here
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
+      )
+      .run();
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    // The sweep counts `review_failures`; a dropped review must be visible
+    // there, with the reason it was dropped.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ pr_number: 42, stage: "pipeline" });
+    expect(String(failureRows(db)[0]!.head_sha)).toBe(makePayload().head_sha!);
+    expect(String(failureRows(db)[0]!.error)).toContain("system-cap");
+    // Wording is reason-specific: a cap refusal never claims a review is live.
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("acking"));
+    expect(warnLine!.msg).toContain("review not admitted");
+    expect(warnLine!.msg).not.toContain("still in flight");
+  });
+
+  test("a storage error refusal that survives the whole backoff records one failure row (W-1)", async () => {
+    reset();
+    messageAttempts = 4;
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: dbFailingOn(db, "review_inflight") as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("error");
   });
 
   test("a reached system cap refuses admission → guard-held, no sandbox (spec §1.3)", async () => {
@@ -2102,11 +2152,15 @@ describe("createReviewConsumer", () => {
     // The foreign row is neither deleted nor duplicated by the refusal.
     expect(inflightRows(db)).toHaveLength(1);
     // §1.3 observability: the global bound is the one that held the message,
-    // and the line carries the caps it was measured against.
-    const heldLine = logLines.find((l) => l.msg.includes("already in flight"));
+    // and the line carries the caps it was measured against. W-1: a cap
+    // refusal is NOT "in flight" — no review for this PR exists.
+    const heldLine = logLines.find((l) => l.msg.includes("review not admitted"));
     expect(heldLine!.fields.reason).toBe("system-cap");
     expect(heldLine!.fields.system_cap).toBe(1);
     expect(heldLine!.fields.workspace_cap).toBe(16);
+    // W-1: a retried refusal is NOT yet a failure — the attempt may still be
+    // admitted later, so no failure row is owed.
+    expect(failureRows(db)).toHaveLength(0);
   });
 
   test("a reached WORKSPACE cap refuses admission while the global count has headroom (spec §1.3)", async () => {
@@ -2127,10 +2181,11 @@ describe("createReviewConsumer", () => {
     expect(inflightRows(db)).toHaveLength(1);
     // §1.3 observability: the tenant's own bound held it, with both caps shown
     // so the operator can tell a busy workspace from a full deployment.
-    const heldLine = logLines.find((l) => l.msg.includes("already in flight"));
+    const heldLine = logLines.find((l) => l.msg.includes("review not admitted"));
     expect(heldLine!.fields.reason).toBe("workspace-cap");
     expect(heldLine!.fields.system_cap).toBe(32);
     expect(heldLine!.fields.workspace_cap).toBe(1);
+    expect(failureRows(db)).toHaveLength(0);
   });
 
   test("a workspace cap below the system cap bounds only its own workspace — a foreign live review admits", async () => {
@@ -2194,6 +2249,7 @@ describe("createReviewConsumer", () => {
     const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("admission failed"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.msg).toContain("treating as held");
+    expect(failureRows(db)).toHaveLength(0);
   });
 
   test("a degraded caps read warns once and admits at the conservative cap (never unlimited)", async () => {
@@ -2269,6 +2325,31 @@ describe("createReviewConsumer", () => {
     ).toBe(reviewGuardTtlSeconds("default") * 1000);
     expect(inflightRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
+  });
+
+  test("the admission row is released AFTER the sandbox is destroyed (S-3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // A release that ran before destroy would let the next attempt admit a
+    // second live container while this one still runs.
+    let rowsAtDestroy = -1;
+    const original = fakeSandbox.destroy;
+    fakeSandbox.destroy = mock(async () => {
+      rowsAtDestroy = inflightRows(db).length;
+      destroyCalls += 1;
+      if (destroyError) throw destroyError;
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    try {
+      await consumer(makeBatch(makePayload()));
+    } finally {
+      fakeSandbox.destroy = original;
+    }
+
+    expect(rowsAtDestroy).toBe(1); // this attempt's row is still the lock
+    expect(inflightRows(db)).toHaveLength(0);
   });
 
   test("two messages for one PR never run concurrently — the second is guard-held while the first is in flight", async () => {

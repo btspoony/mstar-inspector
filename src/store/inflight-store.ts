@@ -59,17 +59,6 @@ export type AcquireInflightOptions = {
 };
 
 /**
- * Level-less fallback TTL (seconds): the `default` level's guard budget
- * (`reviewGuardTtlSeconds("default")` — 10min runner + five 120s git steps +
- * 120s slack). It is written as a literal rather than imported because the
- * consumer imports THIS module, and a module-scope call back into consumer.ts
- * would read its not-yet-initialized budget table (circular-import TDZ). The
- * equality is pinned by the test file; callers that know the review level must
- * pass `reviewGuardTtlSeconds(level)` instead.
- */
-export const INFLIGHT_DEFAULT_TTL_SECONDS = 1320;
-
-/**
  * Acquire the PR's lock and a capacity slot in ONE conditional insert.
  *
  * `meta.changes === 1` is the only success signal: it means the anchor row was
@@ -106,16 +95,6 @@ DELETE FROM review_inflight
 WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND attempt_id = ?
 `;
 
-/**
- * Diagnostics: live rows now, and how many workspaces hold at least one of
- * them (`byWorkspace`) — the headroom view for tuning the caps.
- */
-const COUNT_SQL = `
-SELECT
-  (SELECT COUNT(*) FROM review_inflight WHERE expires_at > ?) AS total,
-  (SELECT COUNT(DISTINCT workspace_id) FROM review_inflight WHERE expires_at > ?) AS by_workspace
-`;
-
 /** ISO-8601 with milliseconds — the ONE text form `expires_at > now` compares correctly. */
 function isoInstant(ms: number): string {
   return new Date(ms).toISOString();
@@ -126,9 +105,15 @@ export async function acquireInflight(
   key: InflightKey,
   opts: AcquireInflightOptions,
 ): Promise<InflightAcquireResult> {
-  const now = isoInstant(Date.parse(opts.now));
-  const expiresAt = isoInstant(Date.parse(opts.now) + opts.ttlSeconds * 1000);
   try {
+    // Conversions live inside the try: a malformed `now` (RangeError) or a
+    // non-finite TTL (NaN) must answer `error` like any other storage-layer
+    // refusal, never escape as a throw.
+    const nowMs = Date.parse(opts.now);
+    const ttlMs = opts.ttlSeconds * 1000;
+    if (!Number.isFinite(nowMs) || !Number.isFinite(ttlMs)) return { ok: false, reason: "error" };
+    const now = isoInstant(nowMs);
+    const expiresAt = isoInstant(nowMs + ttlMs);
     const written = await db
       .prepare(ACQUIRE_SQL)
       .bind(
@@ -185,17 +170,4 @@ export async function releaseInflight(
     .prepare(RELEASE_SQL)
     .bind(key.installation_id, key.owner, key.repo, key.pr_number, attemptId)
     .run();
-}
-
-/** Diagnostics only — never an admission decision (that is `ACQUIRE_SQL`). */
-export async function countInflight(
-  db: D1Like,
-  now: string,
-): Promise<{ total: number; byWorkspace: number }> {
-  const instant = isoInstant(Date.parse(now));
-  const row = await db
-    .prepare(COUNT_SQL)
-    .bind(instant, instant)
-    .first<{ total: number; by_workspace: number }>();
-  return { total: Number(row?.total ?? 0), byWorkspace: Number(row?.by_workspace ?? 0) };
 }

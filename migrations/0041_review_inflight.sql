@@ -20,9 +20,24 @@
 -- TTL (spec §1.5): expired rows are not counted toward the caps and are
 -- replaced in place by the next acquire.
 --
--- Indexes: `review_inflight_workspace` serves the workspace-cap count (and the
--- diagnostics read); `review_inflight_expiry` serves the system-cap count and
--- any expiry sweep. Both counts filter on `expires_at > now`.
+-- Timestamp contract: `acquired_at` / `expires_at` are TEXT in the ISO-8601
+-- UTC millisecond form written by `new Date(ms).toISOString()`
+-- (`YYYY-MM-DDTHH:MM:SS.sssZ`) — the ONE form the `expires_at > ?` comparisons
+-- order correctly as text. A producer writing any other form (epoch, second
+-- precision, local offset) silently corrupts both cap counts.
+--
+-- Retention: there is none yet. A row is deleted only by its own attempt's
+-- release, so an attempt that dies without releasing (hard timeout, eviction)
+-- leaves one expired row behind per distinct reviewed PR, and those rows
+-- accumulate indefinitely. The sweep is read-only by design (it never mutates
+-- this table), so reclaiming them needs a future writer — a cron prune or an
+-- opportunistic `DELETE ... WHERE expires_at <= ?` on the acquire path. Until
+-- then the growth is storage only: both counts filter on `expires_at > now`
+-- and the expiry index serves that range scan.
+--
+-- Indexes: `review_inflight_workspace` serves the workspace-cap count (and any
+-- future diagnostics read); `review_inflight_expiry` serves the system-cap
+-- count and any expiry prune. Both counts filter on `expires_at > now`.
 --
 -- Append-only on the production DB: creates one table and two indexes, touches
 -- no existing table. Forward-only (SQLite has no down).
