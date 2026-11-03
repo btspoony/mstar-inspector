@@ -38,13 +38,18 @@ into an artifact.
 - Keep one declared vocabulary in code (`IMAGE_INPUT_FAMILIES`) and derive both the matchers
   and the printed instruction from it. Prose copies in `AGENTS.md` and `docs/deploy.md` are
   inputs to a parity test, not independent sources of truth.
-- Derive the build-definition path from `wrangler.jsonc` (`containers[].images.sandbox.dockerfile`)
-  instead of hardcoding it; fail closed when the config declares none.
+- Derive the build-definition path(s) from `wrangler.jsonc`
+  (`containers[].images.sandbox.dockerfile`) instead of hardcoding them; fail closed when the
+  config declares none.
 - Treat the build context as an input: the root `.dockerignore` decides what reaches the image.
   For the container config itself, compare the parsed `containers[].images` block (dockerfile,
   build context, image entries) between base and head rather than treating the whole
   `wrangler.jsonc` file as an input path, so an unrelated var, cron or queue edit does not force
   an image rebuild.
+- Read EVERY container block, not just the top-level one: a named environment does not inherit
+  resource keys, so `env.production` declares its own container with its own `dockerfile` and
+  `build_context`. Diff each declared Dockerfile and accept a marker in either, or a production-only
+  repoint ships unguarded.
 - Prove completeness from the artifact, not from memory: parse every `COPY` source in the
   Dockerfile (skipping `COPY --from=`) and require each to match a family. A new `COPY` line
   must either be covered or fail the test.
@@ -81,7 +86,8 @@ A gate script exposes three pure decisions and a CLI:
 ```ts
 touchesImageInput(paths: string[]): boolean
 touchesRebuildMarker(dockerfileDiff: string): boolean
-evaluateImageGate(paths: string[], dockerfileDiff: string): { ok: true } | { ok: false; reason: string }
+evaluateImageGate(paths: string[], dockerfileDiff: string, containersChanged: boolean):
+  { ok: true } | { ok: false; reason: "image-input-without-marker" }
 ```
 
 The CLI takes `--base <sha>`, reads changed paths and the Dockerfile diff, and exits non-zero

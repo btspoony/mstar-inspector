@@ -21,7 +21,7 @@ import {
   familyPattern,
   IMAGE_INPUT_FAMILIES,
   IMAGE_INPUT_PATTERNS,
-  readDockerfilePath,
+  readDockerfilePaths,
   touchesImageInput,
   touchesRebuildMarker,
 } from "./check-image-inputs";
@@ -95,22 +95,39 @@ describe("image input vocabulary parity", () => {
     expect(uncovered).toEqual([]);
   });
 
-  test("the CLI's Dockerfile path is the one wrangler.jsonc builds, and it exists", () => {
-    const configured = readDockerfilePath(readFileSync(join(REPO_ROOT, "wrangler.jsonc"), "utf8"));
-    expect(configured).toBe("sandbox-image/Dockerfile");
+  test("the CLI's Dockerfile paths are the ones wrangler.jsonc builds, and they exist", () => {
+    // Both blocks declare the same file here, so the gate diffs it once — but
+    // it is derived from the config, never hardcoded.
+    const configured = readDockerfilePaths(readFileSync(join(REPO_ROOT, "wrangler.jsonc"), "utf8"));
+    expect(configured).toEqual(["sandbox-image/Dockerfile"]);
     // Both wrangler configs agree, so the gate never diffs a file a deploy ignores.
-    expect(readDockerfilePath(readFileSync(join(REPO_ROOT, "wrangler.smoke.jsonc"), "utf8"))).toBe(configured);
-    expect(readFileSync(join(REPO_ROOT, configured!), "utf8")).toContain("rebuild:");
+    expect(readDockerfilePaths(readFileSync(join(REPO_ROOT, "wrangler.smoke.jsonc"), "utf8"))).toEqual(
+      configured,
+    );
+    expect(readFileSync(join(REPO_ROOT, configured[0]!), "utf8")).toContain("rebuild:");
   });
 
-  test("a config without a container image answers undefined instead of a guessed path", () => {
-    expect(readDockerfilePath("{}")).toBeUndefined();
-    expect(readDockerfilePath("not json")).toBeUndefined();
-    expect(readDockerfilePath('{"containers":[{"images":{}}]}')).toBeUndefined();
+  test("a config without a container image answers no paths instead of a guessed one", () => {
+    expect(readDockerfilePaths("{}")).toEqual([]);
+    expect(readDockerfilePaths("not json")).toEqual([]);
+    expect(readDockerfilePaths('{"containers":[{"images":{}}]}')).toEqual([]);
     // JSONC comments are stripped before the parse.
     expect(
-      readDockerfilePath('{\n // the image\n "containers": [{"images": {"sandbox": {"dockerfile": "./a/Df"}}}]}'),
-    ).toBe("a/Df");
+      readDockerfilePaths('{\n // the image\n "containers": [{"images": {"sandbox": {"dockerfile": "./a/Df"}}}]}'),
+    ).toEqual(["a/Df"]);
+    // A named environment does not inherit `containers` (wrangler), so
+    // `env.production` declares its own Dockerfile path — the gate must read it.
+    expect(
+      readDockerfilePaths(
+        '{"env":{"production":{"containers":[{"images":{"sandbox":{"dockerfile":"./prod/Df"}}}]}}}',
+      ),
+    ).toEqual(["prod/Df"]);
+    expect(
+      readDockerfilePaths(
+        '{"containers":[{"images":{"sandbox":{"dockerfile":"./stage/Df"}}}],' +
+          '"env":{"production":{"containers":[{"images":{"sandbox":{"dockerfile":"./prod/Df"}}}]}}}',
+      ),
+    ).toEqual(["stage/Df", "prod/Df"]);
   });
 });
 
@@ -193,6 +210,32 @@ describe("containerSignature", () => {
     expect(containerSignature('{ "vars": {} }')).toBe(containerSignature("{}"));
     expect(containerSignature("not json")).toBeUndefined();
     expect(containerSignature('{"containers": "no"}')).toBeUndefined();
+  });
+
+  test("the env.production container block counts, not just the top level", () => {
+    // A named environment does not inherit `containers`, so a prod deploy
+    // builds from its own block: every image-deciding edit there is a change.
+    const production = (container: string) =>
+      `{\n  "env": { "production": { "containers": [${container}] } }\n}\n`;
+    const baseSignature = containerSignature(production(BLOCK));
+    expect(baseSignature).toBeDefined();
+    expect(containerSignature("{}")).not.toBe(baseSignature);
+    for (const changed of [
+      BLOCK.replace('"./sandbox-image/Dockerfile"', '"./sandbox-image/Other.Dockerfile"'),
+      BLOCK.replace('"build_context": "."', '"build_context": "./sandbox-image"'),
+      BLOCK.replace('"sandbox":', '"sandbox-v2":'),
+      BLOCK.replace('"name": "c"', '"name": "c2"'),
+    ]) {
+      expect(containerSignature(production(changed)), changed).not.toBe(baseSignature);
+    }
+    // A production vars-only edit is not an image change.
+    expect(
+      containerSignature(
+        `{\n  "env": { "production": { "vars": { "DEPLOYMENT_MODE": "saas" }, "containers": [${BLOCK}] } }\n}\n`,
+      ),
+    ).toBe(baseSignature);
+    // A production block that is not an array fails closed like a top-level one.
+    expect(containerSignature('{"env": {"production": {"containers": "no"}}}')).toBeUndefined();
   });
 });
 
@@ -396,6 +439,37 @@ describe("image gate CLI", () => {
       );
       git("add", "-A");
       git("commit", "-qm", "marker");
+      expect(runGate(dir, base, script)).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an env.production-only image edit is gated against the production Dockerfile", () => {
+    const { dir, git } = tempRepo();
+    try {
+      // Production builds from its own container block and its own Dockerfile;
+      // the staging file is not the one its marker would live in.
+      const config = (buildContext: string) =>
+        '{\n  "containers": [{ "images": { "sandbox": { "dockerfile": "./sandbox-image/Dockerfile" } } }],\n' +
+        `  "env": { "production": { "containers": [{ "name": "prod", "images": { "sandbox": { "dockerfile": "./sandbox-image/Prod.Dockerfile", "build_context": "${buildContext}" } } }] } }\n}\n`;
+      write(dir, "sandbox-image/Dockerfile", "# rebuild: staging\nFROM scratch\n");
+      write(dir, "sandbox-image/Prod.Dockerfile", "# rebuild: production\nFROM scratch\n");
+      write(dir, "wrangler.jsonc", config("."));
+      git("add", "-A");
+      git("commit", "-qm", "config + both images");
+      const base = git("rev-parse", "HEAD");
+
+      // No copied path changed: the container signature is the only signal.
+      write(dir, "wrangler.jsonc", config("./sandbox-image"));
+      git("add", "-A");
+      git("commit", "-qm", "repoint only the production build context");
+      expect(runGate(dir, base, script)).toBe(1);
+
+      // The marker belongs in the PRODUCTION Dockerfile; staging's is not read.
+      write(dir, "sandbox-image/Prod.Dockerfile", "# rebuild: production\n# rebuild: prod context\nFROM scratch\n");
+      git("add", "-A");
+      git("commit", "-qm", "production marker");
       expect(runGate(dir, base, script)).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
