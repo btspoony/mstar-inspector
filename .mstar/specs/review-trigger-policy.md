@@ -36,6 +36,7 @@ The comment trigger is a **bare mention**: no slash command, no magic wording. `
 | `pull_request.reopened` | ignore | enqueue | ignore |
 | other `pull_request` actions | ignore | ignore | ignore |
 | any `pull_request` action whose PR author login ends in `[bot]` (case-insensitive; `dependabot[bot]`, `github-actions[bot]`, another App's `<slug>[bot]`) | ignore | ignore | ignore |
+| any `pull_request` action whose payload carries no author login | ignore | ignore | ignore |
 | `issue_comment.created` (allowed actor, bot mention, on a PR) | enqueue | enqueue | enqueue |
 | `issue_comment.created` (disallowed actor / no mention / not a PR / bot sender / PR opened by a `[bot]` account) | ignore | ignore | ignore |
 

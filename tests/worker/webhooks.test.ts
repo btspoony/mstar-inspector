@@ -14,6 +14,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
 import {
+  BOT_PR_REASON,
   classifyEvent,
   classifyWebhook,
   payloadMentionsALogin,
@@ -47,7 +48,7 @@ function pullRequestBody(action: string, overrides: Record<string, unknown> = {}
     action,
     number: 42,
     installation: { id: 123 },
-    pull_request: { number: 42, head: { sha: HEAD_SHA } },
+    pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" } },
     repository: { name: "test-repo", owner: { login: "test-owner" } },
     ...overrides,
   });
@@ -274,8 +275,21 @@ describe("classifyEvent — pull_request whitelist", () => {
           pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login } },
         }),
       );
-      expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+      expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
     }
+  });
+
+  test("pull_request without an author login is ignored rather than reviewed", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("opened", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA } },
+      }),
+    );
+    expect(outcome).toEqual({
+      kind: "ignore",
+      reason: "pull request payload carried no author login",
+    });
   });
 
   test("pull_request with missing required fields is rejected with 400", () => {
@@ -317,8 +331,10 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
     }
   }
 
-  // §2.1 bot-author row: every action is ignored in EVERY mode, and the bot
-  // guard outranks the mode gate (`open` × `opened` would otherwise enqueue).
+  // §2.1 bot-author row: every whitelisted action is ignored in EVERY mode,
+  // and the bot guard outranks the mode gate (`open` × `opened` would
+  // otherwise enqueue). A non-whitelisted action keeps the action reason
+  // because the whitelist runs first.
   for (const mode of MODES) {
     for (const action of PULL_REQUEST_ACTIONS) {
       test(`${mode} × pull_request.${action} by a [bot] author → ignore`, () => {
@@ -330,7 +346,7 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
           undefined,
           { mode, appSlug: APP_SLUG },
         );
-        expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+        expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
       });
     }
   }
@@ -341,6 +357,17 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
         mode,
         appSlug: APP_SLUG,
       });
+      expect(outcome).toEqual({ kind: "ignore", reason: "pull_request action closed is not whitelisted" });
+    });
+    test(`${mode} × pull_request.closed by a [bot] author → the action reason (whitelist runs first)`, () => {
+      const outcome = classifyEvent(
+        "pull_request",
+        pullRequestBody("closed", {
+          pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+        }),
+        undefined,
+        { mode, appSlug: APP_SLUG },
+      );
       expect(outcome).toEqual({ kind: "ignore", reason: "pull_request action closed is not whitelisted" });
     });
     test(`${mode} × malformed payload still rejects 400 (reject set is mode-invariant)`, () => {
@@ -471,7 +498,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       undefined,
       EVERY_PUSH,
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
   });
 
   test("bot-authored PR outranks the mention grammar, so an unsynced App gets no mention-miss reason", () => {
@@ -488,7 +515,21 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       undefined,
       { mode: "every_push", appSlug: "" },
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
+  });
+
+  test("human-authored comment with a missing required field still rejects 400", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ installation: null }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "issue_comment payload missing required fields",
+    });
   });
 
   test("bot-authored PR outranks the missing-required-fields reject on the comment face", () => {
@@ -506,7 +547,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       undefined,
       EVERY_PUSH,
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
   });
 
   test("bot-authored PR outranks the actor allowlist, so no actor_not_allowed warn fires", () => {
@@ -524,7 +565,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       log,
       EVERY_PUSH,
     );
-    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+    expect(outcome).toEqual({ kind: "ignore", reason: BOT_PR_REASON });
     expect(log.warn).not.toHaveBeenCalled();
   });
 

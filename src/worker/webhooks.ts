@@ -198,7 +198,11 @@ function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
  */
 const BOT_LOGIN = /\[bot\]$/i;
 
-const BOT_PR_REASON = "PR authored by a bot account";
+export const BOT_PR_REASON = "PR authored by a bot account";
+
+/** GitHub always sends `pull_request.user`; without it we cannot prove the
+ * author is human, so the delivery is ignored rather than reviewed. */
+const MISSING_AUTHOR_REASON = "pull request payload carried no author login";
 
 /** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
 export const WEBHOOK_BODY_LIMIT = 1_000_000;
@@ -576,7 +580,11 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
   }
-  if (BOT_LOGIN.test(pull_request?.user?.login ?? "")) {
+  const prAuthor = pull_request?.user?.login;
+  if (!prAuthor) {
+    return { kind: "ignore", reason: MISSING_AUTHOR_REASON };
+  }
+  if (BOT_LOGIN.test(prAuthor)) {
     return { kind: "ignore", reason: BOT_PR_REASON };
   }
   // The install's own account wins: the payload states it, whereas the owner

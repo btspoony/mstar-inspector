@@ -253,7 +253,7 @@ const PR_PAYLOAD = {
   installation: { id: 123 },
   // `state` is what the PR ledger (0039) requires of the payload: a
   // production `pull_request` delivery always carries it.
-  pull_request: { number: 42, state: "open", head: { sha: "abc123" } },
+  pull_request: { number: 42, state: "open", head: { sha: "abc123" }, user: { login: "alice" } },
   repository: { name: "test-repo", owner: { login: "test-owner" } },
 };
 
@@ -1009,7 +1009,7 @@ describe("installations upsert wiring", () => {
 
     // Different PR/sha → a different idempotency key, so delivery 2 enqueues
     // (and therefore reaches the touch) instead of being KV-skipped.
-    const body2 = JSON.stringify({ ...PR_PAYLOAD, number: 43, pull_request: { number: 43, head: { sha: "def456" } } });
+    const body2 = JSON.stringify({ ...PR_PAYLOAD, number: 43, pull_request: { number: 43, head: { sha: "def456" }, user: { login: "alice" } } });
     const res2 = await postWebhook(
       "/webhook/default/app-x",
       body2,
@@ -1047,7 +1047,7 @@ describe("installations upsert wiring", () => {
     const body = JSON.stringify({
       ...PR_PAYLOAD,
       number: 43,
-      pull_request: { number: 43, state: "open", head: { sha: "def456" } },
+      pull_request: { number: 43, state: "open", head: { sha: "def456" }, user: { login: "alice" } },
       installation: { id: 123, account: { login: "octo-org" } },
     });
     const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
