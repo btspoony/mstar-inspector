@@ -1202,6 +1202,44 @@ describe("installation event path", () => {
       { event_name: "installation", outcome: "rejected", status_code: 400 },
     ]);
   });
+
+  test("upsert failure → structured warn, still 200 accepted, zero enqueue (fire-and-forget bookkeeping)", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // D1 double that fails ONLY the app_installations upsert statement —
+    // slug lookup / decrypt / delivery record stay healthy.
+    const brokenDb = {
+      raw: db.raw,
+      batch: db.batch.bind(db),
+      prepare(query: string) {
+        if (query.includes("INSERT INTO app_installations")) {
+          throw new Error("d1 unavailable (test injection)");
+        }
+        return db.prepare(query);
+      },
+    } as unknown as ReturnType<typeof createTestD1>;
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(brokenDb, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(INSTALL_PAYLOAD);
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body, "installation"), env);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0); // an install is never review work
+    const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("installation_upsert_failed");
+    // The failed bookkeeping write left no row.
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number }).n).toBe(0);
+  });
 });
 
 describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => {
