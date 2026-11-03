@@ -498,17 +498,19 @@ export async function readCredentialStdin(
 }
 
 /**
- * Write the recheck round's status document to RECHECK_STATUS_PATH.
+ * Write the recheck round's status document to `path` (production:
+ * RECHECK_STATUS_PATH). The target is a parameter only so a test can write
+ * into its own temp dir instead of the one path a real runner uses.
  * Best-effort by contract: the status is attribution evidence, so a failure
  * to write it must never turn a completed review into a failed run — it is
  * logged and swallowed. Exported so the write path is testable without a
  * container.
  */
-export function writeRecheckStatus(status: RecheckStatus): void {
+export function writeRecheckStatus(status: RecheckStatus, path: string = RECHECK_STATUS_PATH): void {
   try {
-    writeFileSync(RECHECK_STATUS_PATH, JSON.stringify(status));
+    writeFileSync(path, JSON.stringify(status));
   } catch (error) {
-    console.error(`review: cannot write recheck status ${RECHECK_STATUS_PATH}: ${(error as Error).message}`);
+    console.error(`review: cannot write recheck status ${path}: ${(error as Error).message}`);
   }
 }
 
@@ -523,6 +525,7 @@ export async function main(
   argv: string[],
   runtime: AgentRuntime = ompAgentRuntime,
   readStdin: () => Promise<string> = readCredentialStdin,
+  recheckStatusPath: string = RECHECK_STATUS_PATH,
 ): Promise<number> {
   let level: string;
   let inputPath: string;
@@ -642,7 +645,7 @@ export async function main(
           // round's truth: record the write failure as the status the Worker
           // reads, or D1 would keep a round that published nothing as clean.
           if (recheckStatus !== undefined) {
-            writeRecheckStatus({ ...recheckStatus, outcome: "failed", reason: "write-failed" });
+            writeRecheckStatus({ ...recheckStatus, outcome: "failed", reason: "write-failed" }, recheckStatusPath);
           }
           return 1;
         }
@@ -653,7 +656,7 @@ export async function main(
       // deliver. Best-effort: a status write failure is noise, never a failed
       // review.
       if (recheckOutPath !== undefined && recheckStatus !== undefined) {
-        writeRecheckStatus(recheckStatus);
+        writeRecheckStatus(recheckStatus, recheckStatusPath);
       }
       // stdout carries ONLY the envelope JSON (plan Module contracts).
       console.log(JSON.stringify(envelope));

@@ -48,8 +48,9 @@
  *     `recheck` key and writes no file.
  */
 
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -59,7 +60,7 @@ import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, Rev
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { capabilityHostsYaml } from "../../packages/runner/src/models-synthesis";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
-import { RECHECK_STATUS_PATH, type RecheckStatus } from "../../packages/shared/src/recheck-wire";
+import type { RecheckStatus } from "../../packages/shared/src/recheck-wire";
 import { createInMemoryAuthStorage, main, readCredentialStdin, writeRecheckStatus } from "../../packages/runner/src/runner";
 import { sk } from "../helpers/fake-secrets";
 
@@ -158,13 +159,25 @@ function writeInput(json: unknown): string {
   return path;
 }
 
+/**
+ * A fresh status path for one `main()` call. Production passes none and lands
+ * on the fixed `/tmp` path, so the test double must hand each run its own file
+ * — a real runner writing that path must never contend with these tests.
+ */
+function statusPathForRun(): string {
+  const dir = mkdtempSync(join(tmpdir(), "recheck-status-"));
+  statusDirs.push(dir);
+  return join(dir, "status.json");
+}
+
 /** Capture console.log / console.error while a runner main() call runs. */
 async function runCli(
   argv: string[],
   payload = encodeCredentialPayload({}),
-): Promise<{ code: number; stdout: string; stderr: string }> {
+): Promise<{ code: number; stdout: string; stderr: string; statusPath: string }> {
   const logs: string[] = [];
   const errors: string[] = [];
+  const statusPath = statusPathForRun();
   const originalLog = console.log;
   const originalError = console.error;
   console.log = (...args: unknown[]) => logs.push(args.join(" "));
@@ -172,8 +185,8 @@ async function runCli(
   try {
     // The credential payload rides STDIN in production; the injected reader is
     // the same seam the runtime double uses.
-    const code = await main(argv, fakeRuntime, async () => payload);
-    return { code, stdout: logs.join("\n"), stderr: errors.join("\n") };
+    const code = await main(argv, fakeRuntime, async () => payload, statusPath);
+    return { code, stdout: logs.join("\n"), stderr: errors.join("\n"), statusPath };
   } finally {
     console.log = originalLog;
     console.error = originalError;
@@ -301,18 +314,10 @@ function cleanupAgentDirs(): void {
 }
 
 /**
- * The fixed status path is the production one — the runner has no other — so
- * its bytes at load are the state every test must give back. `null` means the
- * path was absent, and only a file/dir this test created is then removed.
+ * Per-CLI-call temp dirs holding the recheck status file. Every `main()` call
+ * gets its own path, so no test ever writes the production fixed path.
  */
-const STATUS_PATH_PRIOR = existsSync(RECHECK_STATUS_PATH) ? readFileSync(RECHECK_STATUS_PATH) : null;
-
-/** Remove the fixed status path without a recursive delete of someone else's tree. */
-function clearStatusPath(): void {
-  if (!existsSync(RECHECK_STATUS_PATH)) return;
-  if (statSync(RECHECK_STATUS_PATH).isDirectory()) rmdirSync(RECHECK_STATUS_PATH);
-  else unlinkSync(RECHECK_STATUS_PATH);
-}
+const statusDirs: string[] = [];
 
 afterEach(() => {
   fakeEnvelope = ENVELOPE;
@@ -325,12 +330,12 @@ afterEach(() => {
   inFlight = undefined;
   for (const copy of preserved) rmSync(copy.parent, { recursive: true, force: true });
   preserved.length = 0;
+  for (const dir of statusDirs) rmSync(dir, { recursive: true, force: true });
+  statusDirs.length = 0;
   delete process.env.OMP_REVIEW_MODEL;
   for (const name of Object.keys(process.env)) {
     if (name.startsWith("MSTAR_POOL_")) delete process.env[name];
   }
-  if (STATUS_PATH_PRIOR === null) clearStatusPath();
-  else writeFileSync(RECHECK_STATUS_PATH, STATUS_PATH_PRIOR);
 });
 
 /** A shape-valid recheck INPUT document (the runner guards shape only). */
@@ -689,13 +694,13 @@ describe("runner entry — --recheck-out channel", () => {
     const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
     const outPath = join(outDir, "recheck.json");
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
-    const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+    const { code, stdout, statusPath } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
 
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
     // No document exists, yet the round is attributable in D1.
     expect(existsSync(outPath)).toBe(false);
-    expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual(fakeRecheckStatus);
+    expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual(fakeRecheckStatus);
   });
 
   test("the written status file is the seat's status, field for field", async () => {
@@ -716,10 +721,10 @@ describe("runner entry — --recheck-out channel", () => {
     const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
     const outPath = join(outDir, "recheck.json");
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
-    const { code } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+    const { code, statusPath } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
 
     expect(code).toBe(0);
-    expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual(fakeRecheckStatus);
+    expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual(fakeRecheckStatus);
   });
 
   test("document write failure → exit 1, no stdout, status records the write failure not the seat's ok", async () => {
@@ -741,7 +746,7 @@ describe("runner entry — --recheck-out channel", () => {
     const outPath = join(outDir, "recheck.json");
     mkdirSync(outPath);
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
-    const { code, stdout, stderr } = await runCli([
+    const { code, stdout, stderr, statusPath } = await runCli([
       "--level",
       "quick",
       "--input",
@@ -753,7 +758,7 @@ describe("runner entry — --recheck-out channel", () => {
     expect(code).toBe(1);
     expect(stdout).toBe("");
     expect(stderr).toContain("cannot write recheck output");
-    expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual({
+    expect(JSON.parse(readFileSync(statusPath, "utf8"))).toEqual({
       ...fakeRecheckStatus,
       outcome: "failed",
       reason: "write-failed",
@@ -761,10 +766,12 @@ describe("runner entry — --recheck-out channel", () => {
   });
 
   test("status write is best-effort: an unwritable status path never fails the run", () => {
-    // The real helper, no container: a directory at the fixed path makes the
+    // The real helper, no container: a directory at the target path makes the
     // write throw (EISDIR), which must be swallowed.
-    clearStatusPath();
-    mkdirSync(RECHECK_STATUS_PATH);
+    const dir = mkdtempSync(join(tmpdir(), "recheck-status-"));
+    statusDirs.push(dir);
+    const target = join(dir, "status.json");
+    mkdirSync(target);
     const original = console.error;
     const errors: string[] = [];
     console.error = (...args: unknown[]) => errors.push(args.join(" "));
@@ -778,13 +785,35 @@ describe("runner entry — --recheck-out channel", () => {
           rejected: 0,
           rejected_row_ids: [],
           error: null,
-        }),
+        }, target),
       ).not.toThrow();
       expect(errors.join("\n")).toContain("cannot write recheck status");
     } finally {
       console.error = original;
-      clearStatusPath();
     }
+  });
+
+  test("no target argument → RECHECK_STATUS_PATH, stated as its literal path", () => {
+    // Production callers pass no target; intercept the write so the assertion
+    // stays on the literal path without touching a real runner's file.
+    const targets: unknown[] = [];
+    const spy = spyOn(fs, "writeFileSync").mockImplementation(((...args: unknown[]) => {
+      targets.push(args[0]);
+    }) as never);
+    try {
+      writeRecheckStatus({
+        schema: "mstar.recheck-status/v1",
+        headSha: RECHECK_INPUT_DOC.headSha,
+        outcome: "skipped",
+        reason: "budget",
+        rejected: 0,
+        rejected_row_ids: [],
+        error: null,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(targets).toEqual(["/tmp/mstar-recheck-status.json"]);
   });
 
   test("legacy input (no recheck field) → runtime input carries no recheck key, no file written", async () => {
