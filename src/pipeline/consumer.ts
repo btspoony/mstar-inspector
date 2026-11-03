@@ -541,11 +541,20 @@ function handleGuardHeld(
   // is the failure event, not each refused attempt. Best-effort: a warn only.
   //
   // `pr-held` is silent only while the live review covers THIS commit: a
-  // duplicate of the same sha is normal traffic, and a comment trigger (null
-  // payload sha) cannot prove otherwise. A DIFFERENT sha is a commit the live
-  // review will never cover, so it takes the drop-record branch below.
+  // duplicate of the same sha is normal traffic, and an unresolved identity on
+  // either side proves nothing — a null payload sha (comment trigger) and a
+  // held row's `""` (that same convention, persisted) both mean "no commit
+  // identity recorded", NOT "a different commit". Only two non-empty shas that
+  // differ name a commit the live review will never cover, so only that takes
+  // the drop-record branch below.
   const payloadSha = message.body.head_sha;
-  if (admission.reason === "pr-held" && (payloadSha === null || payloadSha === heldHeadSha)) return;
+  const heldSha = heldHeadSha ?? "";
+  if (
+    admission.reason === "pr-held" &&
+    (payloadSha === null || payloadSha === "" || heldSha === "" || payloadSha === heldSha)
+  ) {
+    return;
+  }
   // Convention for a job that never resolved a sha (comment trigger —
   // `head_sha` is null in the payload): the row's `head_sha` is `""` (the
   // 0010 column allows it; only `reviews` forbids it), and the PR identity
@@ -555,11 +564,10 @@ function handleGuardHeld(
   const identity = `${message.body.owner}/${message.body.repo}#${message.body.pr_number}`;
   // A shifted-sha drop names the sha the live review holds, so an operator can
   // see which commit was skipped rather than guessing from the refusal code.
+  // Reaching here on `pr-held` means both shas are non-empty and differ.
   const heldNote =
     admission.reason === "pr-held"
-      ? ` — the in-flight review holds head_sha ${
-          heldHeadSha === "" || heldHeadSha === null ? "unresolved (comment trigger)" : heldHeadSha
-        }, so this commit was never reviewed`
+      ? ` — the in-flight review holds head_sha ${heldSha}, so this commit was never reviewed`
       : "";
   return deps.failureStore
     .record({

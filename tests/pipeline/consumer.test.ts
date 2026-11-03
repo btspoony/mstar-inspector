@@ -2132,6 +2132,31 @@ describe("createReviewConsumer", () => {
     expect(dropped).toContain(SHA);
   });
 
+  test("the terminal drop row needs two non-empty, different shas (round-11)", async () => {
+    // A held row's `""` is the same "no commit identity recorded" convention as
+    // a null payload sha (comment trigger) — never evidence of a DIFFERENT
+    // commit, so it must not manufacture a "commit never reviewed" row.
+    const newer = "2222222222222222222222222222222222222222";
+    for (const { held, payload, rows } of [
+      { held: "", payload: newer, rows: 0 },
+      { held: SHA, payload: SHA, rows: 0 },
+      { held: SHA, payload: newer, rows: 1 },
+      { held: SHA, payload: null, rows: 0 },
+    ] as const) {
+      reset();
+      messageAttempts = 4; // final delivery: the job is dropped here
+      const db = await createSeededTestD1();
+      await seedInflight(db, { headSha: held });
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(makePayload({ head_sha: payload })));
+
+      expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+      expect(failureRows(db)).toHaveLength(rows);
+      if (rows === 1) expect(failureRows(db)[0]).toMatchObject({ head_sha: newer });
+    }
+  });
+
   test("a comment-triggered delivery held by a live review stays silent (no sha to compare)", async () => {
     reset();
     messageAttempts = 4;
