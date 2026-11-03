@@ -309,8 +309,8 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     for (const [block, consumer] of [
       ["top level (staging)", asArray(asObject(staging.queues).consumers)[0]],
       ["env.production", asArray(asObject(production.queues).consumers)[0]],
-    ] as const) {
-      expect(consumer, `wrangler.jsonc: ${block} consumer entry is missing`).toBeDefined();
+    ] as [string, Json | undefined][]) {
+      if (!consumer) throw new Error(`wrangler.jsonc: ${block} consumer entry is missing`);
       expect(consumer.max_concurrency, `wrangler.jsonc: ${block} max_concurrency ceiling`).toBe(64);
       expect(consumer.max_batch_size, `wrangler.jsonc: ${block} max_batch_size`).toBe(1);
     }
