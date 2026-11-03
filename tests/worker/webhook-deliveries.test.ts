@@ -727,4 +727,10 @@ describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, Q
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0)).toBe("paused");
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1)).toBe("ok");
   });
+
+  // An install delivery is neither review work nor paused: it records the
+  // account login, so the review switch must not colour its outcome.
+  test.each([0, 1])("maps installation → ok regardless of the review switch (reviewEnabled=%i)", (reviewEnabled) => {
+    expect(deliveryOutcomeFromWebhook({ kind: "installation" }, reviewEnabled)).toBe("ok");
+  });
 });

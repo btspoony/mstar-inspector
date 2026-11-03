@@ -880,7 +880,7 @@ describe("tenant attribution on the webhook read face", () => {
 });
 
 describe("installations upsert wiring", () => {
-  test("per-App webhook with installation_id → app_installations row INSERTED (seen_at set, bare login)", async () => {
+  test("per-App webhook with installation_id → app_installations row INSERTED (seen_at set, login from the delivery)", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -902,11 +902,11 @@ describe("installations upsert wiring", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.app_id).toBe(appRow.id);
     expect(rows[0]!.installation_id).toBe(123);
-    expect(rows[0]!.account_login).toBeNull(); // the classified payload carries no login
+    expect(rows[0]!.account_login).toBe("test-owner"); // the delivery's repository owner = installing account
     expect(typeof rows[0]!.seen_at).toBe("string");
   });
 
-  test("second delivery touches the SAME row — seen_at refreshed, stored login preserved (COALESCE bare touch)", async () => {
+  test("second delivery touches the SAME row — seen_at refreshed, login rewritten from the delivery", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -919,8 +919,8 @@ describe("installations upsert wiring", () => {
       { "x-hub-signature-256": await signatureFor("secret-x", body1), "x-github-event": "pull_request" },
       env,
     );
-    // Backdate + stamp a login: the second delivery must UPDATE this row
-    // (seen_at refresh) without wiping the stored login (bare touch).
+    // Backdate + stamp a stale login: the second delivery must UPDATE this row
+    // (seen_at refresh) and rewrite the login from its own repository owner.
     db.raw
       .prepare("UPDATE app_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
       .run();
@@ -942,7 +942,7 @@ describe("installations upsert wiring", () => {
       .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
     expect(rows).toHaveLength(1); // upsert — no duplicate row
     expect(rows[0]!.installation_id).toBe(123);
-    expect(rows[0]!.account_login).toBe("alice"); // preserved by the COALESCE bare touch
+    expect(rows[0]!.account_login).toBe("test-owner"); // refreshed from the delivery's owner
     expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // refreshed by the touch
   });
 
@@ -957,8 +957,8 @@ describe("installations upsert wiring", () => {
     const headers = { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" };
     const first = await postWebhook("/webhook/default/app-x", body, headers, env);
     expect(first.status).toBe(200);
-    // Backdate + stamp a login: the duplicate delivery must refresh seen_at
-    // WITHOUT wiping the stored login (bare touch).
+    // Backdate + stamp a stale login: the duplicate delivery must refresh
+    // seen_at and rewrite the login from its own repository owner.
     db.raw
       .prepare("UPDATE app_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
       .run();
@@ -978,8 +978,39 @@ describe("installations upsert wiring", () => {
       .query("SELECT installation_id, account_login, seen_at FROM app_installations")
       .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
     expect(rows).toHaveLength(1); // upsert — no duplicate row
-    expect(rows[0]!.account_login).toBe("alice"); // preserved by the COALESCE bare touch
+    expect(rows[0]!.account_login).toBe("test-owner"); // rewritten from the delivery's owner
     expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // refreshed despite the KV skip
+  });
+
+  test("a later delivery that omits the login preserves the stored one (COALESCE bare touch)", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+
+    // Delivery 1 carries the login (repository owner alice) — the row stores it.
+    const prBody = JSON.stringify({
+      ...PR_PAYLOAD,
+      repository: { name: "test-repo", owner: { login: "alice" } },
+    });
+    await postWebhook("/webhook/default/app-x", prBody, await sigHeaders("secret-x", prBody), env);
+    // Backdate so the next write is provable; the login is what must survive.
+    db.raw.prepare("UPDATE app_installations SET seen_at = '2000-01-01 00:00:00'").run();
+
+    // Delivery 2 is a bare touch: an install event with no `account`, so the
+    // classifier hands the route a null login and the store must keep alice.
+    const bareBody = JSON.stringify({ action: "created", installation: { id: 123 } });
+    const bare = await postWebhook("/webhook/default/app-x", bareBody, await sigHeaders("secret-x", bareBody, "installation"), env);
+
+    expect(bare.status).toBe(200);
+    expect(sent).toHaveLength(1); // the install delivery never enqueues
+    const rows = db.raw
+      .query("SELECT installation_id, account_login, seen_at FROM app_installations")
+      .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.installation_id).toBe(123);
+    expect(rows[0]!.account_login).toBe("alice"); // preserved — the bare touch carries no login
+    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // still refreshed
   });
 
   test("upsert failure → structured warn, enqueue still succeeds (fire-and-forget bookkeeping)", async () => {

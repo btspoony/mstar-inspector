@@ -267,7 +267,14 @@ export async function verifySignature(
 export type WebhookOutcome =
   | { kind: "reject"; status: 400 | 401 | 500; reason: string }
   | { kind: "ignore"; reason: string }
-  | { kind: "job"; payload: Omit<ReviewJobPayload, "appRef"> }
+  /**
+   * A review job. `installationAccount` is the repository owner's login —
+   * the installing account for every App-owned install — carried OUTSIDE
+   * `payload` so it never enters the queue message (the consumer contract
+   * `ReviewJobPayload` must not grow an account field) while the route can
+   * still record it on `app_installations`.
+   */
+  | { kind: "job"; payload: Omit<ReviewJobPayload, "appRef">; installationAccount: string }
   /**
    * An install delivery is not review work: it names the installation whose
    * `account_login` the route records, and never carries a queue payload.
@@ -506,6 +513,7 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
       action,
       triggered_by: "pull_request",
     },
+    installationAccount: owner,
   };
 }
 
@@ -573,6 +581,7 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
       action: "created",
       triggered_by: "issue_comment",
     },
+    installationAccount: owner,
   };
 }
 

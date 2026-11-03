@@ -459,15 +459,21 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     env: c.env,
     log: defaultLog,
   });
-  // Install bookkeeping: the classified job payload always
-  // carries installation_id, so touch `app_installations` AFTER the enqueue
-  // — fire-and-forget relative to it (the review path never waits on
+  // Install bookkeeping: every reviewed delivery refreshes the row's login
+  // from `outcome.installationAccount` — the installing account's login — so
+  // installs that predate this column fill in on their next delivery instead
+  // of waiting for another install event. The login rides beside `payload`,
+  // never inside it: the queue message above stays account-free. Fire-and-
+  // forget relative to the enqueue (the review path never waits on
   // bookkeeping) and best-effort: a failure logs a structured warn and the
-  // webhook still returns 200 (never blocks or fails the enqueue). The
-  // bare touch passes no account_login — the store's COALESCE preserves the
-  // stored login.
+  // webhook still returns 200. The store's COALESCE keeps a stored login
+  // when a touch arrives without one.
   try {
-    await appsStore.upsertInstallation({ appId: row.id, installationId: outcome.payload.installation_id });
+    await appsStore.upsertInstallation({
+      appId: row.id,
+      installationId: outcome.payload.installation_id,
+      accountLogin: outcome.installationAccount,
+    });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     webhookWarn("installation_upsert_failed", detail, "installation upsert failed — enqueue unaffected");

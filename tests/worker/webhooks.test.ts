@@ -341,6 +341,8 @@ describe("classifyEvent — every_push default reproduces current classification
       });
       expect(outcome).toEqual({
         kind: "job",
+        // The install account rides beside the payload, never inside it.
+        installationAccount: "test-owner",
         payload: {
           installation_id: 123,
           owner: "test-owner",
