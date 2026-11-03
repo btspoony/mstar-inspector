@@ -85,7 +85,8 @@ import {
   IDEM_ENQUEUED,
   IDEM_FAILED,
   IDEM_PAUSED,
-  isEnqueuedClaim,
+  IDEM_SUPERSEDED,
+  isReviewClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
@@ -2104,10 +2105,12 @@ async function kvDoneHit(
  *
  * `"1"` (queued) and `"done"` (reviewed by this consumer) are that proof;
  * `"dropped"` (the guard's terminal ack in handleGuardHeld), `"failed"` (the
- * final delivery is heading to the DLQ), `"paused"` (the App is paused) and
- * `"degraded"` (the run ended in a degraded notice) are NO proof — every one
- * names a commit that was never reviewed, so this delivery must review rather
- * than skip.
+ * final delivery is heading to the DLQ), `"paused"` (the App is paused),
+ * `"degraded"` (the run ended in a degraded notice) and `"superseded"` (this
+ * sha was itself replaced) are NO proof — every one names a commit that was
+ * never reviewed, so this delivery must review rather than skip. Deliberately
+ * narrower than the worker's pre-check predicate (`isEnqueuedClaim`), which
+ * does accept `superseded` to stop redelivering an obsolete commit.
  *
  * Fail-open: an absent ledger sha, an absent key or a KV fault all mean "no
  * proof" → review normally (a fault logs one warn line).
@@ -2130,7 +2133,7 @@ async function newerCommitHasJob(
       head_sha: headSha,
     });
     const claim = await deps.env.IDEMPOTENCY_KV.get(key);
-    return isEnqueuedClaim(claim);
+    return isReviewClaim(claim);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(fields, `supersede KV read failed — reviewing normally: ${detail}`);
@@ -2409,8 +2412,30 @@ async function processMessage(
       ) {
         deps.log.info(
           { ...baseFields, event: "review_superseded", reason: "superseded", superseded_by_head_at: ledgerHead.headAt },
-          `delivery superseded — the PR head has advanced to ${ledgerHead.headAt} (head_sha ${ledgerHead.headSha ?? "unknown"}), acking with zero side effects (no retry, no DLQ, no container)`,
+          `delivery superseded — the PR head has advanced to ${ledgerHead.headAt} (head_sha ${ledgerHead.headSha ?? "unknown"}), acking with no review side effects (no retry, no DLQ, no container)`,
         );
+        // A superseded sha is replaced, not merely unreviewed: the worker's
+        // pre-check must stop redelivering it. Best-effort — a KV fault only
+        // leaves the stale "1" and never changes this outcome.
+        try {
+          await deps.env.IDEMPOTENCY_KV.put(
+            idemKey({
+              installation_id: payload.installation_id,
+              owner: payload.owner,
+              repo: payload.repo,
+              pr_number: payload.pr_number,
+              head_sha: payloadHeadSha,
+            }),
+            IDEM_SUPERSEDED,
+            { expirationTtl: IDEMPOTENCY_SECONDS },
+          );
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(
+            { ...baseFields, event: "review_superseded" },
+            `superseded-claim KV write failed (a redelivery may review this obsolete commit): ${detail}`,
+          );
+        }
         return { kind: "superseded" };
       }
     }

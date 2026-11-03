@@ -11,7 +11,7 @@
  * those handlers consume.
  */
 import { describe, expect, test } from "bun:test";
-import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../../src/contracts/idem";
+import { idemKey, IDEMPOTENCY_SECONDS, isEnqueuedClaim, type IdempotencyKey } from "../../src/contracts/idem";
 
 const KEY: IdempotencyKey = {
   installation_id: 12345,
@@ -38,5 +38,16 @@ describe("contracts/idem", () => {
     expect(() => idemKey({ ...KEY, head_sha: null as unknown as string })).toThrow(
       /head_sha must be a non-empty string/,
     );
+  });
+
+  test("isEnqueuedClaim: queued, done and superseded skip a redelivery; every other state re-enqueues", () => {
+    // The worker's pre-check. `superseded` belongs on the skip side: a newer
+    // commit replaced this sha, so re-enqueueing would review an obsolete one.
+    for (const claim of ["1", "done", "superseded"] as const) {
+      expect(isEnqueuedClaim(claim)).toBe(true);
+    }
+    for (const claim of ["dropped", "failed", "paused", "degraded", null] as const) {
+      expect(isEnqueuedClaim(claim)).toBe(false);
+    }
   });
 });

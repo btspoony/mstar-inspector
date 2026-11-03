@@ -2238,6 +2238,13 @@ describe("createReviewConsumer", () => {
     expect(line!.fields.superseded_by_head_at).toBe(NEW_AT);
     // No sandbox id on the skip line — nothing was created.
     expect(line!.fields.sandbox_id).toBeUndefined();
+    // The ack stamps its own claim so the worker never re-enqueues a sha a
+    // newer commit already replaced.
+    expect(kvPuts).toContainEqual({
+      key: ENQUEUED_KEY(SHA),
+      value: "superseded",
+      options: { expirationTtl: IDEMPOTENCY_SECONDS },
+    });
   });
 
   test("a newer ledger commit with NO queued job is reviewed, not skipped (open mode / ignored delivery)", async () => {
@@ -2275,13 +2282,13 @@ describe("createReviewConsumer", () => {
     expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
   });
 
-  test("a newer commit whose job was dropped, failed, paused or degraded is reviewed, not skipped", async () => {
+  test("a newer commit whose job was dropped, failed, paused, degraded or superseded is reviewed, not skipped", async () => {
     // `dropped` (the guard's terminal ack), `failed` (the final delivery is
-    // heading to the DLQ), `paused` (the App is paused) and `degraded` (the
-    // run ended in a degraded notice) all name a commit that was never
-    // reviewed: the key is still there, but it no longer proves a review will
-    // ever happen.
-    for (const claim of ["dropped", "failed", "paused", "degraded"] as const) {
+    // heading to the DLQ), `paused` (the App is paused), `degraded` (the run
+    // ended in a degraded notice) and `superseded` (that newer commit was
+    // itself replaced) all name a commit that was never reviewed: the key is
+    // still there, but it no longer proves a review will ever happen.
+    for (const claim of ["dropped", "failed", "paused", "degraded", "superseded"] as const) {
       reset();
       runnerStdout = JSON.stringify(VALID_OUTPUT);
       const db = await createSeededTestD1();
@@ -2333,7 +2340,8 @@ describe("createReviewConsumer", () => {
     // Same commit on both sides: this delivery IS the newest one, so no stamp
     // ordering can make it a leftover — only the sha term holds it back. The
     // third pair (ledger newer) isolates exactly that term: the stamp test
-    // alone would skip it.
+    // alone would skip it. A queued claim for the ledger's own commit is
+    // seeded so the proof cannot be the term that saves it.
     for (const [ledgerAt, payloadAt] of [
       [OLD_AT, OLD_AT],
       [OLD_AT, NEW_AT],
@@ -2343,6 +2351,7 @@ describe("createReviewConsumer", () => {
       runnerStdout = JSON.stringify(VALID_OUTPUT);
       const db = await createSeededTestD1();
       await seedPrHead(db, { headSha: SHA, headAt: ledgerAt });
+      kvEntries.set(ENQUEUED_KEY(SHA), "1");
       const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
       await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: payloadAt })));
@@ -2355,11 +2364,13 @@ describe("createReviewConsumer", () => {
 
   test("a different sha at the ledger's own stamp is reviewed, not skipped (AC-3)", async () => {
     // `>` and not `>=`: a delivery stamped at the same instant as the ledger's
-    // head is not a leftover, so relaxing the comparison would lose it.
+    // head is not a leftover, so relaxing the comparison would lose it. The
+    // newer commit's own claim is seeded so only the stamp term holds it back.
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    kvEntries.set(ENQUEUED_KEY(NEW_SHA), "1");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: NEW_AT })));
@@ -2373,8 +2384,10 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The ledger's head is a different commit stamped BEFORE this delivery.
+    // The ledger's head is a different commit stamped BEFORE this delivery,
+    // and it owns a queued job: only the stamp ordering can save the delivery.
     await seedPrHead(db, { headSha: NEW_SHA, headAt: OLD_AT });
+    kvEntries.set(ENQUEUED_KEY(NEW_SHA), "1");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: NEW_AT })));

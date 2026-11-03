@@ -25,10 +25,13 @@ export const IDEMPOTENCY_SECONDS = 86400;
  *   message was acked with no review.
  * - `IDEM_DEGRADED` ("degraded") — the model output failed validation; the
  *   run ended in a degraded notice, never a review.
+ * - `IDEM_SUPERSEDED` ("superseded") — a newer commit overtook this one; the
+ *   delivery was acked without a review, and none is wanted for this sha.
  *
- * Only the first two prove the commit has a review that ran or will run; the
- * other four mean the commit was NOT reviewed, so a redelivery must enqueue
- * again rather than be skipped.
+ * Only the first two prove the commit has a review that ran or will run;
+ * `dropped` / `failed` / `paused` / `degraded` mean the commit was NOT
+ * reviewed, so a redelivery must enqueue again rather than be skipped.
+ * `superseded` is the third answer: not reviewed, but not wanted either.
  */
 export const IDEM_ENQUEUED = "1";
 export const IDEM_DONE = "done";
@@ -36,13 +39,23 @@ export const IDEM_DROPPED = "dropped";
 export const IDEM_FAILED = "failed";
 export const IDEM_PAUSED = "paused";
 export const IDEM_DEGRADED = "degraded";
+export const IDEM_SUPERSEDED = "superseded";
 
 /**
- * True only for the values that prove the commit's job is pending or already
- * reviewed. `dropped` / `failed` / `paused` / `degraded` / a miss all mean
- * "not reviewed".
+ * The worker's enqueue pre-check: true for every value that makes a
+ * redelivery pointless — queued, reviewed, or replaced by a newer commit;
+ * unlike `isReviewClaim` it accepts `superseded`.
  */
 export function isEnqueuedClaim(value: string | null): boolean {
+  return value === IDEM_ENQUEUED || value === IDEM_DONE || value === IDEM_SUPERSEDED;
+}
+
+/**
+ * The supersede proof: true only for a claim that a review of THIS sha is
+ * queued or completed; unlike `isEnqueuedClaim` it rejects `superseded`, since
+ * a replaced commit proves nothing about the newer one.
+ */
+export function isReviewClaim(value: string | null): boolean {
   return value === IDEM_ENQUEUED || value === IDEM_DONE;
 }
 

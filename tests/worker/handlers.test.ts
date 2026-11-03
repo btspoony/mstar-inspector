@@ -160,6 +160,27 @@ describe("handleReviewJob — a key that proves no review happened", () => {
   });
 });
 
+describe("handleReviewJob — a key that still covers the commit", () => {
+  test("done and superseded values skip the redelivery", async () => {
+    // `done` = this consumer already posted the review; `superseded` = a newer
+    // commit replaced this one, so re-enqueueing would review an obsolete sha.
+    const key = idemKey({ installation_id: 12345, owner: "acme", repo: "inspector", pr_number: 42, head_sha: HEAD_SHA });
+    for (const value of ["done", "superseded"] as const) {
+      const { kv, store } = makeKvStub();
+      store.set(key, { value });
+      const { queue, sent } = makeQueueStub();
+      const log = makeLog();
+
+      const outcome = await handleReviewJob(prPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
+
+      expect(outcome).toEqual({ kind: "skipped", reason: "idempotency hit" });
+      expect(sent).toHaveLength(0);
+      // A skip never rewrites the claim.
+      expect(store.get(key)?.value).toBe(value);
+    }
+  });
+});
+
 describe("handleReviewJob — null head_sha (product lock)", () => {
   test("null head_sha enqueues and never writes a KV key", async () => {
     const { kv, store } = makeKvStub();

@@ -83,12 +83,14 @@ function toEventLog(payload: ReviewJobPayload): WorkerEventLog {
 }
 
 /**
- * Idempotency pre-check: true only when the stored value proves this commit's
- * job is still pending or already ran ("1" / "done"). A "dropped" (the guard
- * gave the job up), "failed" (the final delivery is heading to the DLQ),
- * "paused" (the App is paused) or "degraded" (the run ended in a degraded
- * notice) value means the commit was NEVER reviewed, so a redelivery must
- * enqueue again instead of being skipped. On KV failure, returns false
+ * Idempotency pre-check: true when the stored value proves this commit needs
+ * no new job — "1" (queued), "done" (already reviewed) or "superseded" (a
+ * newer commit replaced it; unlike the consumer's supersede proof, this
+ * predicate accepts it so an obsolete sha is never re-reviewed). A "dropped"
+ * (the guard gave the job up), "failed" (the final delivery is heading to the
+ * DLQ), "paused" (the App is paused) or "degraded" (the run ended in a
+ * degraded notice) value means the commit was NEVER reviewed, so a redelivery
+ * must enqueue again instead of being skipped. On KV failure, returns false
  * (conservative pass) and logs a warning — the D1 UNIQUE constraint is the
  * durable duplicate guard.
  */
