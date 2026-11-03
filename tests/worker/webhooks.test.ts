@@ -344,6 +344,18 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
       });
       expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
     });
+    test(`${mode} × malformed payload by a [bot] author still rejects 400 (reject outranks the bot guard)`, () => {
+      const outcome = classifyEvent(
+        "pull_request",
+        pullRequestBody("opened", {
+          installation: null,
+          pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+        }),
+        undefined,
+        { mode, appSlug: APP_SLUG },
+      );
+      expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
+    });
   }
 
   // §2.1 row: issue_comment.created (allowed actor + bot mention + on a PR)
@@ -356,24 +368,6 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
     test(`${mode} × issue_comment.created without a mention → ignore`, () => {
       const outcome = classifyMention("looks good to me", { mode, appSlug: APP_SLUG });
       expect(outcome).toEqual({ kind: "ignore", reason: "comment body does not mention the App bot" });
-    });
-    // §2.1 bot-author row on the comment face, with an AUTHORIZED actor
-    // (repo owner) so only the bot-author guard can explain the ignore.
-    test(`${mode} × issue_comment.created on a [bot]-authored PR → ignore`, () => {
-      const outcome = classifyEvent(
-        "issue_comment",
-        issueCommentBody({
-          issue: {
-            number: 42,
-            user: { login: "dependabot[bot]" },
-            pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
-          },
-          sender: { type: "User", login: "test-owner" },
-        }),
-        undefined,
-        { mode, appSlug: APP_SLUG },
-      );
-      expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
     });
   }
 });
@@ -455,6 +449,57 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       EVERY_PUSH,
     );
     expect(outcome).toEqual({ kind: "ignore", reason: "comment is not on a pull request thread" });
+  });
+
+  test("comment on a PR opened by a [bot] account is ignored even for an authorized actor", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        issue: {
+          number: 42,
+          user: { login: "dependabot[bot]" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+        sender: { type: "User", login: "test-owner" },
+      }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
+  });
+
+  test("bot-authored PR outranks the mention grammar, so an unsynced App gets no mention-miss reason", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        issue: {
+          number: 42,
+          user: { login: "dependabot[bot]" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+        sender: { type: "User", login: "test-owner" },
+      }),
+      undefined,
+      { mode: "every_push", appSlug: "" },
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
+  });
+
+  test("human-accounted bot login without the [bot] suffix still triggers on the comment face", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        issue: {
+          number: 42,
+          user: { login: "renovate" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+        sender: { type: "User", login: "renovate" },
+      }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome.kind).toBe("job");
   });
 
   test("comment sent by a bot is ignored (self-comment loop guard)", () => {

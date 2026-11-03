@@ -1380,9 +1380,9 @@ the review enqueue, not the bookkeeping). The `installation` branch reaches the
 write on every whitelisted install action and returns without enqueuing; a
 `job` delivery reaches it after the `ignore` return, so **ignored deliveries do
 not reach the write** — a non-whitelisted action, a `manual`-mode App's
-`pull_request`, or a comment that mentions no bot never records a login. A row
-accordingly stays `未知` until the first job delivery or install event for that
-App.
+`pull_request`, a delivery for a PR opened by a bot account (either face), or a
+comment that mentions no bot never records a login. A row accordingly stays
+`未知` until the first job delivery or install event for that App.
 
 > **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
 > the recovery lanes are covered by the implementation's scoped behavioral

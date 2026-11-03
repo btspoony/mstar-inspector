@@ -617,6 +617,16 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   if (action !== "created") {
     return { kind: "ignore", reason: `issue_comment action ${action} is not whitelisted` };
   }
+  // Bot authorship outranks the mention grammar: a PR opened by a bot is
+  // ignored whatever the comment says, and reaching the mention check first
+  // would report MENTION_MISS_REASON on an unsynced App — a false
+  // `mention_unresolved` warn whose remedy cannot change the outcome.
+  if (issue?.pull_request == null) {
+    return { kind: "ignore", reason: "comment is not on a pull request thread" };
+  }
+  if (BOT_LOGIN.test(issue?.user?.login ?? "")) {
+    return { kind: "ignore", reason: BOT_PR_REASON };
+  }
   // Bare mention (spec review-trigger-policy §3): the body must contain the
   // resolved App's `@{appSlug}` as a standalone token — any position, no
   // required wording. Keyed to the route-resolved slug, so one App's mention
@@ -624,12 +634,6 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   const body = comment?.body ?? "";
   if (!bodyMentionsApp(body, appSlug)) {
     return { kind: "ignore", reason: MENTION_MISS_REASON };
-  }
-  if (issue?.pull_request == null) {
-    return { kind: "ignore", reason: "comment is not on a pull request thread" };
-  }
-  if (BOT_LOGIN.test(issue?.user?.login ?? "")) {
-    return { kind: "ignore", reason: BOT_PR_REASON };
   }
   if (sender?.type === "Bot") {
     return { kind: "ignore", reason: "comment sent by a bot (self-comment loop guard)" };
