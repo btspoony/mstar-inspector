@@ -1111,7 +1111,8 @@ their own beyond what the component layer already declares:
   reference, not a shipped component**:
   [`src/design-system/prototypes/record-detail.html`](src/design-system/prototypes/record-detail.html)
   is the approved static prototype (it reads this document's tokens), while the
-  shipped face is `src/spa/pages/AppPullRequestsTab.tsx`.
+  shipped detail face is `src/spa/pages/PullRequestDetail.tsx` (its list face
+  lives in `src/spa/pages/AppPullRequestsTab.tsx`).
 
 ## Voice & content
 
