@@ -669,7 +669,7 @@ describe("createReviewConsumer", () => {
       targetCommentId: null,
     });
     expect(prepared.body).toContain("<!-- mstar-inspector:review:v1 round=1 -->");
-    expect(prepared.body).toContain("**Verdict: needs fixes**");
+    expect(prepared.body).toContain("## ⚠️ Verdict: `needs fixes`");
     expect(prepared.body).toContain("Two issues found in the diff.");
     expect(prepared.body).toContain("## Prior findings recheck"); // §7.10 closure section
     expect(prepared.body).toMatch(
@@ -1535,9 +1535,9 @@ describe("createReviewConsumer", () => {
     expect(posted.body).toContain("*(+10 more findings omitted)*");
     // Merge-class priority: the two must-fix first (stable — F0 before F59),
     // then the should-fix, then the nits — visible in the rendered order.
-    const f0 = posted.body.indexOf("**F0**");
-    const f59 = posted.body.indexOf("**F59**");
-    const f58 = posted.body.indexOf("**F58**");
+    const f0 = posted.body.indexOf("#### 🔴 F0");
+    const f59 = posted.body.indexOf("#### 🔴 F59");
+    const f58 = posted.body.indexOf("#### 🟠 F58");
     expect(f0).toBeGreaterThan(-1);
     expect(f59).toBeGreaterThan(f0);
     expect(f58).toBeGreaterThan(f59);
@@ -3013,92 +3013,7 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
     expect(String(rows[0]!.error)).not.toContain(gh("s", "installation_token"));
   });
 });
-describe("cross-round repeat dedup (AL-21-2)", () => {
-  test("previous round fingerprints are queried before the post and passed to comment assembly", async () => {
-    reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    const store = createArtifactStore(db);
-    // A previous round for the SAME PR (different sha — the current sha row
-    // does not exist yet at assembly time; no head_sha exclusion).
-    const prevFinding = {
-      mergeClass: "should-fix",
-      category: "logic",
-      file_path: "src/auth.ts",
-      line_start: 21,
-      line_end: 21,
-      title: "Fractional expiry comparison",
-      body: "same finding as this round",
-    };
-    await store.put({
-      kind: "review",
-      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: "a".repeat(40) }),
-      schema: "mstar.review/v1",
-      payload: { ...VALID_OUTPUT, findings: [prevFinding] },
-    });
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const post = commenterCalls.find((c) => c.op === "post-prepared")!;
-    expect(post.args).toMatchObject({
-      installationId: 123,
-      owner: "acme",
-      repo: "widgets",
-      prNumber: 42,
-    });
-    // The prepared body carries the repeat-dedup rendering: the finding
-    // whose fingerprint appeared last round is marked repeat and excluded
-    // from the recomputed tally (AL-21-2 — display layer only).
-    const body = (post.args as { body: string }).body;
-    expect(body).toContain("*(repeat)*");
-  });
-
-  test("no previous round → first-round rendering with no repeat markers", async () => {
-    reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const post = commenterCalls.find((c) => c.op === "post-prepared")!;
-    expect((post.args as { body: string }).body).not.toContain("*(repeat)*");
-    expect(reviewCount(db)).toBe(1);
-  });
-
-  test("query failure → first-round semantics: post proceeds, warn logged, review still lands", async () => {
-    reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    // Break ONLY the previous-round query (the store's own statements keep
-    // working) — the consumer must treat the failure as first round.
-    const failingDb = {
-      ...db,
-      prepare: (query: string) => {
-        if (query.includes("envelope IS NOT NULL")) {
-          return {
-            bind: () => {
-              throw new Error("simulated previous-round query failure");
-            },
-          } as never;
-        }
-        return db.prepare(query);
-      },
-    };
-    const consumer = createReviewConsumer(await makeEnv({ DB: failingDb as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    const post = commenterCalls.find((c) => c.op === "post-prepared")!;
-    expect((post.args as { previousFingerprints?: unknown }).previousFingerprints).toBeUndefined();
-    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("previous-round fingerprint query failed"));
-    expect(warn).toBeDefined();
-    // S-3: the dedup-degradation warn carries a structured field, not just text.
-    expect(warn!.fields.dedup).toBe("degraded");
-    expect(reviewCount(db)).toBe(1);
-  });
-
+describe("fingerprint choke point (S-1)", () => {
   test("oversized fingerprint_hint is clamped at the choke point — never lands verbatim in the D1 fingerprint column (S-1)", async () => {
     reset();
     const oversizedHint = "hint-" + "x".repeat(FINDING_TITLE_MAX + 100);

@@ -47,7 +47,7 @@ function pullRequestBody(action: string, overrides: Record<string, unknown> = {}
     action,
     number: 42,
     installation: { id: 123 },
-    pull_request: { number: 42, head: { sha: HEAD_SHA } },
+    pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" } },
     repository: { name: "test-repo", owner: { login: "test-owner" } },
     ...overrides,
   });
@@ -250,6 +250,60 @@ describe("classifyEvent — pull_request whitelist", () => {
     expect(outcome.kind).toBe("ignore");
   });
 
+  test("pull_request opened by a non-bot login ending in 'bot' still yields a job", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("opened", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot" } },
+      }),
+    );
+    expect(outcome.kind).toBe("job");
+  });
+
+  test("bot login suffix matching is case-insensitive", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("synchronize", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "GitHub-Actions[BOT]" } },
+      }),
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+  });
+
+  test("bot-authored PR skip logs an info line naming the reason", () => {
+    const log = makeLog();
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("opened", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+      }),
+      log,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+    expect(log.info).toHaveBeenCalledWith(
+      { event: "pull_request", reason: "bot_author", detail: "author=dependabot[bot] pr=42" },
+      "review skipped — PR author is not reviewable",
+    );
+  });
+
+  test("pull_request without an author login is ignored rather than reviewed", () => {
+    for (const user of [undefined, null, { login: "" }]) {
+      const log = makeLog();
+      const outcome = classifyEvent(
+        "pull_request",
+        pullRequestBody("opened", {
+          pull_request: user === undefined ? { number: 42, head: { sha: HEAD_SHA } } : { number: 42, head: { sha: HEAD_SHA }, user },
+        }),
+        log,
+      );
+      expect(outcome).toEqual({ kind: "ignore", reason: "payload carried no PR author login" });
+      expect(log.info).toHaveBeenCalledWith(
+        { event: "pull_request", reason: "missing_author", detail: "author=null pr=42" },
+        expect.any(String),
+      );
+    }
+  });
+
   test("pull_request with missing required fields is rejected with 400", () => {
     const outcome = classifyEvent("pull_request", pullRequestBody("opened", { installation: null }));
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
@@ -285,6 +339,49 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
             reason: `pull_request action ${action} does not auto-trigger in ${mode} mode`,
           });
         }
+      });
+    }
+  }
+
+  // Whitelist and reject checks precede the mode gate, so these two cases are
+  // mode-invariant by construction and are pinned once, outside the loop.
+  test("pull_request.closed by a [bot] author → the action reason (whitelist runs first)", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("closed", {
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+      }),
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "pull_request action closed is not whitelisted" });
+  });
+
+  test("malformed payload by a [bot] author still rejects 400 (reject outranks the bot guard)", () => {
+    const outcome = classifyEvent(
+      "pull_request",
+      pullRequestBody("opened", {
+        installation: null,
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+      }),
+    );
+    expect(outcome).toEqual({ kind: "reject", status: 400, reason: "pull_request payload missing required fields" });
+  });
+
+  // §2.1 bot-author row: every whitelisted action is ignored in EVERY mode,
+  // and the bot guard outranks the mode gate (`open` × `opened` would
+  // otherwise enqueue). A non-whitelisted action keeps the action reason
+  // because the whitelist runs first.
+  for (const mode of MODES) {
+    for (const action of PULL_REQUEST_ACTIONS) {
+      test(`${mode} × pull_request.${action} by a [bot] author → ignore`, () => {
+        const outcome = classifyEvent(
+          "pull_request",
+          pullRequestBody(action, {
+            pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+          }),
+          undefined,
+          { mode, appSlug: APP_SLUG },
+        );
+        expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
       });
     }
   }
@@ -364,7 +461,7 @@ describe("classifyEvent — head_at (the commit's ordering stamp)", () => {
     const outcome = classifyEvent(
       "pull_request",
       pullRequestBody("synchronize", {
-        pull_request: { number: 42, head: { sha: HEAD_SHA }, updated_at: "2026-03-01T10:00:00Z" },
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" }, updated_at: "2026-03-01T10:00:00Z" },
       }),
     );
     expect(outcome.kind).toBe("job");
@@ -377,7 +474,7 @@ describe("classifyEvent — head_at (the commit's ordering stamp)", () => {
     const outcome = classifyEvent(
       "pull_request",
       pullRequestBody("synchronize", {
-        pull_request: { number: 42, head: { sha: HEAD_SHA }, updated_at: "2026-03-01T12:00:00+02:00" },
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" }, updated_at: "2026-03-01T12:00:00+02:00" },
       }),
     );
     expect(outcome.kind).toBe("job");
@@ -390,7 +487,7 @@ describe("classifyEvent — head_at (the commit's ordering stamp)", () => {
     const outcome = classifyEvent(
       "pull_request",
       pullRequestBody("synchronize", {
-        pull_request: { number: 42, head: { sha: HEAD_SHA }, updated_at: "not-a-timestamp" },
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "test-author" }, updated_at: "not-a-timestamp" },
       }),
     );
     expect(outcome.kind).toBe("job");
@@ -441,7 +538,7 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     expect(outcome).toEqual({ kind: "ignore", reason: "comment body does not mention the App bot" });
   });
 
-  test("a bare `@` with no slug context (omitted trigger) never matches", () => {
+  test("an omitted trigger context (empty slug) never matches a full mention", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody({ comment: { body: `@${APP_SLUG}` } }));
     expect(outcome).toEqual({ kind: "ignore", reason: "comment body does not mention the App bot" });
   });
@@ -450,6 +547,133 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
     const outcome = classifyEvent(
       "issue_comment",
       issueCommentBody({ issue: { number: 7 } }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "comment is not on a pull request thread" });
+  });
+
+  test("comment on a PR opened by a [bot] account is ignored even for an authorized actor", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        issue: {
+          number: 42,
+          user: { login: "dependabot[bot]" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+        sender: { type: "User", login: "test-owner" },
+      }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+  });
+
+  test("comment on a PR with no author login is ignored, matching the pull_request face", () => {
+    for (const issue of [
+      { number: 42, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
+      { number: 42, user: null, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
+      { number: 42, user: {}, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
+      { number: 42, user: { login: "" }, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
+    ]) {
+      const log = makeLog();
+      const outcome = classifyEvent(
+        "issue_comment",
+        issueCommentBody({ issue, sender: { type: "User", login: "test-owner" } }),
+        log,
+        EVERY_PUSH,
+      );
+      expect(outcome).toEqual({ kind: "ignore", reason: "payload carried no PR author login" });
+      expect(log.info).toHaveBeenCalledWith(
+        { event: "issue_comment", reason: "missing_author", detail: "author=null pr=42" },
+        expect.any(String),
+      );
+    }
+  });
+
+  test("human-authored comment with a missing required field still rejects 400", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ installation: null }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "issue_comment payload missing required fields",
+    });
+  });
+
+  test("malformed bot-authored comment still rejects 400 (reject outranks the author guard)", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        installation: null,
+        issue: {
+          number: 42,
+          user: { login: "dependabot[bot]" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+        sender: { type: "User", login: "test-owner" },
+      }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({
+      kind: "reject",
+      status: 400,
+      reason: "issue_comment payload missing required fields",
+    });
+  });
+
+  test("bot-authored PR outranks the actor allowlist, so no actor_not_allowed warn fires", () => {
+    const log = makeLog();
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        issue: {
+          number: 42,
+          user: { login: "dependabot[bot]" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+        sender: { type: "User", login: "hacker-123" },
+      }),
+      log,
+      EVERY_PUSH,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "PR authored by a bot account" });
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledWith(
+      { event: "issue_comment", reason: "bot_author", detail: "author=dependabot[bot] pr=42" },
+      expect.any(String),
+    );
+  });
+
+  test("human-accounted bot login without the [bot] suffix still triggers on the comment face", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({
+        issue: {
+          number: 42,
+          user: { login: "renovate" },
+          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+        },
+        sender: { type: "User", login: "renovate" },
+      }),
+      undefined,
+      EVERY_PUSH,
+    );
+    expect(outcome.kind).toBe("job");
+  });
+
+  test("a plain issue with no mention reports the not-a-PR reason, not the mention miss", () => {
+    // Discriminating input for the guard order: a mention-less body on a plain
+    // issue would report MENTION_MISS_REASON under the old ordering.
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ comment: { body: "looks good to me" }, issue: { number: 7 } }),
       undefined,
       EVERY_PUSH,
     );
@@ -591,7 +815,10 @@ describe("classifyEvent — bot mention grammar: ASCII-restricted folding (QC F-
   test("a non-ASCII character before `@` is not a login continuation: a literal mention still matches", () => {
     // Boundary characters are read from the ORIGINAL body against the ASCII
     // class — U+0130 is outside [A-Za-z0-9-], so it cannot close the boundary.
-    expect(classifyMention("\u0130 @bot-i please", I_SLUG).kind).toBe("job");
+    expect(classifyMention("\u0130@bot-i please", I_SLUG).kind).toBe("job");
+    // A character that ASCII-folds into a continuation letter when lowercased
+    // (U+212A → k) still must not close the boundary.
+    expect(classifyMention("\u212A@k-app please", K_SLUG).kind).toBe("job");
   });
 });
 

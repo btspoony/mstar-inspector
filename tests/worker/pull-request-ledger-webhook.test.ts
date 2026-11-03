@@ -90,6 +90,7 @@ const PR_PAYLOAD = {
     state: "open",
     merged: false,
     head: { sha: "abc123" },
+    user: { login: "btspoony" },
   },
   repository: { name: "mstar-inspector", owner: { login: "btspoony" } },
 };

@@ -188,6 +188,52 @@ function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
   return mode === "open" ? action === "opened" : true;
 }
 
+/**
+ * GitHub gives every bot account a login ending in `[bot]` (dependabot[bot],
+ * github-actions[bot], an App's own `<slug>[bot]`). A PR opened by one of
+ * them is machine-generated — release prep, dependency bumps, self-authored
+ * PRs from another automation — and is never reviewed, on either trigger
+ * face. Case-insensitive because GitHub logins are; the suffix is the whole
+ * rule, so a login without it (whatever its account type) still triggers.
+ */
+const BOT_LOGIN = /\[bot\]$/i;
+
+const BOT_PR_REASON = "PR authored by a bot account";
+
+const MISSING_AUTHOR_REASON = "payload carried no PR author login";
+
+// Stable labels for reason-keyed log greps: the outcome `reason` stays prose,
+// the log line uses snake_case like every other webhook-face diagnostic.
+const BOT_AUTHOR_LABEL = "bot_author";
+const MISSING_AUTHOR_LABEL = "missing_author";
+
+/**
+ * Both trigger faces share one author rule: a PR whose author is unknown is
+ * ignored (GitHub always sends the login — a truncated payload cannot prove a
+ * human authored it), and a `[bot]` login is never reviewed. Info-level, not
+ * warn: a bot PR is a normal skip, and the delivery row still records it.
+ */
+function ignoredForAuthor(
+  login: string | null | undefined,
+  event: "pull_request" | "issue_comment",
+  prNumber: number,
+  log?: HandlerLog,
+): WebhookOutcome | null {
+  const isBot = login ? BOT_LOGIN.test(login) : false;
+  if (login && !isBot) {
+    return null;
+  }
+  log?.info(
+    {
+      event,
+      reason: isBot ? BOT_AUTHOR_LABEL : MISSING_AUTHOR_LABEL,
+      detail: `author=${login || "null"} pr=${prNumber}`,
+    },
+    "review skipped — PR author is not reviewable",
+  );
+  return { kind: "ignore", reason: isBot ? BOT_PR_REASON : MISSING_AUTHOR_REASON };
+}
+
 /** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
 export const WEBHOOK_BODY_LIMIT = 1_000_000;
 
@@ -370,6 +416,8 @@ const pullRequestSchema = z.object({
   pull_request: z
     .object({
       number: z.number().optional(),
+      // PR author — a bot-authored PR is never reviewed (either face).
+      user: z.object({ login: z.string().optional() }).nullable().optional(),
       // Display fields for the per-App PR ledger (`pullRequestRecord`). All
       // optional *and* nullable: a delivery may omit them and every existing
       // classifier guard stays decided by `number` / `head.sha` alone.
@@ -392,8 +440,10 @@ const issueCommentSchema = z.object({
   issue: z
     .object({
       number: z.number(),
-      // PR author (issue.user.login) — the actor allowlist (B5).
-      user: z.object({ login: z.string() }).nullable().optional(),
+      // PR author (issue.user.login) — the actor allowlist (B5) and the
+      // bot/missing-author guard. `login` is optional so a truncated payload
+      // fails closed on the guard instead of rejecting 400.
+      user: z.object({ login: z.string().optional() }).nullable().optional(),
       pull_request: z.unknown().optional(),
     })
     .nullable()
@@ -494,7 +544,7 @@ export function classifyEvent(
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }
   if (eventName === "pull_request") {
-    return classifyPullRequest(rawBody, trigger.mode);
+    return classifyPullRequest(rawBody, trigger.mode, log);
   }
   if (eventName === "issue_comment") {
     return classifyIssueComment(rawBody, log, trigger.appSlug);
@@ -539,7 +589,7 @@ function classifyInstallation(rawBody: string): WebhookOutcome {
   };
 }
 
-function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookOutcome {
+function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode, log?: HandlerLog): WebhookOutcome {
   const parsed = parseBody(rawBody);
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
@@ -565,6 +615,10 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
   // malformed payloads in EVERY mode (spec §2.1 — exactly as today).
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
+  }
+  const authorIgnore = ignoredForAuthor(pull_request?.user?.login, "pull_request", prNumber, log);
+  if (authorIgnore) {
+    return authorIgnore;
   }
   // The install's own account wins: the payload states it, whereas the owner
   // is only the inference a delivery without `installation.account` allows.
@@ -605,6 +659,26 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   if (action !== "created") {
     return { kind: "ignore", reason: `issue_comment action ${action} is not whitelisted` };
   }
+  // Malformed payloads reject before any policy gate, exactly as on the
+  // pull_request face: 400 stays reserved for what a retry cannot repair.
+  const installationId = installation?.id;
+  const owner = repository?.owner.login;
+  const repo = repository?.name;
+  const prNumber = issue?.number;
+  if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
+    return { kind: "reject", status: 400, reason: "issue_comment payload missing required fields" };
+  }
+  // Bot authorship outranks the mention grammar: a PR opened by a bot is
+  // ignored whatever the comment says, and reaching the mention check first
+  // would report MENTION_MISS_REASON on an unsynced App — a false
+  // `mention_unresolved` warn whose remedy cannot change the outcome.
+  if (issue?.pull_request == null) {
+    return { kind: "ignore", reason: "comment is not on a pull request thread" };
+  }
+  const authorIgnore = ignoredForAuthor(issue?.user?.login, "issue_comment", prNumber, log);
+  if (authorIgnore) {
+    return authorIgnore;
+  }
   // Bare mention (spec review-trigger-policy §3): the body must contain the
   // resolved App's `@{appSlug}` as a standalone token — any position, no
   // required wording. Keyed to the route-resolved slug, so one App's mention
@@ -612,9 +686,6 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   const body = comment?.body ?? "";
   if (!bodyMentionsApp(body, appSlug)) {
     return { kind: "ignore", reason: MENTION_MISS_REASON };
-  }
-  if (issue?.pull_request == null) {
-    return { kind: "ignore", reason: "comment is not on a pull request thread" };
   }
   if (sender?.type === "Bot") {
     return { kind: "ignore", reason: "comment sent by a bot (self-comment loop guard)" };
@@ -637,13 +708,6 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
       "bot mention ignored — commenter is not the PR author or repo owner",
     );
     return { kind: "ignore", reason: "comment actor is not the PR author or repo owner" };
-  }
-  const installationId = installation?.id;
-  const owner = repository?.owner.login;
-  const repo = repository?.name;
-  const prNumber = issue?.number;
-  if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
-    return { kind: "reject", status: 400, reason: "issue_comment payload missing required fields" };
   }
   // Same authority as the pull_request face: the payload's own
   // `installation.account.login`, with the repository owner as the fallback —
