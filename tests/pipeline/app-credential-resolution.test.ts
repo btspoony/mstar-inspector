@@ -104,6 +104,10 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     // rebuild copies.
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
+    // 0040/0041: the consumer's per-message admission reads the runtime caps
+    // and writes the `review_inflight` row on EVERY admitted message.
+    "0040_runtime_config.sql",
+    "0041_review_inflight.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

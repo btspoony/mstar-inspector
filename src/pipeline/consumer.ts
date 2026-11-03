@@ -152,6 +152,11 @@ import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandb
 // §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
 import { createCheckBeginLatch, createCheckLifecycle, type CheckBeginLatch } from "./checks";
+// Review admission (review-concurrency §1.2): one `review_inflight` row is the
+// per-PR lock and the capacity reservation; the cap comes from the pipeline's
+// single runtime-config reader (never a dashboard route import).
+import { acquireInflight, releaseInflight, type InflightKey } from "../store/inflight-store";
+import { readReviewConcurrency } from "./concurrency-reader";
 
 export type PipelineEnv = {
   DB: D1Database;
@@ -260,8 +265,10 @@ export type ConsumerLogFields = {
    * `review_paused` (architect lock L4 — union widened ADDITIVELY):
    * the ack-skip line for a paused App's in-flight message; it overrides the
    * trigger fields' event on that one log line.
+   * `review_concurrency_degraded` (plan 308 — union widened ADDITIVELY): the
+   * concurrency reader's degraded-read warn, relayed on this channel.
    */
-  event: "pull_request" | "issue_comment" | "review_paused";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_concurrency_degraded";
   action: string;
   installation_id: number;
   owner: string;
@@ -279,6 +286,8 @@ export type ConsumerLogFields = {
    */
   review_id?: string;
   workspace_id?: string;
+  /** The degraded concurrency read's cap (always the conservative 1 when degraded). */
+  effective?: number;
   /** Whether a failed usage insert landed: true, false (verified absent), or unreadable. */
   usage_applied?: boolean | "unknown";
   /** Review tier resolved from REVIEW_LEVEL. */
@@ -348,86 +357,26 @@ export const defaultConsumerLog: ConsumerLog = {
 };
 
 // ---------------------------------------------------------------------------
-// In-flight review guard (WF-002): one review per PR at a time.
+// Review admission (WF-002 + review-concurrency §1.2): one review per PR at a
+// time, bounded by the system and workspace caps. The KV mutex is gone — the
+// `review_inflight` row (src/store/inflight-store.ts) is the lock AND the
+// reservation, written before any sandbox starts and released in the finally.
 // ---------------------------------------------------------------------------
 
 /**
- * Guard TTL (seconds): must exceed the max review wall-clock — ALL FIVE
- * git-timed steps (clone / rev-parse / diff / numstat / runner-input write,
- * 120s each — numstat + the input write were added without
+ * Admission row TTL (seconds): must exceed the max review wall-clock — ALL
+ * FIVE git-timed steps (clone / rev-parse / diff / numstat / runner-input
+ * write, 120s each — numstat + the input write were added without
  * recomputing this, qc3 F-301) plus the LEVEL's runner step
  * (runnerTimeoutMs(level) — 600s quick/default, 840s deep) plus slack for
- * the untimed steps (token mint, sandbox create, comment post, KV/D1
- * puts) — so the guard can never expire mid-review and unblock a
- * concurrent duplicate. KV expirationTtl is in seconds. Pinned exactly by
- * consumer.test.ts ("reviewGuardTtlSeconds covers the full step-budget
- * arithmetic per level") so a future step addition re-breaks loudly.
+ * the untimed steps (token mint, sandbox create, comment post, D1 puts) —
+ * so the row can never expire mid-review and unblock a concurrent duplicate.
+ * Pinned exactly by consumer.test.ts ("reviewGuardTtlSeconds covers the full
+ * step-budget arithmetic per level") so a future step addition re-breaks
+ * loudly.
  */
 export function reviewGuardTtlSeconds(level: ReviewLevel): number {
   return Math.ceil((runnerTimeoutMs(level) + 5 * EXEC_TIMEOUT_GIT_MS + 120_000) / 1000);
-}
-
-/**
- * In-flight guard key: `inflight:{installation_id}:{owner}/{repo}:{pr_number}`.
- * Keyed WITHOUT head_sha on purpose — comment-mention jobs carry
- * head_sha=null and must still be serialized per PR.
- */
-export function reviewGuardKey(key: {
-  installation_id: number;
-  owner: string;
-  repo: string;
-  pr_number: number;
-}): string {
-  return `inflight:${key.installation_id}:${key.owner}/${key.repo}:${key.pr_number}`;
-}
-
-/**
- * Try to acquire the in-flight guard. Held → false (the caller returns the
- * guard-held outcome; the consumer schedules a per-message delayed retry, so
- * the later attempt lands on the update path once the first attempt's marker
- * exists).
- *
- * KV caveat: Cloudflare KV is eventually consistent (reads may lag writes by
- * up to ~60s) and has no compare-and-set, so this is a BEST-EFFORT mutex —
- * two attempts racing the GET can both pass before either PUT is visible.
- * It narrows the duplicate window from the full review wall-clock to a
- * sub-second KV race; the marker-based upsert remains the durable
- * backstop. KV failure → warn + proceed WITHOUT the guard (the same
- * conservative-pass policy as the idempotency keys), logging that the
- * duplicate-comment race window is open until KV recovers.
- */
-async function acquireReviewGuard(
-  kv: KVNamespace,
-  key: string,
-  level: ReviewLevel,
-  fields: ConsumerLogFields,
-  log: ConsumerLog,
-): Promise<boolean> {
-  try {
-    if ((await kv.get(key)) !== null) return false;
-    await kv.put(key, "inflight", { expirationTtl: reviewGuardTtlSeconds(level) });
-    return true;
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    log.warn(fields, `in-flight guard KV error — proceeding without guard (race window open): ${detail}`);
-    return true;
-  }
-}
-
-/** Release the in-flight guard. Failure → warn; the TTL still expires it. */
-async function releaseReviewGuard(
-  kv: KVNamespace,
-  key: string,
-  level: ReviewLevel,
-  fields: ConsumerLogFields,
-  log: ConsumerLog,
-): Promise<void> {
-  try {
-    await kv.delete(key);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    log.warn(fields, `in-flight guard release failed — guard expires by TTL (${reviewGuardTtlSeconds(level)}s): ${detail}`);
-  }
 }
 
 /**
@@ -1979,19 +1928,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
   // criteria: 失败路径错误日志含幂等键).
   let fields: ConsumerLogFields | undefined;
-  // In-flight guard (WF-002): serializes concurrent reviews per PR — keyed
-  // without head_sha so comment-mention jobs (head_sha=null) are covered too.
-  const guardKey = reviewGuardKey({
-    installation_id: payload.installation_id,
-    owner: payload.owner,
-    repo: payload.repo,
-    pr_number: payload.pr_number,
-  });
-  let guardHeld = false;
+  // Review admission (WF-002 + review-concurrency §1.2): the live
+  // `review_inflight` row this attempt wrote, released in the finally. The
+  // key is the PR identity WITHOUT head_sha, so comment-mention jobs
+  // (head_sha=null) are serialized per PR too; the row also reserves the
+  // workspace and system capacity slots.
+  let inflight: { key: InflightKey; attemptId: string; ttlSeconds: number } | null = null;
   // Set once REVIEW_LEVEL resolves inside the try (resolution must stay in
-  // the try so an invalid value gets the structured error log); the finally
-  // guard release needs the same level's TTL. guardHeld ⇒ level is set
-  // (resolution precedes acquisition).
+  // the try so an invalid value gets the structured error log); the admission
+  // row's TTL needs the same level. inflight ≠ null ⇒ level is set
+  // (resolution precedes admission).
   let level: ReviewLevel | undefined;
   // Runner wall-clock start (d5-budget AC-S10-logs): set just before the
   // runner exec so the failure log can carry elapsed_ms. VISIBILITY ONLY —
@@ -2116,17 +2062,54 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // ZERO side effects — no webhook-face reject, no pause state, no runtime
     // guard beyond this channel (AL-24-5 verdict 3).
     assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.appRef.appId, sandboxImage);
-    // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
-    // already running for this PR, return the DISTINCT guard-held outcome —
-    // NOT a throw. The consumer schedules a per-message delayed retry
-    // (per level: 60/120/240s quick/default, 180/360/720s deep), so the later attempt lands on the update path
-    // (round=N+1) once the earlier attempt has posted its marker; after the
-    // final delayed attempt the job is acked with a warning — guard-held is
-    // not an error state and never goes to the DLQ.
-    if (!(await acquireReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, baseFields, deps.log))) {
+    // 0. Review admission (WF-002 / bugbot BB-3 + review-concurrency §1.2):
+    // ONE conditional D1 insert is both the per-PR lock and the capacity
+    // reservation, so a duplicate for this PR or a reached cap returns the
+    // DISTINCT guard-held outcome — NOT a throw. The consumer schedules a
+    // per-message delayed retry (per level: 60/120/240s quick/default,
+    // 180/360/720s deep); after the final delayed attempt the job is acked
+    // with a warning — guard-held is not an error state and never goes to the
+    // DLQ. Admission precedes EVERY sandbox step, so a refused message costs
+    // no container.
+    // Captured as a const: a `let` widens to `| undefined` inside the callback.
+    const admissionFields = baseFields;
+    const concurrency = await readReviewConcurrency(deps.env.DB, workspaceId, {
+      // ConsumerLog is contravariant against the reader's log: adapt on this
+      // side instead of widening the reader — its fields ride this channel.
+      warn: (readerFields, msg) => deps.log.warn({ ...admissionFields, ...readerFields }, msg),
+    });
+    const inflightKey: InflightKey = {
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      workspace_id: workspaceId,
+    };
+    const attemptId = crypto.randomUUID();
+    const ttlSeconds = reviewGuardTtlSeconds(level);
+    // shortcut: the reader exposes ONE effective cap (min of the system and
+    // workspace caps), so it feeds both store conditions — a workspace quota
+    // below the system cap then also bounds the global count. Upgrade when
+    // the reader exposes the two levels separately.
+    const admission = await acquireInflight(deps.env.DB, inflightKey, {
+      systemCap: concurrency.effective,
+      workspaceCap: concurrency.effective,
+      attemptId,
+      ttlSeconds,
+      now: new Date().toISOString(),
+    });
+    if (!admission.ok) {
+      if (admission.reason === "error") {
+        // Fail closed (spec §1.3): a storage failure never admits, and the
+        // store has no log channel — the operator line is this one.
+        deps.log.warn(
+          baseFields,
+          "review admission failed (storage error) — treating as held; no review admitted",
+        );
+      }
       return { kind: "guard-held" };
     }
-    guardHeld = true;
+    inflight = { key: inflightKey, attemptId, ttlSeconds };
     // 1. Sandbox + installation token (created lazily; destroyed in finally).
     // AL-6 stage window: container acquisition + every in-sandbox step below
     // (clone/rev-parse/diff/numstat/input-write) classify "sandbox" until the
@@ -3244,14 +3227,21 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
     throw err;
   } finally {
-    // Release the in-flight guard once the review settled (posted, KV done,
+    // Release the admission row once the review settled (posted, KV done,
     // put attempted) OR failed — either way the next attempt may proceed.
-    // releaseReviewGuard never throws (KV failure → warn; TTL expires it).
-    if (guardHeld && level !== undefined) {
-      // The guard is acquired only after baseFields resolves (try statement
-      // 1), so the payload fallback below is unreachable on this path — it
-      // only exists to keep the ConsumerLogFields type total.
-      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, fields ?? baseFields ?? payloadIdentityFields(payload), deps.log);
+    // Scoped to THIS attempt's id, so an older attempt can never delete a row
+    // a newer one reclaimed after expiry; a release failure only warns (the
+    // row expires by TTL), never masks the review's own outcome.
+    if (inflight !== null) {
+      try {
+        await releaseInflight(deps.env.DB, inflight.key, inflight.attemptId);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+          `review admission release failed — the row expires by TTL (${inflight.ttlSeconds}s): ${detail}`,
+        );
+      }
     }
     if (sandbox !== null) {
       try {

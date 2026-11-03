@@ -45,6 +45,7 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
 import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
+import { acquireInflight } from "../../src/store/inflight-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
@@ -212,9 +213,30 @@ let diffStdout = "";
 let recheckFileContent = "";
 let recheckFileOverflow = "0";
 
+/**
+ * Optional gate on the FIRST runner exec: a test parks a review inside the
+ * runner (its admission row live) while it dispatches another message.
+ */
+let runnerGate:
+  | { released: Promise<void>; release: () => void; markReached: () => void }
+  | undefined;
+
+/** Hold the next runner exec; `reached` resolves once it is parked. */
+function holdFirstRunner(): { reached: Promise<void>; release: () => void } {
+  const released = Promise.withResolvers<void>();
+  const reached = Promise.withResolvers<void>();
+  runnerGate = { released: released.promise, release: released.resolve, markReached: reached.resolve };
+  return { reached: reached.promise, release: released.resolve };
+}
+
+/** Optional ordering probe: runs at the FIRST sandbox command of a test. */
+let sandboxProbe: (() => void) | undefined;
+
 const fakeSandbox = {
   runCommand: mock(async (cmd: string, opts?: unknown) => {
+    const first = sandboxCalls.length === 0;
     sandboxCalls.push({ cmd, opts });
+    if (first && sandboxProbe !== undefined) sandboxProbe();
     if (sandboxError) throw sandboxError;
     if (cmd.includes("rev-parse")) {
       return { stdout: `${resolvedSha}\n`, stderr: "", exitCode: revParseExitCode };
@@ -234,6 +256,12 @@ const fakeSandbox = {
       return { stdout: `${recheckFileContent}\n${recheckFileOverflow}\n`, stderr: "", exitCode: 0 };
     }
     if (cmd.includes("--input")) {
+      if (runnerGate !== undefined) {
+        const gate = runnerGate;
+        runnerGate = undefined; // only the first runner exec is held
+        gate.markReached();
+        await gate.released;
+      }
       return { stdout: runnerStdout, stderr: runnerStderr, exitCode: runnerExitCode };
     }
     return { stdout: "", stderr: "", exitCode: 0 };
@@ -328,33 +356,18 @@ const testLog: ConsumerLog = {
 };
 // --- helpers ----------------------------------------------------------------
 const kvPuts: Array<{ key: string; value: string; options?: unknown }> = [];
-const kvGuardPuts: Array<{ key: string; value: string; options?: unknown }> = [];
-const kvGuardDeletes: string[] = [];
 const messageRetryCalls: Array<{ attempts: number; delaySeconds?: number }> = [];
 const messageAckCalls: Array<{ attempts: number }> = [];
 let messageAttempts = 1;
 let kvPutError: Error | undefined;
 let kvGetValue: string | null = null;
-let kvGuardValue: string | null = null;
 const kv = {
-  // The in-flight guard (WF-002) uses the `inflight:` key family on the SAME
-  // KV binding — route by prefix so the idem-done assertions on kvPuts stay
-  // unambiguous.
-  get: mock(async (key: string) => {
-    if (key.startsWith("inflight:")) return kvGuardValue;
-    return kvGetValue;
-  }),
+  get: mock(async (_key: string) => kvGetValue),
   put: mock(async (key: string, value: string, options?: unknown) => {
-    if (key.startsWith("inflight:")) {
-      kvGuardPuts.push({ key, value, options });
-    } else {
-      kvPuts.push({ key, value, options });
-    }
+    kvPuts.push({ key, value, options });
     if (kvPutError) throw kvPutError;
   }),
-  delete: mock(async (key: string) => {
-    kvGuardDeletes.push(key);
-  }),
+  delete: mock(async (_key: string) => {}),
 };
 
 async function makeEnv(overrides: Partial<PipelineEnv> = {}): Promise<PipelineEnv> {
@@ -411,8 +424,6 @@ function reset(): void {
   commenterCalls.length = 0;
   Object.assign(commenterState, initialFakeCommenterState());
   kvPuts.length = 0;
-  kvGuardPuts.length = 0;
-  kvGuardDeletes.length = 0;
   messageRetryCalls.length = 0;
   messageAckCalls.length = 0;
   messageAttempts = 1;
@@ -420,6 +431,8 @@ function reset(): void {
   runnerStdout = "";
   runnerStderr = "";
   runnerExitCode = 0;
+  runnerGate = undefined;
+  sandboxProbe = undefined;
   cloneExitCode = 0;
   diffExitCode = 0;
   numstatStdout = "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n";
@@ -436,7 +449,6 @@ function reset(): void {
   recheckFileOverflow = "0";
   kvPutError = undefined;
   kvGetValue = null;
-  kvGuardValue = null;
   checkRequests.length = 0;
   checkRuns.clear();
   checkRequestOverrides = {};
@@ -460,6 +472,42 @@ function usageRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<st
   return db.raw.query("SELECT * FROM usage_events ORDER BY review_id, seq").all() as Array<
     Record<string, unknown>
   >;
+}
+
+/** Live admission rows — the per-PR lock plus the capacity reservation. */
+function inflightRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
+  return db.raw.query("SELECT * FROM review_inflight ORDER BY rowid").all() as Array<Record<string, unknown>>;
+}
+
+/** Seed one live admission row through the REAL store: the state a running review leaves behind. */
+async function seedInflight(
+  db: TestD1,
+  overrides: { pr_number?: number; owner?: string; repo?: string; workspace_id?: string } = {},
+): Promise<void> {
+  const result = await acquireInflight(
+    db,
+    {
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      workspace_id: "default",
+      ...overrides,
+    },
+    { systemCap: 32, workspaceCap: 16, attemptId: "seed-attempt", ttlSeconds: 1320, now: new Date().toISOString() },
+  );
+  expect(result).toEqual({ ok: true });
+}
+
+/** The real D1 double with one statement family throwing (fail-closed probes). */
+function dbFailingOn(db: TestD1, match: string) {
+  return {
+    prepare: (sql: string) => {
+      if (sql.includes(match)) throw new Error("D1 unavailable");
+      return db.prepare(sql);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+  };
 }
 
 describe("createReviewConsumer", () => {
@@ -1089,10 +1137,15 @@ describe("createReviewConsumer", () => {
     expect(runnerCall.cmd).toContain("--level 'deep'");
     expect(reviewCount(db)).toBe(1);
   });
-  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + guard TTL 1560; quick/default stay 600_000 (AC-S10-clock)", async () => {
+  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + admission TTL 1560; quick/default stay 600_000 (AC-S10-clock)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    let admissionTtlMs = -1;
+    sandboxProbe = () => {
+      const row = inflightRows(db)[0]!;
+      admissionTtlMs = Date.parse(String(row.expires_at)) - Date.parse(String(row.acquired_at));
+    };
     const consumer = createReviewConsumer(
       await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
       undefined,
@@ -1107,14 +1160,8 @@ describe("createReviewConsumer", () => {
     // false-timeout a deep three-phase run into the DLQ (spec d5-budget
     // Problem Statement).
     expect(runnerExecTimeout()).toBe(840_000);
-    // The in-flight guard TTL follows the same level table (AC-S10-guard).
-    expect(kvGuardPuts).toEqual([
-      {
-        key: "inflight:123:acme/widgets:42",
-        value: "inflight",
-        options: { expirationTtl: 1560 },
-      },
-    ]);
+    // The admission row's TTL follows the same level table (AC-S10-guard).
+    expect(admissionTtlMs).toBe(1560_000);
     // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
     expect(runnerTimeoutMs("quick")).toBe(600_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);
@@ -1203,7 +1250,7 @@ describe("createReviewConsumer", () => {
       expect(sandboxCalls).toHaveLength(0);
       expect(commenterCalls).toHaveLength(0);
       expect(reviewCount(db)).toBe(0);
-      expect(kvGuardPuts).toHaveLength(0); // the in-flight guard is never touched
+      expect(inflightRows(db)).toHaveLength(0); // no admission row is ever written
       const errLine = logLines.find((l) => l.level === "error");
       expect(errLine).toBeDefined();
       expect(errLine!.msg).toContain("invalid REVIEW_LEVEL");
@@ -1838,6 +1885,10 @@ describe("createReviewConsumer", () => {
       "0031_plans_usage.sql",
       // 0036 renames the seeded route-key column, as the deploy does.
       "0036_app_identity.sql",
+      // 0040/0041: the consumer's admission reads the runtime caps and writes
+      // the `review_inflight` row on every admitted message.
+      "0040_runtime_config.sql",
+      "0041_review_inflight.sql",
     ]) {
       db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
     }
@@ -1930,11 +1981,11 @@ describe("createReviewConsumer", () => {
     expect(JSON.stringify(runnerCredentialPools())).not.toContain("must-not-leak");
   });
 
-  test("guard held on attempt 1 → per-message delayed retry (60s), no throw, no post/insert (BB-3)", async () => {
+  test("a live admission row for the PR → guard-held delayed retry (60s), no throw, no post/insert (BB-3)", async () => {
     reset();
-    kvGuardValue = "inflight";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     // BB-3: the consumer RESOLVES — guard-held is a typed outcome, not a
@@ -1943,12 +1994,11 @@ describe("createReviewConsumer", () => {
     // first review is still running.
     await consumer(makeBatch(makePayload()));
 
-    // Fail fast: no sandbox, no token, no post, no insert, no guard mutation.
+    // Fail fast: no sandbox, no token, no post, no insert, no extra row.
     expect(sandboxCalls).toHaveLength(0);
     expect(commenterCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    expect(kvGuardPuts).toHaveLength(0);
-    expect(kvGuardDeletes).toHaveLength(0);
+    expect(inflightRows(db)).toHaveLength(1); // the live row, untouched
     expect(destroyCalls).toBe(0);
     // A DELAYED per-message retry is scheduled — 60s on the first attempt.
     expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
@@ -1960,8 +2010,8 @@ describe("createReviewConsumer", () => {
 
   test("guard-held backoff escalates 60s → 120s → 240s across attempts (BB-3)", async () => {
     reset();
-    kvGuardValue = "inflight";
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
     for (const [attempts, delaySeconds] of [
       [1, 60],
@@ -1981,8 +2031,8 @@ describe("createReviewConsumer", () => {
   });
   test("REVIEW_LEVEL=deep guard-held → delayed retries use the deep backoff 180s → 360s → 720s (AC-S10-guard)", async () => {
     reset();
-    kvGuardValue = "inflight";
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const consumer = createReviewConsumer(
       await makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
       testLog,
@@ -2007,9 +2057,9 @@ describe("createReviewConsumer", () => {
 
   test("guard still held after the 3 delayed retries → ack with a warning, no DLQ (BB-3)", async () => {
     reset();
-    kvGuardValue = "inflight";
     messageAttempts = 4; // final delivery before the queue would DLQ
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves — acked, never DLQed
@@ -2022,6 +2072,75 @@ describe("createReviewConsumer", () => {
     expect(warnLine!.msg).toContain("no DLQ");
     expect(warnLine!.fields.pr_number).toBe(42);
     expect(warnLine!.fields.installation_id).toBe(123);
+  });
+
+  test("a reached system cap refuses admission → guard-held, no sandbox (spec §1.3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
+         VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
+      )
+      .run();
+    // Another workspace's review holds the single global slot; the untrusted
+    // bit here is the MESSAGE's workspace, whose effective cap becomes 1.
+    await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    // The foreign row is neither deleted nor duplicated by the refusal.
+    expect(inflightRows(db)).toHaveLength(1);
+  });
+
+  test("a D1 error at admission fails closed → guard-held, never admitted (spec §1.3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: dbFailingOn(db, "review_inflight") as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(commenterCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("admission failed"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.msg).toContain("treating as held");
+  });
+
+  test("a degraded caps read warns once and admits at the conservative cap (never unlimited)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: dbFailingOn(db, "review_runtime_settings") as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    const warnLine = logLines.find(
+      (l) => l.level === "warn" && l.fields.event === "review_concurrency_degraded",
+    );
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.fields.workspace_id).toBe("default");
+    expect(warnLine!.fields.effective).toBe(1);
+    // The conservative cap still admits an idle deployment, and the row is
+    // released normally.
+    expect(reviewCount(db)).toBe(1);
+    expect(inflightRows(db)).toHaveLength(0);
   });
 
   test("real failures keep the throw → queue retry → DLQ behavior (BB-3 unchanged)", async () => {
@@ -2040,27 +2159,106 @@ describe("createReviewConsumer", () => {
     expect(messageRetryCalls).toHaveLength(0);
     expect(messageAckCalls).toHaveLength(0);
     expect(destroyCalls).toBe(1);
+    // The admission row is released on the failure path too.
+    expect(inflightRows(db)).toHaveLength(0);
   });
 
-  test("in-flight guard acquired before the pipeline and released after the post settles (WF-002)", async () => {
+  test("admission row is written before the first sandbox step and released after the post settles (WF-002)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    let atFirstSandbox: Array<Record<string, unknown>> = [];
+    sandboxProbe = () => {
+      atFirstSandbox = inflightRows(db);
+    };
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
-    // Guard keyed per PR (no head_sha), written BEFORE the pipeline runs and
-    // deleted in the finally once the post settled.
-    expect(kvGuardPuts).toEqual([
-      {
-        key: "inflight:123:acme/widgets:42",
-        value: "inflight",
-        options: { expirationTtl: reviewGuardTtlSeconds("default") },
-      },
-    ]);
-    expect(kvGuardDeletes).toEqual(["inflight:123:acme/widgets:42"]);
+    // The row is the per-PR lock AND the capacity reservation: it exists when
+    // the FIRST sandbox command runs, keyed by the PR (no head_sha), with the
+    // level's TTL, and is gone once the post settled.
+    expect(atFirstSandbox).toHaveLength(1);
+    expect(atFirstSandbox[0]).toMatchObject({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      workspace_id: "default",
+    });
+    expect(String(atFirstSandbox[0]!.attempt_id)).not.toBe("");
+    expect(
+      Date.parse(String(atFirstSandbox[0]!.expires_at)) - Date.parse(String(atFirstSandbox[0]!.acquired_at)),
+    ).toBe(reviewGuardTtlSeconds("default") * 1000);
+    expect(inflightRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
+  });
+
+  test("two messages for one PR never run concurrently — the second is guard-held while the first is in flight", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const gate = holdFirstRunner();
+
+    const first = consumer(makeBatch(makePayload()));
+    await gate.reached; // the first review is inside the runner; its row is live
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(sandboxCalls.filter((c) => c.cmd.includes("--input"))).toHaveLength(1);
+    expect(reviewCount(db)).toBe(0); // the second message never ran a pipeline
+
+    gate.release();
+    await first;
+    expect(inflightRows(db)).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("two different PRs both admit a review while the first is still in flight", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    const gate = holdFirstRunner();
+
+    const first = consumer(makeBatch(makePayload()));
+    await gate.reached;
+
+    await consumer(makeBatch(makePayload({ pr_number: 43 })));
+
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1); // the second review completed end to end
+    expect(inflightRows(db)).toHaveLength(1); // only the first row is still held
+
+    gate.release();
+    await first;
+    expect(reviewCount(db)).toBe(2);
+    expect(inflightRows(db)).toHaveLength(0);
+  });
+
+  test("a release failure only warns — the review outcome and the TTL backstop stand", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(
+      await makeEnv({ DB: dbFailingOn(db, "DELETE FROM review_inflight") as never }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    // The delete could not run; the row expires by TTL instead of failing a
+    // message whose review already posted (a throw would retry it).
+    expect(inflightRows(db)).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(messageAckCalls).toHaveLength(0);
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("release failed"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.msg).toContain("expires by TTL");
   });
   test("reviewGuardTtlSeconds covers the full step-budget arithmetic per level (qc3 F-301 pin / AC-S10-guard)", () => {
     // Exact pin: FIVE git-timed steps (clone, rev-parse, diff, numstat,
@@ -3881,9 +4079,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a guard-held delivery claims no attempt and runs no Check", async () => {
     reset();
-    kvGuardValue = "inflight";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
+    await seedInflight(db);
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
       ...testOverrides,
@@ -4865,10 +5063,10 @@ describe("workspace attribution gate (one read face)", () => {
     );
 
     // Structural: nothing ran — no sandbox step, no commenter instance (so no
-    // token mint), no guard, no GitHub call, no review row.
+    // token mint), no admission row, no GitHub call, no review row.
     expect(sandboxCalls).toHaveLength(0);
     expect(commenterCalls).toHaveLength(0);
-    expect(kvGuardPuts).toHaveLength(0);
+    expect(inflightRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     // The existing failure path is untouched: the throw IS the queue's
     // retry→DLQ signal (no ack, no message-level retry), with the AL-6 row.
