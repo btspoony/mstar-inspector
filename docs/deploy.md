@@ -2197,14 +2197,45 @@ Contract:
 [`.mstar/specs/review-trigger-policy.md`](../.mstar/specs/review-trigger-policy.md)
 (§2.1 classification matrix, §3 mention grammar).
 
-### Queue consumer concurrency (architect verdict AL-5)
+### Queue consumer concurrency — deploy-time ceiling and runtime caps
 
-- `wrangler.jsonc → queues.consumers[review-queue].max_concurrency: 1` —
-  protective fix: UNSET means the platform auto-scales consumer concurrency
-  by backlog. With a unique sandbox id per attempt (each attempt gets its own
-  Durable-Object-managed container — `scheduling_policy: "durable_object"`
-  has no `max_instances` cap), >1 concurrency would run containers
-  concurrently. Pinned, NOT env-configurable.
+Two different numbers bound the consumer, and they are owned in two different
+places. Keep them apart when reasoning about throughput:
+
+| Bound | Where it lives | Value | What it means |
+|---|---|---|---|
+| Deploy-time **ceiling** | `wrangler.jsonc → queues.consumers[…].max_concurrency` (top level **and** `env.production`) | `64` | The most queue messages the platform may run at once. Ships with the Worker; changing it is a deploy. |
+| Runtime **caps** | D1 — `review_runtime_settings` + `workspaces.max_concurrent_reviews` | system `32`, workspace `16` | The business quota: `min(system, workspace)`. Read per message; changing it needs no deploy (see § Review concurrency caps). |
+| Per-PR **lock** | `review_inflight` primary key | 1 | One review per PR, always. |
+
+The contract the deployment ships is therefore **per-PR serial, cross-PR
+parallel**: two different PRs may review in two different containers at the
+same time, while two messages for the same PR never enter a sandbox
+concurrently — the second is refused at admission and retried on the
+guard-held delay schedule.
+
+Why the ceiling is explicit rather than unset: an UNSET `max_concurrency`
+makes the platform scale consumer concurrency by backlog with no bound at
+all (wrangler's config schema). Each attempt's unique sandbox id starts its
+**own** container under `scheduling_policy: "durable_object"` (the 0.12
+`max_instances` cap no longer exists — see the `containers` comment in
+`wrangler.jsonc`), so `64` is the widest blast radius the account should ever
+accept. Raise it only together with the runtime defaults, and remember the
+platform's 15 min queue-consumer wall-clock cap still bounds any single deep
+review — concurrency changes overlap reviews, it does not lengthen them.
+
+Observation checklist after a concurrency change:
+
+- [ ] Both blocks carry the same ceiling — `max_concurrency: 64` and
+      `max_batch_size: 1` at the top level and inside `env.production`
+      (`bun test tests/contracts/wrangler-env-parity.test.ts` locks the pair).
+- [ ] Throughput moved the way the runtime caps predict: raising the D1 caps
+      changes the admitted rate on the **next** message; raising only the
+      ceiling changes nothing while the caps stay at 32/16.
+- [ ] No `pr-held` burst in the logs for a single busy PR — a repeat there
+      means retries are outrunning the lock, not that the ceiling is low.
+- [ ] Container count stays under the account's container limit; the ceiling
+      is a hard upper bound on simultaneously live sandboxes.
 
 ### Review concurrency caps (runtime configuration)
 

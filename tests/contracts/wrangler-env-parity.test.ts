@@ -196,8 +196,9 @@ function containerFingerprints(block: Json): string[] {
  * and production each point at their OWN DLQ (`review-dlq` vs
  * `review-dlq-prod` — their distinctness is asserted above), but a consumer
  * that declares no DLQ at all, or drops its retry batch bounds, is exactly the
- * drift this lock catches. Both consumers are pinned at max_batch_size 1,
- * max_concurrency 1 and max_retries 3 (see the wrangler.jsonc rationale).
+ * drift this lock catches. Both consumers pin max_batch_size 1, the
+ * deploy-time max_concurrency ceiling and max_retries 3 (see the
+ * wrangler.jsonc rationale); the ceiling VALUE is pinned separately below.
  */
 function consumerTuningFingerprints(block: Json): string[] {
   return asArray(asObject(block.queues).consumers).map((entry) =>
@@ -289,11 +290,30 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     expectSameSet("migrations", migrationFingerprints);
   });
 
-  /** The consumer tuning is the protective fix (max_concurrency 1 against
-   * `max_instances: 1`): a staging-only loosening would silently open a retry
-   * storm → DLQ path in production. */
+  /** The consumer tuning is the protective shape: a staging-only loosening of
+   * the batch bound or the retry count would silently open a retry-storm → DLQ
+   * path in production, and a staging-only ceiling change would make the two
+   * blocks admit different numbers of reviews. */
   test("queues.consumers[] tuning (batch size, concurrency, retries, DLQ presence) matches between the top level and env.production", () => {
     expectSameSet("queues.consumers[] tuning", consumerTuningFingerprints);
+  });
+
+  /** `max_concurrency` is the deploy-time CEILING only — the effective
+   * admission is min(system, workspace) read from D1 per message — so parity
+   * alone would pass with any equal value. Both blocks therefore pin the same
+   * literal: 64, above the platform's 32/16 defaults and bounded because each
+   * attempt's own sandbox id starts its own container. `max_batch_size: 1`
+   * keeps one review per batch so the runner budget owns the whole wall clock.
+   * See the wrangler.jsonc rationale. */
+  test("both consumer blocks pin the deploy-time ceiling (max_concurrency 64, max_batch_size 1)", () => {
+    for (const [block, consumer] of [
+      ["top level (staging)", asArray(asObject(staging.queues).consumers)[0]],
+      ["env.production", asArray(asObject(production.queues).consumers)[0]],
+    ] as [string, Json | undefined][]) {
+      if (!consumer) throw new Error(`wrangler.jsonc: ${block} consumer entry is missing`);
+      expect(consumer.max_concurrency, `wrangler.jsonc: ${block} max_concurrency ceiling`).toBe(64);
+      expect(consumer.max_batch_size, `wrangler.jsonc: ${block} max_batch_size`).toBe(1);
+    }
   });
 
   /** A second/unregistered container entry must fail the lock, not hide behind

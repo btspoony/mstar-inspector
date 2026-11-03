@@ -8,10 +8,11 @@
  * included).
  *
  * Locked surface:
- *   - a healthy read returns the effective cap (the smaller of the two) and
+ *   - a healthy read exposes BOTH caps separately plus their effective min, and
  *     logs nothing
- *   - a degraded read returns the conservative cap (1, i.e. serial), never
- *     throws, and logs EXACTLY one structured warn
+ *   - a workspace cap below the system cap stays distinct from it
+ *   - a degraded read returns the conservative cap (1, i.e. serial) for both
+ *     levels, never throws, and logs EXACTLY one structured warn
  *   - both degradation paths warn: a throwing read, and a PRESENT value the
  *     store cannot trust
  */
@@ -53,10 +54,26 @@ const failingDb: DashboardD1 = {
 };
 
 describe("readReviewConcurrency", () => {
-  test("a healthy read answers the effective cap and logs nothing", async () => {
+  test("a healthy read exposes both caps and their effective min, and logs nothing", async () => {
     const { warns, log } = capture();
+    // Absent settings: system defaults to 32, the workspace column to 16.
     expect(await readReviewConcurrency(fixture(), WS, log)).toEqual({
+      system: 32,
+      workspace: 16,
       effective: 16,
+      degraded: false,
+    });
+    expect(warns).toEqual([]);
+  });
+
+  test("a workspace cap below the system cap stays separate from it", async () => {
+    const db = fixture();
+    db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 2 WHERE id = ?1`).run(WS);
+    const { warns, log } = capture();
+    expect(await readReviewConcurrency(db, WS, log)).toEqual({
+      system: 32,
+      workspace: 2,
+      effective: 2,
       degraded: false,
     });
     expect(warns).toEqual([]);
@@ -65,7 +82,7 @@ describe("readReviewConcurrency", () => {
   test("a failed read answers the conservative cap and logs exactly one warn", async () => {
     const { warns, log } = capture();
     const read = readReviewConcurrency(failingDb, WS, log);
-    expect(await read).toEqual({ effective: 1, degraded: true });
+    expect(await read).toEqual({ system: 1, workspace: 1, effective: 1, degraded: true });
     expect(warns).toHaveLength(1);
     expect(warns[0]?.fields).toMatchObject({
       event: "review_concurrency_degraded",
@@ -82,7 +99,12 @@ describe("readReviewConcurrency", () => {
       )
       .run();
     const { warns, log } = capture();
-    expect(await readReviewConcurrency(db, WS, log)).toEqual({ effective: 1, degraded: true });
+    expect(await readReviewConcurrency(db, WS, log)).toEqual({
+      system: 1,
+      workspace: 1,
+      effective: 1,
+      degraded: true,
+    });
     expect(warns).toHaveLength(1);
   });
 });
