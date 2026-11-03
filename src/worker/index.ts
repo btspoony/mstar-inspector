@@ -69,16 +69,22 @@ app.use("*", spaDispatch());
  * ternary so a future outcome (e.g. AL-21's `hold`) extends one function
  * instead of every call site; unit-tested in
  * tests/worker/webhook-deliveries.test.ts. `reviewEnabled` is the App
- * row's review_enabled flag (0 = the producer-side pause gate).
+ * row's review_enabled flag (0 = the producer-side pause gate); `reviewGlobal`
+ * is the `review_global` server flag the route reads once per request (false =
+ * the global kill switch closed the enqueue face for every App). Either switch
+ * off makes a `job` read `paused`: `ok` means "job enqueued", so recording it
+ * for a delivery the global flag blocked would overstate the platform exactly
+ * as the per-App pause would.
  */
 export function deliveryOutcomeFromWebhook(
   outcome: { kind: WebhookOutcome["kind"] },
   reviewEnabled: number,
+  reviewGlobal: boolean,
 ): DeliveryOutcome {
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
   if (outcome.kind === "installation") return "ignored";
-  return reviewEnabled === 0 ? "paused" : "ok";
+  return reviewEnabled === 0 || !reviewGlobal ? "paused" : "ok";
 }
 
 /**
@@ -381,20 +387,26 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately
   // after classification (before the reject return) so EVERY classified
   // outcome lands: reject → rejected (status_code = the classifier's
-  // status), ignore → ignored, job + review_enabled=0 → paused, job → ok,
-  // installation → ignored (verified, but it enqueues nothing — not a
-  // reviewable event).
-  // The pre-classify failures (413 / db-guard / 404 /
+  // status), ignore → ignored, job + review_enabled=0 or review_global=0 →
+  // paused, job → ok, installation → ignored (verified, but it enqueues
+  // nothing — not a reviewable event).
+  // pre-classify failures (413 / db-guard / 404 /
   // decrypt 500) never reach this line and record nothing (the retired
   // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id
   // is NOT NULL FK). Best-effort like the
   // last_webhook_at touch: a store failure logs a structured warn and never
   // changes the response or the enqueue.
+  //
+  // The `review_global` flag is read HERE — once per request — because BOTH
+  // consumers need it: this record (a globally blocked `job` is `paused`, never
+  // `ok`) and the enqueue gate below. One PK point read, per the flag read
+  // contract in src/admin/flags.ts; a second read for the gate is forbidden.
+  const reviewGlobal = await isFlagEnabled(db, "review_global");
   try {
     await appsStore.recordDelivery({
       appId: row.id,
       eventName,
-      outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled),
+      outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled, reviewGlobal),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
     });
   } catch (err) {
@@ -513,8 +525,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // Global review flag (spec §3.1, compass D21): OFF closes the ENQUEUE face
   // for every App — same contract as the per-App pause above (2xx, zero
   // enqueue) and deliberately NOT a dequeue-side check: work already queued
-  // keeps running. Absent flag row = enabled.
-  if (!(await isFlagEnabled(db, "review_global"))) {
+  // keeps running. Absent flag row = enabled. `reviewGlobal` was read once
+  // before the delivery record — never re-read here.
+  if (!reviewGlobal) {
     webhookInfo(
       "review_global_off",
       webhookRef,

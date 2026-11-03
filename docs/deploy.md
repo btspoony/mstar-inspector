@@ -439,10 +439,10 @@ The review tier `REVIEW_LEVEL` (`quick`/`default`/`deep`) is unset and
 configured nowhere, and the same `keep_vars` limitation applies to it: a
 `REVIEW_LEVEL` set on the production Worker from the dashboard is wiped by the
 next `wrangler deploy --env production`, so it cannot be relied on until it is
-declared in `env.production.vars` and redeployed. Review control is not a plain
-var at all — per-App `github_apps.review_enabled` (dashboard Pause/Resume) is
-the only switch and lives in D1, unaffected by that limitation
-(`.env.example`).
+declared in `env.production.vars` and redeployed. Neither review control is a
+plain var: per-App `github_apps.review_enabled` (dashboard Pause/Resume) gates
+one App, and the `review_global` server flag gates the enqueue face for every
+App. Both live in D1, unaffected by that limitation (`.env.example`).
 
 Sign-in itself needs no plain var: it is open to any GitHub login (§ 6).
 
@@ -1269,14 +1269,17 @@ Plain vars — `wrangler.jsonc` `vars` / `env.production.vars`; redeploy to chan
 |---|---|---|
 | `DEPLOYMENT_MODE` | `self-hosted` at top level, `saas` in `env.production` | deployment shape (`self-hosted` \| `saas`); no default — unset/invalid fails loud. Both deploy workflows pass `saas` through `--var`, which also overrides the top-level value on a manual staging deploy |
 
-Review control is per App, not a plain var: `github_apps.review_enabled`
-(dashboard Pause/Resume) is the only switch. An App with `review_enabled=1`
-reviews for real on a live Worker, so pause any App that must not review yet
-(`review_enabled=0`) before deploying; a paused App still answers 2xx with zero
-enqueue.
+Review control is never a plain var, and it is two switches over D1.
+`github_apps.review_enabled` (dashboard Pause/Resume) gates one App, and the
+`review_global` server flag gates the enqueue face for every App (absent row =
+enabled; it is set through the console's flags page). An App with
+`review_enabled=1` reviews for real on a live Worker, so pause any App that must
+not review yet (`review_enabled=0`) before deploying — or turn `review_global`
+off to hold every App at once. Either switch still answers 2xx with zero
+enqueue, and neither deletes work already queued.
 
 **Before deploying, list the Apps whose reviews you expect to stay paused** —
-nothing at the deployment level can stop them for you:
+the per-App switch is per row, and `review_global` only stops new enqueues:
 
 ```bash
 # staging (default environment)
@@ -1618,8 +1621,10 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    ```
    `review_failures` must be present and the count queryable.
 3. **End-to-end review (v0.6 `modelOverrides` pin)** — with the App's
-   `review_enabled` on (the only review control; a paused App ignores every
-   webhook), open or update a test PR on an installed repo and
+   `review_enabled` on and the global `review_global` flag enabled (the
+   per-App pause and the global switch each close the enqueue face — a paused
+   App or a flag-off server ignores every webhook), open or update a test PR
+   on an installed repo and
    confirm the review comment lands (the App's trigger mode must cover the
    event — the default `every_push` auto-triggers on open/update; from any
    mode, a PR comment @mentioning the App's bot forces a run —
@@ -1826,7 +1831,7 @@ or when deliveries look dead):
 
 | Check | Where | Healthy state |
 |---|---|---|
-| Review switch | Dashboard App settings / `github_apps.review_enabled` | On (`1`) for an App that should review. A paused App (`0`) ignores every verified delivery with 2xx and records `paused`/`ignored` rather than `ok` — this is the ONLY review control |
+| Review switch | Dashboard App settings / `github_apps.review_enabled` | On (`1`) for an App that should review. A paused App (`0`) ignores every verified delivery with 2xx and records `paused`/`ignored` rather than `ok`. The per-App switch gates one App; the `review_global` server flag closes the enqueue face for every App (absent row = enabled, records `paused` too) |
 | Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<workspace_id>/<app_id>` — the per-App route (both segments must match the App's settings card) |
 | Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
 | Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
@@ -2172,8 +2177,11 @@ In every mode, a PR comment that @mentions the App's bot — `@<slug>` or
 the canonical `@<slug>[bot]`, matched as a standalone token —
 (re-)starts a review when the commenter is the PR author or the
 repository owner (bot-sender comments are ignored; anyone else gets a
-structured warn). The per-App pause (`review_enabled`) governs every trigger
-path — it is the only review control.
+structured warn). Two review controls gate every trigger path: the per-App
+pause (`review_enabled`) gates one App, and the server flag `review_global`
+closes the enqueue face for every App (absent row = enabled; set through the
+console's flags page). Neither deletes queued work — a flag turned off stops
+new enqueues, not in-flight ones.
 Operator note: the structured-log `event` label for comment-triggered
 reviews retires `review_command` → `issue_comment`; operator-saved log
 filters keyed on the old label stop matching after deploy.

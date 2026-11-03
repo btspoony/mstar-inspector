@@ -203,6 +203,44 @@ async function sigHeaders(secret: string, body: string, event = "pull_request"):
   return { "x-hub-signature-256": await signatureFor(secret, body), "x-github-event": event };
 }
 
+/** Close the global enqueue face: `review_global = 0` (migration 0033). */
+function setReviewGlobalOff(db: ReturnType<typeof createTestD1>): void {
+  db.raw
+    .prepare("INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES ('review_global', 0, datetime('now'), 'fixture')")
+    .run();
+}
+
+/**
+ * D1 double that fails ONLY the `app_installations` upsert statement — the
+ * slug lookup / decrypt / delivery record stay healthy, so a delivery against
+ * it exercises exactly the bookkeeping-failure path.
+ */
+function brokenInstallDb(db: ReturnType<typeof createTestD1>): ReturnType<typeof createTestD1> {
+  return {
+    raw: db.raw,
+    batch: db.batch.bind(db),
+    prepare(query: string) {
+      if (query.includes("INSERT INTO app_installations")) {
+        throw new Error("d1 unavailable (test injection)");
+      }
+      return db.prepare(query);
+    },
+  } as unknown as ReturnType<typeof createTestD1>;
+}
+
+/** Swap `console.warn` for a mock until `stop()` restores it. */
+function captureWarn(): { warn: ReturnType<typeof mock<(msg: unknown) => void>>; stop: () => void } {
+  const warn = mock((_msg: unknown) => {});
+  const origWarn = console.warn;
+  console.warn = warn;
+  return {
+    warn,
+    stop: () => {
+      console.warn = origWarn;
+    },
+  };
+}
+
 const PR_PAYLOAD = {
   action: "opened",
   number: 42,
@@ -1129,9 +1167,7 @@ describe("installations upsert wiring", () => {
   test("review_global OFF still records the login from a review-type delivery (the flag gates enqueue only)", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    db.raw
-      .prepare("INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES ('review_global', 0, datetime('now'), 'fixture')")
-      .run();
+    setReviewGlobalOff(db);
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 123, account: { login: "octo-org" } } });
@@ -1150,25 +1186,11 @@ describe("installations upsert wiring", () => {
   test("upsert failure → structured warn, enqueue still succeeds (fire-and-forget bookkeeping)", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // D1 double that fails ONLY the app_installations upsert statement —
-    // slug lookup / decrypt path stay healthy.
-    const brokenDb = {
-      raw: db.raw,
-      batch: db.batch.bind(db),
-      prepare(query: string) {
-        if (query.includes("INSERT INTO app_installations")) {
-          throw new Error("d1 unavailable (test injection)");
-        }
-        return db.prepare(query);
-      },
-    } as unknown as ReturnType<typeof createTestD1>;
     const { queue, sent } = makeQueue();
-    const env = makeEnv(brokenDb, { REVIEW_QUEUE: queue as never });
+    const env = makeEnv(brokenInstallDb(db), { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const warn = mock((_msg: unknown) => {});
-    const origWarn = console.warn;
-    console.warn = warn;
+    const { warn, stop } = captureWarn();
     let res: Response;
     try {
       res = await postWebhook(
@@ -1178,7 +1200,7 @@ describe("installations upsert wiring", () => {
         env,
       );
     } finally {
-      console.warn = origWarn;
+      stop();
     }
 
     expect(res.status).toBe(200);
@@ -1253,6 +1275,39 @@ describe("installation event path", () => {
     },
   );
 
+  test("an install event OVERWRITES a stored login — the route passes the authoritative source", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // A login the review path inferred earlier: an install event states the
+    // installation's own account, so it must replace this value. The two
+    // upsert statements differ ONLY by which side wins (apps-store
+    // UPSERT_INSTALLATION_SQL), so this case fails when the route drops
+    // `authoritative` or passes false on the installation branch — the
+    // delivery would leave `alice` in place.
+    db.raw
+      .prepare(
+        "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-1', ?, 555, 'alice', datetime('now'))",
+      )
+      .run(appRow.id);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(INSTALL_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      await sigHeaders("secret-x", body, "installation"),
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(0);
+    expect(installationRows(db)).toEqual([
+      { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+    ]);
+  });
+
   test("paused App (review_enabled=0) still records the installation — the pause gate does not apply", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
@@ -1281,9 +1336,7 @@ describe("installation event path", () => {
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     // Same D1 table `tests/worker/admin-flags.test.ts` uses: an ABSENT row
     // reads as enabled, so this row is what closes the global enqueue face.
-    db.raw
-      .prepare("INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES ('review_global', 0, datetime('now'), 'fixture')")
-      .run();
+    setReviewGlobalOff(db);
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(INSTALL_PAYLOAD);
@@ -1355,30 +1408,16 @@ describe("installation event path", () => {
   test("upsert failure → structured warn, still 200 accepted, zero enqueue (fire-and-forget bookkeeping)", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // D1 double that fails ONLY the app_installations upsert statement —
-    // slug lookup / decrypt / delivery record stay healthy.
-    const brokenDb = {
-      raw: db.raw,
-      batch: db.batch.bind(db),
-      prepare(query: string) {
-        if (query.includes("INSERT INTO app_installations")) {
-          throw new Error("d1 unavailable (test injection)");
-        }
-        return db.prepare(query);
-      },
-    } as unknown as ReturnType<typeof createTestD1>;
     const { queue, sent } = makeQueue();
-    const env = makeEnv(brokenDb, { REVIEW_QUEUE: queue as never });
+    const env = makeEnv(brokenInstallDb(db), { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(INSTALL_PAYLOAD);
 
-    const warn = mock((_msg: unknown) => {});
-    const origWarn = console.warn;
-    console.warn = warn;
+    const { warn, stop } = captureWarn();
     let res: Response;
     try {
       res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body, "installation"), env);
     } finally {
-      console.warn = origWarn;
+      stop();
     }
 
     expect(res.status).toBe(200);
@@ -1448,6 +1487,28 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(line).toBeDefined();
     const fields = JSON.parse(line!) as { event: string };
     expect(fields.event).toBe("review_paused");
+  });
+
+  test("review_global OFF → 2xx ignored, ZERO enqueue, delivery recorded `paused` (never `ok`)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    setReviewGlobalOff(db);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0); // zero enqueue — the global kill switch
+    // The App's own switch is ON, so only the global flag can explain the
+    // outcome: `ok` means "job enqueued", and nothing was.
+    expect(appOps(db, appRow.id).review_enabled).toBe(1);
+    const rows = db.raw
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
+    expect(rows).toEqual([{ event_name: "pull_request", outcome: "paused", status_code: null }]);
   });
 
   test("paused App, non-whitelisted event → 2xx ignored + touched (ignore outcome also counts)", async () => {

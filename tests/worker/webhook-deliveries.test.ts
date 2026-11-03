@@ -722,17 +722,31 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 });
 
 describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, QC S-2)", () => {
-  test("maps reject → rejected / ignore → ignored / job → paused when the App's review switch is off, else ok", () => {
-    expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 1)).toBe("rejected");
-    expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 1)).toBe("ignored");
-    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0)).toBe("paused");
-    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1)).toBe("ok");
+  test("maps reject → rejected / ignore → ignored / job → paused when either review switch is off, else ok", () => {
+    expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 1, true)).toBe("rejected");
+    expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 0, false)).toBe("rejected");
+    expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 1, true)).toBe("ignored");
+    expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 0, false)).toBe("ignored");
+    // The per-App pause.
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0, true)).toBe("paused");
+    // The global kill switch: `ok` means "job enqueued", and a globally
+    // blocked job never is.
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false)).toBe("paused");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, true)).toBe("ok");
   });
 
   // An install delivery is neither review work nor paused: it is verified but
   // enqueues nothing, so it reads `ignored` — never `ok` ("job enqueued") and
-  // never `paused`, regardless of the review switch.
-  test.each([0, 1])("maps installation → ignored regardless of the review switch (reviewEnabled=%i)", (reviewEnabled) => {
-    expect(deliveryOutcomeFromWebhook({ kind: "installation" }, reviewEnabled)).toBe("ignored");
-  });
+  // never `paused`, regardless of either review switch.
+  test.each([
+    [0, true],
+    [1, true],
+    [0, false],
+    [1, false],
+  ])(
+    "maps installation → ignored regardless of the switches (reviewEnabled=%i, reviewGlobal=%s)",
+    (reviewEnabled, reviewGlobal) => {
+      expect(deliveryOutcomeFromWebhook({ kind: "installation" }, reviewEnabled, reviewGlobal)).toBe("ignored");
+    },
+  );
 });
