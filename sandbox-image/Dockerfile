@@ -20,6 +20,9 @@
 # failure message, so a wave that produced nothing names its cause in the
 # durable review row instead of restating the symptom.
 # rebuild: runner stdin bound + sandbox instance probe
+# rebuild: the image-rebuild gate now treats wrangler.jsonc (container image
+# and build-context config) as an image input, so this config-only change
+# touches the marker to keep the gate and the deployed image in step.
 # rebuild: credential stdin ends at a complete payload rather than at EOF, and
 # the review setup stages trace themselves. Both are runner-source changes that
 # landed without touching this file, so the deployed image kept the unbounded
