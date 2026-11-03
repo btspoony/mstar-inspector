@@ -154,7 +154,12 @@ export function PullRequestsListView({
           <button
             type="button"
             className="min-w-0 truncate text-left font-medium hover:underline"
-            onClick={() => onOpen(row)}
+            onClick={(event) => {
+              // The row is the click target for the rest of the row; without
+              // this the button's click bubbles and opens the same PR twice.
+              event.stopPropagation();
+              onOpen(row);
+            }}
           >
             {row.title}
           </button>

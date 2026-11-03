@@ -286,6 +286,40 @@ describe("pull requests tab (mounted)", () => {
     }
   });
 
+  test("a press on a PR's title opens it once; the rest of the row still opens it", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const host = win.document.createElement("div");
+    win.document.body.appendChild(host);
+    const container = host as unknown as HTMLElement;
+    const root = createRoot(host as unknown as Element);
+    const opened: PullRequestRow[] = [];
+    try {
+      await act(async () =>
+        root.render(
+          createElement(PullRequestsListView, {
+            locale: "en",
+            rows: [ROW_OPEN],
+            onOpen: (row) => opened.push(row),
+          }),
+        ),
+      );
+      await act(async () => {});
+      const title = [...container.querySelectorAll("tbody button")].find(
+        (button) => button.textContent === ROW_OPEN.title,
+      );
+      await press(win, title);
+      // The button's click must not bubble into the row handler: one press,
+      // one open — two would open the same PR twice.
+      expect(opened).toEqual([ROW_OPEN]);
+      // The rest of the row is still the row's own click target.
+      await press(win, container.querySelector("tbody td:last-child"));
+      expect(opened).toEqual([ROW_OPEN, ROW_OPEN]);
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
   test("switching PRs never shows the previous PR's data; a failed fetch renders the error face with a retry (S2)", async () => {
     const { container, text, win, rerender, resolve, unmount } = await mountTabWithGatedFetch("acme/web/1");
     try {
@@ -315,10 +349,7 @@ describe("pull requests tab (mounted)", () => {
       expect(retry).toBeDefined();
 
       // Retry re-issues the read; B's payload lands.
-      await act(async () => {
-        retry?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
-      });
-      await act(async () => {});
+      await press(win, retry);
       await act(async () => {
         resolve("/pull-requests/acme/web/2", jsonResponse(DETAIL_B));
       });
@@ -362,74 +393,29 @@ describe("pull requests tab (mounted)", () => {
   });
 
   test("a parent re-render for the same PR neither refetches nor re-flashes loading (S3)", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const realFetch = globalThis.fetch;
-    let reads = 0;
-    globalThis.fetch = (async (input: unknown) => {
-      if (String(input).endsWith("/pull-requests/acme/web/1")) reads += 1;
-      return jsonResponse(DETAIL);
-    }) as unknown as typeof fetch;
-    const tabElementFor = () =>
-      createElement(AppPullRequestsTab, {
-        locale: "en",
-        appId: "1",
-        // A fresh search object each render, as the shell hands it over; the
-        // pr VALUE is what stays put.
-        search: { tab: "pull-requests", window: "30", repo: "", pr: "acme/web/1" },
-        onSearch: noSearch,
-      });
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
-    const text = () => container.textContent ?? "";
+    const { fetches, text, rerender, resolve, unmount } = await mountTabWithGatedFetch("acme/web/1");
     try {
-      await act(async () => root.render(tabElementFor()));
+      await act(async () => resolve("/pull-requests/acme/web/1", jsonResponse(DETAIL)));
       await act(async () => {});
-      expect(reads).toBe(1);
+      expect(fetches).toHaveLength(1);
       expect(text()).toContain("Fix the login flow");
 
       // The parent re-renders: `pullRequestRefOf` hands over a fresh ref object,
       // which must not count as a dependency change.
-      await act(async () => root.render(tabElementFor()));
-      await act(async () => {});
-      expect(reads).toBe(1);
+      await rerender("acme/web/1");
+      expect(fetches).toHaveLength(1);
       expect(text()).toContain("Fix the login flow");
       expect(text()).not.toContain(t("en", "common.loading"));
     } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
+      await unmount();
     }
   });
 
   test("a deep link reads only the detail; closing it issues the list read once (S4)", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const realFetch = globalThis.fetch;
-    const urls: string[] = [];
-    globalThis.fetch = (async (input: unknown) => {
-      const url = String(input);
-      urls.push(url);
-      return url.endsWith("/pull-requests") ? jsonResponse({ pull_requests: [ROW_OPEN] }) : jsonResponse(DETAIL);
-    }) as unknown as typeof fetch;
-    const listReads = () => urls.filter((url) => url.endsWith("/pull-requests"));
-    // The shell owns the search, so closing the detail commits `pr: ""` here
-    // exactly as the real page's onSearch does.
-    function Harness() {
-      const [search, setSearch] = useState<AppDetailSearch>({
-        tab: "pull-requests",
-        window: "30",
-        repo: "",
-        pr: "acme/web/133",
-      });
-      return createElement(AppPullRequestsTab, { locale: "en", appId: "1", search, onSearch: setSearch });
-    }
-    const host = win.document.createElement("div");
-    win.document.body.appendChild(host);
-    const container = host as unknown as HTMLElement;
-    const root = createRoot(host as unknown as Element);
-    const text = () => container.textContent ?? "";
+    const { container, fetches, text, win, resolve, unmount } = await mountTabWithGatedFetch("acme/web/133");
+    const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
     try {
-      await act(async () => root.render(createElement(Harness)));
+      await act(async () => resolve("/pull-requests/acme/web/133", jsonResponse(DETAIL)));
       await act(async () => {});
       // The detail is the whole face the deep link asked for: no list read.
       expect(text()).toContain("Fix the login flow");
@@ -444,11 +430,11 @@ describe("pull requests tab (mounted)", () => {
         ),
       );
       expect(listReads()).toHaveLength(1);
+      await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
+      await act(async () => {});
       expect(text()).toContain("Add the export button");
     } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
+      await unmount();
     }
   });
 });

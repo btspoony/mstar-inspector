@@ -4,11 +4,11 @@
  * The list/detail split imports the same PR payloads; keeping them here means
  * neither file pins its own copy of the data the other one asserts on.
  */
-import { act, createElement } from "react";
+import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Window } from "happy-dom";
 import { AppPullRequestsTab } from "../../src/spa/pages/AppPullRequestsTab";
-import type { PullRequestDetail, PullRequestRow } from "../../src/spa/pages/data";
+import type { AppDetailSearch, PullRequestDetail, PullRequestRow } from "../../src/spa/pages/data";
 import { installDom } from "./dom";
 
 export const ROW_OPEN: PullRequestRow = {
@@ -119,7 +119,11 @@ export async function mountTabWithGatedFetch(initialPr: string) {
   const realFetch = globalThis.fetch;
   type Gate = { promise: Promise<Response>; resolve: (response: Response) => void };
   const gates = new Map<string, Gate>();
+  // Every URL the tab asked for, so a test can prove a read was (or was not)
+  // issued without keeping its own stub.
+  const fetches: string[] = [];
   globalThis.fetch = (async (input: unknown) => {
+    fetches.push(String(input));
     const gate: Gate = Promise.withResolvers<Response>();
     gates.set(String(input), gate);
     return gate.promise;
@@ -130,18 +134,26 @@ export async function mountTabWithGatedFetch(initialPr: string) {
     if (!gate) throw new Error(`no fetch issued for ${suffix}`);
     gate.resolve(response);
   };
-  const tabElementFor = (pr: string) =>
-    createElement(AppPullRequestsTab, {
-      locale: "en",
-      appId: "1",
-      search: { tab: "pull-requests", window: "30", repo: "", pr },
-      onSearch: () => {},
+  // The helper owns the shell's search state, so a close (`onSearch`) commits
+  // exactly as the real page's does — the deep-link test needs no harness.
+  let setSearch: (next: (previous: AppDetailSearch) => AppDetailSearch) => void = () => {};
+  function Harness() {
+    const [search, set] = useState<AppDetailSearch>({
+      tab: "pull-requests",
+      window: "30",
+      repo: "",
+      pr: initialPr,
     });
-  const container = win.document.createElement("div");
-  win.document.body.appendChild(container);
+    setSearch = set;
+    return createElement(AppPullRequestsTab, { locale: "en", appId: "1", search, onSearch: set });
+  }
+  const host = win.document.createElement("div");
+  win.document.body.appendChild(host);
+  // happy-dom's nodes cross into lib.dom's here, as in the suites above.
+  const container = host as unknown as HTMLElement;
   const root = createRoot(container as unknown as Element);
   try {
-    await act(async () => root.render(tabElementFor(initialPr)));
+    await act(async () => root.render(createElement(Harness)));
     await act(async () => {});
   } catch (error) {
     // A mount that throws never reaches `unmount()`: the stub `fetch` and the
@@ -153,11 +165,15 @@ export async function mountTabWithGatedFetch(initialPr: string) {
   }
   return {
     container,
+    fetches,
     text: () => container.textContent ?? "",
     win,
-    /** Re-render the tab for another pr — the switch the read stamp follows. */
+    /**
+     * Re-render for `pr` through a fresh search object — the shell's own
+     * re-sync always hands over a new object with the same value.
+     */
     rerender: async (pr: string) => {
-      await act(async () => root.render(tabElementFor(pr)));
+      await act(async () => setSearch((previous) => ({ ...previous, pr })));
       await act(async () => {});
     },
     resolve,

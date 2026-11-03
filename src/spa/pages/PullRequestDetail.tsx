@@ -290,14 +290,16 @@ export function PullRequestDetailView({
   // A clipboard write can settle after the face is gone; by then the cleanup
   // below has already run, so a late outcome would schedule a timer nothing
   // would clear.
-  const mounted = useRef(true);
-  useEffect(
-    () => () => {
+  const mounted = useRef(false);
+  useEffect(() => {
+    // StrictMode mounts, cleans up and mounts again: the body re-arms the flag
+    // so the second mount is not stuck looking unmounted.
+    mounted.current = true;
+    return () => {
       mounted.current = false;
       for (const timer of Object.values(copyTimers.current)) clearTimeout(timer);
-    },
-    [],
-  );
+    };
+  }, []);
   const announceCopy = (key: string, outcome: "copied" | "failed"): void => {
     if (!mounted.current) return;
     setCopyOutcome((previous) => ({ ...previous, [key]: outcome }));

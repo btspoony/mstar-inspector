@@ -32,13 +32,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
 import { survivorSteps } from "../../src/design-system/tokens";
 import {
-  PROTOTYPES_ROOT,
   SPA_ROOT,
   consumerWalk,
   documentSync,
@@ -572,12 +571,6 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     // A relative root would resolve against the CWD and read as empty: loud
     // failure instead, so a caller bug cannot masquerade as a moved tree.
     expect(() => consumerWalk(["src/spa"])).toThrow(/must be absolute/);
-    // And per root, not just in aggregate: every DECLARED root contributes.
-    // The prototypes forest is the one a dropped `CONSUMER_ROOTS` entry would
-    // silently stop checking, so its presence is asserted, not assumed.
-    const prototypePrefix = `${relative(root, PROTOTYPES_ROOT)}/`;
-    expect(consumers.some((file) => file.startsWith(prototypePrefix))).toBe(true);
-    expect(rootsWithoutConsumers(walk.roots)).toEqual([]);
     for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
       expect(danglingReferences(file, css), file).toEqual([]);

@@ -9,7 +9,7 @@
  * `pull-request-fixtures.ts`.
  */
 import { describe, expect, jest, test } from "bun:test";
-import { act, createElement } from "react";
+import { act, createElement, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
@@ -466,13 +466,18 @@ describe("pull request detail face (static SSR)", () => {
       // The timeline row still names the review, with no dangling separator
       // and the provider rather than an empty model.
       const entry = container.querySelector('[data-slot="activity-entry"]');
+      // The row's dot is aria-hidden; the label and meta are the two spans
+      // inside its text column.
+      const [label, meta] = [...(entry?.querySelectorAll("span") ?? [])].filter(
+        (span) => !span.hasAttribute("aria-hidden"),
+      );
       return {
         verdictText: verdict?.textContent ?? "",
         verdictTone: verdict?.getAttribute("data-tone") ?? null,
         badges: container.querySelectorAll('[role="tabpanel"] [data-slot="status-badge"]').length,
         head: reviewHead(container, "The pipeline recorded no verdict."),
-        label: entry?.querySelector("div > span")?.textContent ?? "",
-        meta: entry?.querySelector("div > span + span")?.textContent ?? "",
+        label: label?.textContent ?? "",
+        meta: meta?.textContent ?? "",
       };
     });
     // Band: the same dash + screen-reader text the no-review case paints.
@@ -662,9 +667,21 @@ describe("pull request detail face (static SSR)", () => {
       ...FAILING,
       failures: [{ stage: "sandbox", error: "first line\nsecond line", created_at: "2026-10-31 23:00:00" }],
     });
-    expect(multiline).toContain("<details>");
-    expect(multiline).toContain(t("en", "pullRequests.failureFullOutput"));
-    expect(multiline).toContain("second line");
+    const fold = withMarkup(multiline, (container) => {
+      const details = container.querySelector<HTMLDetailsElement>('[role="tabpanel"] details');
+      const output = details?.querySelector("pre")?.textContent ?? "";
+      if (details === null) return null;
+      // The fold starts collapsed, so the evidence is behind the summary
+      // until the reader opens it.
+      const collapsed = { open: details.open, output };
+      details.open = true;
+      return { collapsed, opened: details.open, output, summary: details.querySelector("summary")?.textContent ?? "" };
+    });
+    expect(fold).not.toBeNull();
+    expect(fold?.collapsed).toEqual({ open: false, output: "first line\nsecond line" });
+    expect(fold?.opened).toBe(true);
+    expect(fold?.summary).toBe(t("en", "pullRequests.failureFullOutput"));
+    expect(fold?.output).toContain("second line");
   });
 
   test("a failure with no recorded stage renders neither chip nor a dangling separator", () => {
@@ -889,6 +906,41 @@ describe("pull request detail (mounted)", () => {
     }
   });
 
+  test("under StrictMode's double mount a copy's outcome still renders", async () => {
+    // StrictMode runs mount → cleanup → mount; the cleanup-only effect used to
+    // leave the mounted flag false, so every outcome was dropped.
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const host = win.document.createElement("div");
+    win.document.body.appendChild(host);
+    const container = host as unknown as HTMLElement;
+    const root = createRoot(host as unknown as Element);
+    Object.defineProperty(win.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: () => Promise.resolve() },
+    });
+    jest.useFakeTimers();
+    try {
+      await act(async () =>
+        root.render(
+          createElement(
+            StrictMode,
+            null,
+            createElement(PullRequestDetailView, { locale: "en", detail: { ...DETAIL, findings: [] } }),
+          ),
+        ),
+      );
+      await act(async () => {});
+      const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
+      expect(button?.textContent).toBe(t("en", "pullRequests.copyError"));
+      await press(win, button);
+      expect(button?.textContent).toBe(t("en", "pullRequests.copyCopied"));
+    } finally {
+      jest.useRealTimers();
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
   test("copying a second error block does not cancel the first block's revert", async () => {
     const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
     const host = win.document.createElement("div");
@@ -965,25 +1017,26 @@ describe("pull request detail (mounted)", () => {
       problems.push(String(args[0]));
     };
     jest.useFakeTimers();
-    const setTimeoutSpy = jest.spyOn(globalThis, "setTimeout");
     try {
       await act(async () =>
         root.render(createElement(PullRequestDetailView, { locale: "en", detail: { ...DETAIL, findings: [] } })),
       );
       await act(async () => {});
-      await press(win, container.querySelector('[data-slot="copy-error"]'));
+      const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
+      await press(win, button);
+      const labelAtUnmount = button?.textContent;
       // The face goes away while the write is still in flight.
       await act(async () => root.unmount());
-      const timersAtUnmount = setTimeoutSpy.mock.calls.length;
       await act(async () => {
         settleWrite();
       });
-      // The late outcome neither schedules a revert timer nor attempts an
-      // update on the unmounted tree.
-      expect(setTimeoutSpy.mock.calls.length).toBe(timersAtUnmount);
+      // The late outcome cannot reach the gone face: the write's resolution
+      // throws nothing, React never warns about an update after unmount, and
+      // the button the reader saw keeps the label it had.
+      expect(labelAtUnmount).toBe(t("en", "pullRequests.copyError"));
+      expect(button?.textContent).toBe(labelAtUnmount);
       expect(problems.filter((message) => /unmounted|not wrapped in act/.test(message))).toEqual([]);
     } finally {
-      setTimeoutSpy.mockRestore();
       jest.useRealTimers();
       console.error = realError;
       cleanup();
