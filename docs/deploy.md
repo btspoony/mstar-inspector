@@ -2071,9 +2071,11 @@ The five input path families it covers — the gate's whole input vocabulary:
 - `packages/runner/bun.lock`
 - `sandbox-image/**`
 
-Passing requires one added or removed `sandbox-image/Dockerfile` line containing
-`rebuild:` in the same diff; a Dockerfile change that does not touch the marker
-fails like any other image input. The gate reads git output only — it never
+A diff that touches an image input passes only with one added or removed
+`sandbox-image/Dockerfile` line containing `rebuild:` in the same diff; a
+Dockerfile change that does not touch the marker fails like any other image
+input. A diff that touches no image input passes without any Dockerfile change.
+The gate reads git output only — it never
 builds the image and never inspects file contents beyond that Dockerfile diff —
 and an unreadable diff fails the run rather than passing unverified.
 
