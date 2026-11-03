@@ -400,6 +400,8 @@ export type UpsertPullRequestInput = {
   /**
    * The payload's `pull_request.updated_at` (ISO 8601), so ordering follows
    * GitHub's clock rather than our arrival clock. Omitted/null → now.
+   * It is ALSO the `head_at` watermark: the stamp recorded for `headSha` when
+   * this delivery supplies one (migration 0044).
    */
   updatedAt?: string | null;
 };
@@ -1009,6 +1011,17 @@ export function createAppsStore(db: AppsStoreD1) {
      * narrowed to same-second ties. `>` would merely invert which arrival wins
      * and would break a legitimate in-order close→reopen, so this layer accepts
      * the tie; any later delivery for the PR rewrites the row with a new stamp.
+     *
+     * `head_sha` / `head_at` (migration 0044) move as ONE pair, ordered by
+     * `head_at` — the payload stamp the sha arrived with — so a delivery that
+     * overtakes another in the queue cannot rewind the ledger to an older
+     * commit. `head_at` is bound only when the delivery names a sha (the pair
+     * invariant), so:
+     *   - no usable stamp (`excluded.head_at IS NULL`) → the 0039 rule for the
+     *     sha alone (`COALESCE`) and `head_at` untouched;
+     *   - a stamp at least as new as the stored one (or an UNKNOWN stored one,
+     *     `head_at IS NULL`) → both advance;
+     *   - an older stamp → both untouched.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
       // The caller validates the timestamp (`pullRequestRecord` only passes an
@@ -1017,11 +1030,14 @@ export function createAppsStore(db: AppsStoreD1) {
       const seenAt = input.updatedAt === undefined || input.updatedAt === null
         ? null
         : input.updatedAt;
+      // The pair invariant holds at the write: no sha, no stamp — otherwise a
+      // delivery that carries a stamp but no sha would date a sha it never had.
+      const headAt = input.headSha === undefined || input.headSha === null ? null : seenAt;
       await db
         .prepare(
           `INSERT INTO pull_requests
-             (id, app_id, owner, repo, pr_number, title, state, head_sha, last_seen_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
+             (id, app_id, owner, repo, pr_number, title, state, head_sha, head_at, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(datetime(?), datetime('now')))
            ON CONFLICT (app_id, owner, repo, pr_number) DO UPDATE SET
              title = COALESCE(excluded.title, title),
              state = CASE
@@ -1029,7 +1045,16 @@ export function createAppsStore(db: AppsStoreD1) {
                WHEN excluded.last_seen_at >= pull_requests.last_seen_at THEN excluded.state
                ELSE pull_requests.state
              END,
-             head_sha = COALESCE(excluded.head_sha, head_sha),
+             head_sha = CASE
+               WHEN excluded.head_at IS NULL THEN COALESCE(excluded.head_sha, head_sha)
+               WHEN head_at IS NULL OR excluded.head_at >= head_at THEN excluded.head_sha
+               ELSE head_sha
+             END,
+             head_at = CASE
+               WHEN excluded.head_at IS NULL THEN head_at
+               WHEN head_at IS NULL OR excluded.head_at >= head_at THEN excluded.head_at
+               ELSE head_at
+             END,
              last_seen_at = MAX(last_seen_at, excluded.last_seen_at)`,
         )
         .bind(
@@ -1041,9 +1066,36 @@ export function createAppsStore(db: AppsStoreD1) {
           input.title ?? null,
           input.state,
           input.headSha ?? null,
+          headAt,
           seenAt,
         )
         .run();
+    },
+
+    /**
+     * The PR's head watermark — `head_sha` + the stamp it arrived with
+     * (migration 0044) — as ONE strongly consistent point read on the
+     * ledger's own UNIQUE key. The queue consumer reads it to decide whether a
+     * delivery it just dequeued has already been overtaken by a newer commit.
+     *
+     * Missing row → `null` (an unknown PR is never a reason to skip), and the
+     * two fields are reported as the row holds them — a `null` stamp is
+     * "unknown", not "now".
+     */
+    async selectPrHead(input: {
+      appId: string;
+      owner: string;
+      repo: string;
+      prNumber: number;
+    }): Promise<{ headSha: string | null; headAt: string | null } | null> {
+      const row = await db
+        .prepare(
+          `SELECT head_sha, head_at FROM pull_requests
+           WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+        )
+        .bind(input.appId, input.owner, input.repo, input.prNumber)
+        .first<{ head_sha: string | null; head_at: string | null }>();
+      return row === null ? null : { headSha: row.head_sha, headAt: row.head_at };
     },
 
     /**

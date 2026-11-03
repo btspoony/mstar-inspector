@@ -1,0 +1,24 @@
+-- 0044_pull_request_head_at.sql — the stamp of the delivery that last moved
+-- `head_sha`.
+--
+-- `pull_requests` (0039) stores the newest known `head_sha` per PR, but not
+-- WHEN that sha arrived. A queued `synchronize` delivery could therefore be
+-- compared with the ledger only by sha: a delivery whose sha already differs
+-- is indistinguishable from one that is merely older, so the consumer either
+-- reviews an already-superseded commit or never reviews the newest one.
+--
+-- `head_at` stores the RFC 3339 `pull_request.updated_at` of the delivery that
+-- last advanced `head_sha`, in the payload's own spelling (GitHub sends
+-- `YYYY-MM-DDTHH:MM:SSZ`, so text order equals time order and the pair is
+-- comparable as text). It is written ONLY together with a new `head_sha`, so
+-- the column never names a stamp the stored sha did not arrive with.
+--
+-- NULL = unknown (a row written before this migration, or a delivery that
+-- carried no usable `updated_at`). An unknown stamp is never a reason to
+-- skip a delivery: the consumer's skip rule requires a readable `head_at` on
+-- both sides and fails open otherwise.
+--
+-- Append-only on the production DB: one `ALTER TABLE ... ADD COLUMN` on the
+-- table 0039 created, no data rewrite. Forward-only (SQLite has no down).
+
+ALTER TABLE pull_requests ADD COLUMN head_at TEXT;
