@@ -683,7 +683,31 @@ describe("runner entry — --recheck-out channel", () => {
     expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual(fakeRecheckStatus);
   });
 
-  test("the written status carries rejected_row_ids, and rejected matches its length", async () => {
+  test("the written status file is the seat's status, field for field", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeRecheck = RECHECK_RESULT_DOC;
+    // The runner only transports the seat's status: `rejected` deliberately
+    // disagrees with the list length here, so the file cannot pass by
+    // re-deriving either field on the way out.
+    fakeRecheckStatus = {
+      schema: "mstar.recheck-status/v1",
+      headSha: RECHECK_INPUT_DOC.headSha,
+      outcome: "ok",
+      reason: null,
+      rejected: 3,
+      rejected_row_ids: ["row-1", "row-2"],
+      error: null,
+    };
+    const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+    const outPath = join(outDir, "recheck.json");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
+    const { code } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+
+    expect(code).toBe(0);
+    expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual(fakeRecheckStatus);
+  });
+
+  test("document write failure → exit 1, no stdout, status file still written with the seat's outcome", async () => {
     fakeEnvelope = ENVELOPE;
     fakeRecheck = RECHECK_RESULT_DOC;
     fakeRecheckStatus = {
@@ -696,14 +720,24 @@ describe("runner entry — --recheck-out channel", () => {
       error: null,
     };
     const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+    // A directory at the --recheck-out path makes the write throw (EISDIR):
+    // the validated document is lost, so the status is the round's only record.
     const outPath = join(outDir, "recheck.json");
+    mkdirSync(outPath);
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
-    const { code } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+    const { code, stdout, stderr } = await runCli([
+      "--level",
+      "quick",
+      "--input",
+      inputPath,
+      "--recheck-out",
+      outPath,
+    ]);
 
-    expect(code).toBe(0);
-    const written = JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8")) as RecheckStatus;
-    expect(written.rejected_row_ids).toEqual(["row-1", "row-2"]);
-    expect(written.rejected).toBe(written.rejected_row_ids.length);
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("cannot write recheck output");
+    expect(JSON.parse(readFileSync(RECHECK_STATUS_PATH, "utf8"))).toEqual(fakeRecheckStatus);
   });
 
   test("status write is best-effort: an unwritable status path never fails the run", () => {

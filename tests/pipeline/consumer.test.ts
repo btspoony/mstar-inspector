@@ -3373,7 +3373,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       headSha: SHA,
       outcome: "ok",
       reason: null,
-      rejected: 2,
+      // The seat's own count is untrustworthy (and here simply wrong): the
+      // logged `rejected` must come from the sent-row union, not this number.
+      rejected: 99,
       rejected_row_ids: rejectedRowIds,
       error: null,
     });

@@ -628,6 +628,15 @@ export async function main(
 
     try {
       const { envelope, recheck, recheckStatus } = await runtime.runReview(input);
+      // The STATUS is written whenever a recheck round ran — including the
+      // null-document ones (budget skip, seat failure, invalid document) that
+      // used to vanish into container stderr — and it goes FIRST, so the
+      // document write's own I/O failure (exit 1 below) still leaves the round
+      // attributable. Best-effort: a status write failure is noise, never a
+      // failed review.
+      if (recheckOutPath !== undefined && recheckStatus !== undefined) {
+        writeRecheckStatus(recheckStatus);
+      }
       // The optional --recheck-out file is written only when a
       // recheck result exists, and BEFORE the envelope reaches stdout — a
       // write failure is a genuine I-O failure (exit 1, no stdout), not a
@@ -640,13 +649,6 @@ export async function main(
           console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
           return 1;
         }
-      }
-      // The STATUS is written whenever a recheck round ran — including the
-      // null-document ones (budget skip, seat failure, invalid document) that
-      // used to vanish into container stderr. Best-effort: a status write
-      // failure is noise, never a failed review.
-      if (recheckOutPath !== undefined && recheckStatus !== undefined) {
-        writeRecheckStatus(recheckStatus);
       }
       // stdout carries ONLY the envelope JSON (plan Module contracts).
       console.log(JSON.stringify(envelope));

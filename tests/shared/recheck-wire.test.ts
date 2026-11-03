@@ -1,7 +1,8 @@
 /**
- * Per-row recheck convergence (spec review-lifecycle §7.3) —
- * `validateRecheckDoc` drops a bad row instead of failing the document,
- * while document-level distrust (duplicate/foreign row IDs) still fails closed.
+ * Per-row recheck convergence at scale (spec review-lifecycle §7.3): one bad
+ * quote among 25 rows drops only that row, and a noisy (CRLF / trailing-blank)
+ * quote still proves addressed. The per-rule `validateRecheckDoc` contract is
+ * owned by tests/contracts/recheck.test.ts and is not restated here.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -118,122 +119,6 @@ describe("validateRecheckDoc — per-row degradation", () => {
     expect(outcome.doc.results).toHaveLength(1);
     expect(outcome.doc.results[0]!.disposition).toBe("addressed");
     expect(outcome.rejected).toHaveLength(0);
-  });
-
-  test("a malformed row is rejected without failing the document", () => {
-    const outcome = validateRecheckDoc(
-      {
-        schema: "mstar.recheck/v1",
-        headSha: SHA,
-        results: [
-          { rowId: "row-1", disposition: "nonsense", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
-        ],
-      },
-      input(),
-    );
-
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.doc.results).toHaveLength(0);
-    expect(outcome.rejected).toHaveLength(1);
-    expect(outcome.rejected[0]!.rowId).toBe("row-1");
-  });
-
-  test("a row rejected for an extra key keeps the rowId it already proved", () => {
-    const targets = [target(1), target(2)];
-    const outcome = validateRecheckDoc(
-      {
-        schema: "mstar.recheck/v1",
-        headSha: SHA,
-        results: [
-          { ...addressed("row-1"), extra: true },
-          addressed("row-2"),
-        ],
-      },
-      input({ targets }),
-    );
-
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.doc.results).toHaveLength(1);
-    expect(outcome.doc.results[0]!.rowId).toBe("row-2");
-    expect(outcome.rejected).toHaveLength(1);
-    expect(outcome.rejected[0]!.rowId).toBe("row-1");
-    expect(outcome.rejected[0]!.index).toBe(0);
-  });
-});
-
-describe("validateRecheckDoc — document-level distrust still fails closed", () => {
-  test("duplicate row ID fails the whole document", () => {
-    const outcome = validateRecheckDoc(
-      {
-        schema: "mstar.recheck/v1",
-        headSha: SHA,
-        results: [addressed("row-1"), addressed("row-1")],
-      },
-      input(),
-    );
-
-    expect(outcome.ok).toBe(false);
-    if (outcome.ok) return;
-    expect(outcome.error).toContain("duplicate row ID");
-  });
-
-  test("foreign row ID fails the whole document", () => {
-    const outcome = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressed("row-999")] },
-      input(),
-    );
-
-    expect(outcome.ok).toBe(false);
-    if (outcome.ok) return;
-    expect(outcome.error).toContain("foreign row");
-  });
-
-  test("a duplicate row ID with an extra key still fails the whole document", () => {
-    // Identity is decided BEFORE the row-shape check: the extra key must not
-    // downgrade a document-level duplicate into one dropped row.
-    const outcome = validateRecheckDoc(
-      {
-        schema: "mstar.recheck/v1",
-        headSha: SHA,
-        results: [addressed("row-1"), { rowId: "row-1", extra: 1 }],
-      },
-      input(),
-    );
-
-    expect(outcome.ok).toBe(false);
-    if (outcome.ok) return;
-    expect(outcome.error).toContain("duplicate row ID");
-  });
-
-  test("a foreign row ID with an extra key still fails the whole document", () => {
-    const outcome = validateRecheckDoc(
-      {
-        schema: "mstar.recheck/v1",
-        headSha: SHA,
-        results: [addressed("row-1"), { rowId: "row-999", extra: 1 }],
-      },
-      input(),
-    );
-
-    expect(outcome.ok).toBe(false);
-    if (outcome.ok) return;
-    expect(outcome.error).toContain("foreign row");
-  });
-
-  test("a non-object row has no identity and only lands in rejected", () => {
-    const outcome = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressed("row-1"), "nope"] },
-      input(),
-    );
-
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.doc.results.map((row) => row.rowId)).toEqual(["row-1"]);
-    expect(outcome.rejected).toHaveLength(1);
-    expect(outcome.rejected[0]!.rowId).toBeNull();
-    expect(outcome.rejected[0]!.index).toBe(1);
   });
 });
 

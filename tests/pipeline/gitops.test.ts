@@ -26,6 +26,7 @@ import {
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
 import { shellCommand } from "../../src/pipeline/shell-command";
+import { RECHECK_FILE_MAX_BYTES, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 
 describe("gitops command builders", () => {
   test("valid inputs produce single-quoted, allowlisted commands", () => {
@@ -90,10 +91,14 @@ describe("gitops command builders", () => {
     }
   });
 
-  test("readRecheckStatusCommand rides the same bounded transport over the fixed status path", () => {
-    // No second transport: the status read IS the audited read command bound
-    // to RECHECK_STATUS_PATH (the runner's write target).
-    expect(readRecheckStatusCommand()).toEqual(readRecheckCommand("/tmp/mstar-recheck-status.json"));
+  test("readRecheckStatusCommand bounds the status read at 262,144 bytes and probes for overflow", () => {
+    // The product is the command string itself: the same audited transport as
+    // the document read (byte bound + newline separator + bound+1 probe), bound
+    // to the fixed status path rather than a caller-chosen one.
+    const command = readRecheckStatusCommand();
+    expect(command).toContain(`head -c '${RECHECK_FILE_MAX_BYTES}' '${RECHECK_STATUS_PATH}'`);
+    expect(command).toContain(`printf '\\n'`);
+    expect(command).toContain(`tail -c '+${RECHECK_FILE_MAX_BYTES + 1}' '${RECHECK_STATUS_PATH}'`);
   });
 
   test("readRecheckCommand's REAL stdout is content + newline + newline-terminated flag (P67-QC-006)", async () => {
