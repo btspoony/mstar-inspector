@@ -7,7 +7,7 @@ severity: high
 date: 2026-08-26
 status: active
 created_at: 2026-08-26
-last_updated: 2026-08-26
+last_updated: 2026-11-03
 source: review store
 iteration: v0.2
 verified: true
@@ -46,3 +46,19 @@ const stmts = [
 const res = await db.batch(stmts);
 if (res[0].meta.changes === 0) return { outcome: "duplicate" };
 ```
+
+## 单语句准入：条件 INSERT ... SELECT 作为并发配额闸门
+
+**Context.** A runtime concurrency cap (system-wide, per-tenant) plus a per-PR mutex must be evaluated and reserved atomically. A separate `SELECT COUNT(*)` followed by `INSERT` is a check-then-act race; Cloudflare D1 serializes writes on one primary, so a single statement is the cheapest correct primitive — no batch, no transaction wrapper.
+
+**Guidance.**
+
+- Fold every condition into the `INSERT ... SELECT ... WHERE` predicate: per-key uniqueness comes from the primary key (`INSERT OR IGNORE`), and capacities become subquery guards (`(SELECT COUNT(*) FROM inflight WHERE expires_at > :now) < :systemCap`). One statement = atomic admission.
+- A zero-row result is ambiguous (key held vs a cap hit vs unknown target). Disambiguate with one follow-up read *after* the attempt and report a typed reason; never treat zero rows as a generic failure.
+- TTL the reservation row (`expires_at`) and release it scoped to the owning attempt id, so a later attempt that reclaimed an expired row cannot have its row deleted by the previous owner.
+- Use the same predicate in any audit insert so a refused write appends no ledger row.
+- A storage error must fail closed (treat as held/degraded), never fail open to unlimited capacity.
+
+**Why.** This is the one D1 primitive that gives both a mutex and a capacity counter without a second lock, and its atomicity rests on the documented single-writer behaviour rather than on read-then-write luck.
+
+**When to apply.** Any admission gate that combines uniqueness with a count/quota, especially when the limit is runtime-configurable and read on the hot path.
