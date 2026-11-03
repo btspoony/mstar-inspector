@@ -895,22 +895,30 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
  * `headSha`/`baseSha` both carry the AUTHORITATIVE checkout SHA the diff was
  * captured for (the worker runs one diff per pinned checkout — the per-file
  * old/new blob oids on each slice carry the finer-grained pins). Returns the
- * slices plus the per-target excluded flags (honest coverage) and, for every
- * provable target, the slice ids it references — the input builder keeps only
- * those slices, so a row that never rides the wire leaves no orphan evidence
- * behind.
+ * slices plus the per-target excluded flags (honest coverage) — split by WHY
+ * a target got no slice: no eligible slice exists for it (`excludedTargets`)
+ * or its slices exist but the catalog byte budget dropped them
+ * (`catalogBudgetExcluded`) — and, for every provable target, the slice ids
+ * it references — the input builder keeps only those slices, so a row that
+ * never rides the wire leaves no orphan evidence behind.
  */
 function buildEvidenceCatalog(
   diffText: string,
   targets: RecheckTarget[],
   captureSha: string,
-): { slices: EvidenceSlice[]; excludedTargets: Set<string>; sliceIdsByRowId: Map<string, string[]> } {
+): {
+  slices: EvidenceSlice[];
+  excludedTargets: Set<string>;
+  catalogBudgetExcluded: Set<string>;
+  sliceIdsByRowId: Map<string, string[]>;
+} {
   const slices: EvidenceSlice[] = [];
   const excludedTargets = new Set<string>();
+  const catalogBudgetExcluded = new Set<string>();
   const sliceIdsByRowId = new Map<string, string[]>();
   if (diffText === "") {
     for (const target of targets) excludedTargets.add(target.rowId);
-    return { slices, excludedTargets, sliceIdsByRowId };
+    return { slices, excludedTargets, catalogBudgetExcluded, sliceIdsByRowId };
   }
   const files = parseUnifiedDiffFiles(diffText);
   let budget = RECHECK_CATALOG_MAX_BYTES;
@@ -972,7 +980,13 @@ function buildEvidenceCatalog(
     return drafts;
   };
 
-  const addSlice = (draft: Draft): EvidenceSlice | null => {
+  /**
+   * One catalog entry, or WHY it could not be added: `size` is a slice that
+   * cannot be trusted within the per-slice bound (no eligible slice exists
+   * for this draft), `catalog` is a well-formed slice the catalog byte budget
+   * no longer fits (a budget exclusion, not a missing proof).
+   */
+  const addSlice = (draft: Draft): EvidenceSlice | "size" | "catalog" => {
     const slice: EvidenceSlice = {
       id: "",
       headSha: captureSha,
@@ -990,7 +1004,8 @@ function buildEvidenceCatalog(
       complete: draft.complete,
     };
     const bytes = sizeOf(slice);
-    if (bytes > RECHECK_SLICE_MAX_BYTES || bytes > budget) return null;
+    if (bytes > RECHECK_SLICE_MAX_BYTES) return "size";
+    if (bytes > budget) return "catalog";
     return slice;
   };
 
@@ -1013,6 +1028,7 @@ function buildEvidenceCatalog(
         a.oldStart - b.oldStart,
     );
     let included = 0;
+    let catalogDenied = false;
     const referenced: string[] = [];
     for (const draft of candidates) {
       if (included >= RECHECK_SLICES_PER_TARGET) break;
@@ -1024,7 +1040,11 @@ function buildEvidenceCatalog(
         continue;
       }
       const built = addSlice(draft);
-      if (built === null) continue;
+      if (built === "size") continue;
+      if (built === "catalog") {
+        catalogDenied = true;
+        continue;
+      }
       built.id = `ev-${slices.length + 1}`;
       slices.push(built);
       budget -= sizeOf(built);
@@ -1032,10 +1052,14 @@ function buildEvidenceCatalog(
       referenced.push(built.id);
       included += 1;
     }
-    if (included === 0) excludedTargets.add(target.rowId);
-    else sliceIdsByRowId.set(target.rowId, referenced);
+    if (included === 0) {
+      // A row whose slices exist but lost the catalog byte budget is a budget
+      // exclusion, never "no evidence".
+      if (catalogDenied) catalogBudgetExcluded.add(target.rowId);
+      else excludedTargets.add(target.rowId);
+    } else sliceIdsByRowId.set(target.rowId, referenced);
   }
-  return { slices, excludedTargets, sliceIdsByRowId };
+  return { slices, excludedTargets, catalogBudgetExcluded, sliceIdsByRowId };
 }
 
 /**
@@ -1072,10 +1096,12 @@ type OriginalFindingProjection = RecheckTarget["original"];
  *   - an unavailable prior-journal apply means stale lifecycle state — no
  *     closure is trusted (context-incomplete).
  * Per-row reason precedence (first match wins): stale context, then catalog
- * exclusion (`no-evidence` — the row could not be proven from the captured
- * diff, so it was never sent), then gate rejection (`invalid-output` — it WAS
- * sent and answered badly), then the size budget / seat skip (`budget`), then
- * `invalid-output` for an absent document, then `omitted`.
+ * exclusion (`no-evidence` — no slice can prove the row, so it was never
+ * sent), then catalog budget exhaustion (`budget` — its slices exist but the
+ * catalog byte budget dropped them, so it was never sent), then gate
+ * rejection (`invalid-output` — it WAS sent and answered badly), then the
+ * input size budget / seat skip (`budget`), then `invalid-output` for an
+ * absent document, then `omitted`.
  *
  * ATTEMPTED vs never-sent is the accounting split (§7.2 fair rotation): a row
  * the seat was given — whether the gate kept its answer or dropped it — is
@@ -1095,6 +1121,8 @@ function reconcileRecheckRound(input: {
   staleContext: boolean;
   /** Selected rows the trusted catalog could not prove: never sent, never assessable. */
   catalogExcluded: ReadonlySet<string>;
+  /** Selected rows whose slices the catalog byte budget dropped: never sent either. */
+  catalogBudgetExcluded: ReadonlySet<string>;
   /** Selected rows excluded from the recheck input by the §7.3 size budget. */
   budgetExcluded: ReadonlySet<string>;
   /** Rows the gate dropped from an otherwise accepted document (row content errors). */
@@ -1106,8 +1134,18 @@ function reconcileRecheckRound(input: {
   assessedCount: number;
   omittedCount: number;
 } {
-  const { targets, doc, status, discussion, output, staleContext, catalogExcluded, budgetExcluded, rejectedRowIds } =
-    input;
+  const {
+    targets,
+    doc,
+    status,
+    discussion,
+    output,
+    staleContext,
+    catalogExcluded,
+    catalogBudgetExcluded,
+    budgetExcluded,
+    rejectedRowIds,
+  } = input;
   const outcomeByRowId = new Map<string, Assessment>();
   const assessments: Assessment[] = [];
   const forceUnverifiable = (rowId: string, reason: Assessment["reason"]): Assessment => ({
@@ -1136,6 +1174,11 @@ function reconcileRecheckRound(input: {
       // so it never rode the wire — `no-evidence`, never a blamed seat and
       // never the size `budget` (the row was unprovable, not oversized).
       assessment = forceUnverifiable(target.rowId, "no-evidence");
+    } else if (catalogBudgetExcluded.has(target.rowId)) {
+      // Slices for this row exist, but the §7.3 catalog byte budget ran out
+      // before they were added — ALSO never sent, yet a budget exclusion:
+      // `no-evidence` would claim nothing could prove a provable row.
+      assessment = forceUnverifiable(target.rowId, "budget");
     } else if (rejected) {
       // The seat answered this row but the gate dropped it (shape / enum /
       // evidence error) — the row WAS attempted, so it is invalid output,
@@ -2751,8 +2794,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const catalog =
       targets.length > 0
         ? buildEvidenceCatalog(diffText, targets, headSha)
-        : { slices: [] as EvidenceSlice[], excludedTargets: new Set<string>(), sliceIdsByRowId: new Map<string, string[]>() };
+        : {
+            slices: [] as EvidenceSlice[],
+            excludedTargets: new Set<string>(),
+            catalogBudgetExcluded: new Set<string>(),
+            sliceIdsByRowId: new Map<string, string[]>(),
+          };
     const catalogExcluded: ReadonlySet<string> = catalog.excludedTargets;
+    const catalogBudgetExcluded: ReadonlySet<string> = catalog.catalogBudgetExcluded;
 
     // Bounded discussion capture (§7.8) for the selected targets' known
     // threads. API failure is unavailable — never empty/complete.
@@ -2798,7 +2847,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     let recheckInput: RecheckInput | undefined;
     const budgetExcluded = new Set<string>();
     if (targets.length > 0 && !captureFailed) {
-      const candidates = targets.filter((target) => !catalogExcluded.has(target.rowId));
+      const candidates = targets.filter(
+        (target) => !catalogExcluded.has(target.rowId) && !catalogBudgetExcluded.has(target.rowId),
+      );
       // Each row is measured against the budget left by the evidence it
       // references: dropping a row shrinks that evidence, so re-measure until
       // the sent set is stable. The set only ever shrinks, so this terminates.
@@ -3084,6 +3135,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       output,
       staleContext,
       catalogExcluded,
+      catalogBudgetExcluded,
       budgetExcluded,
       rejectedRowIds,
     });

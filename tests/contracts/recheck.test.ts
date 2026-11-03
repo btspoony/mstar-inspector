@@ -92,6 +92,16 @@ const TARGET: RecheckTarget = {
   associationIds: ["assoc-1"],
 };
 
+/** A hunk in an unrelated file whose lines happen to byte-match the concern. */
+const FOREIGN_HUNK: EvidenceSlice = {
+  id: "slice-foreign", headSha: SHA, baseSha: "b" + "0".repeat(39), path: "src/other.ts", oldPath: null,
+  kind: "hunk",
+  oldStart: 8, oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
+  newStart: 8, newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
+  oldBlobOid: "oid-old", headBlobOid: "oid-head",
+  absentAtHead: false, complete: true,
+};
+
 const OLD_CONCERN_IN_OLD_TS = {
   ...ORIGINAL,
   title: "Removed helper",
@@ -557,6 +567,34 @@ describe("validateRecheckDoc — addressed eligibility", () => {
       pairedInput(),
     );
     expectDroppedRow(result, { index: 0, rowId: "row-1", error: "does not match the original concern file" });
+  });
+
+  test("current-code citing an unrelated file drops that row (lines may move, files may not)", () => {
+    // The quote byte-matches the concern's own lines, but they are cited from
+    // another file: a fix in src/other.ts proves nothing about src/a.ts.
+    const foreign = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: SHA,
+        results: [addressedResult({ evidence: evidence({ sliceId: "slice-foreign" }) }), SURVIVOR],
+      },
+      pairedInput({ evidence: [FOREIGN_HUNK] }),
+    );
+    expectDroppedRow(foreign, { index: 0, rowId: "row-1", error: "does not match the original concern file" });
+
+    // The same file cited OUTSIDE the original line range stays eligible: a fix
+    // may move the code, so current-code is not range-bound.
+    const moved = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: SHA,
+        results: [
+          addressedResult({ evidence: evidence({ startLine: 8, endLine: 8, quote: "const a = 1;" }) }),
+        ],
+      },
+      input({ targets: [{ ...TARGET, original: { ...ORIGINAL, lineStart: 10, lineEnd: 10 } }] }),
+    );
+    expect(moved.ok).toBe(true);
   });
 
   test("removed/replaced proof must intersect the original concern's old range", () => {

@@ -210,9 +210,11 @@ function segmentQuote(lines: string[], startLine: number, start: number, endLine
  * trusted catalog slice (spec §7.3 "Validation"): the slice must exist and
  * be complete; the cited range must be integer/ordered and fall entirely
  * inside the appropriate old/new side; the quote must equal those lines
- * after `normalizeQuoteText`; removed/replaced proof must intersect the
- * original concern's old range and demonstrate the relevant structural
- * change. Returns null when eligible, else the failure reason.
+ * after `normalizeQuoteText`; every proof cites the original concern's file
+ * (a `current-code` fix may move lines, never files), and removed/replaced
+ * proof must intersect the original concern's old range and demonstrate the
+ * relevant structural change. Returns null when eligible, else the failure
+ * reason.
  */
 function addressedProofError(
   evidence: { kind: string; sliceId: string; startLine: number; endLine: number; quote: string },
@@ -245,6 +247,11 @@ function addressedProofError(
     }
     if (normalizeQuoteText(expected) !== quote) {
       return 'current-code quote does not match the cited new-side lines';
+    }
+    // Binding to the concern's own file: a fix may move the code within the
+    // file, but a citation from elsewhere proves nothing about THIS concern.
+    if (original.filePath !== null && slice.path !== original.filePath) {
+      return `current-code slice path ${JSON.stringify(slice.path)} does not match the original concern file ${JSON.stringify(original.filePath)}`;
     }
     return null;
   }

@@ -625,6 +625,83 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     ].join("\n");
   }
 
+  /**
+   * One file per row, each a 320-line hunk (four 80-line windows of ~7.8 KiB
+   * slices), so the 256 KiB catalog budget runs out before the last rows.
+   */
+  function catalogBudgetDiff(files: number): string {
+    const body = Array.from({ length: 320 }, (_, i) =>
+      ` const v${String(i + 1).padStart(3, "0")} = 1;`.padEnd(45, " "),
+    );
+    return Array.from({ length: files }, (_, i) => {
+      const path = `src/b${String(i + 1).padStart(2, "0")}.ts`;
+      return [
+        `diff --git a/${path} b/${path}`,
+        "index 1111111..2222222 100644",
+        `--- a/${path}`,
+        `+++ b/${path}`,
+        "@@ -1,320 +1,320 @@",
+        ...body,
+      ].join("\n");
+    }).join("\n") + "\n";
+  }
+
+  test("a row the catalog byte budget drops is a budget exclusion, never no-evidence", async () => {
+    reset();
+    // Twelve provable rows whose slices all fit individually, but not together:
+    // the catalog budget stops adding slices partway through the target list.
+    const rowCount = 12;
+    diffStdout = catalogBudgetDiff(rowCount);
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    recheckFileContent = ""; // no document: every row is accounted by WHY it has no verdict
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    for (let i = 0; i < rowCount; i++) {
+      db.raw
+        .prepare(
+          `INSERT INTO review_findings
+             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+              first_seen_round, last_seen_round, state, created_ms, updated_ms)
+           VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
+        )
+        .run(
+          `eeeeeeee-0000-4000-8000-000000000${String(i + 10).padStart(3, "0")}`,
+          TEST_APP_ID,
+          `finding-budget-${i + 1}`,
+          JSON.stringify({
+            ...TARGET_ORIGINAL,
+            title: `Budget row ${i + 1}`,
+            filePath: `src/b${String(i + 1).padStart(2, "0")}.ts`,
+            lineStart: 1,
+            lineEnd: 1,
+          }),
+          PRIOR_PUB_ID,
+          PRIOR_PUB_ID,
+          PRIOR_SHA,
+          PRIOR_SHA,
+          1_000 + i,
+          1_000 + i,
+        );
+    }
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(writtenInputJson!) as {
+      recheck: { targets: Array<{ rowId: string }>; evidence: Array<{ path: string }> };
+    };
+    // The budget really bit: not every provable row could ride.
+    expect(runnerInput.recheck.targets.length).toBeLessThan(rowCount);
+    expect(new Set(runnerInput.recheck.evidence.map((slice) => slice.path)).size).toBeLessThan(rowCount);
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    // The dropped rows were never sent because their slices lost a BYTE budget
+    // — the same cause as the size budget. `no-evidence` would claim their
+    // files cannot prove them at all.
+    expect(prepared.body).toMatch(/Budget row 12 \| unverifiable \(budget\)/);
+    expect(prepared.body).not.toContain("unverifiable (no-evidence)");
+  });
+
   test("an oversized hunk is sliced into windows that still contain the target line", async () => {
     reset();
     diffStdout = oversizedAuthDiff(200);
@@ -674,6 +751,66 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     // Slice ids stay the shared catalog's stable numbering.
     expect(runnerInput.recheck.evidence.map((slice) => slice.id)).toEqual(["ev-1", "ev-2", "ev-3"]);
     // The in-window quote validates: the row closes as a verified fix.
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("addressed (verified-fix)");
+  });
+
+  test("windows are ordered nearest the concern first, so the third one is ev-1 with its own starts", async () => {
+    reset();
+    diffStdout = oversizedAuthDiff(200);
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The concern sits at line 180 — window THREE in file order (lines 161-200)
+    // and the NEAREST window to the cited line. Nearest-first ordering must put
+    // it first and number it ev-1, with the partition's own exact starts.
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    db.raw.prepare(`UPDATE review_findings SET original_json = ? WHERE id = ?`).run(
+      JSON.stringify({ ...TARGET_ORIGINAL, lineStart: 180, lineEnd: 180 }),
+      TARGET_ROW_ID,
+    );
+    recheckFileContent = JSON.stringify({
+      schema: "mstar.recheck/v1",
+      headSha: SHA,
+      results: [
+        {
+          rowId: TARGET_ROW_ID,
+          disposition: "addressed",
+          reason: "verified-fix",
+          evidence: {
+            kind: "current-code",
+            sliceId: "ev-1",
+            startLine: 180,
+            endLine: 180,
+            quote: "const v180 = 1;",
+            explanation: "The guard now bounds the value.",
+          },
+          relatedCurrentFindingIndexes: [],
+        },
+      ],
+    });
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerInput = JSON.parse(writtenInputJson!) as {
+      recheck: {
+        evidence: Array<{ id: string; oldStart: number; newStart: number; newLines: string[] }>;
+      };
+    };
+    // Nearest first, then by distance: 161 (distance 19), 81 (99), 1 (179).
+    expect(runnerInput.recheck.evidence.map((slice) => [slice.id, slice.oldStart])).toEqual([
+      ["ev-1", 161],
+      ["ev-2", 81],
+      ["ev-3", 1],
+    ]);
+    const nearest = runnerInput.recheck.evidence[0]!;
+    expect(nearest.newStart).toBe(161);
+    expect(nearest.newLines).toHaveLength(40); // 161-200: the tail window
+    expect(nearest.newLines[19]).toBe("const v180 = 1;");
+    // The line-180 quote validates against THAT window, so the nearest slice is
+    // the one the seat can actually cite.
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("addressed (verified-fix)");
   });

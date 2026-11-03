@@ -57,7 +57,6 @@ import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../packages/shared/src/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
-import { capabilityHostsYaml } from "../../packages/runner/src/models-synthesis";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import { RECHECK_STATUS_PATH, type RecheckStatus } from "../../packages/shared/src/recheck-wire";
 import { readRecheckStatusCommand } from "../../src/pipeline/gitops";
@@ -133,8 +132,6 @@ const ENVELOPE = {
 
 /** The omp capability hosts, exactly as the consumer resolves them. */
 const OMP_HOSTS = getSandboxImage("omp")!.hosts;
-/** The base those hosts generate — the zero-custom models.yml equivalence lock. */
-const OMP_BASE_YAML = capabilityHostsYaml(OMP_HOSTS);
 
 /**
  * Child-process probe for the SHARED store definition: build a store through
@@ -558,11 +555,13 @@ describe("runner entry (packages/runner/src/runner.ts)", () => {
     expect(runInputs).toHaveLength(1);
     const input = runInputs[0]!;
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
-    // The zero-custom equivalence lock: the file is EXACTLY the capability
-    // base (ark-plan included) — the poolized base, byte-for-byte.
+    // The file carries the capability base (ark-plan included). Its exact
+    // bytes are pinned against a literal in models-synthesis.test.ts; asserting
+    // this file against a fresh generator call would only compare the generator
+    // with itself.
     const yaml = readFileSync(join(preservedAgentDir(), "models.yml"), "utf8");
-    expect(yaml).toBe(OMP_BASE_YAML);
     expect(yaml).toContain("ark-plan:");
+    expect(yaml).toMatch(/^providers:\n/);
   });
 
   test("customProviders: merge into the capability base and ride agentDir into the runtime input", async () => {
