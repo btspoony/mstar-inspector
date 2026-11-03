@@ -265,7 +265,9 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           key.pr_number,
           key.head_sha,
           payload.verdict,
-          payload.summary_md,
+          // `?? null`: the envelope's summary is optional, and D1 rejects
+          // `undefined` in a bind list — the whole review row would be lost.
+          payload.summary_md ?? null,
           REVIEW_SKILL_VERSION,
           // The validated envelope object itself — full JSON, losslessly
           // restorable via get() (no 64KB truncation on this column).

@@ -490,6 +490,22 @@ describe("createArtifactStore().put", () => {
   });
 });
 
+describe("createArtifactStore().put — optional summary", () => {
+  test("a review whose envelope carries no summary persists, with summary_md NULL", async () => {
+    const db = createSeededTestD1();
+    const store = createArtifactStore(db);
+    // Engine 4.1.6 no longer fabricates a summary, so the key is absent on a
+    // seat that wrote none. D1 rejects `undefined` in a bind list, which would
+    // lose the whole row rather than just the column.
+    const { summary_md: _omitted, ...noSummary } = payload();
+    await store.put(reviewDoc({ payload: noSummary as MstarReviewV1 }));
+
+    const row = db.raw.query("SELECT * FROM reviews").get() as ReviewRow;
+    expect(row.summary_md).toBeNull();
+    expect(row.verdict).toBe("needs fixes");
+  });
+});
+
 describe("createArtifactStore().get", () => {
   test("returns the parsed envelope for a v1 row", async () => {
     const db = createSeededTestD1();
