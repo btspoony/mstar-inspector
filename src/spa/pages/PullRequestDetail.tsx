@@ -345,9 +345,17 @@ export function PullRequestDetailView({
       <Tabs value={family} onValueChange={selectFamily} className="mt-(--spacing-6)">
         {/* Embedded segmented pill (DESIGN.md ### Tabs). Counts are text so a
             family's size never depends on colour alone; the danger dot marks
-            the one fact an operator must not miss. */}
+            the one fact an operator must not miss. Each trigger's accessible
+            name is the label and the count with a separator — the visible
+            spans alone would announce "Findings3". */}
         <TabsList variant="default" aria-label={t(locale, "pullRequests.recordsLabel")}>
-          <TabsTrigger value="findings">
+          <TabsTrigger
+            value="findings"
+            aria-label={t(locale, "pullRequests.familyTabName", {
+              label: t(locale, "pullRequests.findings"),
+              count: detail.findings.length,
+            })}
+          >
             {t(locale, "pullRequests.findings")}
             <span className="text-xs tabular-nums text-(--text-faint)">{detail.findings.length}</span>
             {hasActionableFinding(detail) ? (
@@ -359,11 +367,23 @@ export function PullRequestDetailView({
               />
             ) : null}
           </TabsTrigger>
-          <TabsTrigger value="reviews">
+          <TabsTrigger
+            value="reviews"
+            aria-label={t(locale, "pullRequests.familyTabName", {
+              label: t(locale, "pullRequests.reviews"),
+              count: detail.reviews.length,
+            })}
+          >
             {t(locale, "pullRequests.reviews")}
             <span className="text-xs tabular-nums text-(--text-faint)">{detail.reviews.length}</span>
           </TabsTrigger>
-          <TabsTrigger value="failures">
+          <TabsTrigger
+            value="failures"
+            aria-label={t(locale, "pullRequests.familyTabName", {
+              label: t(locale, "pullRequests.failures"),
+              count: detail.failures.length,
+            })}
+          >
             {t(locale, "pullRequests.failures")}
             <span className="text-xs tabular-nums text-(--text-faint)">{detail.failures.length}</span>
             {detail.failures.length > 0 ? (

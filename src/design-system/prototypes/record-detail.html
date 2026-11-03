@@ -17,6 +17,12 @@
   so a retired role is a dangling reference here, not a silently repainted page.
   The page links the generated stylesheet, so `bun scripts/design-system-check.ts`
   reports it.
+
+  Copy: every chrome string here (labels, group headers, fold actions, the aside
+  and timeline vocabulary) is the shipped `pullRequests.*` value from
+  `src/i18n/zh-CN.ts`, so this reference cannot teach a label the product never
+  renders — change one, change both. Illustrative only: the record bodies and
+  the relative timestamps, which are payload data, not product copy.
 -->
 <title>PR 详情原型 — mstar-inspector</title>
 <style>
@@ -213,12 +219,12 @@
       <span class="repo">acme / web</span>
       <span class="num">#133</span>
       <span class="pill ok">已合并</span>
-      <span class="sha" title="Head SHA">aaa111b</span>
+      <span class="sha" title="头部 SHA">aaa111b</span>
     </div>
     <h1>Fix the login flow</h1>
     <div class="sub">
       <span>首次出现 <b>4 天前</b></span>
-      <span>最近活动 <b>6 小时前</b></span>
+      <span>最近出现 <b>6 小时前</b></span>
       <span>最新审查 <b>kimi-for-coding</b></span>
     </div>
   </header>
@@ -227,10 +233,10 @@
     <div class="m"><span class="k">最新结论</span><span class="v dn">needs fixes</span></div>
     <div class="m"><span class="k">审查</span><span class="v">3</span></div>
     <div class="m"><span class="k">失败</span><span class="v dn">1</span></div>
-    <div class="m"><span class="k">发现</span><span class="v">6<span class="note">1 必须修复</span></span></div>
+    <div class="m"><span class="k">发现</span><span class="v">6<span class="note">1 项必须修复</span></span></div>
   </div>
 
-  <div class="tabs" role="tablist" aria-label="PR 记录">
+  <div class="tabs" role="tablist" aria-label="拉取请求记录">
     <button class="tab" id="t-findings" role="tab" aria-selected="true" aria-controls="p-findings" data-panel="p-findings">发现<span class="n">6</span><span class="dot"></span></button>
     <button class="tab" id="t-reviews" role="tab" aria-selected="false" aria-controls="p-reviews" data-panel="p-reviews">审查<span class="n">3</span></button>
     <button class="tab" id="t-failures" role="tab" aria-selected="false" aria-controls="p-failures" data-panel="p-failures">失败<span class="n">1</span></button>
@@ -365,12 +371,11 @@
         <div class="failure">
           <div class="head">
             <span class="stage">sandbox</span>
-            <span>审查运行失败</span>
             <span class="when">2 天前</span>
           </div>
           <p class="first">runner failed: exit 124, stdout 0B, stderr empty</p>
           <details>
-            <summary>展开完整输出</summary>
+            <summary>完整输出</summary>
             <pre>[sandbox] starting review runner
 [sandbox] image mstar-inspector-sandbox:8f2c1a4
 [sandbox] exec bound reached after 900000ms
@@ -393,7 +398,7 @@ runner failed: exit 124, stdout 0B, stderr empty</pre>
           <dt>仓库</dt><dd>acme/web</dd>
           <dt>编号</dt><dd>#133</dd>
           <dt>状态</dt><dd>已合并</dd>
-          <dt>Head</dt><dd><code>aaa111b</code></dd>
+          <dt>提交</dt><dd><code>aaa111b</code></dd>
           <dt>首次出现</dt><dd>4 天前</dd>
           <dt>最近出现</dt><dd>6 小时前</dd>
         </dl>
@@ -402,7 +407,7 @@ runner failed: exit 124, stdout 0B, stderr empty</pre>
       <div class="side-card">
         <h2 class="side-h">活动</h2>
         <ul class="timeline">
-          <li class="ok"><span class="what">审查通过 · ship it</span><span class="when">6 小时前 · kimi-for-coding</span></li>
+          <li class="ok"><span class="what">审查 · ship it</span><span class="when">6 小时前 · kimi-for-coding</span></li>
           <li class="dn"><span class="what">审查失败 · sandbox</span><span class="when">2 天前</span></li>
           <li><span class="what">审查 · needs fixes</span><span class="when">2 天前 · claude-sonnet-4.5</span></li>
           <li><span class="what">审查 · needs fixes</span><span class="when">4 天前 · kimi-for-coding</span></li>

@@ -144,6 +144,8 @@ export const zhCN: Dictionary = {
     noVerdict: "暂无结论",
     /** 三个记录类别上的分段胶囊。 */
     recordsLabel: "拉取请求记录",
+    /** 类别触发按钮的可访问名称：标签与它绘制的计数。 */
+    familyTabName: "{label}（{count}）",
     /** 发现指标中数量旁的提示。 */
     mustFixNote: "{count} 项必须修复",
     /** 严重度分组标题，按渲染顺序。 */

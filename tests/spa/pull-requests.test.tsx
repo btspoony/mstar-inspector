@@ -14,7 +14,6 @@
  */
 import { describe, expect, test } from "bun:test";
 import { act, createElement, useState } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import {
@@ -28,8 +27,15 @@ import {
 } from "../../src/spa/pages/data";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import { AppPullRequestsTab, PullRequestsListView } from "../../src/spa/pages/AppPullRequestsTab";
-import { installDom, withMarkup } from "./dom";
-import { DETAIL, ROW_OPEN, jsonResponse, mountTabWithGatedFetch, press } from "./pull-request-fixtures";
+import { withMarkup } from "./dom";
+import {
+  DETAIL,
+  ROW_OPEN,
+  jsonResponse,
+  mountTabWithGatedFetch,
+  mountView,
+  press,
+} from "./pull-request-fixtures";
 
 const IDENTITY_APP = {
   github_slug: "demo",
@@ -232,16 +238,11 @@ describe("pull requests data plane (pure helpers)", () => {
 
 describe("pull requests tab (mounted)", () => {
   test("clicking the Pull requests tab on the manage face opens the ledger", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const realFetch = globalThis.fetch;
     // Every read answers the same empty ledger.
-    globalThis.fetch = (async () => jsonResponse({ pull_requests: [] })) as unknown as typeof fetch;
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
+    const { container, win, unmount } = await mountView(createElement(DetailHarness), {
+      fetch: (async () => jsonResponse({ pull_requests: [] })) as unknown as typeof fetch,
+    });
     try {
-      await act(async () => root.render(createElement(DetailHarness)));
-      await act(async () => {});
       const trigger = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "appDetail.tabPullRequests"),
       );
@@ -250,24 +251,15 @@ describe("pull requests tab (mounted)", () => {
       // The ledger's empty state is the opened tab's face.
       expect(container.textContent ?? "").toContain(t("en", "pullRequests.emptyTitle"));
     } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
+      await unmount();
     }
   });
 
   test("the failures column carries the row's failure count", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
+    const { container, unmount } = await mountView(
+      createElement(PullRequestsListView, { locale: "en", rows: [ROW_OPEN, ROW_CLOSED], onOpen: noSearch }),
+    );
     try {
-      await act(async () =>
-        root.render(
-          createElement(PullRequestsListView, { locale: "en", rows: [ROW_OPEN, ROW_CLOSED], onOpen: noSearch }),
-        ),
-      );
-      await act(async () => {});
       const headers = [...container.querySelectorAll("th")].map((th) => th.textContent ?? "");
       const failuresAt = headers.indexOf(t("en", "pullRequests.columnFailures"));
       expect(failuresAt).toBeGreaterThan(-1);
@@ -277,29 +269,20 @@ describe("pull requests tab (mounted)", () => {
       const cells = [...(row?.querySelectorAll("td") ?? [])];
       expect(cells[failuresAt]?.textContent?.trim()).toBe("2");
     } finally {
-      await act(async () => root.unmount());
-      cleanup();
+      await unmount();
     }
   });
 
   test("a press on a PR's title opens it once; the rest of the row still opens it", async () => {
-    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-    const host = win.document.createElement("div");
-    win.document.body.appendChild(host);
-    const container = host as unknown as HTMLElement;
-    const root = createRoot(host as unknown as Element);
     const opened: PullRequestRow[] = [];
+    const { container, win, unmount } = await mountView(
+      createElement(PullRequestsListView, {
+        locale: "en",
+        rows: [ROW_OPEN],
+        onOpen: (row) => opened.push(row),
+      }),
+    );
     try {
-      await act(async () =>
-        root.render(
-          createElement(PullRequestsListView, {
-            locale: "en",
-            rows: [ROW_OPEN],
-            onOpen: (row) => opened.push(row),
-          }),
-        ),
-      );
-      await act(async () => {});
       const title = [...container.querySelectorAll("tbody button")].find(
         (button) => button.textContent === ROW_OPEN.title,
       );
@@ -311,8 +294,7 @@ describe("pull requests tab (mounted)", () => {
       await press(win, container.querySelector("tbody td:last-child"));
       expect(opened).toEqual([ROW_OPEN, ROW_OPEN]);
     } finally {
-      await act(async () => root.unmount());
-      cleanup();
+      await unmount();
     }
   });
 

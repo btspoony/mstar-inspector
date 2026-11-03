@@ -168,6 +168,8 @@ export const en = {
     noVerdict: "no verdict yet",
     /** The segmented pill over the three record families. */
     recordsLabel: "Pull request records",
+    /** A family trigger's accessible name: its label and the count it paints. */
+    familyTabName: "{label} ({count})",
     /** The findings metric's note, rendered beside the count. */
     mustFixNote: "{count} must-fix",
     /** Severity group headers, in the order the groups render. */

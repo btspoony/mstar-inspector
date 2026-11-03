@@ -751,15 +751,22 @@ if (import.meta.main) {
 
   // A chart fill is a large graphic face: WCAG 1.4.11's 3:1, not 4.5:1. Every
   // pair prints its measured ratio, so a token change that erodes a margin is
-  // a visible diff rather than a silent pass.
-  const contrast = chartFillContrast((theme) => resolveTheme(theme).semantic);
-  const below = chartContrastFailures(contrast);
-  console.log(`${below.length === 0 ? "ok  " : "fail"}  chart fill contrast`);
-  for (const { theme, fill, backdrop, ratio } of contrast) {
-    const mark = ratio < CHART_CONTRAST_MIN ? `  BELOW ${CHART_CONTRAST_MIN}:1` : "";
-    console.log(`        ${theme} ${fill} on ${backdrop}: ${ratio.toFixed(3)}:1${mark}`);
+  // a visible diff rather than a silent pass. A token that throws on read is a
+  // broken link of its own, named like the others, so the report below still
+  // runs.
+  try {
+    const contrast = chartFillContrast((theme) => resolveTheme(theme).semantic);
+    const below = chartContrastFailures(contrast);
+    console.log(`${below.length === 0 ? "ok  " : "fail"}  chart fill contrast`);
+    for (const { theme, fill, backdrop, ratio } of contrast) {
+      const mark = ratio < CHART_CONTRAST_MIN ? `  BELOW ${CHART_CONTRAST_MIN}:1` : "";
+      console.log(`        ${theme} ${fill} on ${backdrop}: ${ratio.toFixed(3)}:1${mark}`);
+    }
+    if (below.length > 0) brokenLinks.push("chart fill contrast");
+  } catch (error) {
+    console.error(`fail  chart fill contrast: ${error instanceof Error ? error.message : String(error)}`);
+    brokenLinks.push("chart fill contrast");
   }
-  if (below.length > 0) brokenLinks.push("chart fill contrast");
 
   if (brokenLinks.length > 0) {
     console.error(`\ndesign-system-check: ${brokenLinks.length} broken link(s): ${brokenLinks.join(", ")}`);

@@ -117,15 +117,18 @@ export async function press(win: Window, target: Element | null | undefined): Pr
 }
 
 /**
- * Mount the detail face on its own window, with one settled render, and hand
- * back the container plus the window the clipboard stubs hang off. Teardown
- * unmounts and restores the DOM in one call.
+ * Mount one element on its own window with a settled render, and hand back the
+ * container plus that window. Teardown unmounts and restores the DOM in one
+ * call; a `fetch` stub passed here is installed before the mount and restored
+ * on the way out, including when the mount throws.
  */
-export async function mountDetailView(
-  detail: PullRequestDetail,
-  wrap?: (view: ReactElement) => ReactElement,
+export async function mountView(
+  element: ReactElement,
+  { fetch: fetchImpl = globalThis.fetch }: { fetch?: typeof globalThis.fetch } = {},
 ) {
   const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
   const host = win.document.createElement("div");
   win.document.body.appendChild(host);
   // happy-dom's nodes cross into lib.dom's here: the queries read the same
@@ -133,12 +136,12 @@ export async function mountDetailView(
   const container = host as unknown as HTMLElement;
   const root = createRoot(container as unknown as Element);
   let mounted = true;
-  const view = createElement(PullRequestDetailView, { locale: "en", detail });
   try {
-    await act(async () => root.render(wrap === undefined ? view : wrap(view)));
+    await act(async () => root.render(element));
     await act(async () => {});
   } catch (error) {
     mounted = false;
+    globalThis.fetch = realFetch;
     cleanup();
     throw error;
   }
@@ -151,9 +154,22 @@ export async function mountDetailView(
       if (!mounted) return;
       mounted = false;
       await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
       cleanup();
     },
   };
+}
+
+/**
+ * Mount the detail face, optionally inside a wrapper (StrictMode), and hand
+ * back the container plus the window the clipboard stubs hang off.
+ */
+export async function mountDetailView(
+  detail: PullRequestDetail,
+  wrap?: (view: ReactElement) => ReactElement,
+) {
+  const view = createElement(PullRequestDetailView, { locale: "en", detail });
+  return mountView(wrap === undefined ? view : wrap(view));
 }
 
 /**
@@ -163,8 +179,6 @@ export async function mountDetailView(
  * DOM in one call.
  */
 export async function mountTabWithGatedFetch(initialPr: string) {
-  const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
-  const realFetch = globalThis.fetch;
   // One gate per REQUEST, not per URL: a retry re-reads a URL that was already
   // read, and a URL-keyed gate would replace the request still pending.
   type Gate = { url: string; promise: Promise<Response>; resolve: (response: Response) => void };
@@ -172,7 +186,7 @@ export async function mountTabWithGatedFetch(initialPr: string) {
   // Every URL the tab asked for, so a test can prove a read was (or was not)
   // issued without keeping its own stub.
   const fetches: string[] = [];
-  globalThis.fetch = (async (input: unknown) => {
+  const gatedFetch = (async (input: unknown) => {
     const url = String(input);
     fetches.push(url);
     const gate: Gate = { url, ...Promise.withResolvers<Response>() };
@@ -198,27 +212,11 @@ export async function mountTabWithGatedFetch(initialPr: string) {
     setSearch = set;
     return createElement(AppPullRequestsTab, { locale: "en", appId: "1", search, onSearch: set });
   }
-  const host = win.document.createElement("div");
-  win.document.body.appendChild(host);
-  // happy-dom's nodes cross into lib.dom's here, as in the suites above.
-  const container = host as unknown as HTMLElement;
-  const root = createRoot(container as unknown as Element);
-  try {
-    await act(async () => root.render(createElement(Harness)));
-    await act(async () => {});
-  } catch (error) {
-    // A mount that throws never reaches `unmount()`: the stub `fetch` and the
-    // installed window are restored here, so one broken test cannot leak
-    // either into the next one.
-    globalThis.fetch = realFetch;
-    cleanup();
-    throw error;
-  }
+  const mounted = await mountView(createElement(Harness), { fetch: gatedFetch });
   return {
-    container,
+    ...mounted,
     fetches,
-    text: () => container.textContent ?? "",
-    win,
+    text: () => mounted.container.textContent ?? "",
     /**
      * Re-render for `pr` through a fresh search object — the shell's own
      * re-sync always hands over a new object with the same value.
@@ -228,10 +226,5 @@ export async function mountTabWithGatedFetch(initialPr: string) {
       await act(async () => {});
     },
     resolve,
-    unmount: async () => {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
-    },
   };
 }

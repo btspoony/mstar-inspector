@@ -34,14 +34,14 @@ export type SeverityGroup = {
 };
 
 /**
- * True when a finding asks the operator to act: a must-fix or a should-fix.
- * A nit is not a requested change, so it neither opens the findings family nor
- * earns the trigger's danger dot.
+ * True when a finding asks the operator to act: everything but a nit. The
+ * payload's severity is a free string, so a severity this face does not know
+ * (the `other` bucket, which the UI keeps visible rather than dropping) is a
+ * requested change too — only the one word `nit` reads as no action. That one
+ * predicate drives both the family the face opens on and the trigger's dot.
  */
 export function hasActionableFinding(detail: PullRequestDetail): boolean {
-  return detail.findings.some(
-    (finding) => finding.severity === "must-fix" || finding.severity === "should-fix",
-  );
+  return detail.findings.some((finding) => finding.severity !== "nit");
 }
 
 /** The family the face opens on: the actionable record first, history last. */

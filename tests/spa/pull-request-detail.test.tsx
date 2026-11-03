@@ -93,11 +93,14 @@ describe("pull request detail face (static SSR)", () => {
   const render = (detail: PullRequestDetail) =>
     renderToStaticMarkup(createElement(PullRequestDetailView, { locale: "en", detail }));
 
-  /** The family triggers in render order: selected state + their text content. */
+  /**
+   * The family triggers in render order: selected state and the announced name
+   * (what an assistive technology reads).
+   */
   const familyTabs = (container: HTMLElement) =>
     [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) => ({
       selected: tab.getAttribute("aria-selected") === "true",
-      text: tab.textContent ?? "",
+      name: tab.getAttribute("aria-label") ?? tab.textContent ?? "",
     }));
 
   /**
@@ -127,7 +130,7 @@ describe("pull request detail face (static SSR)", () => {
   const familyDots = (container: HTMLElement): Record<string, boolean> =>
     Object.fromEntries(
       [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map((tab) => [
-        (tab.textContent ?? "").replace(/\d+/g, ""),
+        (tab.getAttribute("aria-label") ?? tab.textContent ?? "").replace(/\s*\(\d+\)$/, ""),
         tab.querySelector('[data-slot="family-dot"]') !== null,
       ]),
     );
@@ -148,9 +151,8 @@ describe("pull request detail face (static SSR)", () => {
   };
 
   /**
-   * A failure-only detail: no finding carries a must-fix or a should-fix, so
-   * the face opens on the failures family and the diagnostic payload is in the
-   * markup.
+   * A failure-only detail: no finding at all, so nothing is actionable and the
+   * face opens on the failures family with the diagnostic payload in the markup.
    */
   const FAILING: PullRequestDetail = { ...DETAIL, findings: [] };
 
@@ -309,13 +311,21 @@ describe("pull request detail face (static SSR)", () => {
     const markup = render(DETAIL);
     const tabs = await withMarkup(render(DETAIL), familyTabs);
     expect(tabs.map((tab) => tab.selected)).toEqual([true, false, false]);
-    expect(tabs[0]?.text.startsWith(t("en", "pullRequests.findings"))).toBe(true);
-    // Counts are text, so the trigger reads "Findings3".
-    expect(tabs.map((tab) => tab.text)).toEqual([
-      `${t("en", "pullRequests.findings")}3`,
-      `${t("en", "pullRequests.reviews")}2`,
-      `${t("en", "pullRequests.failures")}1`,
+    // The announced name is the label and the count with a separator between
+    // them; the visible spans alone would read "Findings3".
+    expect(tabs.map((tab) => tab.name)).toEqual([
+      `${t("en", "pullRequests.findings")} (3)`,
+      `${t("en", "pullRequests.reviews")} (2)`,
+      `${t("en", "pullRequests.failures")} (1)`,
     ]);
+    // Counts stay text inside the trigger, so size never depends on colour.
+    expect(
+      await withMarkup(render(DETAIL), (container) =>
+        [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map(
+          (tab) => [...tab.querySelectorAll("span")].map((span) => span.textContent ?? "").join(""),
+        ),
+      ),
+    ).toEqual(["3", "2", "1"]);
     // Group headers in severity order, each carrying its own count.
     expect(
       await withMarkup(render(DETAIL), (container) =>
@@ -352,6 +362,13 @@ describe("pull request detail face (static SSR)", () => {
       [reviewsLabel]: false,
       [failuresLabel]: true,
     });
+    // A severity this face does not name is still a requested change: the
+    // `other` bucket stays visible, so its trigger must not read as quiet.
+    expect(
+      (await dots({ ...DETAIL, findings: DETAIL.findings.filter((f) => f.severity === "nit").map((f) => ({ ...f, severity: "blocker" })) }))[
+        findingsLabel
+      ],
+    ).toBe(true);
     // No failure: the failures trigger loses its dot too.
     expect(await dots({ ...DETAIL, failures: [] })).toEqual({
       [findingsLabel]: true,
@@ -417,6 +434,18 @@ describe("pull request detail face (static SSR)", () => {
       `${t("en", "pullRequests.expand")} — Drop the unsafe default · #4`,
       `${t("en", "pullRequests.expand")} — #5`,
     ]);
+
+    // A drifted severity alone still opens the findings family and earns the
+    // dot — the bucket it lands in is `other`, not a reason to stay hidden.
+    const driftedOnly: PullRequestDetail = { ...DETAIL, findings: detail.findings.slice(3) };
+    const face = await withMarkup(render(driftedOnly), (container) => ({
+      selected: familyTabs(container).map((tab) => tab.selected),
+      dots: familyDots(container),
+      buckets: severityGroups(container).map((group) => group.severity),
+    }));
+    expect(face.selected).toEqual([true, false, false]);
+    expect(face.dots[t("en", "pullRequests.findings")]).toBe(true);
+    expect(face.buckets).toEqual(["other"]);
   });
 
   /**
@@ -750,23 +779,24 @@ describe("pull request detail face (static SSR)", () => {
     for (const index of [7, 8, 9, 10, 11]) {
       expect(markup, marker(index)).not.toContain(marker(index));
     }
-    // Additional evidence: eight rows — seven activity entries plus the anchor.
-    expect(markup.match(/data-slot="activity-entry"/g) ?? []).toHaveLength(8);
     // The dropped six are named, not silently swallowed: 12 reviews plus the
-    // payload's one failure make 13 events, of which the cap shows seven. The
-    // truncation row itself carries the count and closes the shown history.
+    // payload's one failure make 13 events, of which the cap shows seven — so
+    // the aside renders nine rows: seven capped entries, the truncation note,
+    // and the PR's own anchor. The truncation row itself carries the count and
+    // closes the shown history.
     expect(
       await withMarkup(render(detail), (container) => {
         const rows = [...container.querySelectorAll('[data-slot="activity-entry"], [data-slot="timeline-truncated"]')].map(
           (row) => row.getAttribute("data-slot"),
         );
         return {
+          count: rows.length,
           last: rows.at(-1),
           beforeAnchor: rows.at(-2),
           text: container.querySelector('[data-slot="timeline-truncated"]')?.textContent ?? "",
         };
       }),
-    ).toEqual({ last: "activity-entry", beforeAnchor: "timeline-truncated", text: truncation });
+    ).toEqual({ count: 9, last: "activity-entry", beforeAnchor: "timeline-truncated", text: truncation });
   });
 
   test("a timeline that fits the cap renders no truncation row", async () => {
@@ -779,14 +809,15 @@ describe("pull request detail face (static SSR)", () => {
       reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
       head_sha: `sha${index}`,
     }));
-    const markup = render({ ...DETAIL, reviews, failures: [] });
-    expect(markup.match(/data-slot="activity-entry"/g) ?? []).toHaveLength(7);
-    // Nothing was dropped, so the truncation row is absent rather than empty.
+    const fitting = { ...DETAIL, reviews, failures: [] };
+    // Nothing was dropped: every entry renders and the truncation row is absent
+    // rather than empty.
     expect(
-      await withMarkup(render({ ...DETAIL, reviews, failures: [] }), (container) =>
-        container.querySelector('[data-slot="timeline-truncated"]'),
-      ),
-    ).toBeNull();
+      await withMarkup(render(fitting), (container) => ({
+        entries: container.querySelectorAll('[data-slot="activity-entry"]').length,
+        truncated: container.querySelector('[data-slot="timeline-truncated"]'),
+      })),
+    ).toEqual({ entries: 7, truncated: null });
   });
 
   test("a failure's first line renders as escaped text and its full output stays in details", async () => {
@@ -892,6 +923,35 @@ describe("pull requests detail read derivation (pure)", () => {
 });
 
 describe("pull request detail (mounted)", () => {
+  test("each family trigger answers to its announced name, separator included", async () => {
+    const { container, win, unmount } = await mountDetailView(DETAIL);
+    try {
+      // A role/name query, the way an assistive technology finds the control:
+      // the name a reader hears is label + count with a separator, never the
+      // run-together "Findings3" the visible spans alone would produce.
+      const byRoleName = (name: string) =>
+        [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
+          (tab) => (tab.getAttribute("aria-label") ?? tab.textContent) === name,
+        );
+      const names = [...container.querySelectorAll('[role="tab"]')].map(
+        (tab) => tab.getAttribute("aria-label") ?? tab.textContent,
+      );
+      expect(names).toEqual([
+        `${t("en", "pullRequests.findings")} (3)`,
+        `${t("en", "pullRequests.reviews")} (2)`,
+        `${t("en", "pullRequests.failures")} (1)`,
+      ]);
+      // The name is not only a label: it addresses a real control.
+      expect(byRoleName("Findings")).toBeUndefined();
+      const reviews = byRoleName(`${t("en", "pullRequests.reviews")} (2)`);
+      expect(reviews).toBeDefined();
+      await press(win, reviews);
+      expect(reviews?.getAttribute("aria-selected")).toBe("true");
+    } finally {
+      await unmount();
+    }
+  });
+
   test("the family switch and a fold toggle act on the live tree", async () => {
     const { container, win, unmount } = await mountDetailView(DETAIL);
     try {
@@ -1159,10 +1219,13 @@ describe("pull request detail (mounted)", () => {
       value: { writeText: () => pendingWrite },
     });
     const problems: string[] = [];
-    const realError = console.error;
-    console.error = (...args: unknown[]) => {
-      problems.push(String(args[0]));
+    const realConsole = { error: console.error, warn: console.warn, log: console.log };
+    const record = (name: string) => (...args: unknown[]) => {
+      problems.push(`${name}: ${args.map(String).join(" ")}`);
     };
+    console.error = record("error");
+    console.warn = record("warn");
+    console.log = record("log");
     try {
       const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
       await press(win, button);
@@ -1174,13 +1237,16 @@ describe("pull request detail (mounted)", () => {
       });
       // The late outcome cannot reach the gone face: the write's resolution
       // throws nothing, React never warns about an update after unmount, and
-      // the button the reader saw keeps the label it had.
+      // the button the reader saw keeps the label it had. Nothing at all is
+      // logged — a filtered claim would let an unrelated warning through.
       expect(labelAtUnmount).toBe(t("en", "pullRequests.copyError"));
       expect(button?.textContent).toBe(labelAtUnmount);
-      expect(problems.filter((message) => /unmounted|not wrapped in act/.test(message))).toEqual([]);
+      expect(problems).toEqual([]);
     } finally {
       jest.useRealTimers();
-      console.error = realError;
+      console.error = realConsole.error;
+      console.warn = realConsole.warn;
+      console.log = realConsole.log;
       await unmount();
     }
   });
