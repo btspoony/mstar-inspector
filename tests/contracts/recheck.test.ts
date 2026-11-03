@@ -2,14 +2,17 @@
  * Recheck wire contract tests (spec review-lifecycle §7.3) —
  * `packages/shared/src/recheck-wire.ts` `validateRecheckDoc` against a trusted input.
  *
- * Every rejection rule is exercised as fail-closed behavior:
+ * Document-level distrust fails the whole document closed; a row-level content
+ * error only drops that row into `rejected`, so the rest of the report stands:
  *   - valid doc round-trips (typed, results preserved)
  *   - exact schema + HEAD equality (stale/foreign documents rejected)
  *   - at most 25 results; unique row IDs contained in the input
  *     (duplicate/foreign rejected)
+ *   - every other rule degrades one row: it lands in `rejected` with its index
+ *     and row ID and the surviving rows form `doc.results`
  *   - addressed requires verified-fix + eligible complete catalog slice:
- *     integer ordered range inside the appropriate old/new hunk, exact
- *     (byte-equal) quote match 1–4096 chars, nonblank explanation ≤1200
+ *     integer ordered range inside the appropriate old/new hunk, quote match
+ *     after `normalizeQuoteText` 1–4096 chars, nonblank explanation ≤1200
  *   - removed/replaced proof must intersect the original concern's old
  *     range and demonstrate the structural change (deleted-file absence,
  *     or old lines no longer on the hunk's new side; a current hunk must
@@ -136,6 +139,36 @@ function addressedResult(overrides: Partial<Assessment> = {}): Assessment {
     relatedCurrentFindingIndexes: [],
     ...overrides,
   };
+}
+
+const TARGET_2: RecheckTarget = { ...TARGET, rowId: "row-2", findingId: "f-2", associationIds: ["assoc-2"] };
+
+/** The row that must survive whatever the offending row did. */
+const SURVIVOR: Assessment = {
+  rowId: "row-2",
+  disposition: "unverifiable",
+  reason: "no-evidence",
+  evidence: null,
+  relatedCurrentFindingIndexes: [],
+};
+
+/** Input carrying a second target, so a degraded row leaves a visible survivor. */
+function pairedInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
+  return input({ targets: [TARGET, TARGET_2], ...overrides });
+}
+
+/** A row-level fault drops only that row; the document and the rest stand. */
+function expectDroppedRow(
+  outcome: ReturnType<typeof validateRecheckDoc>,
+  expected: { index: number; rowId: string | null; error: string },
+): void {
+  expect(outcome.ok).toBe(true);
+  if (!outcome.ok) return;
+  expect(outcome.rejected).toHaveLength(1);
+  expect(outcome.rejected[0]!.index).toBe(expected.index);
+  expect(outcome.rejected[0]!.rowId).toBe(expected.rowId);
+  expect(outcome.rejected[0]!.error).toContain(expected.error);
+  expect(outcome.doc.results.map((row) => row.rowId)).toEqual([SURVIVOR.rowId]);
 }
 
 describe("recheck constants (spec §7.3 verbatim)", () => {
@@ -273,71 +306,64 @@ describe("validateRecheckDoc — schema/HEAD/duplicate/foreign rejection", () =>
 });
 
 describe("validateRecheckDoc — addressed eligibility", () => {
-  test("addressed without verified-fix is rejected", () => {
+  test("addressed without verified-fix drops that row", () => {
     const result = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ reason: "no-evidence" })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ reason: "no-evidence" }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain('addressed requires reason "verified-fix"');
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: 'addressed requires reason "verified-fix"' });
   });
 
-  test("addressed with null evidence is rejected", () => {
+  test("addressed with null evidence drops that row", () => {
     const result = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: null })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: null }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("requires eligible evidence");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "requires eligible evidence" });
   });
 
-  test("addressed citing a foreign slice is rejected", () => {
+  test("addressed citing a foreign slice drops that row", () => {
     const result = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ sliceId: "slice-nope" }) })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ sliceId: "slice-nope" }) }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("foreign slice");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "foreign slice" });
   });
 
-  test("addressed citing an incomplete slice is rejected", () => {
+  test("addressed citing an incomplete slice drops that row", () => {
     const incomplete = { ...HUNK, complete: false };
     const result = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult()] },
-      input({ evidence: [incomplete] }),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult(), SURVIVOR] },
+      pairedInput({ evidence: [incomplete] }),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("incomplete");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "incomplete" });
   });
 
-  test("a range outside the hunk new side is rejected", () => {
+  test("a range outside the hunk new side drops that row", () => {
     const result = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ startLine: 20, endLine: 21 }) })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ startLine: 20, endLine: 21 }) }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("not inside the hunk new side");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "not inside the hunk new side" });
   });
 
-  test("an inverted range is rejected", () => {
+  test("an inverted range drops that row", () => {
     const result = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ startLine: 9, endLine: 8 }) })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ startLine: 9, endLine: 8 }) }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("not ordered");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "not ordered" });
   });
 
-  test("a non-byte-equal quote is rejected", () => {
+  test("a quote that does not match the cited lines drops that row", () => {
     const result = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ quote: "const b = 2;" }) })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ quote: "const b = 2;" }) }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("does not byte-equal");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "does not match the cited new-side lines" });
   });
 
-  test("a multi-line quote must byte-equal the contiguous cited lines", () => {
+  test("a multi-line quote must match the contiguous cited lines", () => {
     const ok = validateRecheckDoc(
       {
         schema: "mstar.recheck/v1",
@@ -352,57 +378,60 @@ describe("validateRecheckDoc — addressed eligibility", () => {
       {
         schema: "mstar.recheck/v1",
         headSha: SHA,
-        results: [addressedResult({ evidence: evidence({ startLine: 8, endLine: 9, quote: "const b = null ?? 2;\nconst a = 1;" }) })],
+        results: [
+          addressedResult({ evidence: evidence({ startLine: 8, endLine: 9, quote: "const b = null ?? 2;\nconst a = 1;" }) }),
+          SURVIVOR,
+        ],
       },
-      input(),
+      pairedInput(),
     );
-    expect(bad.ok).toBe(false);
+    expectDroppedRow(bad, { index: 0, rowId: "row-1", error: "does not match the cited new-side lines" });
   });
 
-  test("current-code on a deleted-file slice is rejected", () => {
+  test("current-code on a deleted-file slice drops that row", () => {
     const result = validateRecheckDoc(
       {
         schema: "mstar.recheck/v1",
         headSha: SHA,
-        results: [addressedResult({ evidence: evidence({ sliceId: "slice-del", startLine: 5, endLine: 5, quote: "old line 5" }) })],
+        results: [
+          addressedResult({ evidence: evidence({ sliceId: "slice-del", startLine: 5, endLine: 5, quote: "old line 5" }) }),
+          SURVIVOR,
+        ],
       },
-      input({ targets: [{ ...TARGET, original: OLD_CONCERN_IN_OLD_TS }] }),
+      pairedInput({ targets: [{ ...TARGET, original: OLD_CONCERN_IN_OLD_TS }, TARGET_2] }),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("current-code must cite a hunk slice");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "current-code must cite a hunk slice" });
   });
 
-  test("quote bounds (1–4096 chars) are enforced", () => {
+  test("quote bounds (1–4096 chars) drop the offending row", () => {
     const empty = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ quote: "" }) })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ quote: "" }) }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(empty.ok).toBe(false);
+    expectDroppedRow(empty, { index: 0, rowId: "row-1", error: "quote must be" });
 
     const oversized = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ quote: "x".repeat(4097) }) })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ quote: "x".repeat(4097) }) }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(oversized.ok).toBe(false);
-    if (!oversized.ok) expect(oversized.error).toContain("4096");
+    expectDroppedRow(oversized, { index: 0, rowId: "row-1", error: "4096" });
   });
 
-  test("a blank or over-long explanation is rejected", () => {
+  test("a blank or over-long explanation drops that row", () => {
     const blank = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ explanation: "   " }) })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ explanation: "   " }) }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(blank.ok).toBe(false);
+    expectDroppedRow(blank, { index: 0, rowId: "row-1", error: "nonblank" });
 
     const long = validateRecheckDoc(
-      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ explanation: "x".repeat(1201) }) })] },
-      input(),
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({ evidence: evidence({ explanation: "x".repeat(1201) }) }), SURVIVOR] },
+      pairedInput(),
     );
-    expect(long.ok).toBe(false);
-    if (!long.ok) expect(long.error).toContain("1200");
+    expectDroppedRow(long, { index: 0, rowId: "row-1", error: "1200" });
   });
 
-  test("removed-code deleted-file slice without proven absence is rejected", () => {
+  test("removed-code deleted-file slice without proven absence drops that row", () => {
     const present = { ...DELETED_FILE, absentAtHead: false };
     const result = validateRecheckDoc(
       {
@@ -412,15 +441,15 @@ describe("validateRecheckDoc — addressed eligibility", () => {
           addressedResult({
             evidence: evidence({ kind: "removed-code", sliceId: "slice-del", startLine: 5, endLine: 6, quote: "old line 5\nold line 6" }),
           }),
+          SURVIVOR,
         ],
       },
-      input({ evidence: [present], targets: [{ ...TARGET, original: OLD_CONCERN_IN_OLD_TS }] }),
+      pairedInput({ evidence: [present], targets: [{ ...TARGET, original: OLD_CONCERN_IN_OLD_TS }, TARGET_2] }),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("must prove absence");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "must prove absence" });
   });
 
-  test("removed-code citing old lines still present on the hunk new side is rejected", () => {
+  test("removed-code citing old lines still present on the hunk new side drops that row", () => {
     const result = validateRecheckDoc(
       {
         schema: "mstar.recheck/v1",
@@ -429,15 +458,15 @@ describe("validateRecheckDoc — addressed eligibility", () => {
           addressedResult({
             evidence: evidence({ kind: "removed-code", sliceId: "slice-still", startLine: 9, endLine: 9, quote: "const b = 2;" }),
           }),
+          SURVIVOR,
         ],
       },
-      input({ targets: [{ ...TARGET, original: { ...ORIGINAL, lineStart: 9, lineEnd: 9 } }] }),
+      pairedInput({ targets: [{ ...TARGET, original: { ...ORIGINAL, lineStart: 9, lineEnd: 9 } }, TARGET_2] }),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("still present");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "still present" });
   });
 
-  test("removed-code on a path unrelated to the original concern is rejected", () => {
+  test("removed-code on a path unrelated to the original concern drops that row", () => {
     const result = validateRecheckDoc(
       {
         schema: "mstar.recheck/v1",
@@ -446,12 +475,13 @@ describe("validateRecheckDoc — addressed eligibility", () => {
           addressedResult({
             evidence: evidence({ kind: "removed-code", sliceId: "slice-del", startLine: 5, endLine: 6, quote: "old line 5\nold line 6" }),
           }),
+          SURVIVOR,
         ],
       },
-      input(), // original concern lives in src/a.ts, slice cites src/old.ts
+      // original concern lives in src/a.ts, slice cites src/old.ts
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("does not match the original concern file");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "does not match the original concern file" });
   });
 
   test("removed/replaced proof must intersect the original concern's old range", () => {
@@ -463,15 +493,15 @@ describe("validateRecheckDoc — addressed eligibility", () => {
           addressedResult({
             evidence: evidence({ kind: "replaced-code", sliceId: "slice-rep", startLine: 5, endLine: 5, quote: "count = a + b;" }),
           }),
+          SURVIVOR,
         ],
       },
-      input({ targets: [{ ...TARGET, original: { ...OLD_CONCERN_IN_OLD_TS, lineStart: 50, lineEnd: 60 } }] }),
+      pairedInput({ targets: [{ ...TARGET, original: { ...OLD_CONCERN_IN_OLD_TS, lineStart: 50, lineEnd: 60 } }, TARGET_2] }),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("does not intersect");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "does not intersect" });
   });
 
-  test("replaced-code with no current hunk is rejected (use removed-code)", () => {
+  test("replaced-code with no current hunk drops that row (use removed-code)", () => {
     const pureDeletion = { ...REPLACED_HUNK, newLines: [] };
     const result = validateRecheckDoc(
       {
@@ -481,12 +511,12 @@ describe("validateRecheckDoc — addressed eligibility", () => {
           addressedResult({
             evidence: evidence({ kind: "replaced-code", sliceId: "slice-rep", startLine: 5, endLine: 5, quote: "count = a + b;" }),
           }),
+          SURVIVOR,
         ],
       },
-      input({ evidence: [pureDeletion], targets: [{ ...TARGET, original: OLD_CONCERN_IN_OLD_TS }] }),
+      pairedInput({ evidence: [pureDeletion], targets: [{ ...TARGET, original: OLD_CONCERN_IN_OLD_TS }, TARGET_2] }),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("no current hunk");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "no current hunk" });
   });
 });
 
@@ -496,44 +526,50 @@ describe("validateRecheckDoc — disposition/reason pairing and shapes", () => {
       {
         schema: "mstar.recheck/v1",
         headSha: SHA,
-        results: [{ rowId: "row-1", disposition: "dismissed", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] }],
+        results: [
+          { rowId: "row-1", disposition: "dismissed", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
+          SURVIVOR,
+        ],
       },
-      input(),
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain('dismissed requires reason "non-fix-dismissal"');
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: 'dismissed requires reason "non-fix-dismissal"' });
   });
 
-  test("unverifiable with a closure rationale is rejected", () => {
+  test("unverifiable with a closure rationale drops that row", () => {
     const result = validateRecheckDoc(
       {
         schema: "mstar.recheck/v1",
         headSha: SHA,
-        results: [{ rowId: "row-1", disposition: "unverifiable", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] }],
+        results: [
+          { rowId: "row-1", disposition: "unverifiable", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
+          SURVIVOR,
+        ],
       },
-      input(),
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("unverifiable requires");
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "unverifiable requires" });
   });
 
-  test("evidence citing a nonexistent slice is rejected even for unverifiable/dismissed", () => {
+  test("evidence citing a nonexistent slice drops the row even for unverifiable/dismissed", () => {
     for (const disposition of ["unverifiable", "dismissed"] as const) {
       const reason = disposition === "unverifiable" ? "no-evidence" : "non-fix-dismissal";
       const result = validateRecheckDoc(
         {
           schema: "mstar.recheck/v1",
           headSha: SHA,
-          results: [{
-            rowId: "row-1", disposition, reason,
-            evidence: { kind: "current-code", sliceId: "slice-nope", startLine: 1, endLine: 1, quote: "x", explanation: "e" },
-            relatedCurrentFindingIndexes: [],
-          }],
+          results: [
+            {
+              rowId: "row-1", disposition, reason,
+              evidence: { kind: "current-code", sliceId: "slice-nope", startLine: 1, endLine: 1, quote: "x", explanation: "e" },
+              relatedCurrentFindingIndexes: [],
+            },
+            SURVIVOR,
+          ],
         },
-        input(),
+        pairedInput(),
       );
-      expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.error).toContain("foreign slice");
+      expectDroppedRow(result, { index: 0, rowId: "row-1", error: "foreign slice" });
     }
   });
 
@@ -543,28 +579,28 @@ describe("validateRecheckDoc — disposition/reason pairing and shapes", () => {
         {
           schema: "mstar.recheck/v1",
           headSha: SHA,
-          results: [addressedResult({ relatedCurrentFindingIndexes: indexes as number[] })],
+          results: [addressedResult({ relatedCurrentFindingIndexes: indexes as number[] }), SURVIVOR],
         },
-        input(),
+        pairedInput(),
       );
-      expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.error).toContain("non-negative integers");
+      expectDroppedRow(result, { index: 0, rowId: "row-1", error: "non-negative integers" });
     }
   });
 
-  test("a remote ID smuggled into a result (extra key) is rejected by the strict shape", () => {
+  test("a remote ID smuggled into a result (extra key) drops that row", () => {
     const result = validateRecheckDoc(
       {
         schema: "mstar.recheck/v1",
         headSha: SHA,
         results: [
           { ...addressedResult(), threadId: "PRRT_123" },
+          SURVIVOR,
         ],
       },
-      input(),
+      pairedInput(),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("exactly");
+    // The strict shape fails before rowId is read, so the row is unidentified.
+    expectDroppedRow(result, { index: 0, rowId: null, error: "exactly" });
   });
 
   test("non-object documents fail closed", () => {
