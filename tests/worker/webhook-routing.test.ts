@@ -13,9 +13,10 @@
  * failure (missing DASHBOARD_ENCRYPTION_KEY, tampered envelope) → 500
  * fail-closed (lock L1), zero enqueue.
  *
- * The D1 double is the real bun:sqlite helper over migrations 0001/0002 +
- * 0004/0005 (production-shaped; the store CRUD itself is pinned by
- * tests/worker/apps-store.test.ts — here the rows are seeded raw with
+ * The D1 double is the real bun:sqlite helper over migrations 0003/0004/0005
+ * (+ 0008/0011/0018/0019/0022/0026/0033/0036/0037/0038 — see
+ * `createMigratedD1` below; production-shaped, the store CRUD itself is pinned
+ * by tests/worker/apps-store.test.ts — here the rows are seeded raw with
  * secretbox envelopes so the route exercises the real lookup + decrypt).
  */
 
@@ -37,6 +38,9 @@ const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
+  // 0004: github_apps + app_installations — the two tables the install
+  // bookkeeping writes: every delivery upserts `account_login` into
+  // app_installations (and the installation outcome path does too).
   // 0008: the github_apps ops columns (review_enabled /
   // last_webhook_at) the pause gate + touch read and write on every delivery.
   // 0011: webhook_deliveries — the route's post-classify
@@ -49,6 +53,10 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // 0003/0026: the workspace data plane the strict read face joins
   // (`app_workspaces`, seeded with the single `default` workspace). Seeded
   // Apps here have NO mapping, so they are exactly the strict-mode orphan.
+  // 0033: platform_admin — `server_flags`, the table the global
+  // `review_global` enqueue gate reads.
+  // 0036/0037/0018/0019/0038: the app-identity + ops columns, and the
+  // parent-table rebuild that must carry every one of them.
   for (const name of [
     "0003_dashboard_users.sql",
     "0004_github_apps.sql",
@@ -964,11 +972,10 @@ describe("installations upsert wiring", () => {
       .run();
 
     // GitHub redelivers the IDENTICAL signed body → the idempotency key is
-    // already claimed, handleReviewJob skips the enqueue — but the touch
-    // runs after handleReviewJob regardless of the skip outcome, so seen_at
-    // is still refreshed (spec: upsert on ANY webhook carrying
-    // installation_id; a duplicate delivery is still evidence the install
-    // is alive).
+    // already claimed and handleReviewJob skips the enqueue — but the install
+    // upsert runs before the enqueue, so seen_at is still refreshed (spec:
+    // upsert on ANY webhook carrying installation_id; a duplicate delivery is
+    // still evidence the install is alive).
     const second = await postWebhook("/webhook/default/app-x", body, headers, env);
 
     expect(second.status).toBe(200);
@@ -1011,6 +1018,68 @@ describe("installations upsert wiring", () => {
     expect(rows[0]!.installation_id).toBe(123);
     expect(rows[0]!.account_login).toBe("alice"); // preserved — the bare touch carries no login
     expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // still refreshed
+  });
+
+  test("the installation's own account is persisted, not the inferred repository owner", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    // The delivery states BOTH identities and they disagree: installation
+    // account `octo-org`, repository owner `test-owner`.
+    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 123, account: { login: "octo-org" } } });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    const rows = db.raw
+      .query("SELECT app_id, account_login FROM app_installations")
+      .all() as Array<{ app_id: string; account_login: string | null }>;
+    expect(rows).toEqual([{ app_id: appRow.id, account_login: "octo-org" }]);
+    // The queue message keeps the repository owner: the account never enters
+    // the payload, it is bookkeeping only.
+    expect(sent[0]!.owner).toBe("test-owner");
+  });
+
+  test("paused App still records the login from a review-type delivery (bookkeeping is gate-independent)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    expect(await createAppsStore(db).setReviewEnabled(appRow.id, false)).toBe(true);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 123, account: { login: "octo-org" } } });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0); // paused → zero enqueue
+    const rows = db.raw
+      .query("SELECT app_id, account_login FROM app_installations")
+      .all() as Array<{ app_id: string; account_login: string | null }>;
+    expect(rows).toEqual([{ app_id: appRow.id, account_login: "octo-org" }]);
+  });
+
+  test("review_global OFF still records the login from a review-type delivery (the flag gates enqueue only)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    db.raw
+      .prepare("INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES ('review_global', 0, datetime('now'), 'fixture')")
+      .run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({ ...PR_PAYLOAD, installation: { id: 123, account: { login: "octo-org" } } });
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0); // flag off → zero enqueue
+    const rows = db.raw
+      .query("SELECT app_id, account_login FROM app_installations")
+      .all() as Array<{ app_id: string; account_login: string | null }>;
+    expect(rows).toEqual([{ app_id: appRow.id, account_login: "octo-org" }]);
   });
 
   test("upsert failure → structured warn, enqueue still succeeds (fire-and-forget bookkeeping)", async () => {
@@ -1108,6 +1177,12 @@ describe("installation event path", () => {
     expect(deliveryRows(db, appRow.id)).toEqual([
       { event_name: "installation", outcome: "ignored", status_code: null },
     ]);
+    // A verified install delivery is a verified delivery: the same L5 touch
+    // every non-reject outcome gets (lock L5 — "last verified delivery").
+    const ops = db.raw
+      .query("SELECT last_webhook_at FROM github_apps WHERE id = ?")
+      .get(appRow.id) as { last_webhook_at: string | null };
+    expect(ops.last_webhook_at).not.toBeNull();
   });
 
   test("installation.new_permissions_accepted records the login too", async () => {

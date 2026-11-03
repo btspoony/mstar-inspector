@@ -1345,8 +1345,11 @@ and `issue_comment`: `installation` is not a subscribable GitHub App event
 delivered to every App automatically. So a new App receives
 `installation.created` without any subscription, and the install-bookkeeping
 path fills the row from `installation.account.login`, falling back to the
-repository owner. A fresh install row with no review traffic yet keeps `未知`
-until its first reviewed `pull_request` / `issue_comment` delivery.
+repository owner. That bookkeeping is gate-independent: **any** verified
+`pull_request` / `issue_comment` delivery refreshes the login too, even while
+the App is paused or the global review flag is off (those gates close only the
+review enqueue, not the bookkeeping). A row accordingly stays `未知` only until
+the App receives its first verified review-type delivery or install event.
 
 > **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
 > the recovery lanes are covered by the implementation's scoped behavioral

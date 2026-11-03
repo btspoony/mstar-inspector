@@ -408,6 +408,30 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("ignored", 200);
   }
 
+  // Install bookkeeping: every verified review-type delivery refreshes the
+  // row's login from `outcome.installationAccount` — the installing account's
+  // login — so installs that predate this column fill in on their next
+  // delivery instead of waiting for another install event. The login rides
+  // beside `payload`, never inside it: the queue message below stays
+  // account-free. Written BEFORE the pause gate, the global flag gate and the
+  // enqueue, because those three decide only the ENQUEUE face: a paused App or
+  // a disabled flag must still learn its installing account. Best-effort (the
+  // review path never fails on bookkeeping): a failure logs a structured warn
+  // and the webhook still returns 200. The store's COALESCE keeps a stored
+  // login when a touch arrives without one.
+  if (outcome.kind === "job") {
+    try {
+      await appsStore.upsertInstallation({
+        appId: row.id,
+        installationId: outcome.payload.installation_id,
+        accountLogin: outcome.installationAccount,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      webhookWarn("installation_upsert_failed", detail, "installation upsert failed — enqueue unaffected");
+    }
+  }
+
   // Install event (installation.created / new_permissions_accepted): the one
   // delivery that observes a brand-new install before any review traffic, so
   // it records `account_login` here — BEFORE the pause gate and the global
@@ -463,25 +487,6 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     env: c.env,
     log: defaultLog,
   });
-  // Install bookkeeping: every reviewed delivery refreshes the row's login
-  // from `outcome.installationAccount` — the installing account's login — so
-  // installs that predate this column fill in on their next delivery instead
-  // of waiting for another install event. The login rides beside `payload`,
-  // never inside it: the queue message above stays account-free. Fire-and-
-  // forget relative to the enqueue (the review path never waits on
-  // bookkeeping) and best-effort: a failure logs a structured warn and the
-  // webhook still returns 200. The store's COALESCE keeps a stored login
-  // when a touch arrives without one.
-  try {
-    await appsStore.upsertInstallation({
-      appId: row.id,
-      installationId: outcome.payload.installation_id,
-      accountLogin: outcome.installationAccount,
-    });
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    webhookWarn("installation_upsert_failed", detail, "installation upsert failed — enqueue unaffected");
-  }
   return c.text("accepted", 200);
 });
 

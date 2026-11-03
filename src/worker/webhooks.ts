@@ -305,6 +305,18 @@ const repositorySchema = z
   .optional();
 
 /**
+ * The install's own account login, with the repository owner as the fallback a
+ * delivery without `installation.account` allows — shared by both review
+ * classifiers so the authority order is stated once.
+ */
+function installationAccountOf(
+  installation: { account?: { login: string } | null } | null | undefined,
+  owner: string,
+): string {
+  return installation?.account?.login ?? owner;
+}
+
+/**
  * The `installation` event's own shape (not the bare `installationSchema`,
  * which only supplies the id inside the review events): the account login is
  * the whole point, and it sits one level down under `account`.
@@ -426,7 +438,12 @@ export async function classifyWebhook(
 }
 
 /**
- * Event whitelist → ReviewJobPayload. Returns `ignore` for everything else.
+ * Event whitelist. Returns `ignore` for everything else.
+ *
+ * Outcomes are not review jobs only: `pull_request` / `issue_comment` map to a
+ * `job` carrying `ReviewJobPayload`, while `installation` maps to the
+ * `installation` outcome — the install-bookkeeping face that records
+ * `account_login` without enqueuing anything.
  *
  * `trigger` is the per-App trigger context (spec review-trigger-policy §2):
  * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` (the
@@ -512,7 +529,7 @@ function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookO
   }
   // The install's own account wins: the payload states it, whereas the owner
   // is only the inference a delivery without `installation.account` allows.
-  const installationAccount = installation?.account?.login ?? owner;
+  const installationAccount = installationAccountOf(installation, owner);
   // §2.1 matrix: the mode gates the auto face (manual never auto-triggers;
   // open is opened-only). The bot-mention comment face is orthogonal.
   if (!autoTriggerAllows(mode, action)) {
@@ -588,7 +605,7 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
   }
   // Same authority as the pull_request face: the payload's own
   // `installation.account.login`, with the repository owner as the fallback.
-  const installationAccount = installation?.account?.login ?? owner;
+  const installationAccount = installationAccountOf(installation, owner);
   return {
     kind: "job",
     payload: {
