@@ -447,7 +447,12 @@ export function buildPreparedReviewBody(input: {
   publicationMarker: string;
 }): string {
   const roundMarker = `<!-- mstar-inspector:review:v1 round=${input.round} -->`;
-  const header = `第 ${input.round} 次 review · commit ${input.headSha.slice(0, 7)}`;
+  // English, like every other string this body renders (verdict, tally, the
+  // findings sections). A Chinese header on an otherwise English comment is
+  // unreadable to most readers and unlocalized for the rest: the body has no
+  // locale input, so the only consistent choice is the one language the rest of
+  // it already uses.
+  const header = `Review ${input.round} · commit ${input.headSha.slice(0, 7)}`;
   const core = stripInspectorMarkerSyntax(
     buildReviewBody(input.output, input.omittedFindings, input.previousFingerprints, input.closure),
   );
