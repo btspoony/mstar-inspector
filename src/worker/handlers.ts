@@ -18,7 +18,7 @@
  *   so GitHub's retry re-enqueues instead of being KV-skipped.
  */
 import type { KVNamespace } from "@cloudflare/workers-types";
-import { idemKey, IDEMPOTENCY_SECONDS } from "../contracts/idem";
+import { idemKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { Env } from "./env";
 
@@ -83,9 +83,13 @@ function toEventLog(payload: ReviewJobPayload): WorkerEventLog {
 }
 
 /**
- * Idempotency pre-check: true when the key already exists (skip). On KV
- * failure, returns false (conservative pass) and logs a warning — the D1
- * UNIQUE constraint is the durable duplicate guard.
+ * Idempotency pre-check: true only when the stored value proves this commit's
+ * job is still pending or already ran ("1" / "done"). A "dropped" (the guard
+ * gave the job up) or "failed" (the final delivery is heading to the DLQ)
+ * value means the commit was NEVER reviewed, so a redelivery must enqueue
+ * again instead of being skipped. On KV failure, returns false (conservative
+ * pass) and logs a warning — the D1 UNIQUE constraint is the durable
+ * duplicate guard.
  */
 export async function idempotencyHit(
   kv: KVNamespace,
@@ -94,7 +98,7 @@ export async function idempotencyHit(
   log: HandlerLog,
 ): Promise<boolean> {
   try {
-    return (await kv.get(key)) !== null;
+    return isEnqueuedClaim(await kv.get(key));
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     log.warn(fields, `idempotency KV error — enqueueing anyway (D1 fallback): ${detail}`);
@@ -115,7 +119,7 @@ export async function claimIdempotency(
   log: HandlerLog,
 ): Promise<void> {
   try {
-    await kv.put(key, "1", { expirationTtl: IDEMPOTENCY_SECONDS });
+    await kv.put(key, IDEM_ENQUEUED, { expirationTtl: IDEMPOTENCY_SECONDS });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     log.warn(fields, `idempotency KV error — enqueueing anyway (D1 fallback): ${detail}`);

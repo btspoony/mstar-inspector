@@ -405,9 +405,11 @@ export type UpsertPullRequestInput = {
    * the arrival time of `headSha`, which a delivery naming the same sha still
    * moves.
    *
-   * Callers MUST pass the canonical UTC ISO-8601 spelling
-   * (`new Date(v).toISOString()`): it is bound verbatim and compared as text,
-   * so a numeric-offset spelling would sort wrongly against the stored `Z`.
+   * Precondition: callers MUST pass the canonical UTC ISO-8601 spelling
+   * (`new Date(v).toISOString()`). The column is ordered LEXICALLY, so a
+   * numeric-offset spelling would sort wrongly against the stored `Z` values;
+   * `pullRequestRecord` guarantees it by normalizing before the value gets
+   * here.
    */
   updatedAt?: string | null;
 };
@@ -1032,9 +1034,11 @@ export function createAppsStore(db: AppsStoreD1) {
      *   - an older stamp → both untouched.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
-      // The caller validates the timestamp (`pullRequestRecord` only passes an
-      // RFC 3339 stamp), so this branch is the EXPLICIT "no usable stamp"
-      // fallback: arrival time is the only clock left.
+      // Precondition on `updatedAt`: the canonical UTC ISO-8601 spelling
+      // (`new Date(v).toISOString()`), because the column is ordered lexically
+      // and the CASE arms below compare it as text. `pullRequestRecord`
+      // guarantees it by normalizing; this branch is the EXPLICIT "no usable
+      // stamp" fallback, where arrival time is the only clock left.
       const seenAt = input.updatedAt === undefined || input.updatedAt === null
         ? null
         : input.updatedAt;

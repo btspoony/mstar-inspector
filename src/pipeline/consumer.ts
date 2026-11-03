@@ -76,7 +76,7 @@
 
 import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
-import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
+import { idemKey, IDEMPOTENCY_SECONDS, IDEM_DONE, IDEM_DROPPED, IDEM_FAILED, isEnqueuedClaim, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../../packages/shared/src/runtime";
@@ -226,6 +226,15 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
   default: 600_000,
   deep: 840_000,
 };
+
+/**
+ * Total deliveries a message gets before the queue DLQs it: wrangler.jsonc's
+ * `queues.consumers[].max_retries` is 3, so 1 initial delivery + 3 retries.
+ * The FINAL delivery stamps its idempotency key `failed` (processMessage's
+ * catch) because that commit was never reviewed — keep this in step with the
+ * wrangler value.
+ */
+const QUEUE_MAX_ATTEMPTS = 4;
 
 /**
  * Cap on the prefetched PR diff considered for the line-comments hunk
@@ -524,8 +533,9 @@ export type AdmissionRefusalFields = Required<Pick<ConsumerLogFields, "system_ca
  * and review the new commit. A drop that still happens — a cap/storage
  * refusal, or a row that outlived the schedule — must leave a trace, so the
  * terminal ack records the drop row for a commit the live review never
- * covers, and stamps that commit's idempotency claim `dropped` so the
- * supersede skip stops treating the abandoned job as proof.
+ * covers, and stamps that commit's idempotency claim `dropped` so both the
+ * supersede skip and the worker's pre-check stop treating the abandoned job
+ * as proof: a redelivery for that commit enqueues again.
  */
 async function handleGuardHeld(
   message: Message<ReviewJobPayload>,
@@ -592,9 +602,10 @@ async function handleGuardHeld(
   const headSha = payloadSha ?? "";
   // The newer commit's enqueue claim is the supersede skip's ONLY proof, so a
   // job dropped here for good must stop being proof: overwrite its key with
-  // "dropped" (the same TTL the worker claim used). Best-effort — a KV fault
-  // only leaves a stale "1", which the skip then accepts and `review_failures`
-  // traces (the drop row below).
+  // "dropped" (the same TTL the worker claim used), the value both readers
+  // treat as "not reviewed". Best-effort — a KV fault only leaves a stale "1",
+  // which the skip then accepts and `review_failures` traces (the drop row
+  // below).
   if (headSha !== "") {
     try {
       await deps.env.IDEMPOTENCY_KV.put(
@@ -605,7 +616,7 @@ async function handleGuardHeld(
           pr_number: message.body.pr_number,
           head_sha: headSha,
         }),
-        "dropped",
+        IDEM_DROPPED,
         { expirationTtl: IDEMPOTENCY_SECONDS },
       );
     } catch (err) {
@@ -2060,7 +2071,7 @@ async function kvDoneHit(
   log: ConsumerLog,
 ): Promise<boolean> {
   try {
-    return (await kv.get(key)) === "done";
+    return (await kv.get(key)) === IDEM_DONE;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     log.warn(fields, `idempotency KV read failed — falling back to D1: ${detail}`);
@@ -2077,10 +2088,9 @@ async function kvDoneHit(
  * skip backed by the ledger alone would drop a PR's only review.
  *
  * `"1"` (queued) and `"done"` (reviewed by this consumer) are that proof;
- * `"dropped"` is the guard's terminal ack stamping the job it gave up on
- * (handleGuardHeld), so it is NO proof — that commit will never review. DLQ
- * paths leave `"1"` behind, which this accepts; `review_failures` is what
- * traces those.
+ * `"dropped"` (the guard's terminal ack in handleGuardHeld) and `"failed"`
+ * (the final delivery is heading to the DLQ) are NO proof — both name a commit
+ * that was never reviewed, so this delivery must review rather than skip.
  *
  * Fail-open: an absent ledger sha, an absent key or a KV fault all mean "no
  * proof" → review normally (a fault logs one warn line).
@@ -2103,7 +2113,7 @@ async function newerCommitHasJob(
       head_sha: headSha,
     });
     const claim = await deps.env.IDEMPOTENCY_KV.get(key);
-    return claim !== null && claim !== "dropped";
+    return isEnqueuedClaim(claim);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(fields, `supersede KV read failed — reviewing normally: ${detail}`);
@@ -2176,7 +2186,7 @@ export function createReviewConsumer(
     });
   return async (batch) => {
     for (const message of batch.messages) {
-      const outcome = await processMessage(message.body, deps);
+      const outcome = await processMessage(message.body, deps, message.attempts);
       // BB-3: guard-held is a typed outcome — schedule the per-message
       // delayed retry (or the final ack-with-warning) instead of throwing
       // into the queue's immediate ×3 retry → DLQ path.
@@ -2204,7 +2214,17 @@ export function createReviewConsumer(
   };
 }
 
-async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<ProcessOutcome> {
+/**
+ * @param attempts the delivery number of this message (1 = first delivery);
+ *   only the value past the queue's retry budget matters — it stamps the
+ *   idempotency key `failed` so a DLQ-bound commit stops counting as reviewed-
+ *   or-pending proof.
+ */
+async function processMessage(
+  payload: ReviewJobPayload,
+  deps: ProcessDeps,
+  attempts = 1,
+): Promise<ProcessOutcome> {
   // Unique per attempt: a destroyed sandbox's id is never
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
@@ -3255,7 +3275,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // persisted proof) — a crash in the steps below redelivers into the
     // journal handoff ack, never a duplicate paid review.
     try {
-      await deps.env.IDEMPOTENCY_KV.put(idemKey(key), "done", {
+      await deps.env.IDEMPOTENCY_KV.put(idemKey(key), IDEM_DONE, {
         expirationTtl: IDEMPOTENCY_SECONDS,
       });
     } catch (err) {
@@ -3547,6 +3567,35 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
         `review_failures insert failed (rethrow unchanged): ${recordDetail}`,
       );
+    }
+
+    // This delivery is the last one the queue will make (the next stop is the
+    // DLQ), so the commit will never be reviewed: overwrite its idempotency
+    // key with "failed" (the worker's claim TTL) so neither the worker's
+    // pre-check nor the supersede skip keeps treating the stale "1" as proof.
+    // Keyed off the PAYLOAD sha — the same sha the worker claimed. Best-effort:
+    // a KV fault only leaves "1" behind, which the failure row above traces,
+    // and it never masks the rethrow.
+    if (attempts >= QUEUE_MAX_ATTEMPTS && payload.head_sha) {
+      try {
+        await deps.env.IDEMPOTENCY_KV.put(
+          idemKey({
+            installation_id: payload.installation_id,
+            owner: payload.owner,
+            repo: payload.repo,
+            pr_number: payload.pr_number,
+            head_sha: payload.head_sha,
+          }),
+          IDEM_FAILED,
+          { expirationTtl: IDEMPOTENCY_SECONDS },
+        );
+      } catch (kvErr) {
+        const kvDetail = kvErr instanceof Error ? kvErr.message : String(kvErr);
+        deps.log.warn(
+          fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+          `failed-claim KV write failed (the skip may still treat this commit as queued): ${kvDetail}`,
+        );
+      }
     }
     throw err;
   } finally {

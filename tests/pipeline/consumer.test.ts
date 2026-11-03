@@ -1059,6 +1059,51 @@ describe("createReviewConsumer", () => {
     expect(warn).toBeDefined();
   });
 
+  test("the final delivery stamps the key failed so the commit stops counting as queued", async () => {
+    reset();
+    runnerExitCode = 1;
+    messageAttempts = 4; // 1 initial delivery + max_retries 3 → the next stop is the DLQ
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+
+    // The stale "1" the worker claimed is overwritten: that commit was never
+    // reviewed, so a redelivery must enqueue again instead of being skipped.
+    expect(kvPuts).toEqual([
+      {
+        key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+        value: "failed",
+        options: { expirationTtl: IDEMPOTENCY_SECONDS },
+      },
+    ]);
+  });
+
+  test("a delivery the queue will retry leaves the enqueue claim alone", async () => {
+    reset();
+    runnerExitCode = 1;
+    messageAttempts = 3; // a retry still follows
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+
+    expect(kvPuts.some((p) => p.value === "failed")).toBe(false);
+  });
+
+  test("a failing failed-claim KV write never masks the rethrow", async () => {
+    reset();
+    runnerExitCode = 1;
+    messageAttempts = 4;
+    kvPutError = new Error("kv down");
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+
+    expect(logLines.some((l) => l.level === "warn" && l.msg.includes("failed-claim KV write failed"))).toBe(true);
+  });
+
   test("in-flight legacy-shape payload (absent appRef) → structured channel + healthy batch sibling completes (F-001)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -2215,20 +2260,41 @@ describe("createReviewConsumer", () => {
     expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
   });
 
-  test("a newer commit whose job the guard dropped for good is reviewed, not skipped", async () => {
-    // The guard's terminal ack stamps the abandoned job "dropped": the key is
-    // still there, but it no longer proves a review will ever happen.
+  test("a newer commit whose job was dropped or failed is reviewed, not skipped", async () => {
+    // `dropped` (the guard's terminal ack) and `failed` (the final delivery is
+    // heading to the DLQ) both name a commit that was never reviewed: the key
+    // is still there, but it no longer proves a review will ever happen.
+    for (const claim of ["dropped", "failed"] as const) {
+      reset();
+      runnerStdout = JSON.stringify(VALID_OUTPUT);
+      const db = await createSeededTestD1();
+      await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+      kvEntries.set(ENQUEUED_KEY(NEW_SHA), claim);
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+      expect(reviewCount(db)).toBe(1);
+      expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+    }
+  });
+
+  test("a completed review of the newer commit is proof — the delivery is skipped", async () => {
+    // `done` means this consumer already reviewed that commit, so no second
+    // job is needed: the ledger stamp plus the done claim are the whole proof.
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
-    kvEntries.set(ENQUEUED_KEY(NEW_SHA), "dropped");
+    kvEntries.set(ENQUEUED_KEY(NEW_SHA), "done");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
 
-    expect(reviewCount(db)).toBe(1);
-    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+    expect(reviewCount(db)).toBe(0);
+    expect(sandboxCalls).toHaveLength(0);
+    expect(messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
   });
 
   test("a KV fault on the skip's proof read reviews normally and says so once", async () => {
