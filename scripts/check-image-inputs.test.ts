@@ -6,6 +6,9 @@
  * nothing else does, and a diff that changes the marker passes.
  */
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   evaluateImageGate,
   IMAGE_INPUT_PATTERNS,
@@ -83,4 +86,74 @@ describe("touchesRebuildMarker", () => {
 
   test("context lines and unrelated hunks do not count", () =>
     expect(touchesRebuildMarker(" # rebuild: context only\n+FROM new")).toBe(false));
+});
+
+/** A throwaway repo whose only commits are the ones this test writes. */
+function tempRepo(): { dir: string; git: (...args: string[]) => string } {
+  const dir = mkdtempSync(join(tmpdir(), "image-gate-"));
+  const git = (...args: string[]): string => {
+    const proc = Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+    if (proc.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${proc.stderr.toString()}`);
+    return proc.stdout.toString().trim();
+  };
+  git("init", "-q");
+  git("config", "user.name", "test");
+  git("config", "user.email", "test@example.com");
+  // Git's default; a global `core.quotePath=false` would otherwise hide the quoting.
+  git("config", "core.quotePath", "true");
+  return { dir, git };
+}
+
+function write(dir: string, path: string, content = "export const x = 1;\n"): void {
+  mkdirSync(dirname(join(dir, path)), { recursive: true });
+  writeFileSync(join(dir, path), content);
+}
+
+/** The gate's actual CLI, run against `dir` for `base...HEAD`. */
+function runGate(dir: string, base: string, script: string): number {
+  return Bun.spawnSync(["bun", script, "--base", base], {
+    cwd: dir,
+    stdout: "pipe",
+    stderr: "pipe",
+  }).exitCode!;
+}
+
+describe("image gate CLI", () => {
+  const script = join(import.meta.dir, "check-image-inputs.ts");
+
+  test("a rename out of an input family fails the gate", () => {
+    const { dir, git } = tempRepo();
+    try {
+      write(dir, "packages/runner/src/moved.ts");
+      write(dir, "docs/notes.md", "notes\n");
+      git("add", "-A");
+      git("commit", "-qm", "add runner source");
+      const base = git("rev-parse", "HEAD");
+
+      git("mv", "packages/runner/src/moved.ts", "docs/moved.ts");
+      git("commit", "-qm", "move it out of the image inputs");
+
+      expect(runGate(dir, base, script)).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a non-ASCII input path is matched despite Git quoting", () => {
+    const { dir, git } = tempRepo();
+    try {
+      write(dir, "docs/notes.md", "notes\n");
+      git("add", "-A");
+      git("commit", "-qm", "docs only");
+      const base = git("rev-parse", "HEAD");
+
+      write(dir, "packages/runner/src/中文.ts");
+      git("add", "-A");
+      git("commit", "-qm", "non-ASCII runner source");
+
+      expect(runGate(dir, base, script)).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

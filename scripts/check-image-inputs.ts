@@ -68,6 +68,11 @@ export function evaluateImageGate(paths: string[], dockerfileDiff: string): Imag
   return { ok: false, reason: "image-input-without-marker" };
 }
 
+/** `git diff --name-only -z` output: NUL-separated, never quoted or escaped. */
+export function parseNameOnly(output: string): string[] {
+  return output.split("\0").filter((path) => path !== "");
+}
+
 /** Run one git command; `undefined` when it fails (the diff is then unknown). */
 function git(args: string[]): string | undefined {
   const proc = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -101,14 +106,16 @@ if (import.meta.main) {
   }
 
   const range = `${base}...HEAD`;
-  const nameOnly = git(["diff", "--name-only", range]);
+  // `--no-renames` keeps both sides of a move, so leaving an input family is
+  // visible as a deletion; `-z` avoids Git's quoting of non-ASCII paths.
+  const nameOnly = git(["diff", "--name-only", "--no-renames", "-z", range]);
   const dockerfileDiff = git(["diff", range, "--", "sandbox-image/Dockerfile"]);
   if (nameOnly === undefined || dockerfileDiff === undefined) {
     console.error("::error::check-image-inputs: could not read the diff — treat as unverified, not a pass");
     process.exit(1);
   }
 
-  const paths = nameOnly.split("\n").filter((line) => line !== "");
+  const paths = parseNameOnly(nameOnly);
   const verdict = evaluateImageGate(paths, dockerfileDiff);
   if (!verdict.ok) {
     console.error(`::error::${verdict.reason}: this diff changes image inputs but not the rebuild marker.`);
