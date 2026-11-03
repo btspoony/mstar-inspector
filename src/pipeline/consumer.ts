@@ -105,6 +105,7 @@ import {
 } from "../store/finding-lifecycle";
 import {
   ASSESSMENT_TARGET_CAP,
+  isRecheckStatusReason,
   RECHECK_OUTPUT_PATH,
   RECHECK_STATUS_ERROR_MAX_CHARS,
   validateRecheckDoc,
@@ -1366,23 +1367,29 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 }
 
 /**
- * Payload text of one bounded read command, or null (non-zero exit, overflow
- * beyond the byte bound, or no flag line). Shared by the recheck document and
- * status reads — the transport is identical, only the file differs.
+ * Payload text of one bounded read command, plus WHY it yielded nothing.
+ * Non-zero exit, a missing flag line, or overflow beyond the byte bound are all
+ * "no payload" to the caller, but they are different D1 causes, so the failure
+ * is named rather than collapsed into a bare null. Shared by the recheck
+ * document and status reads — the transport is identical, only the file
+ * differs.
  */
-async function boundedRead(sandbox: ReviewSandbox, command: ReturnType<typeof readRecheckCommand>): Promise<string | null> {
+async function boundedRead(
+  sandbox: ReviewSandbox,
+  command: ReturnType<typeof readRecheckCommand>,
+): Promise<{ text: string | null; failure: string | null }> {
   let read;
   try {
     read = await sandbox.runCommand(command, { timeout: EXEC_TIMEOUT_GIT_MS });
   } catch {
-    return null;
+    return { text: null, failure: "unreadable" };
   }
-  if (read.exitCode !== 0) return null;
+  if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
   const out = read.stdout.trimEnd();
   const split = out.lastIndexOf("\n");
-  if (split < 0) return null;
-  if (out.slice(split + 1).trim() !== "0") return null; // overflow beyond the byte bound
-  return out.slice(0, split);
+  if (split < 0) return { text: null, failure: "unreadable" };
+  if (out.slice(split + 1).trim() !== "0") return { text: null, failure: "overflow" }; // beyond the byte bound
+  return { text: out.slice(0, split), failure: null };
 }
 
 /**
@@ -1429,12 +1436,11 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
         typeof rejectedUnnamed === "number" && Number.isInteger(rejectedUnnamed) && rejectedUnnamed >= 0
           ? rejectedUnnamed
           : 0,
-      // `reason`/`error` are redacted and bounded HERE so the D1 failure text
-      // and the log field carry one capped value — the runner already does the
-      // same for its own copy, but a foreign or hand-rolled status must not be
-      // able to push an unbounded string, or a half-redacted secret, into
-      // either sink. The later exact-value pass still applies.
-      reason: boundedStatusText(value["reason"]),
+      // `reason` is a CLOSED vocabulary: the per-row accounting below branches
+      // on these exact literals, so an off-vocabulary value would fall through
+      // to the wrong verdict instead of being ignored. Unrecognized → null
+      // (same as absent), never a guessed reason.
+      reason: isRecheckStatusReason(value["reason"]) ? value["reason"] : null,
       error: boundedStatusText(value["error"]),
     };
   } catch {
@@ -1473,41 +1479,58 @@ async function readRecheckDoc(
   recheckInput: RecheckInput,
 ): Promise<{
   doc: RecheckDoc | null;
+  /** Why `doc` is null (absent read / overflow / validation), null when it survived. */
+  docFailure: string | null;
   rejected: ReadonlySet<string>;
   anonymousRejectedRows: number;
   status: RecheckStatus | null;
 }> {
-  const [docText, statusText] = await Promise.all([
+  const [docRead, statusRead] = await Promise.all([
     boundedRead(sandbox, readRecheckCommand(RECHECK_OUTPUT_PATH)),
     boundedRead(sandbox, readRecheckStatusCommand()),
   ]);
   let doc: RecheckDoc | null = null;
+  // An empty payload is the seat writing nothing: absent, not malformed.
+  let docFailure: string | null =
+    docRead.failure ?? (docRead.text !== null && docRead.text.trim() === "" ? "absent" : null);
   const droppedRowIds = new Set<string>();
   let anonymousRejectedRows = 0;
-  if (docText !== null) {
+  if (docRead.text !== null) {
     try {
-      const gate = validateRecheckDoc(JSON.parse(docText), recheckInput);
+      const gate = validateRecheckDoc(JSON.parse(docRead.text), recheckInput);
       if (gate.ok) {
         doc = gate.doc;
+        docFailure = null;
         for (const row of gate.rejected) {
           if (row.rowId === null) anonymousRejectedRows += 1;
           else droppedRowIds.add(row.rowId);
         }
+      } else {
+        docFailure = `invalid-document: ${gate.error}`;
       }
     } catch {
-      doc = null;
+      docFailure = "invalid-document: not JSON";
     }
   }
-  const status = parseRecheckStatus(statusText, recheckInput.headSha);
+  const status = parseRecheckStatus(statusRead.text, recheckInput.headSha);
   const sent = new Set(recheckInput.targets.map((target) => target.rowId));
   const rejected = new Set(droppedRowIds);
-  for (const rowId of status?.rejected_row_ids ?? []) if (sent.has(rowId)) rejected.add(rowId);
+  // A row the surviving document CARRIES has a real answer, so a status that
+  // also names it (the seat drops, then re-emits it) must not cost it that
+  // answer: `rejected` outranks the answered row in the reconciliation, and a
+  // row listed in both would report `invalid-output` instead of its actual
+  // assessment. Local gate drops need no such filter — a dropped row is by
+  // construction absent from `doc.results`.
+  const answeredRowIds = new Set((doc?.results ?? []).map((row) => row.rowId));
+  for (const rowId of status?.rejected_row_ids ?? []) {
+    if (sent.has(rowId) && !answeredRowIds.has(rowId)) rejected.add(rowId);
+  }
   // The seat writes an ALREADY-FILTERED document, so the local pass above
   // normally sees no drops at all; the status is the surviving record. Taking
   // the larger of the two unions them without double-counting a round whose
   // unfiltered document also reached this pass.
   const unnamedRejectedRows = Math.max(anonymousRejectedRows, status?.rejected_unnamed ?? 0);
-  return { doc, rejected, anonymousRejectedRows: unnamedRejectedRows, status };
+  return { doc, docFailure, rejected, anonymousRejectedRows: unnamedRejectedRows, status };
 }
 
 /**
@@ -3250,8 +3273,18 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       // because it ran and lost. That is neither a failure row nor an
       // `invalid-output` for a row the seat never answered.
       const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
+      // The status document belongs to the SEAT; a round whose document was
+      // lost has its real cause on the read side (absent / overflow /
+      // validation failure), so that cause LEADS the detail instead of the
+      // seat's `ok: null: null`, which says nothing about what went wrong.
+      // `failed` already names the seat's own fault, so it keeps its triple.
+      const docFailure = recheck?.docFailure ?? null;
       const recheckDetail = redactExactSecrets(
-        redactSecrets(`${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`),
+        redactSecrets(
+          recheckDoc === null && docFailure !== null && recheckOutcome === "ok"
+            ? `document ${docFailure}: ${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`
+            : `${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`,
+        ),
         secretValues,
       ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
       deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](

@@ -109,17 +109,43 @@ export const RECHECK_OUTPUT_PATH = '/tmp/mstar-recheck.json';
  * `rejected` is its length, so both faces of the count agree. A row with no
  * readable rowId cannot be named: `rejected_unnamed` counts those, which is
  * what lets the Worker attribute them by position among the sent-and-unanswered
- * rows instead of losing them. `reason`/`error` are null unless the round
- * degraded — except a `skipped` round, whose `reason` says WHY it never ran:
- * `budget` (no room to start) or `aborted` (the runner cancelled the seat when
- * the main review settled).
+ * rows instead of losing them. `error` is null unless the round degraded — and
+ * `reason` is null for a clean round, otherwise one of the closed
+ * `RECHECK_STATUS_REASONS` below, which the consumer branches on to tell a
+ * cancelled round (`aborted`) from a seat that ran and produced nothing
+ * (`seat-failed` / `invalid-document` / `all-rows-rejected` / `empty-result`)
+ * from one that never got room (`budget`).
  */
 export const RECHECK_STATUS_PATH = '/tmp/mstar-recheck-status.json';
+
+/**
+ * The closed vocabulary of a status `reason`. Every writer emits a member and
+ * every reader rejects anything else: the consumer's per-row accounting
+ * branches on these exact literals, so an off-vocabulary string would silently
+ * fall through to the wrong accounting.
+ */
+export const RECHECK_STATUS_REASONS = [
+  'budget',
+  'aborted',
+  'all-rows-rejected',
+  'empty-result',
+  'seat-failed',
+  'invalid-document',
+] as const;
+export type RecheckStatusReason = (typeof RECHECK_STATUS_REASONS)[number];
+
+const STATUS_REASONS: ReadonlySet<string> = new Set(RECHECK_STATUS_REASONS);
+
+/** Runtime membership test for the closed status-reason vocabulary. */
+export function isRecheckStatusReason(value: unknown): value is RecheckStatusReason {
+  return typeof value === 'string' && STATUS_REASONS.has(value);
+}
+
 export type RecheckStatus = {
   schema: 'mstar.recheck-status/v1'; headSha: string;
   outcome: 'ok' | 'skipped' | 'failed';
   rejected: number; rejected_row_ids: string[]; rejected_unnamed: number;
-  reason: string | null; error: string | null;
+  reason: RecheckStatusReason | null; error: string | null;
 };
 
 /** Status `error` bound — the seat redacts then truncates here, the consumer's failure row too. */
@@ -130,6 +156,17 @@ export const ASSESSMENT_TARGET_CAP = 25;
 export const RECHECK_MAX_RUNTIME_MS = 180_000;
 export const RECHECK_MIN_REMAINING_MS = 30_000;
 export const RECHECK_FILE_MAX_BYTES = 262_144;
+
+/**
+ * §7.8 model-context caps for `RecheckInput.discussion` (50 items, 1200 chars
+ * per item, 8000 total, oldest dropped first). They live HERE because both
+ * faces need them: the Worker bounds the capture with them, and the runner's
+ * seat assignment states them to the model. `src/pipeline/discussion-context`
+ * re-exports them as the consumer-side names.
+ */
+export const MODEL_MAX_ITEMS = 50;
+export const MODEL_ITEM_MAX_CHARS = 1200;
+export const MODEL_TOTAL_MAX_CHARS = 8000;
 
 /** Addressed requires the verified-fix rationale — nothing else closes a row. */
 const ADDRESSED_REASON = 'verified-fix';
@@ -210,6 +247,38 @@ function segmentQuote(lines: string[], startLine: number, start: number, endLine
 }
 
 /**
+ * Whether the cited old lines still survive on the hunk's new side, tested
+ * PER LINE rather than as a joined block. A block test lets an inserted line
+ * inside the cited range forge a removal: the whole block then no longer
+ * appears contiguously, so the removal reads as proven. Every non-blank
+ * normalized quote line must be accounted for by an occurrence on the new side
+ * for the block to count as still present. Two deliberate scoping choices:
+ *   - blank lines are skipped — a blank matches any blank, so it proves
+ *     nothing either way and would fail every quote that spans an empty line;
+ *   - the block counts as still present only when EVERY line matches, so a
+ *     citation that also spans a legitimately surviving identical context line
+ *     still proves the removal of the lines that are gone (the seat cites at
+ *     least one removed line; the range must already intersect the concern).
+ * Occurrences are counted, so two identical quoted lines need two survivors.
+ */
+function oldLinesStillPresent(quote: string, newLines: readonly string[]): boolean {
+  const surviving = new Map<string, number>();
+  for (const line of newLines) {
+    const normalized = normalizeQuoteText(line);
+    if (normalized === '') continue;
+    surviving.set(normalized, (surviving.get(normalized) ?? 0) + 1);
+  }
+  for (const line of quote.split('\n')) {
+    if (line === '') continue;
+    const count = surviving.get(line) ?? 0;
+    if (count === 0) return false;
+    surviving.set(line, count - 1);
+  }
+  // `quote` is never blank (visibleQuote), so at least one line was tested.
+  return true;
+}
+
+/**
  * Structural eligibility of an Addressed evidence citation against the
  * trusted catalog slice (spec §7.3 "Validation"): the slice must exist and
  * be complete; the cited range must be integer/ordered and fall entirely
@@ -286,11 +355,10 @@ function addressedProofError(
       if (!slice.absentAtHead) return 'removed-code deleted-file slice must prove absence at HEAD';
       return null;
     }
-    // Hunk slice: the cited old lines must no longer exist verbatim on the
-    // new side — otherwise the code was not removed by this change. Both
-    // sides are normalized, so a trailing blank cannot disguise present code.
-    const newSide = normalizeQuoteText(slice.newLines.join('\n'));
-    if (slice.newLines.length > 0 && newSide.includes(quote)) {
+    // Hunk slice: the cited old lines must no longer exist on the new side —
+    // otherwise the code was not removed by this change. Tested per line, so
+    // an insertion inside the cited block cannot forge the removal.
+    if (oldLinesStillPresent(quote, slice.newLines)) {
       return 'removed-code cites old lines still present on the hunk new side';
     }
     return null;
@@ -298,14 +366,14 @@ function addressedProofError(
 
   // replaced-code: the old range plus its current hunk — a current side
   // must exist, otherwise the change is a removal, not a replacement. And, as
-  // with removed-code, the cited old lines must no longer exist verbatim on
-  // the new side: an unchanged context line inside the hunk proves nothing
-  // was replaced. Both sides are normalized, so a trailing blank cannot
-  // disguise present code.
+  // with removed-code, the cited old lines must no longer survive on the new
+  // side: only when EVERY cited line is still there does the hunk prove
+  // nothing was replaced. A surviving identical context line elsewhere in the
+  // hunk does not fail a genuine replacement, because a line the change really
+  // removed is then missing from the new side.
   if (slice.kind !== 'hunk') return 'replaced-code must cite a hunk slice';
   if (slice.newLines.length === 0) return 'replaced-code slice has no current hunk (use removed-code)';
-  const newSide = normalizeQuoteText(slice.newLines.join('\n'));
-  if (newSide.includes(quote)) {
+  if (oldLinesStillPresent(quote, slice.newLines)) {
     return 'replaced-code cites old lines still present on the hunk new side';
   }
   return null;

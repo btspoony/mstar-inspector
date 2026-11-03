@@ -71,6 +71,20 @@ const REMOVED_STILL_PRESENT: EvidenceSlice = {
   absentAtHead: false, complete: true,
 };
 
+/**
+ * The still-present block with one line INSERTED inside it: every cited old
+ * line is still on the new side, but no longer contiguous, so a joined-block
+ * test would read the interruption as a removal.
+ */
+const INSERTED_INSIDE: EvidenceSlice = {
+  id: "slice-ins", headSha: SHA, baseSha: "b" + "0".repeat(39), path: "src/a.ts", oldPath: null,
+  kind: "hunk",
+  oldStart: 8, oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
+  newStart: 8, newLines: ["const a = 1;", "const inserted = 0;", "const b = 2;", "const c = 3;"],
+  oldBlobOid: "oid-old", headBlobOid: "oid-head",
+  absentAtHead: false, complete: true,
+};
+
 const TARGET: RecheckTarget = {
   rowId: "row-1",
   findingId: "f-1",
@@ -103,7 +117,7 @@ function input(overrides: Partial<RecheckInput> = {}): RecheckInput {
     schema: "mstar.recheck-input/v1",
     headSha: SHA,
     targets: [TARGET],
-    evidence: [HUNK, DELETED_FILE, REPLACED_HUNK, REMOVED_STILL_PRESENT],
+    evidence: [HUNK, DELETED_FILE, REPLACED_HUNK, REMOVED_STILL_PRESENT, INSERTED_INSIDE],
     discussion: {
       items: [],
       issueCoverage: "complete",
@@ -548,6 +562,53 @@ describe("validateRecheckDoc — addressed eligibility", () => {
       );
       expectDroppedRow(result, { index: 0, rowId: "row-1", error: "still present" });
     }
+  });
+
+  test("an insertion INSIDE the cited block cannot forge a removal: every cited line must be gone", () => {
+    // The block is no longer contiguous, but every cited old line survives, so
+    // nothing was removed. A joined-block `includes` would pass this row.
+    const result = validateRecheckDoc(
+      {
+        schema: "mstar.recheck/v1",
+        headSha: SHA,
+        results: [
+          addressedResult({
+            evidence: evidence({
+              kind: "removed-code",
+              sliceId: "slice-ins",
+              startLine: 8,
+              endLine: 10,
+              quote: "const a = 1;\nconst b = 2;\nconst c = 3;",
+            }),
+          }),
+          SURVIVOR,
+        ],
+      },
+      pairedInput({
+        targets: [{ ...TARGET, original: { ...ORIGINAL, lineStart: 8, lineEnd: 10 } }, TARGET_2],
+      }),
+    );
+    expectDroppedRow(result, { index: 0, rowId: "row-1", error: "still present" });
+  });
+
+  test("a replaced range that keeps an identical context line still proves the replacement", () => {
+    // Real replacements keep some context: only the lines the change actually
+    // removed are gone, so the block is NOT wholly present and the row stands.
+    const replaced = {
+      ...REPLACED_HUNK,
+      id: "slice-rep-context",
+      oldLines: ["count = a + b;", "render();"],
+      newLines: ["total = a + b;", "render();", "audit();"],
+    };
+    const outcome = validateRecheckDoc(
+      { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult({
+        evidence: evidence({ kind: "replaced-code", sliceId: "slice-rep-context", startLine: 5, endLine: 6, quote: "count = a + b;\nrender();" }),
+      })] },
+      input({ evidence: [replaced], targets: [{ ...TARGET, original: OLD_CONCERN_IN_OLD_TS }] }),
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.rejected).toEqual([]);
   });
 
   test("current-code on a renamed file is eligible (the concern's old path identifies it)", () => {

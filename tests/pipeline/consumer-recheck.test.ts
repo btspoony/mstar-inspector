@@ -267,8 +267,11 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       });
     }
     const clocks = db.raw
-      .query(`SELECT last_assessed_ms FROM review_findings WHERE id IN (?, ?)`)
-      .all(rejectedRowIds[0]!, rejectedRowIds[1]!) as Array<{ last_assessed_ms: number | null }>;
+      .query(`SELECT id, last_assessed_ms FROM review_findings WHERE id IN (?, ?)`)
+      .all(rejectedRowIds[0]!, rejectedRowIds[1]!) as Array<{ id: string; last_assessed_ms: number | null }>;
+    // Count first: `.every()` over an empty result would pass vacuously and
+    // prove nothing about either clock.
+    expect(clocks.map((row) => row.id).sort()).toEqual([...rejectedRowIds].sort());
     expect(clocks.map((row) => row.last_assessed_ms).every((ms) => ms !== null)).toBe(true);
     // A usable document means no failure row.
     expect(failureRows(db)).toHaveLength(0);
@@ -879,6 +882,44 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).not.toContain("addressed (verified-fix)");
   });
 
+  test("a row the document answers AND the status names keeps its real assessment, never invalid-output", async () => {
+    // The seat dropped then re-emitted a row: it names the id in its status
+    // while the surviving document carries the verdict. The answer wins — the
+    // `rejected` branch runs first in the reconciliation, so an unfiltered
+    // union would overwrite the assessment and lose the seat's real work.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "ok",
+      reason: null,
+      rejected: 1,
+      rejected_row_ids: [TARGET_ROW_ID],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("addressed (verified-fix)");
+    expect(prepared.body).not.toContain("unverifiable (invalid-output)");
+    const round = db.raw
+      .query(`SELECT assessment_json FROM review_finding_rounds WHERE finding_row_id = ?`)
+      .get(TARGET_ROW_ID) as { assessment_json: string } | null;
+    expect(JSON.parse(round!.assessment_json)).toMatchObject({ disposition: "addressed", reason: "verified-fix" });
+    // Nothing was lost to a drop, so the round reports no rejected row.
+    const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "ok", rejected: 0, assessed: 1 });
+  });
+
   test("a status naming a row this round never sent cannot attribute it: that id is ignored", async () => {
     reset();
     sandbox.diffStdout = VALID_DIFF;
@@ -1019,46 +1060,72 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     ]);
   });
 
-  test("an oversized status error or reason is bounded at parse time, on both the log field and the D1 text", async () => {
+  test("an oversized status error is bounded at parse time, on both the log field and the D1 text", async () => {
     // `z` matches no secret shape, so what comes back is the bound alone.
     const oversized = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS + 200);
     const capped = "z".repeat(RECHECK_STATUS_ERROR_MAX_CHARS);
-    for (const field of ["error", "reason"] as const) {
-      reset();
-      sandbox.diffStdout = VALID_DIFF;
-      sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-      sandbox.recheckFileContent = "";
-      const reason = field === "reason" ? oversized : "seat-failed";
-      const error = field === "error" ? oversized : null;
-      sandbox.recheckStatusContent = JSON.stringify({
-        schema: "mstar.recheck-status/v1",
-        headSha: SHA,
-        outcome: "failed",
-        reason,
-        rejected: 0,
-        rejected_row_ids: [],
-        error,
-      });
-      const db = await createSeededTestD1();
-      await seedPriorPublication(db);
-      await seedOpenTarget(db);
-      await seedAssociation(db, "PRRT_thread1");
-      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "seat-failed",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: oversized,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-      await consumer(makeBatch(makePayload()));
+    await consumer(makeBatch(makePayload()));
 
-      const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
-      const logged = String(line.fields[field === "error" ? "recheck_error" : "recheck_reason"]);
-      expect(logged).toBe(capped);
-      const rows = failureRows(db);
-      expect(rows).toHaveLength(1);
-      // The composed D1 text carries the same capped value, and is itself
-      // bounded — the exact length depends on the separator and the re-cap, so
-      // the bound is what is asserted, not the formatting.
-      const persisted = String(rows[0]!.error);
-      expect(persisted).toContain(capped.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS - 100));
-      expect(persisted.length).toBeLessThanOrEqual(RECHECK_STATUS_ERROR_MAX_CHARS);
-    }
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    expect(String(line.fields.recheck_error)).toBe(capped);
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    // The composed D1 text carries the same capped value, and is itself
+    // bounded — the exact length depends on the separator and the re-cap, so
+    // the bound is what is asserted, not the formatting.
+    const persisted = String(rows[0]!.error);
+    expect(persisted).toContain(capped.slice(0, RECHECK_STATUS_ERROR_MAX_CHARS - 100));
+    expect(persisted.length).toBeLessThanOrEqual(RECHECK_STATUS_ERROR_MAX_CHARS);
+  });
+
+  test("a status reason outside the closed vocabulary is no attribution: null, never a guessed verdict", async () => {
+    // The per-row accounting branches on these exact literals, so an invented
+    // reason would silently pick the wrong branch. It is dropped instead.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = "";
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "failed",
+      reason: "seats-unavailable",
+      rejected: 0,
+      rejected_row_ids: [],
+      error: "seat crashed",
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
+    expect(line.fields).toMatchObject({ recheck_outcome: "failed", recheck_reason: null, recheck_error: "seat crashed" });
+    // The status itself is still attributable (its outcome and error survive);
+    // only the unrecognized reason is dropped.
+    expect(failureTriple(failureRows(db)[0]!)).toEqual({ outcome: "failed", reason: null, error: "seat crashed" });
   });
 
   test("a secret straddling the status cap is redacted at parse time, so no fragment reaches D1 or the log", async () => {
@@ -1188,19 +1255,23 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).not.toContain("unverifiable (invalid-output)");
   });
 
-  test("an unreadable status file keeps the conservative path: invalid-output, no throw, exactly one `recheck` attribution row", async () => {
-    // Three ways the status read can yield nothing: no file, a stream past the
-    // byte bound (flag 1), and a failed shell chain. All are `absent`.
+  test("an unreadable document or status read keeps the conservative path: invalid-output, no throw, exactly one `recheck` attribution row", async () => {
+    // Three ways a read can yield nothing: no file, a stream past the byte
+    // bound (flag 1), and a failed shell chain — each on the status side, plus
+    // the document read's own non-zero exit, which has no status analogue to
+    // hide behind.
     for (const [why, arm] of [
       ["missing", () => {}],
       ["overflow", () => { sandbox.recheckStatusOverflow = "1"; }],
       ["exit", () => { sandbox.recheckStatusExitCode = 1; }],
+      ["doc-exit", () => { sandbox.recheckFileExitCode = 1; }],
     ] as const) {
       reset();
       sandbox.diffStdout = VALID_DIFF;
       sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-      // The document is absent in every case; only the status transport varies.
+      // The document is absent in every case; only the transport varies.
       sandbox.recheckFileContent = "";
+      sandbox.recheckFileOverflow = "0";
       if (why !== "missing") sandbox.recheckStatusContent = "{}";
       arm();
       const db = await createSeededTestD1();
@@ -1215,10 +1286,47 @@ describe("recheck round attribution (§7.7/§7.4/§7.10)", () => {
       expect(prepared.body).toContain("unverifiable (invalid-output)");
       expect(failureRows(db)).toHaveLength(1);
       expect(failureRows(db)[0]).toMatchObject({ stage: "recheck" });
-      // `absent` is the honest outcome whenever the read yields no status.
+      // No attributable status in any arm, so the triple stays `absent`.
       expect(failureTriple(failureRows(db)[0]!)).toEqual({ outcome: "absent", reason: null, error: null });
       const line = logLines.find((l) => l.msg.includes("recheck output absent or failed validation"))!;
       expect(line.fields).toMatchObject({ recheck_outcome: "absent", assessed: 0 });
     }
+  });
+
+  test("a lost document under an `ok` status names the read failure instead of writing `ok: null: null`", async () => {
+    // The seat reported success; the document then failed on the READ side
+    // (overflow here). `ok: null: null` would blame nobody and say nothing, so
+    // the real cause leads the D1 text.
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.recheckFileContent = recheckDocWith({});
+    sandbox.recheckFileOverflow = "1";
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "ok",
+      reason: null,
+      rejected: 0,
+      rejected_row_ids: [],
+      error: null,
+    });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    const persisted = String(rows[0]!.error);
+    // The read cause leads; the seat's own (empty) triple still rides after it
+    // so the row remains attributable to that status.
+    expect(persisted).toMatch(/^document overflow: ok: null: null$/);
+    // The row still reads as an attempted-but-unusable answer.
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (invalid-output)");
   });
 });

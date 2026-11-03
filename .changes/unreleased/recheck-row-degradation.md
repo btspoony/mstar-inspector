@@ -72,6 +72,24 @@ category: Fixed
   drop still reports `ok` with the rejected IDs. The status's
   `rejected` count is derived from `rejected_row_ids` on read, so the two faces
   of the count cannot disagree.
+- **Still-present evidence is tested line by line.** The `removed-code` /
+  `replaced-code` "old lines are gone" guard no longer searches the joined
+  new-side block for the joined quote: an insertion inside the cited block
+  split it and forged a removal. Every non-blank normalized cited line must now
+  be absent from the new-side line set, so the insertion proves nothing — while
+  a genuine replacement that keeps an identical context line still passes,
+  because only the lines the change actually removed are gone.
+- **The status `reason` is a closed vocabulary.** `budget`, `aborted`,
+  `all-rows-rejected`, `empty-result`, `seat-failed` and `invalid-document` are
+  the only accepted values (one shared constant both halves use). The worker's
+  per-row accounting branches on those exact literals, so an off-vocabulary
+  string is dropped on read instead of silently picking a branch.
+- **A lost recheck document names its real cause.** A round whose seat reported
+  `ok` but whose document failed the read (absent, overflow, validation) used to
+  persist `error: "ok: null: null"`. The read cause now leads that text.
+- **A stale drop note no longer erases a real answer.** When the seat's status
+  names a row the surviving document also answered, the answer wins instead of
+  being overwritten with `unverifiable/invalid-output`.
 - **The published coverage line counts real seat answers.** A row the gate
   dropped was attempted and still advances its rotation clock
   (`last_assessed_ms`), but it was never assessed: the coverage line and the
@@ -153,6 +171,17 @@ category: Fixed
   `invalid-output`（答坏了），绝不算作 `omitted`（从未运行）。部分行被拒仍是 `ok`
   并携带被拒行 ID。读取时 `rejected` 计数由 `rejected_row_ids` 推导，两个计数面
   不可能互相矛盾。
+- **「旧行已消失」按行判定。** `removed-code` / `replaced-code` 的守卫不再在拼接后的新侧
+  块里搜索拼接后的引用：在被引用块中间插入一行会打断整块，从而伪造出一次删除。现在要求
+  每一条非空白的规范化被引用行都不出现在新侧行集合中，插入因此不再能证明任何删除；而
+  真实替换中仍保留的相同上下文行不会让该行失败，因为只有真正被删掉的行才会消失。
+- **状态 `reason` 是封闭词表。** 只接受 `budget`、`aborted`、`all-rows-rejected`、
+  `empty-result`、`seat-failed`、`invalid-document`（两侧共用一个常量）。worker 的逐行
+  账目正是按这些字面值分支，因此词表外的值在读取时被丢弃，而不是静默走进某个分支。
+- **丢失的重审文档会说出真实原因。** 席位报告 `ok`、但文档在读取侧失败（缺失 / 超出上限 /
+  校验失败）时，此前会写入 `error: "ok: null: null"`；现在读取原因排在最前。
+- **过期的丢弃记录不再抹掉真实答案。** 当状态点名了某行、而存活的文档也给出了该行的答案时，
+  以答案为准，而不是覆盖成 `unverifiable/invalid-output`。
 - **发布覆盖行只统计席位真正给出的回答。** 被校验丢弃的行是「已尝试」的，轮转时钟
   （`last_assessed_ms`）照常前进，但它从未被真正评估：覆盖行与该轮的账目日志字段
   现在只统计携带文档结果的行，一轮再也无法声称席位从未交付的重审数量。生命周期时钟

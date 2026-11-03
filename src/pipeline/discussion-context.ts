@@ -26,7 +26,14 @@
  * snapshot hashing (review-threads.ts) — never logged, never handed to a seat.
  */
 
-import type { Coverage, Discussion, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
+import {
+  MODEL_ITEM_MAX_CHARS,
+  MODEL_MAX_ITEMS,
+  MODEL_TOTAL_MAX_CHARS,
+  type Coverage,
+  type Discussion,
+  type ThreadSnapshot,
+} from "../../packages/shared/src/recheck-wire";
 import {
   fetchIssueComments,
   fetchThreadConversation,
@@ -46,10 +53,11 @@ export const DISCUSSION_ISSUE_MAX_COMMENTS = 200;
 /** >200 replies in a target thread → that thread's coverage `truncated`. */
 export const DISCUSSION_THREAD_MAX_REPLIES = 200;
 
-// Model-context caps (spec §7.8).
-export const MODEL_MAX_ITEMS = 50;
-export const MODEL_ITEM_MAX_CHARS = 1200;
-export const MODEL_TOTAL_MAX_CHARS = 8000;
+// Model-context caps (spec §7.8) — ONE source for both faces: the runner's
+// seat assignment states these same figures to the model, so the constants
+// live in the shared wire module and are re-exported here under the
+// consumer-side names.
+export { MODEL_ITEM_MAX_CHARS, MODEL_MAX_ITEMS, MODEL_TOTAL_MAX_CHARS };
 
 export type ListDiscussionInput = {
   installationId: number;

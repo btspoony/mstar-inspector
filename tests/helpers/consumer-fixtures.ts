@@ -159,6 +159,7 @@ export type FakeSandboxState = {
   /** The runner's recheck document and the `wc -c` overflow flag of its read. */
   recheckFileContent: string;
   recheckFileOverflow: string;
+  recheckFileExitCode: number;
   /** The seat's status document; `null` = the runner wrote none. */
   recheckStatusContent: string | null;
   recheckStatusOverflow: string;
@@ -190,6 +191,7 @@ export function initialFakeSandboxState(): FakeSandboxState {
     writtenInputJson: undefined,
     recheckFileContent: "",
     recheckFileOverflow: "0",
+    recheckFileExitCode: 0,
     recheckStatusContent: null,
     recheckStatusOverflow: "0",
     recheckStatusExitCode: 0,
@@ -231,6 +233,9 @@ function answerCommand(cmd: string, state: FakeSandboxState): ExecResult {
     return { stdout: "", stderr: "", exitCode: state.writeInputExitCode };
   }
   if (cmd === RECHECK_DOC_READ) {
+    if (state.recheckFileExitCode !== 0) {
+      return { stdout: "", stderr: "read failed", exitCode: state.recheckFileExitCode };
+    }
     return { stdout: `${state.recheckFileContent}\n${state.recheckFileOverflow}\n`, stderr: "", exitCode: 0 };
   }
   if (cmd === RECHECK_STATUS_READ) {
