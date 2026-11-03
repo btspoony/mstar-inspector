@@ -344,7 +344,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
     expect(full).toContain("8/17");
   });
 
-  test("a hostile category label renders as escaped text on every label surface (legend + tooltip name)", () => {
+  test("a hostile series label renders as escaped text on every label surface (legend + tooltip name)", () => {
     // XSS pin (qc2-S-3, restated): series labels are wire strings that
     // travel several surfaces — the HTML legend text and the tooltip series
     // name — plus the axis tick face via a hostile bucket_start (next pin).
