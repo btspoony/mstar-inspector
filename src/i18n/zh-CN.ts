@@ -166,7 +166,7 @@ export const zhCN: Dictionary = {
     factRepo: "仓库",
     factNumber: "编号",
     factState: "状态",
-    factHead: "Head",
+    factHead: "提交",
     timelineReview: "审查 · {verdict}",
     /** 载荷未记录结论的审查：整行仍渲染，不留下悬空的分隔符。 */
     timelineReviewNoVerdict: "审查 · 暂无结论",

@@ -20,7 +20,7 @@ import {
 } from "../../src/spa/pages/data";
 import { currentDetailRead, PullRequestDetailView, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
 import { installDom, withMarkup } from "./dom";
-import { DETAIL, ROW_OPEN } from "./pull-request-fixtures";
+import { DETAIL, ROW_OPEN, press } from "./pull-request-fixtures";
 
 describe("pull request detail data plane (pure helpers)", () => {
   test("the detail URL builder encodes owner/repo so a value cannot break out of the path family", () => {
@@ -286,16 +286,44 @@ describe("pull request detail face (static SSR)", () => {
           line: null,
           body: "The payload's severity is a free string; this one is outside the set.",
         },
+        {
+          // An out-of-set severity with no identity text: its toggle must still
+          // be named, by its position.
+          finding_id: "f-5",
+          severity: "blocker",
+          title: "",
+          file_path: "",
+          line: null,
+          body: "A second out-of-set finding, this one untitled.",
+        },
       ],
     };
     const read = withMarkup(render(detail), (container) => {
       const groups = severityGroups(container);
-      return { groups, other: groups.at(-1)?.text ?? "" };
+      return {
+        groups,
+        other: groups.at(-1)?.text ?? "",
+        // The bucket opens folded like every non-must-fix group, and its
+        // untitled entry falls back to its position for the toggle's name.
+        otherFolds: foldPairs(container).slice(3),
+        otherLabels: [...container.querySelectorAll("button[aria-expanded][aria-label]")]
+          .map((control) => control.getAttribute("aria-label") ?? "")
+          .slice(3),
+      };
     });
     expect(read.groups.map((group) => group.severity)).toEqual(["must-fix", "should-fix", "nit", "other"]);
-    // The bucket carries its own count, and its finding renders under it.
-    expect(read.groups.at(-1)?.header).toBe(`${t("en", "pullRequests.severityOther")}1`);
+    // The bucket carries its own count, and its findings render under it.
+    expect(read.groups.at(-1)?.header).toBe(`${t("en", "pullRequests.severityOther")}2`);
     expect(read.other).toContain("Drop the unsafe default");
+    expect(read.other).toContain("this one untitled");
+    expect(read.otherFolds).toEqual([
+      { expanded: false, hidden: true },
+      { expanded: false, hidden: true },
+    ]);
+    expect(read.otherLabels).toEqual([
+      `${t("en", "pullRequests.expand")} — Drop the unsafe default`,
+      `${t("en", "pullRequests.expand")} — #5`,
+    ]);
   });
 
   /**
@@ -530,6 +558,9 @@ describe("pull request detail face (static SSR)", () => {
     const emptySha: PullRequestDetail = {
       ...DETAIL,
       pull_request: { ...DETAIL.pull_request, head_sha: "", latest_review: null },
+      // No review row either: the band's verdict then falls back to the PR
+      // row's summary, which is absent too.
+      reviews: [],
     };
     const markup = render(emptySha);
     // The PR-level chip disappears rather than rendering an empty one; its
@@ -705,15 +736,6 @@ describe("pull request detail (mounted)", () => {
     // same roles, attributes and `hidden` the static tests do.
     const container = host as unknown as HTMLElement;
     const root = createRoot(host as unknown as Element);
-    const press = async (target: Element | null | undefined) => {
-      const pointer = (type: string) =>
-        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
-      await act(async () => {
-        target?.dispatchEvent(pointer("mousedown"));
-        target?.dispatchEvent(pointer("click"));
-      });
-      await act(async () => {});
-    };
     const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
     const panels = () => [...container.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
     const selected = () => tabs().map((tab) => tab.getAttribute("aria-selected") === "true");
@@ -726,12 +748,12 @@ describe("pull request detail (mounted)", () => {
       expect(visible()).toEqual([true, false, false]);
 
       // The reviews family: the selection and the visible panel both move.
-      await press(tabs()[1]);
+      await press(win, tabs()[1]);
       expect(selected()).toEqual([false, true, false]);
       expect(visible()).toEqual([false, true, false]);
 
       // And back — a one-way switch would pass the assertion above.
-      await press(tabs()[0]);
+      await press(win, tabs()[0]);
       expect(selected()).toEqual([true, false, false]);
       expect(visible()).toEqual([true, false, false]);
 
@@ -744,9 +766,63 @@ describe("pull request detail (mounted)", () => {
           : container.querySelector<HTMLElement>(`#${control.getAttribute("aria-controls") ?? ""}`);
       expect(controls()[1]?.getAttribute("aria-expanded")).toBe("false");
       expect(bodyOf(controls()[1])?.hidden).toBe(true);
-      await press(controls()[1]);
+      await press(win, controls()[1]);
       expect(controls()[1]?.getAttribute("aria-expanded")).toBe("true");
       expect(bodyOf(controls()[1])?.hidden).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
+  test("two findings sharing a payload id fold independently", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1");
+    const host = win.document.createElement("div");
+    win.document.body.appendChild(host);
+    const container = host as unknown as HTMLElement;
+    const root = createRoot(host as unknown as Element);
+    // The payload can repeat an id; the rendered rows must not share a fold.
+    const duplicated: PullRequestDetail = {
+      ...DETAIL,
+      findings: [
+        {
+          finding_id: "f-1",
+          severity: "must-fix",
+          title: "First copy",
+          file_path: "",
+          line: null,
+          body: "First body.",
+        },
+        {
+          finding_id: "f-1",
+          severity: "must-fix",
+          title: "Second copy",
+          file_path: "",
+          line: null,
+          body: "Second body.",
+        },
+      ],
+    };
+    const controls = () =>
+      [...container.querySelectorAll<HTMLElement>('[data-slot="finding"] button[aria-controls]')];
+    const bodyOf = (control: HTMLElement | undefined) =>
+      control === undefined
+        ? null
+        : container.querySelector<HTMLElement>(`#${control.getAttribute("aria-controls") ?? ""}`);
+    try {
+      await act(async () =>
+        root.render(createElement(PullRequestDetailView, { locale: "en", detail: duplicated })),
+      );
+      await act(async () => {});
+      // Both must-fix bodies start open, and each control owns a distinct body.
+      expect(controls().map((control) => control.getAttribute("aria-expanded"))).toEqual(["true", "true"]);
+      expect(new Set(controls().map((control) => control.getAttribute("aria-controls"))).size).toBe(2);
+      // Folding the second leaves the first open: one id for two rows used to
+      // fold them together.
+      await press(win, controls()[1]);
+      expect(controls().map((control) => control.getAttribute("aria-expanded"))).toEqual(["true", "false"]);
+      expect(bodyOf(controls()[0])?.hidden).toBe(false);
+      expect(bodyOf(controls()[1])?.hidden).toBe(true);
     } finally {
       await act(async () => root.unmount());
       cleanup();
@@ -772,15 +848,6 @@ describe("pull request detail (mounted)", () => {
         },
       },
     });
-    const press = async (target: Element | null | undefined) => {
-      const pointer = (type: string) =>
-        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
-      await act(async () => {
-        target?.dispatchEvent(pointer("mousedown"));
-        target?.dispatchEvent(pointer("click"));
-      });
-      await act(async () => {});
-    };
     // No actionable finding: the face opens on the failures family, whose one
     // control is the copy action.
     const copyButton = () => container.querySelector<HTMLElement>('[data-slot="copy-error"]');
@@ -797,7 +864,7 @@ describe("pull request detail (mounted)", () => {
       expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyError"));
 
       // Resolved write: the label reports the outcome, once.
-      await press(copyButton());
+      await press(win, copyButton());
       expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyCopied"));
       expect(renders(t("en", "pullRequests.copyCopied"))).toBe(1);
       expect(liveRegions()).toHaveLength(0);
@@ -811,7 +878,7 @@ describe("pull request detail (mounted)", () => {
 
       // Rejected write: silence would leave the previous clipboard content in
       // place, so the failure is reported the same way.
-      await press(copyButton());
+      await press(win, copyButton());
       expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyFailed"));
       expect(renders(t("en", "pullRequests.copyFailed"))).toBe(1);
       expect(liveRegions()).toHaveLength(0);
@@ -832,15 +899,6 @@ describe("pull request detail (mounted)", () => {
       configurable: true,
       value: { writeText: () => Promise.resolve() },
     });
-    const press = async (target: Element | null | undefined) => {
-      const pointer = (type: string) =>
-        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
-      await act(async () => {
-        target?.dispatchEvent(pointer("mousedown"));
-        target?.dispatchEvent(pointer("click"));
-      });
-      await act(async () => {});
-    };
     const copyButtons = () => [...container.querySelectorAll<HTMLElement>('[data-slot="copy-error"]')];
     jest.useFakeTimers();
     try {
@@ -863,11 +921,11 @@ describe("pull request detail (mounted)", () => {
       expect(copyButtons()).toHaveLength(2);
 
       // Copy A, then B one second later. B's press must not cancel A's revert.
-      await press(copyButtons()[0]);
+      await press(win, copyButtons()[0]);
       await act(async () => {
         jest.advanceTimersByTime(1000);
       });
-      await press(copyButtons()[1]);
+      await press(win, copyButtons()[1]);
       expect(copyButtons()[0]?.textContent).toBe(t("en", "pullRequests.copyCopied"));
       expect(copyButtons()[1]?.textContent).toBe(t("en", "pullRequests.copyCopied"));
 
@@ -901,15 +959,6 @@ describe("pull request detail (mounted)", () => {
       configurable: true,
       value: { writeText: () => pendingWrite },
     });
-    const press = async (target: Element | null | undefined) => {
-      const pointer = (type: string) =>
-        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
-      await act(async () => {
-        target?.dispatchEvent(pointer("mousedown"));
-        target?.dispatchEvent(pointer("click"));
-      });
-      await act(async () => {});
-    };
     const problems: string[] = [];
     const realError = console.error;
     console.error = (...args: unknown[]) => {
@@ -922,7 +971,7 @@ describe("pull request detail (mounted)", () => {
         root.render(createElement(PullRequestDetailView, { locale: "en", detail: { ...DETAIL, findings: [] } })),
       );
       await act(async () => {});
-      await press(container.querySelector('[data-slot="copy-error"]'));
+      await press(win, container.querySelector('[data-slot="copy-error"]'));
       // The face goes away while the write is still in flight.
       await act(async () => root.unmount());
       const timersAtUnmount = setTimeoutSpy.mock.calls.length;
@@ -951,15 +1000,6 @@ describe("pull request detail (mounted)", () => {
     // as absent, not as a rejecting write. happy-dom's own Clipboard lives on
     // the prototype, so the absent state is shadowed on the instance.
     Object.defineProperty(win.navigator, "clipboard", { configurable: true, value: undefined });
-    const press = async (target: Element | null | undefined) => {
-      const pointer = (type: string) =>
-        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
-      await act(async () => {
-        target?.dispatchEvent(pointer("mousedown"));
-        target?.dispatchEvent(pointer("click"));
-      });
-      await act(async () => {});
-    };
     try {
       await act(async () =>
         root.render(
@@ -970,7 +1010,7 @@ describe("pull request detail (mounted)", () => {
       const copyButton = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
       // The affordance is not hidden just because the API is missing.
       expect(copyButton).not.toBeNull();
-      await press(copyButton);
+      await press(win, copyButton);
       expect(copyButton?.textContent).toBe(t("en", "pullRequests.copyFailed"));
       expect(container.querySelectorAll('[role="status"], [aria-live]')).toHaveLength(0);
     } finally {

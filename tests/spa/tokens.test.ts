@@ -32,12 +32,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
 import { survivorSteps } from "../../src/design-system/tokens";
 import {
+  PROTOTYPES_ROOT,
+  SPA_ROOT,
   consumerWalk,
   documentSync,
   danglingReferences,
@@ -566,14 +568,15 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const missing = join(root, "src/does-not-exist");
     expect(rootsWithoutConsumers(consumerWalk([missing]).roots)).toEqual(["src/does-not-exist"]);
     // A root with a consumer contributes nothing to that list.
-    expect(rootsWithoutConsumers(consumerWalk([join(root, "src/spa")]).roots)).toEqual([]);
+    expect(rootsWithoutConsumers(consumerWalk([SPA_ROOT]).roots)).toEqual([]);
     // A relative root would resolve against the CWD and read as empty: loud
     // failure instead, so a caller bug cannot masquerade as a moved tree.
     expect(() => consumerWalk(["src/spa"])).toThrow(/must be absolute/);
     // And per root, not just in aggregate: every DECLARED root contributes.
     // The prototypes forest is the one a dropped `CONSUMER_ROOTS` entry would
     // silently stop checking, so its presence is asserted, not assumed.
-    expect(consumers.some((file) => file.startsWith("src/design-system/prototypes/"))).toBe(true);
+    const prototypePrefix = `${relative(root, PROTOTYPES_ROOT)}/`;
+    expect(consumers.some((file) => file.startsWith(prototypePrefix))).toBe(true);
     expect(rootsWithoutConsumers(walk.roots)).toEqual([]);
     for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
@@ -599,6 +602,19 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       "dark:retired-900",
       "light:retired-900",
     ]);
+    // The HTML shells are the other grammar: a retired name quoted in an HTML
+    // comment is prose, while the same name in the shell's body is live. A
+    // `<style>` block inside the shell is CSS again, comments included.
+    const htmlNames = (html: string) => [
+      ...new Set(danglingReferences("probe.html", html).map(({ name }) => name)),
+    ];
+    expect(
+      htmlNames('<!-- legacy: var(--retired-900) --><div style="color: var(--surface-page)"></div>'),
+    ).toEqual([]);
+    expect(htmlNames('<div style="color: var(--retired-900)"></div>')).toEqual(["retired-900"]);
+    expect(
+      htmlNames("<style>/* var(--retired-900) */ .a { color: var(--surface-page); }</style>"),
+    ).toEqual([]);
   });
 
   test("an unreadable consumer is a reported failure, never a thrown run", () => {

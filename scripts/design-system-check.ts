@@ -62,9 +62,9 @@ import { THEMES, resolveTheme } from "../src/design-system/tokens";
 const ROOT = path.resolve(import.meta.dir, "..");
 const FIXTURE_PATH = path.join(ROOT, "src/design-system/fixture.json");
 const DESIGN_PATH = path.join(ROOT, "DESIGN.md");
-const SPA_ROOT = path.join(ROOT, "src/spa");
+export const SPA_ROOT = path.join(ROOT, "src/spa");
 /** Hand-written reference pages under the design system: static, never built. */
-const PROTOTYPES_ROOT = path.join(ROOT, "src/design-system/prototypes");
+export const PROTOTYPES_ROOT = path.join(ROOT, "src/design-system/prototypes");
 /** The one stylesheet under `src/spa` the token source derives — link 1 owns it. */
 const GENERATED_STYLESHEET = "src/spa/styles/tokens.css";
 const CONSUMER_FILE = /\.(?:css|html)$/;
@@ -216,7 +216,32 @@ const REFERENCE = /var\s*\(\s*--([a-z0-9-]+)[\s,)]/g;
  */
 const DECLARATION = /(?:^|[;{\s}])(--[a-z0-9-]+)\s*:\s*([^;{}]*)/g;
 /** A block comment declares nothing: a commented-out `--legacy-x:` is not a declaration. */
-const COMMENT = /\/\*[\s\S]*?\*\//g;
+const CSS_COMMENT = /\/\*[\s\S]*?\*\//g;
+/** The other consumer grammar: an HTML shell's own comment. */
+const HTML_COMMENT = /<!--[\s\S]*?-->/g;
+/** A `<style>` block inside an HTML shell — CSS again, so its comments go too. */
+const STYLE_BLOCK = /(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi;
+/** The consumers written as HTML shells rather than as stylesheets. */
+const HTML_FILE = /\.html$/i;
+
+/**
+ * `text` without its comments, read in the grammar the file is written in: a
+ * stylesheet's block comments, an HTML shell's `<!-- … -->` ones, and — in the
+ * shell's `<style>` blocks — the stylesheet's again.
+ *
+ * One CSS-only stripper read an HTML comment as live markup: a token name
+ * quoted in prose became a reference and failed the link, while inside a
+ * `<style>` block the same stripper happened to be right only because it ran
+ * over the whole file.
+ */
+function withoutComments(file: string, text: string): string {
+  if (!HTML_FILE.test(file)) return text.replace(CSS_COMMENT, "");
+  return text
+    .replace(HTML_COMMENT, "")
+    .replace(STYLE_BLOCK, (_block, open: string, css: string, close: string) =>
+      `${open}${css.replace(CSS_COMMENT, "")}${close}`,
+    );
+}
 
 export interface DanglingReference {
   readonly file: string;
@@ -225,7 +250,7 @@ export interface DanglingReference {
 }
 
 /**
- * Every `var(--x)` in `css` that names neither a token of `theme` nor a property
+ * Every `var(--x)` in `text` that names neither a token of `theme` nor a property
  * the file declares itself. Checked per theme rather than over the union: a name
  * one theme declares and the other does not is dangling in the other one, and
  * the union would hide exactly that.
@@ -236,11 +261,13 @@ export interface DanglingReference {
  * (`I-000248`). Only that spelling loses its vote; a name declared genuinely
  * elsewhere in the file still excuses its references.
  *
- * Comments are stripped before either match, so a retired name quoted in prose
- * neither becomes a reference nor a self-declaration that suppresses the check.
+ * Comments are stripped in the file's own grammar before either match, so a
+ * retired name quoted in prose — a CSS comment or an HTML shell's `<!-- -->`
+ * — neither becomes a reference nor a self-declaration that suppresses the
+ * check.
  */
-export function danglingReferences(file: string, css: string): DanglingReference[] {
-  const live = css.replace(COMMENT, "");
+export function danglingReferences(file: string, text: string): DanglingReference[] {
+  const live = withoutComments(file, text);
   const local = new Set(
     [...live.matchAll(DECLARATION)]
       .filter((match) => !new RegExp(`var\\s*\\(\\s*${match[1]}(?=[\\s,)])`).test(match[2] as string))

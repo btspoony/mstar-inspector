@@ -29,7 +29,7 @@ import {
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
 import { AppPullRequestsTab, PullRequestsListView } from "../../src/spa/pages/AppPullRequestsTab";
 import { installDom, withMarkup } from "./dom";
-import { DETAIL, ROW_OPEN, jsonResponse, mountTabWithGatedFetch } from "./pull-request-fixtures";
+import { DETAIL, ROW_OPEN, jsonResponse, mountTabWithGatedFetch, press } from "./pull-request-fixtures";
 
 const IDENTITY_APP = {
   github_slug: "demo",
@@ -423,15 +423,6 @@ describe("pull requests tab (mounted)", () => {
       });
       return createElement(AppPullRequestsTab, { locale: "en", appId: "1", search, onSearch: setSearch });
     }
-    const press = async (target: Element | null | undefined) => {
-      const pointer = (type: string) =>
-        new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
-      await act(async () => {
-        target?.dispatchEvent(pointer("mousedown"));
-        target?.dispatchEvent(pointer("click"));
-      });
-      await act(async () => {});
-    };
     const host = win.document.createElement("div");
     win.document.body.appendChild(host);
     const container = host as unknown as HTMLElement;
@@ -447,6 +438,7 @@ describe("pull requests tab (mounted)", () => {
       // Closing the detail is the list's cue — exactly one read, whose rows
       // replace the unmounted detail.
       await press(
+        win,
         [...container.querySelectorAll("button")].find(
           (button) => button.textContent === t("en", "pullRequests.backToList"),
         ),

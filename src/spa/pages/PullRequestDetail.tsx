@@ -157,11 +157,13 @@ const TIMELINE_DOT: Record<StatusTone, string> = {
 type ActivityEntry = { at: string; key: string; tone: StatusTone; label: string; meta: string };
 
 /**
- * Activity rows the aside timeline renders: `TIMELINE_LIMIT - 1` events plus the
- * PR's first-sighting entry. The optional "earlier events not shown" disclosure
- * is one row more, rendered only when the cap actually dropped an event.
+ * The event-row cap: at most this many merged review/failure rows render, then
+ * the PR's first-sighting row. The "earlier events not shown" row is one row
+ * more, rendered only when the cap actually dropped an event — so the aside
+ * renders `TIMELINE_LIMIT + 1` rows when the history fits the cap and
+ * `TIMELINE_LIMIT + 2` at most, which is the DOM the cap tests pin.
  */
-const TIMELINE_LIMIT = 8;
+const TIMELINE_LIMIT = 7;
 
 /** How long the copy action's outcome stays on the button before it reverts. */
 const COPY_OUTCOME_MS = 2000;
@@ -269,8 +271,12 @@ export function PullRequestDetailView({
 
   const mustFix = detail.findings.filter((finding) => finding.severity === "must-fix").length;
   const groups = severityGroups(locale, detail.findings);
-  // Reviews arrive newest first from the store, so the first row is the latest.
+  // The detail's own review list is the record for "latest": its first row is
+  // the newest review and carries the attribution. The PR row's summary is the
+  // fallback for a detail read that carried no review rows — the band, the
+  // header meta and the review list all read this one value.
   const latestReview = detail.reviews[0] ?? null;
+  const latestVerdict = latestReview?.verdict ?? pr.latest_review?.verdict ?? "";
   // Both fields can be empty (a v1 payload records neither): the attribution is
   // then "", and an empty meta item or span would read as a missing value.
   const latestAttribution = latestReview === null ? "" : reviewAttribution(locale, latestReview);
@@ -318,15 +324,15 @@ export function PullRequestDetailView({
       // coerced to "" — is not an alarm: the dash is announced, so the
       // figure never reads as a blank cell or as a verdict.
       value:
-        pr.latest_review === null || pr.latest_review.verdict === "" ? (
+        latestVerdict === "" ? (
           <>
             <span aria-hidden="true">—</span>
             <span className="sr-only">{t(locale, "pullRequests.noVerdict")}</span>
           </>
         ) : (
-          pr.latest_review.verdict
+          latestVerdict
         ),
-      tone: verdictTone(pr.latest_review?.verdict ?? "") === "danger" ? "danger" : undefined,
+      tone: verdictTone(latestVerdict) === "danger" ? "danger" : undefined,
     },
     { key: t(locale, "pullRequests.reviews"), value: detail.reviews.length },
     {
@@ -415,7 +421,7 @@ export function PullRequestDetailView({
       meta: formatRelativeTime(failure.created_at, locale),
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
-  const shownHistory = history.slice(0, TIMELINE_LIMIT - 1);
+  const shownHistory = history.slice(0, TIMELINE_LIMIT);
   // The cap is silent unless it says so: the row below names what it dropped.
   const hiddenHistory = history.length - shownHistory.length;
   const activity: ActivityEntry[] = [
@@ -525,15 +531,20 @@ export function PullRequestDetailView({
                       </h3>
                       <ul className="flex flex-col gap-2">
                         {group.items.map(({ finding, index }) => {
-                          const open = openFindings[finding.finding_id] ?? finding.severity === "must-fix";
+                          // One identity for the rendered row: a payload id
+                          // two findings share would otherwise fold them
+                          // together, so position joins it — and the fold
+                          // state, the React key and the body id all read it.
+                          const findingKey = `${finding.finding_id || "finding"}-${index}`;
+                          const open = openFindings[findingKey] ?? finding.severity === "must-fix";
                           const location =
                             finding.file_path === ""
                               ? ""
                               : `${finding.file_path}${finding.line === null ? "" : `:${finding.line}`}`;
-                          const id = bodyId(`finding-${index}`);
+                          const id = bodyId(findingKey);
                           return (
                             <li
-                              key={id}
+                              key={findingKey}
                               data-slot="finding"
                               className={cn(
                                 "flex flex-col gap-1.5 rounded-(--radius-container) border border-(--border-default) border-l-2 bg-(--surface-card) px-3.5 py-3",
@@ -571,7 +582,7 @@ export function PullRequestDetailView({
                                 aria-controls={id}
                                 aria-label={foldLabel(locale, open, finding.title, index + 1)}
                                 onClick={() =>
-                                  setOpenFindings((previous) => ({ ...previous, [finding.finding_id]: !open }))
+                                  setOpenFindings((previous) => ({ ...previous, [findingKey]: !open }))
                                 }
                               >
                                 <ChevronRight

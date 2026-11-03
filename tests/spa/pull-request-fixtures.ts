@@ -6,6 +6,7 @@
  */
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
+import type { Window } from "happy-dom";
 import { AppPullRequestsTab } from "../../src/spa/pages/AppPullRequestsTab";
 import type { PullRequestDetail, PullRequestRow } from "../../src/spa/pages/data";
 import { installDom } from "./dom";
@@ -93,6 +94,21 @@ export const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 /**
+ * One press as the browser performs it — the pointer events Radix listens for,
+ * then a flush so the state the press caused has settled. Shared by every
+ * mounted suite, so none of them spells this sequence again.
+ */
+export async function press(win: Window, target: Element | null | undefined): Promise<void> {
+  const pointer = (type: string) =>
+    new win.MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }) as unknown as Event;
+  await act(async () => {
+    target?.dispatchEvent(pointer("mousedown"));
+    target?.dispatchEvent(pointer("click"));
+  });
+  await act(async () => {});
+}
+
+/**
  * Mount the tab with every fetch gated until the test resolves it by URL
  * suffix, so a transition frame is observable instead of raced. The mount of
  * `initialPr` is the helper's own first act; teardown restores `fetch` and the
@@ -124,8 +140,17 @@ export async function mountTabWithGatedFetch(initialPr: string) {
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
-  await act(async () => root.render(tabElementFor(initialPr)));
-  await act(async () => {});
+  try {
+    await act(async () => root.render(tabElementFor(initialPr)));
+    await act(async () => {});
+  } catch (error) {
+    // A mount that throws never reaches `unmount()`: the stub `fetch` and the
+    // installed window are restored here, so one broken test cannot leak
+    // either into the next one.
+    globalThis.fetch = realFetch;
+    cleanup();
+    throw error;
+  }
   return {
     container,
     text: () => container.textContent ?? "",
