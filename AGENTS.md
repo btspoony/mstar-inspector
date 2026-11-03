@@ -53,6 +53,7 @@ commit whenever you change any of:
 - `packages/shared/src/**`
 - `packages/runner/package.json` or `packages/runner/bun.lock` (the image
   installs from them, so an omp SDK bump is an image change)
+- `packages/runner/verify-synthesis.sh` (copied to `/opt/verify-synthesis.sh`)
 - `sandbox-image/**` — the CLI shims and their lockfiles
 
 Check before merging anything that touches those paths:

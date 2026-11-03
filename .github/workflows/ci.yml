@@ -17,6 +17,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # The image gate diffs against the pull request base commit.
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -45,6 +48,14 @@ jobs:
           cp packages/runner/package.json packages/runner/bun.lock "$TMP"
           (cd "$TMP" && bun install --frozen-lockfile)
           rm -rf "$TMP"
+
+      # `wrangler` hashes `sandbox-image/Dockerfile` alone, so an image input
+      # change that skips the `# rebuild:` marker would deploy the Worker while
+      # the container keeps the previous build. Pull requests only: a push has
+      # no base commit to diff against.
+      - name: Image rebuild gate
+        if: github.event_name == 'pull_request'
+        run: bun scripts/check-image-inputs.ts --base "${{ github.event.pull_request.base.sha }}"
 
       - name: Typecheck
         run: bun run typecheck
