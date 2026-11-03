@@ -1,15 +1,15 @@
 /**
- * Pull request detail face (App detail IA): the bounded record face.
+ * Pull request detail face (App detail IA): the static faces and pure helpers.
  *
  * Static-SSR pins over the pure face (the InsightsRecordsView idiom): the
  * header facts and metric band, the severity buckets, the folds, the failures
- * panel, and the aside timeline. Mounted (happy-dom) pins cover what only real
- * effects and events prove: the family switch, fold toggles, and the copy
- * action's per-block outcome. Payloads shared with the list suite live in
- * `pull-request-fixtures.ts`.
+ * panel, and the aside timeline — plus the read/parse derivations that face
+ * consumes. Mounted (happy-dom) behaviour lives in
+ * `pull-request-detail-interaction.test.tsx`; payloads shared with the list
+ * suite live in `pull-request-fixtures.ts`.
  */
-import { describe, expect, jest, test } from "bun:test";
-import { act, createElement, StrictMode } from "react";
+import { describe, expect, test } from "bun:test";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import {
@@ -17,9 +17,9 @@ import {
   parsePullRequestDetail,
   type PullRequestDetail,
 } from "../../src/spa/pages/data";
-import { currentDetailRead, PullRequestDetailView, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
+import { PullRequestDetailView } from "../../src/spa/pages/PullRequestDetail";
 import { withMarkup } from "./dom";
-import { DETAIL, ROW_OPEN, mountDetailView, press } from "./pull-request-fixtures";
+import { DETAIL, ROW_OPEN } from "./pull-request-fixtures";
 
 describe("pull request detail data plane (pure helpers)", () => {
   test("the detail URL builder encodes owner/repo so a value cannot break out of the path family", () => {
@@ -88,7 +88,6 @@ describe("pull request detail data plane (pure helpers)", () => {
     });
   });
 });
-
 describe("pull request detail face (static SSR)", () => {
   const render = (detail: PullRequestDetail) =>
     renderToStaticMarkup(createElement(PullRequestDetailView, { locale: "en", detail }));
@@ -157,33 +156,43 @@ describe("pull request detail face (static SSR)", () => {
   const FAILING: PullRequestDetail = { ...DETAIL, findings: [] };
 
   test("the header names the PR's own facts; the band aggregates them", async () => {
+    // One render, read from the one tree: the header, its meta line and the
+    // band all describe the same payload, so nothing here can pass against a
+    // different render than the one it claims to read.
     const markup = render(DETAIL);
+    const read = await withMarkup(markup, (container) => ({
+      // Short-sha chip over the head sha, titled with the full-name tooltip.
+      chips: [...container.querySelectorAll<HTMLElement>('[data-slot="head-sha"]')].map(
+        (chip) => chip.textContent ?? "",
+      ),
+      meta: container.querySelector('[data-slot="pr-meta"]')?.textContent ?? "",
+      // The four label/figure pairs, in order — the aggregate the header
+      // claims, read as the operator reads it.
+      metrics: [...container.querySelectorAll('[data-slot="metric"]')].map((metric) => [
+        metric.querySelector('[data-slot="metric-key"]')?.textContent ?? "",
+        metric.querySelector('[data-slot="metric-value"]')?.textContent ?? "",
+      ]),
+    }));
     expect(markup).toContain("Fix the login flow");
     expect(markup).toContain("acme/web #133");
     expect(markup).toContain(t("en", "pullRequests.state.merged"));
-    // Short-sha chip over the head sha, titled with the full-name tooltip.
-    const chips = await withMarkup(render(DETAIL), (container) =>
-      [...container.querySelectorAll<HTMLElement>('[data-slot="head-sha"]')].map((chip) => chip.textContent ?? ""),
-    );
-    expect(chips).toEqual(["aaa111b"]);
+    expect(read.chips).toEqual(["aaa111b"]);
     expect(markup).toContain(t("en", "pullRequests.headSha"));
-    // Meta line: first seen, last seen.
-    for (const label of ["firstSeen", "lastSeen"] as const) {
-      expect(markup).toContain(t("en", `pullRequests.${label}`));
-    }
-    // The latest-review attribution is the header meta line's own item; the
-    // reviews panel renders the same string, so it is read off that line —
-    // selected by its slot, not by its position among the header's children.
-    const headerMeta = await withMarkup(
-      render(DETAIL),
-      (container) => container.querySelector('[data-slot="pr-meta"]')?.textContent ?? "",
-    );
-    expect(headerMeta).toContain(t("en", "pullRequests.latestReview"));
-    expect(headerMeta).toContain(
+    // The meta line carries the latest review's attribution — the one fact the
+    // aside does not repeat. First/last seen live in the aside facts only; the
+    // header used to print them a second time on the same screen.
+    expect(read.meta).toContain(t("en", "pullRequests.latestReview"));
+    expect(read.meta).toContain(
       t("en", "pullRequests.reviewMeta", { model: "kimi-for-coding", provider: "openrouter" }),
     );
+    for (const label of ["firstSeen", "lastSeen"] as const) {
+      expect(read.meta).not.toContain(t("en", `pullRequests.${label}`));
+      // ...and they still render — exactly once, in the aside's facts.
+      const rendered = markup.split(t("en", `pullRequests.${label}`)).length - 1;
+      expect(rendered, label).toBe(1);
+    }
     // A review that records neither model nor provider has no attribution to
-    // show: the item disappears rather than rendering an empty label.
+    // show: the line disappears rather than rendering an empty label.
     expect(
       await withMarkup(
         render({
@@ -199,22 +208,14 @@ describe("pull request detail face (static SSR)", () => {
             },
           ],
         }),
-        (container) => container.querySelector('[data-slot="pr-meta"]')?.textContent ?? "",
+        (container) => container.querySelector('[data-slot="pr-meta"]'),
       ),
-    ).not.toContain(t("en", "pullRequests.latestReview"));
-    // Band: the four label/figure pairs, in order — the aggregate the header
-    // claims, read as the operator reads it.
-    const metrics = await withMarkup(render(DETAIL), (container) =>
-      [...container.querySelectorAll('[data-slot="metric"]')].map((metric) => [
-        metric.querySelector('[data-slot="metric-key"]')?.textContent ?? "",
-        metric.querySelector('[data-slot="metric-value"]')?.textContent ?? "",
-      ]),
-    );
-    expect(metrics[0]).toEqual([t("en", "pullRequests.columnVerdict"), "needs fixes"]);
-    expect(metrics[1]).toEqual([t("en", "pullRequests.reviews"), "2"]);
-    expect(metrics[2]).toEqual([t("en", "pullRequests.failures"), "1"]);
-    expect(metrics[3]?.[0]).toBe(t("en", "pullRequests.findings"));
-    expect(metrics[3]?.[1]).toContain(t("en", "pullRequests.mustFixNote", { count: 1 }));
+    ).toBeNull();
+    expect(read.metrics[0]).toEqual([t("en", "pullRequests.columnVerdict"), "needs fixes"]);
+    expect(read.metrics[1]).toEqual([t("en", "pullRequests.reviews"), "2"]);
+    expect(read.metrics[2]).toEqual([t("en", "pullRequests.failures"), "1"]);
+    expect(read.metrics[3]?.[0]).toBe(t("en", "pullRequests.findings"));
+    expect(read.metrics[3]?.[1]).toContain(t("en", "pullRequests.mustFixNote", { count: 1 }));
   });
 
   test("the band wears the danger face for a non-shipping verdict and any failure", async () => {
@@ -228,33 +229,44 @@ describe("pull request detail face (static SSR)", () => {
   test("the band and the timeline paint a verdict with the same rule", async () => {
     // One table, two surfaces: the band's figure and the timeline's row must
     // agree, so a verdict cannot read as an alarm in one and quiet in the
-    // other — including the pre-v1 words the table names explicitly.
+    // other. Both tones are read off their own hooks — the band's
+    // `data-tone` on the verdict figure, the timeline row's own `data-tone`.
     const tones = async (detail: PullRequestDetail) =>
-      withMarkup(render(detail), (container) =>
-        [...container.querySelectorAll('[data-slot="activity-entry"]')].map((entry) =>
-          entry.getAttribute("data-tone"),
-        ),
-      );
-    const shipped: PullRequestDetail = {
+      withMarkup(render(detail), (container) => ({
+        band: container.querySelectorAll('[data-slot="metric-value"]')[0]?.getAttribute("data-tone") ?? null,
+        timeline: container.querySelector('[data-slot="activity-entry"]')?.getAttribute("data-tone"),
+      }));
+    /** The same detail with one review whose verdict is `verdict`. */
+    const verdict = (verdict: string, summary: string): PullRequestDetail => ({
       ...DETAIL,
       pull_request: {
         ...DETAIL.pull_request,
-        latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 08:00:00" },
+        latest_review: { verdict, reviewed_at: "2026-11-01 08:00:00" },
       },
       reviews: [
         {
-          verdict: "ship it",
-          summary_md: "Looks good overall.",
+          verdict,
+          summary_md: summary,
           model: "kimi-for-coding",
           provider: "openrouter",
           reviewed_at: "2026-11-01 08:00:00",
           head_sha: "aaa111bbb222",
         },
       ],
-    };
-    // The review is the newest event on both faces.
-    expect((await tones(DETAIL))[0]).toBe("danger");
-    expect((await tones(shipped))[0]).toBe("success");
+    });
+    // The review is the newest event on both faces, and the same word paints
+    // both the same way: a shipping verdict is quiet, a change request is an
+    // alarm — never one of each.
+    expect(await tones(verdict("ship it", "Looks good overall."))).toEqual({ band: null, timeline: "success" });
+    expect(await tones(verdict("request_changes", "The race is still reachable."))).toEqual({
+      band: "danger",
+      timeline: "danger",
+    });
+    // An unknown verdict is not an alarm on either surface.
+    expect(await tones(verdict("looks fine", "An unknown verdict."))).toEqual({
+      band: null,
+      timeline: "neutral",
+    });
   });
 
   test("a legacy verdict keeps its meaning: approve is success, a change request is danger", async () => {
@@ -820,7 +832,7 @@ describe("pull request detail face (static SSR)", () => {
     ).toEqual({ entries: 7, truncated: null });
   });
 
-  test("a failure's first line renders as escaped text and its full output stays in details", async () => {
+  test("a failure's first line renders as escaped text and the remaining output stays in details", async () => {
     const markup = render(FAILING);
     expect((await withMarkup(render(FAILING), familyTabs)).map((tab) => tab.selected)).toEqual([
       false,
@@ -838,16 +850,23 @@ describe("pull request detail face (static SSR)", () => {
         return block === null ? null : (block.textContent ?? "");
       }),
     ).toContain("sandbox");
-    // A multi-line error folds its full output behind a native details block;
-    // its behaviour is pinned in the mounted suite, where the disclosure can
-    // actually be opened.
+    // A multi-line error folds what the row has not already said: the
+    // disclosure starts at the SECOND line, because the first one is the
+    // diagnosis above it. The disclosure's behaviour (and the clipboard's full
+    // text) is pinned in the mounted suite, where it can actually be opened.
     const failureText = (error: string) => ({
       ...FAILING,
       failures: [{ stage: "sandbox", error, created_at: "2026-10-31 23:00:00" }],
     });
     const multiline = render(failureText("a\nb"));
-    expect(multiline).toContain(t("en", "pullRequests.failureFullOutput"));
-    expect(multiline).toContain("a\nb");
+    expect(multiline).toContain(t("en", "pullRequests.failureRemainingOutput"));
+    const folded = await withMarkup(multiline, (container) => ({
+      diagnosis: container.querySelector('[role="tabpanel"] li[data-tone="danger"] p')?.textContent ?? "",
+      evidence: container.querySelector('[role="tabpanel"] pre')?.textContent ?? "",
+    }));
+    expect(folded.diagnosis).toBe("a");
+    expect(folded.evidence).toBe("b");
+    expect(folded.evidence.startsWith(folded.diagnosis)).toBe(false);
     // A single-line error has nothing to fold.
     expect(
       await withMarkup(render(FAILING), (container) => container.querySelector('[role="tabpanel"] details')),
@@ -902,370 +921,5 @@ describe("pull request detail face (static SSR)", () => {
       t("en", "pullRequests.timelineFirstSeen"),
     ]);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
-  });
-});
-
-describe("pull requests detail read derivation (pure)", () => {
-  test("a read stamped for another pr derives to not-yet-loaded, whatever its kind (N1)", () => {
-    const okA: DetailRead = { pr: "acme/web/1", kind: "ok", data: DETAIL };
-    const errorA: DetailRead = { pr: "acme/web/1", kind: "error" };
-    const loadingA: DetailRead = { pr: "acme/web/1", kind: "loading" };
-    // A's view AND A's error must not render for B — the B transition
-    // frame derives to null, which renders the loading face.
-    expect(currentDetailRead(okA, "acme/web/2")).toBeNull();
-    expect(currentDetailRead(errorA, "acme/web/2")).toBeNull();
-    expect(currentDetailRead(loadingA, "acme/web/2")).toBeNull();
-    // The matching stamp passes through — including the error, for retry.
-    expect(currentDetailRead(okA, "acme/web/1")).toEqual(okA);
-    expect(currentDetailRead(errorA, "acme/web/1")).toEqual(errorA);
-    expect(currentDetailRead(null, "acme/web/1")).toBeNull();
-  });
-});
-
-describe("pull request detail (mounted)", () => {
-  test("each family trigger answers to its announced name, separator included", async () => {
-    const { container, win, unmount } = await mountDetailView(DETAIL);
-    try {
-      // A role/name query, the way an assistive technology finds the control:
-      // the name a reader hears is label + count with a separator, never the
-      // run-together "Findings3" the visible spans alone would produce.
-      const byRoleName = (name: string) =>
-        [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
-          (tab) => (tab.getAttribute("aria-label") ?? tab.textContent) === name,
-        );
-      const names = [...container.querySelectorAll('[role="tab"]')].map(
-        (tab) => tab.getAttribute("aria-label") ?? tab.textContent,
-      );
-      expect(names).toEqual([
-        `${t("en", "pullRequests.findings")} (3)`,
-        `${t("en", "pullRequests.reviews")} (2)`,
-        `${t("en", "pullRequests.failures")} (1)`,
-      ]);
-      // The name is not only a label: it addresses a real control.
-      expect(byRoleName("Findings")).toBeUndefined();
-      const reviews = byRoleName(`${t("en", "pullRequests.reviews")} (2)`);
-      expect(reviews).toBeDefined();
-      await press(win, reviews);
-      expect(reviews?.getAttribute("aria-selected")).toBe("true");
-    } finally {
-      await unmount();
-    }
-  });
-
-  test("the family switch and a fold toggle act on the live tree", async () => {
-    const { container, win, unmount } = await mountDetailView(DETAIL);
-    try {
-      const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
-      const panels = () => [...container.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
-      const selected = () => tabs().map((tab) => tab.getAttribute("aria-selected") === "true");
-      const visible = () => panels().map((panel) => panel.hidden === false);
-      // DETAIL carries a must-fix finding: findings first, its panel open.
-      expect(selected()).toEqual([true, false, false]);
-      expect(visible()).toEqual([true, false, false]);
-
-      // The reviews family: the selection and the visible panel both move.
-      await press(win, tabs()[1]);
-      expect(selected()).toEqual([false, true, false]);
-      expect(visible()).toEqual([false, true, false]);
-
-      // And back — a one-way switch would pass the assertion above.
-      await press(win, tabs()[0]);
-      expect(selected()).toEqual([true, false, false]);
-      expect(visible()).toEqual([true, false, false]);
-
-      // A fold toggle flips its own `aria-expanded` and its body's `hidden`.
-      // The second finding starts folded; the first starts open.
-      const controls = () => [...container.querySelectorAll<HTMLElement>("button[aria-expanded][aria-controls]")];
-      const bodyOf = (control: HTMLElement | undefined) =>
-        control === undefined
-          ? null
-          : container.querySelector<HTMLElement>(`#${control.getAttribute("aria-controls") ?? ""}`);
-      expect(controls()[1]?.getAttribute("aria-expanded")).toBe("false");
-      expect(bodyOf(controls()[1])?.hidden).toBe(true);
-      await press(win, controls()[1]);
-      expect(controls()[1]?.getAttribute("aria-expanded")).toBe("true");
-      expect(bodyOf(controls()[1])?.hidden).toBe(false);
-    } finally {
-      await unmount();
-    }
-  });
-
-  test("two findings sharing a payload id fold independently", async () => {
-    // The payload can repeat an id; the rendered rows must not share a fold.
-    const duplicated: PullRequestDetail = {
-      ...DETAIL,
-      findings: [
-        {
-          finding_id: "f-1",
-          severity: "must-fix",
-          title: "First copy",
-          file_path: "",
-          line: null,
-          body: "First body.",
-        },
-        {
-          finding_id: "f-1",
-          severity: "must-fix",
-          title: "Second copy",
-          file_path: "",
-          line: null,
-          body: "Second body.",
-        },
-      ],
-    };
-    const { container, win, unmount } = await mountDetailView(duplicated);
-    try {
-      const controls = () =>
-        [...container.querySelectorAll<HTMLElement>('[data-slot="finding"] button[aria-controls]')];
-      const bodyOf = (control: HTMLElement | undefined) =>
-        control === undefined
-          ? null
-          : container.querySelector<HTMLElement>(`#${control.getAttribute("aria-controls") ?? ""}`);
-      // Both must-fix bodies start open, and each control owns a distinct body.
-      expect(controls().map((control) => control.getAttribute("aria-expanded"))).toEqual(["true", "true"]);
-      expect(new Set(controls().map((control) => control.getAttribute("aria-controls"))).size).toBe(2);
-      // Folding the second leaves the first open: one id for two rows used to
-      // fold them together.
-      await press(win, controls()[1]);
-      expect(controls().map((control) => control.getAttribute("aria-expanded"))).toEqual(["true", "false"]);
-      expect(bodyOf(controls()[0])?.hidden).toBe(false);
-      expect(bodyOf(controls()[1])?.hidden).toBe(true);
-    } finally {
-      await unmount();
-    }
-  });
-
-  test("the copy action reports its outcome on the button and reverts", async () => {
-    // The clipboard is the one surface happy-dom does not script: the first
-    // write resolves and the second rejects, so both branches are exercised.
-    let writes = 0;
-    jest.useFakeTimers();
-    // No actionable finding: the face opens on the failures family, whose one
-    // control is the copy action.
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
-    try {
-      Object.defineProperty(win.navigator, "clipboard", {
-        configurable: true,
-        value: {
-          writeText: () => {
-            writes += 1;
-            return writes === 1 ? Promise.resolve() : Promise.reject(new Error("denied"));
-          },
-        },
-      });
-      const copyButton = () => container.querySelector<HTMLElement>('[data-slot="copy-error"]');
-      // The button's own label is the outcome's one channel: the name of the
-      // focused control changes, and no live region repeats it.
-      const liveRegions = () => container.querySelectorAll('[role="status"], [aria-live]');
-      const renders = (label: string) => (container.textContent ?? "").split(label).length - 1;
-      expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyError"));
-
-      // Resolved write: the label reports the outcome, once.
-      await press(win, copyButton());
-      expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyCopied"));
-      expect(renders(t("en", "pullRequests.copyCopied"))).toBe(1);
-      expect(liveRegions()).toHaveLength(0);
-
-      // ...and it reverts on its own, so a later paste is not misread.
-      await act(async () => {
-        jest.advanceTimersByTime(2000);
-      });
-      expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyError"));
-      expect(renders(t("en", "pullRequests.copyCopied"))).toBe(0);
-
-      // Rejected write: silence would leave the previous clipboard content in
-      // place, so the failure is reported the same way.
-      await press(win, copyButton());
-      expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyFailed"));
-      expect(renders(t("en", "pullRequests.copyFailed"))).toBe(1);
-      expect(liveRegions()).toHaveLength(0);
-    } finally {
-      jest.useRealTimers();
-      await unmount();
-    }
-  });
-
-  test("a clipboard write that throws synchronously reports the failure", async () => {
-    // Some browsers throw from `writeText` rather than returning a rejected
-    // promise. A throw must land on the same outcome, not escape the handler.
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
-    Object.defineProperty(win.navigator, "clipboard", {
-      configurable: true,
-      value: {
-        writeText: () => {
-          throw new Error("clipboard is blocked");
-        },
-      },
-    });
-    const problems: unknown[] = [];
-    const realError = console.error;
-    console.error = (...args: unknown[]) => {
-      problems.push(args[0]);
-    };
-    try {
-      const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
-      await press(win, button);
-      // The press reports the failure on the button it kept focus on, and the
-      // throw never reached React as an uncaught handler error.
-      expect(button?.textContent).toBe(t("en", "pullRequests.copyFailed"));
-      expect(problems).toEqual([]);
-    } finally {
-      console.error = realError;
-      await unmount();
-    }
-  });
-
-  test("a failure's full output is folded until the reader opens the disclosure", async () => {
-    // The first line is the diagnosis; the rest is evidence behind a native
-    // disclosure. Read the behaviour off the rendered tree: closed → only the
-    // summary, opened → the full output, both driven by a press on the summary.
-    const { container, win, unmount } = await mountDetailView({
-      ...DETAIL,
-      findings: [],
-      failures: [{ stage: "sandbox", error: "first line\nsecond line", created_at: "2026-10-31 23:00:00" }],
-    });
-    try {
-      const details = () => container.querySelector<HTMLDetailsElement>('[role="tabpanel"] details');
-      const summary = () => details()?.querySelector("summary");
-      const output = () => details()?.querySelector("pre")?.textContent ?? "";
-      const block = () => container.querySelector('[role="tabpanel"] li[data-tone="danger"]');
-      // Closed: the diagnosis stands in the block, the evidence sits behind
-      // the disclosure's own summary.
-      expect(details()?.open).toBe(false);
-      expect(block()?.querySelector("p")?.textContent).toBe("first line");
-      expect(summary()?.textContent).toBe(t("en", "pullRequests.failureFullOutput"));
-
-      await press(win, summary());
-      expect(details()?.open).toBe(true);
-      expect(output()).toBe("first line\nsecond line");
-    } finally {
-      await unmount();
-    }
-  });
-
-  test("under StrictMode's double mount a copy's outcome still renders", async () => {
-    // StrictMode runs mount → cleanup → mount; the cleanup-only effect used to
-    // leave the mounted flag false, so every outcome was dropped.
-    jest.useFakeTimers();
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] }, (view) =>
-      createElement(StrictMode, null, view),
-    );
-    try {
-      Object.defineProperty(win.navigator, "clipboard", {
-        configurable: true,
-        value: { writeText: () => Promise.resolve() },
-      });
-      const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
-      expect(button?.textContent).toBe(t("en", "pullRequests.copyError"));
-      await press(win, button);
-      expect(button?.textContent).toBe(t("en", "pullRequests.copyCopied"));
-    } finally {
-      jest.useRealTimers();
-      await unmount();
-    }
-  });
-
-  test("copying a second error block does not cancel the first block's revert", async () => {
-    jest.useFakeTimers();
-    const { container, win, unmount } = await mountDetailView({
-      ...DETAIL,
-      findings: [],
-      failures: [
-        { stage: "sandbox", error: "first block", created_at: "2026-10-31 23:00:00" },
-        { stage: "review", error: "second block", created_at: "2026-10-30 23:00:00" },
-      ],
-    });
-    try {
-      Object.defineProperty(win.navigator, "clipboard", {
-        configurable: true,
-        value: { writeText: () => Promise.resolve() },
-      });
-      const copyButtons = () => [...container.querySelectorAll<HTMLElement>('[data-slot="copy-error"]')];
-      expect(copyButtons()).toHaveLength(2);
-
-      // Copy A, then B one second later. B's press must not cancel A's revert.
-      await press(win, copyButtons()[0]);
-      await act(async () => {
-        jest.advanceTimersByTime(1000);
-      });
-      await press(win, copyButtons()[1]);
-      expect(copyButtons()[0]?.textContent).toBe(t("en", "pullRequests.copyCopied"));
-      expect(copyButtons()[1]?.textContent).toBe(t("en", "pullRequests.copyCopied"));
-
-      // A's own two seconds are up; B's label is untouched.
-      await act(async () => {
-        jest.advanceTimersByTime(1000);
-      });
-      expect(copyButtons()[0]?.textContent).toBe(t("en", "pullRequests.copyError"));
-      expect(copyButtons()[1]?.textContent).toBe(t("en", "pullRequests.copyCopied"));
-
-      await act(async () => {
-        jest.advanceTimersByTime(1000);
-      });
-      expect(copyButtons()[1]?.textContent).toBe(t("en", "pullRequests.copyError"));
-    } finally {
-      jest.useRealTimers();
-      await unmount();
-    }
-  });
-
-  test("a clipboard write that settles after unmount updates nothing", async () => {
-    // A write the test settles by hand, so it can outlive the face.
-    const { promise: pendingWrite, resolve: settleWrite } = Promise.withResolvers<void>();
-    jest.useFakeTimers();
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
-    Object.defineProperty(win.navigator, "clipboard", {
-      configurable: true,
-      value: { writeText: () => pendingWrite },
-    });
-    const problems: string[] = [];
-    const realConsole = { error: console.error, warn: console.warn, log: console.log };
-    const record = (name: string) => (...args: unknown[]) => {
-      problems.push(`${name}: ${args.map(String).join(" ")}`);
-    };
-    console.error = record("error");
-    console.warn = record("warn");
-    console.log = record("log");
-    try {
-      const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
-      await press(win, button);
-      const labelAtUnmount = button?.textContent;
-      // The face goes away while the write is still in flight.
-      await unmount();
-      await act(async () => {
-        settleWrite();
-      });
-      // The late outcome cannot reach the gone face: the write's resolution
-      // throws nothing, React never warns about an update after unmount, and
-      // the button the reader saw keeps the label it had. Nothing at all is
-      // logged — a filtered claim would let an unrelated warning through.
-      expect(labelAtUnmount).toBe(t("en", "pullRequests.copyError"));
-      expect(button?.textContent).toBe(labelAtUnmount);
-      expect(problems).toEqual([]);
-    } finally {
-      jest.useRealTimers();
-      console.error = realConsole.error;
-      console.warn = realConsole.warn;
-      console.log = realConsole.log;
-      await unmount();
-    }
-  });
-
-  test("without a Clipboard API the copy control stays and reports the failure", async () => {
-    // An insecure context offers no Clipboard API at all: the property reads
-    // as absent, not as a rejecting write. happy-dom's own Clipboard lives on
-    // the prototype, so the absent state is shadowed on the instance.
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
-    Object.defineProperty(win.navigator, "clipboard", { configurable: true, value: undefined });
-    try {
-      const copyButton = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
-      // The affordance is not hidden just because the API is missing.
-      expect(copyButton).not.toBeNull();
-      await press(win, copyButton);
-      expect(copyButton?.textContent).toBe(t("en", "pullRequests.copyFailed"));
-      expect(container.querySelectorAll('[role="status"], [aria-live]')).toHaveLength(0);
-    } finally {
-      await unmount();
-    }
   });
 });

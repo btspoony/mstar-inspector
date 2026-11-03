@@ -19,6 +19,24 @@ import {
 } from "./data";
 
 /**
+ * One list read, stamped with the App it answers for. The tab instance survives
+ * an App switch (`/dashboard/apps/:appId` keeps the same route family), so an
+ * unstamped read would paint the previous App's rows or error under the new
+ * one until the new read landed.
+ */
+export type ListRead = { app: string; rows: PullRequestRow[] | null; kind: "loading" | "ok" | "error" };
+
+/**
+ * The read for the ACTIVE App — the loading face when the stamp names another
+ * one. Deriving at render (not resetting in an effect) is what removes the
+ * stale frame: an effect runs after paint, so the previous App's rows would
+ * still be the frame the operator saw.
+ */
+export function currentListRead(read: ListRead, appId: string): ListRead {
+  return read.app === appId ? read : { app: appId, rows: null, kind: "loading" };
+}
+
+/**
  * The Pull requests tab of the App detail page — the per-App ledger of
  * every PR the App received. Two faces in one tab: the list (`pr` empty)
  * and the in-place detail (a valid `pr` search param). The detail address
@@ -51,8 +69,12 @@ export function AppPullRequestsTab({
   /** Shell-owned commit: replaceState + state update (never popstate). */
   onSearch: (next: AppDetailSearch) => void;
 }) {
-  const [rows, setRows] = useState<PullRequestRow[] | null>(null);
-  const [listState, setListState] = useState<"loading" | "ok" | "error">("loading");
+  // One list read, stamped with the App it belongs to: switching Apps reuses
+  // this tab instance, so an unstamped ledger would paint the previous App's
+  // rows (or its error) until the new read landed. A read for another App
+  // derives to `loading` with no rows.
+  const [read, setRead] = useState<ListRead>({ app: appId, rows: null, kind: "loading" });
+  const current = currentListRead(read, appId);
   // ErrorState retry: bumping the nonce re-runs the load effect below.
   const [reloadNonce, setReloadNonce] = useState(0);
 
@@ -67,20 +89,23 @@ export function AppPullRequestsTab({
     // re-runs on the emptied search value.
     if (detailOpen) return;
     let cancelled = false;
-    setListState("loading");
+    // Rows survive a re-read of the SAME App, so a retry does not blank the
+    // ledger; an App switch drops them with the stamp.
+    const carry = (previous: ListRead): PullRequestRow[] | null =>
+      previous.app === appId ? previous.rows : null;
+    setRead((previous) => ({ app: appId, rows: carry(previous), kind: "loading" }));
     fetchJson(appPullRequestsUrl(apiBase(), appId))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parsePullRequestList(raw);
         if (!parsed) {
-          setListState("error");
+          setRead((previous) => ({ app: appId, rows: carry(previous), kind: "error" }));
           return;
         }
-        setRows(parsed);
-        setListState("ok");
+        setRead({ app: appId, rows: parsed, kind: "ok" });
       })
       .catch(() => {
-        if (!cancelled) setListState("error");
+        if (!cancelled) setRead((previous) => ({ app: appId, rows: carry(previous), kind: "error" }));
       });
     return () => {
       cancelled = true;
@@ -111,8 +136,8 @@ export function AppPullRequestsTab({
   }
 
   return (
-    <div className="flex flex-col gap-6" aria-busy={listState === "loading"}>
-      {listState === "loading" && rows === null ? (
+    <div className="flex flex-col gap-6" aria-busy={current.kind === "loading"}>
+      {current.kind === "loading" && current.rows === null ? (
         <p role="status" className="text-sm text-muted-foreground">
           {t(locale, "common.loading")}
         </p>
@@ -120,10 +145,10 @@ export function AppPullRequestsTab({
       {/* A failed read replaces the ledger rather than sitting above it: rows
           from an earlier read would read as the current list. Covers the close
           of a detail, whose list read is this tab's own. */}
-      {listState === "error" ? (
+      {current.kind === "error" ? (
         <ErrorState locale={locale} onRetry={() => setReloadNonce((nonce) => nonce + 1)} />
-      ) : rows !== null ? (
-        <PullRequestsListView locale={locale} rows={rows} onOpen={openPr} />
+      ) : current.rows !== null ? (
+        <PullRequestsListView locale={locale} rows={current.rows} onOpen={openPr} />
       ) : null}
     </div>
   );

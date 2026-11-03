@@ -180,8 +180,8 @@ export const en = {
     /** One fold control per finding body and per review summary. */
     expand: "Expand",
     collapse: "Collapse",
-    /** The failure block's full-output fold and copy action. */
-    failureFullOutput: "Full output",
+    /** The failure block's remaining-output fold (the diagnosis above is the first line) and copy action. */
+    failureRemainingOutput: "Remaining output",
     copyError: "Copy error",
     /** The copy action's transient outcome, shown on the button for a couple of seconds. */
     copyCopied: "Copied",

@@ -176,7 +176,8 @@ export async function mountDetailView(
  * Mount the tab with every fetch gated until the test resolves it by URL
  * suffix, so a transition frame is observable instead of raced. The mount of
  * `initialPr` is the helper's own first act; teardown restores `fetch` and the
- * DOM in one call.
+ * DOM in one call. `switchApp` moves the SAME tab instance to another App, the
+ * way the shell does when the route's appId changes in place.
  */
 export async function mountTabWithGatedFetch(initialPr: string) {
   // One gate per REQUEST, not per URL: a retry re-reads a URL that was already
@@ -202,6 +203,7 @@ export async function mountTabWithGatedFetch(initialPr: string) {
   // The helper owns the shell's search state, so a close (`onSearch`) commits
   // exactly as the real page's does — the deep-link test needs no harness.
   let setSearch: (next: (previous: AppDetailSearch) => AppDetailSearch) => void = () => {};
+  let setApp: (next: string) => void = () => {};
   function Harness() {
     const [search, set] = useState<AppDetailSearch>({
       tab: "pull-requests",
@@ -209,8 +211,10 @@ export async function mountTabWithGatedFetch(initialPr: string) {
       repo: "",
       pr: initialPr,
     });
+    const [appId, setAppId] = useState("1");
     setSearch = set;
-    return createElement(AppPullRequestsTab, { locale: "en", appId: "1", search, onSearch: set });
+    setApp = setAppId;
+    return createElement(AppPullRequestsTab, { locale: "en", appId, search, onSearch: set });
   }
   const mounted = await mountView(createElement(Harness), { fetch: gatedFetch });
   return {
@@ -223,6 +227,11 @@ export async function mountTabWithGatedFetch(initialPr: string) {
      */
     rerender: async (pr: string) => {
       await act(async () => setSearch((previous) => ({ ...previous, pr })));
+      await act(async () => {});
+    },
+    /** Move the tab to another App, keeping the same `search` (and PR). */
+    switchApp: async (appId: string) => {
+      await act(async () => setApp(appId));
       await act(async () => {});
     },
     resolve,

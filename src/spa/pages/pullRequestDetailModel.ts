@@ -13,15 +13,22 @@ import type { PullRequestDetail, PullRequestFinding, PullRequestReview } from ".
 /** The three record families the detail face switches between. */
 export type RecordFamily = "findings" | "reviews" | "failures";
 
+/** The three severity words this face names; every other spelling is `other`. */
+export const SEVERITY_KEYS = {
+  mustFix: "must-fix",
+  shouldFix: "should-fix",
+  nit: "nit",
+} as const;
+
 /**
  * Severity buckets in the order an operator asks about them. `severity` is a
  * free string in the payload, so the last bucket catches every spelling these
  * three do not name.
  */
 export const SEVERITY_GROUPS = [
-  { severity: "must-fix", labelKey: "pullRequests.severityMustFix", tone: "danger" },
-  { severity: "should-fix", labelKey: "pullRequests.severityShouldFix", tone: "warn" },
-  { severity: "nit", labelKey: "pullRequests.severityNit", tone: "neutral" },
+  { severity: SEVERITY_KEYS.mustFix, labelKey: "pullRequests.severityMustFix", tone: "danger" },
+  { severity: SEVERITY_KEYS.shouldFix, labelKey: "pullRequests.severityShouldFix", tone: "warn" },
+  { severity: SEVERITY_KEYS.nit, labelKey: "pullRequests.severityNit", tone: "neutral" },
 ] as const;
 
 export type SeverityTone = (typeof SEVERITY_GROUPS)[number]["tone"];
@@ -41,7 +48,7 @@ export type SeverityGroup = {
  * predicate drives both the family the face opens on and the trigger's dot.
  */
 export function hasActionableFinding(detail: PullRequestDetail): boolean {
-  return detail.findings.some((finding) => finding.severity !== "nit");
+  return detail.findings.some((finding) => finding.severity !== SEVERITY_KEYS.nit);
 }
 
 /** The family the face opens on: the actionable record first, history last. */

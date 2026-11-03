@@ -7,10 +7,12 @@
  * seen / failure count) and the empty state. Mounted (happy-dom) pins cover
  * what only real effects and events prove: the manage-gated click-through to
  * the ledger, the failures-column cell content, and the S2 switching contract
- * — a retained detail from PR A must never render while PR B loads, and a
- * failed fetch for the new PR renders the error face with a retry. The detail
- * face itself lives in `pull-request-detail.test.tsx`; payloads both suites
- * read live in `pull-request-fixtures.ts`.
+ * — a retained detail from PR A must never render while PR B loads, a failed
+ * fetch for the new PR renders the error face with a retry, and a switch to
+ * another App never paints the previous App's rows. The detail face
+ * itself lives in `pull-request-detail-static.test.tsx` and
+ * `pull-request-detail-interaction.test.tsx`; payloads every suite reads live
+ * in `pull-request-fixtures.ts`.
  */
 import { describe, expect, test } from "bun:test";
 import { act, createElement, useState } from "react";
@@ -26,7 +28,12 @@ import {
   type SettingsPayload,
 } from "../../src/spa/pages/data";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
-import { AppPullRequestsTab, PullRequestsListView } from "../../src/spa/pages/AppPullRequestsTab";
+import {
+  AppPullRequestsTab,
+  PullRequestsListView,
+  currentListRead,
+  type ListRead,
+} from "../../src/spa/pages/AppPullRequestsTab";
 import { withMarkup } from "./dom";
 import {
   DETAIL,
@@ -197,6 +204,22 @@ describe("pull requests data plane (pure helpers)", () => {
     expect(appPullRequestsUrl("/dashboard/acme", "12345")).toBe(
       "/dashboard/acme/api/apps/12345/pull-requests",
     );
+  });
+
+  test("a ledger read stamped for another App derives to a clean loading face", () => {
+    // App 1's answered read: rows, ok state, App 1's stamp.
+    const appOne: ListRead = { app: "1", rows: [ROW_OPEN], kind: "ok" };
+    // Under App 2 the rows and the ok state are gone — nothing survives the
+    // switch, so the operator's first frame cannot be another App's ledger.
+    expect(currentListRead(appOne, "2")).toEqual({ app: "2", rows: null, kind: "loading" });
+    // The same stamp under its own App passes through untouched.
+    expect(currentListRead(appOne, "1")).toBe(appOne);
+    // An error is App-scoped too: App 1's failure must not announce on App 2.
+    expect(currentListRead({ app: "1", rows: null, kind: "error" }, "2")).toEqual({
+      app: "2",
+      rows: null,
+      kind: "loading",
+    });
   });
 
   test("pullRequestRefOf validates the pr param shape and rejects dot segments", () => {
@@ -411,6 +434,37 @@ describe("pull requests tab (mounted)", () => {
       await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
       await act(async () => {});
       expect(text()).toContain("Add the export button");
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("switching Apps never paints the previous App's ledger while the new read is pending", async () => {
+    // The tab instance survives an App switch (the shell keeps it mounted for
+    // `/dashboard/apps/:appId`), so the ledger is stamped with its App: App 1's
+    // row must be gone the instant the tab belongs to App 2.
+    const { container, fetches, text, switchApp, resolve, unmount } = await mountTabWithGatedFetch("");
+    try {
+      await act(async () => resolve("/apps/1/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
+      await act(async () => {});
+      expect(text()).toContain("Add the export button");
+
+      // App 2's read is issued but not answered: the loading face stands in,
+      // with neither App 1's row nor App 1's empty/error state.
+      await switchApp("2");
+      const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
+      expect(listReads()).toHaveLength(2);
+      expect(listReads()[1]).toContain("/apps/2/");
+      expect(text()).not.toContain("Add the export button");
+      expect(text()).toContain(t("en", "common.loading"));
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(container.querySelector("table")).toBeNull();
+
+      // App 2's own ledger replaces the loading face.
+      await act(async () => resolve("/apps/2/pull-requests", jsonResponse({ pull_requests: [ROW_CLOSED] })));
+      await act(async () => {});
+      expect(text()).toContain("Revert the cache change");
+      expect(text()).not.toContain("Add the export button");
     } finally {
       await unmount();
     }

@@ -993,7 +993,8 @@ describe("SSR STYLE token parity", () => {
   }
 
   test("every declared token carries the value tokens.css resolves to, in its own theme", async () => {
-    const { dark: ssrDark, light: ssrLight } = ssrBlocks(await ssrStyle());
+    const style = await ssrStyle();
+    const { dark: ssrDark, light: ssrLight } = ssrBlocks(style);
     const css = await Bun.file(TOKENS_CSS).text();
     const cssRoot = cssCustomProperties(extractBlock(css, ":root {"));
     const cssLight = cssCustomProperties(extractBlock(css, ':root[data-theme="light"] {'));
@@ -1001,7 +1002,19 @@ describe("SSR STYLE token parity", () => {
 
     // `--focus-halo` is the face's own composed shadow, not a token.
     const names = Object.keys(ssrDark).filter((name) => name !== "focus-halo");
-    expect(names.length, "the face rendered no token").toBeGreaterThan(40);
+    // The property a bare count stood in for: the face declares a value for
+    // every token its own stylesheet paints with — no paint left unthemed —
+    // and every name it declares really is a token the fixture carries in that
+    // theme, so a typo cannot pass by resolving to nothing.
+    const painted = [...new Set([...style.matchAll(/var\(--([a-z0-9-]+)\)/g)].map((m) => m[1] as string))];
+    expect(painted.filter((name) => !names.includes(name))).toEqual(["focus-halo"]);
+    for (const theme of THEMES) {
+      const declared = new Set(Object.values(FIXTURE[theme]).flatMap((layer) => Object.keys(layer)));
+      expect(
+        names.filter((name) => !declared.has(name)),
+        `${theme} declares no such token`,
+      ).toEqual([]);
+    }
     for (const name of names) {
       const dark = ssrDark[name] as string;
       const light = ssrLight[name];

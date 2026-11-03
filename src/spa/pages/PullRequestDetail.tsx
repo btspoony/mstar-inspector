@@ -22,6 +22,7 @@ import {
   foldLabel,
   hasActionableFinding,
   reviewAttribution,
+  SEVERITY_KEYS,
   severityGroups,
   timelineRows,
   verdictTone,
@@ -167,7 +168,7 @@ export function PullRequestDetailView({
   // carry (the spaces and colons in a review timestamp) is folded to a dash.
   const bodyId = (key: string): string => `${baseId}-${key.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
 
-  const mustFix = detail.findings.filter((finding) => finding.severity === "must-fix").length;
+  const mustFix = detail.findings.filter((finding) => finding.severity === SEVERITY_KEYS.mustFix).length;
   const groups = severityGroups(locale, detail.findings);
   // The detail's own review list is the record for "latest": its first row is
   // the newest review and carries the attribution. The PR row's summary is the
@@ -313,29 +314,21 @@ export function PullRequestDetailView({
         <h2 className="text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking) font-(weight:--typo-heading-20-weight) text-(--text-primary)">
           {pr.title}
         </h2>
-        <div
-          data-slot="pr-meta"
-          className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--text-faint)"
-        >
-          <span>
-            {t(locale, "pullRequests.firstSeen")}{" "}
-            <span className="text-(--text-muted) tabular-nums" title={pr.first_seen_at}>
-              {formatRelativeTime(pr.first_seen_at, locale)}
-            </span>
-          </span>
-          <span>
-            {t(locale, "pullRequests.lastSeen")}{" "}
-            <span className="text-(--text-muted) tabular-nums" title={pr.last_seen_at}>
-              {formatRelativeTime(pr.last_seen_at, locale)}
-            </span>
-          </span>
-          {latestAttribution === "" ? null : (
+        {/* The meta line carries what the aside does not: the latest review's
+            attribution. First/last seen live in the aside facts — printing
+            them twice on one screen made the header repeat the aside. An
+            unattributed review leaves the line empty, so it disappears. */}
+        {latestAttribution === "" ? null : (
+          <div
+            data-slot="pr-meta"
+            className="flex flex-wrap gap-x-3.5 gap-y-1.5 text-(length:--typo-label-12-size) leading-(--typo-label-12-line) text-(--text-faint)"
+          >
             <span>
               {t(locale, "pullRequests.latestReview")}{" "}
               <span className="text-(--text-muted)">{latestAttribution}</span>
             </span>
-          )}
-        </div>
+          </div>
+        )}
       </header>
 
       <div className="mt-(--spacing-6)">
@@ -423,7 +416,7 @@ export function PullRequestDetailView({
                           // together, so position joins it — and the fold
                           // state, the React key and the body id all read it.
                           const findingKey = `${finding.finding_id || "finding"}-${index}`;
-                          const open = openFindings[findingKey] ?? finding.severity === "must-fix";
+                          const open = openFindings[findingKey] ?? finding.severity === SEVERITY_KEYS.mustFix;
                           const location =
                             finding.file_path === ""
                               ? ""
@@ -615,10 +608,13 @@ export function PullRequestDetailView({
                         {lines.length > 1 ? (
                           <details>
                             <summary className="cursor-pointer text-(length:--typo-label-12-size) text-(--text-secondary)">
-                              {t(locale, "pullRequests.failureFullOutput")}
+                              {t(locale, "pullRequests.failureRemainingOutput")}
                             </summary>
+                            {/* The diagnosis above already printed the first
+                                line; this block is the evidence BELOW it. The
+                                copy action still takes the whole error. */}
                             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre rounded-(--radius-control) border border-(--tone-danger-border) bg-(--surface-page) p-2.5 font-mono text-(length:--typo-label-12-size) leading-relaxed text-(--text-secondary)">
-                              {failure.error}
+                              {lines.slice(1).join("\n")}
                             </pre>
                           </details>
                         ) : null}

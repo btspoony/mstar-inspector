@@ -156,8 +156,8 @@ export const zhCN: Dictionary = {
     /** 每条发现正文与审查摘要各有一个折叠控件。 */
     expand: "展开",
     collapse: "收起",
-    /** 失败块的完整输出折叠与复制动作。 */
-    failureFullOutput: "完整输出",
+    /** 失败块其余输出的折叠（首行已作为诊断显示）与复制动作。 */
+    failureRemainingOutput: "其余输出",
     copyError: "复制错误",
     /** 复制动作的瞬时结果，在按钮上显示约两秒。 */
     copyCopied: "已复制",
