@@ -155,17 +155,22 @@ function SectionPager<K extends RecordSection>({
 }) {
   const page = state.page;
   if (page === null || page.total === 0) return null;
+  // The label is derived from the page in hand, so a total that shrank between
+  // reads cannot invert it: `from` never passes `total`, and `to` never falls
+  // below `from`. The buttons keep their own bounds, so a stale offset heals
+  // on the next press.
+  const from = Math.min(state.offset + 1, page.total);
+  const to = Math.max(from, Math.min(state.offset + page.items.length, page.total));
   return (
     <div data-slot="pager" className="flex flex-wrap items-center justify-between gap-2">
       <span
         data-slot="pager-range"
+        // The range is the page transition's only non-visual report; it is the
+        // live region for it, so nothing else announces the same text.
+        aria-live="polite"
         className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tabular-nums text-(--text-faint)"
       >
-        {t(locale, "pullRequests.pageRange", {
-          from: state.offset + 1,
-          to: state.offset + page.items.length,
-          total: page.total,
-        })}
+        {t(locale, "pullRequests.pageRange", { from, to, total: page.total })}
       </span>
       <div className="flex items-center gap-2">
         <Button

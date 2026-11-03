@@ -792,19 +792,36 @@ export function pullRequestRecord(rawBody: string): {
  * fallback. `null` when the body is not JSON, carries no `repository`, or
  * states neither form.
  *
+ * The preferred source is read on its own: a delivery that states only
+ * `full_name`, or states it beside a malformed `owner`/`name`, still has the
+ * authoritative name. Each field degrades to absent (`.catch`) instead of
+ * failing the whole read, so junk in one component cannot discard another.
+ *
  * Never throws: this rides the best-effort delivery-recording path, so a
  * malformed body degrades to "unknown source" rather than costing the row.
  */
 export function webhookRepositoryFullName(rawBody: string): string | null {
   const parsed = parseBody(rawBody);
   if (parsed === null) return null;
-  const result = z.object({ repository: repositorySchema }).safeParse(parsed);
+  const result = z
+    .object({
+      repository: z
+        .object({
+          full_name: z.string().min(1).nullish().catch(null),
+          name: z.string().nullish().catch(null),
+          owner: z.object({ login: z.string() }).nullish().catch(null),
+        })
+        .nullish()
+        .catch(null),
+    })
+    .safeParse(parsed);
   if (!result.success) return null;
   const repository = result.data.repository;
   if (!repository) return null;
-  if (repository.full_name !== undefined) return repository.full_name;
-  const { login } = repository.owner;
-  return login === "" || repository.name === "" ? null : `${login}/${repository.name}`;
+  if (repository.full_name) return repository.full_name;
+  const login = repository.owner?.login ?? "";
+  const name = repository.name ?? "";
+  return login === "" || name === "" ? null : `${login}/${name}`;
 }
 
 function parseBody(rawBody: string): unknown {

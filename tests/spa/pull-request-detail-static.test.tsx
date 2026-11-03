@@ -1048,6 +1048,23 @@ describe("pull request detail face (static SSR)", () => {
     ]);
   });
 
+  test("a page that shrank under a stale offset renders a clamped range, and the range is a live region", async () => {
+    // The server's total fell to 20 between reads while the reader still holds
+    // offset 20: the honest page is empty, and the label must never invert.
+    const built = scene({ ...RECORDS, findings: page([], 20) });
+    const read = (offset: number) =>
+      withMarkup(render(built.detail, recordsOf(built.pages, offset)), (container) => {
+        const label = container.querySelector('[data-slot="pager-range"]');
+        return { range: label?.textContent ?? "", live: label?.getAttribute("aria-live") ?? null };
+      });
+    expect(await read(20)).toEqual({
+      range: t("en", "pullRequests.pageRange", { from: 20, to: 20, total: 20 }),
+      live: "polite",
+    });
+    // An offset past the new total also clamps rather than reading 31–30.
+    expect((await read(30)).range).toBe(t("en", "pullRequests.pageRange", { from: 20, to: 20, total: 20 }));
+  });
+
   test("the findings filter is present only while the PR has findings", async () => {
     const filter = async (markup: string) =>
       withMarkup(markup, (container) => {

@@ -4349,20 +4349,21 @@ type ParsePagingResult = { ok: true; offset: number; limit: number } | { ok: fal
 
 /**
  * `offset` / `limit` from the query string. Absent means the default; a
- * present value must be plain decimal digits and in range — a malformed one is
- * a 400, so a caller never believes it asked for a page it did not get.
+ * present value must be plain decimal digits and a safe integer — a malformed
+ * one is a 400, so a caller never believes it asked for a page it did not get.
+ * A well-formed `limit` outside the bounds is CLAMPED into them (the contract's
+ * "defaults to 10, clamped to [1, 50]"), never rejected: a bounded adjustment
+ * still answers with a page.
  */
 function parseRecordPaging(c: DashboardContext): ParsePagingResult {
   const rawLimit = c.req.query("limit");
   const rawOffset = c.req.query("offset");
   if (rawLimit !== undefined && !/^[0-9]+$/.test(rawLimit)) return { ok: false };
   if (rawOffset !== undefined && !/^[0-9]+$/.test(rawOffset)) return { ok: false };
-  const limit = rawLimit === undefined ? RECORD_PAGE_LIMIT.default : Number(rawLimit);
+  const requestedLimit = rawLimit === undefined ? RECORD_PAGE_LIMIT.default : Number(rawLimit);
   const offset = rawOffset === undefined ? 0 : Number(rawOffset);
-  if (!Number.isSafeInteger(limit) || limit < RECORD_PAGE_LIMIT.min || limit > RECORD_PAGE_LIMIT.max) {
-    return { ok: false };
-  }
-  if (!Number.isSafeInteger(offset)) return { ok: false };
+  if (!Number.isSafeInteger(requestedLimit) || !Number.isSafeInteger(offset)) return { ok: false };
+  const limit = Math.min(RECORD_PAGE_LIMIT.max, Math.max(RECORD_PAGE_LIMIT.min, requestedLimit));
   return { ok: true, offset, limit };
 }
 
@@ -4418,7 +4419,8 @@ type PullRequestRecordSection = "findings" | "reviews" | "failures";
  * One paged record family. The section is fixed by the registered literal path
  * (three paths share this handler); `severity` is read for findings only — an
  * empty or absent value is no filter, and the returned `total` is filtered.
- * A miss is the detail's 404 on every family; malformed paging is a 400.
+ * A miss is the detail's 404 on every family; malformed paging is a 400, and
+ * an out-of-bounds `limit` is clamped into `[1, 50]`.
  */
 const appPullRequestRecordsRoute = async (
   c: DashboardContext,

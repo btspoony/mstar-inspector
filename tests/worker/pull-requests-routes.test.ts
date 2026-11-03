@@ -10,7 +10,8 @@
  * `{ pull_request, counts }`; each section answers one page plus its total. A
  * tuple this App never received is a 404 on every path — the address is the
  * ledger's own key, so a same-number PR in another repo is a miss, never a
- * fallback. Bad paging is a 400, never a silent default.
+ * fallback. Bad paging is a 400, never a silent default — but a well-formed
+ * `limit` outside `[1, 50]` is clamped into it rather than rejected.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -355,11 +356,30 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     const db = await fixture();
     seedInstallation(db);
     for (const section of ["findings", "reviews", "failures"] as const) {
-      for (const query of ["limit=0", "limit=51", "limit=abc", "offset=-1", "offset=1.5"]) {
+      for (const query of ["limit=abc", "limit=", "limit=1e3", "limit=-1", "offset=-1", "offset=1.5"]) {
         const res = await getFace(`${sectionPath(section)}?${query}`, db);
         expect(res.status, `${section}?${query}`).toBe(400);
       }
     }
+  });
+
+  test("an out-of-bounds limit is clamped into [1, 50], not rejected", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    seedReviews(db, 12);
+    // limit=0 clamps up to 1: a one-row page, not a 400.
+    const floorLimit = await getFace(`${sectionPath("reviews")}?limit=0`, db);
+    expect(floorLimit.status).toBe(200);
+    const floored = (await floorLimit.json()) as { items: unknown[]; total: number };
+    expect(floored.items).toHaveLength(1);
+    expect(floored.total).toBe(12);
+
+    // limit=51 clamps down to 50: the whole 12-row corpus comes back on one page.
+    const ceilingLimit = await getFace(`${sectionPath("reviews")}?limit=51`, db);
+    expect(ceilingLimit.status).toBe(200);
+    const ceilinged = (await ceilingLimit.json()) as { items: unknown[]; total: number };
+    expect(ceilinged.items).toHaveLength(12);
+    expect(ceilinged.total).toBe(12);
   });
 
   test("an unknown PR number → 404", async () => {

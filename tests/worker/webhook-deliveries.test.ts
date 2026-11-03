@@ -190,6 +190,29 @@ describe("webhookRepositoryFullName (delivery source repo, migration 0040)", () 
     expect(webhookRepositoryFullName("{not json")).toBeNull();
     expect(webhookRepositoryFullName("null")).toBeNull();
   });
+
+  test("the preferred source is read on its own, without a valid owner/name pair", () => {
+    // The authoritative form alone — no `name`, no `owner` — still names the repo.
+    expect(webhookRepositoryFullName(JSON.stringify({ repository: { full_name: "acme/widgets" } }))).toBe(
+      "acme/widgets",
+    );
+    // A malformed fallback pair does not discard a valid preferred source.
+    expect(
+      webhookRepositoryFullName(
+        JSON.stringify({ repository: { full_name: "acme/widgets", name: 42, owner: { login: "" } } }),
+      ),
+    ).toBe("acme/widgets");
+    // A conflicting pair loses to full_name.
+    expect(
+      webhookRepositoryFullName(
+        JSON.stringify({ repository: { full_name: "acme/widgets", name: "other", owner: { login: "elsewhere" } } }),
+      ),
+    ).toBe("acme/widgets");
+    // An unusable full_name falls through to the pair; an empty one is not a name.
+    expect(
+      webhookRepositoryFullName(JSON.stringify({ repository: { full_name: "", name: "widgets", owner: { login: "acme" } } })),
+    ).toBe("acme/widgets");
+  });
 });
 
 describe("apps-store delivery face (recordDelivery / deliverySummary / listRecentDeliveries)", () => {

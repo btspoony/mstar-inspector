@@ -276,8 +276,12 @@ describe("pull request detail (mounted)", () => {
       });
       const copyButton = () => container.querySelector<HTMLElement>('[data-slot="copy-error"]');
       // The button's own label is the outcome's one channel: the name of the
-      // focused control changes, and no live region repeats it.
-      const liveRegions = () => container.querySelectorAll('[role="status"], [aria-live]');
+      // focused control changes, and no live region repeats that text. (The
+      // pager's range region is the page transition's channel, not the copy's.)
+      const liveRegionsRepeating = (label: string) =>
+        [...container.querySelectorAll('[role="status"], [aria-live]')].filter((node) =>
+          (node.textContent ?? "").includes(label),
+        );
       const renders = (label: string) => (container.textContent ?? "").split(label).length - 1;
       expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyError"));
 
@@ -285,7 +289,7 @@ describe("pull request detail (mounted)", () => {
       await press(win, copyButton());
       expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyCopied"));
       expect(renders(t("en", "pullRequests.copyCopied"))).toBe(1);
-      expect(liveRegions()).toHaveLength(0);
+      expect(liveRegionsRepeating(t("en", "pullRequests.copyCopied"))).toHaveLength(0);
 
       // ...and it reverts on its own, so a later paste is not misread.
       await act(async () => {
@@ -299,7 +303,7 @@ describe("pull request detail (mounted)", () => {
       await press(win, copyButton());
       expect(copyButton()?.textContent).toBe(t("en", "pullRequests.copyFailed"));
       expect(renders(t("en", "pullRequests.copyFailed"))).toBe(1);
-      expect(liveRegions()).toHaveLength(0);
+      expect(liveRegionsRepeating(t("en", "pullRequests.copyFailed"))).toHaveLength(0);
     } finally {
       jest.useRealTimers();
       await unmount();
@@ -543,7 +547,12 @@ describe("pull request detail (mounted)", () => {
       expect(copyButton).not.toBeNull();
       await press(win, copyButton);
       expect(copyButton?.textContent).toBe(t("en", "pullRequests.copyFailed"));
-      expect(container.querySelectorAll('[role="status"], [aria-live]')).toHaveLength(0);
+      // Nothing announces the copy outcome: the button's label is its one channel.
+      expect(
+        [...container.querySelectorAll('[role="status"], [aria-live]')].filter((node) =>
+          (node.textContent ?? "").includes(t("en", "pullRequests.copyFailed")),
+        ),
+      ).toHaveLength(0);
     } finally {
       await unmount();
     }
