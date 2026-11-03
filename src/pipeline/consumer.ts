@@ -271,11 +271,15 @@ export type ConsumerLogFields = {
    * `review_paused` (architect lock L4 — union widened ADDITIVELY):
    * the ack-skip line for a paused App's in-flight message; it overrides the
    * trigger fields' event on that one log line.
+   * `review_superseded` (union widened ADDITIVELY, same shape as
+   * `review_paused`): the ack-skip line for a delivery the PR ledger has
+   * overtaken — the outcome label an operator greps for a review that never
+   * ran, instead of filtering the trigger label down by `reason`.
    * `review_concurrency_degraded` (the review-concurrency cutover, 2026-11 —
    * union widened ADDITIVELY): the
    * concurrency reader's degraded-read warn, relayed on this channel.
    */
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_concurrency_degraded";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded";
   action: string;
   installation_id: number;
   owner: string;
@@ -2286,7 +2290,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         (await newerCommitHasJob(deps, payload, ledgerHead.headSha, baseFields))
       ) {
         deps.log.info(
-          { ...baseFields, reason: "superseded", superseded_by_head_at: ledgerHead.headAt },
+          { ...baseFields, event: "review_superseded", reason: "superseded", superseded_by_head_at: ledgerHead.headAt },
           `delivery superseded — the PR head has advanced to ${ledgerHead.headAt} (head_sha ${ledgerHead.headSha ?? "unknown"}), acking with zero side effects (no retry, no DLQ, no container)`,
         );
         return { kind: "superseded" };

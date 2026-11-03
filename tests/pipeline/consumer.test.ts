@@ -2171,6 +2171,9 @@ describe("createReviewConsumer", () => {
     const line = logLines.find((l) => l.fields.reason === "superseded");
     expect(line).toBeDefined();
     expect(line!.level).toBe("info");
+    // The skip is findable by the documented `event=` grep (the paused
+    // sibling's precedent), not only by the reason shared with refusals.
+    expect(line!.fields.event).toBe("review_superseded");
     expect(line!.fields.superseded_by_head_at).toBe(NEW_AT);
     // No sandbox id on the skip line — nothing was created.
     expect(line!.fields.sandbox_id).toBeUndefined();

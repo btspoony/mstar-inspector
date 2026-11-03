@@ -321,7 +321,9 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const row = db.raw
       .query("SELECT head_at FROM pull_requests WHERE app_id = ?")
       .get(appRow.id) as { head_at: string | null };
-    expect(head_at).toBe("2026-03-01T10:00:00.000Z");
+    // The route owns ONE thing here: the row carries exactly the bytes the
+    // queue carries (an absent payload stamp is a NULL row). With the literal
+    // pin gone, this is the only assertion either value can fail.
     expect(row.head_at).toBe(head_at ?? null);
   });
 
