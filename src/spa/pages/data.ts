@@ -1367,6 +1367,22 @@ export function parseModels(data: unknown): ModelsPayload | null {
   return { groups };
 }
 
+/** The workspace concurrency face: the stored cap plus the ceiling and range it must respect. */
+export type ConcurrencySettings = { concurrency: number; system: number; min: number; max: number };
+
+export function parseConcurrencySettings(data: unknown): ConcurrencySettings | null {
+  if (!isRecord(data)) return null;
+  const { concurrency, system, min, max } = data;
+  if (typeof concurrency !== "number" || typeof system !== "number") return null;
+  if (typeof min !== "number" || typeof max !== "number") return null;
+  return { concurrency, system, min, max };
+}
+
+/** A write's answer: the value the server actually stored, or null on a bad body. */
+export function parseStoredConcurrency(data: unknown): number | null {
+  return isRecord(data) && typeof data.concurrency === "number" ? data.concurrency : null;
+}
+
 export function splitModelChain(raw: string | null | undefined): string[] {
   if (!raw) return [];
   return raw

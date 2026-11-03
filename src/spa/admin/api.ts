@@ -109,6 +109,22 @@ export async function readFlags(): Promise<FlagRow[]> {
   return list(body.flags, "flags").map((row) => ({ key: text(row, "key"), enabled: bool(row, "enabled") }));
 }
 
+/** The system review-concurrency parameters (iteration spec §1.1). */
+export type RuntimeConfig = { concurrency: number; min: number; max: number };
+
+export async function readRuntime(): Promise<RuntimeConfig> {
+  const body = map(await fetchJson(`${BASE}/runtime`), "runtime response");
+  return {
+    concurrency: num(body, "concurrency"),
+    min: num(body, "min"),
+    max: num(body, "max"),
+  };
+}
+
+export function setSystemConcurrency(concurrency: number): Promise<void> {
+  return write("PATCH", "/runtime", { concurrency });
+}
+
 export async function readWorkspaces(): Promise<WorkspaceRow[]> {
   const body = map(await fetchJson(`${BASE}/workspaces`), "workspaces response");
   return list(body.workspaces, "workspaces").map((row) => ({

@@ -46,6 +46,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { SidebarProvider } from "@design-system";
 import { App as AdminApp } from "../../src/spa/admin/main";
 import { FlagsPage as AdminFlagsPage } from "../../src/spa/admin/FlagsPage";
+import { RuntimePage as AdminRuntimePage } from "../../src/spa/admin/RuntimePage";
 import { SupportGrantsPage as AdminSupportGrantsPage } from "../../src/spa/admin/SupportGrantsPage";
 import { UsersPage as AdminUsersPage } from "../../src/spa/admin/UsersPage";
 import { WorkspacesPage as AdminWorkspacesPage } from "../../src/spa/admin/WorkspacesPage";
@@ -378,6 +379,7 @@ const ADMIN_GRANTS = [
 
 /** The console's read stub: one payload per endpoint the console calls. */
 const adminApi = (url: string): unknown => {
+  if (url.includes("/runtime")) return { concurrency: 24, min: 1, max: 250 };
   if (url.includes("/workspaces")) return { workspaces: ADMIN_WORKSPACES };
   if (url.includes("/users")) return { users: ADMIN_USERS };
   if (url.includes("/support-grants")) return { grants: ADMIN_GRANTS };
@@ -544,7 +546,8 @@ const SURFACES: readonly Surface[] = [
     marker: t("en", "login.signIn"),
     render: () => renderLight(createElement(LoginPage, { boot: { locale: "en", login: null, name: null } })),
   },
-  // The 2026-11-01 census: the console's four screens plus the shell they mount in.
+  // The 2026-11-01 census, extended by plan 309's runtime screen: the
+  // console's five page family plus the shell they mount in.
   // Each marker is a loaded-face string, so a screen that fell back to its
   // skeleton or error branch cannot pass the marker assertion.
   {
@@ -561,6 +564,11 @@ const SURFACES: readonly Surface[] = [
     name: "Console — flags",
     marker: t("en", "admin.flags.effectReviewGlobal"),
     render: () => mountAdmin(createElement(AdminFlagsPage, { locale: "en" }), "/_internal_admin/flags"),
+  },
+  {
+    name: "Console — runtime",
+    marker: t("en", "admin.runtime.concurrencyCurrent", { value: 24 }),
+    render: () => mountAdmin(createElement(AdminRuntimePage, { locale: "en" }), "/_internal_admin/runtime"),
   },
   {
     name: "Console — workspaces",
@@ -585,7 +593,7 @@ const SURFACES: readonly Surface[] = [
 ];
 
 describe("both-theme acceptance pass", () => {
-  test("the pass enumerates the eight customer faces and the console's five", () => {
+  test("the pass enumerates the eight customer faces and the console's six", () => {
     expect(SURFACES.map((surface) => surface.name)).toEqual([
       "Apps list",
       "App detail — settings",
@@ -597,6 +605,7 @@ describe("both-theme acceptance pass", () => {
       "Login",
       "Console — shell",
       "Console — flags",
+      "Console — runtime",
       "Console — workspaces",
       "Console — users",
       "Console — support access",
@@ -614,12 +623,12 @@ describe("both-theme acceptance pass", () => {
     }
     // Empty = no token is returned to plans 201/202.
     expect(findings).toEqual([]);
-    // The verdict names what it compared: 13 surfaces, this many references.
+    // The verdict names what it compared: 14 surfaces, this many references.
     expect(Object.keys(measured)).toHaveLength(SURFACES.length);
-    // The console's five are part of the verdict, not appended to it: each one
+    // The console's six are part of the verdict, not appended to it: each one
     // rendered a token vocabulary of its own.
     const consoleSurfaces = Object.entries(measured).filter(([name]) => name.startsWith("Console"));
-    expect(consoleSurfaces).toHaveLength(5);
+    expect(consoleSurfaces).toHaveLength(6);
     for (const [name, count] of consoleSurfaces) expect(count, name).toBeGreaterThan(0);
     const total = Object.values(measured).reduce((sum, count) => sum + count, 0);
     expect(total).toBeGreaterThan(150);

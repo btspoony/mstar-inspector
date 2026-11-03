@@ -188,8 +188,81 @@ describe("workspace name card", () => {
     expect(html).toContain("Acme");
   });
 
-  test("a non-owner gets the refusal copy and no editable form", () => {
-    const html = withLocation(PATH, () =>
+  test("the concurrency card reads the stored cap and submits it", async () => {
+    const { win, cleanup } = installDom(`http://localhost${PATH}`);
+    const calls: { method: string; url: string; body: string }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      const url = String(input);
+      calls.push({ method, url, body: String(init?.body ?? "") });
+      if (method === "PUT") {
+        return new Response(JSON.stringify({ concurrency: 4 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/settings/concurrency")) {
+        return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ grants: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () =>
+        root.render(
+          createElement(Layout, {
+            boot,
+            pathname: PATH,
+            flash: null,
+            children: createElement(WorkspaceSettingsPage, { boot }),
+          }),
+        ),
+      );
+      // The read lands the stored value, not the documented default.
+      const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
+      expect(input.value).toBe("8");
+      expect(container.textContent).toContain(t("en", "workspace.concurrencySystemCap", { system: 32 }));
+
+      const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setValue?.call(input, "4");
+        input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+      });
+      await act(async () => {
+        input
+          .closest("form")
+          ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+      });
+
+      expect(calls.filter((call) => call.method === "PUT")).toEqual([
+        {
+          method: "PUT",
+          url: "/dashboard/ws_acme/api/settings/concurrency",
+          body: JSON.stringify({ concurrency: 4 }),
+        },
+      ]);
+      expect(container.textContent).toContain(t("en", "workspace.concurrencySaved"));
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("an admin gets the concurrency card but no name form; a plain member gets the refusal copy", () => {
+    // The name is owner-only; the review concurrency is owner-or-admin — the
+    // page mirrors the two routes rather than the stricter gate alone.
+    const asAdmin = withLocation(PATH, () =>
       renderToStaticMarkup(
         createElement(WorkspaceSettingsPage, {
           boot: {
@@ -199,7 +272,21 @@ describe("workspace name card", () => {
         }),
       ),
     );
-    expect(html).toContain(t("en", "workspace.settingsOwnerOnly"));
-    expect(html).not.toContain('id="workspace-name"');
+    expect(asAdmin).toContain(t("en", "workspace.concurrencyHeading"));
+    expect(asAdmin).not.toContain('id="workspace-name"');
+
+    const asMember = withLocation(PATH, () =>
+      renderToStaticMarkup(
+        createElement(WorkspaceSettingsPage, {
+          boot: {
+            ...boot,
+            memberships: boot.memberships?.map((m) => ({ ...m, role: "member" as const })),
+          },
+        }),
+      ),
+    );
+    expect(asMember).toContain(t("en", "workspace.settingsOwnerOnly"));
+    expect(asMember).not.toContain('id="workspace-name"');
+    expect(asMember).not.toContain('id="workspace-concurrency"');
   });
 });

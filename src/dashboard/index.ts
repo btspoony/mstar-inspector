@@ -180,6 +180,15 @@ import {
   removedPage,
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
+import {
+  CONCURRENCY_MAX,
+  CONCURRENCY_MIN,
+  RuntimeConfigError,
+  getSystemConcurrency,
+  getWorkspaceConcurrency,
+  isConcurrencyValue,
+  setWorkspaceConcurrency,
+} from "./runtime-config-store";
 import { isLocale, resolveLocale, serializeLocaleCookie, t, type DictionaryKey, type Locale } from "../i18n";
 import { RESERVED_WORKSPACE_SLUGS, WORKSPACE_FAMILY_SEGMENTS, wantsHtml } from "../spa/routes";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
@@ -2288,6 +2297,68 @@ const workspaceNameRoute = async (c: DashboardContext) => {
   return c.json({ name: row.name });
 };
 
+// --- Workspace settings: the review-concurrency cap ---
+//
+// The tenant half of the runtime configuration (iteration spec §1.1): the
+// effective cap is min(system, this). Owner/admin may read and change it; a
+// plain member gets the tenant 404 — the value is not theirs either way. The
+// store owns validation and refuses a value above the system cap rather than
+// clamping it, so no request can store a number that would never apply.
+const workspaceConcurrencyGate = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return { ok: false as const, response: member.response };
+  if (!canManageRole(member.scope.role)) {
+    return { ok: false as const, response: await tenantNotFound(c) };
+  }
+  return { ok: true as const, member };
+};
+
+const workspaceConcurrencyReadRoute = async (c: DashboardContext) => {
+  const gate = await workspaceConcurrencyGate(c);
+  if (!gate.ok) return gate.response;
+  const workspaceId = gate.member.scope.workspaceId;
+  const [concurrency, system] = await Promise.all([
+    getWorkspaceConcurrency(gate.member.db, workspaceId),
+    getSystemConcurrency(gate.member.db),
+  ]);
+  return c.json({ concurrency, system, min: CONCURRENCY_MIN, max: CONCURRENCY_MAX });
+};
+
+const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
+  const gate = await workspaceConcurrencyGate(c);
+  if (!gate.ok) return gate.response;
+  const { db, user, scope } = gate.member;
+  let value: unknown;
+  try {
+    const body = (await c.req.json()) as { concurrency?: unknown };
+    value = body.concurrency;
+  } catch {
+    // malformed body → the shape gate's 400, never a 500
+  }
+  if (!isConcurrencyValue(value)) {
+    return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
+      min: CONCURRENCY_MIN,
+      max: CONCURRENCY_MAX,
+    });
+  }
+  try {
+    return c.json({ concurrency: await setWorkspaceConcurrency(db, scope.workspaceId, value, user.github_login) });
+  } catch (err) {
+    if (!(err instanceof RuntimeConfigError)) throw err;
+    // A row retired between the gate and the UPDATE is the same 404 an unknown
+    // ref gets; the cap refusal carries the ceiling it compared against.
+    if (err.reason === "unknown_workspace") return await tenantNotFound(c);
+    if (err.reason === "above_system") {
+      const system = await getSystemConcurrency(db);
+      return keyed400(c, SETTINGS_400_KEYS.concurrencyAboveSystem, { system });
+    }
+    return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
+      min: CONCURRENCY_MIN,
+      max: CONCURRENCY_MAX,
+    });
+  }
+};
+
 // --- Apps list + per-App management (spec § Multi-App 契约,
 // Clarify #6, architect-pinned POST action paths) ---
 //
@@ -2777,6 +2848,9 @@ const SETTINGS_400_KEYS = {
   triggerModeUnknown: "settings.error.triggerModeUnknown",
   unknownOperation: "settings.error.unknownOperation",
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
+  /** Workspace review-concurrency cap (iteration spec §2.3). */
+  concurrencyInvalid: "settings.error.concurrencyInvalid",
+  concurrencyAboveSystem: "settings.error.concurrencyAboveSystem",
 } as const satisfies Record<string, DictionaryKey>;
 
 /**
@@ -2795,6 +2869,19 @@ function settings400Response(
   if (wantsHtmlFormNavigation(c)) {
     return c.redirect(scopedAppPath(c, `/dashboard/apps/${appId}/settings`), 302);
   }
+  return keyed400(c, key, params);
+}
+
+/**
+ * The keyed 400 body — ONE spelling for every settings refusal, App-scoped or
+ * workspace-scoped: `key` for the SPA's locale resolver, `message` = the en
+ * face (so an English-substring consumer keeps working), `params` for its t().
+ */
+function keyed400(
+  c: DashboardContext,
+  key: DictionaryKey,
+  params?: Record<string, string | number>,
+): Response {
   return c.json({ key, message: t("en", key, params), ...(params ? { params } : {}) }, 400);
 }
 
@@ -4402,6 +4489,14 @@ for (const route of APP_ROUTES) {
 // above carries GET/POST only): the name is the workspace's own label, so there
 // is no deployment-level copy to register.
 dashboardApp.put("/:workspaceRef/api/settings/name", workspaceOnly(workspaceNameRoute));
+dashboardApp.get(
+  "/:workspaceRef/api/settings/concurrency",
+  workspaceOnly(workspaceConcurrencyReadRoute),
+);
+dashboardApp.put(
+  "/:workspaceRef/api/settings/concurrency",
+  workspaceOnly(workspaceConcurrencyWriteRoute),
+);
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
 // not a wired route above is a placeholder submit and must never succeed —

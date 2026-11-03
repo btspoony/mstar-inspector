@@ -308,14 +308,22 @@ export const zhCN: Dictionary = {
     inviteExpired: "该邀请已过期。",
     inviteGone: "该邀请已失效——可能已被撤回。",
     inviteAcceptFailed: "接受邀请失败，请重试。",
-    /** `/dashboard/<ref>/settings` 的所有者专属门禁。 */
-    settingsOwnerOnly: "只有工作区所有者可以修改这些设置。",
+    /** `/dashboard/<ref>/settings` 的管理者门禁——普通成员看到此文案。 */
+    settingsOwnerOnly: "只有工作区所有者和管理员可以修改这些设置。",
     /** 所有者的名称卡片——顶部切换器显示的名称。 */
     nameHeading: "工作区名称",
     nameDescription: "顶部工作区切换器显示的名称。此工作区的网址是其 id，不会改变。",
     nameSave: "保存名称",
     nameSaved: "工作区名称已更新。",
     nameFailed: "修改工作区名称失败，请重试。",
+    concurrencyHeading: "审查并发",
+    concurrencyDescription: "此工作区同时运行的审查数量。平台的系统上限始终叠加生效。",
+    concurrencyLabel: "并发审查数",
+    concurrencySave: "保存并发数",
+    concurrencySaved: "审查并发数已更新。",
+    concurrencyFailed: "修改审查并发数失败，请重试。",
+    /** {system} = 该工作区不能超过的平台系统上限。 */
+    concurrencySystemCap: "系统上限：{system}。",
   },
   /**
    * 平台运维支持（2026-10）：运维人员的只读界面与租户不可关闭的授权通知。
@@ -448,6 +456,8 @@ export const zhCN: Dictionary = {
       triggerModeUnknown: "{mode} 不是有效的审查触发模式 — 可用值为 open、every_push、manual。未存储任何内容。",
       unknownOperation: "未知的设置操作 — 请重新提交此页面的某个表单。",
       githubMetadataRefreshFailed: "GitHub 未返回该 App 的元数据 — 未刷新任何内容。请确认该 App 仍然存在后重试。",
+      concurrencyInvalid: "并发数必须是 {min} 到 {max} 之间的整数。未存储任何内容。",
+      concurrencyAboveSystem: "该并发数高于本平台的系统上限（{system}）。请改为 {system} 或更低 — 未存储任何内容。",
     },
     ops: "运维",
     opsCopy: "以下操作改变此 App 如何应答传入的投递。",
@@ -653,9 +663,10 @@ export const zhCN: Dictionary = {
       /** 返回运维自己的工作区外壳。 */
       dashboardLink: "工作区控制台",
     },
-    /** 控制台四个导航标签 —— `pages.ts` 通过 `labelKey` 路由。 */
+    /** 控制台导航标签 —— `pages.ts` 通过 `labelKey` 路由。 */
     nav: {
       flags: "服务器开关",
+      runtime: "运行时参数",
       workspaces: "工作区",
       users: "用户",
       supportGrants: "支持访问",
@@ -695,6 +706,20 @@ export const zhCN: Dictionary = {
       toggleFailed: "无法更改 {flag}。",
       /** 开关的可访问名称：“{flag} {state}”，state 为 ON/OFF。 */
       stateAria: "{flag} {state}",
+    },
+    /** 运行时参数页（迭代规格 §1.1）。 */
+    runtime: {
+      description: "非机密的运行时参数。更改会在下一次审查生效，并追加一条审计记录。",
+      loadFailed: "无法加载运行时参数。",
+      concurrencyTitle: "系统审查并发",
+      concurrencyDescription: "整个平台同时运行的审查数量。每个工作区的上限都受此值约束。",
+      concurrencyLabel: "并发审查数",
+      concurrencySave: "保存",
+      concurrencySaved: "已保存。",
+      /** 写入失败且错误不可识别时的兜底文案。 */
+      concurrencyFailed: "修改系统并发数失败。",
+      /** {value} = 当前存储的上限（或文档默认值）。 */
+      concurrencyCurrent: "下一次审查生效值：{value}。",
     },
     /** 工作区页。 */
     workspaces: {
