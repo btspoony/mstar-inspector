@@ -1368,14 +1368,22 @@ export function parseModels(data: unknown): ModelsPayload | null {
 }
 
 /** The workspace concurrency face: the stored cap plus the ceiling and range it must respect. */
-export type ConcurrencySettings = { concurrency: number; system: number; min: number; max: number };
+export type ConcurrencySettings = {
+  concurrency: number;
+  system: number;
+  min: number;
+  max: number;
+  /** The stored cap could not be read: both numbers above are the conservative fallback. */
+  degraded: boolean;
+};
 
 export function parseConcurrencySettings(data: unknown): ConcurrencySettings | null {
   if (!isRecord(data)) return null;
-  const { concurrency, system, min, max } = data;
+  const { concurrency, system, min, max, degraded } = data;
   if (typeof concurrency !== "number" || typeof system !== "number") return null;
   if (typeof min !== "number" || typeof max !== "number") return null;
-  return { concurrency, system, min, max };
+  if (typeof degraded !== "boolean") return null;
+  return { concurrency, system, min, max, degraded };
 }
 
 /**

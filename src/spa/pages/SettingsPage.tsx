@@ -64,7 +64,7 @@ import {
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
-import { LoadingNotice, LoadFailedNotice, NoticeRegion, type OpNotice } from "./PageNotice";
+import { LoadingNotice, LoadFailedNotice, NoticeRegion, PageNotice, type OpNotice } from "./PageNotice";
 import { ProvidersSection } from "./settings-providers";
 
 export type PendingAction =
@@ -1090,6 +1090,9 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
   // Section-local channel, like the name card's: an op outcome never rides the page-level notice.
   const [concurrencyNotice, setConcurrencyNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  // A degraded read is re-read on demand: the stored value is untrusted, so
+  // "try again" is a first-class action next to saving a fresh value.
+  const [attempt, setAttempt] = useState(0);
   // The value this workspace ACTUALLY gets: the server refuses a workspace cap
   // above the system cap, but an operator can lower the system cap below an
   // already-stored workspace value. The form then seeds from the effective
@@ -1106,7 +1109,10 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         if (!live) return;
         const parsed = parseConcurrencySettings(data);
         if (parsed === null) setFailed(true);
-        else setLoaded(parsed);
+        else {
+          setFailed(false);
+          setLoaded(parsed);
+        }
       },
       () => {
         if (live) setFailed(true);
@@ -1115,7 +1121,7 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
     return () => {
       live = false;
     };
-  }, []);
+  }, [attempt]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -1133,6 +1139,9 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         // succeeded, so the submitted number stands in for the unreadable one
         // instead of reporting the save as a failure.
         const stored = parseStoredConcurrency(body) ?? submitted;
+        // `degraded` is NOT cleared here: it reports that some stored level could
+        // not be read, and a workspace write does not repair an unreadable system
+        // row — which is precisely the level that keeps reviews serial.
         setLoaded((previous) => previous && { ...previous, concurrency: stored });
         setDraft(null);
       }
@@ -1153,6 +1162,46 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         <LoadFailedNotice locale={locale} />
       ) : loaded === null ? (
         <LoadingNotice locale={locale} />
+      ) : loaded.degraded ? (
+        // The store could not trust the stored cap, so both numbers in this
+        // payload are the conservative fallback (serial). Rendering that as a
+        // normal value would invite a save of a number nobody stored, so the
+        // card states the read failed and offers two honest recoveries: re-read,
+        // or replace the unreadable value with one the operator types.
+        <div className="flex flex-col gap-3">
+          <PageNotice kind="warn" message={t(locale, "workspace.concurrencyUnreadable")} />
+          <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-sm font-medium" htmlFor="workspace-concurrency">
+                {t(locale, "workspace.concurrencyLabel")}
+              </label>
+              <Input
+                id="workspace-concurrency"
+                type="number"
+                min={loaded.min}
+                // Not `loaded.system`: in this state that number is the fallback,
+                // so using it as the browser bound would make the field refuse
+                // every value a real cap could be. The server still refuses
+                // anything above the cap its write predicate enforces.
+                max={loaded.max}
+                className="w-32"
+                autoComplete="off"
+                required
+                value={draft ?? ""}
+                onChange={(event) => setDraft(event.target.value)}
+              />
+              {/* No "system cap" line here: `loaded.system` is the conservative
+                  fallback in this state, and stating it as the ceiling would name
+                  a number no write was compared against. */}
+            </div>
+            <Button type="submit" disabled={busy}>
+              {t(locale, "workspace.concurrencySave")}
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => setAttempt((count) => count + 1)}>
+              {t(locale, "common.retry")}
+            </Button>
+          </form>
+        </div>
       ) : (
         <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
           <div className="flex flex-col gap-1.5">

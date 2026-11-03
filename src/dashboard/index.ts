@@ -181,6 +181,7 @@ import {
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
 import {
+  AboveSystemError,
   CONCURRENCY_MAX,
   CONCURRENCY_MIN,
   RuntimeConfigError,
@@ -2317,11 +2318,17 @@ const workspaceConcurrencyReadRoute = async (c: DashboardContext) => {
   const gate = await workspaceConcurrencyGate(c);
   if (!gate.ok) return gate.response;
   const workspaceId = gate.member.scope.workspaceId;
-  const [concurrency, system] = await Promise.all([
+  const [workspace, system] = await Promise.all([
     getWorkspaceConcurrency(gate.member.db, workspaceId),
     getSystemConcurrency(gate.member.db),
   ]);
-  return c.json({ concurrency, system, min: CONCURRENCY_MIN, max: CONCURRENCY_MAX });
+  return c.json({
+    concurrency: workspace.concurrency,
+    system: system.concurrency,
+    min: CONCURRENCY_MIN,
+    max: CONCURRENCY_MAX,
+    degraded: workspace.degraded || system.degraded,
+  });
 };
 
 const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
@@ -2346,11 +2353,11 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
   } catch (err) {
     if (!(err instanceof RuntimeConfigError)) throw err;
     // A row retired between the gate and the UPDATE is the same 404 an unknown
-    // ref gets; the cap refusal carries the ceiling it compared against.
+    // ref gets; the cap refusal carries the ceiling its own predicate compared
+    // against, so this route never re-derives it.
     if (err.reason === "unknown_workspace") return await tenantNotFound(c);
-    if (err.reason === "above_system") {
-      const system = await getSystemConcurrency(db);
-      return keyed400(c, SETTINGS_400_KEYS.concurrencyAboveSystem, { system });
+    if (err instanceof AboveSystemError) {
+      return keyed400(c, SETTINGS_400_KEYS.concurrencyAboveSystem, { system: err.system });
     }
     return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
       min: CONCURRENCY_MIN,

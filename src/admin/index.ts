@@ -127,10 +127,12 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
+  const system = await getSystemConcurrency(db);
   return c.json({
-    concurrency: await getSystemConcurrency(db),
+    concurrency: system.concurrency,
     min: CONCURRENCY_MIN,
     max: CONCURRENCY_MAX,
+    degraded: system.degraded,
   });
 }
 

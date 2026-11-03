@@ -235,6 +235,46 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     expect(storedWorkspace(db)).toBe(8);
   });
 
+  test("an unreadable stored cap surfaces degraded on both read faces, not a normal number", async () => {
+    // The faces must not present the conservative fallback as this workspace's
+    // setting: `degraded` is what lets them render a warning instead.
+    const { db } = fixture();
+    seed(db, "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
+      "review.concurrency.system", "not-a-number", new Date().toISOString());
+    expect(await (await getConcurrency(db, "ws-acme", "dana")).json()).toEqual({
+      // The workspace column is NULL (a real absence → its 16 default); only the
+      // system level was untrusted, so that level answers the conservative 1 and
+      // the flag is set. Each level degrades on its own value, never on its peer.
+      concurrency: 16,
+      system: 1,
+      min: 1,
+      max: 250,
+      degraded: true,
+    });
+    expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
+      concurrency: 1,
+      min: 1,
+      max: 250,
+      degraded: true,
+    });
+  });
+
+  test("an unreadable stored cap is reported as the cap the write actually enforced", async () => {
+    // `systemCapSql` answers the conservative 1 for an untrusted value, so the
+    // write is refused against 1 — the keyed 400 must say 1, not the 32 a
+    // second parse would read from the same row.
+    const { db } = fixture();
+    seed(db, "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
+      "review.concurrency.system", "not-a-number", new Date().toISOString());
+    const res = await putConcurrency(db, "ws-acme", "dana", { concurrency: 4 });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      key: "settings.error.concurrencyAboveSystem",
+      params: { system: 1 },
+    });
+    expect(storedWorkspace(db)).toBeNull();
+  });
+
   test("an out-of-range, non-integer or non-numeric value is a keyed 400", async () => {
     const { db } = fixture();
     for (const body of [
@@ -262,7 +302,13 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       const res = await getConcurrency(db, "ws-acme", login);
       expect(res.status, login).toBe(200);
       // NULL column reads as the documented default 16; here it was written.
-      expect(await res.json()).toEqual({ concurrency: 8, system: 20, min: 1, max: 250 });
+      expect(await res.json()).toEqual({
+        concurrency: 8,
+        system: 20,
+        min: 1,
+        max: 250,
+        degraded: false,
+      });
     }
   });
 
@@ -273,6 +319,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       system: 32,
       min: 1,
       max: 250,
+      degraded: false,
     });
     expect((await getConcurrency(db, "ws-acme", "frank")).status).toBe(404);
   });
@@ -301,12 +348,14 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       concurrency: 32,
       min: 1,
       max: 250,
+      degraded: false,
     });
     await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ concurrency: 5 }) });
     expect(await (await runtimeApi(db, { method: "GET" })).json()).toEqual({
       concurrency: 5,
       min: 1,
       max: 250,
+      degraded: false,
     });
   });
 

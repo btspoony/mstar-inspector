@@ -384,6 +384,9 @@ export const en = {
     /** {stored} > {system}: an operator lowered the system cap after this workspace's value was stored. */
     concurrencyStoredAboveSystem:
       "Stored value: {stored} — above the current system cap of {system}, so {system} applies until you save a lower value.",
+    /** The stored cap could not be read — the numbers are a fallback, not this workspace's setting. */
+    concurrencyUnreadable:
+      "The stored review concurrency could not be read, so reviews are running one at a time. Nothing was changed — retry the read.",
   },
   /**
    * Platform-operator support (2026-10): the operator's read-only face and the
@@ -856,6 +859,9 @@ export const en = {
       concurrencyFailed: "Could not change the system concurrency.",
       /** {value} = the cap currently stored (or the documented default). */
       concurrencyCurrent: "Effective on the next review: {value}.",
+      /** The stored cap could not be read — the numbers are a fallback, not the stored setting. */
+      concurrencyUnreadable:
+        "The stored system concurrency could not be read, so every workspace is running one review at a time. Nothing was changed — retry the read.",
     },
     /** Workspaces page. */
     workspaces: {

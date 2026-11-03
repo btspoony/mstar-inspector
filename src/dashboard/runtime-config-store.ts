@@ -25,8 +25,11 @@
  * a PRESENT value the parse cannot trust, or a result that is not a row at
  * all, answers the CONSERVATIVE cap (1, i.e. serial) with `degraded: true` and
  * never throws — a settings read that breaks must not admit unlimited
- * concurrent reviews. The structured warn belongs to the consumer that has a
- * logger (the pipeline reader), not here.
+ * concurrent reviews. The single-level readers (`getSystemConcurrency`,
+ * `getWorkspaceConcurrency`) answer `{ concurrency, degraded }` for the same
+ * reason: a settings face that renders the conservative fallback as a normal
+ * value invites a save of a number nobody stored. The structured warn belongs
+ * to the consumer that has a logger (the pipeline reader), not here.
  *
  * Write discipline: values are integers in 1..250; a workspace value above the
  * CURRENT system value is refused, never clamped. The cap is part of the
@@ -77,25 +80,22 @@ function parseStored(value: unknown): number | undefined {
   return isConcurrencyValue(parsed) ? parsed : Number.NaN;
 }
 
-/**
- * One cap from its stored value: absent → `fallback`, present-but-untrusted →
- * the conservative bound. Same answer `getEffectiveConcurrency` degrades to.
- */
-function resolveStored(value: unknown, fallback: number): number {
-  const parsed = parseStored(value);
-  if (parsed === undefined) return fallback;
-  return Number.isNaN(parsed) ? CONCURRENCY_MIN : parsed;
-}
+/** One single-level read: the cap, plus whether the stored value could be trusted. */
+export type ConcurrencyRead = { concurrency: number; degraded: boolean };
 
 /**
  * One cap from one result row. Only `row === null` is an absent setting, so the
  * caller's default applies; a present row whose selected field is missing is a
  * malformed result — untrusted, never absent.
  */
-function resolveRow(row: { value?: unknown } | null, fallback: number): number {
-  if (row === null) return fallback;
-  if (row.value === undefined) return CONCURRENCY_MIN;
-  return resolveStored(row.value, fallback);
+function resolveRow(row: { value?: unknown } | null, fallback: number): ConcurrencyRead {
+  if (row === null) return { concurrency: fallback, degraded: false };
+  if (row.value === undefined) return { concurrency: CONCURRENCY_MIN, degraded: true };
+  const parsed = parseStored(row.value);
+  if (parsed === undefined) return { concurrency: fallback, degraded: false };
+  return Number.isNaN(parsed)
+    ? { concurrency: CONCURRENCY_MIN, degraded: true }
+    : { concurrency: parsed, degraded: false };
 }
 
 /** Why a write was refused. `invalid_value` is the 1..250 range; `above_system`
@@ -116,6 +116,22 @@ export class RuntimeConfigError extends Error {
   }
 }
 
+/**
+ * A workspace value above the system cap. It carries the cap the write
+ * predicate itself compared against — the same `systemCapSql` expression, not a
+ * second parse of the row — so the refusal can never quote a different number
+ * than the one that decided it.
+ */
+export class AboveSystemError extends RuntimeConfigError {
+  readonly system: number;
+
+  constructor(value: number, system: number) {
+    super("above_system", `workspace concurrency ${value} exceeds the system cap ${system}`);
+    this.name = "AboveSystemError";
+    this.system = system;
+  }
+}
+
 /** The two caps and the value they resolve to. */
 export type EffectiveConcurrency = {
   system: number;
@@ -127,8 +143,11 @@ export type EffectiveConcurrency = {
 /** One `review_runtime_settings` row. The declared `value` type constrains nothing a row actually carries. */
 type RuntimeSettingRow = { value?: unknown };
 
-/** The system cap; an absent row reads as the default, anything untrusted as 1. */
-export async function getSystemConcurrency(db: DashboardD1): Promise<number> {
+/**
+ * The system cap on its own: an absent row reads as the default, anything
+ * untrusted as 1 with `degraded: true`.
+ */
+export async function getSystemConcurrency(db: DashboardD1): Promise<ConcurrencyRead> {
   const row = await db
     .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
     .bind(SYSTEM_CONCURRENCY_KEY)
@@ -136,11 +155,14 @@ export async function getSystemConcurrency(db: DashboardD1): Promise<number> {
   return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT);
 }
 
-/** The workspace cap; an absent or RETIRED workspace reads as the default, anything untrusted as 1. */
+/**
+ * The workspace cap on its own: an absent or RETIRED workspace reads as the
+ * default, anything untrusted as 1 with `degraded: true`.
+ */
 export async function getWorkspaceConcurrency(
   db: DashboardD1,
   workspaceId: string,
-): Promise<number> {
+): Promise<ConcurrencyRead> {
   const row = await db
     .prepare(
       "SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = ? AND deleted_at IS NULL",
@@ -310,19 +332,17 @@ export async function setWorkspaceConcurrency(
 
   // Zero rows: the write was refused, so nothing was written. Which refusal it
   // was comes from the state after the attempt, never from a check before it.
+  // The cap is read through `systemCapSql` — the expression the UPDATE compared
+  // against — so the message cannot quote a number a second parser decided.
   const post = await db
     .prepare(
       `SELECT (SELECT 1 FROM workspaces WHERE id = ?1 AND deleted_at IS NULL) AS target,
-              (SELECT value FROM review_runtime_settings WHERE key = ?2) AS system_value`,
+              ${systemCapSql("?2")} AS system_cap`,
     )
     .bind(workspaceId, SYSTEM_CONCURRENCY_KEY)
-    .first<{ target: unknown; system_value?: unknown }>();
+    .first<{ target: unknown; system_cap?: unknown }>();
   if (post === null || post.target === null) throw new UnknownWorkspaceError(workspaceId);
-  const system = resolveStored(post.system_value, SYSTEM_CONCURRENCY_DEFAULT);
-  throw new RuntimeConfigError(
-    "above_system",
-    `workspace concurrency ${value} exceeds the system cap ${system}`,
-  );
+  throw new AboveSystemError(value, Number(post.system_cap));
 }
 
 /** A refused write against a workspace id that does not exist. */

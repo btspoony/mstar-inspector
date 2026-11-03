@@ -203,7 +203,7 @@ describe("workspace name card", () => {
         });
       }
       if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250 }), {
+        return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250, degraded: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -277,7 +277,7 @@ describe("workspace name card", () => {
         });
       }
       if (url.endsWith("/api/settings/concurrency")) {
-        return new Response(JSON.stringify({ concurrency: 8, system: 4, min: 1, max: 250 }), {
+        return new Response(JSON.stringify({ concurrency: 8, system: 4, min: 1, max: 250, degraded: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -345,7 +345,7 @@ describe("workspace name card", () => {
           headers: { "Content-Type": "text/html" },
         });
       }
-      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250 }), {
+      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250, degraded: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -399,12 +399,12 @@ describe("workspace name card", () => {
         });
       }
       if (url === "/dashboard/ws_beta/api/settings/concurrency") {
-        return new Response(JSON.stringify({ concurrency: 5, system: 12, min: 1, max: 250 }), {
+        return new Response(JSON.stringify({ concurrency: 5, system: 12, min: 1, max: 250, degraded: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
       }
-      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250 }), {
+      return new Response(JSON.stringify({ concurrency: 8, system: 32, min: 1, max: 250, degraded: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -455,6 +455,60 @@ describe("workspace name card", () => {
           body: JSON.stringify({ concurrency: 5 }),
         },
       ]);
+
+      await act(async () => root.unmount());
+    } finally {
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
+  });
+
+  test("a degraded read warns instead of showing the fallback cap in the field", async () => {
+    // The store answered the conservative 1 for both levels because neither
+    // stored value could be read. Rendering that as a normal value would invite
+    // a save of a number nobody stored.
+    const { win, cleanup } = installDom(`http://localhost${PATH}`);
+    const calls: Call[] = [];
+    const realFetch = globalThis.fetch;
+    let degraded = true;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      calls.push({ method: init?.method ?? "GET", url: String(input), body: String(init?.body ?? "") });
+      return new Response(
+        JSON.stringify({ concurrency: 1, system: 1, min: 1, max: 250, degraded }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
+
+      expect(container.textContent).toContain(t("en", "workspace.concurrencyUnreadable"));
+      // The field is a recovery path, not a value display: it starts EMPTY, so no
+      // number the store never held is presented as this workspace's setting.
+      const field = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
+      expect(field).not.toBeNull();
+      expect(field.value).toBe("");
+      // Nor may the "system cap" line state the fallback as the real ceiling.
+      expect(container.textContent).not.toContain(t("en", "workspace.concurrencySystemCap", { system: 1 }));
+
+      // The offered recovery is a re-read, not a save of the fallback.
+      degraded = false;
+      const retry = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "common.retry"),
+      );
+      expect(retry).toBeDefined();
+      await act(async () =>
+        (retry as unknown as HTMLButtonElement).dispatchEvent(
+          new win.Event("click", { bubbles: true }) as unknown as Event,
+        ),
+      );
+      expect(calls.filter((call) => call.url.endsWith("/api/settings/concurrency"))).toHaveLength(2);
+      expect(container.textContent).not.toContain(t("en", "workspace.concurrencyUnreadable"));
+      expect((win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement).value).toBe(
+        "1",
+      );
 
       await act(async () => root.unmount());
     } finally {

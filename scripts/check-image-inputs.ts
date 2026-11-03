@@ -25,6 +25,10 @@ import { readFileSync } from "node:fs";
  * so editing one alone fails. The root `.dockerignore` belongs here because it
  * decides which of those sources reach the build context at all: excluding one
  * changes the image without touching anything the Dockerfile names.
+ * `wrangler.jsonc` belongs here because it is the container's build config: its
+ * `build_context` decides which tree the Dockerfile sees, and its `dockerfile`
+ * path decides which file is hashed, so editing either changes the image a
+ * deploy produces — while the gate would still be diffing the old path.
  */
 export const IMAGE_INPUT_FAMILIES: readonly string[] = [
   "packages/runner/src/**",
@@ -34,6 +38,7 @@ export const IMAGE_INPUT_FAMILIES: readonly string[] = [
   "packages/runner/verify-synthesis.sh",
   "sandbox-image/**",
   ".dockerignore",
+  "wrangler.jsonc",
 ];
 
 /** One family glob as an anchored path regex (`**` = anything below). */

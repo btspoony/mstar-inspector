@@ -75,6 +75,16 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 <p className="text-sm text-muted-foreground">
                   {t(locale, "admin.runtime.concurrencyDescription")}
                 </p>
+                {data.degraded ? (
+                  // The stored cap could not be trusted, so `data.concurrency` is
+                  // the conservative fallback: showing it as the current value
+                  // would invite saving a number nobody stored. The form stays
+                  // (a save is the only way to repair an unreadable row) but
+                  // starts empty, and the "effective" line is withheld.
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.concurrencyUnreadable")} />
+                  </div>
+                ) : null}
                 <form
                   className="mt-4 flex flex-wrap items-end gap-2"
                   onSubmit={(event) => void onSubmit(event, data.concurrency)}
@@ -90,17 +100,25 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       max={data.max}
                       className="w-32"
                       autoComplete="off"
-                      value={draft ?? String(data.concurrency)}
+                      required={data.degraded}
+                      value={draft ?? (data.degraded ? "" : String(data.concurrency))}
                       onChange={(event) => setDraft(event.target.value)}
                     />
                   </div>
                   <Button type="submit" disabled={busy}>
                     {t(locale, "admin.runtime.concurrencySave")}
                   </Button>
+                  {data.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
                 </form>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {t(locale, "admin.runtime.concurrencyCurrent", { value: data.concurrency })}
-                </p>
+                {data.degraded ? null : (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t(locale, "admin.runtime.concurrencyCurrent", { value: data.concurrency })}
+                  </p>
+                )}
               </CardContent>
             </SectionCard>
           </div>

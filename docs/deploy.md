@@ -2072,6 +2072,8 @@ The input path families it covers — the gate's whole input vocabulary:
 - `packages/runner/verify-synthesis.sh`
 - `sandbox-image/**`
 - `.dockerignore` — it decides which of these sources reach the build context
+- `wrangler.jsonc` — its build context decides which tree the Dockerfile sees
+  and its dockerfile path decides which file is hashed
 
 `scripts/check-image-inputs.test.ts` proves the list is complete against the
 image itself: every `COPY <src>` source in `sandbox-image/Dockerfile` must be
@@ -2089,14 +2091,18 @@ reads git output only — it never
 builds the image and never inspects file contents beyond that Dockerfile diff —
 and an unreadable diff or config fails the run rather than passing unverified.
 
-**Pull requests only.** The `Image rebuild gate` step in
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is gated on
-`github.event_name == 'pull_request'` and diffs against
-`github.event.pull_request.base.sha`; the job checkout therefore carries
-`fetch-depth: 0`. A push has no base commit to diff against, so a direct push to
-`main` is not covered — there the manual check in
-[`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild stays the rule, and that
-section also carries the marker instruction the gate prints on failure.
+**Pull requests and pushes.** The `Image rebuild gate` step in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) diffs a pull request
+against `github.event.pull_request.base.sha` and a push (CI runs on `main`)
+against `github.event.before`, the ref's previous tip; the job checkout
+therefore carries `fetch-depth: 0`. A branch's first push reports the all-zeros
+sha, which has nothing to diff against — the step skips that case and exits
+successfully rather than failing on a diff it cannot compute. `deploy.yml` does
+not run the gate itself yet; wiring it into the deploy job is tracked as
+`I-000342`, so until then a push straight to `main` that lands between the CI
+run and the deploy still relies on the manual check in
+[`AGENTS.md`](../AGENTS.md) § Sandbox image rebuild, which also carries the
+marker instruction the gate prints on failure.
 
 The same gate runs locally against any base rev:
 

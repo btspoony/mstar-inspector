@@ -334,7 +334,7 @@ describe("Flags screen", () => {
 });
 
 describe("Runtime screen", () => {
-  const RUNTIME = { concurrency: 24, min: 1, max: 250 };
+  const RUNTIME = { concurrency: 24, min: 1, max: 250, degraded: false };
 
   test("a failed read renders the error with a retry that reloads", async () => {
     let failing = true;
@@ -387,6 +387,36 @@ describe("Runtime screen", () => {
     expect(surface.text()).toContain("body must be { concurrency: <integer in 1..250> }");
     // The rejected write leaves the stored value as it was.
     expect(surface.text()).toContain("Effective on the next review: 24.");
+    await surface.close();
+  });
+
+  test("a degraded read warns instead of presenting the fallback as the stored cap", async () => {
+    // The store answered the conservative 1 because the row could not be read.
+    // Showing 1 as a normal value would invite saving a number nobody stored.
+    let degraded = true;
+    const surface = await runtimeScreen(() =>
+      json({ concurrency: 1, min: 1, max: 250, degraded }),
+    );
+    expect(surface.text()).toContain(
+      "The stored system concurrency could not be read, so every workspace is running one review at a time. Nothing was changed — retry the read.",
+    );
+    // The form stays — a save is the only way to repair an unreadable row — but
+    // its field starts EMPTY and the "effective" line is withheld, so neither
+    // presents the fallback as the stored cap.
+    const input = surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement;
+    expect(input).not.toBeNull();
+    expect(input.value).toBe("");
+    expect(surface.text()).not.toContain("Effective on the next review: 1.");
+
+    // The offered recovery is the read, and it clears the warning once it works.
+    degraded = false;
+    const retry = [...surface.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Retry",
+    );
+    expect(retry).toBeDefined();
+    await surface.click(retry!);
+    expect(surface.text()).toContain("Effective on the next review: 1.");
+    expect(surface.text()).not.toContain("could not be read");
     await surface.close();
   });
 
