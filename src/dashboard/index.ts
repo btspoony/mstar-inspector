@@ -3124,7 +3124,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
       });
     }
     const installations = await apps.listInstallations(app.id);
-    const deliveries = await apps.listRecentDeliveries(app.id, 5);
+    const deliveries = await apps.listRecentDeliveries(app.id, 10);
     const deliverySummary = await apps.deliverySummary(app.id);
     const base = {
       // The stable workspace id the App belongs to (server-resolved scope,
@@ -3166,6 +3166,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
         event_name: d.event_name,
         outcome: d.outcome,
         status_code: d.status_code,
+        repository_full_name: d.repository_full_name,
         created_at: d.created_at,
       })),
       delivery_summary: {

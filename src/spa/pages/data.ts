@@ -416,6 +416,8 @@ type SettingsHealth = {
     event_name: string | null;
     outcome: string;
     status_code: number | null;
+    /** `owner/name` of the source repo (migration 0040); NULL = unknown source. */
+    repository_full_name: string | null;
     created_at: string;
   }>;
   delivery_summary?: {
@@ -912,8 +914,11 @@ export function pullRequestStatePill(
   return { label: t(locale, "pullRequests.state.open"), tone: "accent" };
 }
 
-/** The App detail page's tabs (应用设置 / 洞察 / Pull requests). The last two are manager-only. */
-export type AppDetailTab = "settings" | "insights" | "pull-requests";
+/**
+ * The App detail page's tabs (应用设置 / 已安装 / 洞察 / Pull requests). The
+ * last three are manager-only — they render from the manage payload.
+ */
+export type AppDetailTab = "settings" | "installations" | "insights" | "pull-requests";
 
 /**
  * URL-derived detail state: the active tab, the insights filters, and the
@@ -943,18 +948,21 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
  * shared by the mount initializer and the popstate re-sync (the
  * spa-url-state-resync contract), built on the pinned insights helpers
  * (off-set windows resolve to the default segment). The manager-gated tab
- * values (`insights`, `pull-requests`) are honored only for managers; a
- * non-manager — or any other tab value — always resolves to the settings
- * tab. `pr` rides verbatim when it matches the `owner/repo/number` shape.
+ * values (`installations`, `insights`, `pull-requests`) are honored only for
+ * managers; a non-manager — or any other tab value — always resolves to the
+ * settings tab. `pr` rides verbatim when it matches the `owner/repo/number`
+ * shape.
  */
 export function parseAppDetailSearch(search: string, canManage: boolean): AppDetailSearch {
   const insights = parseInsightsSearch(search);
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const rawTab = params.get("tab");
   // The bare path IS settings — the only legal non-settings values are the
-  // two manager tabs, gated by the payload's can_manage.
+  // three manager tabs, gated by the payload's can_manage.
   const tab: AppDetailTab =
-    canManage && (rawTab === "insights" || rawTab === "pull-requests") ? rawTab : "settings";
+    canManage && (rawTab === "installations" || rawTab === "insights" || rawTab === "pull-requests")
+      ? rawTab
+      : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";

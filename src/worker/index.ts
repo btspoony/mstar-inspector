@@ -34,6 +34,7 @@ import {
   payloadMentionsALogin,
   pullRequestRecord,
   WEBHOOK_BODY_LIMIT,
+  webhookRepositoryFullName,
   type WebhookOutcome,
 } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
@@ -435,6 +436,10 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       eventName,
       outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled, reviewGlobal),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
+      // The diagnostics face's "which repo did this come from?" answer — the
+      // same best-effort parse as the PR ledger below, null when the payload
+      // carries no repository.
+      repositoryFullName: webhookRepositoryFullName(rawBody),
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

@@ -381,9 +381,10 @@ export function SettingsView({
       {/* Detail-page section flow (r3 baseline § 5): one content plane divided
           by hairlines instead of one framed card per section. Sections are
           direct siblings so FlowSection's first/last edge trimming applies.
-          Order and membership are the plan's: identity, installations,
-          runtime & harness, configuration (providers, chains), seats, and the
-          destructive ops zone. Every field, action and data flow is unchanged. */}
+          Order and membership are the plan's: identity, runtime & harness,
+          configuration (providers, chains), seats, and the destructive ops
+          zone. The installations / deliveries face lives on its own 已安装 tab
+          (AppDetailPage). Every field, action and data flow is unchanged. */}
       <div className="flex flex-col">
         <AppInfoSection
           locale={locale}
@@ -392,8 +393,6 @@ export function SettingsView({
           canManage={payload.can_manage}
           onReload={() => onReload({ background: true })}
         />
-
-        <InstallationsSection locale={locale} payload={payload} />
 
         <RuntimeHarnessSection
           locale={locale}
@@ -711,12 +710,15 @@ export function AppInfoSection({
 }
 
 /**
- * Installations — the App's `installations[]` rows (manager settings payload
- * only) as a table, plus the delivery health they explain: the last webhook
- * and the recent deliveries. One row is one installation, and its facts are
- * exactly `account_login`, `installation_id` and `seen_at` — the payload
- * carries no per-installation repository count, so no repository column
- * exists (dashboard surface pass, 2026-11-01; compass D13).
+ * Installations — the body of the App detail's 已安装 / Installed tab
+ * (manager-only): the App's `installations[]` rows as a table, plus the
+ * delivery health they explain: the last webhook and the recent deliveries.
+ * One row is one installation, and its facts are exactly `account_login`,
+ * `installation_id` and `seen_at` — the payload carries no per-installation
+ * repository count, so no repository column exists (dashboard surface pass,
+ * 2026-11-01; compass D13). Each delivery line leads with its source
+ * repository (migration 0040), or the unknown-source label for rows written
+ * before it.
  */
 export function InstallationsSection({
   locale,
@@ -782,10 +784,13 @@ export function InstallationsSection({
           <ul className="flex flex-col gap-2">
             {payload.deliveries.map((delivery, index) => (
               <li key={`${delivery.created_at}-${index}`} className="text-sm">
-                <span className="font-medium">{delivery.event_name ?? t(locale, "settings.unknownEvent")}</span>
+                <span className="font-medium">
+                  {delivery.repository_full_name ?? t(locale, "settings.unknownSource")}
+                </span>
                 <span className="text-muted-foreground">
                   {" "}
-                  · {formatRelativeTime(delivery.created_at, locale)} ·{" "}
+                  · {delivery.event_name ?? t(locale, "settings.unknownEvent")} ·{" "}
+                  {formatRelativeTime(delivery.created_at, locale)} ·{" "}
                   {deliveryOutcomeLabel(delivery.outcome, locale)} ·{" "}
                   {t(locale, "settings.status", {
                     code: delivery.status_code === null ? "—" : String(delivery.status_code),

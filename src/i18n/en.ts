@@ -125,6 +125,7 @@ export const en = {
   appDetail: {
     backToApps: "Back to Apps",
     tabSettings: "Settings",
+    tabInstallations: "Installed",
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
   },
@@ -490,9 +491,10 @@ export const en = {
     noInstallations: "No installations yet.",
     recentDeliveries: "Recent deliveries",
     recentDeliveriesCopy:
-      "Up to 5 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",
+      "Up to 10 webhook deliveries — outcomes that report a verdict (OK / Paused / Rejected) come first, then the rest newest first.",
     noDeliveries: "No deliveries yet.",
     unknownEvent: "unknown event",
+    unknownSource: "unknown repo",
     status: "status {code}",
     addToChain: "Add to chain",
     noAutoDiscovery: "This provider does not list models — pick from another verified provider.",

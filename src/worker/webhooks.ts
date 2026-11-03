@@ -366,7 +366,14 @@ const installationSchema = z
   .nullable()
   .optional();
 const repositorySchema = z
-  .object({ name: z.string(), owner: z.object({ login: z.string() }) })
+  .object({
+    name: z.string(),
+    owner: z.object({ login: z.string() }),
+    // Optional: GitHub states the `owner/name` form on every repository
+    // payload, but the classifiers only ever needed the pair — requiring it
+    // would turn an old-shaped delivery into a parse failure.
+    full_name: z.string().min(1).optional(),
+  })
   .nullable()
   .optional();
 
@@ -775,6 +782,29 @@ export function pullRequestRecord(rawBody: string): {
     // which the store resolves to now EXPLICITLY.
     updatedAt: RFC3339.test(pull_request?.updated_at ?? "") ? (pull_request?.updated_at ?? null) : null,
   };
+}
+
+/**
+ * The delivery's SOURCE repository (`owner/name`) — the diagnostics face's
+ * "which repo did this delivery come from?" answer, which the delivery row
+ * could not give before migration 0040. `repository.full_name` wins when
+ * GitHub states it; the same block's `owner.login` + `name` pair is the
+ * fallback. `null` when the body is not JSON, carries no `repository`, or
+ * states neither form.
+ *
+ * Never throws: this rides the best-effort delivery-recording path, so a
+ * malformed body degrades to "unknown source" rather than costing the row.
+ */
+export function webhookRepositoryFullName(rawBody: string): string | null {
+  const parsed = parseBody(rawBody);
+  if (parsed === null) return null;
+  const result = z.object({ repository: repositorySchema }).safeParse(parsed);
+  if (!result.success) return null;
+  const repository = result.data.repository;
+  if (!repository) return null;
+  if (repository.full_name !== undefined) return repository.full_name;
+  const { login } = repository.owner;
+  return login === "" || repository.name === "" ? null : `${login}/${repository.name}`;
 }
 
 function parseBody(rawBody: string): unknown {

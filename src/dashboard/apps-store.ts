@@ -364,6 +364,11 @@ export type RecordDeliveryInput = {
   outcome: DeliveryOutcome;
   /** The classifier's status for rejected; NULL for every other outcome. */
   statusCode: number | null;
+  /**
+   * The delivery's source repository (`owner/name`, migration 0040) — NULL
+   * when the payload carried no `repository` (an install / bypass event).
+   */
+  repositoryFullName: string | null;
 };
 
 /** A row of `webhook_deliveries` (D1 column names, snake_case; migration 0011). */
@@ -373,6 +378,8 @@ export type WebhookDeliveryRow = {
   event_name: string | null;
   outcome: DeliveryOutcome;
   status_code: number | null;
+  /** `owner/name` of the source repo (0040); NULL = unknown source. */
+  repository_full_name: string | null;
   created_at: string;
 };
 
@@ -928,10 +935,17 @@ export function createAppsStore(db: AppsStoreD1) {
       const eventName = input.eventName === null ? null : input.eventName.slice(0, EVENT_NAME_MAX_LENGTH);
       await db
         .prepare(
-          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name)
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .bind(crypto.randomUUID(), input.appId, eventName, input.outcome, input.statusCode)
+        .bind(
+          crypto.randomUUID(),
+          input.appId,
+          eventName,
+          input.outcome,
+          input.statusCode,
+          input.repositoryFullName,
+        )
         .run();
     },
 
@@ -959,7 +973,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * Recent-deliveries read face (settings panel): THIS App's rows, verdict
      * tier first, newest first inside each tier (created_at has second
      * precision, so rowid breaks ties inside one second — the order is total
-     * and deterministic), bounded by the caller's N (default 5).
+     * and deterministic), bounded by the caller's N (default 10).
      *
      * The panel exists for one question — is review flowing? — and bypass
      * traffic (`check_run`, `ping`, …) dwarfs review traffic while landing in
@@ -970,7 +984,7 @@ export function createAppsStore(db: AppsStoreD1) {
      * untouched, and an App whose ONLY traffic is bypass rows still returns
      * those rows — the list never goes empty because of the ranking.
      */
-    async listRecentDeliveries(appId: string, limit = 5): Promise<WebhookDeliveryRow[]> {
+    async listRecentDeliveries(appId: string, limit = 10): Promise<WebhookDeliveryRow[]> {
       const res = await db
         .prepare(
           `SELECT * FROM webhook_deliveries
