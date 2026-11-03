@@ -76,7 +76,18 @@
 
 import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
-import { idemKey, IDEMPOTENCY_SECONDS, IDEM_DONE, IDEM_DROPPED, IDEM_FAILED, isEnqueuedClaim, type IdempotencyKey } from "../contracts/idem";
+import {
+  idemKey,
+  IDEMPOTENCY_SECONDS,
+  IDEM_DEGRADED,
+  IDEM_DONE,
+  IDEM_DROPPED,
+  IDEM_ENQUEUED,
+  IDEM_FAILED,
+  IDEM_PAUSED,
+  isEnqueuedClaim,
+  type IdempotencyKey,
+} from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../../packages/shared/src/runtime";
@@ -471,12 +482,13 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
  * FOUR DISTINCT typed outcomes never throw: a guard-held message
  * is scheduled for a per-message delayed retry and finally acked with a
  * warning — it is never rethrown into the immediate-retry ×3 → DLQ path; a
- * PAUSED message (the App's review_enabled=0) is acked directly — an
- * intentional skip with zero side effects, never a retry or a DLQ entry (a
- * throw would be the wrong semantics for an operator pause); a DEGRADED
- * message (parse-fail) is acked directly after its best-effort
- * review_failures row + degraded comment — a deterministic model-output
- * failure where retry is deterministic waste; a SUPERSEDED message is acked
+ * PAUSED message (the App's review_enabled=0) is acked directly after its
+ * payload sha's claim is stamped `paused` — no review, no sandbox, never a
+ * retry or a DLQ entry (a throw would be the wrong semantics for an operator
+ * pause); a DEGRADED message (parse-fail) is acked directly after its
+ * best-effort review_failures row + degraded comment and a `degraded` claim
+ * stamp — a deterministic model-output failure where retry is deterministic
+ * waste; a SUPERSEDED message is acked
  * directly because the ledger already holds a newer commit for its PR.
  * Infra failures keep the
  * existing throw → retry → DLQ behavior (plus the AL-6 best-effort failure
@@ -603,25 +615,28 @@ async function handleGuardHeld(
   // The newer commit's enqueue claim is the supersede skip's ONLY proof, so a
   // job dropped here for good must stop being proof: overwrite its key with
   // "dropped" (the same TTL the worker claim used), the value both readers
-  // treat as "not reviewed". Best-effort — a KV fault only leaves a stale "1",
-  // which the skip then accepts and `review_failures` traces (the drop row
-  // below).
+  // treat as "not reviewed". Never downgrade `done` though — a sha this
+  // consumer already reviewed stays proof, or the redelivery would re-review
+  // a reviewed commit. So read first and write only over absent/`1`; a read
+  // fault skips the write (the claim stays "1", today's behavior). Best-effort
+  // — a KV fault only leaves a stale "1", which the skip then accepts and
+  // `review_failures` traces (the drop row below).
   if (headSha !== "") {
+    const claimKey = idemKey({
+      installation_id: message.body.installation_id,
+      owner: message.body.owner,
+      repo: message.body.repo,
+      pr_number: message.body.pr_number,
+      head_sha: headSha,
+    });
     try {
-      await deps.env.IDEMPOTENCY_KV.put(
-        idemKey({
-          installation_id: message.body.installation_id,
-          owner: message.body.owner,
-          repo: message.body.repo,
-          pr_number: message.body.pr_number,
-          head_sha: headSha,
-        }),
-        IDEM_DROPPED,
-        { expirationTtl: IDEMPOTENCY_SECONDS },
-      );
+      const current = await deps.env.IDEMPOTENCY_KV.get(claimKey);
+      if (current === null || current === IDEM_ENQUEUED) {
+        await deps.env.IDEMPOTENCY_KV.put(claimKey, IDEM_DROPPED, { expirationTtl: IDEMPOTENCY_SECONDS });
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `dropped-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
+      deps.log.warn(fields, `dropped-claim KV update failed (the skip may still treat this commit as queued): ${detail}`);
     }
   }
   const identity = `${message.body.owner}/${message.body.repo}#${message.body.pr_number}`;
@@ -2088,9 +2103,11 @@ async function kvDoneHit(
  * skip backed by the ledger alone would drop a PR's only review.
  *
  * `"1"` (queued) and `"done"` (reviewed by this consumer) are that proof;
- * `"dropped"` (the guard's terminal ack in handleGuardHeld) and `"failed"`
- * (the final delivery is heading to the DLQ) are NO proof — both name a commit
- * that was never reviewed, so this delivery must review rather than skip.
+ * `"dropped"` (the guard's terminal ack in handleGuardHeld), `"failed"` (the
+ * final delivery is heading to the DLQ), `"paused"` (the App is paused) and
+ * `"degraded"` (the run ended in a degraded notice) are NO proof — every one
+ * names a commit that was never reviewed, so this delivery must review rather
+ * than skip.
  *
  * Fail-open: an absent ledger sha, an absent key or a KV fault all mean "no
  * proof" → review normally (a fault logs one warn line).
@@ -2194,8 +2211,9 @@ export function createReviewConsumer(
         await handleGuardHeld(message, deps, outcome.admission, outcome.heldHeadSha);
       } else if (outcome.kind === "paused") {
         // Architect lock L4: a paused App's in-flight message is
-        // acked DIRECTLY — an intentional skip with zero side effects, never
-        // a retry and never a DLQ entry.
+        // acked DIRECTLY — an intentional skip (its claim was already stamped
+        // `paused` inside processMessage), never a retry and never a DLQ
+        // entry.
         message.ack();
       } else if (outcome.kind === "degraded") {
         // Architect AL-1: parse-fail degrade — the
@@ -2326,8 +2344,33 @@ async function processMessage(
     if (resolution.kind === "paused") {
       deps.log.info(
         { ...baseFields, event: "review_paused" },
-        "review paused — app review_enabled=0; acking with zero side effects (no retry, no DLQ)",
+        "review paused — app review_enabled=0; acking without a review (no retry, no DLQ)",
       );
+      // A pause is an answer about the REVIEW, not about the commit: the
+      // worker's "1" claim must stop proving a review is coming, or both
+      // readers (the supersede skip and the worker's pre-check) would accept
+      // it forever. Best-effort — a KV fault only leaves the stale "1".
+      if (payload.head_sha) {
+        try {
+          await deps.env.IDEMPOTENCY_KV.put(
+            idemKey({
+              installation_id: payload.installation_id,
+              owner: payload.owner,
+              repo: payload.repo,
+              pr_number: payload.pr_number,
+              head_sha: payload.head_sha,
+            }),
+            IDEM_PAUSED,
+            { expirationTtl: IDEMPOTENCY_SECONDS },
+          );
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(
+            { ...baseFields, event: "review_paused" },
+            `paused-claim KV write failed (the skip may still treat this commit as queued): ${detail}`,
+          );
+        }
+      }
       return { kind: "paused" };
     }
     const { commenter, githubAppId, workspaceId } = resolution;
@@ -3018,6 +3061,27 @@ async function processMessage(
         `review degraded: output failed schema validation (${redactedError}) — degraded publication ${degradedOutcome.phase}` +
           `${degradedOutcome.phase === "failed" ? ` (${degradedOutcome.reason})` : ""}; acked, no retry/DLQ`,
       );
+      // A degraded notice is not a review: stamp the payload sha (the same
+      // key the worker claimed) so neither reader keeps accepting the "1".
+      // Best-effort — a KV fault only leaves the stale claim behind.
+      if (payload.head_sha) {
+        try {
+          await deps.env.IDEMPOTENCY_KV.put(
+            idemKey({
+              installation_id: payload.installation_id,
+              owner: payload.owner,
+              repo: payload.repo,
+              pr_number: payload.pr_number,
+              head_sha: payload.head_sha,
+            }),
+            IDEM_DEGRADED,
+            { expirationTtl: IDEMPOTENCY_SECONDS },
+          );
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(fields, `degraded-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
+        }
+      }
       return { kind: "degraded" };
     }
 

@@ -21,19 +21,26 @@ export const IDEMPOTENCY_SECONDS = 86400;
  * - `IDEM_DROPPED` ("dropped") — the in-flight guard gave the job up for good.
  * - `IDEM_FAILED` ("failed") — the final delivery threw; the message is
  *   heading to the DLQ.
+ * - `IDEM_PAUSED` ("paused") — the App is paused (review_enabled=0); the
+ *   message was acked with no review.
+ * - `IDEM_DEGRADED` ("degraded") — the model output failed validation; the
+ *   run ended in a degraded notice, never a review.
  *
  * Only the first two prove the commit has a review that ran or will run; the
- * other two mean the commit was NOT reviewed, so a redelivery must enqueue
+ * other four mean the commit was NOT reviewed, so a redelivery must enqueue
  * again rather than be skipped.
  */
 export const IDEM_ENQUEUED = "1";
 export const IDEM_DONE = "done";
 export const IDEM_DROPPED = "dropped";
 export const IDEM_FAILED = "failed";
+export const IDEM_PAUSED = "paused";
+export const IDEM_DEGRADED = "degraded";
 
 /**
  * True only for the values that prove the commit's job is pending or already
- * reviewed. `dropped` / `failed` / a miss all mean "not reviewed".
+ * reviewed. `dropped` / `failed` / `paused` / `degraded` / a miss all mean
+ * "not reviewed".
  */
 export function isEnqueuedClaim(value: string | null): boolean {
   return value === IDEM_ENQUEUED || value === IDEM_DONE;

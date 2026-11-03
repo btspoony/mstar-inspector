@@ -85,11 +85,12 @@ function toEventLog(payload: ReviewJobPayload): WorkerEventLog {
 /**
  * Idempotency pre-check: true only when the stored value proves this commit's
  * job is still pending or already ran ("1" / "done"). A "dropped" (the guard
- * gave the job up) or "failed" (the final delivery is heading to the DLQ)
- * value means the commit was NEVER reviewed, so a redelivery must enqueue
- * again instead of being skipped. On KV failure, returns false (conservative
- * pass) and logs a warning — the D1 UNIQUE constraint is the durable
- * duplicate guard.
+ * gave the job up), "failed" (the final delivery is heading to the DLQ),
+ * "paused" (the App is paused) or "degraded" (the run ended in a degraded
+ * notice) value means the commit was NEVER reviewed, so a redelivery must
+ * enqueue again instead of being skipped. On KV failure, returns false
+ * (conservative pass) and logs a warning — the D1 UNIQUE constraint is the
+ * durable duplicate guard.
  */
 export async function idempotencyHit(
   kv: KVNamespace,
