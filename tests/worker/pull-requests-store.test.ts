@@ -1,6 +1,7 @@
 /**
  * PR ledger store faces (migration 0039) — `upsertPullRequest`,
- * `listPullRequests`, `getPullRequest`.
+ * `listPullRequests`, and the detail split: `getPullRequestHead`,
+ * `countPullRequestRecords` and the three paged record readers.
  *
  * The fixture is the full migration set (the store helper walks
  * `migrations/`), so 0039 is the real DDL. Rows for `reviews`,
@@ -382,8 +383,18 @@ describe("sweepTerminalPullRequests", () => {
   });
 });
 
-describe("getPullRequest", () => {
-  test("returns the row with reviews, failures and findings", async () => {
+describe("pull request detail reads", () => {
+  /** One review row for `PR`'s repo. */
+  function seedReview(db: TestD1, id: string, reviewedAt: string, verdict = "approve"): void {
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, reviewed_at, app_id)
+         VALUES (?, 99, 'acme', 'widgets', 131, ?, ?, 'looks good', 'm1', 'p1', ?, ?)`,
+      )
+      .run(id, `sha-${id}`, verdict, reviewedAt, APP_ID);
+  }
+
+  async function detailFixture(): Promise<TestD1> {
     const db = createMigratedTestD1();
     seedApp(db);
     await createAppsStore(db).upsertPullRequest(PR);
@@ -392,34 +403,92 @@ describe("getPullRequest", () => {
       .run(APP_ID);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, app_id)
-         VALUES ('r1', 99, 'acme', 'widgets', 131, 'sha-1', 'approve', 'looks good', 'm1', 'p1', ?)`,
-      )
-      .run(APP_ID);
-    db.raw
-      .prepare(
         `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
          VALUES ('fx', 99, 'acme', 'widgets', 131, 'sha-1', 'sandbox', 'timeout')`,
       )
       .run();
     seedFinding(db, { findingId: "F-1", mergeClass: "must-fix", title: "Null deref", filePath: "src/a.ts", lineStart: 12, body: "guard it" });
+    return db;
+  }
 
-    const detail = await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131);
-    expect(detail).not.toBeNull();
-    expect(detail!.pull_request.latest_review).toEqual({ verdict: "approve", reviewed_at: expect.any(String) });
-    expect(detail!.pull_request.failure_count).toBe(1);
-    expect(detail!.reviews.length).toBe(1);
-    expect(detail!.reviews[0]!.summary_md).toBe("looks good");
-    expect(detail!.failures).toEqual([{ stage: "sandbox", error: "timeout", created_at: expect.any(String) }]);
-    expect(detail!.findings).toEqual([
+  test("the head, the counts and each record page read the same PR", async () => {
+    const db = await detailFixture();
+    seedReview(db, "r1", "2026-01-02 00:00:00");
+    const store = createAppsStore(db);
+
+    const head = await store.getPullRequestHead(APP_ID, "acme", "widgets", 131);
+    expect(head?.title).toBe("Add a thing");
+    // The latest review rides the head for the header's verdict fallback.
+    expect(head?.latest_verdict).toBe("approve");
+    expect(head?.latest_reviewed_at).toBe("2026-01-02 00:00:00");
+
+    expect(await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131)).toEqual({
+      findings: 1,
+      reviews: 1,
+      failures: 1,
+    });
+
+    const page = { offset: 0, limit: 10 };
+    const findings = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, page);
+    expect(findings.total).toBe(1);
+    expect(findings.items).toEqual([
       { finding_id: "F-1", severity: "must-fix", title: "Null deref", file_path: "src/a.ts", line: 12, body: "guard it" },
+    ]);
+
+    const reviews = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, page);
+    expect(reviews.total).toBe(1);
+    expect(reviews.items[0]!.summary_md).toBe("looks good");
+
+    const failures = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, page);
+    expect(failures.total).toBe(1);
+    expect(failures.items).toEqual([
+      { stage: "sandbox", error: "timeout", created_at: expect.any(String) },
     ]);
   });
 
-  test("unknown PR number → null (the route's 404)", async () => {
+  test("a severity filter narrows the findings page and its total", async () => {
+    const db = await detailFixture();
+    seedFinding(
+      db,
+      { findingId: "F-2", mergeClass: "nit", title: "Rename a thing", filePath: "src/b.ts", lineStart: 3, body: "style" },
+      "row-2",
+    );
+    const store = createAppsStore(db);
+    const page = { offset: 0, limit: 10 };
+    expect((await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, page)).total).toBe(2);
+    const filtered = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
+      ...page,
+      severity: "must-fix",
+    });
+    expect(filtered.total).toBe(1);
+    expect(filtered.items.map((finding) => finding.finding_id)).toEqual(["F-1"]);
+    // An exact match: a spelling the PR does not carry is an empty page.
+    const missing = await store.listPullRequestFindings(APP_ID, "acme", "widgets", 131, {
+      ...page,
+      severity: "blocker",
+    });
+    expect(missing).toEqual({ items: [], total: 0 });
+  });
+
+  test("limit/offset step through a section without moving its total", async () => {
+    const db = await detailFixture();
+    seedReview(db, "r1", "2026-01-02 00:00:00");
+    seedReview(db, "r2", "2026-01-03 00:00:00");
+    seedReview(db, "r3", "2026-01-04 00:00:00");
+    const store = createAppsStore(db);
+    // Newest first: the first page holds the two newest reviews.
+    const first = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 2 });
+    expect(first.total).toBe(3);
+    expect(first.items.map((review) => review.reviewed_at)).toEqual(["2026-01-04 00:00:00", "2026-01-03 00:00:00"]);
+    const second = await store.listPullRequestReviews(APP_ID, "acme", "widgets", 131, { offset: 2, limit: 2 });
+    expect(second.total).toBe(3);
+    expect(second.items.map((review) => review.reviewed_at)).toEqual(["2026-01-02 00:00:00"]);
+  });
+
+  test("unknown PR number → null head (the route's 404)", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    expect(await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 999)).toBeNull();
+    expect(await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "widgets", 999)).toBeNull();
   });
 
   test("the same number in another repo of the SAME App → null, never a fallback", async () => {
@@ -429,8 +498,8 @@ describe("getPullRequest", () => {
     await createAppsStore(db).upsertPullRequest({ ...PR, repo: "gadgets", title: "Other repo's #131" });
     // Both rows exist under #131; asking for a repo that has none must miss
     // rather than answer with either of them.
-    expect(await createAppsStore(db).getPullRequest(APP_ID, "acme", "sprockets", 131)).toBeNull();
-    expect((await createAppsStore(db).getPullRequest(APP_ID, "acme", "gadgets", 131))!.pull_request.title).toBe(
+    expect(await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "sprockets", 131)).toBeNull();
+    expect((await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "gadgets", 131))?.title).toBe(
       "Other repo's #131",
     );
   });
@@ -440,7 +509,7 @@ describe("getPullRequest", () => {
     seedApp(db);
     seedApp(db, "other-app", 2002);
     await createAppsStore(db).upsertPullRequest({ ...PR, appId: "other-app" });
-    expect(await createAppsStore(db).getPullRequest(APP_ID, "acme", "widgets", 131)).toBeNull();
+    expect(await createAppsStore(db).getPullRequestHead(APP_ID, "acme", "widgets", 131)).toBeNull();
   });
 });
 
@@ -448,10 +517,12 @@ describe("getPullRequest", () => {
 function seedFinding(
   db: TestD1,
   finding: { findingId: string; mergeClass: string; title: string; filePath: string; lineStart: number; body: string },
+  rowId = "row-1",
 ): void {
+  // Two findings can share one publication: the first call creates it.
   db.raw
     .prepare(
-      `INSERT INTO review_publications
+      `INSERT OR IGNORE INTO review_publications
          (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
        VALUES ('p1', ?, 99, 'acme', 'widgets', 131, 'sha-1', 'review', 'applied', '{}', 1, 1)`,
     )
@@ -462,9 +533,10 @@ function seedFinding(
          (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms)
-       VALUES ('row-1', ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', 1, 1, 'open', 1, 1)`,
+       VALUES (?, ?, 99, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', 1, 1, 'open', 1, 1)`,
     )
     .run(
+      rowId,
       APP_ID,
       finding.findingId,
       JSON.stringify({

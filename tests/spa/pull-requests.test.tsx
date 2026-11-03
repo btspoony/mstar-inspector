@@ -129,9 +129,7 @@ const DETAIL_B: PullRequestDetail = {
     latest_review: null,
     failure_count: 0,
   },
-  reviews: [],
-  failures: [],
-  findings: [],
+  counts: { findings: 0, reviews: 0, failures: 0 },
 };
 
 /** The stateful wrapper AppDetailView expects: the harness owns the search. */

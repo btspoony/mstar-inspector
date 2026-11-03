@@ -4342,62 +4342,137 @@ const appPullRequestsRoute = async (c: DashboardContext) => {
   return c.json({ pull_requests: rows });
 };
 
-const appPullRequestRoute = async (c: DashboardContext) => {
-  c.header("Cache-Control", "private, no-store");
-  const gate = await requireAppManagerJson(c);
-  if (!gate.ok) return gate.response;
+/** The record-section paging bounds, enforced here (never a silent default on a bad value). */
+const RECORD_PAGE_LIMIT = { default: 10, min: 1, max: 50 } as const;
+
+type ParsePagingResult = { ok: true; offset: number; limit: number } | { ok: false };
+
+/**
+ * `offset` / `limit` from the query string. Absent means the default; a
+ * present value must be plain decimal digits and in range — a malformed one is
+ * a 400, so a caller never believes it asked for a page it did not get.
+ */
+function parseRecordPaging(c: DashboardContext): ParsePagingResult {
+  const rawLimit = c.req.query("limit");
+  const rawOffset = c.req.query("offset");
+  if (rawLimit !== undefined && !/^[0-9]+$/.test(rawLimit)) return { ok: false };
+  if (rawOffset !== undefined && !/^[0-9]+$/.test(rawOffset)) return { ok: false };
+  const limit = rawLimit === undefined ? RECORD_PAGE_LIMIT.default : Number(rawLimit);
+  const offset = rawOffset === undefined ? 0 : Number(rawOffset);
+  if (!Number.isSafeInteger(limit) || limit < RECORD_PAGE_LIMIT.min || limit > RECORD_PAGE_LIMIT.max) {
+    return { ok: false };
+  }
+  if (!Number.isSafeInteger(offset)) return { ok: false };
+  return { ok: true, offset, limit };
+}
+
+/** The PR number path segment: decimal digits only, a positive safe integer. */
+function pullRequestNumberOf(c: DashboardContext): number | null {
   const raw = c.req.param("number") ?? "";
   // Decimal digits only (the App-id segment's rule): `0x1f` / `1e3` are number
   // spellings that `Number()` would alias onto a real PR number.
   const number = /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN;
-  if (!Number.isSafeInteger(number) || number <= 0) {
-    return c.json({ error: "unknown pull request" }, 404);
-  }
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+const appPullRequestRoute = async (c: DashboardContext) => {
+  c.header("Cache-Control", "private, no-store");
+  const gate = await requireAppManagerJson(c);
+  if (!gate.ok) return gate.response;
+  const number = pullRequestNumberOf(c);
+  if (number === null) return c.json({ error: "unknown pull request" }, 404);
   // The address is the ledger's own key — owner AND repo AND number. One App
   // serves several repos, so a number alone is ambiguous; a miss is a 404,
-  // never a same-number row from another repo. (`?? ""` only satisfies the
-  // generic handler's `string | undefined` param type.)
-  const detail = await gate.store.getPullRequest(
-    gate.app.id,
-    c.req.param("owner") ?? "",
-    c.req.param("repo") ?? "",
-    number,
-  );
-  if (detail === null) return c.json({ error: "unknown pull request" }, 404);
+  // never a same-number row from another repo.
+  const owner = c.req.param("owner") ?? "";
+  const repo = c.req.param("repo") ?? "";
+  const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
+  if (head === null) return c.json({ error: "unknown pull request" }, 404);
+  const counts = await gate.store.countPullRequestRecords(gate.app.id, owner, repo, number);
   // Same total-shape rule as the list: the store reports the tables' actual
   // columns, and this boundary is where a nullable column becomes "". The
-  // v1 pipeline NEVER records a `provider` (the artifact store persists NULL
-  // and the consumer passes `null`), and a finding may be repo-wide
-  // (`file_path` null), so a client parser must not be the thing that decides
-  // whether a real review renders.
+  // record families are paged separately — the head carries only their totals.
   return c.json({
     pull_request: {
-      ...detail.pull_request,
-      title: detail.pull_request.title ?? "",
-      head_sha: detail.pull_request.head_sha ?? "",
-      state:
-        detail.pull_request.state === "merged" || detail.pull_request.state === "closed"
-          ? detail.pull_request.state
-          : "open",
+      number: head.pr_number,
+      owner: head.owner,
+      repo: head.repo,
+      title: head.title ?? "",
+      state: head.state === "merged" || head.state === "closed" ? head.state : "open",
+      head_sha: head.head_sha ?? "",
+      first_seen_at: head.first_seen_at,
+      last_seen_at: head.last_seen_at,
+      latest_review:
+        head.latest_reviewed_at === null
+          ? null
+          : { verdict: head.latest_verdict ?? "", reviewed_at: head.latest_reviewed_at },
+      failure_count: counts.failures,
     },
-    reviews: detail.reviews.map((review) => ({
-      verdict: review.verdict ?? "",
-      summary_md: review.summary_md ?? "",
-      model: review.model ?? "",
-      provider: review.provider ?? "",
-      reviewed_at: review.reviewed_at,
-      head_sha: review.head_sha ?? "",
-    })),
-    failures: detail.failures,
-    findings: detail.findings.map((finding) => ({
-      finding_id: finding.finding_id,
-      severity: finding.severity ?? "",
-      title: finding.title ?? "",
-      file_path: finding.file_path ?? "",
-      line: finding.line,
-      body: finding.body ?? "",
-    })),
+    counts,
   });
+};
+
+type PullRequestRecordSection = "findings" | "reviews" | "failures";
+
+/**
+ * One paged record family. The section is fixed by the registered literal path
+ * (three paths share this handler); `severity` is read for findings only — an
+ * empty or absent value is no filter, and the returned `total` is filtered.
+ * A miss is the detail's 404 on every family; malformed paging is a 400.
+ */
+const appPullRequestRecordsRoute = async (
+  c: DashboardContext,
+  section: PullRequestRecordSection,
+) => {
+  c.header("Cache-Control", "private, no-store");
+  const gate = await requireAppManagerJson(c);
+  if (!gate.ok) return gate.response;
+  const number = pullRequestNumberOf(c);
+  if (number === null) return c.json({ error: "unknown pull request" }, 404);
+  const paging = parseRecordPaging(c);
+  if (!paging.ok) return c.json({ error: "invalid paging" }, 400);
+  const owner = c.req.param("owner") ?? "";
+  const repo = c.req.param("repo") ?? "";
+  // The section readers see rows, not PRs: "empty" and "unknown PR" are the
+  // same answer, so existence is checked once here.
+  const head = await gate.store.getPullRequestHead(gate.app.id, owner, repo, number);
+  if (head === null) return c.json({ error: "unknown pull request" }, 404);
+  const { offset, limit } = paging;
+  if (section === "findings") {
+    const rawSeverity = c.req.query("severity") ?? "";
+    const page = await gate.store.listPullRequestFindings(gate.app.id, owner, repo, number, {
+      offset,
+      limit,
+      severity: rawSeverity === "" ? null : rawSeverity,
+    });
+    return c.json({
+      items: page.items.map((finding) => ({
+        finding_id: finding.finding_id,
+        severity: finding.severity ?? "",
+        title: finding.title ?? "",
+        file_path: finding.file_path ?? "",
+        line: finding.line,
+        body: finding.body ?? "",
+      })),
+      total: page.total,
+    });
+  }
+  if (section === "reviews") {
+    const page = await gate.store.listPullRequestReviews(gate.app.id, owner, repo, number, { offset, limit });
+    return c.json({
+      items: page.items.map((review) => ({
+        verdict: review.verdict,
+        summary_md: review.summary_md ?? "",
+        model: review.model ?? "",
+        provider: review.provider ?? "",
+        reviewed_at: review.reviewed_at,
+        head_sha: review.head_sha,
+      })),
+      total: page.total,
+    });
+  }
+  const page = await gate.store.listPullRequestFailures(gate.app.id, owner, repo, number, { offset, limit });
+  return c.json({ items: page.items, total: page.total });
 };
 
 // --- App + member route table ----------------------------------------------
@@ -4440,13 +4515,17 @@ const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/insights/summary", handler: appInsightsRoute, access: "write" },
-  // Per-App pull-request ledger (migration 0039): the list face and the
-  // one-PR detail face. The detail address is the ledger's own key —
-  // owner/repo/number — because one App serves several repos and a number is
-  // only unique within a repo. App-scoped reads are `write` in this table
-  // (AC3) — only the workspace-scoped member list is `read`.
+  // Per-App pull-request ledger (migration 0039): the list face, the one-PR
+  // head face and its three paged record families. The detail address is the
+  // ledger's own key — owner/repo/number — because one App serves several
+  // repos and a number is only unique within a repo. App-scoped reads are
+  // `write` in this table (AC3) — only the workspace-scoped member list is
+  // `read`. The section reads share one handler; each path fixes its family.
   { method: "get", path: "/api/apps/:appId/pull-requests", handler: appPullRequestsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/pull-requests/:owner/:repo/:number", handler: appPullRequestRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId/pull-requests/:owner/:repo/:number/findings", handler: (c) => appPullRequestRecordsRoute(c, "findings"), access: "write" },
+  { method: "get", path: "/api/apps/:appId/pull-requests/:owner/:repo/:number/reviews", handler: (c) => appPullRequestRecordsRoute(c, "reviews"), access: "write" },
+  { method: "get", path: "/api/apps/:appId/pull-requests/:owner/:repo/:number/failures", handler: (c) => appPullRequestRecordsRoute(c, "failures"), access: "write" },
   // The member list is `read` (every member sees it, and the operator's AC2
   // field set is this same list); every App/settings read and invite face is
   // `write` (AC3).

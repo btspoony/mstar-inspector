@@ -2,18 +2,22 @@
  * Pull request detail face (App detail IA): the mounted faces.
  *
  * happy-dom pins over what only real effects and events prove: the family
- * switch, fold toggles, the copy action's per-block outcome and its late-write
- * and unmount paths, and the read stamp that keeps another PR's face off the
- * current one. The static faces and pure helpers live in
- * `pull-request-detail-static.test.tsx`; payloads shared with the list suite
- * live in `pull-request-fixtures.ts`.
+ * switch and its section read, paging and the severity filter, fold toggles,
+ * the copy action's per-block outcome and its late-write and unmount paths,
+ * and the read stamp that keeps another PR's face off the current one. The
+ * static faces and pure helpers live in `pull-request-detail-static.test.tsx`;
+ * payloads shared with the list suite live in `pull-request-fixtures.ts`.
  */
 import { describe, expect, jest, test } from "bun:test";
 import { act, createElement, StrictMode } from "react";
 import { t } from "../../src/i18n";
-import type { PullRequestDetail } from "../../src/spa/pages/data";
+import type { PullRequestFailure, PullRequestFinding } from "../../src/spa/pages/data";
 import { currentDetailRead, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
-import { DETAIL, mountDetailView, press } from "./pull-request-fixtures";
+import { DETAIL, FAILURES, mountDetailView, page, press, scene } from "./pull-request-fixtures";
+
+/** A face whose only records are failures: it opens on the failures family. */
+const failuresOnly = (failures: PullRequestFailure[] = FAILURES) =>
+  scene({ findings: page([]), reviews: page([]), failures: page(failures) });
 
 describe("pull requests detail read derivation (pure)", () => {
   test("a read stamped for another pr derives to not-yet-loaded, whatever its kind (N1)", () => {
@@ -31,9 +35,10 @@ describe("pull requests detail read derivation (pure)", () => {
     expect(currentDetailRead(null, "acme/web/1")).toBeNull();
   });
 });
+
 describe("pull request detail (mounted)", () => {
   test("each family trigger answers to its announced name, separator included", async () => {
-    const { container, win, unmount } = await mountDetailView(DETAIL);
+    const { container, win, unmount } = await mountDetailView(scene());
     try {
       // A role/name query, the way an assistive technology finds the control:
       // the name a reader hears is label + count with a separator, never the
@@ -42,7 +47,7 @@ describe("pull request detail (mounted)", () => {
         [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
           (tab) => (tab.getAttribute("aria-label") ?? tab.textContent) === name,
         );
-      const names = [...container.querySelectorAll('[role="tab"]')].map(
+      const names = [...container.querySelectorAll<HTMLElement>('[role="tab"]')].map(
         (tab) => tab.getAttribute("aria-label") ?? tab.textContent,
       );
       expect(names).toEqual([
@@ -62,17 +67,18 @@ describe("pull request detail (mounted)", () => {
   });
 
   test("the family switch and a fold toggle act on the live tree", async () => {
-    const { container, win, unmount } = await mountDetailView(DETAIL);
+    const { container, win, unmount } = await mountDetailView(scene());
     try {
       const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
       const panels = () => [...container.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
       const selected = () => tabs().map((tab) => tab.getAttribute("aria-selected") === "true");
       const visible = () => panels().map((panel) => panel.hidden === false);
-      // DETAIL carries a must-fix finding: findings first, its panel open.
+      // The counts carry a must-fix finding: findings first, its panel open.
       expect(selected()).toEqual([true, false, false]);
       expect(visible()).toEqual([true, false, false]);
 
-      // The reviews family: the selection and the visible panel both move.
+      // The reviews family: the selection and the visible panel both move. Its
+      // page is read on first selection and lands before the assertion.
       await press(win, tabs()[1]);
       expect(selected()).toEqual([false, true, false]);
       expect(visible()).toEqual([false, true, false]);
@@ -99,30 +105,136 @@ describe("pull request detail (mounted)", () => {
     }
   });
 
+  test("selecting a family reads its page once; returning to it reads nothing", async () => {
+    const { container, win, fetches, unmount } = await mountDetailView(scene());
+    try {
+      // Landing is the head plus the opening family (findings, by counts).
+      const reads = (section: string) => fetches.filter((url) => url.includes(`/${section}?`)).length;
+      expect(reads("findings")).toBe(1);
+      expect(reads("reviews")).toBe(0);
+      expect(reads("failures")).toBe(0);
+
+      const tabs = () => [...container.querySelectorAll<HTMLElement>('[role="tab"]')];
+      await press(win, tabs()[1]);
+      expect(reads("reviews")).toBe(1);
+
+      // Switching away and back renders the page already held — no re-read.
+      await press(win, tabs()[0]);
+      await press(win, tabs()[1]);
+      expect(reads("reviews")).toBe(1);
+      expect(reads("findings")).toBe(1);
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("next and prev move the section offset and swap the page", async () => {
+    const corpus: PullRequestFinding[] = Array.from({ length: 25 }, (_, index) => ({
+      finding_id: `f-${index}`,
+      severity: "must-fix",
+      title: `Finding ${String(index).padStart(2, "0")}`,
+      file_path: "",
+      line: null,
+      body: "",
+    }));
+    const { container, win, fetches, unmount } = await mountDetailView(scene({ findings: page(corpus) }));
+    try {
+      const text = () => container.textContent ?? "";
+      const pagerButton = (label: string) =>
+        [...container.querySelectorAll<HTMLButtonElement>('[data-slot="pager"] button')].find(
+          (button) => button.textContent === label,
+        );
+      // First page: rows 0–9, the range names them, prev is at the bound.
+      expect(text()).toContain("Finding 00");
+      expect(text()).not.toContain("Finding 10");
+      expect(container.querySelector('[data-slot="pager-range"]')?.textContent).toBe(
+        t("en", "pullRequests.pageRange", { from: 1, to: 10, total: 25 }),
+      );
+      expect(pagerButton(t("en", "pullRequests.pagePrev"))?.disabled).toBe(true);
+
+      await press(win, pagerButton(t("en", "pullRequests.pageNext")));
+      expect(fetches.filter((url) => url.includes("/findings?"))).toHaveLength(2);
+      expect(fetches.at(-1)).toContain("offset=10");
+      expect(text()).toContain("Finding 10");
+      expect(text()).not.toContain("Finding 00");
+      expect(container.querySelector('[data-slot="pager-range"]')?.textContent).toBe(
+        t("en", "pullRequests.pageRange", { from: 11, to: 20, total: 25 }),
+      );
+
+      await press(win, pagerButton(t("en", "pullRequests.pagePrev")));
+      expect(text()).toContain("Finding 00");
+      expect(container.querySelector('[data-slot="pager-range"]')?.textContent).toBe(
+        t("en", "pullRequests.pageRange", { from: 1, to: 10, total: 25 }),
+      );
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("the severity filter reloads findings from the first page", async () => {
+    const corpus: PullRequestFinding[] = [
+      ...Array.from({ length: 12 }, (_, index) => ({
+        finding_id: `m-${index}`,
+        severity: "must-fix",
+        title: `Must ${index}`,
+        file_path: "",
+        line: null,
+        body: "",
+      })),
+      { finding_id: "n-1", severity: "nit", title: "Nit 1", file_path: "", line: null, body: "" },
+    ];
+    const { container, win, fetches, unmount } = await mountDetailView(scene({ findings: page(corpus) }));
+    try {
+      const pagerButton = (label: string) =>
+        [...container.querySelectorAll<HTMLButtonElement>('[data-slot="pager"] button')].find(
+          (button) => button.textContent === label,
+        );
+      // Step off the first page, so the filter's reset is observable.
+      expect(container.textContent ?? "").not.toContain("Nit 1");
+      await press(win, pagerButton(t("en", "pullRequests.pageNext")));
+      expect(fetches.at(-1)).toContain("offset=10");
+      // The second page reaches the last row of the corpus.
+      expect(container.textContent ?? "").toContain("Nit 1");
+
+      // Pick the must-fix bucket: the read goes back to offset 0 with the
+      // severity on the query, and only its rows render.
+      await press(win, container.querySelector('[role="combobox"]'));
+      const option = [...win.document.querySelectorAll('[role="option"]')].find(
+        (row) => row.textContent === t("en", "pullRequests.severityMustFix"),
+      );
+      expect(option).toBeDefined();
+      await press(win, option as unknown as Element);
+      const last = fetches.at(-1) ?? "";
+      expect(last).toContain("offset=0");
+      expect(last).toContain("severity=must-fix");
+      expect(container.textContent ?? "").not.toContain("Nit 1");
+      expect(container.textContent ?? "").toContain("Must 0");
+    } finally {
+      await unmount();
+    }
+  });
+
   test("two findings sharing a payload id fold independently", async () => {
     // The payload can repeat an id; the rendered rows must not share a fold.
-    const duplicated: PullRequestDetail = {
-      ...DETAIL,
-      findings: [
-        {
-          finding_id: "f-1",
-          severity: "must-fix",
-          title: "First copy",
-          file_path: "",
-          line: null,
-          body: "First body.",
-        },
-        {
-          finding_id: "f-1",
-          severity: "must-fix",
-          title: "Second copy",
-          file_path: "",
-          line: null,
-          body: "Second body.",
-        },
-      ],
-    };
-    const { container, win, unmount } = await mountDetailView(duplicated);
+    const duplicated: PullRequestFinding[] = [
+      {
+        finding_id: "f-1",
+        severity: "must-fix",
+        title: "First copy",
+        file_path: "",
+        line: null,
+        body: "First body.",
+      },
+      {
+        finding_id: "f-1",
+        severity: "must-fix",
+        title: "Second copy",
+        file_path: "",
+        line: null,
+        body: "Second body.",
+      },
+    ];
+    const { container, win, unmount } = await mountDetailView(scene({ findings: page(duplicated) }));
     try {
       const controls = () =>
         [...container.querySelectorAll<HTMLElement>('[data-slot="finding"] button[aria-controls]')];
@@ -149,9 +261,9 @@ describe("pull request detail (mounted)", () => {
     // write resolves and the second rejects, so both branches are exercised.
     let writes = 0;
     jest.useFakeTimers();
-    // No actionable finding: the face opens on the failures family, whose one
-    // control is the copy action.
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
+    // No finding and no review: the face opens on the failures family, whose
+    // one control is the copy action.
+    const { container, win, unmount } = await mountDetailView(failuresOnly());
     try {
       Object.defineProperty(win.navigator, "clipboard", {
         configurable: true,
@@ -197,7 +309,7 @@ describe("pull request detail (mounted)", () => {
   test("a clipboard write that throws synchronously reports the failure", async () => {
     // Some browsers throw from `writeText` rather than returning a rejected
     // promise. A throw must land on the same outcome, not escape the handler.
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
+    const { container, win, unmount } = await mountDetailView(failuresOnly());
     Object.defineProperty(win.navigator, "clipboard", {
       configurable: true,
       value: {
@@ -231,11 +343,9 @@ describe("pull request detail (mounted)", () => {
     // driven by a press on the summary. The copy action still takes the whole
     // error, diagnosis included.
     const error = "first line\nsecond line\nthird line";
-    const { container, win, unmount } = await mountDetailView({
-      ...DETAIL,
-      findings: [],
-      failures: [{ stage: "sandbox", error, created_at: "2026-10-31 23:00:00" }],
-    });
+    const { container, win, unmount } = await mountDetailView(
+      failuresOnly([{ stage: "sandbox", error, created_at: "2026-10-31 23:00:00" }]),
+    );
     try {
       const details = () => container.querySelector<HTMLDetailsElement>('[role="tabpanel"] details');
       const summary = () => details()?.querySelector("summary");
@@ -275,7 +385,7 @@ describe("pull request detail (mounted)", () => {
     // StrictMode runs mount → cleanup → mount; the cleanup-only effect used to
     // leave the mounted flag false, so every outcome was dropped.
     jest.useFakeTimers();
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] }, (view) =>
+    const { container, win, unmount } = await mountDetailView(failuresOnly(), (view) =>
       createElement(StrictMode, null, view),
     );
     try {
@@ -295,14 +405,12 @@ describe("pull request detail (mounted)", () => {
 
   test("copying a second error block does not cancel the first block's revert", async () => {
     jest.useFakeTimers();
-    const { container, win, unmount } = await mountDetailView({
-      ...DETAIL,
-      findings: [],
-      failures: [
+    const { container, win, unmount } = await mountDetailView(
+      failuresOnly([
         { stage: "sandbox", error: "first block", created_at: "2026-10-31 23:00:00" },
         { stage: "review", error: "second block", created_at: "2026-10-30 23:00:00" },
-      ],
-    });
+      ]),
+    );
     try {
       Object.defineProperty(win.navigator, "clipboard", {
         configurable: true,
@@ -341,7 +449,7 @@ describe("pull request detail (mounted)", () => {
     // A write the test settles by hand, so it can outlive the face.
     const { promise: pendingWrite, resolve: settleWrite } = Promise.withResolvers<void>();
     jest.useFakeTimers();
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
+    const { container, win, unmount } = await mountDetailView(failuresOnly());
     Object.defineProperty(win.navigator, "clipboard", {
       configurable: true,
       value: { writeText: () => pendingWrite },
@@ -388,7 +496,7 @@ describe("pull request detail (mounted)", () => {
     // An insecure context offers no Clipboard API at all: the property reads
     // as absent, not as a rejecting write. happy-dom's own Clipboard lives on
     // the prototype, so the absent state is shadowed on the instance.
-    const { container, win, unmount } = await mountDetailView({ ...DETAIL, findings: [] });
+    const { container, win, unmount } = await mountDetailView(failuresOnly());
     Object.defineProperty(win.navigator, "clipboard", { configurable: true, value: undefined });
     try {
       const copyButton = container.querySelector<HTMLElement>('[data-slot="copy-error"]');

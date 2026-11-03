@@ -750,12 +750,29 @@ export type PullRequestFinding = {
   body: string;
 };
 
-/** The PR detail payload (`GET …/pull-requests/:owner/:repo/:number`). */
+/** The PR detail payload's record totals — one number per record family. */
+export type PullRequestCounts = { findings: number; reviews: number; failures: number };
+
+/**
+ * The PR detail payload (`GET …/pull-requests/:owner/:repo/:number`): the head
+ * row plus its record totals. The families themselves are paged reads.
+ */
 export type PullRequestDetail = {
   pull_request: PullRequestRow;
-  reviews: PullRequestReview[];
-  failures: PullRequestFailure[];
-  findings: PullRequestFinding[];
+  counts: PullRequestCounts;
+};
+
+/** The three record families, one paged read each. */
+export type RecordSection = "findings" | "reviews" | "failures";
+
+/** One record section's page: its rows plus the total the pager counts against. */
+export type RecordPage<T> = { items: T[]; total: number };
+
+/** Each section's row type — what `parseRecordPage` yields for that section. */
+export type RecordPageItems = {
+  findings: PullRequestFinding;
+  reviews: PullRequestReview;
+  failures: PullRequestFailure;
 };
 
 /**
@@ -863,24 +880,54 @@ export function parsePullRequestList(data: unknown): PullRequestRow[] | null {
 }
 
 /**
- * The detail payload: row + reviews + failures + findings. The envelope
- * keeps its shape (a missing/!array face fails the parse), but every
- * array is parsed per entry — one drifted review/failure/finding is
- * dropped, not the whole detail.
+ * The detail payload: the head row plus its record totals. The envelope is
+ * strict — a missing row or a missing/non-finite count fails the whole parse,
+ * because a silent zero would disable a tab's count.
  */
 export function parsePullRequestDetail(data: unknown): PullRequestDetail | null {
   if (!isRecord(data)) return null;
   const pull_request = parsePullRequestRow(data.pull_request);
   if (pull_request === null) return null;
-  if (!Array.isArray(data.reviews) || !Array.isArray(data.failures) || !Array.isArray(data.findings)) {
-    return null;
-  }
-  return {
-    pull_request,
-    reviews: data.reviews.map(parsePullRequestReview).filter(present),
-    failures: data.failures.map(parsePullRequestFailure).filter(present),
-    findings: data.findings.map(parsePullRequestFinding).filter(present),
-  };
+  const counts = parsePullRequestCounts(data.counts);
+  if (counts === null) return null;
+  return { pull_request, counts };
+}
+
+/** A count is required and finite; anything else fails the payload. */
+function finiteCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parsePullRequestCounts(value: unknown): PullRequestCounts | null {
+  if (!isRecord(value)) return null;
+  const findings = finiteCount(value.findings);
+  const reviews = finiteCount(value.reviews);
+  const failures = finiteCount(value.failures);
+  if (findings === null || reviews === null || failures === null) return null;
+  return { findings, reviews, failures };
+}
+
+/** One row parser per section — the page parse below is keyed by it. */
+const RECORD_PARSERS = {
+  findings: parsePullRequestFinding,
+  reviews: parsePullRequestReview,
+  failures: parsePullRequestFailure,
+} satisfies { [K in RecordSection]: (value: unknown) => RecordPageItems[K] | null };
+
+/**
+ * One record page: `{ items, total }`. The envelope is strict (a missing
+ * `items` array or a non-finite `total` fails the page), but every row is
+ * parsed per entry — one drifted record is dropped, not the whole page.
+ */
+export function parseRecordPage<S extends RecordSection>(
+  section: S,
+  data: unknown,
+): RecordPage<RecordPageItems[S]> | null {
+  if (!isRecord(data) || !Array.isArray(data.items)) return null;
+  const total = finiteCount(data.total);
+  if (total === null) return null;
+  const parse = RECORD_PARSERS[section] as (value: unknown) => RecordPageItems[S] | null;
+  return { items: data.items.map(parse).filter(present), total };
 }
 
 export function appPullRequestsUrl(base: string, appId: string): string {
@@ -898,6 +945,24 @@ export function appPullRequestsUrl(base: string, appId: string): string {
  */
 export function appPullRequestDetailUrl(base: string, appId: string, ref: PullRequestRef): string {
   return `${base}/api/apps/${encodeURIComponent(appId)}/pull-requests/${encodeURIComponent(ref.owner)}/${encodeURIComponent(ref.repo)}/${ref.number}`;
+}
+
+/**
+ * One record section's page URL. `offset`/`limit` ride every request — the
+ * server's bounds are the contract — and `severity` only when the findings
+ * filter is set; the query is encoded, so a free-form value cannot break out
+ * of it.
+ */
+export function appPullRequestRecordsUrl(
+  base: string,
+  appId: string,
+  ref: PullRequestRef,
+  section: RecordSection,
+  page: { offset: number; limit: number; severity?: string },
+): string {
+  const params = new URLSearchParams({ offset: String(page.offset), limit: String(page.limit) });
+  if (page.severity !== undefined && page.severity !== "") params.set("severity", page.severity);
+  return `${appPullRequestDetailUrl(base, appId, ref)}/${section}?${params.toString()}`;
 }
 
 /**

@@ -151,8 +151,13 @@ export const zhCN: Dictionary = {
     recordsLabel: "拉取请求记录",
     /** 类别触发按钮的可访问名称：标签与它绘制的计数。 */
     familyTabName: "{label}（{count}）",
-    /** 发现指标中数量旁的提示。 */
-    mustFixNote: "{count} 项必须修复",
+    /** 发现筛选的标签与“不筛选”选项。 */
+    filterSeverity: "严重程度",
+    filterAll: "全部",
+    /** 记录列表下方的分页：上一页/下一页与相对总数的已加载区间。 */
+    pagePrev: "上一页",
+    pageNext: "下一页",
+    pageRange: "{from}–{to} / {total}",
     /** 严重度分组标题，按渲染顺序。 */
     severityMustFix: "必须修复",
     severityShouldFix: "建议修复",

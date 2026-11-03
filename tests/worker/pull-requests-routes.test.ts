@@ -1,14 +1,16 @@
 /**
- * GET /api/apps/:appId/pull-requests and
- * GET /api/apps/:appId/pull-requests/:owner/:repo/:number — the App-scoped PR
- * ledger faces (migration 0039).
+ * GET /api/apps/:appId/pull-requests,
+ * GET /api/apps/:appId/pull-requests/:owner/:repo/:number and its three
+ * `findings` / `reviews` / `failures` section reads — the App-scoped PR ledger
+ * faces (migration 0039).
  *
  * Both ride the SAME gate ladder as every other App JSON read: membership →
  * App-id resolution (unknown / soft-deleted / CROSS-WORKSPACE all collapse into
- * the one `unknown app` 404) → the workspace owner/admin role. The detail face
- * answers 404
- * for a tuple this App never received — the address is the ledger's own key, so
- * a same-number PR in another repo is a miss, never a fallback.
+ * the one `unknown app` 404) → the workspace owner/admin role. The head answers
+ * `{ pull_request, counts }`; each section answers one page plus its total. A
+ * tuple this App never received is a 404 on every path — the address is the
+ * ledger's own key, so a same-number PR in another repo is a miss, never a
+ * fallback. Bad paging is a 400, never a silent default.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -166,15 +168,84 @@ describe("GET /api/apps/:appId/pull-requests", () => {
   });
 });
 
+const detailPath = `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/131`;
+const sectionPath = (section: "findings" | "reviews" | "failures") => `${detailPath}/${section}`;
+
+/** The installation the failure join reads (one App, one installation). */
+function seedInstallation(db: TestD1): void {
+  db.raw
+    .prepare(
+      "INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', 'app-acme', 77, 'acme', datetime('now'))",
+    )
+    .run();
+}
+
+/** `count` reviews for #131, oldest first, so the store's newest-first order is observable. */
+function seedReviews(db: TestD1, count: number): void {
+  for (let index = 0; index < count; index += 1) {
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, reviewed_at, app_id)
+         VALUES (?, 77, 'acme', 'widgets', 131, ?, 'comment', ?, 'app-acme')`,
+      )
+      .run(`r-${index}`, `sha-${index}`, `2026-01-${String(index + 1).padStart(2, "0")} 00:00:00`);
+  }
+}
+
+function seedFailure(db: TestD1, id = "fx-1"): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+       VALUES (?, 77, 'acme', 'widgets', 131, 'sha-1', 'sandbox', 'timeout')`,
+    )
+    .run(id);
+}
+
+/** Lifecycle findings: one publication, one row per entry. */
+function seedFindings(
+  db: TestD1,
+  entries: Array<{ id: string; findingId: string; mergeClass: string; filePath: string | null; lineStart: number | null }>,
+): void {
+  db.raw
+    .prepare(
+      `INSERT OR IGNORE INTO review_publications
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+       VALUES ('p1', 'app-acme', 77, 'acme', 'widgets', 131, 'sha-1', 'review', 'applied', '{}', 1, 1)`,
+    )
+    .run();
+  for (const entry of entries) {
+    db.raw
+      .prepare(
+        `INSERT INTO review_findings
+           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+            first_seen_round, last_seen_round, state, created_ms, updated_ms)
+         VALUES (?, 'app-acme', 77, 'acme', 'widgets', 131, ?, ?, 'p1', 'p1', 'sha-1', 'sha-1', 1, 1, 'open', 1, 1)`,
+      )
+      .run(
+        entry.id,
+        entry.findingId,
+        JSON.stringify({
+          title: `Finding ${entry.findingId}`,
+          body: "",
+          filePath: entry.filePath,
+          lineStart: entry.lineStart,
+          lineEnd: entry.lineStart,
+          mergeClass: entry.mergeClass,
+          category: null,
+          fingerprintHint: null,
+        }),
+      );
+  }
+}
+
 describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
   test("a review with NULL provider / model / summary round-trips as empty strings", async () => {
     const db = await fixture();
     // The v1 pipeline always writes reviews.provider NULL (the artifact store
     // persists the payload's null), and a degraded run may omit model /
     // summary. The whole detail panel must still parse.
-    db.raw
-      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', 'app-acme', 77, 'acme', datetime('now'))")
-      .run();
+    seedInstallation(db);
     db.raw
       .prepare(
         `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, provider, app_id)
@@ -182,66 +253,130 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
       )
       .run();
 
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/131`, db);
+    // The head's counts are the review count; the row itself rides the page.
+    const head = (await (await getFace(detailPath, db)).json()) as { counts: { reviews: number } };
+    expect(head.counts.reviews).toBe(1);
+
+    const res = await getFace(sectionPath("reviews"), db);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { reviews: Array<Record<string, unknown>> };
-    expect(body.reviews[0]).toMatchObject({ verdict: "comment", summary_md: "", model: "", provider: "" });
+    const body = (await res.json()) as { items: Array<Record<string, unknown>>; total: number };
+    expect(body.total).toBe(1);
+    expect(body.items[0]).toMatchObject({ verdict: "comment", summary_md: "", model: "", provider: "" });
   });
 
   test("a repo-wide finding (null file_path) round-trips as ''", async () => {
     const db = await fixture();
-    db.raw
-      .prepare(
-        `INSERT INTO review_publications
-           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
-         VALUES ('p1', 'app-acme', 77, 'acme', 'widgets', 131, 'sha-1', 'review', 'applied', '{}', 1, 1)`,
-      )
-      .run();
-    db.raw
-      .prepare(
-        `INSERT INTO review_findings
-           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
-            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
-            first_seen_round, last_seen_round, state, created_ms, updated_ms)
-         VALUES ('row-1', 'app-acme', 77, 'acme', 'widgets', 131, 'F-1', ?, 'p1', 'p1', 'sha-1', 'sha-1', 1, 1, 'open', 1, 1)`,
-      )
-      .run(
-        JSON.stringify({
-          title: "Repo-wide thing",
-          body: "",
-          filePath: null,
-          lineStart: null,
-          lineEnd: null,
-          mergeClass: "nit",
-          category: null,
-          fingerprintHint: null,
-        }),
-      );
+    seedInstallation(db);
+    seedFindings(db, [{ id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null }]);
 
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/131`, db);
-    const body = (await res.json()) as { findings: Array<Record<string, unknown>> };
-    expect(body.findings[0]).toMatchObject({ finding_id: "F-1", file_path: "", line: null });
+    const res = await getFace(sectionPath("findings"), db);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: Array<Record<string, unknown>> };
+    expect(body.items[0]).toMatchObject({ finding_id: "F-1", file_path: "", line: null });
   });
 
-  test("returns the row with its reviews, failures and findings", async () => {
-    const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/131`, await fixture());
+  test("returns the head row and its counts only — no record arrays", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    seedReviews(db, 2);
+    seedFailure(db);
+    seedFindings(db, [
+      { id: "row-1", findingId: "F-1", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3 },
+      { id: "row-2", findingId: "F-2", mergeClass: "nit", filePath: null, lineStart: null },
+    ]);
+
+    const res = await getFace(detailPath, db);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      pull_request: Record<string, unknown>;
-      reviews: unknown[];
-      failures: unknown[];
-      findings: unknown[];
+    const body = (await res.json()) as { pull_request: Record<string, unknown>; counts: Record<string, number> };
+    expect(Object.keys(body).sort()).toEqual(["counts", "pull_request"]);
+    expect(body.pull_request).toMatchObject({
+      number: 131,
+      owner: "acme",
+      repo: "widgets",
+      failure_count: 1,
+      latest_review: { verdict: "comment", reviewed_at: "2026-01-02 00:00:00" },
+    });
+    expect(body.counts).toEqual({ findings: 2, reviews: 2, failures: 1 });
+  });
+
+  test("each section pages with limit and offset, and defaults to 10 rows", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    seedReviews(db, 12);
+    // No paging params: the server's default limit is 10.
+    const first = (await (await getFace(sectionPath("reviews"), db)).json()) as {
+      items: Array<{ reviewed_at: string }>;
+      total: number;
     };
-    expect(body.pull_request).toMatchObject({ number: 131, owner: "acme", repo: "widgets" });
-    expect(body.reviews).toEqual([]);
-    expect(body.failures).toEqual([]);
-    expect(body.findings).toEqual([]);
+    expect(first.total).toBe(12);
+    expect(first.items).toHaveLength(10);
+    expect(first.items[0]?.reviewed_at).toBe("2026-01-12 00:00:00");
+
+    const paged = (await (await getFace(`${sectionPath("reviews")}?limit=2&offset=2`, db)).json()) as {
+      items: Array<{ reviewed_at: string }>;
+      total: number;
+    };
+    expect(paged.total).toBe(12);
+    expect(paged.items.map((item) => item.reviewed_at)).toEqual([
+      "2026-01-10 00:00:00",
+      "2026-01-09 00:00:00",
+    ]);
+  });
+
+  test("findings severity filters exactly and returns the filtered total", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    seedFindings(db, [
+      { id: "row-1", findingId: "F-1", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3 },
+      { id: "row-2", findingId: "F-2", mergeClass: "nit", filePath: null, lineStart: null },
+    ]);
+    const all = (await (await getFace(sectionPath("findings"), db)).json()) as { total: number };
+    expect(all.total).toBe(2);
+
+    const filtered = (await (
+      await getFace(`${sectionPath("findings")}?severity=must-fix`, db)
+    ).json()) as { items: Array<{ finding_id: string }>; total: number };
+    expect(filtered.total).toBe(1);
+    expect(filtered.items.map((item) => item.finding_id)).toEqual(["F-1"]);
+
+    // An empty severity is no filter; an unmatched one is an empty page.
+    const noFilter = (await (await getFace(`${sectionPath("findings")}?severity=`, db)).json()) as {
+      total: number;
+    };
+    expect(noFilter.total).toBe(2);
+    const unmatched = (await (await getFace(`${sectionPath("findings")}?severity=blocker`, db)).json()) as {
+      items: unknown[];
+      total: number;
+    };
+    expect(unmatched).toEqual({ items: [], total: 0 });
+  });
+
+  test("malformed paging is a 400 on every section", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    for (const section of ["findings", "reviews", "failures"] as const) {
+      for (const query of ["limit=0", "limit=51", "limit=abc", "offset=-1", "offset=1.5"]) {
+        const res = await getFace(`${sectionPath(section)}?${query}`, db);
+        expect(res.status, `${section}?${query}`).toBe(400);
+      }
+    }
   });
 
   test("an unknown PR number → 404", async () => {
     const res = await getFace(`/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999`, await fixture());
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "unknown pull request" });
+  });
+
+  test("an unknown PR is a 404 on every section path", async () => {
+    for (const section of ["findings", "reviews", "failures"] as const) {
+      const res = await getFace(
+        `/dashboard/acme/api/apps/${ACME_APP_ID}/pull-requests/acme/widgets/999/${section}`,
+        await fixture(),
+      );
+      expect(res.status, section).toBe(404);
+      expect(await res.json()).toEqual({ error: "unknown pull request" });
+    }
   });
 
   test("the number in a repo this App never received → 404, no same-number fallback", async () => {

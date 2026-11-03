@@ -8,7 +8,13 @@
  */
 import { t, type Locale } from "../../i18n";
 import { formatRelativeTime } from "../relative-time";
-import type { PullRequestDetail, PullRequestFinding, PullRequestReview } from "./data";
+import type {
+  PullRequestCounts,
+  PullRequestFailure,
+  PullRequestFinding,
+  PullRequestReview,
+  PullRequestRow,
+} from "./data";
 
 /** The three record families the detail face switches between. */
 export type RecordFamily = "findings" | "reviews" | "failures";
@@ -72,16 +78,16 @@ export type SeverityGroup = {
   items: { finding: PullRequestFinding; index: number }[];
 };
 
-/** True when the payload holds a finding to act on — the predicate behind the dot. */
-export function hasActionableFinding(detail: PullRequestDetail): boolean {
-  return detail.findings.some((finding) => isActionable(finding.severity));
-}
-
-/** The family the face opens on: the actionable record first, history last. */
-export function defaultFamily(detail: PullRequestDetail): RecordFamily {
-  if (hasActionableFinding(detail)) return "findings";
-  if (detail.failures.length > 0) return "failures";
-  return "reviews";
+/**
+ * The family the face opens on. The head carries only totals, so the order is
+ * the one the counts can answer: records first, history last. The findings
+ * family is ensured first when it has any row, so its dot and its buckets are
+ * the face's opening read.
+ */
+export function defaultFamily(counts: PullRequestCounts): RecordFamily {
+  if (counts.findings > 0) return "findings";
+  if (counts.reviews > 0) return "reviews";
+  return "failures";
 }
 
 /** Findings bucketed by severity, empty groups dropped, `other` last. */
@@ -230,16 +236,22 @@ export type ActivityEntry = {
 export type TimelineRow = ActivityEntry | { key: "timeline-truncated"; hidden: number };
 
 /**
- * Derive the aside timeline: the merged review/failure history capped at
- * `TIMELINE_LIMIT`, the truncation note when the cap dropped anything, then the
- * PR's own first sighting as the anchor.
+ * Derive the aside timeline from the LOADED pages: the merged review/failure
+ * history capped at `TIMELINE_LIMIT`, the truncation note when the cap dropped
+ * anything, then the PR's own first sighting as the anchor. A section that is
+ * not loaded yet contributes nothing — the aside describes the reads the face
+ * actually made, never rows it never fetched.
  */
-export function timelineRows(locale: Locale, detail: PullRequestDetail): TimelineRow[] {
-  const pr = detail.pull_request;
+export function timelineRows(
+  locale: Locale,
+  pr: PullRequestRow,
+  reviews: readonly PullRequestReview[],
+  failures: readonly PullRequestFailure[],
+): TimelineRow[] {
   // Both tables stamp `datetime('now')` (UTC), so the raw text orders
   // chronologically.
   const history: ActivityEntry[] = [
-    ...detail.reviews.map((review, index) => {
+    ...reviews.map((review, index) => {
       // The payload coerces an absent verdict to ""; a label of "Review · "
       // would paint a separator with nothing after it.
       const label =
@@ -258,7 +270,7 @@ export function timelineRows(locale: Locale, detail: PullRequestDetail): Timelin
         meta: attribution === "" ? when : `${when} · ${attribution}`,
       };
     }),
-    ...detail.failures.map((failure, index) => ({
+    ...failures.map((failure, index) => ({
       at: failure.created_at,
       key: `failure-${index}`,
       tone: "danger" as const,

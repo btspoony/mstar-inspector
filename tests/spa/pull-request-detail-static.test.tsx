@@ -3,8 +3,10 @@
  *
  * Static-SSR pins over the pure face (the InsightsRecordsView idiom): the
  * header facts and metric band, the severity buckets, the folds, the failures
- * panel, and the aside timeline — plus the read/parse derivations that face
- * consumes. Mounted (happy-dom) behaviour lives in
+ * panel, the pager and the aside timeline — plus the read/parse derivations
+ * that face consumes. The view is pure: the head and the per-section pages are
+ * supplied as props, so each render is one tree describing one payload.
+ * Mounted (happy-dom) behaviour lives in
  * `pull-request-detail-interaction.test.tsx`; payloads shared with the list
  * suite live in `pull-request-fixtures.ts`.
  */
@@ -14,10 +16,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import {
   appPullRequestDetailUrl,
+  appPullRequestRecordsUrl,
   githubPullRequestUrl,
   githubRepoUrl,
   parsePullRequestDetail,
+  parseRecordPage,
   type PullRequestDetail,
+  type PullRequestRow,
 } from "../../src/spa/pages/data";
 import {
   PullRequestDetail as PullRequestDetailFace,
@@ -25,7 +30,33 @@ import {
 } from "../../src/spa/pages/PullRequestDetail";
 import { recordId } from "../../src/spa/pages/pullRequestDetailModel";
 import { withMarkup } from "./dom";
-import { DETAIL, ROW_OPEN } from "./pull-request-fixtures";
+import {
+  DETAIL,
+  FINDINGS,
+  RECORDS,
+  REVIEWS,
+  page,
+  recordsOf,
+  scene,
+  type RecordPages,
+} from "./pull-request-fixtures";
+
+const render = (detail: PullRequestDetail, records = recordsOf()) =>
+  renderToStaticMarkup(
+    createElement(PullRequestDetailView, {
+      locale: "en",
+      detail,
+      records,
+      onEnsureSection: () => {},
+      onLoadPage: () => {},
+    }),
+  );
+
+/** A complete face for a page set (counts derived from the pages' totals). */
+const face = (over: Partial<RecordPages> = {}, row: Partial<PullRequestRow> = {}) => {
+  const built = scene(over, row);
+  return render(built.detail, recordsOf(built.pages));
+};
 
 // The read callback is synchronous by type: `withMarkup` closes its window as
 // soon as the read returns, so an async read would resolve against a closed
@@ -45,6 +76,31 @@ describe("pull request detail data plane (pure helpers)", () => {
     ).toBe("/dashboard/api/apps/1/pull-requests/a%2Fb/settings%3Fx/42");
   });
 
+  test("the record URL carries the page window, and severity only for findings", () => {
+    expect(
+      appPullRequestRecordsUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 }, "findings", {
+        offset: 20,
+        limit: 10,
+        severity: "must-fix",
+      }),
+    ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/findings?offset=20&limit=10&severity=must-fix");
+    // The filter value is encoded, and an empty filter is simply absent.
+    expect(
+      appPullRequestRecordsUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 }, "findings", {
+        offset: 0,
+        limit: 10,
+        severity: "a&b",
+      }),
+    ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/findings?offset=0&limit=10&severity=a%26b");
+    expect(
+      appPullRequestRecordsUrl("/dashboard", "1", { owner: "acme", repo: "web", number: 42 }, "reviews", {
+        offset: 0,
+        limit: 10,
+        severity: "",
+      }),
+    ).toBe("/dashboard/api/apps/1/pull-requests/acme/web/42/reviews?offset=0&limit=10");
+  });
+
   test("the GitHub builders encode each segment and cannot escape the path", () => {
     expect(githubRepoUrl("acme", "web")).toBe("https://github.com/acme/web");
     // A hostile segment stays inside the path: `/`, `?` and `#` are encoded,
@@ -54,32 +110,41 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(githubPullRequestUrl("a/b", "x?y", 7)).toBe("https://github.com/a%2Fb/x%3Fy/pull/7");
   });
 
-  test("the detail parser keeps the envelope strict but drops drifted entries (QC)", () => {
+  test("the detail parser keeps the envelope strict; a page drops drifted entries (QC)", () => {
     expect(parsePullRequestDetail(DETAIL)).toEqual(DETAIL);
-    // One drifted failure / finding drops that entry, not the whole detail.
-    expect(parsePullRequestDetail({ ...DETAIL, failures: [{ stage: 1 }] })?.failures).toEqual([]);
-    expect(
-      parsePullRequestDetail({ ...DETAIL, findings: [{ ...DETAIL.findings[0], line: "42" }] })?.findings,
-    ).toEqual([]);
+    // The counts are required and finite: a silent zero would disable a tab.
+    expect(parsePullRequestDetail({ ...DETAIL, counts: { ...DETAIL.counts, findings: null } })).toBeNull();
+    expect(parsePullRequestDetail({ ...DETAIL, counts: { ...DETAIL.counts, reviews: Number.NaN } })).toBeNull();
+    expect(parsePullRequestDetail({ ...DETAIL, counts: undefined })).toBeNull();
     // A pull_request without its address still fails the envelope.
     expect(
       parsePullRequestDetail({ ...DETAIL, pull_request: { ...DETAIL.pull_request, owner: null } }),
     ).toBeNull();
     expect(parsePullRequestDetail(null)).toBeNull();
+
+    // One drifted failure / finding drops that entry, not the whole page.
+    expect(parseRecordPage("failures", { items: [{ stage: 1 }], total: 1 })).toEqual({ items: [], total: 1 });
+    expect(
+      parseRecordPage("findings", { items: [{ ...FINDINGS[0], line: "42" }], total: 1 })?.items,
+    ).toEqual([]);
+    // The page envelope itself stays strict.
+    expect(parseRecordPage("reviews", { items: [], total: Number.NaN })).toBeNull();
+    expect(parseRecordPage("reviews", { total: 1 })).toBeNull();
+    expect(parseRecordPage("reviews", null)).toBeNull();
   });
 
   test("a review with provider null parses and renders without a null leak (QC)", async () => {
-    const withNulls = {
-      ...DETAIL,
-      reviews: [
-        { ...DETAIL.reviews[0], verdict: null, summary_md: null, model: null, provider: null },
-      ],
-      findings: [{ ...DETAIL.findings[0], title: null, file_path: null, body: null }],
-    };
-    const parsed = parsePullRequestDetail(withNulls);
+    const reviews = parseRecordPage("reviews", {
+      items: [{ ...REVIEWS[0], verdict: null, summary_md: null, model: null, provider: null }],
+      total: 1,
+    });
+    const findings = parseRecordPage("findings", {
+      items: [{ ...FINDINGS[0], title: null, file_path: null, body: null }],
+      total: 1,
+    });
     // The nullable text fields coerce to "" at the parse boundary; the
     // address fields pass through untouched.
-    expect(parsed?.reviews[0]).toEqual({
+    expect(reviews?.items[0]).toEqual({
       verdict: "",
       summary_md: "",
       model: "",
@@ -87,7 +152,7 @@ describe("pull request detail data plane (pure helpers)", () => {
       reviewed_at: "2026-11-01 08:00:00",
       head_sha: "aaa111bbb222",
     });
-    expect(parsed?.findings[0]).toEqual({
+    expect(findings?.items[0]).toEqual({
       finding_id: "f-1",
       severity: "must-fix",
       title: "",
@@ -95,12 +160,20 @@ describe("pull request detail data plane (pure helpers)", () => {
       line: 42,
       body: "",
     });
-    // And the view renders the coerced row: an unattributed review (both fields
-    // coerced empty) renders no attribution span and no "Latest review" meta —
-    // an empty value would read as a missing fact — and the empty finding path
-    // renders no location at all, no bare `:line` (N12). Each negative is read
-    // off the node that owns the field, so unrelated text cannot satisfy it.
-    await withMarkup(renderToStaticMarkup(createElement(PullRequestDetailView, { locale: "en", detail: parsed ?? DETAIL })), (container) => {
+    const detail: PullRequestDetail = {
+      ...DETAIL,
+      counts: { ...DETAIL.counts, reviews: 1, findings: 1 },
+    };
+    const markup = render(
+      detail,
+      recordsOf({ ...RECORDS, reviews: reviews ?? page([]), findings: findings ?? page([]) }),
+    );
+    // An unattributed review (both fields coerced empty) renders no "Latest
+    // review" meta — an empty value would read as a missing fact — and the
+    // empty finding path renders no location at all, no bare `:line` (N12).
+    // Each negative is read off the node that owns the field, so unrelated
+    // text cannot satisfy it.
+    await withMarkup(markup, (container) => {
       const meta = container.querySelector('[data-slot="pr-meta"]');
       expect(meta?.textContent ?? "").not.toContain(t("en", "pullRequests.latestReview"));
       const finding = container.querySelector('[data-slot="finding"]');
@@ -110,10 +183,8 @@ describe("pull request detail data plane (pure helpers)", () => {
     });
   });
 });
-describe("pull request detail face (static SSR)", () => {
-  const render = (detail: PullRequestDetail) =>
-    renderToStaticMarkup(createElement(PullRequestDetailView, { locale: "en", detail }));
 
+describe("pull request detail face (static SSR)", () => {
   /**
    * The family triggers in render order: selected state and the announced name
    * (what an assistive technology reads).
@@ -172,15 +243,31 @@ describe("pull request detail face (static SSR)", () => {
   };
 
   /**
-   * A failure-only detail: no finding at all, so nothing is actionable and the
-   * face opens on the failures family with the diagnostic payload in the markup.
+   * Fold pairs read off the rendered container: each fold control's
+   * `aria-expanded`, the body its `aria-controls` names, and whether that body
+   * carries `hidden`. Bodies stay mounted, so the attribute — not presence — is
+   * the fold.
    */
-  const FAILING: PullRequestDetail = { ...DETAIL, findings: [] };
+  const foldPairs = (container: HTMLElement) =>
+    [...container.querySelectorAll<HTMLElement>("button[aria-expanded][aria-controls]")].map((control) => {
+      const id = control.getAttribute("aria-controls") ?? "";
+      return {
+        expanded: control.getAttribute("aria-expanded") === "true",
+        hidden: container.querySelector<HTMLElement>(`#${id}`)?.hidden,
+      };
+    });
+
+  /**
+   * A failures-only face: no finding and no review, so the counts open the
+   * failures family with the diagnostic payload in the markup.
+   */
+  const failing = (over: Partial<RecordPages> = {}) =>
+    face({ findings: page([]), reviews: page([]), ...over });
 
   test("the PR number and its repository link to GitHub with a safe target", async () => {
     // Both links read their address from the row's own owner/repo/number; the
     // accessible name says where the control goes, and the glyph is decoration.
-    const links = await withMarkup(render(DETAIL), (container) =>
+    const links = await withMarkup(face(), (container) =>
       [...container.querySelectorAll("a")].map((anchor) => ({
         href: anchor.getAttribute("href"),
         target: anchor.getAttribute("target"),
@@ -210,11 +297,11 @@ describe("pull request detail face (static SSR)", () => {
     ]);
   });
 
-  test("the header names the PR's own facts; the band aggregates them", async () => {
+  test("the header names the PR's own facts; the band aggregates the head counts", async () => {
     // One render, read from the one tree: the header, its meta line and the
     // band all describe the same payload, so nothing here can pass against a
     // different render than the one it claims to read.
-    const markup = render(DETAIL);
+    const markup = face();
     const read = await withMarkup(markup, (container) => ({
       // Short-sha chip over the head sha, titled with the full-name tooltip.
       chips: [...container.querySelectorAll<HTMLElement>('[data-slot="head-sha"]')].map(
@@ -250,9 +337,8 @@ describe("pull request detail face (static SSR)", () => {
     // show: the line disappears rather than rendering an empty label.
     expect(
       await withMarkup(
-        render({
-          ...DETAIL,
-          reviews: [
+        face({
+          reviews: page([
             {
               verdict: "needs fixes",
               summary_md: "An unattributed round.",
@@ -261,20 +347,20 @@ describe("pull request detail face (static SSR)", () => {
               reviewed_at: "2026-11-01 08:00:00",
               head_sha: "aaa111b",
             },
-          ],
+          ]),
         }),
         (container) => container.querySelector('[data-slot="pr-meta"]') !== null,
       ),
     ).toBe(false);
     expect(read.metrics[0]).toEqual([t("en", "pullRequests.columnVerdict"), "needs fixes"]);
+    // The band reads the head counts, never the loaded page length.
     expect(read.metrics[1]).toEqual([t("en", "pullRequests.reviews"), "2"]);
     expect(read.metrics[2]).toEqual([t("en", "pullRequests.failures"), "1"]);
-    expect(read.metrics[3]?.[0]).toBe(t("en", "pullRequests.findings"));
-    expect(read.metrics[3]?.[1]).toContain(t("en", "pullRequests.mustFixNote", { count: 1 }));
+    expect(read.metrics[3]).toEqual([t("en", "pullRequests.findings"), "3"]);
   });
 
   test("the band wears the danger face for a non-shipping verdict and any failure", async () => {
-    const tones = await withMarkup(render(DETAIL), (container) =>
+    const tones = await withMarkup(face(), (container) =>
       [...container.querySelectorAll('[data-slot="metric-value"]')].map((value) => value.getAttribute("data-tone")),
     );
     // Verdict (needs fixes) and failures (1) are alerts; the two counts are not.
@@ -288,29 +374,28 @@ describe("pull request detail face (static SSR)", () => {
     // band's `data-tone` on the verdict figure, the badge's on the row's pill,
     // the timeline row's on itself. The fixtures are the pre-v1 words too:
     // reading them as alarms by default used to paint `approve` red.
-    const legacy = (verdict: string, summary: string): PullRequestDetail => ({
-      ...DETAIL,
-      pull_request: {
-        ...DETAIL.pull_request,
-        latest_review: { verdict, reviewed_at: "2026-11-01 08:00:00" },
-      },
-      // No finding and no failure: the face opens on the reviews, where the
-      // badge of the recorded verdict renders.
-      findings: [],
-      failures: [],
-      reviews: [
+    const legacy = (verdict: string, summary: string) =>
+      face(
         {
-          verdict,
-          summary_md: summary,
-          model: "kimi-for-coding",
-          provider: "openrouter",
-          reviewed_at: "2026-11-01 08:00:00",
-          head_sha: "aaa111bbb222",
+          // No finding and no failure: the face opens on the reviews, where the
+          // badge of the recorded verdict renders.
+          findings: page([]),
+          failures: page([]),
+          reviews: page([
+            {
+              verdict,
+              summary_md: summary,
+              model: "kimi-for-coding",
+              provider: "openrouter",
+              reviewed_at: "2026-11-01 08:00:00",
+              head_sha: "aaa111bbb222",
+            },
+          ]),
         },
-      ],
-    });
-    const read = async (detail: PullRequestDetail) =>
-      withMarkup(render(detail), (container) => ({
+        { latest_review: { verdict, reviewed_at: "2026-11-01 08:00:00" } },
+      );
+    const read = async (markup: string) =>
+      withMarkup(markup, (container) => ({
         band: container.querySelectorAll('[data-slot="metric-value"]')[0]?.getAttribute("data-tone") ?? null,
         badge: container
           .querySelector('[role="tabpanel"] [data-slot="status-badge"]')
@@ -337,10 +422,10 @@ describe("pull request detail face (static SSR)", () => {
     });
   });
 
-  test("a must-fix finding opens the findings family, grouped by severity", async () => {
-    // One render, one parse: the triggers, their counts and the severity
-    // groups all describe the same tree.
-    const markup = render(DETAIL);
+  test("a findings count opens the findings family, grouped by severity", async () => {
+    // One render, one page: the triggers, their counts and the severity groups
+    // all describe the same tree.
+    const markup = face();
     const read = await withMarkup(markup, (container) => ({
       tabs: familyTabs(container),
       // Counts stay text inside the trigger, so size never depends on colour.
@@ -371,21 +456,21 @@ describe("pull request detail face (static SSR)", () => {
     expect(markup).not.toContain(":null");
   });
 
-  test("the danger dot marks an actionable family and a recorded failure, and nothing else", async () => {
-    const dots = async (detail: PullRequestDetail) => withMarkup(render(detail), familyDots);
+  test("the danger dot marks an actionable loaded findings page and a recorded failure, nothing else", async () => {
+    const dots = async (over: Partial<RecordPages> = {}) => withMarkup(face(over), familyDots);
     const findingsLabel = t("en", "pullRequests.findings");
     const failuresLabel = t("en", "pullRequests.failures");
     const reviewsLabel = t("en", "pullRequests.reviews");
 
     // A must-fix and a should-fix both make the findings family actionable; a
     // recorded failure is an alarm of its own; history never earns a dot.
-    expect(await dots(DETAIL)).toEqual({ [findingsLabel]: true, [reviewsLabel]: false, [failuresLabel]: true });
+    expect(await dots()).toEqual({ [findingsLabel]: true, [reviewsLabel]: false, [failuresLabel]: true });
     // A should-fix alone is a requested change, not a nit.
     expect(
-      (await dots({ ...DETAIL, findings: DETAIL.findings.filter((f) => f.severity === "should-fix") }))[findingsLabel],
+      (await dots({ findings: page(FINDINGS.filter((f) => f.severity === "should-fix")) }))[findingsLabel],
     ).toBe(true);
     // Nits only: nothing to act on, so the findings trigger goes quiet.
-    expect(await dots({ ...DETAIL, findings: DETAIL.findings.filter((f) => f.severity === "nit") })).toEqual({
+    expect(await dots({ findings: page(FINDINGS.filter((f) => f.severity === "nit")) })).toEqual({
       [findingsLabel]: false,
       [reviewsLabel]: false,
       [failuresLabel]: true,
@@ -393,12 +478,14 @@ describe("pull request detail face (static SSR)", () => {
     // A severity this face does not name is still a requested change: the
     // `other` bucket stays visible, so its trigger must not read as quiet.
     expect(
-      (await dots({ ...DETAIL, findings: DETAIL.findings.filter((f) => f.severity === "nit").map((f) => ({ ...f, severity: "blocker" })) }))[
-        findingsLabel
-      ],
+      (await dots({
+        findings: page(
+          FINDINGS.filter((f) => f.severity === "nit").map((f) => ({ ...f, severity: "blocker" })),
+        ),
+      }))[findingsLabel],
     ).toBe(true);
     // No failure: the failures trigger loses its dot too.
-    expect(await dots({ ...DETAIL, failures: [] })).toEqual({
+    expect(await dots({ failures: page([]) })).toEqual({
       [findingsLabel]: true,
       [reviewsLabel]: false,
       [failuresLabel]: false,
@@ -406,31 +493,28 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("an out-of-set severity lands in the `other` bucket, last, with its count", async () => {
-    const detail: PullRequestDetail = {
-      ...DETAIL,
-      findings: [
-        ...DETAIL.findings,
-        {
-          finding_id: "f-4",
-          severity: "blocker",
-          title: "Drop the unsafe default",
-          file_path: "",
-          line: null,
-          body: "The payload's severity is a free string; this one is outside the set.",
-        },
-        {
-          // An out-of-set severity with no identity text: its toggle must still
-          // be named, by its position.
-          finding_id: "f-5",
-          severity: "blocker",
-          title: "",
-          file_path: "",
-          line: null,
-          body: "A second out-of-set finding, this one untitled.",
-        },
-      ],
-    };
-    const read = await withMarkup(render(detail), (container) => {
+    const withOther = page([
+      ...FINDINGS,
+      {
+        finding_id: "f-4",
+        severity: "blocker",
+        title: "Drop the unsafe default",
+        file_path: "",
+        line: null,
+        body: "The payload's severity is a free string; this one is outside the set.",
+      },
+      {
+        // An out-of-set severity with no identity text: its toggle must still
+        // be named, by its position.
+        finding_id: "f-5",
+        severity: "blocker",
+        title: "",
+        file_path: "",
+        line: null,
+        body: "A second out-of-set finding, this one untitled.",
+      },
+    ]);
+    const read = await withMarkup(face({ findings: withOther }), (container) => {
       const groups = severityGroups(container);
       // The bucket is picked by its severity, not by its position, so the
       // claims below cannot silently read a known bucket.
@@ -464,41 +548,25 @@ describe("pull request detail face (static SSR)", () => {
     ]);
 
     // One legacy severity, three surfaces, one rule: `blocker` is not a nit, so
-    // the face opens on the findings, the trigger earns the danger dot (the
-    // dot reads the bucket flags), and the finding still renders — in `other`,
-    // the bucket it lands in rather than a reason to stay hidden.
-    const legacyOnly: PullRequestDetail = { ...DETAIL, findings: detail.findings.slice(3) };
-    const face = await withMarkup(render(legacyOnly), (container) => ({
+    // the face opens on the findings, the trigger earns the danger dot, and the
+    // finding still renders — in `other`, the bucket it lands in.
+    const legacyOnly = face({ findings: page(withOther.items.slice(3)) });
+    const legacyRead = await withMarkup(legacyOnly, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
       dots: familyDots(container),
       buckets: severityGroups(container).map((group) => group.severity),
     }));
-    expect(face.selected).toEqual([true, false, false]);
-    expect(face.dots[t("en", "pullRequests.findings")]).toBe(true);
-    expect(face.buckets).toEqual(["other"]);
+    expect(legacyRead.selected).toEqual([true, false, false]);
+    expect(legacyRead.dots[t("en", "pullRequests.findings")]).toBe(true);
+    expect(legacyRead.buckets).toEqual(["other"]);
   });
 
-  /**
-   * Fold pairs read off the rendered container: each fold control's
-   * `aria-expanded`, the body its `aria-controls` names, and whether that body
-   * carries `hidden`. Bodies stay mounted, so the attribute — not presence — is
-   * the fold.
-   */
-  const foldPairs = (container: HTMLElement) =>
-    [...container.querySelectorAll<HTMLElement>("button[aria-expanded][aria-controls]")].map((control) => {
-      const id = control.getAttribute("aria-controls") ?? "";
-      return {
-        expanded: control.getAttribute("aria-expanded") === "true",
-        hidden: container.querySelector<HTMLElement>(`#${id}`)?.hidden,
-      };
-    });
-
   test("only the must-fix body opens; every other group starts folded", async () => {
-    const markup = render(DETAIL);
+    const markup = face();
     // Fold order follows the group order: must-fix, should-fix, nit.
     const { pairs, labels } = await withMarkup(markup, (container) => ({
       pairs: foldPairs(container),
-      labels: [...container.querySelectorAll("button[aria-expanded][aria-label]")].map(
+      labels: [...container.querySelectorAll('[role="tabpanel"] li button[aria-expanded][aria-label]')].map(
         (control) => control.getAttribute("aria-label") ?? "",
       ),
     }));
@@ -525,14 +593,13 @@ describe("pull request detail face (static SSR)", () => {
     // Same title, same severity: only the position separates them, so the
     // label rule must carry it for every record rather than only for the
     // ones with no text at all.
-    const twin: PullRequestDetail = {
-      ...DETAIL,
-      findings: [
+    const twin = face({
+      findings: page([
         { finding_id: "f-1", severity: "must-fix", title: "Guard the write", file_path: "", line: null, body: "" },
         { finding_id: "f-2", severity: "must-fix", title: "Guard the write", file_path: "", line: null, body: "" },
-      ],
-    };
-    const labels = await withMarkup(render(twin), (container) =>
+      ]),
+    });
+    const labels = await withMarkup(twin, (container) =>
       [...container.querySelectorAll<HTMLElement>('[data-slot="finding"] button[aria-label]')].map(
         (control) => control.getAttribute("aria-label") ?? "",
       ),
@@ -547,14 +614,13 @@ describe("pull request detail face (static SSR)", () => {
   test("a toggle whose record carries no identity text falls back to its position", async () => {
     // A coerced-empty title leaves the finding with nothing to name itself by;
     // the position keeps the two toggles distinguishable.
-    const untitled: PullRequestDetail = {
-      ...DETAIL,
-      findings: [
+    const untitled = face({
+      findings: page([
         { finding_id: "f-1", severity: "must-fix", title: "", file_path: "", line: null, body: "" },
         { finding_id: "f-2", severity: "should-fix", title: "", file_path: "", line: null, body: "" },
-      ],
-    };
-    const findingLabels = await withMarkup(render(untitled), (container) =>
+      ]),
+    });
+    const findingLabels = await withMarkup(untitled, (container) =>
       [...container.querySelectorAll('[data-slot="finding"] button[aria-label]')].map(
         (control) => control.getAttribute("aria-label") ?? "",
       ),
@@ -565,7 +631,7 @@ describe("pull request detail face (static SSR)", () => {
     ]);
 
     // The same case on the reviews family: no verdict and no head sha.
-    const anonymous = (summary: string, reviewed_at: string): PullRequestDetail["reviews"][number] => ({
+    const anonymous = (summary: string, reviewed_at: string) => ({
       verdict: "",
       summary_md: summary,
       model: "",
@@ -573,15 +639,14 @@ describe("pull request detail face (static SSR)", () => {
       reviewed_at,
       head_sha: "",
     });
-    const unattributed: PullRequestDetail = {
-      ...DETAIL,
-      findings: [],
-      failures: [],
-      reviews: [anonymous("", "2026-11-01 08:00:00"), anonymous("An older round.", "2026-10-30 08:00:00")],
-    };
+    const unattributed = face({
+      findings: page([]),
+      failures: page([]),
+      reviews: page([anonymous("", "2026-11-01 08:00:00"), anonymous("An older round.", "2026-10-30 08:00:00")]),
+    });
     expect(
-      await withMarkup(render(unattributed), (container) =>
-        [...container.querySelectorAll("button[aria-expanded][aria-label]")].map(
+      await withMarkup(unattributed, (container) =>
+        [...container.querySelectorAll('[role="tabpanel"] li button[aria-expanded][aria-label]')].map(
           (control) => control.getAttribute("aria-label") ?? "",
         ),
       ),
@@ -592,11 +657,10 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("a should-fix finding alone opens the findings family", async () => {
-    // No must-fix anywhere: a requested change still outranks history, so the
+    // No must-fix anywhere: a findings count still outranks history, so the
     // face must open on the findings rather than the reviews.
-    const shouldOnly: PullRequestDetail = {
-      ...DETAIL,
-      findings: [
+    const markup = face({
+      findings: page([
         {
           finding_id: "f-2",
           severity: "should-fix",
@@ -605,17 +669,11 @@ describe("pull request detail face (static SSR)", () => {
           line: 88,
           body: "The refresh cookie is set with secure only.",
         },
-      ],
-    };
-    const markup = render(shouldOnly);
-    expect((await withMarkup(markup, familyTabs)).map((tab) => tab.selected)).toEqual([
-      true,
-      false,
-      false,
-    ]);
+      ]),
+    });
+    expect((await withMarkup(markup, familyTabs)).map((tab) => tab.selected)).toEqual([true, false, false]);
     expect(markup).toContain("The refresh cookie is set with secure only.");
-    // The findings figure counts the row but names no must-fix: the note is a
-    // must-fix count, so a should-fix-only detail must not wear it.
+    // The findings figure is the head's count: one row, no must-fix note.
     expect(
       await withMarkup(
         markup,
@@ -630,29 +688,25 @@ describe("pull request detail face (static SSR)", () => {
   test("an empty verdict reads as no verdict: announced dash, no pill, no dangling separator", async () => {
     // The parser coerces a nullable verdict to "": that is a review whose
     // verdict was never recorded, not the verdict "".
-    const empty: PullRequestDetail = {
-      ...DETAIL,
-      pull_request: {
-        ...DETAIL.pull_request,
-        latest_review: { verdict: "", reviewed_at: "2026-11-01 08:00:00" },
+    const empty = face(
+      {
+        findings: page([]),
+        failures: page([]),
+        reviews: page([
+          {
+            verdict: "",
+            summary_md: "The pipeline recorded no verdict.",
+            // Provider-only attribution: the row must name the provider.
+            model: "",
+            provider: "openrouter",
+            reviewed_at: "2026-11-01 08:00:00",
+            head_sha: "aaa111b",
+          },
+        ]),
       },
-      reviews: [
-        {
-          verdict: "",
-          summary_md: "The pipeline recorded no verdict.",
-          // Provider-only attribution: the row must name the provider.
-          model: "",
-          provider: "openrouter",
-          reviewed_at: "2026-11-01 08:00:00",
-          head_sha: "aaa111b",
-        },
-      ],
-      // No actionable finding and no failure: the face opens on the reviews,
-      // which is where the coerced verdict renders.
-      findings: [],
-      failures: [],
-    };
-    const read = await withMarkup(render(empty), (container) => {
+      { latest_review: { verdict: "", reviewed_at: "2026-11-01 08:00:00" } },
+    );
+    const read = await withMarkup(empty, (container) => {
       const verdict = container.querySelectorAll('[data-slot="metric-value"]')[0];
       // The timeline row still names the review, with no dangling separator
       // and the provider rather than an empty model.
@@ -687,7 +741,7 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("a clean detail opens on the reviews family with the latest summary readable", async () => {
-    const reviews = [
+    const reviews = page([
       {
         verdict: "ship it",
         summary_md: "Everything the last round asked for is in.",
@@ -704,20 +758,13 @@ describe("pull request detail face (static SSR)", () => {
         reviewed_at: "2026-10-30 09:00:00",
         head_sha: "bbb222c",
       },
-    ];
-    const clean: PullRequestDetail = {
-      pull_request: {
-        ...ROW_OPEN,
-        number: 7,
-        title: "Add the export button",
+    ]);
+    const markup = face(
+      { findings: page([]), failures: page([]), reviews },
+      {
         latest_review: { verdict: "ship it", reviewed_at: "2026-11-01 09:00:00" },
-        failure_count: 0,
       },
-      reviews,
-      failures: [],
-      findings: [],
-    };
-    const markup = render(clean);
+    );
     const read = await withMarkup(markup, (container) => ({
       selected: familyTabs(container).map((tab) => tab.selected),
       // The latest summary opens; older history is mounted but folded.
@@ -728,7 +775,7 @@ describe("pull request detail face (static SSR)", () => {
       olderHead: reviewHead(container, "An older round, folded by default."),
       // Review toggles name their verdict and short sha, so two "Collapse"s on
       // this face are distinguishable.
-      labels: [...container.querySelectorAll("button[aria-expanded][aria-label]")].map(
+      labels: [...container.querySelectorAll('[role="tabpanel"] li button[aria-expanded][aria-label]')].map(
         (control) => control.getAttribute("aria-label") ?? "",
       ),
     }));
@@ -751,48 +798,43 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("an empty head sha renders neither chip nor aside row", async () => {
-    const emptySha: PullRequestDetail = {
-      ...DETAIL,
-      pull_request: { ...DETAIL.pull_request, head_sha: "", latest_review: null },
+    const emptySha = face(
       // No review row either: the band's verdict then falls back to the PR
       // row's summary, which is absent too.
-      reviews: [],
-    };
-    const markup = render(emptySha);
+      { reviews: page([]) },
+      { head_sha: "", latest_review: null },
+    );
     // The PR-level chip disappears rather than rendering an empty one; its
     // tooltip and the aside's Head row go with it.
     expect(
-      await withMarkup(markup, (container) =>
+      await withMarkup(emptySha, (container) =>
         [...container.querySelectorAll<HTMLElement>('[data-slot="head-sha"]')].map((chip) => chip.textContent ?? ""),
       ),
     ).toEqual([]);
-    expect(markup).not.toContain(t("en", "pullRequests.headSha"));
-    expect(markup).not.toContain(t("en", "pullRequests.factHead"));
+    expect(emptySha).not.toContain(t("en", "pullRequests.headSha"));
+    expect(emptySha).not.toContain(t("en", "pullRequests.factHead"));
     // The verdict figure is announced rather than left blank.
-    expect(markup).toContain(t("en", "pullRequests.noVerdict"));
+    expect(emptySha).toContain(t("en", "pullRequests.noVerdict"));
   });
 
   test("the aside timeline is capped and still ends on the PR's first sighting", async () => {
-    const history = Array.from({ length: 12 }, (_, index) => ({
-      verdict: "needs fixes",
-      summary_md: `Round ${index}`,
-      // The timeline's meta line renders the review's model, so a per-review
-      // model is the one stable, rendered marker of WHICH rows survived.
-      model: `model-${String(index).padStart(2, "0")}`,
-      provider: "",
-      // Newest first, as the store orders them; one hour apart.
-      reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
-      head_sha: `sha${index}`,
-    }));
-    const detail = {
-      ...DETAIL,
-      pull_request: {
-        ...DETAIL.pull_request,
-        latest_review: { verdict: "needs fixes", reviewed_at: history[0]?.reviewed_at ?? "" },
-      },
-      reviews: history,
-    };
-    const markup = render(detail);
+    const history = page(
+      Array.from({ length: 12 }, (_, index) => ({
+        verdict: "needs fixes",
+        summary_md: `Round ${index}`,
+        // The timeline's meta line renders the review's model, so a per-review
+        // model is the one stable, rendered marker of WHICH rows survived.
+        model: `model-${String(index).padStart(2, "0")}`,
+        provider: "",
+        // Newest first, as the store orders them; one hour apart.
+        reviewed_at: `2026-11-01 ${String(12 - index).padStart(2, "0")}:00:00`,
+        head_sha: `sha${index}`,
+      })),
+    );
+    const markup = face(
+      { reviews: history },
+      { latest_review: { verdict: "needs fixes", reviewed_at: history.items[0]?.reviewed_at ?? "" } },
+    );
     // `· model-NN` is the timeline's meta separator: the header names the model
     // without it, so the marker identifies exactly the rows that rendered.
     const marker = (index: number) => ` · model-${String(index).padStart(2, "0")}`;
@@ -831,20 +873,21 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("a timeline that fits the cap renders no truncation row", async () => {
-    // Seven history entries is the cap: six shown plus the anchor, none dropped.
-    const reviews = Array.from({ length: 6 }, (_, index) => ({
-      verdict: "ship it",
-      summary_md: `Round ${index}`,
-      model: `model-${index}`,
-      provider: "",
-      reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
-      head_sha: `sha${index}`,
-    }));
-    const fitting = { ...DETAIL, reviews, failures: [] };
+    // Six reviews plus the anchor is under the seven-event cap.
+    const reviews = page(
+      Array.from({ length: 6 }, (_, index) => ({
+        verdict: "ship it",
+        summary_md: `Round ${index}`,
+        model: `model-${index}`,
+        provider: "",
+        reviewed_at: `2026-10-31 ${String(12 - index).padStart(2, "0")}:00:00`,
+        head_sha: `sha${index}`,
+      })),
+    );
     // Nothing was dropped: every entry renders and the truncation row is absent
     // rather than empty.
     expect(
-      await withMarkup(render(fitting), (container) => ({
+      await withMarkup(face({ reviews, failures: page([]) }), (container) => ({
         entries: container.querySelectorAll('[data-slot="activity-entry"]').length,
         // A boolean, not the node: the window is gone once the read returns.
         truncated: container.querySelector('[data-slot="timeline-truncated"]') !== null,
@@ -853,7 +896,7 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("a failure's first line renders as escaped text and the remaining output stays in details", async () => {
-    const markup = render(FAILING);
+    const markup = failing();
     expect((await withMarkup(markup, familyTabs)).map((tab) => tab.selected)).toEqual([
       false,
       false,
@@ -874,11 +917,13 @@ describe("pull request detail face (static SSR)", () => {
     // disclosure starts at the SECOND line, because the first one is the
     // diagnosis above it. The disclosure's behaviour (and the clipboard's full
     // text) is pinned in the mounted suite, where it can actually be opened.
-    const failureText = (error: string) => ({
-      ...FAILING,
-      failures: [{ stage: "sandbox", error, created_at: "2026-10-31 23:00:00" }],
-    });
-    const multiline = render(failureText("a\nb"));
+    const failureText = (error: string) =>
+      face({
+        findings: page([]),
+        reviews: page([]),
+        failures: page([{ stage: "sandbox", error, created_at: "2026-10-31 23:00:00" }]),
+      });
+    const multiline = failureText("a\nb");
     expect(multiline).toContain(t("en", "pullRequests.failureRemainingOutput"));
     const folded = await withMarkup(multiline, (container) => ({
       diagnosis: container.querySelector('[role="tabpanel"] li[data-tone="danger"] p')?.textContent ?? "",
@@ -893,7 +938,7 @@ describe("pull request detail face (static SSR)", () => {
     ).toBe(false);
     // A trailing newline is not a second line: `"boom\n"` is one line of
     // output, so it renders no disclosure either.
-    const trailing = await withMarkup(render(failureText("boom\n")), (container) => ({
+    const trailing = await withMarkup(failureText("boom\n"), (container) => ({
       details: container.querySelector('[role="tabpanel"] details') !== null,
       text: container.querySelector('[role="tabpanel"] li[data-tone="danger"]')?.textContent ?? "",
     }));
@@ -904,23 +949,25 @@ describe("pull request detail face (static SSR)", () => {
   test("a failure with no recorded stage renders neither chip nor a dangling separator", async () => {
     // The payload coerces a missing stage to "": an empty chip would read as a
     // fact, and `Review failed · ` would leave the separator hanging.
-    const stageless: PullRequestDetail = {
-      ...DETAIL,
-      findings: [],
-      failures: [{ stage: "", error: "boom", created_at: "2026-10-31 23:00:00" }],
-    };
-    const read = await withMarkup(render(stageless), (container) => {
-      // The failure row is the activity entry whose label names the failure;
-      // the review row carries its own verdict label instead.
-      const entry = [...container.querySelectorAll<HTMLElement>('[data-slot="activity-entry"]')].find((row) =>
-        (row.textContent ?? "").startsWith(t("en", "pullRequests.timelineFailureNoStage")),
-      );
-      return {
-        entryFound: entry !== undefined,
-        stageChip: container.querySelector('[role="tabpanel"] [data-slot="failure-stage"]') !== null,
-        labels: [...(entry?.querySelectorAll("span") ?? [])].map((span) => span.textContent ?? ""),
-      };
-    });
+    const read = await withMarkup(
+      face({
+        findings: page([]),
+        reviews: page([]),
+        failures: page([{ stage: "", error: "boom", created_at: "2026-10-31 23:00:00" }]),
+      }),
+      (container) => {
+        // The failure row is the activity entry whose label names the failure;
+        // the review row carries its own verdict label instead.
+        const entry = [...container.querySelectorAll<HTMLElement>('[data-slot="activity-entry"]')].find((row) =>
+          (row.textContent ?? "").startsWith(t("en", "pullRequests.timelineFailureNoStage")),
+        );
+        return {
+          entryFound: entry !== undefined,
+          stageChip: container.querySelector('[role="tabpanel"] [data-slot="failure-stage"]') !== null,
+          labels: [...(entry?.querySelectorAll("span") ?? [])].map((span) => span.textContent ?? ""),
+        };
+      },
+    );
     expect(read.entryFound).toBe(true);
     expect(read.stageChip).toBe(false);
     expect(read.labels).toContain(t("en", "pullRequests.timelineFailureNoStage"));
@@ -932,7 +979,7 @@ describe("pull request detail face (static SSR)", () => {
     // The record keys differ only in punctuation (space vs `T` in the
     // timestamp), and the old fold-to-dash sanitisation mapped both onto one
     // id: a duplicate DOM id whose `aria-controls` pointed at one body.
-    const punctuated = (reviewed_at: string, summary: string): PullRequestDetail["reviews"][number] => ({
+    const punctuated = (reviewed_at: string, summary: string) => ({
       verdict: "ship it",
       summary_md: summary,
       model: "kimi-for-coding",
@@ -940,16 +987,18 @@ describe("pull request detail face (static SSR)", () => {
       reviewed_at,
       head_sha: "aaa111b",
     });
-    const detail: PullRequestDetail = {
-      ...DETAIL,
-      findings: [],
-      failures: [],
-      reviews: [punctuated("2026-11-01 08:00:00", "First record."), punctuated("2026-11-01T08:00:00", "Second record.")],
-    };
+    const markup = face({
+      findings: page([]),
+      failures: page([]),
+      reviews: page([
+        punctuated("2026-11-01 08:00:00", "First record."),
+        punctuated("2026-11-01T08:00:00", "Second record."),
+      ]),
+    });
     // The encoding is the contract: distinct keys, distinct ids — never one
     // sanitised text two records can share.
     expect(recordId("base", "2026-11-01 08:00:00")).not.toBe(recordId("base", "2026-11-01-08:00:00"));
-    const read = await withMarkup(render(detail), (container) => {
+    const read = await withMarkup(markup, (container) => {
       const bodyOf = (id: string) =>
         [...container.querySelectorAll<HTMLElement>("p[id]")].find((body) => body.id === id) ?? null;
       return [...container.querySelectorAll<HTMLElement>('[role="tabpanel"] button[aria-controls]')].map((control) => {
@@ -961,6 +1010,56 @@ describe("pull request detail face (static SSR)", () => {
     expect(new Set(read.map(({ id }) => id)).size).toBe(2);
     // Each control points at its own record's body, not the other one's.
     expect(read.map(({ body }) => body)).toEqual(["First record.", "Second record."]);
+  });
+
+  test("the pager reports the loaded range over the section total and respects the bounds", async () => {
+    const pages = {
+      ...RECORDS,
+      // The head counts 25 findings; this page holds three of them.
+      findings: page(FINDINGS, 25),
+    };
+    const range = (container: HTMLElement) =>
+      container.querySelector('[data-slot="pager-range"]')?.textContent ?? "";
+    const controls = (container: HTMLElement) =>
+      [...container.querySelectorAll<HTMLButtonElement>('[data-slot="pager"] button')].map((button) => ({
+        label: button.textContent ?? "",
+        disabled: button.disabled,
+      }));
+    const built = scene(pages);
+    const first = await withMarkup(render(built.detail, recordsOf(built.pages)), (container) => ({
+      range: range(container),
+      controls: controls(container),
+    }));
+    expect(first.range).toBe(t("en", "pullRequests.pageRange", { from: 1, to: 3, total: 25 }));
+    expect(first.controls).toEqual([
+      { label: t("en", "pullRequests.pagePrev"), disabled: true },
+      { label: t("en", "pullRequests.pageNext"), disabled: false },
+    ]);
+
+    // A later page: the range moves and prev is live. The last page disables next.
+    const last = await withMarkup(
+      render(built.detail, recordsOf(built.pages, 22)),
+      (container) => ({ range: range(container), controls: controls(container) }),
+    );
+    expect(last.range).toBe(t("en", "pullRequests.pageRange", { from: 23, to: 25, total: 25 }));
+    expect(last.controls).toEqual([
+      { label: t("en", "pullRequests.pagePrev"), disabled: false },
+      { label: t("en", "pullRequests.pageNext"), disabled: true },
+    ]);
+  });
+
+  test("the findings filter is present only while the PR has findings", async () => {
+    const filter = async (markup: string) =>
+      withMarkup(markup, (container) => {
+        const trigger = container.querySelector('[role="combobox"]');
+        return { present: trigger !== null, name: trigger?.getAttribute("aria-label") ?? "" };
+      });
+    expect(await filter(face())).toEqual({
+      present: true,
+      name: t("en", "pullRequests.filterSeverity"),
+    });
+    // No findings to filter: the control is noise, so it is absent.
+    expect((await filter(face({ findings: page([]) }))).present).toBe(false);
   });
 
   test("the loading face keeps the back control outside the busy region", async () => {
@@ -1005,7 +1104,7 @@ describe("pull request detail face (static SSR)", () => {
   });
 
   test("the aside carries the PR facts and one merged timeline, newest first", () => {
-    const markup = render(DETAIL);
+    const markup = face();
     for (const label of ["factRepo", "factNumber", "factState", "factHead"] as const) {
       expect(markup).toContain(t("en", `pullRequests.${label}`));
     }

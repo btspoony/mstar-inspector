@@ -469,6 +469,15 @@ type AppsStoreD1 = {
   batch(statements: AppsStoreStatement[]): Promise<AppsStoreBatchResult[]>;
 };
 
+/** The `SELECT COUNT(*) AS n` row of a batch statement. */
+type CountRow = { n: number };
+
+/** One batch statement's `COUNT(*)` result. */
+function countOf(result: AppsStoreBatchResult): number {
+  const [row] = result.results as CountRow[];
+  return row?.n ?? 0;
+}
+
 /**
  * Tenant read face (migration 0026) — there is exactly one. Every
  * execution-facing App read INNER JOINs `app_workspaces`, so an App with no
@@ -1160,50 +1169,116 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * ONE pull request with its review history, failures and findings — the
-     * detail face. The address is the ledger's OWN key
-     * (app_id, owner, repo, pr_number): one App can be installed on several
-     * repos, and a number is only unique WITHIN a repo, so a number-only
-     * lookup would answer with a different repo's PR. A miss is `null` — never
-     * a same-number row from another repo.
+     * ONE pull request's head row — the detail face's first read. The address
+     * is the ledger's OWN key (app_id, owner, repo, pr_number): one App can be
+     * installed on several repos, and a number is only unique WITHIN a repo,
+     * so a number-only lookup would answer with a different repo's PR. A miss
+     * is `null` — never a same-number row from another repo.
+     *
+     * The latest review rides along: it is the header's verdict fallback while
+     * the reviews section is still unloaded. The counts are a separate read
+     * (`countPullRequestRecords`), so the head stays one row plus one lookup.
+     */
+    async getPullRequestHead(
+      appId: string,
+      owner: string,
+      repo: string,
+      prNumber: number,
+    ): Promise<PullRequestHeadRow | null> {
+      const results = await db.batch([
+        db
+          .prepare(
+            `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
+             FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT verdict, reviewed_at FROM reviews
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+             ORDER BY reviewed_at DESC, rowid DESC LIMIT 1`,
+          )
+          .bind(appId, owner, repo, prNumber),
+      ]);
+      const row = results[0]!.results[0] as PullRequestBaseRow | undefined;
+      if (row === undefined) return null;
+      const latest = results[1]!.results[0] as { verdict: string; reviewed_at: string } | undefined;
+      return {
+        ...row,
+        latest_verdict: latest?.verdict ?? null,
+        latest_reviewed_at: latest?.reviewed_at ?? null,
+      };
+    },
+
+    /**
+     * The three record families' totals — the head payload's `counts`. The
+     * failure count rides the same join the failures section pages, so the tab
+     * count and the list length always agree.
+     */
+    async countPullRequestRecords(
+      appId: string,
+      owner: string,
+      repo: string,
+      prNumber: number,
+    ): Promise<PullRequestRecordCounts> {
+      const results = await db.batch([
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM review_findings
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM reviews
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM review_failures f
+             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+      ]);
+      return {
+        findings: countOf(results[0]!),
+        reviews: countOf(results[1]!),
+        failures: countOf(results[2]!),
+      };
+    },
+
+    /**
+     * One page of a PR's findings, newest lifecycle row first, optionally
+     * filtered by an exact `mergeClass` (the wire's `severity`). The `total` is
+     * the FILTERED count — the pager's denominator.
      *
      * Findings come from `review_findings` (the lifecycle table): it carries
      * `finding_id` and the immutable original as JSON, so `severity` is its
      * `mergeClass` (the vocab-switch mapping `findings.severity` already
      * uses), and `title` / `file_path` / `line` / `body` are read out of
-     * `original_json`. Newest lifecycle row first.
+     * `original_json`.
      */
-    async getPullRequest(
+    async listPullRequestFindings(
       appId: string,
       owner: string,
       repo: string,
       prNumber: number,
-    ): Promise<PullRequestDetail | null> {
-      const row = await db
-        .prepare(
-          `SELECT owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at
-           FROM pull_requests WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
-        )
-        .bind(appId, owner, repo, prNumber)
-        .first<PullRequestBaseRow>();
-      if (!row) return null;
+      page: PullRequestPageRequest,
+    ): Promise<PullRequestRecordPage<PullRequestFindingRow>> {
+      const filter =
+        page.severity === undefined || page.severity === null
+          ? ""
+          : " AND json_extract(original_json, '$.mergeClass') = ?";
+      const filterBinds = filter === "" ? [] : [page.severity];
       const results = await db.batch([
         db
           .prepare(
-            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha
-             FROM reviews WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             ORDER BY reviewed_at DESC, rowid DESC`,
+            `SELECT COUNT(*) AS n FROM review_findings
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?${filter}`,
           )
-          .bind(appId, row.owner, row.repo, prNumber),
-        db
-          .prepare(
-            `SELECT f.stage, f.error, f.created_at
-             FROM review_failures f
-             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?
-             ORDER BY f.created_at DESC, f.rowid DESC`,
-          )
-          .bind(appId, row.owner, row.repo, prNumber),
+          .bind(appId, owner, repo, prNumber, ...filterBinds),
         db
           .prepare(
             `SELECT finding_id,
@@ -1213,42 +1288,83 @@ export function createAppsStore(db: AppsStoreD1) {
                     json_extract(original_json, '$.lineStart') AS line,
                     json_extract(original_json, '$.body') AS body
              FROM review_findings
-             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-             ORDER BY updated_ms DESC, finding_id`,
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?${filter}
+             ORDER BY updated_ms DESC, finding_id
+             LIMIT ? OFFSET ?`,
           )
-          .bind(appId, row.owner, row.repo, prNumber),
+          .bind(appId, owner, repo, prNumber, ...filterBinds, page.limit, page.offset),
       ]);
-      // The histories ARE the aggregates: reviews come newest first, so the
-      // first one is the latest verdict; the failure COUNT excludes the
-      // paging set (`PAGING_EXCLUDED_STAGES` — per-round attribution of a
-      // review that continued), while the history list itself carries every
-      // stage, so a lost metered record and a degraded recheck round both
-      // keep a surface.
-      const reviews = results[0]!.results as PullRequestReviewDetailRow[];
-      const failures = results[1]!.results as PullRequestFailureDetailRow[];
       return {
-        pull_request: {
-          number: row.pr_number,
-          owner: row.owner,
-          repo: row.repo,
-          title: row.title,
-          state: row.state,
-          head_sha: row.head_sha,
-          first_seen_at: row.first_seen_at,
-          last_seen_at: row.last_seen_at,
-          latest_review:
-            reviews[0] === undefined ? null : { verdict: reviews[0].verdict, reviewed_at: reviews[0].reviewed_at },
-          failure_count: failures.filter(
-            (failure) => !(PAGING_EXCLUDED_STAGES as readonly string[]).includes(failure.stage),
-          ).length,
-        },
-        reviews,
-        failures,
+        items: results[1]!.results as PullRequestFindingRow[],
+        total: countOf(results[0]!),
+      };
+    },
+
+    /** One page of a PR's reviews, newest first — the history's first page is its latest verdict. */
+    async listPullRequestReviews(
+      appId: string,
+      owner: string,
+      repo: string,
+      prNumber: number,
+      page: PullRequestPageRequest,
+    ): Promise<PullRequestRecordPage<PullRequestReviewDetailRow>> {
+      const results = await db.batch([
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM reviews
+             WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT verdict, summary_md, model, provider, reviewed_at, head_sha
+             FROM reviews WHERE app_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+             ORDER BY reviewed_at DESC, rowid DESC
+             LIMIT ? OFFSET ?`,
+          )
+          .bind(appId, owner, repo, prNumber, page.limit, page.offset),
+      ]);
+      return {
         // Nullable columns pass through AS THEY ARE: the store reports what
         // the tables hold, and the route's wire mapping decides what the
         // client may receive (a NULL `provider` is a real, common row — the
         // v1 pipeline never records one).
-        findings: results[2]!.results as PullRequestFindingRow[],
+        items: results[1]!.results as PullRequestReviewDetailRow[],
+        total: countOf(results[0]!),
+      };
+    },
+
+    /** One page of a PR's review failures, newest first — the diagnostic payload this face exists for. */
+    async listPullRequestFailures(
+      appId: string,
+      owner: string,
+      repo: string,
+      prNumber: number,
+      page: PullRequestPageRequest,
+    ): Promise<PullRequestRecordPage<PullRequestFailureDetailRow>> {
+      const results = await db.batch([
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n
+             FROM review_failures f
+             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
+          )
+          .bind(appId, owner, repo, prNumber),
+        db
+          .prepare(
+            `SELECT f.stage, f.error, f.created_at
+             FROM review_failures f
+             JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
+             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?
+             ORDER BY f.created_at DESC, f.rowid DESC
+             LIMIT ? OFFSET ?`,
+          )
+          .bind(appId, owner, repo, prNumber, page.limit, page.offset),
+      ]);
+      return {
+        items: results[1]!.results as PullRequestFailureDetailRow[],
+        total: countOf(results[0]!),
       };
     },
   };
@@ -1289,13 +1405,25 @@ export type PullRequestReviewDetailRow = {
 
 export type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
 
-/** Detail read result — the row plus its three histories. */
-export type PullRequestDetail = {
-  pull_request: PullRequestRow;
-  reviews: PullRequestReviewDetailRow[];
-  failures: PullRequestFailureDetailRow[];
-  findings: PullRequestFindingRow[];
+/** The detail head: the ledger row plus its latest review, for the header's verdict fallback. */
+export type PullRequestHeadRow = PullRequestBaseRow & {
+  latest_verdict: string | null;
+  latest_reviewed_at: string | null;
 };
+
+/** The three record families' totals (the detail payload's `counts`). */
+export type PullRequestRecordCounts = { findings: number; reviews: number; failures: number };
+
+/** One record section's page request — the route validates the bounds before this. */
+export type PullRequestPageRequest = {
+  offset: number;
+  limit: number;
+  /** `findings` only: exact `mergeClass`; absent/`null` is no filter. */
+  severity?: string | null;
+};
+
+/** One record section's page: the rows plus the total the pager counts against. */
+export type PullRequestRecordPage<T> = { items: T[]; total: number };
 
 /**
  * Join the ledger list's three result sets in memory — the tuple
