@@ -254,7 +254,7 @@ describe("classifyEvent — pull_request whitelist", () => {
     const outcome = classifyEvent(
       "pull_request",
       pullRequestBody("opened", {
-        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "renovate" } },
+        pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot" } },
       }),
     );
     expect(outcome.kind).toBe("job");
@@ -311,6 +311,24 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
     }
   }
 
+  // §2.1 bot-author row: every action is ignored in EVERY mode, and the bot
+  // guard outranks the mode gate (`open` × `opened` would otherwise enqueue).
+  for (const mode of MODES) {
+    for (const action of PULL_REQUEST_ACTIONS) {
+      test(`${mode} × pull_request.${action} by a [bot] author → ignore`, () => {
+        const outcome = classifyEvent(
+          "pull_request",
+          pullRequestBody(action, {
+            pull_request: { number: 42, head: { sha: HEAD_SHA }, user: { login: "dependabot[bot]" } },
+          }),
+          undefined,
+          { mode, appSlug: APP_SLUG },
+        );
+        expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
+      });
+    }
+  }
+
   for (const mode of MODES) {
     test(`${mode} × pull_request.closed (never whitelisted) → the action reason, not a mode reason`, () => {
       const outcome = classifyEvent("pull_request", pullRequestBody("closed"), undefined, {
@@ -338,6 +356,24 @@ describe("classifyEvent — review trigger mode matrix (spec §2.1, exhaustive)"
     test(`${mode} × issue_comment.created without a mention → ignore`, () => {
       const outcome = classifyMention("looks good to me", { mode, appSlug: APP_SLUG });
       expect(outcome).toEqual({ kind: "ignore", reason: "comment body does not mention the App bot" });
+    });
+    // §2.1 bot-author row on the comment face, with an AUTHORIZED actor
+    // (repo owner) so only the bot-author guard can explain the ignore.
+    test(`${mode} × issue_comment.created on a [bot]-authored PR → ignore`, () => {
+      const outcome = classifyEvent(
+        "issue_comment",
+        issueCommentBody({
+          issue: {
+            number: 42,
+            user: { login: "dependabot[bot]" },
+            pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+          },
+          sender: { type: "User", login: "test-owner" },
+        }),
+        undefined,
+        { mode, appSlug: APP_SLUG },
+      );
+      expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
     });
   }
 });
@@ -419,22 +455,6 @@ describe("classifyEvent — issue_comment bot mention (spec §3)", () => {
       EVERY_PUSH,
     );
     expect(outcome).toEqual({ kind: "ignore", reason: "comment is not on a pull request thread" });
-  });
-
-  test("comment on a PR opened by a [bot] account is ignored", () => {
-    const outcome = classifyEvent(
-      "issue_comment",
-      issueCommentBody({
-        issue: {
-          number: 42,
-          user: { login: "release-prep[bot]" },
-          pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
-        },
-      }),
-      undefined,
-      EVERY_PUSH,
-    );
-    expect(outcome).toEqual({ kind: "ignore", reason: "pull request was opened by a bot account" });
   });
 
   test("comment sent by a bot is ignored (self-comment loop guard)", () => {

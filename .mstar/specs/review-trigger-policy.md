@@ -1,6 +1,7 @@
 # Review Trigger Policy (review-trigger-policy)
 
 > **Status:** DRAFT — authored 2026-09-17; technical contract verified against source and frozen 2026-09-17 after product and architect review; pending PM lock before integration.
+> **Amendment 2026-11-03:** bot-authored PRs (author login ending in `[bot]`) are never reviewed — no auto trigger in any mode and no bot-mention trigger. §1, §2.1, §3 and acceptance anchor 3 below reflect it.
 > **SSOT:** This file — per-App review trigger modes, the bot-mention comment trigger, and their authorization/kill-switch semantics. GitHub publication face remains `github-review-comment-mapping.md`; review lifecycle remains `review-lifecycle.md`.
 > **Authority:** Deferred row "`/review` command extensions" in `review-lifecycle.md` §Deferred (trigger = explicit user demand) — demand recorded 2026-09-17 and resolved in superseding form: the command is retired outright rather than extended, so this file — not that row — now governs the comment trigger. RL-7 itself is unchanged.
 
@@ -9,10 +10,10 @@
 Each App chooses when reviews start:
 
 1. **`open`** — review a PR the first time it opens (the `opened` event only). New pushes and reopens never auto-trigger; a reviewer mentions the bot when they want another pass.
-2. **`every_push`** (default) — review on `opened`, `synchronize`, and `reopened`. This is today's behavior; the default preserves it exactly.
+2. **`every_push`** (default) — review on `opened`, `synchronize`, and `reopened`. This is today's behavior; the default preserves it exactly for human-authored PRs.
 3. **`manual`** — the App never auto-reviews. Only a bot mention starts a review.
 
-In every mode, a comment that @mentions the App's bot can (re-)start a review — on-demand re-run for auto modes, the only trigger for `manual`.
+In every mode, a comment that @mentions the App's bot can (re-)start a review — on-demand re-run for auto modes, the only trigger for `manual`. This excludes PRs opened by a bot account (§2.1), which are never reviewed on either face.
 
 The comment trigger is a **bare mention**: no slash command, no magic wording. `/review` is retired.
 
@@ -45,7 +46,7 @@ Ignored paths keep today's structured-log discipline; classification never rejec
 - **Mention target:** the App's own bot identity, taken from the row's cached `github_slug` — GitHub's App slug, refreshed from `GET /app` at manifest conversion and on every metadata refresh (migration `0036`). The webhook face routes by `{webhookPath}` (the opaque local route key) and resolves the row before classification, so matching is keyed to the resolved row — one App's mention never triggers another App. A comment body matches when it contains `@{github_slug}` (ASCII case-insensitive compare against the cached slug, matched as a literal) as a **standalone token**: the character immediately before `@` and the character immediately after the match, when present, must both be outside the GitHub login continuation set `A-Z a-z 0-9 -`. GitHub logins may contain hyphens, so `-` continues a mention rather than ending it: `@{github_slug}-other` and `@{github_slug}bot` never match, and an email-shaped body (`name@{github_slug}.host`) never matches. `@{github_slug}`, the canonical `@{github_slug}[bot]`, `@{github_slug},`, `@{github_slug}.` and a match at either end of the body all match (`[` is not a continuation character, so the `[bot]` suffix needs no separate grammar).
 - **No target before the first sync:** `github_slug` is NULL until the first successful metadata fetch, so a comment has nothing to match and no review starts — fail-safe, never a guessed slug. An App renamed on GitHub answers to the new slug from the next refresh (24h TTL, or immediately via the manager's manual refresh), never to the old one.
 - **Bare mention:** any position in the body; no required wording. Presence of the mention is the entire grammar — no natural-language interpretation (RL-7 discipline of `review-lifecycle.md` is preserved).
-- **Authorization gate (unchanged from the retired command):** `issue_comment.created` only; the comment must be on a PR thread; `sender.type === "Bot"` is ignored (self-comment loop guard); only the PR author or the repository owner may trigger; disallowed actors produce the existing structured warn.
+- **Authorization gate (extended by the bot-author exclusion):** `issue_comment.created` only; the comment must be on a PR thread; `sender.type === "Bot"` is ignored (self-comment loop guard); a PR whose author login ends in `[bot]` is ignored regardless of commenter; only the PR author or the repository owner may trigger; disallowed actors produce the existing structured warn.
 - **Enqueue semantics:** identical to the retired `/review` path — `head_sha = null`, KV idempotency skip-by-design, per-App pause checked before enqueue. The enqueued payload's `triggered_by` is `"issue_comment"`: the `ReviewJobPayload.triggered_by` wire union becomes `"pull_request" | "issue_comment"` and the `"review_command"` member is removed together with the command; the pipeline-side `review_failures` event label retires `"review_command"` with it.
 - **Retirement:** the `/review` prefix constant, its grammar, its tests, and any documentation of it are removed. No compatibility alias, no deprecation window (development-stage clean new-App contract).
 - **Operator visibility:** the App settings page displays the exact mention string built from the cached `github_slug` (`@{github_slug}` / the canonical `[bot]` form), so operators know what to type; while the cache is NULL the page renders no mention at all rather than a placeholder. The authorization and grammar clauses above are unchanged by this cache — only the source of the slug name is.
@@ -69,7 +70,7 @@ Ignored paths keep today's structured-log discipline; classification never rejec
 
 1. Mode matrix (§2.1) is pinned exhaustively by worker classification tests (mode × event × actor).
 2. Mention grammar (§3) is pinned: canonical `[bot]` form, bare-slug form, trailing-boundary rejections (`@{appSlug}-other`, `@{appSlug}bot`), leading-boundary rejection (email-shaped `name@{appSlug}.host`), match at body start/middle/end, multi-App isolation, actor gate, bot-sender guard.
-3. `every_push` default reproduces current behavior byte-for-byte at the classification layer (diff-to-current pin).
+3. `every_push` default reproduces current behavior byte-for-byte at the classification layer for human-authored PR payloads (diff-to-current pin); the bot-author row is the sole added ignore.
 4. Body-cap tests cover: truthful header over limit, lying short header with oversized body, headerless chunked oversized body, at-limit body accepted.
 5. Admin-required-input evidence recorded against `docs/deploy.md` § 6 + the deploy workflow's pre-deploy required check and post-deploy assertion.
 6. The `triggered_by` wire union retires `"review_command"`: classification and pipeline tests pin `"issue_comment"` on the mention path and the updated `review_failures` event label.

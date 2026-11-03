@@ -2191,10 +2191,11 @@ alongside the pause switch:
 - `manual` — never auto-reviews.
 
 A PR opened by a bot account is **never** reviewed, on either face
-(auto trigger and bot mention). GitHub marks bot logins with a `[bot]`
-suffix, so `dependabot[bot]`, `github-actions[bot]` and another App's own
-`<slug>[bot]` all qualify (case-insensitive suffix match); `renovate`
-without the suffix is an ordinary login and still triggers.
+(auto trigger and bot mention): the rule is the login suffix, so
+`dependabot[bot]`, `github-actions[bot]` and another App's own
+`<slug>[bot]` all qualify (case-insensitive match). A bot-*user* login
+without the suffix — `renovate`, for example — is not matched and still
+triggers.
 
 In every mode, a PR comment that @mentions the App's bot — `@<slug>` or
 the canonical `@<slug>[bot]`, matched as a standalone token —
