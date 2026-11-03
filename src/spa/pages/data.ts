@@ -901,6 +901,20 @@ export function appPullRequestDetailUrl(base: string, appId: string, ref: PullRe
 }
 
 /**
+ * The PR's own repository on GitHub, built from the ROW's owner/repo. Each
+ * segment is passed through `encodeURIComponent`, so a hostile segment stays
+ * inside the URL path — it cannot rewrite the host, the query or the fragment.
+ */
+export function githubRepoUrl(owner: string, repo: string): string {
+  return `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+}
+
+/** The PR on GitHub: the same repository address plus its `/pull/<number>`. */
+export function githubPullRequestUrl(owner: string, repo: string, number: number): string {
+  return `${githubRepoUrl(owner, repo)}/pull/${encodeURIComponent(String(number))}`;
+}
+
+/**
  * The PR state pill's copy + tone, derived once for the list and the
  * detail face. The state vocabulary is the API contract's closed set; the
  * face itself belongs to `StatusBadge` in `@design-system`.

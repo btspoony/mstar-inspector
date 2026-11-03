@@ -152,6 +152,10 @@ export const en = {
     },
     /** The detail header line: `{owner}/{repo} #{number}`. */
     prNumber: "{owner}/{repo} #{number}",
+    /** The header line's accessible name: the PR's GitHub address. */
+    openOnGithub: "Open {owner}/{repo}#{number} on GitHub",
+    /** The aside repo value's accessible name: the repository's GitHub address. */
+    openRepoOnGithub: "Open {owner}/{repo} on GitHub",
     /** The short-sha chip's tooltip. */
     headSha: "Head SHA",
     reviews: "Reviews",

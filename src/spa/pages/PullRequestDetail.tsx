@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, ChevronRight, Copy } from "lucide-react";
+import { ArrowLeft, ChevronRight, Copy, ExternalLink } from "lucide-react";
 import { t } from "../../i18n";
 import { Button, cn, StatusBadge, Tabs, TabsContent, TabsList, TabsTrigger } from "@design-system";
 import { fetchJson } from "../api";
@@ -10,6 +10,8 @@ import { MetricBand, type Metric } from "../components/MetricBand";
 import { ErrorState } from "../components/state/ErrorState";
 import {
   appPullRequestDetailUrl,
+  githubPullRequestUrl,
+  githubRepoUrl,
   parsePullRequestDetail,
   pullRequestStatePill,
   type PullRequestDetail,
@@ -261,7 +263,21 @@ export function PullRequestDetailView({
   ];
 
   const facts: { label: string; value: ReactNode }[] = [
-    { label: t(locale, "pullRequests.factRepo"), value: `${pr.owner}/${pr.repo}` },
+    {
+      label: t(locale, "pullRequests.factRepo"),
+      value: (
+        <a
+          href={githubRepoUrl(pr.owner, pr.repo)}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={t(locale, "pullRequests.openRepoOnGithub", { owner: pr.owner, repo: pr.repo })}
+          className="inline-flex items-center gap-1 underline-offset-2 hover:underline"
+        >
+          {`${pr.owner}/${pr.repo}`}
+          <ExternalLink aria-hidden="true" className="size-3" />
+        </a>
+      ),
+    },
     { label: t(locale, "pullRequests.factNumber"), value: `#${pr.number}` },
     { label: t(locale, "pullRequests.factState"), value: pill.label },
     // The payload coerces a nullable head_sha to "": an empty chip would read
@@ -301,9 +317,20 @@ export function PullRequestDetailView({
     <div className="flex flex-col">
       <header className="flex flex-col gap-2.5">
         <div className="flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-(--text-secondary) tabular-nums">
+          <a
+            href={githubPullRequestUrl(pr.owner, pr.repo, pr.number)}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={t(locale, "pullRequests.openOnGithub", {
+              owner: pr.owner,
+              repo: pr.repo,
+              number: pr.number,
+            })}
+            className="inline-flex items-center gap-1 text-(--text-secondary) tabular-nums underline-offset-2 hover:underline"
+          >
             {t(locale, "pullRequests.prNumber", { owner: pr.owner, repo: pr.repo, number: pr.number })}
-          </span>
+            <ExternalLink aria-hidden="true" className="size-3" />
+          </a>
           <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           {pr.head_sha === "" ? null : (
             <span

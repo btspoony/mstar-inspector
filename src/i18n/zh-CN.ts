@@ -128,6 +128,10 @@ export const zhCN: Dictionary = {
     },
     /** 详情头部行：`{owner}/{repo} #{number}`。 */
     prNumber: "{owner}/{repo} #{number}",
+    /** 头部行的可访问名称：该 PR 的 GitHub 地址。 */
+    openOnGithub: "在 GitHub 打开 {owner}/{repo}#{number}",
+    /** 侧栏仓库值的可访问名称：该仓库的 GitHub 地址。 */
+    openRepoOnGithub: "在 GitHub 打开 {owner}/{repo}",
     /** 短 SHA 徽标的悬浮提示。 */
     headSha: "头部 SHA",
     reviews: "审查",

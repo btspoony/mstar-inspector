@@ -14,6 +14,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import {
   appPullRequestDetailUrl,
+  githubPullRequestUrl,
+  githubRepoUrl,
   parsePullRequestDetail,
   type PullRequestDetail,
 } from "../../src/spa/pages/data";
@@ -41,6 +43,15 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(
       appPullRequestDetailUrl("/dashboard", "1", { owner: "a/b", repo: "settings?x", number: 42 }),
     ).toBe("/dashboard/api/apps/1/pull-requests/a%2Fb/settings%3Fx/42");
+  });
+
+  test("the GitHub builders encode each segment and cannot escape the path", () => {
+    expect(githubRepoUrl("acme", "web")).toBe("https://github.com/acme/web");
+    // A hostile segment stays inside the path: `/`, `?` and `#` are encoded,
+    // so it cannot rewrite the host, the query or the fragment.
+    expect(githubRepoUrl("a/b", "x?y#z")).toBe("https://github.com/a%2Fb/x%3Fy%23z");
+    expect(githubPullRequestUrl("acme", "web", 42)).toBe("https://github.com/acme/web/pull/42");
+    expect(githubPullRequestUrl("a/b", "x?y", 7)).toBe("https://github.com/a%2Fb/x%3Fy/pull/7");
   });
 
   test("the detail parser keeps the envelope strict but drops drifted entries (QC)", () => {
@@ -165,6 +176,39 @@ describe("pull request detail face (static SSR)", () => {
    * face opens on the failures family with the diagnostic payload in the markup.
    */
   const FAILING: PullRequestDetail = { ...DETAIL, findings: [] };
+
+  test("the PR number and its repository link to GitHub with a safe target", async () => {
+    // Both links read their address from the row's own owner/repo/number; the
+    // accessible name says where the control goes, and the glyph is decoration.
+    const links = await withMarkup(render(DETAIL), (container) =>
+      [...container.querySelectorAll("a")].map((anchor) => ({
+        href: anchor.getAttribute("href"),
+        target: anchor.getAttribute("target"),
+        rel: anchor.getAttribute("rel"),
+        name: anchor.getAttribute("aria-label"),
+        glyph: anchor.querySelector("svg") !== null,
+        text: anchor.textContent ?? "",
+      })),
+    );
+    expect(links).toEqual([
+      {
+        href: "https://github.com/acme/web/pull/133",
+        target: "_blank",
+        rel: "noopener noreferrer",
+        name: t("en", "pullRequests.openOnGithub", { owner: "acme", repo: "web", number: 133 }),
+        glyph: true,
+        text: t("en", "pullRequests.prNumber", { owner: "acme", repo: "web", number: 133 }),
+      },
+      {
+        href: "https://github.com/acme/web",
+        target: "_blank",
+        rel: "noopener noreferrer",
+        name: t("en", "pullRequests.openRepoOnGithub", { owner: "acme", repo: "web" }),
+        glyph: true,
+        text: "acme/web",
+      },
+    ]);
+  });
 
   test("the header names the PR's own facts; the band aggregates them", async () => {
     // One render, read from the one tree: the header, its meta line and the
