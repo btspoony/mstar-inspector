@@ -353,7 +353,8 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // nothing — the existing fail-safe.
   const appSlug = row.github_slug ?? "";
   // The classifier's ONE parse, kept for the delivery row's source repository
-  // below — recording a delivery must not re-parse up-to-1 MB of body.
+  // and the PR ledger below — recording either must not re-parse up-to-1 MB of
+  // body.
   let classified: unknown = null;
   const outcome = await classifyWebhook(
     appSecret,
@@ -464,7 +465,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // validate). Best-effort like recordDelivery above: a store failure logs a
   // structured warn and never changes the response.
   if (eventName === "pull_request") {
-    const record = pullRequestRecord(rawBody);
+    const record = pullRequestRecord(classified);
     if (record === null) {
       // Visible, not silent: this delivery ran (or was ignored) with no ledger
       // row, so the dashboard's "what did this App receive" answer is

@@ -411,6 +411,22 @@ describe("GET /api/apps/:appId/pull-requests/:owner/:repo/:number", () => {
     }
   });
 
+  test("an offset past the documented maximum is a 400, not a scan", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    seedReviews(db, 12);
+    // 100000 is the last accepted offset (RECORD_PAGE_OFFSET_MAX); one past it
+    // is a window no PR history can reach, so it is malformed paging, not a
+    // page that walks and discards the whole family before answering empty.
+    const atMax = await getFace(`${sectionPath("reviews")}?offset=100000`, db);
+    expect(atMax.status).toBe(200);
+    const atMaxPage = (await atMax.json()) as { items: unknown[] };
+    expect(atMaxPage.items).toEqual([]);
+    const past = await getFace(`${sectionPath("reviews")}?offset=100001`, db);
+    expect(past.status).toBe(400);
+    expect(await past.json()).toEqual({ error: "invalid paging" });
+  });
+
   test("an out-of-bounds limit is clamped into [1, 50], not rejected", async () => {
     const db = await fixture();
     seedInstallation(db);

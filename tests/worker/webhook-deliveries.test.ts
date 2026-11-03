@@ -431,14 +431,15 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     expect(await store.listRecentDeliveries("app-1")).toHaveLength(10);
   });
 
-  test("recordDelivery caps event_name at 64 chars and repository_full_name at 160 at persist time (seat2 hygiene pin)", async () => {
+  test("recordDelivery caps event_name at 64 chars and repository_full_name at 160 at persist time", async () => {
     const db = createMigratedTestD1();
     seedAppRow(db);
     const store = createAppsStore(db);
 
-    // The x-github-event header and the body's repository.full_name are both
-    // attacker-influenced on the unauthenticated reject path — the persisted
-    // values must be bounded.
+    // The store bounds what it persists, whatever its caller passes: the
+    // x-github-event header is attacker-influenced on the unauthenticated
+    // reject path, while the body's repository name is only capped as
+    // defence-in-depth against GitHub's own length ceilings.
     await store.recordDelivery({
       appId: "app-1",
       eventName: "x".repeat(200),

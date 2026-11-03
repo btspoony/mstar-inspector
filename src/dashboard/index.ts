@@ -4345,13 +4345,22 @@ const appPullRequestsRoute = async (c: DashboardContext) => {
 /** The record-section paging bounds, enforced here (never a silent default on a bad value). */
 const RECORD_PAGE_LIMIT = { default: 10, min: 1, max: 50 } as const;
 
+/**
+ * Upper bound on `offset`. A PR's record families are its own history — a few
+ * thousand rows at most — so a window past this cannot address a real page:
+ * it is a 400 like any other malformed paging, rather than an offset handed to
+ * SQLite, which would walk and discard the whole family only to answer empty.
+ */
+const RECORD_PAGE_OFFSET_MAX = 100_000;
+
 type ParsePagingResult = { ok: true; offset: number; limit: number } | { ok: false };
 
 /**
  * `offset` / `limit` from the query string. Absent means the default; a
  * present value must be plain decimal digits and a safe integer — a malformed
  * one is a 400, so a caller never believes it asked for a page it did not get.
- * A well-formed `limit` outside the bounds is CLAMPED into them (the contract's
+ * An `offset` above RECORD_PAGE_OFFSET_MAX is a 400 for the same reason. A
+ * well-formed `limit` outside the bounds is CLAMPED into them (the contract's
  * "defaults to 10, clamped to [1, 50]"), never rejected: a bounded adjustment
  * still answers with a page.
  */
@@ -4363,6 +4372,7 @@ function parseRecordPaging(c: DashboardContext): ParsePagingResult {
   const requestedLimit = rawLimit === undefined ? RECORD_PAGE_LIMIT.default : Number(rawLimit);
   const offset = rawOffset === undefined ? 0 : Number(rawOffset);
   if (!Number.isSafeInteger(requestedLimit) || !Number.isSafeInteger(offset)) return { ok: false };
+  if (offset > RECORD_PAGE_OFFSET_MAX) return { ok: false };
   const limit = Math.min(RECORD_PAGE_LIMIT.max, Math.max(RECORD_PAGE_LIMIT.min, requestedLimit));
   return { ok: true, offset, limit };
 }

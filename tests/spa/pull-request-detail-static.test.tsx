@@ -119,7 +119,7 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(githubPullRequestUrl("a/b", "x?y", 7)).toBe("https://github.com/a%2Fb/x%3Fy/pull/7");
   });
 
-  test("the detail parser keeps the envelope strict; a page drops drifted entries (QC)", () => {
+  test("the detail parser keeps the envelope strict; a page drops drifted entries", () => {
     expect(parsePullRequestDetail(DETAIL)).toEqual(DETAIL);
     // The counts are required and finite: a silent zero would disable a tab.
     expect(parsePullRequestDetail({ ...DETAIL, counts: { ...DETAIL.counts, findings: null } })).toBeNull();
@@ -159,7 +159,7 @@ describe("pull request detail data plane (pure helpers)", () => {
     expect(defaultFamily({ findings: 0, reviews: 2, failures: 0, must_fix: 0 })).toBe("reviews");
   });
 
-  test("a review with provider null parses and renders without a null leak (QC)", async () => {
+  test("a review with provider null parses and renders without a null leak", async () => {
     const reviews = parseRecordPage("reviews", {
       items: [{ ...REVIEWS[0], verdict: null, summary_md: null, model: null, provider: null }],
       total: 1,

@@ -295,7 +295,15 @@ export function detailFetch(sceneFor: (appId: string) => DetailScene): { fetch: 
             : sceneValue.pages.failures.items;
       const offset = Number(url.searchParams.get("offset") ?? "0");
       const limit = Number(url.searchParams.get("limit") ?? "10");
-      return jsonResponse({ items: rows.slice(offset, offset + limit), total: rows.length });
+      // The page's declared `total` is authoritative: the head was built from
+      // it, so a scene can state a total its served window never reaches. A
+      // severity filter has no declared total of its own — like the route, it
+      // reports the rows it filtered.
+      const filtered = section === "findings" && severity !== null;
+      return jsonResponse({
+        items: rows.slice(offset, offset + limit),
+        total: filtered ? rows.length : sceneValue.pages[section].total,
+      });
     }
     return jsonResponse(sceneValue.detail);
   }) as unknown as typeof fetch;
@@ -441,7 +449,12 @@ export async function mountTabAcrossApps(initialPr: string, sceneFor: (appId: st
   };
 }
 
-/** One record-section page (the total defaults to the row count). */
+/**
+ * One record-section page. `total` is AUTHORITATIVE, never derived: the head's
+ * counts and the mounted stub's section reads both follow it, so a scene can
+ * state a total its window does not reach (a head of 20 findings over an empty
+ * page) — the shape a shrunk page or a stale offset produces.
+ */
 export function page<T>(items: T[], total = items.length): RecordPage<T> {
   return { items, total };
 }

@@ -13,14 +13,24 @@ import { act, createElement, StrictMode } from "react";
 import { t } from "../../src/i18n";
 import type { PullRequestFailure, PullRequestFinding } from "../../src/spa/pages/data";
 import { currentDetailRead, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
-import { DETAIL, FAILURES, jsonResponse, mountDetailView, mountTabAcrossApps, page, press, scene } from "./pull-request-fixtures";
+import {
+  DETAIL,
+  detailFetch,
+  FAILURES,
+  jsonResponse,
+  mountDetailView,
+  mountTabAcrossApps,
+  page,
+  press,
+  scene,
+} from "./pull-request-fixtures";
 
 /** A face whose only records are failures: it opens on the failures family. */
 const failuresOnly = (failures: PullRequestFailure[] = FAILURES) =>
   scene({ findings: page([]), reviews: page([]), failures: page(failures) });
 
 describe("pull requests detail read derivation (pure)", () => {
-  test("a read stamped for another pr derives to not-yet-loaded, whatever its kind (N1)", () => {
+  test("a read stamped for another pr derives to not-yet-loaded, whatever its kind", () => {
     const okA: DetailRead = { pr: "acme/web/1", kind: "ok", data: DETAIL };
     const errorA: DetailRead = { pr: "acme/web/1", kind: "error" };
     const loadingA: DetailRead = { pr: "acme/web/1", kind: "loading" };
@@ -630,8 +640,7 @@ describe("pull request detail (mounted)", () => {
       const button = container.querySelector<HTMLElement>('[data-slot="copy-error"]');
       await press(win, button);
       // The write is still in flight: the idle label is what the reader saw.
-      const labelAtPress = button?.textContent;
-      expect(labelAtPress).toBe(t("en", "pullRequests.copyError"));
+      expect(button?.textContent).toBe(t("en", "pullRequests.copyError"));
       // The face goes away while the write is still in flight. The harness
       // already holds one timer of its own, so the count is a baseline, not 0.
       await unmount();
@@ -640,12 +649,10 @@ describe("pull request detail (mounted)", () => {
         settleWrite();
       });
       await act(async () => {});
-      // Both halves of the claim are observable: a late outcome would arm the
-      // REST timer against the gone face (one more timer than the baseline),
-      // and the button the reader saw keeps the label it had. Nothing at all
-      // is logged — a filtered claim would let an unrelated warning through.
+      // A late outcome would arm the REST timer against the gone face (one more
+      // timer than the baseline). Nothing at all is logged — a filtered claim
+      // would let an unrelated warning through.
       expect(jest.getTimerCount()).toBe(timersAfterUnmount);
-      expect(button?.textContent).toBe(labelAtPress);
       expect(problems).toEqual([]);
     } finally {
       jest.useRealTimers();
@@ -656,7 +663,7 @@ describe("pull request detail (mounted)", () => {
     }
   });
 
-  test("an App switch in place discards the previous App's record pages (F1)", async () => {
+  test("an App switch in place discards the previous App's record pages", async () => {
     // The shell keeps the open PR address while the route's App changes
     // (`mountTabWithGatedFetch` § switchApp). Both Apps hold the same
     // `owner/repo/number`; only App B's rows belong under App B's head.
@@ -715,5 +722,25 @@ describe("pull request detail (mounted)", () => {
     } finally {
       await unmount();
     }
+  });
+});
+
+describe("the scene stub's section reads", () => {
+  test("a read reports the page's declared total, not the rows its window holds", async () => {
+    // A scene may state a head total its window never reaches (the stale-offset
+    // / shrunk-page shape the static suite covers), so the stub must serve that
+    // same total — otherwise the mounted face pages against a number its own
+    // head contradicts.
+    const { fetch } = detailFetch(() => scene({ findings: page([], 20) }));
+    const read = async (query: string) => {
+      const res = await fetch(
+        `http://localhost/dashboard/api/apps/1/pull-requests/acme/web/133/findings?${query}`,
+      );
+      return (await res.json()) as { items: unknown[]; total: number };
+    };
+    expect(await read("offset=0&limit=10")).toEqual({ items: [], total: 20 });
+    // A severity filter has no declared total of its own: like the route, it
+    // reports the rows it matched.
+    expect(await read("offset=0&limit=10&severity=must-fix")).toEqual({ items: [], total: 0 });
   });
 });

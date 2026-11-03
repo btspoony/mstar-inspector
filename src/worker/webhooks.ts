@@ -751,11 +751,12 @@ const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d
  * a value: the ledger's `state` domain is GitHub's own ('open' | 'closed'),
  * promoted to 'merged' when the payload says so.
  *
- * Deliberately a SECOND parse of the same body: `classifyEvent` returns the
- * identity only on a `job`, and the ledger must also record the `ignore`
- * outcomes (a non-whitelisted action, a mode that does not auto-trigger).
+ * Takes the ALREADY PARSED body (the one `classifyEvent` read), never the raw
+ * text: the ledger must also record the `ignore` outcomes — a non-whitelisted
+ * action, a mode that does not auto-trigger — which the classifier's outcome
+ * does not carry, so it reads the same document instead of parsing it again.
  */
-export function pullRequestRecord(rawBody: string): {
+export function pullRequestRecord(parsed: unknown): {
   owner: string;
   repo: string;
   prNumber: number;
@@ -764,7 +765,6 @@ export function pullRequestRecord(rawBody: string): {
   headSha: string | null;
   updatedAt: string | null;
 } | null {
-  const parsed = parseBody(rawBody);
   if (parsed === null) return null;
   const result = pullRequestSchema.safeParse(parsed);
   if (!result.success) return null;

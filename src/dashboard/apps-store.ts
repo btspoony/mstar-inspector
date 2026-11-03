@@ -320,12 +320,13 @@ const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'reject
 export const EVENT_NAME_MAX_LENGTH = 64;
 
 /**
- * Persist bound for the source repository name (`owner/name`, migration 0043)
- * — same rationale as EVENT_NAME_MAX_LENGTH: `repository.full_name` rides in
- * the body, which is attacker-controlled on the unauthenticated reject path,
- * and the DDL has no length constraint. GitHub's own ceilings (39-char owner +
- * 100-char repo) add up to 140, so 160 is headroom, not a truncation risk for
- * real deliveries.
+ * Persist bound for the source repository name (`owner/name`, migration 0043).
+ * `repository.full_name` rides in the BODY of an HMAC-verified delivery — the
+ * signature check runs before classification, so this field is not
+ * attacker-supplied — which is why it is bounded differently from
+ * EVENT_NAME_MAX_LENGTH: this is defence-in-depth against GitHub's own
+ * ceilings (39-char owner + 100-char repo = 139), and the DDL has no length
+ * constraint. 160 is headroom, never a truncation risk for a real delivery.
  */
 export const REPOSITORY_FULL_NAME_MAX_LENGTH = 160;
 
