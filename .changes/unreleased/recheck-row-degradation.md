@@ -117,14 +117,20 @@ category: Fixed
 - **The published coverage line counts real seat answers.** A row the gate
   dropped was attempted and still advances its rotation clock
   (`last_assessed_ms`), but it was never assessed: the coverage line and the
-  round's accounting log field now count only rows that carry a document
-  result, so a round can no longer claim reassessments the seat never
-  delivered. The lifecycle clock keeps the attempted rows, so fair rotation is
-  unchanged. A gate drop that carried no usable row ID is attributed to the
+  round's accounting log field count only rows that carry a document result, so
+  a round can no longer claim reassessments the seat never delivered. The
+  lifecycle clock keeps the attempted rows, so fair rotation is unchanged. Each
+  selected row is published under exactly one term — `assessed`, `invalid-output`
+  or `omitted`, so `assessed + invalid-output + omitted = selected` — and the
+  middle term is the closure table's own label, so the line and the rows agree.
+  A gate drop that carried no usable row ID is attributed to the
   sent-but-unanswered row at its position instead of being reported `omitted`;
   the status now carries `rejected_unnamed` (a count, since such a drop cannot
   be named), so that attribution also works for a document the runner already
-  filtered.
+  filtered. That seat-authored count has no ceiling, so it is clamped to the
+  rows it could legitimately claim (sent, unanswered, unnamed): any excess is
+  ignored and reported as `rejected_unnamed_ignored`, never spread onto rows the
+  seat never received.
 - **A finding inside an oversized hunk keeps local evidence.** A hunk larger
   than the 80-line slice bound is no longer excluded whole (which left every
   finding inside it permanently `no-evidence`): it is split into consecutive
@@ -224,10 +230,15 @@ category: Fixed
   以答案为准，而不是覆盖成 `unverifiable/invalid-output`。
 - **发布覆盖行只统计席位真正给出的回答。** 被校验丢弃的行是「已尝试」的，轮转时钟
   （`last_assessed_ms`）照常前进，但它从未被真正评估：覆盖行与该轮的账目日志字段
-  现在只统计携带文档结果的行，一轮再也无法声称席位从未交付的重审数量。生命周期时钟
-  仍然包含已尝试的行，因此公平轮转不变。校验丢弃且没有可用行 ID 的行，按其位置归到
-  已发送但无回答的那一行，而不是报成 `omitted`；状态现在携带 `rejected_unnamed`
-  （一个计数——这种丢弃无法被命名），因此即使文档已被 runner 过滤，归因依然成立。
+  只统计携带文档结果的行，一轮再也无法声称席位从未交付的重审数量。生命周期时钟
+  仍然包含已尝试的行，因此公平轮转不变。每个被选中的行只会落在其中一个条目下——
+  `assessed`、`invalid-output` 或 `omitted`，即 `assessed + invalid-output + omitted
+  = selected`——中间一项正是闭合表使用的标签，所以覆盖行与表格行不会互相矛盾。
+  校验丢弃且没有可用行 ID 的行，按其位置归到已发送但无回答的那一行，而不是报成
+  `omitted`；状态现在携带 `rejected_unnamed`（一个计数——这种丢弃无法被命名），
+  因此即使文档已被 runner 过滤，归因依然成立。该计数由席位自述、没有上限，因此会被
+  夹到它合法能声称的行数（已发送、无回答、未命名）；超出的部分被忽略，并以
+  `rejected_unnamed_ignored` 记录，绝不会摊到席位从未收到的行上。
 - **超大 hunk 内的 finding 仍保有局部证据。** 超过 80 行切片上限的 hunk 不再被整体
   排除（那会让它内部的每个 finding 永久成为 `no-evidence`）：它按连续 ≤80 行切成
   多个窗口，离原始关注行最近的优先，每个窗口的起始行号直接来自 hunk 头的行号算术。

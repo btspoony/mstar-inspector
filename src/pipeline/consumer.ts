@@ -388,6 +388,12 @@ export type ConsumerLogFields = {
   recheck_reason?: string | null;
   recheck_error?: string | null;
   rejected?: number;
+  /**
+   * Unnamed gate drops the status claimed beyond the rows that could
+   * legitimately have produced them (sent, unanswered, unnamed). Ignored, and
+   * counted here so a seat-authored overcount is visible rather than silent.
+   */
+  rejected_unnamed_ignored?: number;
   assessed?: number;
 };
 
@@ -1128,16 +1134,16 @@ type OriginalFindingProjection = RecheckTarget["original"];
  * catalog exclusion, seat skip, no document at all) is NOT attempted: it is
  * accounted as `omitted` for coverage and leaves `last_assessed_ms` alone.
  *
- * ONE round therefore yields TWO counts, and they are not interchangeable:
- * `assessedCount` is the rows carrying a real `docResult` — the REAL seat
- * answers, which is what the published coverage line and the accounting log
- * field report; `assessments.length` is the lifecycle clock, which also
- * carries the gate-rejected rows (attempted and answered badly). Reporting the
- * clock as "assessed" would claim reassessments the seat never delivered.
- * `unansweredCount` is the complement (`selected - assessments.length`): it
- * covers BOTH the never-sent rows above AND the rows that were sent into a
- * round whose document was absent or invalid, which the coverage line reports
- * as `omitted`.
+ * ONE round therefore yields THREE coverage terms, and they partition the
+ * selected rows exactly once — `assessed + invalid-output + omitted ===
+ * selected`. `assessedCount` is the rows carrying a real `docResult` (the REAL
+ * seat answers the published coverage line reports); `invalidOutputCount` is
+ * the unanswered rows the closure table labels `invalid-output` (gate-rejected,
+ * or sent into a round whose document was absent); `unansweredCount` is the
+ * rest — never sent, never attempted. `assessments.length` is NOT any of these:
+ * it is the lifecycle clock, which also carries the gate-rejected rows
+ * (attempted, answered badly), so reporting it as "assessed" would claim
+ * reassessments the seat never delivered.
  */
 function reconcileRecheckRound(input: {
   targets: RecheckTarget[];
@@ -1168,12 +1174,25 @@ function reconcileRecheckRound(input: {
   /** Rows carrying a real seat answer — the published coverage/tally count. */
   assessedCount: number;
   /**
-   * Rows that ended the round with no answer at all: neither a surviving
-   * document row nor a gate rejection. That covers the never-sent rows (size or
-   * catalog budget, seat skip) AND the rows sent into a round whose document
-   * was absent or invalid. It is the coverage line's `omitted` figure.
+   * Unanswered rows whose outcome is `invalid-output` — the same term the
+   * closure table renders for them: gate-rejected rows, rows sent into a round
+   * whose document was absent/invalid, and empty-result rounds. Attempted, so
+   * the lifecycle clock moved, but no answer survived.
+   */
+  invalidOutputCount: number;
+  /**
+   * Unanswered rows that were never attempted (`budget` / `no-evidence` /
+   * `omitted` / `context-incomplete`). Together with the two counts above this
+   * accounts for every selected row exactly once:
+   * `assessed + invalid-output + omitted === selected`.
    */
   unansweredCount: number;
+  /**
+   * Unnamed gate drops actually attributed — `min(claimed, pool)`. The caller
+   * logs `anonymousRejectedRows - anonymousRejectedCount` as the ignored excess
+   * of a seat-authored count that outran the rows it could legitimately claim.
+   */
+  anonymousRejectedCount: number;
 } {
   const {
     targets,
@@ -1208,22 +1227,25 @@ function reconcileRecheckRound(input: {
   // mapping is POSITION among the rows that were sent and left unanswered: the
   // seat emitted N results we cannot identify, so the first N such rows are
   // the attempted-and-bad ones. Never-sent rows (catalog exclusion, catalog or
-  // size budget) stay out of the pool — dropping one into `invalid-output`
-  // would blame a row the seat never received.
+  // size budget, capture failure) stay out of the pool — dropping one into
+  // `invalid-output` would blame a row the seat never received.
+  //
+  // The status's count is a seat-authored number with no ceiling: a foreign or
+  // broken status may claim more drops than there are rows to blame. It is
+  // therefore CLAMPED to the pool it can legitimately claim (sent, unanswered,
+  // not named by id), never spread past it.
+  const anonymousPool = targets.filter(
+    (target) =>
+      !answeredRowIds.has(target.rowId) &&
+      !rejectedRowIds.has(target.rowId) &&
+      !catalogExcluded.has(target.rowId) &&
+      !catalogBudgetExcluded.has(target.rowId) &&
+      !budgetExcluded.has(target.rowId),
+  );
+  const anonymousRejectedCount = Math.min(anonymousRejectedRows, anonymousPool.length);
   const anonymouslyRejected = new Set<string>();
-  if (anonymousRejectedRows > 0) {
-    for (const target of targets) {
-      if (anonymouslyRejected.size >= anonymousRejectedRows) break;
-      if (answeredRowIds.has(target.rowId) || rejectedRowIds.has(target.rowId)) continue;
-      if (
-        catalogExcluded.has(target.rowId) ||
-        catalogBudgetExcluded.has(target.rowId) ||
-        budgetExcluded.has(target.rowId)
-      ) {
-        continue;
-      }
-      anonymouslyRejected.add(target.rowId);
-    }
+  for (const target of anonymousPool.slice(0, anonymousRejectedCount)) {
+    anonymouslyRejected.add(target.rowId);
   }
 
   // An `empty-result` round is the all-rows-rejected case without a gate drop:
@@ -1356,17 +1378,31 @@ function reconcileRecheckRound(input: {
     }
   }
 
+  // Coverage counts REAL seat answers, not the lifecycle clock: a
+  // gate-rejected row advances `last_assessed_ms` but was never assessed.
+  // Every selected row lands in exactly one of these three terms, and the
+  // published line states the identity `assessed + invalid-output + omitted =
+  // selected`. `invalid-output` is the term the closure table renders for the
+  // same rows, so the line and the table cannot disagree.
+  let assessedCount = 0;
+  let invalidOutputCount = 0;
+  for (const target of targets) {
+    if (answeredRowIds.has(target.rowId)) {
+      assessedCount += 1;
+    } else if (outcomeByRowId.get(target.rowId)?.reason === "invalid-output") {
+      invalidOutputCount += 1;
+    }
+  }
   return {
     assessments,
     outcomeByRowId,
     resolutions,
-    // Coverage counts REAL seat answers, not the lifecycle clock: a
-    // gate-rejected row advances `last_assessed_ms` but was never assessed.
-    assessedCount: targets.filter((target) => answeredRowIds.has(target.rowId)).length,
-    // No surviving answer and no gate rejection: never sent, or sent into a
-    // round whose document never arrived. `assessments.length` is the lifecycle
-    // clock (attempted rows), so it cannot stand in for this count.
-    unansweredCount: targets.length - assessments.length,
+    assessedCount,
+    invalidOutputCount,
+    // Neither a surviving answer nor a gate rejection: `assessments.length` is
+    // the lifecycle clock (attempted rows), so it cannot stand in for this.
+    unansweredCount: targets.length - assessedCount - invalidOutputCount,
+    anonymousRejectedCount,
   };
 }
 
@@ -3332,9 +3368,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           recheck_error: status?.error === null || status?.error === undefined
             ? null
             : redactExactSecrets(redactSecrets(status.error), secretValues),
-          // Named drops + the ones the gate could not name (no usable rowId):
-          // the count reports what happened, not only what could be named.
-          rejected: rejectedRowIds.size + anonymousRejectedRows,
+          // Named drops + the unnamed ones actually attributed (no usable
+          // rowId, so mapped by position): the count reports what happened,
+          // not only what could be named.
+          rejected: rejectedRowIds.size + reconciled.anonymousRejectedCount,
+          // A seat-authored `rejected_unnamed` is unbounded; any claim beyond
+          // the sent-and-unanswered pool is excess that can claim no row. It is
+          // dropped, and reported here so the silence has a number.
+          rejected_unnamed_ignored: anonymousRejectedRows - reconciled.anonymousRejectedCount,
           // Real seat answers (the published coverage count), never the
           // lifecycle clock — a gate-rejected row advances `last_assessed_ms`
           // without ever having been assessed.
@@ -3386,6 +3427,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       totalOpen,
       selected: targets.length,
       assessed: reconciled.assessedCount,
+      invalidOutput: reconciled.invalidOutputCount,
       omitted: reconciled.unansweredCount,
       capped: Math.max(0, totalOpen - targets.length),
       contextCoverage,

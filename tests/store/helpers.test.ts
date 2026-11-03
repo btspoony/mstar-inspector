@@ -5,7 +5,7 @@
  * unchanged and a plain read changing nothing.
  */
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1 } from "./helpers";
+import { createMigratedTestD1, migrationNumber } from "./helpers";
 
 const AT = "2026-10-27T00:00:00.000Z";
 /** Same shape as the operator store's guarded audit append. */
@@ -32,5 +32,14 @@ describe("test D1 double", () => {
     const miss = await insert("event-2", "no-such-workspace");
     expect(miss.results).toEqual([]);
     expect(miss.meta.changes).toBe(0);
+  });
+
+  test("a .sql without a numeric prefix fails by name instead of vanishing from the order", () => {
+    // Wrangler orders migrations by numeric prefix. A file with none has no
+    // apply order, so it must fail loudly — a silent drop would build a
+    // partial schema on a fresh database and hide the cause.
+    expect(() => migrationNumber("add_index.sql")).toThrow(/add_index\.sql has no numeric prefix/);
+    expect(() => migrationNumber("0043_review_inflight.sql")).not.toThrow();
+    expect(migrationNumber("0043_review_inflight.sql")).toBe(43);
   });
 });

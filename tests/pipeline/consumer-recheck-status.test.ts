@@ -135,9 +135,10 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     // All 25 rows were ATTEMPTED — 23 answered assessably, 2 answered badly and
     // gate-dropped — so every one advances its rotation clock. The published
     // coverage counts the REAL seat answers only (23), so a gate-rejected row
-    // never inflates the reassessed tally; nothing was omitted.
+    // never inflates the reassessed tally; it is published as its own
+    // `invalid-output` term instead of vanishing, and nothing was omitted.
     expect(prepared.body).toContain("Reassessed 23/25 open prior finding(s)");
-    expect(prepared.body).toContain("0 omitted");
+    expect(prepared.body).toContain("2 invalid-output · 0 omitted");
     expect(prepared.body).toContain("unverifiable (invalid-output)");
     expect(prepared.body).not.toContain("unverifiable (omitted)");
     // Every attempted row persisted a round row, gate-dropped ones included.
@@ -293,7 +294,9 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
     const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (invalid-output)");
     expect(prepared.body).not.toContain("unverifiable (omitted)");
-    expect(prepared.body).toContain("0 omitted");
+    // The one selected row is accounted by the SAME term the table renders.
+    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    expect(prepared.body).toContain("1 invalid-output · 0 omitted");
     // The round delivered nothing usable, so it is recorded once, named.
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
@@ -751,6 +754,57 @@ describe("recheck round attribution — status and row accounting (§7.7/§7.4/�
       ["anonymous-0", true],
       ["anonymous-1", false],
     ]);
+  });
+
+  test("a `rejected_unnamed` larger than the sent-and-unanswered pool attributes only the pool, and logs the excess", async () => {
+    reset();
+    sandbox.diffStdout = VALID_DIFF;
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    // TWO sent rows, both unanswered — the only rows an unnamed drop could
+    // legitimately claim.
+    for (let i = 0; i < 2; i += 1) {
+      await seedOpenTarget(db, {
+        rowId: `clamp-${i}`,
+        findingId: `finding-clamp-${i}`,
+        original: { fingerprintHint: `clamp-fp-${i}` },
+        nowMs: 2_000 + i,
+      });
+    }
+    sandbox.recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    // A seat-authored count with no ceiling: 5 unnamed drops for 2 rows. The
+    // excess can claim no row, so it is clamped away — never invented onto a
+    // third row (there is none) and never used to inflate the tally.
+    sandbox.recheckStatusContent = JSON.stringify({
+      schema: "mstar.recheck-status/v1",
+      headSha: SHA,
+      outcome: "ok",
+      reason: null,
+      rejected: 0,
+      rejected_row_ids: [],
+      rejected_unnamed: 5,
+      error: null,
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    // Both rows are attempted-and-bad; no row is claimed twice, none omitted.
+    expect(prepared.body).toContain("Reassessed 0/2 open prior finding(s)");
+    expect(prepared.body).toContain("2 invalid-output · 0 omitted");
+    const tableRows = prepared.body.split("\n").filter((l) => l.startsWith("| Old null deref"));
+    expect(tableRows).toHaveLength(2);
+    expect(tableRows.every((l) => l.includes("| unverifiable (invalid-output) "))).toBe(true);
+    // `rejected` reports what was attributed (2), not what was claimed (5).
+    const line = logLines.find((l) => l.msg.includes("recheck round accounted"))!;
+    expect(line.fields).toMatchObject({
+      recheck_outcome: "ok",
+      rejected: 2,
+      rejected_unnamed_ignored: 3,
+      assessed: 0,
+    });
   });
 
   test("an oversized status error is bounded at parse time, on both the log field and the D1 text", async () => {

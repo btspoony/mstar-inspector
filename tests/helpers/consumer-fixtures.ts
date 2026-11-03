@@ -1,11 +1,17 @@
 /**
- * Fixtures shared by the consumer test files (tests/pipeline/consumer.test.ts
- * and consumer-recheck.test.ts): the App-seeded D1 double, the sandbox exec and
- * log doubles, the envelope/diff fixtures and the finding-lifecycle seeds the
- * recheck cases hang off.
+ * Fixtures shared by every consumer suite: the App-seeded D1 double, the
+ * sandbox exec and log doubles, the envelope/diff fixtures and the
+ * finding-lifecycle seeds the recheck cases hang off.
+ *
+ * Consumers, post-split: `tests/pipeline/consumer.test.ts` (the round itself)
+ * and the three per-concern recheck files — `consumer-recheck-catalog`,
+ * `consumer-recheck-precedence`, `consumer-recheck-status`. The runtime
+ * harness (injected doubles, message/payload builders, `reset()`) lives in
+ * `./consumer-harness`, which imports from here; a suite that needs a double
+ * imports it from there.
  *
  * Each double reads its behavior from a caller-owned mutable STATE object, so
- * one copy serves both suites and tests still switch it per case.
+ * one copy serves every suite and tests still switch it per case.
  */
 import { mock } from "bun:test";
 import type { ReviewOutput } from "../../src/review/schema";

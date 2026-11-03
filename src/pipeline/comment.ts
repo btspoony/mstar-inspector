@@ -292,6 +292,13 @@ export type ClosureCoverage = {
   totalOpen: number;
   selected: number;
   assessed: number;
+  /**
+   * Selected rows the closure table renders as `unverifiable (invalid-output)`:
+   * sent and answered badly, or sent into a round whose document was absent.
+   * The SAME term as the table's reason column, so the line and the rows agree.
+   */
+  invalidOutput: number;
+  /** Selected rows that never got an answer and were never attempted. */
   omitted: number;
   capped: number;
   contextCoverage: Coverage;
@@ -315,8 +322,12 @@ export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[
   const lines: string[] = [
     "## Prior findings recheck",
     "",
+    // Every selected row lands in exactly one term here — `assessed`,
+    // `invalid-output` (the closure table's own label for those rows), or
+    // `omitted` — so `assessed + invalid-output + omitted === selected`.
     `Reassessed ${coverage.assessed}/${coverage.selected} open prior finding(s) this round` +
-      ` · ${coverage.omitted} omitted · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
+      ` · ${coverage.invalidOutput} invalid-output · ${coverage.omitted} omitted` +
+      ` · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
       ` · context coverage: ${coverage.contextCoverage}`,
   ];
   if (shown.length > 0) {

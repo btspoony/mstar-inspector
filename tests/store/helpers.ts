@@ -30,6 +30,23 @@ import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/typ
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** Earliest review-store schema (production before the github_apps work). */
 const BASE_MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
+/** A migration filename's numeric prefix — the only part wrangler orders on. */
+const MIGRATION_PREFIX = /^(\d+)_/;
+
+/**
+ * One migration's apply-order number. A `.sql` file without a numeric prefix
+ * has NO defined position in wrangler's order, so it fails here BY NAME
+ * instead of being dropped from every selector below — a silent drop would
+ * apply a partial schema on a fresh database and hide the cause.
+ */
+export function migrationNumber(name: string): number {
+  const match = MIGRATION_PREFIX.exec(name);
+  if (match === null) {
+    throw new Error(`migration ${name} has no numeric prefix — its apply order is undefined`);
+  }
+  return Number.parseInt(match[1]!, 10);
+}
+
 /**
  * Wrangler applies migrations in NUMERIC prefix order, so a lexical filename
  * compare would put `1000_*` before `999_*`. Every migration selector below
@@ -37,8 +54,9 @@ const BASE_MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
  */
 export function migrationsAfter(number: number): string[] {
   return readdirSync(MIGRATIONS_DIR)
-    .filter((name) => name.endsWith(".sql") && Number.parseInt(name, 10) > number)
-    .sort((a, b) => Number.parseInt(a, 10) - Number.parseInt(b, 10));
+    .filter((name) => name.endsWith(".sql"))
+    .sort((a, b) => migrationNumber(a) - migrationNumber(b))
+    .filter((name) => migrationNumber(name) > number);
 }
 
 /** Full migration list, in wrangler's apply order (numeric, not lexical). */

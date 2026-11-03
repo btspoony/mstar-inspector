@@ -394,6 +394,7 @@ describe("buildClosureSection", () => {
     totalOpen: 3,
     selected: 2,
     assessed: 1,
+    invalidOutput: 0,
     omitted: 1,
     capped: 0,
     contextCoverage: "complete",
@@ -418,6 +419,13 @@ describe("buildClosureSection", () => {
     expect(md).toContain("Reassessed 1/2 open prior finding(s) this round");
     expect(md).toContain("| finding | disposition | evidence | thread |");
     expect(md).toContain("| Fractional expiry comparison | addressed (verified-fix) | diff | - |");
+  });
+
+  test("the coverage line publishes every selected row exactly once", () => {
+    // The identity the line promises: assessed + invalid-output + omitted ===
+    // selected. Here 1 assessed + 1 invalid-output + 0 omitted on 2 selected.
+    const md = buildClosureSection({ ...coverage, invalidOutput: 1, omitted: 0 }, rows);
+    expect(md).toContain("Reassessed 1/2 open prior finding(s) this round · 1 invalid-output · 0 omitted");
   });
 
   test("empty rows still carry the coverage line inside the fold", () => {
@@ -654,6 +662,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
       totalOpen: 25,
       selected: 25,
       assessed: 25,
+      invalidOutput: 0,
       omitted: 0,
       capped: 0,
       contextCoverage: "complete",

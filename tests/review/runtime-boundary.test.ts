@@ -258,6 +258,20 @@ describe("in-image module graph — the image ships packages/runner/src plus the
     expect(admittedFaces(copySources)).toEqual([...ADMITTED_FACE]);
   });
 
+  test("the admitted shared set is exactly the Dockerfile's shared COPY set", () => {
+    // Exact, both ways. An extra per-file `COPY packages/shared/src/<module>`
+    // is a SECOND admission path: it is a shared COPY source the single
+    // directory COPY does not carry, and the resulting duplicate fails the set
+    // comparison below — so a module can never ride the image through a route
+    // this guard does not know. The same pin catches a narrowed COPY that
+    // silently drops a module before the next image build does.
+    const sharedCopySources = copySources.filter(
+      (spec) => spec === "packages/shared/src" || spec.startsWith("packages/shared/src/"),
+    );
+    expect(sharedCopySources).toEqual(["packages/shared/src"]);
+    expect(admittedShared).toEqual(collectFiles(SHARED_SRC).sort());
+  });
+
   test("no COPY line ships the repository root src/ tree", () => {
     // The split's regression: the image once shipped src/review + src/contracts.
     expect(rootSrcCopies).toEqual([]);
