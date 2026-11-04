@@ -66,6 +66,11 @@
 # reason, and the report seat honours a caller signal aborted before the call
 # instead of running to its own timeout. A stale image accepts the over-byte
 # document, writes it, and loses it to the Worker's overflow read.
+# rebuild: the report seat now receives the run's teardown signal (joined with a
+# caller abort), so a torn-down run stops an in-flight seat, and the shared
+# report gate no longer echoes the seat's own keys/values in its rejection
+# reason. A stale image runs the seat to its full timer after teardown and logs
+# seat-authored text into the structured report diagnostics.
 #
 # Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via packages/runner/package.json and

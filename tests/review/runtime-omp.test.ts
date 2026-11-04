@@ -52,7 +52,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
-import type { AgentRuntime, ReviewLevel } from "../../packages/shared/src/runtime";
+import type { AgentRuntime, ReviewLevel, ReviewRunResult } from "../../packages/shared/src/runtime";
 import type { SupervisedSeat } from "../../packages/runner/src/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
 import { REPORT_OUTPUT_SCHEMA } from "../../packages/runner/src/report";
@@ -2735,6 +2735,39 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     // The deep parent's own session is the seat's session.
     expect((subagentRequests[0]!.session as { cwd: unknown }).cwd).toBe(TEST_WORKTREE);
   });
+
+  for (const [name, input] of [
+    ["quick/default", { ...BASE_INPUT, level: "quick" as const }],
+    ["deep", DEEP_INPUT],
+  ] as const) {
+    test(`${name}: a caller abort after the report seat starts resolves null, never throws`, async () => {
+      // The seat parks until its OWN signal fires, so the abort lands while the
+      // seat is in flight — the caller-teardown contract, not the pre-abort one.
+      if (input.level === "deep") parentYields = [deepEnvelope()];
+      const dispatch = deferred();
+      seatDispatchQueue = input.level === "deep" ? [dispatch.resolve] : [() => {}, dispatch.resolve];
+      seatResults =
+        input.level === "deep" ? [{ awaitAbort: true }] : [{ data: seatPayload() }, { awaitAbort: true }];
+      const controller = new AbortController();
+      const errors: string[] = [];
+      const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        errors.push(args.join(" "));
+      });
+      let result: ReviewRunResult;
+      try {
+        const run = ompAgentRuntime.runReview({ ...input, prContext: PR_CONTEXT, signal: controller.signal });
+        await dispatch.promise;
+        controller.abort();
+        result = await run;
+      } finally {
+        spy.mockRestore();
+      }
+      expect(result.report).toBeNull();
+      // The review itself is untouched: the envelope still resolves.
+      expect(result.envelope.schema).toBe("mstar.review/v1");
+      expect(errors.filter((line) => line.includes("report_seat_aborted"))).toHaveLength(1);
+    });
+  }
 });
 
 describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () => {

@@ -98,6 +98,7 @@ import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type Review
 import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat, type RecheckSeatResult } from "./recheck";
 import { runReportSeat, revalidatedNotes } from "./report";
 import type { ReportDoc } from "../../shared/src/report-wire";
+import type { RecheckDoc } from "../../shared/src/recheck-wire";
 
 /**
  * Environment override for the mstar-harness plugin root — the primary,
@@ -1218,6 +1219,10 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
     : DEEP_SEAT_ROLE_FILES;
   let session: AgentSession | undefined;
   let recheckSession: AgentSession | undefined;
+  // The run's teardown signal: aborted the moment teardown begins, so a report
+  // seat still in flight stops with the run (its own timer stays the bound
+  // while the run lives). A caller-supplied abort joins it.
+  const teardown = new AbortController();
   try {
     await installDeepSeatAgents(cwd, pluginRoot);
     if (wantsRecheck) await installSeatAgent(cwd);
@@ -1487,6 +1492,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         asToolSession(parentSession, cwd),
         envelope,
         settled?.doc ?? null,
+        runTeardownSignal(teardown, input),
       );
       return {
         envelope,
@@ -1496,6 +1502,9 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       };
     });
   } finally {
+    // Signal before the sessions settle: on the caller-abort path a report seat
+    // may still be in flight, and it must stop with the run it belongs to.
+    teardown.abort();
     // Teardown order: both sessions settle BEFORE the agent-file cleanup
     // (never concurrent agent-file writes/cleanup, spec §7.8).
     for (const live of [session, recheckSession]) {
@@ -1518,16 +1527,27 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
 }
 
 /**
+ * The run's teardown signal: the review-scoped controller, joined with the
+ * caller's own abort when the port supplies one. The report seat is the only
+ * consumer — it runs after the review settles, so teardown is the one place
+ * that can stop it while it is in flight.
+ */
+function runTeardownSignal(controller: AbortController, input: AgentRuntimeRunInput): AbortSignal {
+  return input.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, input.signal]);
+}
+
+/**
  * Run the narrative report seat for one settled review, serial and bounded.
  * Absent `prContext` = legacy input: no seat, `null` — byte-identical behavior.
- * The signal is a local controller so a teardown cannot leave the seat running
- * past the run (its own timer already bounds the window).
+ * `signal` is the run's teardown signal, so a torn-down run stops the seat
+ * instead of waiting out its own timer.
  */
 async function runReportSeatFor(
   input: AgentRuntimeRunInput,
   session: ToolSession,
   envelope: MstarReviewV1,
-  recheckDoc: import("../../shared/src/recheck-wire").RecheckDoc | null,
+  recheckDoc: RecheckDoc | null,
+  signal: AbortSignal,
 ): Promise<ReportDoc | null> {
   if (input.prContext === undefined) return null;
   return runReportSeat({
@@ -1537,6 +1557,7 @@ async function runReportSeatFor(
     prContext: input.prContext,
     model: seatModelChain(input),
     level: input.level,
+    signal,
   });
 }
 
@@ -1573,6 +1594,9 @@ export const ompAgentRuntime: AgentRuntime = {
     // is ephemeral, so installing there is fine — it is removed on exit).
     const cwd = input.worktreePath;
     let session: AgentSession | undefined;
+    // The run's teardown signal (same contract as the deep path): aborting it
+    // stops a report seat still in flight, and a caller-supplied abort joins it.
+    const teardown = new AbortController();
     try {
       traceStage("enter_run_review");
       await installSeatAgent(cwd);
@@ -1817,7 +1841,13 @@ export const ompAgentRuntime: AgentRuntime = {
       // describe findings that already exist. A null report (no prContext, a
       // failed seat, an invalid document) degrades the sections to `none` —
       // never a failed review.
-      const report = await runReportSeatFor(input, toolSession, envelope, settled?.doc ?? null);
+      const report = await runReportSeatFor(
+        input,
+        toolSession,
+        envelope,
+        settled?.doc ?? null,
+        runTeardownSignal(teardown, input),
+      );
       return {
         envelope,
         recheck: settled?.doc ?? null,
@@ -1825,6 +1855,9 @@ export const ompAgentRuntime: AgentRuntime = {
         report,
       };
     } finally {
+      // Signal before the session settles: a report seat still in flight on the
+      // caller-abort path must stop with the run.
+      teardown.abort();
       if (session) {
         try {
           await session.dispose();
