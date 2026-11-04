@@ -11,7 +11,9 @@
  * `migrations/`), so 0044's ALTER TABLE is what these assertions run against.
  * Stamps use the `.000Z` spelling `pullRequestRecord` emits
  * (`normalizeRfc3339` → `new Date(v).toISOString()`); the write compares them
- * as text, so the fixture spelling is the one the ledger actually holds.
+ * as text, so the fixture spelling is the one the ledger actually holds. That
+ * spelling is enforced INSIDE the write (not merely by the caller), which one
+ * case below pins with a numeric-offset input.
  */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -180,6 +182,16 @@ describe("upsertPullRequest head watermark (0044)", () => {
     });
     // An App with no ledger row is "unknown" — never another App's watermark.
     expect(await store.selectPrHead({ ...ADDRESS, appId: "app-with-no-rows" })).toBeNull();
+  });
+
+  test("a numeric-offset stamp is rewritten to UTC inside the write, not trusted from the caller", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    // The column is ordered lexically, so a `+02:00` spelling stored verbatim
+    // would sort below a `Z` value five minutes older. The store normalizes,
+    // so no caller can put an unorderable stamp in the watermark.
+    await createAppsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T12:00:00+02:00" }));
+    expect((await createAppsStore(db).selectPrHead(ADDRESS))?.headAt).toBe("2026-03-01T10:00:00.000Z");
   });
 
   test("selectPrHead answers null for a row that does not exist", async () => {

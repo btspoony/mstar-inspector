@@ -2024,6 +2024,25 @@ describe("createReviewConsumer", () => {
     expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
   });
 
+  test("a force-push back to a superseded sha reviews it — the claim is not a tombstone (A → B → A)", async () => {
+    // A was skipped once (its claim reads `superseded`), then B was pushed and
+    // now A is the head again. The ledger's head IS A, so the skip's
+    // "different commit" term cannot fire, and the stale claim must not stop
+    // the review either: the ledger comparison is the whole decision.
+    reset();
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: SHA, headAt: NEW_AT });
+    kvState.entries.set(ENQUEUED_KEY(SHA), "superseded");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
   test("a KV fault on the skip's proof read reviews normally and says so once", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);

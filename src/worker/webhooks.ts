@@ -24,6 +24,7 @@
  */
 import { Webhooks } from "@octokit/webhooks";
 import { z } from "zod";
+import { normalizeRfc3339 } from "../contracts/rfc3339";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { ReviewTriggerMode } from "../dashboard/apps-store";
 import type { HandlerLog } from "./handlers";
@@ -727,28 +728,6 @@ function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appS
     installationAccount,
     accountAuthoritative: false,
   };
-}
-
-/**
- * RFC 3339 (what GitHub stamps) — the input gate for the ledger's
- * `last_seen_at` and for the `head_at` watermark carried on the job payload.
- * A value that fails this is treated as ABSENT by the caller rather than
- * handed to SQLite's `datetime()`, which silently returns NULL for junk and
- * would let the store's "no timestamp" fallback masquerade as a real clock.
- */
-const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-
-/**
- * The one spelling every stored stamp uses. `RFC3339` admits numeric offsets
- * (`+02:00`), which do NOT sort correctly as text against `Z`; rewriting to
- * UTC ISO-8601 (`new Date(v).toISOString()`) makes the payload's `head_at`
- * and the ledger's `head_at` comparable byte-for-byte. Junk → `undefined`,
- * never `now`.
- */
-function normalizeRfc3339(value: string | null | undefined): string | undefined {
-  if (!RFC3339.test(value ?? "")) return undefined;
-  const time = new Date(value as string);
-  return Number.isNaN(time.getTime()) ? undefined : time.toISOString();
 }
 
 /**

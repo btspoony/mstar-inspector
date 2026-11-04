@@ -40,13 +40,15 @@ describe("contracts/idem", () => {
     );
   });
 
-  test("isEnqueuedClaim: queued, done and superseded skip a redelivery; every other state re-enqueues", () => {
-    // The worker's pre-check. `superseded` belongs on the skip side: a newer
-    // commit replaced this sha, so re-enqueueing would review an obsolete one.
-    for (const claim of ["1", "done", "superseded"] as const) {
+  test("isEnqueuedClaim: queued and done skip a redelivery; every other state re-enqueues", () => {
+    // The worker's pre-check. `superseded` is NOT on the skip side: it only
+    // says the sha was a leftover when it was acked, and a force-push can make
+    // that same sha the PR head again (A → B → A), where it must be enqueued
+    // and the consumer's ledger comparison decides.
+    for (const claim of ["1", "done"] as const) {
       expect(isEnqueuedClaim(claim)).toBe(true);
     }
-    for (const claim of ["dropped", "failed", "paused", "degraded", null] as const) {
+    for (const claim of ["superseded", "dropped", "failed", "paused", "degraded", null] as const) {
       expect(isEnqueuedClaim(claim)).toBe(false);
     }
   });

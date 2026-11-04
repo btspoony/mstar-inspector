@@ -252,10 +252,13 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
  * Total deliveries a message gets before the queue DLQs it: wrangler.jsonc's
  * `queues.consumers[].max_retries` is 3, so 1 initial delivery + 3 retries.
  * The FINAL delivery stamps its idempotency key `failed` (processMessage's
- * catch) because that commit was never reviewed — keep this in step with the
- * wrangler value.
+ * catch) because that commit was never reviewed.
+ *
+ * Exported so the coupling is ASSERTED, not just commented:
+ * `tests/pipeline/queue-config-contract.test.ts` reads wrangler.jsonc and
+ * fails when the two numbers drift.
  */
-const QUEUE_MAX_ATTEMPTS = 4;
+export const QUEUE_MAX_ATTEMPTS = 4;
 
 /**
  * Cap on the prefetched PR diff considered for the line-comments hunk
@@ -2553,21 +2556,25 @@ async function kvDoneHit(
 }
 
 /**
- * Does the ledger's newer commit own a job that will still run? The worker
+ * Does the ledger's newer commit own a job that may still run? The worker
  * claims the idempotency key only AFTER a successful `REVIEW_QUEUE.send`, so
  * the key proves that commit was enqueued. The ledger alone proves nothing:
  * every verified non-reject delivery advances it, including ones that enqueue
  * nothing (a `synchronize` in `open` mode, a paused App, a failed send), so a
- * skip backed by the ledger alone would drop a PR's only review.
+ * skip backed by the ledger alone would ack a delivery whose PR head has no
+ * review.
  *
  * `"1"` (queued) and `"done"` (reviewed by this consumer) are that proof;
  * `"dropped"` (the guard's terminal ack in handleGuardHeld), `"failed"` (the
  * final delivery is heading to the DLQ), `"paused"` (the App is paused),
  * `"degraded"` (the run ended in a degraded notice) and `"superseded"` (this
  * sha was itself replaced) are NO proof — every one names a commit that was
- * never reviewed, so this delivery must review rather than skip. Deliberately
- * narrower than the worker's pre-check predicate (`isEnqueuedClaim`), which
- * does accept `superseded` to stop redelivering an obsolete commit.
+ * never reviewed, so this delivery must review rather than skip.
+ *
+ * This is a POINT-IN-TIME read, not a reservation: it proves the newer job was
+ * enqueued and not yet terminally dropped when the ack was written. That job
+ * can still be dropped afterwards (see handleGuardHeld); the `review_failures`
+ * row it leaves is the only trace, and nothing re-enqueues this delivery.
  *
  * Fail-open: an absent ledger sha, an absent key or a KV fault all mean "no
  * proof" → review normally (a fault logs one warn line).
@@ -2846,9 +2853,17 @@ async function processMessage(
     // The ledger advances on EVERY verified non-reject delivery, including the
     // ones that enqueue nothing (a `synchronize` in `open` mode, a paused App,
     // a failed enqueue), so the ledger alone cannot stand as the skip's proof:
-    // the newer commit must also own a job that will still run — its
-    // idempotency key is claimed only after a successful send and is stamped
-    // "dropped" when the guard gives that job up for good.
+    // the newer commit must also own a job — its idempotency key is claimed
+    // only after a successful send and is stamped "dropped" when the guard
+    // gives that job up for good.
+    //
+    // That proof is read ONCE, at ack time, and never reserved: it says the
+    // newer job was enqueued and not yet terminally dropped when this delivery
+    // is acked. If that job is dropped afterwards, nothing re-enqueues this
+    // one — the `review_failures` row from the drop is the trace, and the PR's
+    // head then has no review until a later delivery. This is the accepted
+    // cost of keeping the skip free of retries, not a guarantee that no PR can
+    // lose its only review.
     //
     // `issue_comment` jobs and pre-migration messages carry no stamp and take
     // today's path untouched — not even these reads.
@@ -2873,9 +2888,13 @@ async function processMessage(
           { ...baseFields, event: "review_superseded", reason: "superseded", superseded_by_head_at: ledgerHead.headAt },
           `delivery superseded — the PR head has advanced to ${ledgerHead.headAt} (head_sha ${ledgerHead.headSha ?? "unknown"}), acking with no review side effects (no retry, no DLQ, no container)`,
         );
-        // A superseded sha is replaced, not merely unreviewed: the worker's
-        // pre-check must stop redelivering it. Best-effort — a KV fault only
-        // leaves the stale "1" and never changes this outcome.
+        // A superseded sha is not reviewed by THIS delivery, so its claim must
+        // stop proving a review of it is coming. Deliberately not a tombstone:
+        // a force-push can make this sha the head again (A → B → A), and the
+        // worker's pre-check re-enqueues any `superseded` claim for exactly
+        // that reason — this delivery's ledger comparison is what decides it
+        // was a leftover, not the claim. Best-effort — a KV fault only leaves
+        // the stale "1" and never changes this outcome.
         try {
           await deps.env.IDEMPOTENCY_KV.put(
             idemKey({

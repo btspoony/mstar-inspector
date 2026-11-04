@@ -83,16 +83,17 @@ function toEventLog(payload: ReviewJobPayload): WorkerEventLog {
 }
 
 /**
- * Idempotency pre-check: true when the stored value proves this commit needs
- * no new job — "1" (queued), "done" (already reviewed) or "superseded" (a
- * newer commit replaced it; unlike the consumer's supersede proof, this
- * predicate accepts it so an obsolete sha is never re-reviewed). A "dropped"
+ * Idempotency pre-check: true only when the stored value proves this commit
+ * needs no new job — "1" (queued) or "done" (already reviewed). A "dropped"
  * (the guard gave the job up), "failed" (the final delivery is heading to the
- * DLQ), "paused" (the App is paused) or "degraded" (the run ended in a
- * degraded notice) value means the commit was NEVER reviewed, so a redelivery
- * must enqueue again instead of being skipped. On KV failure, returns false
- * (conservative pass) and logs a warning — the D1 UNIQUE constraint is the
- * durable duplicate guard.
+ * DLQ), "paused" (the App is paused), "degraded" (the run ended in a degraded
+ * notice) or "superseded" (a newer commit overtook it at ack time) value means
+ * the commit was NEVER reviewed, so a redelivery must enqueue again instead of
+ * being skipped. `superseded` is therefore no tombstone: a force-push back to
+ * that sha makes it the head again, and the consumer's ledger comparison — not
+ * this claim — then decides whether it is a leftover. On KV failure, returns
+ * false (conservative pass) and logs a warning — the D1 UNIQUE constraint is
+ * the durable duplicate guard.
  */
 export async function idempotencyHit(
   kv: KVNamespace,

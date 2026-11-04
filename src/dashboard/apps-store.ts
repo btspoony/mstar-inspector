@@ -103,6 +103,7 @@
  *     caller-visible errors, never swallowed.
  */
 import { PAGING_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
+import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { getSandboxImage } from "../contracts/sandbox-images";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
@@ -408,11 +409,10 @@ export type UpsertPullRequestInput = {
    * the arrival time of `headSha`, which a delivery naming the same sha still
    * moves.
    *
-   * Precondition: callers MUST pass the canonical UTC ISO-8601 spelling
-   * (`new Date(v).toISOString()`). The column is ordered LEXICALLY, so a
-   * numeric-offset spelling would sort wrongly against the stored `Z` values;
-   * `pullRequestRecord` guarantees it by normalizing before the value gets
-   * here.
+   * Omitted/null/malformed → now. Any admitted RFC 3339 spelling (a numeric
+   * offset included) is rewritten to UTC ISO-8601 inside the write, because
+   * the column is ordered LEXICALLY and a `+02:00` row would sort wrongly
+   * against the stored `Z` values.
    */
   updatedAt?: string | null;
 };
@@ -1037,14 +1037,13 @@ export function createAppsStore(db: AppsStoreD1) {
      *   - an older stamp → both untouched.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
-      // Precondition on `updatedAt`: the canonical UTC ISO-8601 spelling
-      // (`new Date(v).toISOString()`), because the column is ordered lexically
-      // and the CASE arms below compare it as text. `pullRequestRecord`
-      // guarantees it by normalizing; this branch is the EXPLICIT "no usable
-      // stamp" fallback, where arrival time is the only clock left.
-      const seenAt = input.updatedAt === undefined || input.updatedAt === null
-        ? null
-        : input.updatedAt;
+      // The canonical UTC ISO-8601 spelling (`new Date(v).toISOString()`) is a
+      // PRECONDITION of the column, which is ordered lexically — a numeric
+      // offset would sort wrongly against the stored `Z` values. Enforced here
+      // rather than documented for the caller: a second writer cannot store an
+      // unorderable spelling. `null` is the EXPLICIT "no usable stamp"
+      // fallback, where arrival time is the only clock left.
+      const seenAt = normalizeRfc3339(input.updatedAt) ?? null;
       // The pair below holds at the write: no sha, no stamp — otherwise a
       // delivery that carries a stamp but no sha would move the PR's delivery
       // watermark on behalf of a commit it never named.

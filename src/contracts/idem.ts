@@ -25,13 +25,16 @@ export const IDEMPOTENCY_SECONDS = 86400;
  *   message was acked with no review.
  * - `IDEM_DEGRADED` ("degraded") — the model output failed validation; the
  *   run ended in a degraded notice, never a review.
- * - `IDEM_SUPERSEDED` ("superseded") — a newer commit overtook this one; the
- *   delivery was acked without a review, and none is wanted for this sha.
+ * - `IDEM_SUPERSEDED` ("superseded") — a newer commit overtook this one when
+ *   the delivery was acked, so no review ran for it.
  *
  * Only the first two prove the commit has a review that ran or will run;
- * `dropped` / `failed` / `paused` / `degraded` mean the commit was NOT
- * reviewed, so a redelivery must enqueue again rather than be skipped.
- * `superseded` is the third answer: not reviewed, but not wanted either.
+ * `dropped` / `failed` / `paused` / `degraded` / `superseded` all name a
+ * commit that was NOT reviewed, so a redelivery must enqueue again rather
+ * than be skipped. `superseded` in particular is not a tombstone: a sha can
+ * become the PR head again (force-push A → B → A), and then the ledger
+ * comparison — not this stale claim — is what decides whether it is a
+ * leftover.
  */
 export const IDEM_ENQUEUED = "1";
 export const IDEM_DONE = "done";
@@ -42,18 +45,25 @@ export const IDEM_DEGRADED = "degraded";
 export const IDEM_SUPERSEDED = "superseded";
 
 /**
- * The worker's enqueue pre-check: true for every value that makes a
- * redelivery pointless — queued, reviewed, or replaced by a newer commit;
- * unlike `isReviewClaim` it accepts `superseded`.
+ * The worker's enqueue pre-check: true only for a claim that a review of this
+ * sha is queued or already posted — the two values that make a redelivery
+ * pointless.
+ *
+ * Deliberately identical to `isReviewClaim` in this revision, and kept as its
+ * own name because the two answer different questions at different layers:
+ * the worker asks "need a job?", the consumer asks "is the newer commit's
+ * review coming?". `superseded` is on the FALSE side for both: the sha was
+ * skipped once, but a force-push back to it (A → B → A) makes it the head
+ * again, and only the ledger comparison may then decide it is a leftover.
  */
 export function isEnqueuedClaim(value: string | null): boolean {
-  return value === IDEM_ENQUEUED || value === IDEM_DONE || value === IDEM_SUPERSEDED;
+  return value === IDEM_ENQUEUED || value === IDEM_DONE;
 }
 
 /**
  * The supersede proof: true only for a claim that a review of THIS sha is
- * queued or completed; unlike `isEnqueuedClaim` it rejects `superseded`, since
- * a replaced commit proves nothing about the newer one.
+ * queued or completed; it rejects `superseded`, since a replaced commit
+ * proves nothing about the newer one.
  */
 export function isReviewClaim(value: string | null): boolean {
   return value === IDEM_ENQUEUED || value === IDEM_DONE;
