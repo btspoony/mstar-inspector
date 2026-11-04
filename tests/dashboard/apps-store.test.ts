@@ -9,9 +9,9 @@
  *     unreadable stored verdict array reads as `null`, never that default;
  *   - saveCheckGate validates BEFORE writing — a non-integer or out-of-range
  *     score and an off-vocabulary verdict leave the stored gate untouched;
- *   - saveAllowlist REPLACES the owner set in one batch (a removal is written
- *     by the same operation that adds), collapses duplicates and keeps an
- *     empty set meaningful;
+ *   - saveAllowlist REPLACES the owner set in chunks at the repo's batch
+ *     budget (a removal is written by the same operation that adds),
+ *     collapses duplicates and keeps an empty set meaningful;
  *   - both writers refuse an unknown or soft-deleted App with no rows written;
  *   - visibility round-trips and reads `unknown` for a never-probed row.
  *
@@ -175,6 +175,22 @@ describe("owner allowlist (migration 0045)", () => {
     // App is left with no orphan owner rows either.
     const owners = db.raw.query("SELECT COUNT(*) AS n FROM app_owner_allowlist").get() as { n: number };
     expect(owners.n).toBe(0);
+  });
+
+  test("a wide owner set saves across batch chunks and still replaces the set", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "app-allow-wide", { githubAppId: 5104 });
+    const store = createAppsStore(db);
+    // 62 statements (DELETE + 60 INSERTs + UPDATE) — three chunks at the
+    // 25-statement budget, so the chunk boundary is exercised for real.
+    const wide = Array.from({ length: 60 }, (_, i) => `owner-${String(i).padStart(3, "0")}`);
+
+    expect(await store.saveAllowlist("app-allow-wide", { enabled: true, owners: wide })).toBe(true);
+    expect(await store.getAllowlist("app-allow-wide")).toEqual({ enabled: true, owners: wide });
+
+    // The second save still replaces, not merges, across the same chunks.
+    expect(await store.saveAllowlist("app-allow-wide", { enabled: false, owners: wide.slice(0, 1) })).toBe(true);
+    expect(await store.getAllowlist("app-allow-wide")).toEqual({ enabled: false, owners: wide.slice(0, 1) });
   });
 });
 
