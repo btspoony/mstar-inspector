@@ -1941,7 +1941,9 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
   function preGateDb(): TestD1 {
     const db = createTestD1();
     const gate = migrationNumber(GATE_MIGRATION);
-    for (const name of migrationsAfter(2).filter((migration) => migrationNumber(migration) < gate)) {
+    for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
+      (migration) => migrationNumber(migration) < gate,
+    )) {
       db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     return db;
