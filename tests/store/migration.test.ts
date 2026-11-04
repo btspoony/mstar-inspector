@@ -1896,11 +1896,27 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       .get() as { value: string };
     expect(system.value).toBe("64");
 
+    // The previous values survive in the migration's own record table.
+    const recorded = db.raw
+      .prepare(
+        `SELECT workspace_id, previous_value, clamped_to
+           FROM workspace_concurrency_clamp_0043 ORDER BY workspace_id`,
+      )
+      .all() as Array<{ workspace_id: string; previous_value: number; clamped_to: number }>;
+    expect(recorded).toEqual([
+      { workspace_id: "ws_33", previous_value: 33, clamped_to: WORKSPACE_CONCURRENCY_MAX },
+      { workspace_id: "ws_40", previous_value: 40, clamped_to: WORKSPACE_CONCURRENCY_MAX },
+    ]);
+
     // Replaying the file on the clamped schema is a no-op.
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
     const replay = db.raw
       .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
       .all() as Array<{ id: string; cap: number | null }>;
     expect(replay).toEqual(rows);
+    const recordedAgain = db.raw
+      .query("SELECT COUNT(*) AS n FROM workspace_concurrency_clamp_0043")
+      .get() as { n: number };
+    expect(recordedAgain.n).toBe(2);
   });
 });

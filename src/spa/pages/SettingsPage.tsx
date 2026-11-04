@@ -1141,10 +1141,9 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
         // succeeded, so the submitted number stands in for the unreadable one
         // instead of reporting the save as a failure.
         const stored = parseStoredConcurrency(body) ?? submitted;
-        // This write is the workspace's own level, so its value is now known
-        // and trustworthy: show it. A degraded flag caused by the platform
-        // level is re-raised by the next read, and never traps the card in an
-        // empty field after a save that landed.
+        // This write is the workspace's own level — the only level this
+        // payload's `degraded` reports — so the accepted value is now known
+        // and trustworthy: show it and clear the flag.
         setLoaded((previous) => previous && { ...previous, concurrency: stored, degraded: false });
         setDraft(null);
       }

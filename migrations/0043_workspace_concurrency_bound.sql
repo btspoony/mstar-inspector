@@ -18,9 +18,20 @@
 --
 -- Append-only on the production DB: one UPDATE, no schema change.
 
--- The clamp is NOT ledgered from here: `platform_audit_events` is created by
--- 0033, and several fixtures (and any historical-shape reconstruction) apply
--- this file on a schema cut before it. Record the affected rows BEFORE the
--- deploy instead — `docs/deploy.md` § Review concurrency caps carries the
--- query; the lowered value itself is not recoverable from the database.
+-- The previous values are recorded in this migration's own table rather than
+-- `platform_audit_events`: that ledger is created by 0033, and several fixtures
+-- (plus any historical-shape reconstruction) apply this file on a schema cut
+-- before it. `INSERT OR IGNORE` keeps a replay a no-op.
+CREATE TABLE IF NOT EXISTS workspace_concurrency_clamp_0043 (
+  workspace_id   TEXT PRIMARY KEY,
+  previous_value INTEGER NOT NULL,
+  clamped_to     INTEGER NOT NULL,
+  clamped_at     TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO workspace_concurrency_clamp_0043
+  (workspace_id, previous_value, clamped_to, clamped_at)
+SELECT id, max_concurrent_reviews, 32, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  FROM workspaces
+ WHERE max_concurrent_reviews > 32;
 UPDATE workspaces SET max_concurrent_reviews = 32 WHERE max_concurrent_reviews > 32;

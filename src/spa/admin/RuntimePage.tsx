@@ -38,11 +38,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     setBusy(true);
     setNotice(null);
     try {
-      const stored = await setSystemConcurrency(next);
+      const saved = await setSystemConcurrency(next);
       // A 2xx rewrote exactly the level this page reports, so the row is
       // readable again: the server's answer replaces the value and clears the
       // flag that made the field start empty.
-      update((data) => ({ ...data, concurrency: stored, degraded: false }));
+      update((data) => ({ ...data, concurrency: saved, degraded: false }));
       setDraft(null);
       setNotice({ kind: "success", message: t(locale, "admin.runtime.concurrencySaved") });
     } catch (error) {

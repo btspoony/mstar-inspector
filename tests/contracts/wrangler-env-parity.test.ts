@@ -260,6 +260,20 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     expectSameSet("queues.consumers[] tuning", consumerTuningFingerprints);
   });
 
+  /** The ceiling's VALUE is a deploy-config decision, but it is the blast-radius
+   * bound (every admitted attempt starts its own container), so both blocks are
+   * pinned to Cloudflare Queues' hard limit: 250 concurrent consumer
+   * invocations. Set-equality above only keeps the two blocks from drifting. */
+  test("both consumer blocks pin the deploy-time ceiling to Cloudflare's 250", () => {
+    for (const [block, consumer] of [
+      ["top level (staging)", asArray(asObject(staging.queues).consumers)[0]],
+      ["env.production", asArray(asObject(production.queues).consumers)[0]],
+    ] as [string, Json | undefined][]) {
+      if (!consumer) throw new Error(`wrangler.jsonc: ${block} consumer entry is missing`);
+      expect(consumer.max_concurrency, `wrangler.jsonc: ${block} max_concurrency ceiling`).toBe(250);
+    }
+  });
+
   /** A second/unregistered container entry must fail the lock, not hide behind
    * the first. Image values stay owned by `sandbox-images.test.ts`. */
   test("containers (class_name + scheduling_policy + images keys) match between the top level and env.production", () => {
