@@ -2330,8 +2330,8 @@ backfill and no settings visit.
 - **Scope:** the gate is per App and applies to that App's own installs. One
   App's list never changes another App's deliveries.
 - **Visibility never gates admission.** The allowlist applies for every cached
-  `github_visibility` value: `private` only hides the Settings control, so a
-  stale `private` cache can never leave the gate inert.
+  `github_visibility` value: `private` only adds a note under the allowlist
+  control, so a stale `private` cache can never leave the gate inert.
 
 **Visibility is probed, not read.** Whether an App is public or private has no
 authenticated API field, so the dashboard probes it anonymously — `GET
@@ -2347,16 +2347,17 @@ answer `200` and erases the distinction.
 | never probed (NULL column) | reads as `unknown` |
 
 The probe runs during the App's metadata refresh and again whenever the owner
-allowlist is switched on, so the control the Settings page shows matches the
+allowlist is switched on, so the note the Settings page shows matches the
 App instead of a stale cache. On the refresh path an inconclusive answer keeps
 the previously stored value; the enable path stores `unknown`, because the
 cache it replaces is exactly what may be wrong. A `404` is ambiguous (a missing
 or renamed slug answers the same), so a stored `private` is a UI hint, never
 proof and never an enforcement switch:
 
-- A `private` App renders no allowlist control on its Installed tab — it does
-  not disable the gate. Admission never reads the cache, so the stored list
-  stays enforced.
+- Every App renders the allowlist control on its Installed tab, whatever the
+  cached visibility; a cached `private` only adds a note under it that the
+  stored list still applies. Admission never reads the cache, so the list is
+  enforced either way.
 - No cached value changes admission: `public`, `private` and `unknown` all
   enforce the list alike.
 - Caching visibility writes that column only; `updated_at` stays the
