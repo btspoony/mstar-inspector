@@ -111,7 +111,7 @@ import {
   listPendingInvites,
   revokeInvite,
 } from "./invite-store";
-import { fetchAppMetadata, isGithubMetadataStale } from "./github-app-metadata";
+import { fetchAppMetadata, fetchAppVisibility, isGithubMetadataStale } from "./github-app-metadata";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   CLOUDFLARE_ACCOUNT_ID_PATTERN,
@@ -3028,6 +3028,24 @@ async function refreshGithubMetadata(
       logSettingsFailure("github_metadata_attempt", app.id, err);
     }
   };
+  /**
+   * Cache the App's public/private visibility (migration 0045) from the
+   * anonymous probe. It runs ONLY inside a real metadata refresh — the fresh
+   * short-circuit returns before this — so it shares the TTL/`force` bounds
+   * instead of costing one request per settings read. `null` from the probe
+   * is "no answer": the stored value stays. Bookkeeping only, so a store
+   * rejection is logged and swallowed (the markAttempt rule) and can never
+   * turn an already-persisted profile refresh into `failed`.
+   */
+  const probeVisibility = async (slug: string | null): Promise<void> => {
+    if (slug === null) return;
+    try {
+      const visibility = await fetchAppVisibility(slug);
+      if (visibility !== null) await apps.saveGithubVisibility(app.id, visibility);
+    } catch (err) {
+      logSettingsFailure("github_visibility", app.id, err);
+    }
+  };
   try {
     const decryptedPem = await createSecretbox(encryptionKey).decryptSecret(
       app.private_key_enc,
@@ -3045,6 +3063,11 @@ async function refreshGithubMetadata(
       return { status: "failed", row: app };
     }
     await apps.saveGithubMetadata(app.id, result.metadata);
+    // Probe with the slug this refresh just resolved, falling back to the
+    // cached one (saveGithubMetadata COALESCE-preserves it when the payload
+    // has none). Before the re-read so the returned row carries the fresh
+    // visibility.
+    await probeVisibility(result.metadata.githubSlug ?? app.github_slug);
     const row = (await apps.getAppById(app.id)) ?? app;
     // A payload that yields no slug persists the profile but leaves the
     // re-attempt trigger hot; the marker keeps it from looping.

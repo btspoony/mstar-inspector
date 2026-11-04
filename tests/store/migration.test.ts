@@ -1933,3 +1933,82 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
     expect(recordedAgain.n).toBe(2);
   });
 });
+
+describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
+  const GATE_MIGRATION = "0045_review_gate_and_owner_allowlist.sql";
+
+  /** A DB shaped like production at 0044: every earlier file, applied in order. */
+  function preGateDb(): TestD1 {
+    const db = createTestD1();
+    for (const name of readdirSync(MIGRATIONS_DIR)
+      .filter((name) => name.endsWith(".sql") && name >= "0003_dashboard_users.sql" && name < GATE_MIGRATION)
+      .sort()) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
+    return db;
+  }
+
+  test("existing rows materialize the gate and visibility defaults with no backfill", () => {
+    const db = preGateDb();
+    // A row written before the migration carries no gate configuration.
+    insertGithubAppRow(db, { id: "legacy-app", githubAppId: 9001, name: "legacy-app" });
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, GATE_MIGRATION), "utf8"));
+
+    const row = db.raw
+      .query(
+        `SELECT check_min_score, check_pass_verdicts, allowlist_enabled, github_visibility
+           FROM github_apps WHERE id = 'legacy-app'`,
+      )
+      .get() as {
+      check_min_score: number;
+      check_pass_verdicts: string;
+      allowlist_enabled: number;
+      github_visibility: string | null;
+    };
+    expect(row).toEqual({
+      check_min_score: 80,
+      check_pass_verdicts: '["ship it"]',
+      allowlist_enabled: 0,
+      github_visibility: null,
+    });
+
+    // The columns' own contract: NOT NULL with those DDL defaults, and a
+    // nullable visibility that admits only the three known spellings.
+    const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const byName = Object.fromEntries(cols.map((col) => [col.name, col]));
+    expect(byName.check_min_score).toMatchObject({ type: "INTEGER", notnull: 1, dflt_value: "80" });
+    expect(byName.check_pass_verdicts).toMatchObject({ type: "TEXT", notnull: 1, dflt_value: `'["ship it"]'` });
+    expect(byName.allowlist_enabled).toMatchObject({ type: "INTEGER", notnull: 1, dflt_value: "0" });
+    expect(byName.github_visibility).toMatchObject({ type: "TEXT", notnull: 0, dflt_value: null });
+
+    expect(() => db.raw.prepare("UPDATE github_apps SET check_min_score = 101 WHERE id = 'legacy-app'").run()).toThrow();
+    expect(() =>
+      db.raw.prepare("UPDATE github_apps SET github_visibility = 'secret' WHERE id = 'legacy-app'").run(),
+    ).toThrow();
+    db.raw.prepare("UPDATE github_apps SET github_visibility = 'private' WHERE id = 'legacy-app'").run();
+  });
+
+  test("app_owner_allowlist is keyed per (app, owner) and references github_apps", () => {
+    const db = createMigratedTestD1();
+    insertGithubAppRow(db, { id: "allow-app", githubAppId: 9002, name: "allow-app" });
+    const insert = db.raw.prepare(
+      `INSERT INTO app_owner_allowlist (app_id, owner_login, created_at)
+       VALUES (?, ?, datetime('now'))`,
+    );
+    insert.run("allow-app", "acme");
+    expect(() => insert.run("allow-app", "acme")).toThrow();
+    insert.run("allow-app", "beta");
+    // An unknown App is refused by the FK, not silently stored.
+    expect(() => insert.run("ghost-app", "acme")).toThrow();
+
+    const owners = db.raw
+      .query("SELECT owner_login FROM app_owner_allowlist WHERE app_id = 'allow-app' ORDER BY owner_login")
+      .all() as Array<{ owner_login: string }>;
+    expect(owners.map((entry) => entry.owner_login)).toEqual(["acme", "beta"]);
+  });
+});

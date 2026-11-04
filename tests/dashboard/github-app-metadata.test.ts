@@ -31,6 +31,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   fetchAppMetadata,
+  fetchAppVisibility,
   githubAppSlugFromHtmlUrl,
   GITHUB_METADATA_TTL_MS,
   isGithubMetadataStale,
@@ -492,5 +493,45 @@ describe("isGithubMetadataStale (TTL — the settings read path's refresh gate)"
     expect(twentyThreeHoursOld).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     // A future timestamp is stale (doomed refresh attempt, never trusted).
     expect(isGithubMetadataStale(utcText(NOW_MS + 60_000), NOW_MS)).toBe(true);
+  });
+});
+
+describe("fetchAppVisibility (anonymous GET /apps/{slug})", () => {
+  test("200 → public, with no credential, the slug in the URL and a 3s budget", async () => {
+    let timeoutMs: number | undefined;
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs = ms;
+      return origAbortTimeout.call(AbortSignal, ms);
+    }) as typeof AbortSignal.timeout;
+    const { calls } = stubFetch(() => new Response("{}", { status: 200 }));
+
+    expect(await fetchAppVisibility("acme-inspector")).toBe("public");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://api.github.com/apps/acme-inspector");
+    const headers = calls[0]!.init!.headers as Record<string, string>;
+    // Anonymous on purpose: the probe never mints or sends an App JWT.
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers.Accept).toBe("application/vnd.github+json");
+    expect(timeoutMs).toBe(3_000);
+  });
+
+  test("404 → private (a private App has no public listing entry)", async () => {
+    stubFetch(() => new Response(null, { status: 404 }));
+    expect(await fetchAppVisibility("acme-inspector")).toBe("private");
+  });
+
+  test("any other status → null, so the caller keeps the stored value", async () => {
+    for (const status of [500, 403, 301]) {
+      const { calls } = stubFetch(() => new Response(null, { status }));
+      expect(await fetchAppVisibility("acme-inspector")).toBeNull();
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  test("a network failure → null, never a throw", async () => {
+    stubFetch(() => {
+      throw new TypeError("network down");
+    });
+    expect(await fetchAppVisibility("acme-inspector")).toBeNull();
   });
 });
