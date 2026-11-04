@@ -28,8 +28,9 @@ category: Added
   base whose `base...head` is genuinely empty is nothing to review: the delivery is acked with one structured
   line, no review body and no `context_incomplete` row, and its Check inherits the reviewed head's gate result
   against the current gate (`success`/`failure`, naming that head and its verdict/score) instead of ending in a
-  free-standing `neutral` — an empty commit cannot replace the reviewed head's failing required check; only an
-  unreadable baseline result leaves it `neutral`. The
+  free-standing `neutral` — an empty commit cannot replace the reviewed head's failing required check; an
+  unreadable baseline result (missing row, unparseable envelope, missing score) fails the check closed
+  instead of going `neutral`. The
   report document's byte bound is derived from its per-field character budgets, so a document that honours
   every budget can never be rejected.
 
@@ -53,5 +54,6 @@ category: Added
   挤掉付费运行”的情况同样跳过。若合法增量基线的 `base...head` 确实为空，则视为无可审查内容：本次投递打一条
   结构化日志后直接 ack，不发布新评论、不写 `context_incomplete` 行，其 Check 继承被审查 head 的 gate 结果
   （按当前 gate 得出 `success`/`failure`，并写明该 head 及其 verdict/score），而不是以独立的 `neutral` 结束——
-  空提交无法替换被审查 head 那个失败的必需检查；只有基线结果不可读时才保持 `neutral`。报告文档
+  空提交无法替换被审查 head 那个失败的必需检查；基线结果不可读（行缺失、envelope 无法解析、缺少评分）时
+  检查直接失败关闭，而不是保持 `neutral`。报告文档
   的字节上限由各字段的字符预算推导而来，任何满足预算的文档都不可能被字节门拒绝。

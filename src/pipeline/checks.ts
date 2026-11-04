@@ -843,9 +843,13 @@ export const CHECK_SUMMARIES = {
     `No new changes at ${head7} (since ${base7}); the review gate of ${base7} was missed: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
   inheritedGateUnreadable: (head7: string, base7: string, reason: string) =>
     `No new changes at ${head7} (since ${base7}); the review gate for ${base7} could not be evaluated — ${reason}.`,
-  /** The reviewed head itself has no readable result: there is nothing to inherit. */
+  /**
+   * The reviewed head itself has no readable result: nothing can be inherited,
+   * so the check fails closed rather than going neutral and shedding the
+   * required check an empty commit did not earn.
+   */
   inheritedUnreadable: (head7: string, base7: string) =>
-    `No new changes at ${head7} (since ${base7}); the reviewed head ${base7} has no readable review result, so no gate result could be inherited.`,
+    `No new changes at ${head7} (since ${base7}); the review result of ${base7} could not be read, so no gate result could be inherited and the check is failing closed.`,
 } as const;
 
 /** The allowed-verdict list for a public summary — bounded even if a stored gate were malformed. */
@@ -878,7 +882,7 @@ export type CheckTerminalOutcome =
  * | any send with unconfirmed result, or expired attempt w/o proof | failure |
  * | recovery exhausted                                             | proof-derived, else failure |
  * | empty increment: inherits the reviewed head's gate result      | success/failure |
- * | empty increment with no readable baseline result               | neutral |
+ * | empty increment with no readable baseline result               | failure |
  *
  * Proof precedence (normal over degraded within the exact scope/SHA) lives in
  * `readPublicationProof`, which the caller uses to obtain `proof`; this
@@ -889,10 +893,13 @@ export type CheckTerminalOutcome =
  * and never falls back to the scope/SHA row); `null` or a null score is
  * UNREADABLE, never a pass. `gate` is the stored App gate; `null` is unreadable
  * CONFIGURATION and fails closed — there is no permissive default to fall back
- * to. `neutral` is produced ONLY when there is no result to inherit at all
- * (`inherited` set and the baseline review unreadable), because a degraded
- * publication cannot prove the gate was met (clarify C3) and an empty
- * increment must never launder a failing baseline into `neutral`.
+ * to. The `inherited` branch (an EMPTY increment) has NO neutral exit: the
+ * baseline row, its envelope and its verdict are read fail-closed, so a
+ * baseline that cannot be read is a `failure`, never a neutral required check
+ * an empty commit could use to shed a failing one. `neutral` is reachable only
+ * for a free-standing `skipped` round with no inheritable head, where there is
+ * nothing to inherit and no send to lose; a degraded publication cannot prove
+ * the gate was met (clarify C3) and concludes `failure`.
  */
 export function decideConclusion(input: {
   proof: PublicationProof | null;
@@ -934,15 +941,16 @@ export function decideConclusion(input: {
   }
   // An empty increment has no send of its own to lose, but its content IS the
   // reviewed head's: the Check carries THAT head's result judged against the
-  // App's CURRENT gate. `neutral` only when the baseline result itself cannot
-  // be read — otherwise an empty commit could replace a failing required check
-  // with a neutral one. A non-passing verdict, an unreadable gate row and an
-  // unreadable score all fail closed, exactly as that head's own round did.
+  // App's CURRENT gate. There is NO neutral exit: the baseline row, envelope,
+  // verdict and score are read fail-closed, so an unreadable baseline cannot
+  // shed a failing required check through an empty commit. A non-passing
+  // verdict, an unreadable gate row and an unreadable score fail closed,
+  // exactly as that head's own round did.
   if (inherited !== undefined) {
     const head7 = inherited.headSha.slice(0, 7);
     const base7 = inherited.reviewedHeadSha.slice(0, 7);
     if (review === null) {
-      return { desired: "neutral", title: CHECK_NAME, summary: CHECK_SUMMARIES.inheritedUnreadable(head7, base7) };
+      return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.inheritedUnreadable(head7, base7) };
     }
     if (gate === null) {
       return {
@@ -1097,8 +1105,8 @@ export type CheckLifecycle = {
      * The reviewed head an EMPTY increment inherits (its `base...head` is
      * empty): the Check then carries THAT head's persisted result judged
      * against the current gate, so a skipped round can never replace a failing
-     * baseline Check with `neutral`. Omitted → no result to inherit (`neutral`
-     * for `skipped`).
+     * baseline Check with `neutral`; an unreadable baseline fails closed.
+     * Omitted → no result to inherit (`neutral` for `skipped`).
      */
     inheritedHeadSha?: string;
     /**

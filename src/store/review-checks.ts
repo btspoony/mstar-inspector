@@ -1432,7 +1432,7 @@ export async function readPublishedReview(
  * per-App identity `findIncrementBase` selected that head with — the scope/SHA
  * `reviews` row is the projection of the apply, and that head's own Check was
  * judged from it. `null` when the row, its envelope or its verdict cannot be
- * read; the caller then concludes `neutral` instead of inventing a result. A
+ * read; the caller then fails the check closed instead of inventing a result. A
  * readable verdict without a tally keeps `scorePct: null`, exactly like a
  * published payload without a tally. Read-only.
  */

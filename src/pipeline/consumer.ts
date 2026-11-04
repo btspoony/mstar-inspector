@@ -866,7 +866,8 @@ export type CheckLifecycleHooks = {
     /**
      * The reviewed head an EMPTY increment inherits: the Check carries that
      * head's result against the current gate instead of a free-standing
-     * `neutral`. Omitted → nothing to inherit.
+     * `neutral`; an unreadable baseline fails closed. Omitted → nothing to
+     * inherit.
      */
     inheritedHeadSha?: string;
     /** The operator-configured bound on the terminal `checks.update` (spec §7.10). */
