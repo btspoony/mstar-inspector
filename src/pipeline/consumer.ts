@@ -428,9 +428,10 @@ export type ConsumerLogFields = {
    * Set on the diff-capture warn, naming WHY the captured text cannot prove a
    * row: `empty` (the exec exited 0 and delivered nothing while the same
    * round's numstat shows a diff — a capture failure), `overflow` (the diff
-   * exists but is over DIFF_PREFETCH_MAX_BYTES) or `unreadable` (no flag line,
-   * so the transport broke). All three make the round's recheck context
-   * unavailable; none is published as `no-evidence`.
+   * exists but is over DIFF_PREFETCH_MAX_BYTES) or `unreadable` (the sandbox
+   * reply carried no flag line — the command itself always terminates one, so
+   * this can only be a broken transport). All three make the round's recheck
+   * context unavailable; none is published as `no-evidence`.
    */
   diff_capture?: "empty" | "overflow" | "unreadable";
 };

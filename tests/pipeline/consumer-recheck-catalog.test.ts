@@ -218,6 +218,39 @@ describe("recheck evidence catalog and window slicing (§7.3)", () => {
     expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
   });
 
+  test("a reply with no flag line is a capture failure, never a confident no-evidence", async () => {
+    // `parseBoundedRead` names a bounded read whose reply carries NO flag line
+    // `unreadable`: the diff may well be on disk, but the Worker never received
+    // a verdict about it. The command always terminates its own reply, so this
+    // is the transport breaking — still a capture failure, and the round must
+    // say so instead of publishing `no-evidence` for every row.
+    reset();
+    sandbox.diffReadStdout = "";
+    sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const warn = logLines.find((l) => l.fields.diff_capture !== undefined);
+    expect(warn?.fields.diff_capture).toBe("unreadable");
+    expect(warn?.level).toBe("warn");
+    expect(warn?.msg).toContain("context-unavailable");
+    // Context unavailable → no recheck round goes out…
+    const writtenInput = JSON.parse(sandbox.writtenInputJson!) as { recheck?: unknown };
+    expect(writtenInput.recheck).toBeUndefined();
+    // …the round itself still runs (the runner input was written), and the
+    // prepared body names the reason instead of claiming the rows were checked.
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (context-incomplete)");
+    expect(prepared.body).not.toContain("unverifiable (no-evidence)");
+    expect(prepared.body).toContain("context coverage: unavailable");
+    expect(db.raw.query("SELECT * FROM review_failures").all()).toHaveLength(0);
+  });
+
   test("a row the trusted catalog cannot prove never rides the wire: no-evidence, never budget, never assessed", async () => {
     reset();
     sandbox.diffStdout = VALID_DIFF;

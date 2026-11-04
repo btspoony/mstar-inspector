@@ -12,11 +12,13 @@ category: Fixed
   the first 2 MiB, then a `wc -c` overflow flag. Over-size still yields no
   slices and keeps the base-filter fallback for line comments; the round is
   never dropped.
-- **A diff capture that cannot prove a row is reported, not fabricated.** Exit
-  0 with nothing to read means the capture failed (`gh pr diff` always emits a
-  header for a real PR); an over-bound diff exists but cannot prove a row; a
-  read with no flag line means the transport broke. All three now leave the
-  round `context-incomplete` with a `diff_capture: "empty" | "overflow" |
+- **A diff capture that cannot prove a row is reported, not fabricated.** An
+  empty capture is judged against the SAME round's numstat: nothing read while
+  the numstat shows a diff is a capture failure, while nothing read and an empty
+  numstat is a genuinely empty PR — a normal round, not a lost capture. An
+  over-bound diff exists but cannot prove a row, and a read with no flag line
+  means the transport broke. Each of those leaves the round
+  `context-incomplete` with a `diff_capture: "empty" | "overflow" |
   "unreadable"` warn, instead of publishing a confident `no-evidence` verdict
   per row.
 
@@ -27,8 +29,9 @@ category: Fixed
   对从未展示给 seat 的行发布 `unverifiable (no-evidence)`。该命令现在既写文件
   （仍是 numstat 的来源），又通过与 recheck 文档相同的受限通道读回：前 2 MiB，
   随后是 `wc -c` 溢出标记。超限仍不产生切片、行内评论退回 base 过滤，整轮从不丢弃。
-- **无法证明任何行的 diff 捕获如实上报，而非伪造结论。** 退出码 0 却读不到任何内容
-  说明捕获失败（真实 PR 的 `gh pr diff` 至少会输出头部）；超限的 diff 存在却无法
-  证明任何行；读回缺少标记行则说明通道损坏。这三种情况现在都让整轮标记为
-  `context-incomplete`，并打出 `diff_capture: "empty" | "overflow" | "unreadable"`
-  警告，而不是为每一行发布看似确定的 `no-evidence`。
+- **无法证明任何行的 diff 捕获如实上报，而非伪造结论。** 空捕获要与同一轮的 numstat
+  对照判断：读不到任何内容而 numstat 显示有 diff，是捕获失败；两者都为空则是真正
+  无改动的 PR，属于正常一轮而非丢失捕获。超限的 diff 存在却无法证明任何行；读回
+  缺少标记行则说明通道损坏。以上情况都让整轮标记为 `context-incomplete`，并打出
+  `diff_capture: "empty" | "overflow" | "unreadable"` 警告，而不是为每一行发布
+  看似确定的 `no-evidence`。

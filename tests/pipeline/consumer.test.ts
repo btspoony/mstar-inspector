@@ -2806,9 +2806,11 @@ describe("line comments (AL-3 layered delivery)", () => {
 
   test("no diff text (capture unavailable) → base-filter attempt (draft semantics)", async () => {
     reset();
-    // sandbox.diffStdout stays "" — the prefilter has no trusted diff to compare
-    // against, so the base layer alone decides (GitHub validates at send;
-    // the hunk layer is skipped, never fabricated).
+    // The bounded read delivers nothing while numstat shows a diff: the trusted
+    // diff is unavailable, so the prefilter has no text to compare against and
+    // the base layer alone decides (GitHub validates at send; the hunk layer is
+    // skipped, never fabricated).
+    sandbox.diffStdout = "";
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
