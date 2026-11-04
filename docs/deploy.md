@@ -2375,16 +2375,16 @@ row expires.
   under the previous `1..64` range) down to `32` when it applies. This is a
   one-time, customer-visible lowering of an existing setting, performed at
   deploy time; the tenant's card shows the clamped value afterwards. The
-  previous values are NOT recoverable from the database, so record them before
-  the deploy applies the migration:
+  migration records each previous value in `workspace_concurrency_clamp_0043`
+  (one row per affected workspace), and the runbook's pre-apply snapshot
+  (Time Travel bookmark / export, § D1 migrations) still restores the whole
+  pre-`0043` state. For the cheap per-row answer, run this BEFORE the deploy
+  and keep the output with the deploy evidence:
 
   ```sql
   SELECT id, max_concurrent_reviews FROM workspaces
    WHERE max_concurrent_reviews > 32 ORDER BY id;
   ```
-
-  Keep that output with the deploy evidence — it is the answer to a later
-  "why is this workspace's cap 32?" question.
 - Every accepted write lands with its `platform_audit_events` row (actor
   included) in one D1 batch; a refused write changes no row and audits
   nothing.

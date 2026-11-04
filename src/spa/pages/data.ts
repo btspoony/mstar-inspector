@@ -1522,7 +1522,11 @@ export type ConcurrencySettings = {
  * repair. A typed value IS the repair, so the form stays usable.
  */
 export function concurrencySubmitBlocked(degraded: boolean, draft: string | null): boolean {
-  return degraded && draft === null;
+  // An untouched degraded form has no value to write (the field's payload is
+  // the conservative fallback). A cleared field is never a value either:
+  // `Number("")` is 0, which the server would refuse after a round-trip.
+  if (draft === null) return degraded;
+  return draft.trim() === "";
 }
 
 export function parseConcurrencySettings(data: unknown): ConcurrencySettings | null {

@@ -113,11 +113,11 @@ export type ConcurrencyRead = { concurrency: number; degraded: boolean };
 function resolveRow(
   row: { value?: unknown } | null,
   fallback: number,
-  max: number,
+  parse: (value: unknown) => number | undefined,
 ): ConcurrencyRead {
   if (row === null) return { concurrency: fallback, degraded: false };
   if (row.value === undefined) return { concurrency: CONCURRENCY_MIN, degraded: true };
-  const parsed = parseStored(row.value, max);
+  const parsed = parse(row.value);
   if (parsed === undefined) return { concurrency: fallback, degraded: false };
   return Number.isNaN(parsed)
     ? { concurrency: CONCURRENCY_MIN, degraded: true }
@@ -163,7 +163,9 @@ export async function getSystemConcurrency(db: DashboardD1): Promise<Concurrency
       .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
       .bind(SYSTEM_CONCURRENCY_KEY)
       .first<RuntimeSettingRow>();
-    return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT, SYSTEM_CONCURRENCY_MAX);
+    return resolveRow(row, SYSTEM_CONCURRENCY_DEFAULT, (value) =>
+      parseStored(value, SYSTEM_CONCURRENCY_MAX),
+    );
   } catch {
     return { concurrency: CONCURRENCY_MIN, degraded: true };
   }
@@ -187,13 +189,7 @@ export async function getWorkspaceConcurrency(
       )
       .bind(workspaceId)
       .first<RuntimeSettingRow>();
-    if (row === null) return { concurrency: WORKSPACE_CONCURRENCY_DEFAULT, degraded: false };
-    if (row.value === undefined) return { concurrency: CONCURRENCY_MIN, degraded: true };
-    const parsed = parseWorkspaceStored(row.value);
-    if (parsed === undefined) return { concurrency: WORKSPACE_CONCURRENCY_DEFAULT, degraded: false };
-    return Number.isNaN(parsed)
-      ? { concurrency: CONCURRENCY_MIN, degraded: true }
-      : { concurrency: parsed, degraded: false };
+    return resolveRow(row, WORKSPACE_CONCURRENCY_DEFAULT, parseWorkspaceStored);
   } catch {
     return { concurrency: CONCURRENCY_MIN, degraded: true };
   }

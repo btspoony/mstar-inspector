@@ -160,7 +160,8 @@ function containerFingerprints(block: Json): string[] {
  * that declares no DLQ at all, or drops its retry batch bounds, is exactly the
  * drift this lock catches. Both consumers pin max_batch_size 1, the
  * deploy-time max_concurrency ceiling and max_retries 3 (see the
- * wrangler.jsonc rationale); the ceiling VALUE is pinned separately below.
+ * wrangler.jsonc rationale). Set-equality keeps the two blocks equal; the
+ * ceiling VALUE is pinned to Cloudflare's 250 by the test below it.
  */
 function consumerTuningFingerprints(block: Json): string[] {
   return asArray(asObject(block.queues).consumers).map((entry) =>
