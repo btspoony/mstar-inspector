@@ -51,12 +51,18 @@ this field existed reads `null` until one of those happens.
 ## Delivery admission runs before any record
 
 An App can restrict review work to a set of repository owners. The switch is
-off by default and off means the pre-existing behavior exactly.
+off by default: off filters no owner, so every owner is reviewed as before.
 
-When the switch is on, admission happens after classification and before the
-first write, for EVERY cached visibility. `private` never exempts a delivery
-and never hides the control; it only adds a note, so a stale `private` cache
-can never leave the gate inert or unmanageable.
+Admission happens after classification and before the first write, for EVERY
+cached visibility, and the switch does not scope the read: every classified
+delivery that carries a repository owner reads the allowlist row whether the
+switch is on or off, so the read failure below fails closed (a `500` GitHub
+retries) on an App whose allowlist was never enabled. The switch only decides
+whether the owner list is applied. `private` never exempts a delivery and
+never hides the control; it only adds a note, so a stale `private` cache can
+never leave the gate inert or unmanageable.
+
+With the switch on, the repository owner the payload names decides:
 
 - owner readable and listed -> continue
 - owner readable and not listed -> respond `200` with a short body and write

@@ -2311,8 +2311,11 @@ carry defaults — an existing row materializes the allowlist off, the gate at
 80 points on the verdict `ship it` — plus the new table, so the apply needs no
 backfill and no settings visit.
 
-- **Off by default, and off is the historical behavior exactly** — every owner
-  is reviewed as before.
+- **Off by default: no owner is filtered.** Every owner is reviewed as before.
+  What the switch does not govern is the read itself: admission reads the
+  allowlist row for every classified delivery that carries a repository owner,
+  on and off alike, so the failed read below applies while the switch is off
+  too — a `500` and a GitHub retry where nothing used to be read at all.
 - **On:** a delivery is admitted only when its `repository.owner.login` is
   listed, on the `pull_request` trigger and the `issue_comment` mention alike.
   Logins compare case-insensitively; the stored list keeps the operator's case.
