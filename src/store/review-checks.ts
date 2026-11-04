@@ -1406,7 +1406,9 @@ export { readPublicationProof } from "./finding-lifecycle";
  * write wins, it can lag a confirmed publication (apply still due, or failed)
  * or belong to an earlier attempt for the same head SHA, which RL-12 allows,
  * and it carries no proof identity, so it must never decide an attempt that
- * published something else. Callers without a proof id read the row.
+ * published something else. Callers without a proof id read the row — always by
+ * exact App: 0001 keys `reviews` without the App, so a row attributed to
+ * another App (or to none) is no gate input for this one.
  *
  * A readable payload whose tally is missing keeps its verdict with
  * `scorePct: null` (unreadable gate input, never a fallback to another
@@ -1427,9 +1429,10 @@ export async function readPublishedReview(
   const row = await db
     .prepare(
       `SELECT verdict, envelope FROM reviews
-       WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?`,
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?`,
     )
     .bind(
+      input.scope.appId,
       input.scope.installationId,
       input.scope.owner,
       input.scope.repo,

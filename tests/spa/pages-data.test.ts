@@ -1031,6 +1031,11 @@ describe("invite grammar + page copy", () => {
 describe("review gate verdict mirror", () => {
   // The browser bundle cannot import the Node-only engine, so the SPA restates
   // the vocabulary; this pins the copy to the engine tuple, in order.
+  //
+  // DELIBERATE, not incidental: this pin and the `parseSettings` round-trip
+  // (`Every verdict the SPA renders round-trips through this parse`) are the two
+  // guards on that restated copy — the pin catches an engine vocabulary change,
+  // the round-trip proves every offered string is accepted back. Both stay.
   test("the SPA PR_VERDICTS mirror equals the engine tuple, in order", () => {
     expect([...SPA_PR_VERDICTS]).toEqual([...ENGINE_PR_VERDICTS]);
   });

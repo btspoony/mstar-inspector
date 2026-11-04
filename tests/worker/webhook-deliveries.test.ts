@@ -1094,6 +1094,27 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(fields.event).toBe("owner_allowlist_read_failed");
   });
 
+  test("allowlist OFF still reads the gate: an unreadable table is fail-closed too", async () => {
+    // The switch is off in the stored snapshot, but that snapshot lives in the
+    // table itself: dropping it makes the switch UNKNOWN, and an unknown switch
+    // must not admit. The read is unconditional, so the OFF case fails closed
+    // exactly like the ON one.
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).saveAllowlist(appRow.id, { enabled: false, owners: [] });
+    db.raw.exec("DROP TABLE app_owner_allowlist");
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe("owner allowlist unreadable");
+    expect(sent).toHaveLength(0);
+    expect(ledgerState(db, appRow.id)).toEqual({ deliveries: 0, pullRequests: 0, lastWebhookAt: null });
+  });
+
   test("installation bookkeeping is never gated: an unreadable allowlist still records the delivery", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });

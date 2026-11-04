@@ -1184,11 +1184,17 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         }),
         deps.getCheckGate(handle.scope),
       ]);
-      const review = await readPublishedReview(deps.db, {
-        scope: handle.scope,
-        headSha: handle.headSha,
-        ...(proof === null ? {} : { publicationId: proof.publicationId }),
-      });
+      // PROOF decides: without one the review is never consulted (the
+      // conclusion is the honest unconfirmed failure), so the read is skipped
+      // rather than issued and discarded.
+      const review =
+        proof === null
+          ? null
+          : await readPublishedReview(deps.db, {
+              scope: handle.scope,
+              headSha: handle.headSha,
+              publicationId: proof.publicationId,
+            });
       const conclusion = decideConclusion({
         proof,
         outcome: input.outcome,
