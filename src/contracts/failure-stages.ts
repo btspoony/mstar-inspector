@@ -13,12 +13,13 @@
 
 /**
  * Stages whose rows record a review that CONTINUED — per-round attribution,
- * never a failure of the review itself. The two COUNT faces exclude this whole
- * set: the cron sweep's paging count and the dashboard's failure count (list
- * aggregate and detail `failure_count`). The dashboard's per-PR failure
- * HISTORY excludes nothing — both stages stay visible there, because each row
- * is the only surface for something D1 lost (`usage`: a dropped metered
- * attempt, `recheck`: a round that produced no usable document).
+ * never a failure of the review itself. Every COUNT and every list that pages
+ * these rows excludes the whole set: the cron sweep's paging count, the
+ * dashboard's failure count (list aggregate, detail `counts.failures`) and the
+ * per-PR failure history. One rule on both faces, so a tab number never
+ * disagrees with the pager below it. The rows stay in `review_failures` —
+ * `usage` is the only record of a dropped metered attempt and `recheck` of a
+ * round that produced no usable document — they are just not failures.
  */
 export const PAGING_EXCLUDED_STAGES = Object.freeze(["recheck", "usage"] as const);
 

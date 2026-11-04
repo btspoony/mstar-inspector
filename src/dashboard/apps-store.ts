@@ -1151,11 +1151,9 @@ export function createAppsStore(db: AppsStoreD1) {
      * both are per-round attribution written for rounds that continued
      * (`recheck` a budget skip / dead seat / invalid document, `usage` a
      * failed `usage_events` insert), so a clean PR would otherwise read a
-     * non-zero failure count. This count excludes both; the sweep excludes the
-     * same two stages from paging. The detail face's failure HISTORY excludes
-     * nothing: `usage` (a lost metered record) and `recheck` (a round that
-     * produced no usable document) each need a surface, and the detail's own
-     * `counts.failures` still filters the same two stages out.
+     * non-zero failure count. This count excludes both, exactly as the sweep
+     * and the detail face's own failure count and history do: one rule, so the
+     * tab number, the pager and the rows can never disagree.
      */
     async listPullRequests(appId: string): Promise<PullRequestRow[]> {
       const results = await db.batch([
@@ -1239,15 +1237,14 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The record totals — the head payload's `counts`. The failure count rides
-     * the same join the failures section pages, plus the
-     * `PAGING_EXCLUDED_STAGES` exclusion: those rows are per-round ATTRIBUTION
-     * for reviews that continued (`recheck` a budget skip / dead seat / invalid
-     * document, `usage` a failed `usage_events` insert), so a clean PR would
-     * otherwise report failures it never had. The section itself excludes
-     * nothing — `usage` (a lost metered record) and `recheck` (a round that
-     * produced no usable document) each need a surface — so its `total` may
-     * exceed this count by exactly those rows.
+     * The record totals — the head payload's `counts`. Every failure count on
+     * this face (this one, the list's `failure_count`, the failures section's
+     * `total`) carries ONE rule: `PAGING_EXCLUDED_STAGES` rows are per-round
+     * ATTRIBUTION for reviews that continued (`recheck` a budget skip / dead
+     * seat / invalid document, `usage` a failed `usage_events` insert), not
+     * failures of the review ledger this face pages, so a clean PR never
+     * reports one. They stay in `review_failures` for the ops sweep to skip in
+     * its own paging signal and for the log tail.
      *
      * `must_fix` is the PR's own count of must-fix findings, unfiltered and
      * unpaged: the family dot answers "does this PR have one", never "does the
@@ -1408,8 +1405,10 @@ export function createAppsStore(db: AppsStoreD1) {
 
     /**
      * One page of a PR's review failures, newest first — the diagnostic
-     * payload this face exists for. `null` = the App's ledger does not hold
-     * this PR.
+     * payload this face exists for. COUNT and SELECT carry the SAME
+     * `PAGING_EXCLUDED_STAGES` predicate `countPullRequestRecords` applies, so
+     * the tab's number, this `total` and the pager agree with the rendered
+     * rows. `null` = the App's ledger does not hold this PR.
      */
     async listPullRequestFailures(
       appId: string,
@@ -1425,7 +1424,8 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT COUNT(*) AS n
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
+             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
           .bind(appId, owner, repo, prNumber),
         db
@@ -1433,7 +1433,8 @@ export function createAppsStore(db: AppsStoreD1) {
             `SELECT f.stage, f.error, f.created_at
              FROM review_failures f
              JOIN app_installations i ON i.installation_id = f.installation_id AND i.app_id = ?
-             WHERE f.owner = ? AND f.repo = ? AND f.pr_number = ?
+             WHERE f.stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
+               AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC
              LIMIT ? OFFSET ?`,
           )

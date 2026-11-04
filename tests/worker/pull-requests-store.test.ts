@@ -140,13 +140,13 @@ describe("listPullRequests", () => {
   });
 
   // One parameterized case, one set of assertions: every attribution-only
-  // stage projects the same way — out of the failure count, kept in the
-  // detail history.
+  // stage projects the same way — out of the failure count AND out of the
+  // failure page, so the tab's number always matches the pager.
   for (const [stage, error] of [
     ["recheck", "skipped: budget: null"],
     ["usage", "D1_ERROR: no such table"],
   ] as const) {
-    test(`${stage} attribution rows are not review failures: count 0, but the detail history keeps the row`, async () => {
+    test(`${stage} attribution rows are not review failures: counted 0 and paged 0`, async () => {
       const db = createMigratedTestD1();
       seedApp(db);
       await createAppsStore(db).upsertPullRequest(PR);
@@ -161,22 +161,44 @@ describe("listPullRequests", () => {
         )
         .run(stage, error);
 
-      const rows = await createAppsStore(db).listPullRequests(APP_ID);
-      const byNumber = new Map(rows.map((row) => [row.number, row]));
-      expect(byNumber.get(131)!.failure_count).toBe(0);
       const store = createAppsStore(db);
-      // Still not a REVIEW failure — the attribution row has a surface in the
-      // detail's paged history, while the detail's failure COUNT stays 0.
+      expect((await store.listPullRequests(APP_ID))[0]!.failure_count).toBe(0);
       expect((await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131)).failures).toBe(0);
       const history = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, {
         offset: 0,
         limit: 10,
       });
-      expect(history!.items).toEqual([{ stage, error, created_at: expect.any(String) }]);
-      // Still in D1 as attribution — only the failure count drops it.
+      expect(history!.total).toBe(0);
+      expect(history!.items).toEqual([]);
+      // Still in D1 as attribution — the failure face just does not page it.
       expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
     });
   }
+
+  test("the failure count and the failures section total agree when both an attribution row and an ordinary one exist", async () => {
+    // The second face of the same rule: the recheck row is counted and paged
+    // out on BOTH sides, so the tab's number is the pager's denominator.
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createAppsStore(db).upsertPullRequest(PR);
+    db.raw
+      .prepare("INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 77, 'acme', datetime('now'))")
+      .run(APP_ID);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+         VALUES ('f-recheck', 77, 'acme', 'widgets', 131, 'sha-1', 'recheck', 'skipped: budget: null'),
+                ('f-runner', 77, 'acme', 'widgets', 131, 'sha-1', 'runner', 'boom')`,
+      )
+      .run();
+
+    const store = createAppsStore(db);
+    const counts = await store.countPullRequestRecords(APP_ID, "acme", "widgets", 131);
+    const page = await store.listPullRequestFailures(APP_ID, "acme", "widgets", 131, { offset: 0, limit: 10 });
+    expect(counts.failures).toBe(1);
+    expect(page!.total).toBe(counts.failures);
+    expect(page!.items.map((item) => item.stage)).toEqual(["runner"]);
+  });
 
   test("a sibling App's reviews and failures never leak into the list", async () => {
     const db = createMigratedTestD1();
