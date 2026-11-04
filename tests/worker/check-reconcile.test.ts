@@ -410,12 +410,17 @@ function run(db: TestD1, deps: CheckReconcileDeps = {}) {
 /**
  * The same database with the SELECTs matching `matcher` throwing, i.e. a
  * persistent read failure on exactly those statements (everything else —
- * including the durable writes and `raw` assertions — still works).
+ * including the durable writes and `raw` assertions — still works). `attempted`
+ * collects every statement that threw, so a test can prove the read it cares
+ * about was actually issued rather than skipped.
  */
-function withFailingReads(db: TestD1, matcher: RegExp): TestD1 {
+function withFailingReads(db: TestD1, matcher: RegExp, attempted: string[] = []): TestD1 {
   return {
     prepare(sql: string) {
-      if (matcher.test(sql)) throw new Error("d1 read failed");
+      if (matcher.test(sql)) {
+        attempted.push(sql);
+        throw new Error("d1 read failed");
+      }
       return db.prepare(sql);
     },
     batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
@@ -688,12 +693,19 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   test("a persistent gate/review read failure still terminalizes the attempt (QC3-F-001)", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
+    // Seed a CONFIRMED publication proof plus the applied review, so the
+    // decision actually reaches the gate: without them the lane concludes from
+    // the absent proof alone and never issues the two reads this case is about.
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof);
+    seedReview(db, SCOPE, SHA, "ship it", 96);
     // The gate and the APPLIED review are the two reads a failing D1 keeps
     // failing; after migration 0045 a corrupt `check_pass_verdicts` no longer
     // throws either — `getCheckGate` reports it as null, the same UNREADABLE
     // input. Neither is a reason to skip the terminal conclusion: an attempt
     // that only retried would never conclude its Check.
-    const degraded = withFailingReads(db, /check_pass_verdicts|FROM reviews/);
+    const attempted: string[] = [];
+    const degraded = withFailingReads(db, /check_pass_verdicts|FROM reviews/, attempted);
     const fetchStub = stubFetch();
     const pushed: CheckConclusion[] = [];
     try {
@@ -714,9 +726,12 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     } finally {
       fetchStub.restore();
     }
+    // The gate read was ATTEMPTED and its failure decided the conclusion: a
+    // lane that skipped it would pass the proof through unjudged.
+    expect(attempted.some((sql) => sql.includes("check_pass_verdicts"))).toBe(true);
     expect(pushed).toHaveLength(1);
     expect(pushed[0]?.desired).toBe("failure");
-    expect(pushed[0]?.summary).toBe("Review attempt could not be confirmed complete; publication status is unknown.");
+    expect(pushed[0]?.summary).toBe("Review gate could not be evaluated for 0123456: the App's gate configuration could not be read.");
     const row = await rawRow(db, attempt.identity.attemptId);
     expect(row.desired).toBe("failure");
     expect(row.observed).toBe("failure");
