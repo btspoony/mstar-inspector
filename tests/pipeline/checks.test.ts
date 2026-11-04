@@ -1142,10 +1142,12 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
   ] as const;
 
   test("a confirmed normal publication decides from proof: success when the gate is met, whatever the terminal outcome", () => {
-    // A proven publication is never demoted by how the attempt ended — a
-    // `publication-unknown`/`expired` outcome with a durable proof still reads
-    // the gate and succeeds when it is met.
-    for (const outcome of ["publication-unknown", "expired"] as const) {
+    // A proven publication is never demoted by how the attempt ended. The
+    // sweep is the WHOLE outcome vocabulary — an unconfirmed or expired
+    // attempt, a pre-publication failure, a rejected degraded send, an
+    // exhausted finalization — because the proof, not the terminal outcome,
+    // decides once a durable normal publication exists.
+    for (const outcome of outcomes) {
       for (const score of [80, 100]) {
         const decided = decideConclusion({
           proof: normal,
