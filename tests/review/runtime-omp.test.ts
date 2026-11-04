@@ -52,7 +52,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
-import type { AgentRuntime, ReviewLevel, ReviewRunResult } from "../../packages/shared/src/runtime";
+import type {
+  AgentRuntime,
+  AgentRuntimeRunInput,
+  ReviewLevel,
+  ReviewRunResult,
+} from "../../packages/shared/src/runtime";
 import type { SupervisedSeat } from "../../packages/runner/src/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
 import { REPORT_OUTPUT_SCHEMA } from "../../packages/runner/src/report";
@@ -2171,73 +2176,74 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (AL-23-1; 
   });
 });
 
+/** Recheck fixtures shared with the report-seat suite (both dispatch the same seat definition). */
+const RECHECK_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+/** Minimal trusted-catalog recheck input (shape mirrors the T1 fixtures). */
+function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
+  return {
+    schema: "mstar.recheck-input/v1",
+    headSha: RECHECK_SHA,
+    targets: [
+      {
+        rowId: "row-1",
+        findingId: "f-1",
+        original: {
+          title: "Unbounded recursion",
+          body: "The reaper recurses without a depth bound.",
+          filePath: "src/reaper.ts",
+          lineStart: 8,
+          lineEnd: 10,
+          mergeClass: "must-fix",
+          category: "logic",
+          fingerprintHint: "fp-reaper",
+        },
+        firstSeenSha: RECHECK_SHA,
+        lastAssessment: null,
+        associationIds: ["assoc-1"],
+      },
+    ],
+    evidence: [
+      {
+        id: "slice-1",
+        headSha: RECHECK_SHA,
+        baseSha: "b000000000000000000000000000000000000000",
+        path: "src/reaper.ts",
+        oldPath: null,
+        kind: "hunk",
+        oldStart: 8,
+        oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
+        newStart: 8,
+        newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
+        addedNewLines: [9],
+        oldBlobOid: "oid-old",
+        headBlobOid: "oid-head",
+        absentAtHead: false,
+        complete: true,
+      },
+    ],
+    discussion: { items: [], issueCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
+    ...overrides,
+  };
+}
+
+/** A document validateRecheckDoc accepts against `recheckInput()`. */
+function validRecheckDoc(): RecheckDoc {
+  return {
+    schema: "mstar.recheck/v1",
+    headSha: RECHECK_SHA,
+    results: [
+      { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+    ],
+  };
+}
+
+/** A stale document — validateRecheckDoc rejects it as a whole. */
+function staleRecheckDoc(): RecheckDoc {
+  return { ...validRecheckDoc(), headSha: "ffffffffffffffffffffffffffffffffffffffff" };
+}
+
 describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
-  const RECHECK_SHA = "0123456789abcdef0123456789abcdef01234567";
-
-  /** Minimal trusted-catalog recheck input (shape mirrors the T1 fixtures). */
-  function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
-    return {
-      schema: "mstar.recheck-input/v1",
-      headSha: RECHECK_SHA,
-      targets: [
-        {
-          rowId: "row-1",
-          findingId: "f-1",
-          original: {
-            title: "Unbounded recursion",
-            body: "The reaper recurses without a depth bound.",
-            filePath: "src/reaper.ts",
-            lineStart: 8,
-            lineEnd: 10,
-            mergeClass: "must-fix",
-            category: "logic",
-            fingerprintHint: "fp-reaper",
-          },
-          firstSeenSha: RECHECK_SHA,
-          lastAssessment: null,
-          associationIds: ["assoc-1"],
-        },
-      ],
-      evidence: [
-        {
-          id: "slice-1",
-          headSha: RECHECK_SHA,
-          baseSha: "b000000000000000000000000000000000000000",
-          path: "src/reaper.ts",
-          oldPath: null,
-          kind: "hunk",
-          oldStart: 8,
-          oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
-          newStart: 8,
-          newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
-          addedNewLines: [9],
-          oldBlobOid: "oid-old",
-          headBlobOid: "oid-head",
-          absentAtHead: false,
-          complete: true,
-        },
-      ],
-      discussion: { items: [], issueCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
-      ...overrides,
-    };
-  }
-
-  /** A document validateRecheckDoc accepts against `recheckInput()`. */
-  function validRecheckDoc(): RecheckDoc {
-    return {
-      schema: "mstar.recheck/v1",
-      headSha: RECHECK_SHA,
-      results: [
-        { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
-      ],
-    };
-  }
-
-  /** A stale document — validateRecheckDoc rejects it as a whole. */
-  function staleRecheckDoc(): RecheckDoc {
-    return { ...validRecheckDoc(), headSha: "ffffffffffffffffffffffffffffffffffffffff" };
-  }
-
   beforeEach(() => {
     // Fresh far-future anchor per test: budget-equivalent to the unset state
     // (full 180s cap) AND immune to anchor state leaked from other test
@@ -2641,12 +2647,6 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 });
 
-/**
- * Seat supervision (progress nudges): while a seat runs it is told how much of
- * the shared review clock is left and asked to converge; a seat that returned is
- * never messaged again. The loop's ticks are driven through bun's FAKE CLOCK
- * (`jest.useFakeTimers`), so every tick, figure and delivery is deterministic.
- */
 describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
   const REPORT: ReportDoc = {
     schema: "mstar.report/v1",
@@ -2672,7 +2672,9 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     });
 
     expect(result.report).toEqual(REPORT);
-    expect(seatResults).toHaveLength(0);
+    // The review itself is unchanged by the report: the seat's finding still
+    // synthesized the published envelope.
+    expect(result.envelope.verdict).toBe("blocked");
     expect(subagentRequests).toHaveLength(2);
     const request = subagentRequests[1]!;
     expect(request.outputSchema).toBe(REPORT_OUTPUT_SCHEMA);
@@ -2768,8 +2770,47 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
       expect(errors.filter((line) => line.includes("report_seat_aborted"))).toHaveLength(1);
     });
   }
+
+  // Round-4: the seat definition must exist BEFORE the session is created —
+  // omp discovers agents per session, so an install that lands after creation
+  // is invisible to it. A deep report round WITHOUT a recheck used to install
+  // nothing while still dispatching the report seat.
+  for (const [tier, input] of [
+    ["quick", { ...BASE_INPUT, level: "quick" as const }],
+    ["default", BASE_INPUT],
+    ["deep", DEEP_INPUT],
+  ] as const) {
+    for (const [name, over, wantsRecheck, wantsReport] of [
+      ["recheck only", { recheck: recheckInput() }, true, false],
+      ["report only", { prContext: PR_CONTEXT }, false, true],
+      ["recheck + report", { recheck: recheckInput(), prContext: PR_CONTEXT }, true, true],
+    ] as ReadonlyArray<readonly [string, Partial<AgentRuntimeRunInput>, boolean, boolean]>) {
+      test(`${tier}: ${name} installs the seat definition before the session exists`, async () => {
+        if (tier === "deep") parentYields = [deepEnvelope()];
+        // Dispatch order: the recheck child first (it is created before the
+        // review work), then the level's review seats, then the report seat.
+        const seatCount = tier === "deep" ? 0 : tier === "quick" ? 1 : 2;
+        seatResults = [
+          ...(wantsRecheck ? [{ data: validRecheckDoc() }] : []),
+          ...Array.from({ length: seatCount }, () => ({ data: seatPayload() })),
+          ...(wantsReport ? [{ data: REPORT }] : []),
+        ];
+
+        const result = await ompAgentRuntime.runReview({ ...input, ...over });
+
+        expect(installedAgentFiles).toContain("mstar-review-seat.md");
+        expect(result.report).toEqual(wantsReport ? REPORT : null);
+      });
+    }
+  }
 });
 
+/**
+ * Seat supervision (progress nudges): while a seat runs it is told how much of
+ * the shared review clock is left and asked to converge; a seat that returned is
+ * never messaged again. The loop's ticks are driven through bun's FAKE CLOCK
+ * (`jest.useFakeTimers`), so every tick, figure and delivery is deterministic.
+ */
 describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () => {
   /** The engine cadence this repo reads — never a re-typed number of seconds. */
   const normalTickMs = PR_REVIEW_NUDGE_CADENCE.normalSeconds * 1000;
