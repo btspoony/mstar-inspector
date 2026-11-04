@@ -7,6 +7,11 @@
 # without rebuilding the image, and the container keeps running stale code.
 # Touch this comment whenever the copied runner sources change.
 #
+# rebuild: a failed write of the optional report side document now logs a
+# structured `report_write_failed` warn and still prints the validated envelope
+# (exit 0, sections render `none`); the recheck document keeps its hard failure
+# because it feeds correctness. A stale image exits 1 with no stdout, so the
+# Worker takes its runner-failure path and discards a review that had settled.
 # rebuild: the deep review's report seat now runs on its OWN session instead of
 # the deep parent's. The parent carries the review's single prompt/yield stream
 # (its terminal yield IS the envelope), so a report child riding it was a second

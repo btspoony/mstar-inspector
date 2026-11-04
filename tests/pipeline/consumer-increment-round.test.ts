@@ -113,6 +113,7 @@ describe("incremental review rounds", () => {
   test("ahead: numstat reads the increment, a `since` fact rides the input, the header marks the round", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.compareStatus = "ahead";
     sandbox.diffStdout = VALID_DIFF;
     sandbox.incrementDiffStdout = VALID_DIFF;
     sandbox.numstatStdout = "3\t1\tsrc/auth.ts\n";
@@ -202,6 +203,7 @@ describe("incremental review rounds", () => {
   test("the newest ELIGIBLE reviewed head is the base, never an older or ineligible row", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.compareStatus = "ahead";
     sandbox.diffStdout = VALID_DIFF;
     sandbox.incrementDiffStdout = VALID_DIFF;
     const older = "c".repeat(40);
@@ -240,6 +242,7 @@ describe("incremental review rounds", () => {
   test("an increment capture failure is a round failure, never a silent full-diff fallback", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.compareStatus = "ahead";
     sandbox.diffStdout = VALID_DIFF;
     sandbox.incrementDiffExitCode = 128;
     const db = await createSeededTestD1();
@@ -291,9 +294,10 @@ describe("incremental review rounds", () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     sandbox.diffStdout = VALID_DIFF;
-    // `ahead` (the default) turns the round incremental, but the base...head
-    // capture comes back empty at exit 0 — the same capture failure the full
-    // diff's empty read is, and it must reach the stored row.
+    // `ahead` turns the round incremental, but the base...head capture comes
+    // back empty at exit 0 — the same capture failure the full diff's empty
+    // read is, and it must reach the stored row.
+    sandbox.compareStatus = "ahead";
     sandbox.incrementDiffStdout = "";
     const db = await createSeededTestD1();
     seedReview(db, PREVIOUS_SHA);
@@ -311,6 +315,7 @@ describe("incremental review rounds", () => {
   test("an over-size increment stdout copy is not a capture failure — numstat still reads the file", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.compareStatus = "ahead";
     sandbox.diffStdout = VALID_DIFF;
     // Only the stdout COPY is byte-bounded; the increment command redirects the
     // whole base...head diff into the file, and numstat reads THAT. Overflow is
@@ -405,6 +410,7 @@ describe("incremental review rounds", () => {
   test("the recheck catalog is still built from the FULL diff on an increment round", async () => {
     reset();
     sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    sandbox.compareStatus = "ahead";
     // The full diff proves the prior finding's file; the increment touches a
     // DIFFERENT file, so a catalog built from the increment would exclude it.
     sandbox.diffStdout = VALID_DIFF;

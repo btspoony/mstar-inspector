@@ -338,7 +338,9 @@ export function initialFakeSandboxState(): FakeSandboxState {
     diffReadStdout: null,
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
     numstatExitCode: 0,
-    compareStatus: "ahead",
+    // NON-increment by default: a case that seeds a prior review stays a
+    // full-diff round unless it opts in with `ahead`.
+    compareStatus: "identical",
     compareExitCode: 0,
     incrementDiffStdout: "",
     incrementDiffExitCode: 0,
