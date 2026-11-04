@@ -294,17 +294,29 @@ const SYSTEM_UPSERT_SQL = `
     updated_by = excluded.updated_by`;
 
 /**
+ * The workspace cap as the ledger sees a stored value: the same clamp the
+ * reader applies (canonical digits above the maximum record the maximum),
+ * so `before` cannot disagree with the cap the workspace was running.
+ */
+const workspaceAuditCapSql = (value: string) => `CASE
+      WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) > ${WORKSPACE_CONCURRENCY_MAX}
+        THEN ${WORKSPACE_CONCURRENCY_MAX}
+      WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) BETWEEN ${CONCURRENCY_MIN} AND ${WORKSPACE_CONCURRENCY_MAX}
+        THEN CAST(${value} AS INTEGER)
+      ELSE NULL END`;
+
+/**
  * The ledger row carries the UPDATE's own guard — the target exists — so a
  * refused write appends nothing. It computes `before` with a subquery against
  * the not-yet-updated row: a bind cannot read the old value after the write.
- * That subquery goes through the same trust fragment as the system audit, so a
- * corrupt stored value is recorded as `null` rather than the raw column.
+ * That subquery uses the workspace clamp above, so a corrupt stored value is
+ * recorded as `null` rather than the raw column.
  */
 const WORKSPACE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   SELECT ?1, ?2, 'workspace.concurrency.set', 'workspace', ?3,
-         json_object('before', (SELECT ${trustedConcurrencySql("max_concurrent_reviews", "NULL", WORKSPACE_CONCURRENCY_MAX)}
+         json_object('before', (SELECT ${workspaceAuditCapSql("max_concurrent_reviews")}
                                   FROM workspaces WHERE id = ?3),
                      'after', ?4),
          ?5

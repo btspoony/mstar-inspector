@@ -2376,10 +2376,10 @@ row expires.
   one-time, customer-visible lowering of an existing setting, performed at
   deploy time; the tenant's card shows the clamped value afterwards. The
   migration records each previous value in `workspace_concurrency_clamp_0043`
-  (one row per affected workspace), and the runbook's pre-apply snapshot
-  (Time Travel bookmark / export, § D1 migrations) still restores the whole
-  pre-`0043` state. For the cheap per-row answer, run this BEFORE the deploy
-  and keep the output with the deploy evidence:
+  (one row per affected workspace) — that table is the per-row answer. For the
+  pre-apply evidence, run this BEFORE the deploy and keep the output with the
+  deploy evidence; restoring the whole database follows § Rollback
+  (production), which is an accepted limitation on its own:
 
   ```sql
   SELECT id, max_concurrent_reviews FROM workspaces

@@ -1841,7 +1841,20 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
 
 describe("migrations/0043_workspace_concurrency_bound.sql", () => {
   test("clamps rows above the maximum when applied, and a replay is a no-op", async () => {
-    const db = createMigratedTestD1();
+    // Apply everything BEFORE 0043, so the file runs for the first time over
+    // rows that already exist — the real deploy order.
+    const db = createTestD1();
+    const before = readdirSync(MIGRATIONS_DIR)
+      .filter(
+        (name) =>
+          name.endsWith(".sql") &&
+          name >= "0003_dashboard_users.sql" &&
+          name < "0043_workspace_concurrency_bound.sql",
+      )
+      .sort();
+    for (const name of before) {
+      db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    }
     const insert = db.raw.prepare(
       `INSERT INTO workspaces (id, slug, name, created_at, max_concurrent_reviews)
        VALUES (?1, ?1, ?1, '2026-11-04T00:00:00.000Z', ?2)`,

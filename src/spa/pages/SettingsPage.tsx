@@ -1188,7 +1188,7 @@ export function WorkspaceConcurrencyCard({ locale }: { locale: SpaBoot["locale"]
                 max={loaded.max}
                 className="w-32"
                 autoComplete="off"
-                required={loaded.degraded}
+                required
                 value={draft ?? (loaded.degraded ? "" : String(loaded.concurrency))}
                 onChange={(event) => setDraft(event.target.value)}
               />

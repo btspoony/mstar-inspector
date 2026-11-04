@@ -109,7 +109,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       max={data.max}
                       className="w-32"
                       autoComplete="off"
-                      required={data.degraded}
+                      required
                       value={draft ?? (data.degraded ? "" : String(data.concurrency))}
                       onChange={(event) => setDraft(event.target.value)}
                     />

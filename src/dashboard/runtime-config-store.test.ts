@@ -414,20 +414,22 @@ describe("runtime-config-store", () => {
     ]);
   });
 
-  test("a corrupt workspace row audits before: null and the write repairs it", async () => {
+  test("a corrupt workspace row audits what the reader applied and the write repairs it", async () => {
     const db = fixture();
     const seed = db.raw.prepare(
       "UPDATE workspaces SET max_concurrent_reviews = ?1 WHERE id = ?2",
     );
-    // The column is INTEGER, so ' 8' is stored as the readable 8; the untrusted
-    // shapes are text and out-of-range numbers, which a raw read would ledger
-    // as 'abc' and 33 — values no reader and no write predicate ever accepted.
-    for (const corrupt of ["abc", WORKSPACE_CONCURRENCY_MAX + 1]) {
+    // The ledger mirrors the reader: non-canonical text is `null`, an
+    // above-maximum value is the maximum the read clamped it to.
+    for (const [corrupt, before] of [
+      ["abc", null],
+      [WORKSPACE_CONCURRENCY_MAX + 1, WORKSPACE_CONCURRENCY_MAX],
+    ] as const) {
       seed.run(corrupt, WS);
       expect(await setWorkspaceConcurrency(db, WS, 12, ACTOR)).toBe(12);
       expect(storedWorkspace(db)).toBe(12);
       expect(auditDetails(db, "workspace.concurrency.set").at(-1)).toEqual({
-        before: null,
+        before,
         after: 12,
       });
     }
