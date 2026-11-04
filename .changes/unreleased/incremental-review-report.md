@@ -1,0 +1,22 @@
+---
+category: Added
+---
+
+- **Incremental review rounds**: when the pull request's previous reviewed head is an ancestor of the new
+  one (GitHub `compare` → `ahead`), the seats review the `since <base>` delta instead of the whole PR, and
+  the comment header marks the round with `· since <sha7>`. The prior-findings evidence catalog still reads
+  the full PR diff, and any other compare verdict (or a force-push 404) keeps the full-diff round.
+- **Complete review reports**: the published comment now carries what the envelope cannot — a
+  `**What this PR does**` overview, a mechanical `### Revalidated findings` table, `### Linked-issue AC`,
+  `### ✅ Verified`, `### 🗑️ Considered & rejected`, and a collapsible `## 🛠️ Plan to fix`. These ride a
+  side document (`mstar.report/v1`) written by a bounded report seat, validated fail-closed by the Worker,
+  and rendered as `none` when unavailable.
+
+<!-- CN -->
+- **增量审查轮次**：当本 PR 上一个已审查的 head 是新 head 的祖先（GitHub `compare` 返回 `ahead`）时，各席位
+  只审查 `since <base>` 的增量而非整个 PR，评论头部以 `· since <sha7>` 标注。既有 finding 的证据目录仍基于完整
+  PR diff 构建；其它 compare 结论（或 force-push 造成的 404）继续走全量 diff 轮次。
+- **完整审查报告**：发布的评论现在携带 envelope 无法承载的内容——`**What this PR does**` 概述、机器生成的
+  `### Revalidated findings` 表、`### Linked-issue AC`、`### ✅ Verified`、`### 🗑️ Considered & rejected`
+  与可折叠的 `## 🛠️ Plan to fix`。这些内容走独立文档（`mstar.report/v1`），由有界报告席位写出，Worker
+  失败即拒绝校验，缺失时统一渲染为 `none`。

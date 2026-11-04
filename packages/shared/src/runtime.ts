@@ -12,6 +12,7 @@
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent";
 import type { RecheckDoc, RecheckInput, RecheckStatus } from "./recheck-wire";
+import type { PrContext, ReportDoc } from "./report-wire";
 
 /**
  * Full review-tier universe. `deep` is a first-class tier
@@ -146,9 +147,15 @@ export type AgentRuntimeRunInput = {
    * second prompt/yield stream on any existing session.
    */
   recheck?: RecheckInput;
+  /**
+   * Optional PR context (the description plus its closing issues) for the
+   * report seat. ABSENT = no report seat runs and the result's `report` is
+   * null, so the legacy runner input stays byte-identical.
+   */
+  prContext?: PrContext;
 };
 
-/** One completed review run: the validated envelope plus its optional recheck document (spec §7.8). */
+/** One completed review run: the validated envelope plus its optional side documents. */
 export type ReviewRunResult = {
   envelope: MstarReviewV1;
   recheck: RecheckDoc | null;
@@ -159,6 +166,13 @@ export type ReviewRunResult = {
    * round ran (legacy input).
    */
   recheckStatus?: RecheckStatus;
+  /**
+   * The narrative report (mstar.report/v1), or null when the run produced
+   * none (no `prContext` in the input, the seat failed, or its document did
+   * not pass `validateReportDoc`). Never throws: a missing report degrades the
+   * published sections to `none`.
+   */
+  report: ReportDoc | null;
 };
 
 export interface AgentRuntime {

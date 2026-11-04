@@ -55,6 +55,8 @@ import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, vali
 import type { AgentRuntime, ReviewLevel } from "../../packages/shared/src/runtime";
 import type { SupervisedSeat } from "../../packages/runner/src/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../packages/runner/src/recheck";
+import { REPORT_OUTPUT_SCHEMA } from "../../packages/runner/src/report";
+import type { ReportDoc } from "../../packages/shared/src/report-wire";
 import { RECHECK_STATUS_ERROR_MAX_CHARS, type RecheckDoc, type RecheckInput } from "../../packages/shared/src/recheck-wire";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
@@ -2645,6 +2647,96 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
  * never messaged again. The loop's ticks are driven through bun's FAKE CLOCK
  * (`jest.useFakeTimers`), so every tick, figure and delivery is deterministic.
  */
+describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
+  const REPORT: ReportDoc = {
+    schema: "mstar.report/v1",
+    overview: "Adds an expiry guard.",
+    linkedIssueAc: "none",
+    verified: "none",
+    rejected: "none",
+    planToFix: "none",
+  };
+  const PR_CONTEXT = {
+    prBody: "Closes #7",
+    issues: [{ number: 7, title: "Guard", body: "- reject expired tokens" }],
+  };
+
+  test("quick/default: a report seat runs SERIALLY after the settled review and its document rides the result", async () => {
+    // Dispatch order: review seat, then the report seat (never concurrent —
+    // the report cites the settled envelope).
+    seatResults = [{ data: seatPayload() }, { data: REPORT }];
+    const result = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      prContext: PR_CONTEXT,
+    });
+
+    expect(result.report).toEqual(REPORT);
+    expect(seatResults).toHaveLength(0);
+    expect(subagentRequests).toHaveLength(2);
+    const request = subagentRequests[1]!;
+    expect(request.outputSchema).toBe(REPORT_OUTPUT_SCHEMA);
+    expect(request.schemaMode).toBe("strict");
+    // The report seat sees the settled envelope and the untrusted PR context.
+    const assignment = request.assignment as string;
+    // The settled envelope rides verbatim (its verdict comes from synthesis).
+    expect(assignment).toContain('"schema":"mstar.review/v1"');
+    expect(assignment).toContain('"verdict":"blocked"');
+    expect(assignment).toContain("Closes #7");
+    expect(assignment).toContain("reject expired tokens");
+    expect(assignment).toContain("mstar.report/v1");
+    expect(request.model).toEqual([...BASE_INPUT.modelSelectors]);
+  });
+
+  test("without prContext no report seat is dispatched and the result is null", async () => {
+    seatResults = [{ data: seatPayload() }];
+    const result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+    expect(result.report).toBeNull();
+    expect(subagentRequests).toHaveLength(1);
+  });
+
+  test("a failed report seat resolves null — the review is untouched", async () => {
+    seatResults = [{ data: seatPayload() }, { error: "model unavailable" }];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", prContext: PR_CONTEXT });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result.report).toBeNull();
+    expect(result.envelope.schema).toBe("mstar.review/v1");
+    // The review itself is unaffected: same synthesized verdict as a run
+    // without a report seat.
+    expect(result.envelope.verdict).toBe("blocked");
+  });
+
+  test("a report document that fails its own gate resolves null", async () => {
+    seatResults = [
+      { data: seatPayload() },
+      { data: { ...REPORT, overview: "   " } },
+    ];
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", prContext: PR_CONTEXT });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result.report).toBeNull();
+  });
+
+  test("deep: the report seat runs after the parent turn and the recheck seat both settled", async () => {
+    parentYields = [deepEnvelope()];
+    seatResults = [{ data: REPORT }];
+    const result = await ompAgentRuntime.runReview({ ...DEEP_INPUT, prContext: PR_CONTEXT });
+    expect(result.report).toEqual(REPORT);
+    expect(subagentRequests).toHaveLength(1);
+    // The deep parent's own session is the seat's session.
+    expect((subagentRequests[0]!.session as { cwd: unknown }).cwd).toBe(TEST_WORKTREE);
+  });
+});
+
 describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () => {
   /** The engine cadence this repo reads — never a re-typed number of seconds. */
   const normalTickMs = PR_REVIEW_NUDGE_CADENCE.normalSeconds * 1000;
