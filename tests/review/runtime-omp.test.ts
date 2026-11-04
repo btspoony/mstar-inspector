@@ -2800,6 +2800,9 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
 
         expect(installedAgentFiles).toContain("mstar-review-seat.md");
         expect(result.report).toEqual(wantsReport ? REPORT : null);
+        // The cleanup set is static, so the added install is undone with the
+        // rest — a leftover definition would leak into the caller's clone.
+        expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
       });
     }
   }
